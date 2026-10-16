@@ -1,0 +1,5 @@
+# Lune scripts: plain Luau plus the globals Lune injects.
+std = "luau"
+
+[lints]
+shadowing = "allow"

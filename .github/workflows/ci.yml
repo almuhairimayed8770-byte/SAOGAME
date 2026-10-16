@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    name: Lint, test, validate, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install tools (aftman.toml)
+        uses: ok-nick/setup-aftman@v0.4.2
+
+      - name: StyLua (format check)
+        run: stylua --check src tests tools
+
+      - name: Selene (lint)
+        run: |
+          selene src
+          selene tests tools
+
+      - name: Lune unit tests
+        run: lune run tests/run.luau
+
+      - name: Data validators and naming blocklist
+        run: lune run tools/validate.luau
+
+      - name: Rojo build (game)
+        run: rojo build default.project.json -o build/Skyspire.rbxl
+
+      - name: Rojo build (places)
+        run: tools/build-places.sh
+
+      - name: Upload built places
+        uses: actions/upload-artifact@v4
+        with:
+          name: places
+          path: |
+            build/*.rbxl
+            places/*.rbxl
+          retention-days: 14

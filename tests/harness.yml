@@ -1,0 +1,18 @@
+# Selene standard library for spec files: Luau plus the globals tests/run.luau injects.
+base: luau
+globals:
+  describe:
+    args:
+      - type: string
+      - type: function
+  it:
+    args:
+      - type: string
+      - type: function
+  expect:
+    args:
+      - type: any
+  Harness:
+    any: true
+  Test:
+    any: true

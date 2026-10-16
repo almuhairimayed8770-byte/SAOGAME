@@ -1,0 +1,132 @@
+--!strict
+--[[
+	Core combat tunables (section 6). Starting values; tune here, never in a gameplay script.
+	Times are seconds, distances are studs, fractions are 0..1.
+]]
+
+local Combat = {
+	-- Blade Art timeline
+	startPoseTime = 0.15, -- the body moves into the stance
+	activationHold = 0.1, -- trail ignites, chime, the tell
+	activationCancelTime = 1.0, -- holding the key past this cancels the Art
+	postMotionMin = 0.2, -- the shortest a Switch can cut a post-motion to (Phase 1)
+	locomotionBlendOut = 0.2, -- blend from the end pose back to locomotion
+
+	-- Hit-stop in frames at 60 fps (section 6) and the camera response to each tier (section 10)
+	hitStopFrames = {
+		Normal = 3,
+		Final = 6,
+		Kill = 10,
+	},
+	hitStopFrameSeconds = 1 / 60,
+	cameraNudgeStuds = 0.4,
+	cameraShakeStuds = {
+		Normal = 0.15,
+		Final = 0.3,
+		Kill = 0.6,
+	},
+	highlightFlashFrames = 2,
+
+	-- Damage formula: weaponAttack * artMultiplier * (1 + STR * strScale) * crit - targetDefense
+	strDamageScale = 0.012,
+	critMultiplier = 1.5,
+	critChancePerAgi = 0.004, -- 100 AGI = 40% crit chance
+	critChanceMax = 0.6,
+	minimumDamage = 1,
+	basicAttackMultiplier = 0.3, -- each basic hit is about 30% of a tier-1 Art
+	basicAttackGaugeFraction = 0.1, -- basic attacks deal a tenth of Art gauge damage
+	basicChainLength = 3,
+	basicChainWindow = 0.6, -- seconds to continue the chain
+	basicHitDuration = 0.35,
+
+	-- Guard Gauge and Break
+	guardRegenPerSecond = 0.1, -- fraction of max per second while not hit by Arts
+	guardRegenDelay = 0.5, -- seconds after an Art hit before regen resumes
+	breakDuration = 3.0,
+	breakDamageMultiplier = 2.0,
+	breakPostMotion = 0, -- Arts landed on a Broken enemy have zero post-motion
+
+	-- Switch (Phase 1 uses these; the window is drawn in Phase 0 for review)
+	switchWindow = 0.8,
+	switchDamageBonus = 0.25,
+	switchGaugeBonus = 0.5,
+	switchPostMotionCut = 0.2,
+	tempoMaxStacks = 5,
+	tempoDamagePerStack = 0.04,
+	tempoDecay = 3.0,
+
+	-- Guard and parry
+	guardConeDegrees = 120,
+	guardReduction = 0.7,
+	shieldConeDegrees = 180,
+	shieldReduction = 0.85,
+	guardGaugeDrainFraction = 1.0, -- fraction of incoming gauge damage applied to the guarding player
+	guardBreakStagger = 1.2,
+	parryWindow = 0.15,
+	parryStagger = 1.0,
+	playerGuardGaugeBase = 100,
+
+	-- Dodge
+	dodgeDuration = 0.25,
+	dodgeInvulnerability = 0.1,
+	dodgeCooldown = 0.6,
+	dodgeDistance = 8,
+
+	-- Enemy telegraphs (section 6): wind-up held 0.4 to 1.2 s; the hard rule floor is 0.3
+	telegraphMinWindUp = 0.3,
+	telegraphDefaultWindUp = 0.4,
+	telegraphMaxWindUp = 1.2,
+
+	-- Stagger
+	staggerDuration = 0.5,
+	staggerDirections = 4,
+
+	-- HP and recovery
+	outOfCombatRegenDelay = 8.0,
+	outOfCombatRegenPerSecond = 0.01,
+	combatTagDuration = 6.0, -- seconds after the last hit before "out of combat"
+	hpYellowFraction = 0.5,
+	hpRedFraction = 0.25,
+	lowHpMusicDuck = 6, -- dB
+	basePlayerHp = 300,
+	hpPerLevel = 10,
+
+	-- Death (section 6)
+	deathFreeze = 0.5, -- silence and freeze before the shatter
+
+	-- Server hit detection (section 6, D-010)
+	hitSampleHz = 60,
+	lagAllowance = 0.15,
+	hitSphereRadius = 1.2,
+	maxTargetsPerWindow = 6,
+	facingTolerance = 0.35, -- cosine slack when comparing reported facing to the server's
+
+	-- Anti-cheat basics (section 17)
+	artRequestTolerance = 0.05, -- seconds early an Art may be requested before its lock ends
+	maxSpeedStudsPerSecond = 24, -- sprint cap outside root motion
+	rootMotionSlack = 4, -- extra studs allowed while an Art carries the body
+	teleportFlagDistance = 40, -- a jump bigger than this in one heartbeat is flagged
+	anomalyKickThreshold = 12, -- flags inside the window before a kick
+	anomalyWindow = 30, -- seconds
+
+	-- Threat (section 6)
+	threatPerDamage = 1.0,
+	threatTauntMultiplier = 3.0,
+	threatHealMultiplier = 0.5,
+
+	-- Floating digits (section 14)
+	digitFadeTime = 0.6,
+	digitRise = 2.5,
+
+	-- Status effects (section 6)
+	status = {
+		Bleed = { duration = 8, tickInterval = 1, damageFraction = 0.02 },
+		Poison = { duration = 20, tickInterval = 2, damageFraction = 0.015, blocksPotions = true },
+		Paralysis = { duration = 3 },
+		Stun = { duration = 1.5 },
+		Burn = { duration = 5, tickInterval = 0.5, damageFraction = 0.01 },
+		Freeze = { duration = 6, speedMultiplier = 0.6 },
+	},
+}
+
+return Combat

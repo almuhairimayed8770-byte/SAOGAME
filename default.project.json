@@ -1,0 +1,35 @@
+{
+	"name": "Skyspire",
+	"globIgnorePaths": ["**/*.spec.luau", "**/selene.toml"],
+	"tree": {
+		"$className": "DataModel",
+		"ReplicatedStorage": {
+			"Shared": {
+				"$path": "src/shared"
+			}
+		},
+		"ServerScriptService": {
+			"Server": {
+				"$path": "src/server"
+			}
+		},
+		"StarterPlayer": {
+			"$properties": {
+				"CharacterWalkSpeed": 16,
+				"CharacterJumpPower": 50,
+				"EnableMouseLockOption": false,
+				"CameraMode": "Classic"
+			},
+			"StarterPlayerScripts": {
+				"Client": {
+					"$path": "src/client"
+				}
+			}
+		},
+		"Workspace": {
+			"$properties": {
+				"StreamingEnabled": false
+			}
+		}
+	}
+}

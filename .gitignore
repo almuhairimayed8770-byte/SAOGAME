@@ -1,0 +1,22 @@
+# Built places and models (built by `rojo build` in CI; see tools/build-places.sh)
+places/*.rbxl
+places/*.rbxlx
+places/*.rbxm
+*.rbxl.lock
+
+# Wally
+Packages/
+ServerPackages/
+DevPackages/
+wally.lock.tmp
+
+# Tooling caches
+.lune/
+/roblox.yml
+sourcemap.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+*.swp

@@ -1,0 +1,5 @@
+# Spec files run under Lune with the globals that tests/run.luau injects (see harness.yml).
+std = "harness"
+
+[lints]
+shadowing = "allow"

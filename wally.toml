@@ -1,0 +1,16 @@
+[package]
+name = "skyspire/skyspire"
+version = "0.1.0"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
+private = true
+
+# Phase 0 ships with zero external packages (see docs/DECISIONS.md, D-004): Signal, Spring,
+# Easing, Verlet and the schema checker live in src/shared/util. The packages below are the
+# planned dependencies for later phases; uncomment a line when the phase that needs it starts.
+[dependencies]
+# promise = "evaera/promise@4.0.0"          # Phase 1: network layer, teleport flows
+# t = "osyrisrblx/t@3.1.0"                  # Phase 1: remote schema validation (if Check.luau is retired)
+
+[server-dependencies]
+# profile-store = "loleris/profilestore@1.0.0"  # Phase 2: saves with session locking

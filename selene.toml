@@ -1,0 +1,7 @@
+# Game code (src/) lints against the Roblox standard library.
+# tests/ and tools/ run under Lune and carry their own selene.toml.
+std = "roblox"
+
+[lints]
+# `--!strict` plus the validators catch shadowing on purpose in data tables; keep the rest strict.
+shadowing = "allow"

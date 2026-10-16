@@ -1,0 +1,75 @@
+local Signal = Harness.load("src/shared/util/Signal")
+local task = require("@lune/task")
+
+describe("Signal", function()
+	it("delivers arguments to every handler", function()
+		local signal = Signal.new()
+		local received = {}
+		signal:Connect(function(a, b)
+			table.insert(received, a + b)
+		end)
+		signal:Connect(function(a, b)
+			table.insert(received, a * b)
+		end)
+		signal:Fire(2, 3)
+		task.wait()
+		table.sort(received)
+		expect(received).toEqual({ 5, 6 })
+	end)
+
+	it("Once fires one time and Disconnect stops delivery", function()
+		local signal = Signal.new()
+		local count = 0
+		signal:Once(function()
+			count += 1
+		end)
+		local connection = signal:Connect(function()
+			count += 10
+		end)
+		signal:Fire()
+		task.wait()
+		connection:Disconnect()
+		signal:Fire()
+		task.wait()
+		expect(count).toBe(11)
+		expect(connection.Connected).toBe(false)
+	end)
+
+	it("a handler error does not stop the others", function()
+		local signal = Signal.new()
+		local reached = false
+		signal:Connect(function()
+			error("boom")
+		end)
+		signal:Connect(function()
+			reached = true
+		end)
+		signal:Fire()
+		task.wait()
+		expect(reached).toBe(true)
+	end)
+
+	it("Wait resumes with the fired values", function()
+		local signal = Signal.new()
+		local got
+		task.spawn(function()
+			got = signal:Wait()
+		end)
+		signal:Fire("hit")
+		task.wait()
+		expect(got).toBe("hit")
+	end)
+
+	it("Destroy drops handlers and later fires are ignored", function()
+		local signal = Signal.new()
+		local count = 0
+		signal:Connect(function()
+			count += 1
+		end)
+		signal:Destroy()
+		signal:Fire()
+		task.wait()
+		expect(count).toBe(0)
+		expect(signal:ConnectionCount()).toBe(0)
+	end)
+end)
