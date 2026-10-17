@@ -36,7 +36,7 @@ local Combat = {
 	basicAttackMultiplier = 0.3, -- each basic hit is about 30% of a tier-1 Art
 	basicAttackGaugeFraction = 0.1, -- basic attacks deal a tenth of Art gauge damage
 	basicChainLength = 3,
-	basicChainWindow = 0.6, -- seconds to continue the chain
+	basicChainWindow = 0.6, -- seconds after the previous swing STARTED in which the next basic continues the chain
 	basicHitDuration = 0.35,
 
 	-- Guard Gauge and Break
@@ -63,6 +63,7 @@ local Combat = {
 	guardGaugeDrainFraction = 1.0, -- fraction of incoming gauge damage applied to the guarding player
 	guardBreakStagger = 1.2,
 	parryWindow = 0.15,
+	parryRearmTime = 0.25, -- seconds the guard must stay down before a new raise can parry (no tap spam)
 	parryStagger = 1.0,
 	playerGuardGaugeBase = 100,
 
@@ -108,6 +109,7 @@ local Combat = {
 	teleportFlagDistance = 40, -- a jump bigger than this in one heartbeat is flagged
 	anomalyKickThreshold = 12, -- flags inside the window before a kick
 	anomalyWindow = 30, -- seconds
+	anticheatSampleInterval = 0.25, -- seconds between root position samples per player (AntiCheatService)
 
 	-- Threat (section 6)
 	threatPerDamage = 1.0,
@@ -117,6 +119,13 @@ local Combat = {
 	-- Floating digits (section 14)
 	digitFadeTime = 0.6,
 	digitRise = 2.5,
+
+	-- Entity lifecycle and server bookkeeping (EntityService / CombatService; D-012)
+	respawnDelay = 5, -- seconds a dead player waits before the character reloads (Lucid deletion is Phase 2)
+	corpseRemoveDelay = 4, -- seconds after death before an enemy model is removed (freeze + shatter + margin)
+	humanoidPinnedHealth = 100, -- the engine Humanoid's Health and MaxHealth, pinned and ignored
+	enemyTickHz = 20, -- enemy regen and state timers step at this rate; players step every frame
+	strikeLineWidth = 4, -- studs; the width of an enemy line strike (attack arc = 0)
 
 	-- Status effects (section 6)
 	status = {

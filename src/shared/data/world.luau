@@ -1,0 +1,99 @@
+--!strict
+--[[
+	World building tunables (sections 5, 11, 16, 20; D-005, D-013). playground.luau says where the
+	rim, pillars, clouds and kill volume are; this table says how PlaygroundBuilder makes them:
+	rail count and heights, pillar material and the SurfaceLights that light the ceiling underside,
+	the cloud billboards' particle shape, the kill volume part, folder names and the part budget.
+
+	Environment colors here are {r, g, b} triples like lighting.luau (the palette is for UI and FX
+	only). Distances are studs, times are seconds, angles are degrees, fractions are 0..1.
+]]
+
+local World = {
+	playground = {
+		modelName = "Playground", -- the Model places/Playground.project.json builds
+		partBudget = 2000, -- the whole Playground model, counted after the build
+		partCountAttribute = "PartCount",
+		folders = {
+			railing = "Railing",
+			pillars = "Pillars",
+			clouds = "Clouds",
+			enemies = "Enemies", -- under workspace: EnemyService parents spawned rigs here
+			entities = "Entities", -- under workspace: non-enemy server-built fighters (stand-ins, dummies)
+		},
+		killVolumeName = "KillVolume",
+	},
+
+	railing = {
+		railCount = 2, -- a top rail at the post height and one at half of it
+		material = "SmoothPlastic",
+		postColor = { 0.62, 0.6, 0.56 },
+		railColor = { 0.68, 0.66, 0.62 },
+		railOverlap = 1.0, -- fraction of a post's width each rail runs past its posts (no gaps)
+	},
+
+	pillars = {
+		material = "Slate",
+		color = { 0.42, 0.4, 0.38 }, -- the ceiling's stone
+		ceilingGap = 4, -- studs between a pillar's top and the ceiling underside, room for the light to spread
+		light = {
+			angle = 180, -- a full hemisphere up onto the ceiling underside
+			color = { 1, 0.9, 0.75 }, -- warm stone light (section 11: "lit from below by SurfaceLights")
+			shadows = false,
+		},
+	},
+
+	clouds = {
+		particlesPerEmitter = 4, -- 24 emitters x 4 = 96 of the 400-particle budget
+		lifetime = { min = 14, max = 20 },
+		lightEmission = 0.15,
+		spreadDegrees = 18, -- around the tangent the particles drift along
+		rotationDegreesPerSecond = 2, -- +/- slow turn
+		heightJitter = 30, -- the ring undulates this far above and below the drop
+		radialJitter = 25,
+		emitterPartSize = 1, -- the invisible host part
+		color = { 1, 1, 1 },
+		-- When fx.luau is present its High quality tier sets the emitter count; this is the fallback.
+		fallbackCountKey = "cloudCount",
+	},
+
+	killVolume = {
+		-- The kill volume is a check, not a trap: PlaygroundService kills any fighter whose root is
+		-- below playground.killVolume.y on Heartbeat. The part only marks the plane for debugging.
+		transparency = 1,
+		checkInterval = 0.25, -- seconds between root-height scans
+	},
+
+	spawn = {
+		-- A spawned pack member stands this far above its spawn point's ground: hipHeight plus half
+		-- the root part (the Humanoid holds the root bottom at HipHeight above the floor).
+		groundEpsilon = 0.05, -- lifted a hair so a rig never starts inside the field
+	},
+
+	character = {
+		-- Humanoid scale NumberValues the engine reads (Humanoid children); PlaygroundService writes
+		-- rigs.luau PlayerR15.scale into them.
+		scaleValues = {
+			bodyHeight = "BodyHeightScale",
+			bodyWidth = "BodyWidthScale",
+			bodyDepth = "BodyDepthScale",
+			head = "HeadScale",
+		},
+		partWaitSeconds = 10, -- how long CharacterAdded waits for the Humanoid and the RightHand
+	},
+
+	anticheat = {
+		-- Policy strings and the few knobs that are not in combat.luau's section 17 block
+		-- (sample interval, speed cap, slack, teleport distance, kick threshold and window live there).
+		shadowAttribute = "Shadowed", -- set true on the Player at half the kick threshold (routes to Trial servers later)
+		kickText = "The system has ended your session: anomalous movement.", -- the system line and the kick message
+		lineToken = "SystemCyan", -- palette token of the system line
+		kickDelay = 0.5, -- seconds between the system line and the kick, so the line is seen
+		abuseWeight = 1, -- anomaly weight of one Net abuse report (rate limit or schema failure)
+		speedWeight = 1, -- anomaly weight of one over-speed sample
+		minimumAnomalies = 2, -- a kick needs at least this many separate anomalies (never on a single one)
+		reasons = { speed = "speed", teleport = "teleport", abuse = "abuse" },
+	},
+}
+
+return World
