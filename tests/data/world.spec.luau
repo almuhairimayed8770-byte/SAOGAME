@@ -47,6 +47,34 @@ describe("world data", function()
 		expect(Combat.anticheatSampleInterval).toBeLessThan(Combat.anomalyWindow)
 	end)
 
+	it("anti-cheat fractions shadow before the kick and keep a single teleport under it", function()
+		local Combat = Harness.load("src/shared/data/combat")
+		local policy = World.anticheat
+		expect(policy.shadowFraction).toBeGreaterThan(0)
+		expect(policy.shadowFraction).toBeLessThan(1)
+		expect(policy.teleportWeightCapFraction).toBeGreaterThanOrEqual(0)
+		expect(policy.teleportWeightCapFraction).toBeLessThanOrEqual(1)
+		local heaviest = math.floor(Combat.anomalyKickThreshold * policy.teleportWeightCapFraction)
+		expect(heaviest).toBeLessThan(Combat.anomalyKickThreshold)
+	end)
+
+	it("rate-limits exactly the client-to-server remotes", function()
+		local Remotes = Harness.load("src/shared/net/Remotes")
+		local rates = World.anticheat.remoteRates
+		for name, definition in Remotes do
+			if definition.direction == "ClientToServer" then
+				expect(rates[name]).toBeTruthy()
+			end
+		end
+		for name, rate in rates do
+			expect(Remotes[name]).toBeTruthy()
+			expect(Remotes[name].direction).toBe("ClientToServer")
+			expect(rate.perSecond).toBeGreaterThan(0)
+			expect(rate.burst).toBeGreaterThanOrEqual(1)
+			expect(rate.burst).toBe(math.floor(rate.burst))
+		end
+	end)
+
 	it("colors are {r, g, b} in 0..1", function()
 		for _, color in
 			{ World.railing.postColor, World.railing.railColor, World.pillars.color, World.pillars.light.color }

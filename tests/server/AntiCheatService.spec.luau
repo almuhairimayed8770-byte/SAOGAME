@@ -2,9 +2,9 @@
 --[[
 	AntiCheatService under Lune: the real EntityService (fake clock, net, tags) as the registry, a
 	fake CombatService that says which Art runs, fakes that record attributes, kicks and system
-	lines. Watching through Registered, honest movement, the Art / Dodge allowances, the carried
-	state across a sample, teleports, the shadow flag, the kick (never on one anomaly), Net abuse,
-	the sliding window, death and respawn resets, and the sample clock.
+	lines. Watching through Registered, honest movement, the lag credit, the Art / Dodge allowances,
+	the carried state across a sample, teleports, the shadow flag, the kick (never on one anomaly),
+	Net abuse, the sliding window, death and respawn resets, and the sample clock.
 ]]
 
 Harness.stubService("CollectionService", {
@@ -38,11 +38,17 @@ local Playground = Harness.load("src/shared/data/playground")
 local CollectionService = Harness.game():GetService("CollectionService")
 
 local INTERVAL = Combat.anticheatSampleInterval
--- The sprint allowance over `seconds`: the cap over the interval plus the section 17 lag budget.
+-- The full lag credit: the sprint cap over the section 17 lag budget, spent once rather than per sample.
+local CREDIT = Combat.maxSpeedStudsPerSecond * Combat.lagAllowance
+-- The sprint allowance over `seconds` with a full credit: the cap over the time plus the credit.
 local function allowance(seconds: number): number
-	return Combat.maxSpeedStudsPerSecond * (seconds + Combat.lagAllowance)
+	return Combat.maxSpeedStudsPerSecond * seconds + CREDIT
 end
+-- One sample at exactly the sprint cap, and the allowance of a sample with a full credit.
+local CAP = Combat.maxSpeedStudsPerSecond * INTERVAL
 local SPRINT = allowance(INTERVAL)
+-- Replication jitter of nearly the whole lag, with a margin for float32 positions.
+local JITTER = CREDIT - 0.1
 local TELEPORT = 200
 
 -- ------------------------------------------------------------------------------------------
@@ -220,15 +226,71 @@ end)
 -- ------------------------------------------------------------------------------------------
 
 describe("AntiCheatService movement samples", function()
-	it("an honest sprint inside the cap is never flagged", function()
+	it("an honest sprint at the cap is never flagged, whatever the replication jitter", function()
 		fresh()
 		local who, _, root = fighter()
-		for _ = 1, 20 do
-			local verdict = move(who, root, SPRINT - 0.1)
+		-- The first reading catches up on a lag from before the watch: the credit starts full.
+		expect(move(who, root, CAP + JITTER).kind).toBe("ok")
+		for index = 1, 20 do
+			-- A reading that lags behind the root, then one that catches up: the root moved CAP each time.
+			local verdict = move(who, root, if index % 2 == 1 then CAP - JITTER else CAP + JITTER)
 			expect(verdict.kind).toBe("ok")
 		end
+		for _ = 1, 4 do
+			expect(move(who, root, CAP).kind).toBe("ok")
+		end
 		expect(AntiCheatService.flagsOf(who)).toEqual({})
-		expect(AntiCheatService.stats().samples).toBe(20)
+		expect(AntiCheatService.stats().samples).toBe(25)
+		expect(AntiCheatService.stats().flags).toBe(0)
+	end)
+
+	it("the lag credit is spent once: a sustained walk at 1.5x the cap is flagged within a few samples", function()
+		fresh()
+		local who, _, root = fighter()
+		local first: number? = nil
+		local samples = 8
+		for index = 1, samples do
+			local verdict = move(who, root, CAP * 1.5)
+			if verdict.kind ~= "ok" and first == nil then
+				first = index
+			end
+		end
+		expect(first).toBeTruthy()
+		expect(first).toBeLessThanOrEqual(3)
+		-- Once the credit is gone every sample over the cap is an anomaly.
+		expect(AntiCheatService.stats().speed).toBe(samples - (first :: number) + 1)
+		-- The whole walk fits a fresh sample's allowance: only the spent credit catches it.
+		expect(CAP * 1.5).toBeLessThanOrEqual(SPRINT)
+	end)
+
+	it("an Art's unused grant refills the credit, so the jitter after it is not flagged", function()
+		fresh()
+		local who, id, root = fighter()
+		local leap = Arts.byId("OneHandedSword.SonicLeap")
+		currentArt = leap
+		EntityService.setState(id, "Art", 2)
+		-- The Art carries the body its rootMotion; the slack it leaves unused keeps the credit full.
+		expect(move(who, root, CAP + leap.rootMotion).kind).toBe("ok")
+		currentArt = nil
+		EntityService.setState(id, "Idle")
+		expect(move(who, root, CAP).kind).toBe("ok") -- covered by the carried Art
+		-- The lag catches up: the credit is still full.
+		expect(move(who, root, CAP + JITTER).kind).toBe("ok")
+		expect(AntiCheatService.stats().flags).toBe(0)
+	end)
+
+	it("a death and the new character refill the credit", function()
+		fresh()
+		local who, id, root = fighter()
+		expect(move(who, root, CAP + JITTER).kind).toBe("ok") -- the credit is nearly spent
+		EntityService.die(id, nil)
+		expect(move(who, root, 0)).toBe(nil)
+		local model, newRoot = character(who.Name)
+		EntityService.registerPlayer(who, model, Playground.loadout)
+		task.wait()
+		clock.t += INTERVAL
+		expect(AntiCheatService.sample(who, INTERVAL)).toBe(nil) -- the first sample only records
+		expect(move(who, newRoot, CAP + JITTER).kind).toBe("ok")
 		expect(AntiCheatService.stats().flags).toBe(0)
 	end)
 
@@ -329,10 +391,11 @@ describe("AntiCheatService movement samples", function()
 		expect(move(who, root, SPRINT + Combat.dodgeDistance - 0.1).kind).toBe("speed")
 	end)
 
-	it("a longer interval (lag spike) scales the allowance", function()
+	it("a longer interval (lag spike) scales the cap term, and the credit is added once", function()
 		fresh()
 		local who, _, root = fighter()
 		expect(move(who, root, allowance(2) - 0.1, 2).kind).toBe("ok")
+		move(who, root, 0) -- standing still refills the credit the spike spent
 		-- A hair over the cap after a long spike: flagged with the smallest weight, whatever the kind.
 		local verdict = move(who, root, allowance(2) + 0.5, 2)
 		expect(verdict.kind == "speed" or verdict.kind == "teleport").toBe(true)
@@ -351,11 +414,12 @@ describe("AntiCheatService teleports and the kick", function()
 		local verdict = move(who, root, 1e6)
 		task.wait()
 		expect(verdict.kind).toBe("teleport")
-		expect(verdict.weight).toBe(math.floor(Combat.anomalyKickThreshold / 2))
+		expect(verdict.weight).toBe(math.floor(Combat.anomalyKickThreshold * World.anticheat.teleportWeightCapFraction))
 		expect(#kicks).toBe(0)
 		expect(AntiCheatService.isKicked(who)).toBe(false)
 		expect(AntiCheatService.stats().teleport).toBe(1)
-		-- Half the threshold in one anomaly: shadowed, but still here.
+		-- The heaviest single anomaly reaches the shadow weight: shadowed, but still here.
+		expect(World.anticheat.teleportWeightCapFraction).toBeGreaterThanOrEqual(World.anticheat.shadowFraction)
 		expect(AntiCheatService.isShadowed(who)).toBe(true)
 		expect(attributes[who][World.anticheat.shadowAttribute]).toBe(true)
 	end)
@@ -409,18 +473,22 @@ describe("AntiCheatService teleports and the kick", function()
 		expect(AntiCheatService.stats().kicked).toBe(1)
 	end)
 
-	it("the shadow flag comes at half the threshold of plain over-speed samples and is set once", function()
-		fresh()
-		local who, _, root = fighter()
-		local half = math.ceil(Combat.anomalyKickThreshold / 2 / World.anticheat.speedWeight)
-		for index = 1, half do
+	it(
+		"the shadow flag comes at shadowFraction of the threshold of plain over-speed samples and is set once",
+		function()
+			fresh()
+			local who, _, root = fighter()
+			local half =
+				math.ceil(Combat.anomalyKickThreshold * World.anticheat.shadowFraction / World.anticheat.speedWeight)
+			for index = 1, half do
+				move(who, root, SPRINT + 1)
+				expect(AntiCheatService.isShadowed(who)).toBe(index >= half)
+			end
 			move(who, root, SPRINT + 1)
-			expect(AntiCheatService.isShadowed(who)).toBe(index >= half)
+			expect(AntiCheatService.stats().shadowed).toBe(1)
+			expect(#kicks).toBe(0)
 		end
-		move(who, root, SPRINT + 1)
-		expect(AntiCheatService.stats().shadowed).toBe(1)
-		expect(#kicks).toBe(0)
-	end)
+	)
 
 	it("the threshold of over-speed samples inside the window is a kick; spread past the window it is not", function()
 		fresh()
@@ -575,7 +643,7 @@ describe("AntiCheatService resets and the clock", function()
 		AntiCheatService.tick(step)
 		expect(AntiCheatService.stats().samples).toBe(1)
 		expect(AntiCheatService.stats().flags).toBe(0)
-		-- The next sample covers a single interval: a step past its allowance (cap plus lag budget) is over.
+		-- The next sample covers a single interval: a step past its allowance (cap plus the full credit) is over.
 		local last = root.CFrame.Position
 		root.CFrame = CFrame.new(last.X + allowance(INTERVAL) + 1, last.Y, last.Z)
 		clock.t += INTERVAL

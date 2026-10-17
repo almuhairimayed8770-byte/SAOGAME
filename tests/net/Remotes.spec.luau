@@ -1,5 +1,6 @@
 --!strict
 local Remotes = Harness.load("src/shared/net/Remotes")
+local World = Harness.load("src/shared/data/world")
 
 describe("Remotes", function()
 	it("every client-to-server remote has a rate limit and a strict schema", function()
@@ -18,6 +19,25 @@ describe("Remotes", function()
 				true
 			)
 		end
+	end)
+
+	it("every rate limit comes from world.luau anticheat.remoteRates under the remote's name", function()
+		local rates = World.anticheat.remoteRates
+		local limited = 0
+		for name, definition in Remotes do
+			if definition.direction == "ClientToServer" then
+				limited += 1
+				expect(rates[name]).toBeTruthy()
+				expect(definition.rate).toBe(rates[name])
+			end
+		end
+		local listed = 0
+		for name in rates do
+			listed += 1
+			expect(Remotes[name]).toBeTruthy()
+			expect(Remotes[name].direction).toBe("ClientToServer")
+		end
+		expect(listed).toBe(limited)
 	end)
 
 	it("ArtRequest accepts a well-formed payload and rejects a non-unit facing", function()

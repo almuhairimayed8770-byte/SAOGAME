@@ -3,7 +3,9 @@
 	Validates src/shared/data/world.luau: the Playground part budget is under the section 11 scene
 	budget and above what the rim, pillars and clouds need from playground.luau; every count,
 	distance and time is positive; colors are {r, g, b} in 0..1; the folder EnemyService spawns
-	into is still called Enemies; the Humanoid scale value names are the engine's.
+	into is still called Enemies; the Humanoid scale value names are the engine's; the anti-cheat
+	fractions keep the shadow flag before the kick and a single teleport under it; every
+	client-to-server remote in net/Remotes.luau has exactly one anticheat.remoteRates entry.
 ]]
 
 type Context = {
@@ -89,6 +91,8 @@ local function validate(ctx: Context): { string }
 		}),
 		anticheat = Check.strictInterface({
 			shadowAttribute = Check.string(32),
+			shadowFraction = Check.number(0, 1),
+			teleportWeightCapFraction = Check.number(0, 1),
 			kickText = Check.string(200),
 			lineToken = Check.string(32),
 			kickDelay = Check.number(0, 5),
@@ -100,6 +104,7 @@ local function validate(ctx: Context): { string }
 				teleport = Check.string(32),
 				abuse = Check.string(32),
 			}),
+			remoteRates = Check.map(Check.string(64), Check.strictInterface({ perSecond = positive, burst = count })),
 		}),
 	})
 	local ok, message = schema(World)
@@ -119,6 +124,28 @@ local function validate(ctx: Context): { string }
 	end
 	if World.anticheat.speedWeight * World.anticheat.minimumAnomalies > Combat.anomalyKickThreshold then
 		problem("two over-speed samples alone must never reach the kick threshold")
+	end
+	local teleportCap = math.floor(Combat.anomalyKickThreshold * World.anticheat.teleportWeightCapFraction)
+	if teleportCap >= Combat.anomalyKickThreshold then
+		problem("a single teleport must never reach the kick threshold (anticheat.teleportWeightCapFraction)")
+	end
+	if World.anticheat.shadowFraction <= 0 or World.anticheat.shadowFraction >= 1 then
+		problem("anticheat.shadowFraction must put the shadow flag above zero weight and before the kick")
+	end
+
+	-- Every client-to-server remote is rate limited from this table, and nothing else is listed.
+	local Remotes = ctx.load("src/shared/net/Remotes")
+	local rates = World.anticheat.remoteRates
+	for name, definition in Remotes do
+		if definition.direction == "ClientToServer" and rates[name] == nil then
+			problem(("anticheat.remoteRates has no entry for the client-to-server remote %s"):format(name))
+		end
+	end
+	for name in rates do
+		local definition = Remotes[name]
+		if definition == nil or definition.direction ~= "ClientToServer" then
+			problem(("anticheat.remoteRates.%s is not a client-to-server remote"):format(tostring(name)))
+		end
 	end
 
 	if World.clouds.lifetime.max < World.clouds.lifetime.min then

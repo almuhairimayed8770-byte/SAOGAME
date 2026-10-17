@@ -85,7 +85,9 @@ local World = {
 	anticheat = {
 		-- Policy strings and the few knobs that are not in combat.luau's section 17 block
 		-- (sample interval, speed cap, slack, teleport distance, kick threshold and window live there).
-		shadowAttribute = "Shadowed", -- set true on the Player at half the kick threshold (routes to Trial servers later)
+		shadowAttribute = "Shadowed", -- set true on the Player at shadowFraction of the kick threshold (routes to Trial servers later)
+		shadowFraction = 0.5, -- fraction of combat.anomalyKickThreshold whose window weight sets the shadow flag
+		teleportWeightCapFraction = 0.5, -- one teleport anomaly weighs at most this fraction of the kick threshold
 		kickText = "The system has ended your session: anomalous movement.", -- the system line and the kick message
 		lineToken = "SystemCyan", -- palette token of the system line
 		kickDelay = 0.5, -- seconds between the system line and the kick, so the line is seen
@@ -93,6 +95,18 @@ local World = {
 		speedWeight = 1, -- anomaly weight of one over-speed sample
 		minimumAnomalies = 2, -- a kick needs at least this many separate anomalies (never on a single one)
 		reasons = { speed = "speed", teleport = "teleport", abuse = "abuse" },
+		-- Per-remote rate limits (section 17) for every client-to-server remote in net/Remotes.luau:
+		-- requests per second refilled and the burst a bucket holds; a rejection is one abuse report
+		-- weighted by abuseWeight.
+		remoteRates = {
+			ClientReady = { perSecond = 1, burst = 2 },
+			ArtRequest = { perSecond = 6, burst = 3 },
+			BasicAttackRequest = { perSecond = 6, burst = 3 },
+			GuardRequest = { perSecond = 12, burst = 6 },
+			DodgeRequest = { perSecond = 4, burst = 2 },
+			TargetRequest = { perSecond = 8, burst = 4 },
+			SwitchCallRequest = { perSecond = 2, burst = 2 },
+		},
 	},
 }
 

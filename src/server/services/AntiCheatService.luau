@@ -5,21 +5,26 @@
 
 	Every combat.anticheatSampleInterval seconds (stepped from Heartbeat, never task.wait) the service
 	reads a watched player's root position through EntityService and judges the horizontal distance
-	since the last sample against Rules.allowedDistance: the sprint cap over the interval plus the
-	combat.lagAllowance lag budget, plus the running Art's rootMotion and combat.rootMotionSlack
-	mid-Art (CombatService.currentArt says which Art; without CombatService the weapon category's
-	largest Art is assumed), plus combat.dodgeDistance mid-Dodge. The interval before a sample is
+	since the last sample against Rules.allowedDistance: the sprint cap over the interval, plus the
+	running Art's rootMotion and combat.rootMotionSlack mid-Art (CombatService.currentArt says which
+	Art; without CombatService the weapon category's largest Art is assumed), plus
+	combat.dodgeDistance mid-Dodge, plus the player's lag credit. The interval before a sample is
 	covered by whichever of the previous and current states is more permissive, so an Art that ends
-	between samples is not punished. A character without a root (reset, removed, respawning) is not
-	judged: the sample resets rather than reading the origin as a teleport. A delta beyond
+	between samples is not punished. The lag credit is the combat.lagAllowance budget spent once,
+	not per sample (Rules.maxCredit / Rules.nextCredit): it starts full, a sample that travels past
+	its allowance without credit spends it, a sample that travels less refills it, so replication
+	jitter never flags an honest sprinter while a sustained walk over the cap is flagged within a
+	few samples. A character without a root (reset, removed, respawning) is not judged: the sample
+	resets (and the credit refills) rather than reading the origin as a teleport. A delta beyond
 	combat.teleportFlagDistance is a teleport anomaly weighted by the distances it spans; anything
 	else over the allowance is an over-speed anomaly. Net.server().abuse (rate limits, schema
 	failures) adds an anomaly per report.
 
-	Anomalies live combat.anomalyWindow seconds. At half of combat.anomalyKickThreshold the player
-	gets the attribute world.anticheat.shadowAttribute = true (the shadow flag; Trial-server routing
-	is a later phase). At the threshold, and never for a single anomaly, the player receives a
-	SystemLine and is kicked. Every flag is logged with the player's UserId and the reason.
+	Anomalies live combat.anomalyWindow seconds. At world.anticheat.shadowFraction of
+	combat.anomalyKickThreshold the player gets the attribute world.anticheat.shadowAttribute = true
+	(the shadow flag; Trial-server routing is a later phase). At the threshold, and never for a
+	single anomaly, the player receives a SystemLine and is kicked. Every flag is logged with the
+	player's UserId and the reason.
 
 	The service only reads EntityService and CombatService; it never writes HP or positions.
 	Everything engine-facing comes through `Deps` (bind), so it runs under Lune with fakes.
@@ -64,6 +69,7 @@ type Entry = {
 	lastPosition: Vector3?,
 	lastState: string,
 	lastMotion: number?,
+	credit: number, -- studs of lag credit left (Rules.maxCredit when full)
 	elapsed: number, -- seconds since the last sample
 	flags: { Rules.Flag },
 	shadowed: boolean,
@@ -83,7 +89,8 @@ local AntiCheatService = {}
 
 --- Fires (player, reason, weight) for every anomaly recorded.
 AntiCheatService.Flagged = Signal.new() :: Signal.Signal<Player, string, number>
---- Fires (player) once when a player crosses half the kick threshold and is shadow-flagged.
+--- Fires (player) once when a player crosses world.anticheat.shadowFraction of the kick threshold
+--- and is shadow-flagged.
 AntiCheatService.Shadowed = Signal.new() :: Signal.Signal<Player>
 --- Fires (player, reason) when a player is kicked; the reason is the anomaly that tipped the window.
 AntiCheatService.Kicked = Signal.new() :: Signal.Signal<Player, string>
@@ -134,6 +141,7 @@ local function newEntry(player: Player): Entry
 		lastPosition = nil,
 		lastState = STATE_IDLE,
 		lastMotion = nil,
+		credit = Rules.maxCredit(Combat),
 		elapsed = 0,
 		flags = {},
 		shadowed = false,
@@ -187,11 +195,13 @@ function AntiCheatService.isKicked(player: Player): boolean
 	return entry ~= nil and entry.kicked
 end
 
--- The sample forgets where the character was (death, respawn, a new character, no root).
+-- The sample forgets where the character was (death, respawn, a new character, no root); the
+-- next reading starts fresh, so the lag credit is full again.
 local function resetSample(entry: Entry)
 	entry.lastPosition = nil
 	entry.lastState = STATE_IDLE
 	entry.lastMotion = nil
+	entry.credit = Rules.maxCredit(Combat)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -354,7 +364,10 @@ function AntiCheatService.sample(player: Player, interval: number): Rules.Verdic
 			Combat,
 			entry.lastMotion
 		)
-		verdict = Rules.evaluate(delta, math.max(allowedNow, allowedBefore), Combat)
+		-- The allowance without credit (Art or Dodge grant included) both judges and refills.
+		local base = math.max(allowedNow, allowedBefore)
+		verdict = Rules.evaluate(delta, base + entry.credit, Combat)
+		entry.credit = Rules.nextCredit(entry.credit, base, delta, Combat)
 		stats.samples += 1
 		if (verdict :: Rules.Verdict).kind ~= "ok" then
 			local v = verdict :: Rules.Verdict

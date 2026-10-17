@@ -1,14 +1,16 @@
 --!strict
 --[[
 	Remote definitions (section 17). Every remote has a kind, a direction, a payload schema and,
-	for client-to-server remotes, a rate limit. The server validates every payload against the
-	schema before any handler runs; a payload that fails is dropped and counted as an anomaly.
+	for client-to-server remotes, a rate limit (world.luau anticheat.remoteRates, keyed by the
+	remote's name). The server validates every payload against the schema before any handler runs;
+	a payload that fails is dropped and counted as an anomaly.
 
 	Payloads are always one table. Entity ids are integers assigned by the server; positions and
 	facings are plain {x, y, z} tables so schemas can check them.
 ]]
 
 local Check = require(script.Parent.Parent.util.Check)
+local World = require(script.Parent.Parent.data.world)
 
 export type Kind = "Event" | "Unreliable" | "Function"
 export type Direction = "ClientToServer" | "ServerToClient"
@@ -19,6 +21,8 @@ export type RemoteDef = {
 	schema: Check.Checker,
 	rate: { perSecond: number, burst: number }?, -- ClientToServer only
 }
+
+local rates = World.anticheat.remoteRates
 
 local entityId = Check.integer(1)
 local artId = Check.string(64)
@@ -42,7 +46,7 @@ local Remotes: { [string]: RemoteDef } = {
 		kind = "Event",
 		direction = "ClientToServer",
 		schema = Check.strictInterface({}),
-		rate = { perSecond = 1, burst = 2 },
+		rate = rates.ClientReady,
 	},
 	ArtRequest = {
 		kind = "Event",
@@ -52,7 +56,7 @@ local Remotes: { [string]: RemoteDef } = {
 			facing = unitVec,
 			clientTime = Check.number(0),
 		}),
-		rate = { perSecond = 6, burst = 3 },
+		rate = rates.ArtRequest,
 	},
 	BasicAttackRequest = {
 		kind = "Event",
@@ -61,7 +65,7 @@ local Remotes: { [string]: RemoteDef } = {
 			facing = unitVec,
 			clientTime = Check.number(0),
 		}),
-		rate = { perSecond = 6, burst = 3 },
+		rate = rates.BasicAttackRequest,
 	},
 	GuardRequest = {
 		kind = "Event",
@@ -71,7 +75,7 @@ local Remotes: { [string]: RemoteDef } = {
 			facing = unitVec,
 			clientTime = Check.number(0),
 		}),
-		rate = { perSecond = 12, burst = 6 },
+		rate = rates.GuardRequest,
 	},
 	DodgeRequest = {
 		kind = "Event",
@@ -80,7 +84,7 @@ local Remotes: { [string]: RemoteDef } = {
 			direction = Check.vec3(1.0001),
 			clientTime = Check.number(0),
 		}),
-		rate = { perSecond = 4, burst = 2 },
+		rate = rates.DodgeRequest,
 	},
 	TargetRequest = {
 		kind = "Event",
@@ -88,13 +92,13 @@ local Remotes: { [string]: RemoteDef } = {
 		schema = Check.strictInterface({
 			entityId = Check.optional(entityId),
 		}),
-		rate = { perSecond = 8, burst = 4 },
+		rate = rates.TargetRequest,
 	},
 	SwitchCallRequest = {
 		kind = "Event",
 		direction = "ClientToServer",
 		schema = Check.strictInterface({}),
-		rate = { perSecond = 2, burst = 2 },
+		rate = rates.SwitchCallRequest,
 	},
 
 	-- ------------------------------------------------------------------ server -> client (reliable)

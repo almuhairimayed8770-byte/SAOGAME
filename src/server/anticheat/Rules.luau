@@ -4,20 +4,27 @@
 	and is tested under Lune without an engine.
 
 	- allowedDistance: how far a fighter may legitimately travel in one sample interval. The sprint
-	  cap (combat.maxSpeedStudsPerSecond) always applies, over the interval plus the section 17 lag
-	  budget (combat.lagAllowance): the client sprints at exactly the cap and the server reads its
-	  root through replication, whose phase jitter would otherwise put an honest sprinter a hair over
-	  the cap on every other sample. Mid-Art the Art's rootMotion plus combat.rootMotionSlack is
-	  added; mid-Dodge combat.dodgeDistance is added. Only the horizontal plane is judged (the engine
-	  owns falling, and the kill volume owns the rim).
+	  cap (combat.maxSpeedStudsPerSecond) always applies over the interval, plus whatever lag credit
+	  the caller passes. Mid-Art the Art's rootMotion plus combat.rootMotionSlack is added; mid-Dodge
+	  combat.dodgeDistance is added. Only the horizontal plane is judged (the engine owns falling,
+	  and the kill volume owns the rim).
+	- maxCredit / nextCredit: the section 17 lag budget (combat.lagAllowance) as a per-player credit
+	  of maxCredit studs (the sprint cap over the lag). The client sprints at exactly the cap and the
+	  server reads its root through replication, whose jitter can put one reading up to the lag
+	  ahead of the last; it does not accumulate, so over many samples an honest root travels at most
+	  the cap over the elapsed time plus one lag. The credit is spent by a sample that travels past
+	  its allowance without credit and refills only when a sample travels less, never above
+	  maxCredit, so a sustained walk over the cap drains it within a few samples and is flagged.
 	- evaluate: compares a sampled delta with its allowance. Inside the allowance nothing happens; a
 	  delta beyond combat.teleportFlagDistance is a teleport anomaly weighted by how many
 	  teleport distances the unexplained part (delta minus allowance) spans, at least one and
-	  capped at half the kick threshold so no single anomaly can ever kick; anything else beyond
-	  the allowance is an over-speed anomaly of weight world.anticheat.speedWeight.
+	  capped at world.anticheat.teleportWeightCapFraction of the kick threshold so no single
+	  anomaly can ever kick; anything else beyond the allowance is an over-speed anomaly of weight
+	  world.anticheat.speedWeight.
 	- prune / weight / shouldShadow / shouldKick: the sliding combat.anomalyWindow. A kick needs at
 	  least world.anticheat.minimumAnomalies separate anomalies AND a total weight at or above
-	  combat.anomalyKickThreshold inside the window; the shadow flag comes at half that weight.
+	  combat.anomalyKickThreshold inside the window; the shadow flag comes at
+	  world.anticheat.shadowFraction of that weight.
 
 	Every number comes from combat.luau and world.luau; the callers pass the combat table so a test
 	can hand in its own.
@@ -48,7 +55,7 @@ export type RecordLike = {
 --- The combat numbers the rules read (tests pass their own table).
 export type CombatLike = {
 	maxSpeedStudsPerSecond: number,
-	lagAllowance: number, -- seconds of replication lag every sample tolerates (section 17, D-010)
+	lagAllowance: number, -- seconds of replication lag; the sprint cap over it is the lag credit (section 17)
 	rootMotionSlack: number,
 	dodgeDistance: number,
 	teleportFlagDistance: number,
@@ -101,12 +108,18 @@ function Rules.categoryOf(record: RecordLike): Types.WeaponCategory?
 	return Weapons.category(weaponId)
 end
 
---- Studs a fighter in `record`'s state may travel in `interval` seconds (plus the lag budget).
---- `artRootMotion` is the running Art's rootMotion when the caller knows it (0 for a basic swing);
---- nil falls back to the largest Art of the fighter's weapon category so an unknown Art never
---- flags an honest player.
-function Rules.allowedDistance(interval: number, record: RecordLike, combat: CombatLike, artRootMotion: number?): number
-	local allowed = combat.maxSpeedStudsPerSecond * (math.max(interval, 0) + combat.lagAllowance)
+--- Studs a fighter in `record`'s state may travel in `interval` seconds, plus `credit` studs of
+--- lag credit (nil is none). `artRootMotion` is the running Art's rootMotion when the caller knows
+--- it (0 for a basic swing); nil falls back to the largest Art of the fighter's weapon category so
+--- an unknown Art never flags an honest player.
+function Rules.allowedDistance(
+	interval: number,
+	record: RecordLike,
+	combat: CombatLike,
+	artRootMotion: number?,
+	credit: number?
+): number
+	local allowed = combat.maxSpeedStudsPerSecond * math.max(interval, 0) + math.max(credit or 0, 0)
 	local state = record.state :: string
 	if STATE_ART[state] then
 		local motion = artRootMotion
@@ -120,13 +133,27 @@ function Rules.allowedDistance(interval: number, record: RecordLike, combat: Com
 	return allowed
 end
 
+--- The full lag credit, in studs: the sprint cap over the section 17 lag budget. A player starts
+--- with it, and again after every sample reset (death, respawn, a new character).
+function Rules.maxCredit(combat: CombatLike): number
+	return combat.maxSpeedStudsPerSecond * math.max(combat.lagAllowance, 0)
+end
+
+--- The lag credit after a sample that travelled `delta` studs against `base` studs allowed without
+--- credit (the Art or Dodge grant included): what the sample left unused refills it, what it
+--- travelled past `base` spends it, clamped to 0..maxCredit.
+function Rules.nextCredit(credit: number, base: number, delta: number, combat: CombatLike): number
+	return math.clamp(credit + base - delta, 0, Rules.maxCredit(combat))
+end
+
 --- The anomaly weight of a teleport of `delta` studs when `allowed` of them were legitimate: one per
---- teleportFlagDistance of unexplained distance (at least one), capped at half the kick threshold so
---- a single anomaly can never reach it on its own.
+--- teleportFlagDistance of unexplained distance (at least one), capped at
+--- world.anticheat.teleportWeightCapFraction of the kick threshold so a single anomaly can never
+--- reach it on its own.
 function Rules.teleportWeight(delta: number, combat: CombatLike, allowed: number?): number
 	local excess = delta - (allowed or 0)
 	local spans = math.ceil(excess / combat.teleportFlagDistance)
-	local cap = math.max(1, math.floor(combat.anomalyKickThreshold / 2))
+	local cap = math.max(1, math.floor(combat.anomalyKickThreshold * World.anticheat.teleportWeightCapFraction))
 	return math.clamp(spans, 1, cap)
 end
 
@@ -202,10 +229,11 @@ function Rules.count(flags: { Flag }, now: number, combat: CombatLike?): number
 	return total
 end
 
---- True once the window's weight reaches half the kick threshold: the player is shadow-flagged.
+--- True once the window's weight reaches world.anticheat.shadowFraction of the kick threshold: the
+--- player is shadow-flagged.
 function Rules.shouldShadow(flags: { Flag }, now: number, combat: CombatLike?): boolean
 	local threshold = (combat or Combat).anomalyKickThreshold
-	return Rules.weight(flags, now, combat) >= threshold / 2
+	return Rules.weight(flags, now, combat) >= threshold * World.anticheat.shadowFraction
 end
 
 --- True once the window holds at least world.anticheat.minimumAnomalies separate anomalies whose
