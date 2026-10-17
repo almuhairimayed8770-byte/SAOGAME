@@ -109,6 +109,7 @@ local Fx = {
 		bossRise = 9,
 		shardSize = { min = 0.3, max = 0.85 },
 		bossShardSize = { min = 0.5, max = 1.6 },
+		shardAspect = { min = 0.5, max = 1 }, -- X and Z extents as a fraction of a shard's base size
 		outwardSpeed = { min = 2.5, max = 7 }, -- studs per second at t = 0
 		upwardBias = 0.35, -- fraction of the outward direction tilted up
 		drag = 2.2, -- per second; outward speed decays exponentially
@@ -116,6 +117,7 @@ local Fx = {
 		shrinkEnd = 0.08, -- final scale fraction
 		fadeStart = 0.35, -- fraction of the life where transparency begins to rise
 		riseEasing = "QuadOut",
+		fallbackLimbSize = 2, -- studs; the stand-in limb for a rig with no visible parts
 		limbJitter = 0.6, -- fraction of a limb's half-size the spawn point is scattered by
 		hiddenTransparency = 1,
 		flash = {
@@ -275,7 +277,6 @@ local Fx = {
 			Mud = "Grass",
 			Ground = "Gravel",
 			Sand = "Gravel",
-			Gravel = "Gravel",
 			Pebble = "Gravel",
 			Snow = "Snow",
 			Ice = "Snow",

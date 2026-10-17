@@ -136,7 +136,11 @@ function ShatterMath.layout(limbs: { Limb }, count: number, seed: number, boss: 
 			speed = nextRange(rng, config.outwardSpeed.min, config.outwardSpeed.max),
 			axis = axis,
 			spin = nextRange(rng, config.rotationSpeed.min, config.rotationSpeed.max),
-			size = { base * nextRange(rng, 0.5, 1), base, base * nextRange(rng, 0.5, 1) },
+			size = {
+				base * nextRange(rng, config.shardAspect.min, config.shardAspect.max),
+				base,
+				base * nextRange(rng, config.shardAspect.min, config.shardAspect.max),
+			},
 			phase = nextUnit(rng),
 		})
 	end

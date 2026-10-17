@@ -143,7 +143,8 @@ local function limbsOf(model: Instance): { ShatterMath.Limb }
 	if #limbs == 0 then
 		local position = Engine.modelPosition(model)
 		if position ~= nil then
-			table.insert(limbs, { pos = Engine.toTable(position), size = { 2, 2, 2 } })
+			local side = Fx.shatter.fallbackLimbSize
+			table.insert(limbs, { pos = Engine.toTable(position), size = { side, side, side } })
 		end
 	end
 	return limbs

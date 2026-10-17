@@ -117,6 +117,7 @@ local Remotes: { [string]: RemoteDef } = {
 			artId = Check.optional(artId),
 			hitIndex = Check.integer(0),
 			isSwitch = Check.optional(Check.boolean),
+			staggerDirection = Check.optional(Check.literal("Front", "Back", "Left", "Right")),
 		}),
 	},
 	EntityDied = {

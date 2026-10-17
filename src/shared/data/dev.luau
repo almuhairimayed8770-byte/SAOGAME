@@ -238,6 +238,7 @@ local Dev = {
 			textSize = 13,
 			titleTextSize = 16,
 			controlsHeight = 36,
+			controlRows = 3, -- 3 speeds + 6 transport and toggle buttons at 4 per row inside listWidth
 			buttonWidth = 64,
 			buttonGap = 6,
 			padding = 10,

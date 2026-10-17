@@ -232,7 +232,7 @@ local title = text({
 })
 local readout = text({ Size = UDim2.new(1, 0, 0, PanelData.readoutHeight), LayoutOrder = 2 })
 local controls = El.new("Frame", {
-	Size = UDim2.new(1, 0, 0, PanelData.controlsHeight * 2),
+	Size = UDim2.new(1, 0, 0, PanelData.controlsHeight * PanelData.controlRows),
 	BackgroundTransparency = 1,
 	LayoutOrder = 3,
 }, {
@@ -258,7 +258,7 @@ local list = El.new("ScrollingFrame", {
 		-(
 				PanelData.headerHeight
 				+ PanelData.readoutHeight
-				+ PanelData.controlsHeight * 2
+				+ PanelData.controlsHeight * PanelData.controlRows
 				+ PanelData.problemsHeight
 				+ PanelData.buttonGap * 4
 			)
