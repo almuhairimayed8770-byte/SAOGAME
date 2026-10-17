@@ -25,6 +25,7 @@ local Combat = require(Shared.data.combat)
 local ChoreoData = require(Shared.data.choreo)
 local InputData = require(Shared.data.input)
 local Playground = require(Shared.data.playground)
+local World = require(Shared.data.world)
 local Arts = require(Shared.data.arts)
 local Types = require(Shared.types)
 local Net = require(Shared.net.Net)
@@ -279,7 +280,8 @@ end
 
 -- ------------------------------------------------------------------ basic, guard, dodge
 
---- Basic attack: the next hit of the three-hit chain (section 6).
+--- Basic attack: the next hit of the three-hit chain (section 6). Clicks faster than the
+--- server's BasicAttackRequest refill are dropped here, so honest mashing never reads as abuse.
 function CharacterController.basicAttack()
 	if animator == nil then
 		return
@@ -287,6 +289,9 @@ function CharacterController.basicAttack()
 	local t = now()
 	local ok = ActionLogic.canStart(state, "Basic", t, dodgeReadyAt)
 	if not ok then
+		return
+	end
+	if not ActionLogic.basicReady(basicLastTime, t, 1 / World.anticheat.remoteRates.BasicAttackRequest.perSecond) then
 		return
 	end
 	basicChain = ActionLogic.nextBasic(basicChain, basicLastTime, t, Combat.basicChainWindow, Combat.basicChainLength)

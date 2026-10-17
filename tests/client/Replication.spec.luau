@@ -229,6 +229,8 @@ describe("Replication", function()
 	it("HitConfirmed: hit-stop on both rigs, a digit, a white flash, nudge and shake for the attacker", function()
 		local t = setup()
 		Replication.dispatch("HitConfirmed", hit())
+		-- Only a parry throws the spark burst; an ordinary hit never does.
+		expect(#t.find("sparks", "parry")).toBe(0)
 		local attackerStops = t.find("animator:me", "hitStop")
 		local targetStops = t.find("animator:boar", "hitStop")
 		expect(#attackerStops).toBe(1)
@@ -390,8 +392,11 @@ describe("Replication", function()
 		Replication.dispatch("HitConfirmed", hit({ staggerDirection = "Front", broke = true }))
 		Replication.dispatch("HitConfirmed", hit())
 		expect(#t.find("animator:boar", "play")).toBe(3)
+		-- None of those hits (flinching, killing, breaking or plain) threw a parry spark.
+		expect(#t.find("sparks", "parry")).toBe(0)
 		-- A parried enemy plays its Parry reaction (the reaction slot), never a flinch on top.
 		Replication.dispatch("HitConfirmed", hit({ staggerDirection = "Front", parried = true, damage = 0 }))
+		expect(#t.find("sparks", "parry")).toBe(1)
 		plays = t.find("animator:boar", "play")
 		expect(#plays).toBe(4)
 		expect(plays[4].args[1]).toBe("enemy/Boar/Parry")
@@ -484,7 +489,7 @@ describe("Replication", function()
 		expect(t.find("telegraphs", "hide")[5].args[1]).toBe(t.models.boar)
 	end)
 
-	it("EntityDied freezes the rig, ducks every sound, then shatters (and reads a player's name)", function()
+	it("EntityDied freezes the rig, ducks Music, SFX and UI, then shatters (and reads a player's name)", function()
 		local t = setup()
 		Replication.dispatch(
 			"EntityDied",
@@ -850,6 +855,61 @@ describe("Replication", function()
 		expect(played[1].args[2]).toBe(Vector3.new(1, 2, 3))
 		expect(#t.find("systemLine", "show")).toBe(0)
 	end)
+
+	it(
+		"EntityDied: each shatter releases the duck before it cracks, so a second death never mutes the first",
+		function()
+			local t = setup()
+			-- Two deaths inside one freeze (Sharp Nail hits land closer together than deathFreeze).
+			Replication.dispatch(
+				"EntityDied",
+				{ entityId = 7, shatter = "Beast", position = { 1, 2, 3 }, name = "Frenzy Boar" }
+			)
+			Replication.dispatch(
+				"EntityDied",
+				{ entityId = 99, shatter = "Beast", position = { 4, 5, 6 }, name = "Gone" }
+			)
+			local ducks = t.find("sfx", "duck")
+			expect(#ducks).toBe(2)
+			for _, duck in ducks do
+				expect(duck.args[1]).toBe(combat.deathDuckDb)
+				expect(duck.args[2]).toBe(combat.deathFreeze)
+			end
+			expect(#t.scheduled).toBe(2)
+
+			-- The first shatter: a release (0 dB, at once) is recorded before Shatter.play.
+			t.scheduled[1].fn()
+			local releaseAt, shatterAt = nil, nil
+			for index, call in t.calls do
+				if call.module == "sfx" and call.fn == "duck" and call.args[1] == 0 and call.args[2] == 0 then
+					releaseAt = releaseAt or index
+				elseif call.module == "shatter" and call.fn == "play" then
+					shatterAt = shatterAt or index
+				end
+			end
+			expect(releaseAt).never.toBeNil()
+			expect(shatterAt).never.toBeNil()
+			expect(releaseAt :: number).toBeLessThan(shatterAt :: number)
+			expect(#t.find("sfx", "duck")).toBe(3)
+
+			-- The second death has no rig: its own release comes before the crack it plays directly.
+			t.scheduled[2].fn()
+			ducks = t.find("sfx", "duck")
+			expect(#ducks).toBe(4)
+			expect(ducks[4].args[1]).toBe(0)
+			expect(ducks[4].args[2]).toBe(0)
+			local lastRelease, crackAt = 0, 0
+			for index, call in t.calls do
+				if call.module == "sfx" and call.fn == "duck" then
+					lastRelease = index
+				elseif call.module == "sfx" and call.fn == "play" and call.args[1] == "shatter.Crack" then
+					crackAt = index
+				end
+			end
+			expect(#cracks(t)).toBe(1)
+			expect(lastRelease).toBeLessThan(crackAt)
+		end
+	)
 
 	it("dispatch rejects unknown remotes", function()
 		setup()

@@ -2,6 +2,7 @@
 local ActionLogic = Harness.load("src/client/controllers/ActionLogic")
 local combat = Harness.load("src/shared/data/combat")
 local choreo = Harness.load("src/shared/data/choreo")
+local world = Harness.load("src/shared/data/world")
 
 local function art(id, preconditions)
 	return {
@@ -111,6 +112,53 @@ describe("ActionLogic", function()
 		expect(ActionLogic.nextBasic(2, 5.3, 5.6, window, length)).toBe(3)
 		expect(ActionLogic.nextBasic(3, 5.6, 5.9, window, length)).toBe(1)
 		expect(ActionLogic.nextBasic(1, 5, 5 + window + 0.1, window, length)).toBe(1)
+	end)
+
+	it("paces basic attacks at the server's BasicAttackRequest refill so mashing never trips the limit", function()
+		local rate = world.anticheat.remoteRates.BasicAttackRequest
+		local interval = 1 / rate.perSecond
+		-- The first click of a session (nothing sent yet) always goes out.
+		expect(ActionLogic.basicReady(0, 5, interval)).toBe(true)
+		-- A click inside the refill interval is dropped; one at or past it goes out.
+		expect(ActionLogic.basicReady(5, 5 + interval * 0.5, interval)).toBe(false)
+		expect(ActionLogic.basicReady(5, 5 + interval - 1e-3, interval)).toBe(false)
+		expect(ActionLogic.basicReady(5, 5 + interval, interval)).toBe(true)
+		expect(ActionLogic.basicReady(5, 5 + interval * 2, interval)).toBe(true)
+
+		-- A 12 clicks/s masher for 30 s, each request reaching the server with up to 80 ms of
+		-- network jitter (late and on-time packets alternate: the worst bunching it allows), run
+		-- through the same token bucket Net keeps per player and remote.
+		local function rejectedRequests(gate: number): (number, number)
+			local clicksPerSecond, jitter = 12, 0.08
+			local lastSent = 0
+			local arrivals = {}
+			for index = 1, clicksPerSecond * 30 do
+				local clickAt = 10 + index / clicksPerSecond
+				if ActionLogic.basicReady(lastSent, clickAt, gate) then
+					lastSent = clickAt
+					table.insert(arrivals, clickAt + (if #arrivals % 2 == 0 then jitter else 0))
+				end
+			end
+			table.sort(arrivals)
+			local tokens, last, rejected = rate.burst, arrivals[1], 0
+			for _, at in arrivals do
+				tokens = math.min(rate.burst, tokens + (at - last) * rate.perSecond)
+				last = at
+				if tokens < 1 then
+					rejected += 1
+				else
+					tokens -= 1
+				end
+			end
+			return rejected, #arrivals
+		end
+		local rejected, sent = rejectedRequests(interval)
+		expect(sent).toBeGreaterThan(0)
+		expect(rejected).toBe(0)
+		-- Ungated, the same masher overruns the bucket, and each rejection is an abuse report of
+		-- abuseWeight: far more than the kick threshold inside the 30 s.
+		local ungated = rejectedRequests(0)
+		expect(ungated * world.anticheat.abuseWeight).toBeGreaterThan(combat.anomalyKickThreshold)
 	end)
 
 	it("builds clip ids from the rig kind", function()

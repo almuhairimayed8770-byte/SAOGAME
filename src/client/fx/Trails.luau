@@ -9,9 +9,14 @@
 
 	`setActive(model, on, kind)`: Art trails are full width in the Art's color; Basic trails are
 	thinner and whiter; Smear is full width for the smear frames. Several kinds may be on at once
-	(a Smear inside a hit window); the trail stays enabled while any is. `activationLight` turns
-	the blade light on in the trail color and flashes the weapon's Highlight white for three
-	frames. `flashWhite` is the two-frame white flash on a Switch landing or a parry.
+	(a Smear inside a hit window); the trail stays enabled while any is. The width follows the
+	kind that is on, the color follows the swing (Art over Basic): a Basic swing's smear frames
+	go full width but stay whiter, and once every kind is off the fading tail keeps the look of
+	the swing that drew it (Trail.Color and WidthScale recolor the whole trail).
+
+	`activationLight` turns the blade light on in the trail color and flashes the weapon's
+	Highlight white for three frames. `flashWhite` is the two-frame white flash on a Switch
+	landing or a parry.
 
 	Budget: at most fx.quality[tier].maxTrails trails are enabled at once; when more rigs are
 	swinging, the farthest from the viewer are disabled first. Trails past the tier's distance
@@ -42,6 +47,7 @@ type Entry = {
 	token: string,
 	color: Color3,
 	active: { [string]: boolean },
+	swing: Kind, -- the last swing kind on (Art or Basic): the color, and the width once nothing is on
 	flashCancel: (() -> ())?,
 	flashing: boolean,
 	allowed: boolean, -- inside the budget and the distance
@@ -175,8 +181,21 @@ local function wantsTrail(entry: Entry): boolean
 	return entry.flashing or activeKind(entry) ~= nil
 end
 
+-- The swing whose look the trail wears: Art over Basic while either is on, else the last one, so
+-- neither a Smear frame nor the fade after the swing changes the color.
+local function swingKind(entry: Entry): Kind
+	if entry.active.Art then
+		return "Art"
+	elseif entry.active.Basic then
+		return "Basic"
+	end
+	return entry.swing
+end
+
 local function applyAppearance(entry: Entry)
-	local kind = activeKind(entry) or "Art"
+	local swing = swingKind(entry)
+	entry.swing = swing
+	local kind = activeKind(entry) or swing
 	local multiplier = Fx.trail.width[kind] or Fx.trail.width.Art
 	local scale = if entry.span > 1e-6 then entry.baseWidth / entry.span else 1
 	local widthKeys = {}
@@ -187,7 +206,7 @@ local function applyAppearance(entry: Entry)
 	local color = entry.color
 	if entry.flashing then
 		color = Palette.color3(Fx.trail.flashToken :: any)
-	elseif kind == "Basic" then
+	elseif swing == "Basic" then
 		color = entry.color:Lerp(Palette.color3("TrailWhite"), Fx.trail.basicWhiteBlend)
 	end
 	entry.trail.Color = ColorSequence.new(color)
@@ -244,6 +263,7 @@ function Trails.attach(model: Instance): boolean
 		token = token,
 		color = color,
 		active = {},
+		swing = "Art",
 		flashCancel = nil,
 		flashing = false,
 		allowed = true,

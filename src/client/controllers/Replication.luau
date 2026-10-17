@@ -3,7 +3,7 @@
 	Replication: every server-to-client remote becomes a client reaction (ARCHITECTURE "Client
 	reactions to remotes"): clips on other rigs, telegraphs, hit-stop, digits, highlight flashes,
 	an enemy's additive directional flinch, the parry spark burst, camera nudge and shake, the HP
-	flash, the death freeze (every sound group ducked) and shatter, the death system line after the
+	flash, the death freeze (Music, SFX and UI ducked) and shatter, the death system line after the
 	shatter, other system lines, the Switch ring. A Stagger, Break, guard break or death hides the
 	wind-up telegraph it interrupted. It also routes every rig's clip events (trail, smear,
 	activation light, footsteps, clip sounds) to the FX and audio packages, so trails, smears and
@@ -305,9 +305,13 @@ function handlers.EntityDied(payload: any)
 		animator:setTimeScale(0)
 		d.trails.setActive(record.model, false, "Art")
 	end
-	-- Freeze and silence (section 6, section 11): every sound group ducks, not only the music.
+	-- Freeze and silence (section 6, section 11): Music, SFX and UI duck, not only the music.
 	d.sfx.duck(Combat.deathDuckDb, Combat.deathFreeze)
 	d.schedule(Combat.deathFreeze, function()
+		-- The silence ends as this shatter cracks. SfxPool keeps only the newest duck, so without
+		-- this a second death inside the freeze would keep the groups down and swallow this crack
+		-- and chime; a duck of 0 dB restores full volume and makes any pending restore stale.
+		d.sfx.duck(0, 0)
 		if record ~= nil then
 			-- Shatter.play plays the crack itself (SfxPool.shatter) at the rig.
 			d.shatter.play(record.model, payload.shatter)

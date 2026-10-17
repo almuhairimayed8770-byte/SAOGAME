@@ -156,6 +156,13 @@ function ActionLogic.dodgeDirection(localX: number, localZ: number, deadzone: nu
 	return if localZ < 0 then "Forward" else "Back"
 end
 
+--- True when a basic attack may go out: at least `minInterval` seconds since the last one sent.
+--- The controller passes the BasicAttackRequest refill interval (1 / world.luau perSecond), so
+--- a player mashing the button never outruns the server's rate limit (section 17).
+function ActionLogic.basicReady(lastTime: number, now: number, minInterval: number): boolean
+	return now - lastTime >= minInterval
+end
+
 --- The next basic-attack chain index: continues inside the window, otherwise restarts at 1.
 function ActionLogic.nextBasic(
 	chainIndex: number,
