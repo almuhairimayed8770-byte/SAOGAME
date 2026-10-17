@@ -41,7 +41,7 @@ src/client/
   choreo/ClipLibrary.luau      loads clip modules by id
   choreo/Locomotion.luau       8-direction blend space, turn-in-place, skid, landing squash, foot IK
   camera/CameraController      spring follow, FOV, nudge, shake, lock-on framing, orbit presets
-  fx/Trails, Smear, Shatter, Telegraphs, OutlineManager, SwitchRing, Digits, Quality
+  fx/Trails, Smear, Shatter, Sparks, Telegraphs, OutlineManager, SwitchRing, Digits, Quality
   ui/lib/                      el(), state cells
   ui/Hud, Nameplates, SystemLine
   audio/SfxPool, MusicDirector
@@ -130,7 +130,9 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
 - Trail kinds: a `TrailOn`'s `data.kind` (`"Art"` or `"Basic"`) picks the trail kind, and the client
   remembers it for the rest of that clip's trail events (`HitWindowOpen`/`Close`, `TrailOff` and
   `PostMotionStart` carry no kind); without one, a clip id containing `/Basic` means Basic.
-  `SmearOn`/`SmearOff` also turn the full-width `Smear` trail kind on and off.
+  `SmearOn`/`SmearOff` also turn the full-width `Smear` trail kind on and off. The width follows the
+  kind that is on; the color follows the swing (Art over Basic), so a Basic swing's smear frames widen
+  the trail but keep its whiter color, and the fading tail keeps the look of the swing that drew it.
 - Sounds: a `Sfx` or `Voice` event carries `data.name = "family.Name"` from `sfx.luau`; the client
   plays it through `SfxPool.play` at the rig, and the clips validator rejects a name `Sfx.get`
   cannot resolve. Sounds a server remote already triggers (parry, block, guard break) are not
@@ -151,8 +153,10 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
    `Stance` and `NoClip`. On failure it fires `ActionRejected` to that client (which cancels its
    prediction). On success it sets `State = "Art"`, fires `ActionStarted` to everyone (including the
    requester, who ignores its own), and schedules the timeline from the clip. The timeline starts at
-   the request's `clientTime` clamped into `[now - lagAllowance, now]` (`CombatService.runStartOf`,
-   the 150 ms lag allowance, D-010), and `ActionStarted.serverTime` carries that start: for each hit window it
+   the request's `clientTime` clamped into `[max(now - lagAllowance, min(freeAt, now)), now]`, where
+   `freeAt` is the fighter's `lockUntil` before the new action (`CombatService.runStartOf`, the 150 ms
+   lag allowance, D-010), so a rewound action never overlaps the lock before it; a basic swing's chain
+   index uses the same start, and `ActionStarted.serverTime` carries it: for each hit window it
    samples the clip at `hitSampleHz` through `ClipSampler` + `Pose` and runs `HitSweep` between
    samples; every hit goes through `DamageMath` and `EntityService.applyHit`, then `HitConfirmed` is
    fired to all clients. After the last hit the entity enters `PostMotion` for `postMotion` seconds
@@ -166,7 +170,7 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
    `HitConfirmed` carries the hit's `staggerDirection` (Front, Back, Left, Right in the target's frame).
    A parry staggers the enemy (`parryStagger`) and (Phase 1) opens a Switch window.
 4. Death: `EntityService` sets `Dead`, fires `EntityDied {shatter}` to all; the client freezes the
-   rig for `deathFreeze` with every sound group ducked by `deathDuckDb`, plays `Shatter`, then shows
+   rig for `deathFreeze` with the Music, SFX and UI groups ducked by `deathDuckDb`, plays `Shatter`, then shows
    the system line (D-035).
 
 Hit-stop, trails, camera, digits and highlight flashes are client reactions to `HitConfirmed`;
@@ -196,13 +200,13 @@ nothing about animation runs on the server except the pose sampling used by the 
 | `assets.luau` | asset ids by name; missing ids are reported |
 | `choreo.luau` | animation tunables: blend times and the blend easing, smear scale, idle cycle, locomotion speeds |
 | `camera.luau` | section 10 camera numbers |
-| `fx.luau` | budgets, shard counts, trail lifetimes, telegraph sizes, quality tiers |
+| `fx.luau` | budgets, shard counts, trail lifetimes, telegraph sizes, the parry spark burst, quality tiers |
 | `playground.luau` | the Playground: field radius, rim, pillars, clouds, spawn tables, loadout |
 | `ai.luau` | every AI tunable: perception, archetype tuning, pathing, tick rates |
 | `world.luau` | world builder tunables (folders, railing, pillars, clouds, kill volume) and the anti-cheat policy, including the shadow and teleport-cap fractions and the per-remote rate limits (`anticheat.remoteRates`) |
 | `weaponModels.luau` | placeholder weapon geometry per category and the names the client relies on |
 | `input.luau` | key, gamepad and touch bindings |
-| `ui.luau` | HUD, nameplate and system-line layout numbers |
+| `ui.luau` | HUD, nameplate and system-line layout numbers, and the death system-line text |
 | `dev.luau` | dev tooling numbers: Capture panel, ClipLab, PoseEditor, pose server (D-028) |
 
 Row convention (D-017): tables with many rows keep them under `Module.rows` with `byId(id)` and
@@ -221,7 +225,7 @@ scans every text file in the repo except `docs/GAME_SPEC.md` and the blocklist i
 | `Telegraph` | `Telegraphs.show(entity, kind, windUp, shape)`: weapon Highlight fill + ground decal |
 | `HitConfirmed` | hit-stop on attacker and target rigs, `Digits`, Highlight flash, `Trails` flash on Switch, camera nudge/shake, HUD HP flash; on a parry `Sparks.parry(position)`; on an enemy hit that neither kills nor breaks, the additive `Flinch<staggerDirection>` clip |
 | `StateChanged` | stagger/break/guard-break clips, HUD status; `Stagger`, `Break`, `GuardBroken` and `Dead` hide that enemy's telegraph |
-| `EntityDied` | freeze `deathFreeze`, `SfxPool.duck(deathDuckDb, deathFreeze)` on every group, `Shatter.play(model, shatterKind)` (which plays the crack); the crack plays directly through `SfxPool` only when the rig is already gone; after the shatter the system line: `ui.luau` `systemLine.deathSelf` for the dying player, `deathOther` with the name for everyone else |
+| `EntityDied` | freeze `deathFreeze`, `SfxPool.duck(deathDuckDb, deathFreeze)` on the Music, SFX and UI groups, `Shatter.play(model, shatterKind)` (which plays the crack); the crack plays directly through `SfxPool` only when the rig is already gone; each shatter first releases the duck (`SfxPool.duck(0, 0)`) so its crack is heard even while another death is still frozen; after the shatter the system line: `ui.luau` `systemLine.deathSelf` for the dying player, `deathOther` with the name for everyone else |
 | `ActionRejected` | cancel the predicted clip, no digit |
 | `SystemLine` | centered system text with chime |
 | `SwitchWindow` | `SwitchRing` on the enemy, SWITCH prompt (Phase 1 logic, Phase 0 visuals) |

@@ -15,7 +15,7 @@ bottom-left while you record.
 | `art-rising-arc.mp4` | 5 s | the sunken start pose, the rise onto the toes, two hits with Normal then Final hit-stop, the trail on only in the windows |
 | `enemy-boar-charge.mp4` | 5 s | 0.6 s crouch with the red line, the launch, the skid, readable from behind |
 | `enemy-kobold-overhead.mp4` | 5 s | 1.0 s wind-up with the yellow edge, the chop, the recovery |
-| `parry-spark.mp4` | 5 s | guard tapped inside the window; spark and ring; the enemy staggers |
+| `parry-spark.mp4` | 5 s | guard tapped inside the window against the kobold's overhead (the boar's charge is unblockable); spark and ring; the enemy staggers |
 | `kill-shatter.mp4` | 5 s | the 10-frame kill hit-stop, the 0.5 s freeze and silence, the shards rising |
 | `locomotion.mp4` | 10 s | walk, run, sprint drawn and sheathed, turn in place, skid stop, jump and land; no T-pose, no sliding foot |
 

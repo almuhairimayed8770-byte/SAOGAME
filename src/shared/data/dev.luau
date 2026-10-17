@@ -165,7 +165,7 @@ local Dev = {
 				id = "parry-spark",
 				title = "Parry",
 				seconds = 5,
-				notes = "guard tapped inside the window; spark and ring; the enemy staggers",
+				notes = "guard tapped inside the window against the kobold's overhead (the boar's charge is unblockable); spark and ring; the enemy staggers",
 			},
 			{
 				id = "kill-shatter",

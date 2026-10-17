@@ -15,12 +15,12 @@ toolchain (`aftman.toml`); nothing has run inside Roblox Studio yet, and every l
 | Clips | 56 Choreo clips: 36 `player/OneHandedSword/*` (locomotion, guard, parry, dodges, flinches, Basic1-3, Horizontal, Vertical, RisingArc, SharpNail, DeathFreeze), 10 `enemy/Boar/*`, 10 `enemy/Kobold/*` | `tests/choreo/clips.spec.luau`, `ClipLibrary.spec.luau`, clips validator |
 | Choreo (client) | `ClipSampler` (per-clip structure cache), `Pose`, `Mixer` (layers, pause, time scale, catch-up), `Choreo` (animator per rig, quality tiers, Roblox Animation fallback), `ClipLibrary`, `Locomotion` + `LocomotionState` | `tests/choreo/*` |
 | Controllers, camera, net | Input, Character, Target, EntityTracker, Replication (drives every remote rig's locomotion), ActionLogic, WeaponInfo, Siblings; CameraController + CameraMath; `Net` / `Remotes` (D-008) | `tests/client/*`, `tests/net/*` |
-| FX | Trails, Smear, Shatter (+ ShatterMath), Telegraphs (+ TelegraphShapes), OutlineManager (+ OutlineRanking), Digits, SwitchRing, Quality, FrameClock, Engine | `tests/client/*` |
+| FX | Trails, Smear, Shatter (+ ShatterMath), Sparks, Telegraphs (+ TelegraphShapes), OutlineManager (+ OutlineRanking), Digits, SwitchRing, Quality, FrameClock, Engine | `tests/client/*` |
 | UI and audio | `El` component library (D-007), Hud (+ HudLogic), Nameplates, SystemLine; MusicDirector (+ MusicState), SfxPool | `tests/client/*` |
 | Server | EntityService, CombatService (DamageMath, HitSweep D-010, the section 17 request checks including the quick-slot check), EnemyService with Brain / Charger / Brute AI, PlaygroundService, AntiCheatService (+ anticheat Rules), world builders (RigBuilder, WeaponBuilder, PlaygroundBuilder, PlaygroundLayout), `Main.server.luau` | `tests/server/*`, `tests/smoke/*.smoke.luau` (need Studio) |
 | Tools and docs | `Capture.client.luau` (gate shot prompts), the ClipLab (`places/ClipLab.project.json`, `ClipLab.server.luau`, `ClipLab.client.luau`, `ReviewMarkers`), the PoseEditor Studio plugin (`tools/PoseEditor`) with `Serialize` / `Session`, `tools/pose-server.luau`, `tools/assets.luau`, `tools/smoke.sh`, `tools/animation-review.luau`, `tools/build-plugin.sh`, `data/dev.luau`, this docs set | `tests/tools/*` |
 
-Suite at the time of writing: `lune run tests/run.luau` 741 passed, 0 failed, 65 spec files. `lune run tools/validate.luau`:
+Suite at the time of writing: `lune run tests/run.luau` 794 passed, 0 failed, 68 spec files. `lune run tools/validate.luau`:
 24 validators, 0 problems; the clips validator prints one warning for the 160 later-phase clips (66 Arts, 65 enemy
 attacks, 29 boss attacks) that are not authored yet and are outside the Phase 0 scope (D-015).
 `tools/animation-review.luau` flags no review-rule finding on the 56 clips (9 attacks); the hand-filled columns are
@@ -39,6 +39,26 @@ still empty (no Studio pass yet). `tools/lint.sh --offline` (StyLua, Selene, tes
 - Mobile layout and touch controls: the data (`input.luau` touch buttons) exists; no layout pass has been made.
 - Nothing has been published to Roblox; nothing has run inside Studio from this environment (no Studio here).
 
+## Review pass (2026-10-17)
+
+Two adversarial review rounds over the whole tree, each finding checked by two independent reviewers
+before it was fixed. The fixes that matter most for the gate:
+
+- **Server-to-client remotes work.** `Net.fire` and `fireAll` threw on every call, so no hit,
+  telegraph, death or rejection would have reached a client in Studio. `tests/net/Net.spec.luau`
+  now covers the send path.
+- **The parry sparks** (`fx/Sparks.luau`), enemy directional flinches on every non-lethal hit, the
+  death freeze with all sound ducked and the system line after the shatter (D-035).
+- **No linear limb blends.** Crossfades are eased and blend-space weights keep summing to 1, so a
+  stop no longer dips the pose toward rest (D-032, D-033).
+- **Server authority.** The guard cone is judged from the server's root, not the client's facing;
+  the 150 ms lag allowance is a bounded time rewind of the hit sweep (D-010); the anti-cheat spends
+  its lag budget once instead of per sample (D-034); basic-attack mashing can no longer trip the
+  rate limit (D-037).
+- **Spec fidelity.** Boar charges are Unblockable red lines (section 9), so the parry beat in the
+  gate clip is against the kobold's overhead. Clip sound events name real `sfx.luau` entries and
+  are validated (D-036). The repository's GitHub name is kept out of every file (D-001).
+
 ## Known review items for the Studio pass
 
 - Kobold `Overhead` holds the raised axe for 1.3 s while the telegraph light goes out at the 1.0 s wind-up and the
@@ -46,6 +66,11 @@ still empty (no Studio pass yet). `tools/lint.sh --offline` (StyLua, Selene, tes
   0.25x whether the swing should begin the moment the light goes out.
 - Rising Arc smear planes (X on the rising diagonal, Y on the overhead flick) and the heels coming down at 0.9 s.
 - Section 8 startups below 0.25 s for later weapon lines are kept verbatim (D-020); nothing in Phase 0 uses them.
+- A Basic swing's trail goes out about two frames before the clip's `TrailOff`, because its hit window closing
+  turns the Basic trail kind off; judge at 0.25x whether the tail reads short.
+- Each guard tap sends two `GuardRequest`s, so tapping guard faster than six times a second for a few seconds
+  would trip that remote's rate limit. Parry spam gains nothing past the 0.25 s re-arm (D-031); raise
+  `remoteRates.GuardRequest` in `world.luau` if play-testing shows honest players reaching it.
 
 ## Phase 0 gate (section 20) and the section 21 checklist
 
@@ -103,6 +128,6 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 | `docs/clips/phase-0/art-rising-arc.mp4` | 5 s | the sunken start pose, the rise onto the toes, two hits with Normal then Final hit-stop, the trail on only in the windows |
 | `docs/clips/phase-0/enemy-boar-charge.mp4` | 5 s | 0.6 s crouch with the red line, the launch, the skid, readable from behind |
 | `docs/clips/phase-0/enemy-kobold-overhead.mp4` | 5 s | 1.0 s wind-up with the yellow edge, the chop, the recovery |
-| `docs/clips/phase-0/parry-spark.mp4` | 5 s | guard tapped inside the window; spark and ring; the enemy staggers |
+| `docs/clips/phase-0/parry-spark.mp4` | 5 s | guard tapped inside the window against the kobold's overhead (the boar's charge is unblockable); spark and ring; the enemy staggers |
 | `docs/clips/phase-0/kill-shatter.mp4` | 5 s | the 10-frame kill hit-stop, the 0.5 s freeze and silence, the shards rising |
 | `docs/clips/phase-0/locomotion.mp4` | 10 s | walk, run, sprint drawn and sheathed, turn in place, skid stop, jump and land; no T-pose, no sliding foot |
