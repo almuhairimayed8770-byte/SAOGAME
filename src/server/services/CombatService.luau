@@ -11,8 +11,9 @@
 	along it (HitSweep); every touch becomes damage through DamageMath and EntityService.applyHit
 	and a HitConfirmed to all clients. After the last window the body is held in PostMotion (zero
 	when the target was in Break), then freed. A requested Art or basic swing runs that timeline
-	from its clientTime clamped into combat.lagAllowance (runStartOf), so a lagged swing's damage
-	windows line up with what its client already showed.
+	from its clientTime clamped into combat.lagAllowance and floored at the moment the body was last
+	free (runStartOf), so a lagged swing's damage windows line up with what its client already
+	showed without ever overlapping the lock before it.
 
 	Enemy strikes come from EnemyService (enemyStrike): each player in the attack's cone or line
 	is checked for dodge frames, a parry (guard raised inside parryWindow), a guard (cone and
@@ -332,13 +333,21 @@ local function facingMatches(record: Record, facing: { number }, lookVector: Vec
 end
 
 --- When a requested action's server timeline starts: the client's stamp (workspace:GetServerTimeNow
---- on the client, the same clock as `now`) clamped into [now - lagAllowance, now], so a lagged swing
---- catches up by at most combat.lagAllowance and never starts in the future (section 6, D-010).
-function CombatService.runStartOf(clientTime: any, now: number): number
+--- on the client, the same clock as `now`) clamped into [max(now - lagAllowance, min(freeAt, now)), now].
+--- A lagged swing catches up by at most combat.lagAllowance, never starts in the future, and never
+--- starts before `freeAt`, the fighter's lockUntil read before the new action replaces it: a stamp
+--- cannot pull an Art or basic swing back into the post-motion, stagger or swing before it (sections
+--- 6 and 17, D-010). A lock still running at receipt (a request inside artRequestTolerance, a basic
+--- swing being cancelled) floors the start at `now`.
+function CombatService.runStartOf(clientTime: any, now: number, freeAt: number?): number
 	if typeof(clientTime) ~= "number" or clientTime ~= clientTime then
 		return now -- missing or NaN: no rewind
 	end
-	return math.clamp(clientTime, now - Combat.lagAllowance, now)
+	local earliest = now - Combat.lagAllowance
+	if freeAt ~= nil and freeAt == freeAt then
+		earliest = math.max(earliest, math.min(freeAt, now))
+	end
+	return math.clamp(clientTime, earliest, now)
 end
 
 -- A body is free to start an action when it is in a free state, cancelling a basic swing, or its
@@ -794,12 +803,17 @@ function CombatService.beginArt(entityId: number, artId: string, facing: Vector3
 end
 
 -- The next basic-chain swing after validation; `clientTime` (a request's stamp) or nil (code callers).
+-- The swing, its chain index and the chain clock all run from the same start: the clamped stamp,
+-- floored at the moment the body was last free (runStartOf), or `now` for code callers.
 local function startBasic(entityId: number, facing: Vector3?, clientTime: number?): (boolean, string?)
 	local record = EntityService.get(entityId)
 	local now = dependencies().now()
 	local session = if record ~= nil then sessionOf(record.id) else nil
+	local startAt = if record ~= nil and clientTime ~= nil
+		then CombatService.runStartOf(clientTime, now, record.lockUntil)
+		else now
 	local index = if session ~= nil
-		then CombatService.nextBasicIndex(session.basicChain, session.basicLastAt, now)
+		then CombatService.nextBasicIndex(session.basicChain, session.basicLastAt, startAt)
 		else 1
 	local clipId = if record ~= nil then playerClipId(record, "Basic" .. tostring(index)) else nil
 	local look = if record ~= nil then facingOf(record, facing) else Vector3.zAxis * -1
@@ -814,9 +828,8 @@ local function startBasic(entityId: number, facing: Vector3?, clientTime: number
 		return false, "NoClip"
 	end
 	session.basicChain = index
-	session.basicLastAt = now
+	session.basicLastAt = startAt
 	local finalHit = index >= Combat.basicChainLength
-	local startAt = if clientTime ~= nil then CombatService.runStartOf(clientTime, now) else now
 	beginRun(
 		record,
 		nil,
@@ -1051,6 +1064,8 @@ local function onArtRequest(player: Player, payload: any)
 	local weapon = weaponOf(record)
 	local gaugeScale = if weapon ~= nil then weapon.gaugeDamage else 1
 	local facing = unitOrNil(flat(asVector(payload.facing))) or facingOf(record, nil)
+	-- Read the lock before beginRun replaces it: the rewind never reaches back past it.
+	local startAt = CombatService.runStartOf(payload.clientTime, now, record.lockUntil)
 	beginRun(
 		record,
 		art,
@@ -1060,7 +1075,7 @@ local function onArtRequest(player: Player, payload: any)
 		DamageMath.gaugeDamage(art.gaugeDamage * gaugeScale, false),
 		facing,
 		now,
-		CombatService.runStartOf(payload.clientTime, now),
+		startAt,
 		true
 	)
 end

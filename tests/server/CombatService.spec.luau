@@ -732,14 +732,31 @@ describe("CombatService lag allowance", function()
 		expect(CombatService.runStartOf(0 / 0, 10)).toBe(10)
 	end)
 
+	it("runStartOf never reaches back before the moment the body was last free", function()
+		-- Free since 9.95: a stamp further back is floored there; one after it is kept.
+		expect(CombatService.runStartOf(9.85, 10, 9.95)).toBeCloseTo(9.95, 1e-9)
+		expect(CombatService.runStartOf(0, 10, 9.95)).toBeCloseTo(9.95, 1e-9)
+		expect(CombatService.runStartOf(9.97, 10, 9.95)).toBeCloseTo(9.97, 1e-9)
+		-- Free long ago: the lag allowance is the only bound.
+		expect(CombatService.runStartOf(0, 10, 5)).toBeCloseTo(10 - Combat.lagAllowance, 1e-9)
+		-- A lock still running at receipt (inside artRequestTolerance, a basic being cut): no rewind.
+		expect(CombatService.runStartOf(9.9, 10, 10 + Combat.artRequestTolerance)).toBe(10)
+		expect(CombatService.runStartOf(0, 10, 10)).toBe(10)
+		-- Still never in the future, and a missing stamp is still the receipt.
+		expect(CombatService.runStartOf(11, 10, 9.95)).toBe(10)
+		expect(CombatService.runStartOf(nil, 10, 9.95)).toBe(10)
+	end)
+
 	local STEP = 1 / 240
 
 	-- Seconds from the request's receipt to its first HitConfirmed on a boar ahead, and the
-	-- broadcast start relative to the receipt.
+	-- broadcast start relative to the receipt. The fighter has been free for a second first, so the
+	-- spawn instant does not floor the rewind.
 	local function firstHitAfter(lag)
 		fresh()
 		local _, player = spawnPlayer()
 		spawnBoar()
+		advance(1)
 		local receivedAt = clock.t
 		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal", nil, receivedAt - lag))
 		local started = lastOf("ActionStarted")
@@ -764,6 +781,7 @@ describe("CombatService lag allowance", function()
 	it("the clamped start moves the broadcast, the timeline and the lock; code callers start now", function()
 		fresh()
 		local playerId, player = spawnPlayer()
+		advance(1) -- free well before the stamp: the spawn instant does not floor the rewind
 		local receivedAt = clock.t
 		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal", nil, receivedAt - 0.1))
 		expect(lastOf("ActionStarted").serverTime).toBeCloseTo(receivedAt - 0.1, 1e-6)
@@ -798,6 +816,148 @@ describe("CombatService lag allowance", function()
 		expect(CombatService.beginArt(playerId, "OneHandedSword.Horizontal")).toBe(true)
 		expect(lastOf("ActionStarted").serverTime).toBe(clock.t)
 		expect(select(2, CombatService.currentArt(playerId))).toBe(clock.t)
+	end)
+
+	-- Steps the running Art into its PostMotion and returns the moment that lock ends.
+	local function postMotionEnd(record)
+		while record.state == "Art" do
+			advance(1 / 60)
+		end
+		expect(record.state).toBe("PostMotion")
+		return record.lockUntil
+	end
+
+	it("an early stamp sent at the end of PostMotion never starts before the previous lock allows", function()
+		fresh()
+		local playerId, player = spawnPlayer()
+		advance(1)
+		local record = EntityService.get(playerId)
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		local firstStart = lastOf("ActionStarted").serverTime
+		local firstLock = record.lockUntil - firstStart
+		local lockEnd = postMotionEnd(record)
+
+		-- Sent the moment the request tolerance accepts it, stamped far in the past: the lock is still
+		-- running at receipt, so the Art starts at the receipt, never up to lagAllowance inside it.
+		clock.t = lockEnd - Combat.artRequestTolerance
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal", nil, 0))
+		expect(#sentOf("ActionRejected")).toBe(0)
+		local secondStart = lastOf("ActionStarted").serverTime
+		expect(secondStart).toBe(clock.t)
+		expect(secondStart).toBeGreaterThanOrEqual(lockEnd - Combat.artRequestTolerance)
+		expect(select(2, CombatService.currentArt(playerId))).toBe(clock.t)
+		expect(record.lockUntil).toBeCloseTo(clock.t + firstLock, 1e-9) -- the whole lock, none cut away
+		-- Back to back, Arts are as far apart as the clip allows (section 17): the lock less the tolerance.
+		expect(secondStart - firstStart).toBeGreaterThanOrEqual(firstLock - Combat.artRequestTolerance - 1e-9)
+
+		-- Sent after that lock ran out, stamped far in the past: it rewinds to the moment the body
+		-- became free and no further.
+		lockEnd = postMotionEnd(record)
+		advance(lockEnd - clock.t + 0.05)
+		expect(record.state).toBe("Idle")
+		local freeAt = record.lockUntil
+		expect(freeAt).toBeGreaterThanOrEqual(lockEnd)
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal", nil, 0))
+		expect(#sentOf("ActionRejected")).toBe(0)
+		expect(lastOf("ActionStarted").serverTime).toBe(freeAt)
+		expect(lastOf("ActionStarted").serverTime).toBeLessThan(clock.t) -- still a rewind, just a bounded one
+	end)
+
+	it("an early stamp sent out of a Stagger never starts inside the stagger", function()
+		fresh()
+		local playerId, player = spawnPlayer()
+		local koboldId = spawnKobold(CFrame.lookAt(Vector3.new(0, 2.2, -4), Vector3.new(0, 2.2, 0)))
+		advance(1)
+		local record = EntityService.get(playerId)
+		local function stagger()
+			CombatService.enemyStrike(koboldId, OVERHEAD, Vector3.new(0, 2.2, -4), Vector3.new(0, 0, 1))
+			expect(record.state).toBe("Stagger")
+			return record.lockUntil
+		end
+
+		-- Accepted inside the request tolerance: the stagger still runs, so the Art starts at receipt.
+		local staggerEnd = stagger()
+		clock.t = staggerEnd - Combat.artRequestTolerance
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal", nil, 0))
+		expect(#sentOf("ActionRejected")).toBe(0)
+		expect(lastOf("ActionStarted").serverTime).toBe(clock.t)
+		expect(lastOf("ActionStarted").serverTime).toBeGreaterThanOrEqual(staggerEnd - Combat.artRequestTolerance)
+
+		-- The same for a basic swing, after a second stagger has cut that Art.
+		staggerEnd = stagger()
+		expect(CombatService.currentArt(playerId)).toBeNil()
+		clock.t = staggerEnd - Combat.artRequestTolerance
+		handlers.BasicAttackRequest(player, basicPayload(0))
+		expect(#sentOf("ActionRejected")).toBe(0)
+		expect(lastOf("ActionStarted").clipId).toBe("player/OneHandedSword/Basic1")
+		expect(lastOf("ActionStarted").serverTime).toBe(clock.t)
+
+		-- Sent after the stagger ran out: back to the moment the body stood up, no further.
+		staggerEnd = stagger()
+		advance(staggerEnd - clock.t + 0.05)
+		expect(record.state).toBe("Idle")
+		local freeAt = record.lockUntil
+		expect(freeAt).toBeGreaterThanOrEqual(staggerEnd)
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal", nil, 0))
+		expect(#sentOf("ActionRejected")).toBe(0)
+		expect(lastOf("ActionStarted").serverTime).toBe(freeAt)
+		expect(select(2, CombatService.currentArt(playerId))).toBe(freeAt)
+	end)
+
+	it("a basic swing still in flight is cut at receipt: the next basic or Art never rewinds into it", function()
+		fresh()
+		local playerId, player = spawnPlayer()
+		advance(1)
+		local record = EntityService.get(playerId)
+		handlers.BasicAttackRequest(player, basicPayload())
+		advance(0.2)
+		expect(record.stateTag).toBe("Basic")
+		expect(record.lockUntil).toBeGreaterThan(clock.t)
+		-- The next basic, stamped 0.1 s early, starts at its receipt with its whole swing.
+		handlers.BasicAttackRequest(player, basicPayload(clock.t - 0.1))
+		expect(lastOf("ActionStarted").clipId).toBe("player/OneHandedSword/Basic2")
+		expect(lastOf("ActionStarted").serverTime).toBe(clock.t)
+		expect(lastOf("StateChanged").duration).toBe(Combat.basicHitDuration)
+		-- An Art cutting that swing, stamped 0.1 s early, starts at its receipt too.
+		advance(0.2)
+		expect(record.stateTag).toBe("Basic")
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal", nil, clock.t - 0.1))
+		expect(lastOf("ActionStarted").artId).toBe("OneHandedSword.Horizontal")
+		expect(lastOf("ActionStarted").serverTime).toBe(clock.t)
+		expect(select(2, CombatService.currentArt(playerId))).toBe(clock.t)
+		expect(#sentOf("ActionRejected")).toBe(0)
+	end)
+
+	it("the basic chain counts its window from the rewound start, the clock the client swung on", function()
+		fresh()
+		local _, player = spawnPlayer()
+		advance(1)
+		-- Basic1 stamped and received at t0; Basic2 pressed at t0 + 0.55 (inside the window) and
+		-- delivered at t0 + 0.65 (outside it): the server picks Basic2, started where it was pressed.
+		local t0 = clock.t
+		handlers.BasicAttackRequest(player, basicPayload(t0))
+		expect(lastOf("ActionStarted").clipId).toBe("player/OneHandedSword/Basic1")
+		-- The premise: 0.55 s is inside the chain window, 0.65 s is past it.
+		expect(0.55).toBeLessThan(Combat.basicChainWindow)
+		expect(0.65).toBeGreaterThan(Combat.basicChainWindow)
+		advance(0.65)
+		expect(clock.t - t0).toBeCloseTo(0.65, 1e-9)
+		handlers.BasicAttackRequest(player, basicPayload(t0 + 0.55))
+		expect(lastOf("ActionStarted").clipId).toBe("player/OneHandedSword/Basic2")
+		expect(lastOf("ActionStarted").serverTime).toBeCloseTo(t0 + 0.55, 1e-9)
+
+		-- Basic1 stamped t1 - 0.1 and received at t1; Basic2 stamped and received at t1 + 0.55: the
+		-- chain window ran from t1 - 0.1, so it closed and the chain restarts at Basic1.
+		advance(1)
+		local t1 = clock.t
+		handlers.BasicAttackRequest(player, basicPayload(t1 - 0.1))
+		expect(lastOf("ActionStarted").clipId).toBe("player/OneHandedSword/Basic1")
+		expect(lastOf("ActionStarted").serverTime).toBeCloseTo(t1 - 0.1, 1e-9)
+		advance(0.55)
+		handlers.BasicAttackRequest(player, basicPayload())
+		expect(lastOf("ActionStarted").clipId).toBe("player/OneHandedSword/Basic1")
+		expect(lastOf("ActionStarted").serverTime).toBe(clock.t)
+		expect(#sentOf("ActionRejected")).toBe(0)
 	end)
 end)
 
