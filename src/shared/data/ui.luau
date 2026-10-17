@@ -120,6 +120,7 @@ local UI = {
 			fadeOutFraction = 0.7,
 			callerTextSize = 16,
 			screenYFraction = 0.3, -- fallback position when no target model is known
+			billboardSize = { width = 300, height = 60 }, -- pixels
 		},
 		telegraphIntensity = { default = 1, min = 0.5, max = 1 },
 	},
@@ -128,6 +129,7 @@ local UI = {
 		distance = 90, -- studs; plates fade out past this
 		fadeBand = 15, -- studs over which the fade happens
 		hoverRadiusPixels = 36, -- a player's name shows when the cursor is this close to the plate
+		strokeTransparency = 0.5, -- the name's dark stroke; fades with the plate
 		player = {
 			width = 160,
 			height = 44,

@@ -2,6 +2,7 @@
 -- Instance-level rules of the HUD package that Lune can check: pooled nameplates survive the rig
 -- they pointed at, nothing hangs over a dead or boss rig, and the SWITCH prompt never leaves the
 -- HUD's own ScreenGui (a target the server removes mid-window must not take the HUD loop down).
+-- The text strokes and the SWITCH billboard's size come from ui.luau, never from a literal.
 local Engine = Harness.load("src/client/fx/Engine")
 local Hud = Harness.load("src/client/ui/Hud")
 local Nameplates = Harness.load("src/client/ui/Nameplates")
@@ -123,6 +124,33 @@ describe("Nameplates (instances)", function()
 		expect(seen).never.toBeNil()
 		expect(seen.id).toBe(bossId)
 	end)
+
+	it("draws the name's stroke from ui.luau and fades it with the plate", function()
+		local model, id = rig("Enemy")
+		EntityTracker.track(model)
+		task.wait()
+		local plate = Nameplates.plateOf(id)
+		local stroke = UI.nameplates.strokeTransparency
+		expect(plate.name.TextStrokeTransparency).toBeCloseTo(stroke, 1e-6)
+		-- The viewer steps half-way into the fade band: the stroke fades at the name's rate.
+		local halfway = UI.nameplates.distance + UI.nameplates.fadeBand * 0.5
+		Engine.setViewer(function()
+			return Vector3.new(0, 0, halfway)
+		end)
+		Nameplates.update()
+		expect(plate.name.TextTransparency).toBeCloseTo(0.5, 1e-6)
+		expect(plate.name.TextStrokeTransparency).toBeCloseTo(stroke + (1 - stroke) * 0.5, 1e-6)
+		-- Past the band the stroke is gone with the name.
+		Engine.setViewer(function()
+			return Vector3.new(0, 0, UI.nameplates.distance + UI.nameplates.fadeBand * 2)
+		end)
+		Nameplates.update()
+		expect(plate.name.TextTransparency).toBe(1)
+		expect(plate.name.TextStrokeTransparency).toBe(1)
+		Engine.setViewer(function()
+			return Vector3.zero
+		end)
+	end)
 end)
 
 describe("Hud SWITCH prompt (instances)", function()
@@ -142,6 +170,10 @@ describe("Hud SWITCH prompt (instances)", function()
 		local label = billboard:FindFirstChild("SwitchPrompt")
 		expect(label).never.toBeNil()
 		expect(label.Text).toBe(UI.hud.switchPrompt.text)
+		expect(label.TextStrokeTransparency).toBeCloseTo(UI.hud.textStrokeTransparency, 1e-6)
+		local size = UI.hud.switchPrompt.billboardSize
+		expect(billboard.Size.X.Offset).toBe(size.width)
+		expect(billboard.Size.Y.Offset).toBe(size.height)
 		expect(label.TextTransparency).toBe(0)
 		expect(label:FindFirstChild("Caller").Text).toBe("Brann")
 		-- Nothing of the prompt lives inside the rig.

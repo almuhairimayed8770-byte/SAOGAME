@@ -128,7 +128,7 @@ local function newPlate(kind: "Player" | "Enemy"): Plate
 		TextSize = config.nameTextSize,
 		TextColor3 = Palette.color3(config.nameToken :: any),
 		TextStrokeColor3 = Palette.color3("OutlineInk"),
-		TextStrokeTransparency = 0.5,
+		TextStrokeTransparency = UI.nameplates.strokeTransparency,
 		Text = "",
 		LayoutOrder = 2,
 	}) :: TextLabel
@@ -207,7 +207,8 @@ local function applyAlpha(plate: Plate, alpha: number, showName: boolean)
 	local transparency = 1 - alpha
 	plate.diamond.BackgroundTransparency = transparency
 	plate.name.TextTransparency = if showName then transparency else 1
-	plate.name.TextStrokeTransparency = if showName then 0.5 + 0.5 * transparency else 1
+	local stroke = UI.nameplates.strokeTransparency
+	plate.name.TextStrokeTransparency = if showName then stroke + (1 - stroke) * transparency else 1
 	if plate.hpBack ~= nil then
 		(plate.hpBack :: Frame).BackgroundTransparency = UI.nameplates.enemy.hpBar.backgroundTransparency
 			+ (1 - UI.nameplates.enemy.hpBar.backgroundTransparency) * transparency;
