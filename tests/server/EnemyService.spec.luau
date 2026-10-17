@@ -1,0 +1,853 @@
+--!strict
+--[[
+	EnemyService under Lune: the real EntityService (fake clock, fake net, fake tags), a fake
+	RigBuilder, a fake engine (positions, facings, MoveTo goals, path requests) with a one-line
+	physics stand-in, and a fake CombatService that records enemy strikes. Spawning, the tick,
+	telegraph and action payloads against the remote schemas, sleep, death, interrupts, despawn,
+	the MoveTo / pathfinding mover and the step accumulator.
+]]
+
+Harness.stubService("CollectionService", {
+	AddTag = function(_self, instance, tag)
+		instance:AddTag(tag)
+	end,
+	RemoveTag = function(_self, instance, tag)
+		instance:RemoveTag(tag)
+	end,
+	HasTag = function(_self, instance, tag)
+		return instance:HasTag(tag)
+	end,
+})
+Harness.stubService("RunService", {
+	IsServer = function()
+		return true
+	end,
+	IsClient = function()
+		return false
+	end,
+})
+
+local EntityService = Harness.load("src/server/services/EntityService")
+local EnemyService = Harness.load("src/server/services/EnemyService")
+local AI = Harness.load("src/shared/data/ai")
+local Enemies = Harness.load("src/shared/data/enemies")
+local Combat = Harness.load("src/shared/data/combat")
+local Net = Harness.load("src/shared/net/Net")
+local CollectionService = Harness.game():GetService("CollectionService")
+
+local TICK = AI.tickSeconds()
+local FORWARD = Vector3.new(0, 0, -1)
+local BOAR = Enemies.byId("FrenzyBoar")
+local KOBOLD = Enemies.byId("KoboldAxeman")
+local CHARGE = BOAR.attacks[1]
+local OVERHEAD = KOBOLD.attacks[1]
+
+-- ------------------------------------------------------------------------------------------
+-- Fixtures
+-- ------------------------------------------------------------------------------------------
+
+local clock = { t = 1000 }
+local sent: { any } = {}
+local strikes: { any } = {}
+local spawned: { any } = {}
+local despawned: { any } = {}
+local builds: { any } = {}
+local pathCalls: { any } = {}
+local pathResult: ((from: Vector3, to: Vector3) -> { Vector3 }?)? = nil
+local deferredPaths: { () -> () }? = nil -- when set, path computations queue here instead of running inline
+local physicsEnabled = true
+local players: { any } = {}
+local bodies: { [any]: any } = {}
+local folder: any = nil
+local connections: { any } = {}
+
+local function near(a: Vector3, b: Vector3, epsilon: number?): boolean
+	return (a - b).Magnitude <= (epsilon or 1e-3)
+end
+
+local function bodyOf(model: any)
+	local body = bodies[model]
+	if body == nil then
+		body = {
+			position = Vector3.zero,
+			facing = FORWARD,
+			goal = nil,
+			walkSpeed = nil,
+			moveTos = {},
+			stops = 0,
+			destroyed = false,
+		}
+		bodies[model] = body
+	end
+	return body
+end
+
+local function writeRoot(model: any, body: any)
+	local root = model.PrimaryPart
+	if root ~= nil then
+		root.CFrame = CFrame.new(body.position)
+	end
+end
+
+local engine = {
+	place = function(model, cframe)
+		local body = bodyOf(model)
+		body.position = cframe.Position
+		body.facing = cframe.LookVector
+		body.parentAtPlace = model.Parent -- the real engine claims network ownership here: it needs Workspace
+		writeRoot(model, body)
+	end,
+	position = function(model)
+		return bodyOf(model).position
+	end,
+	facing = function(model)
+		return bodyOf(model).facing
+	end,
+	setFacing = function(model, facing)
+		bodyOf(model).facing = facing.Unit
+	end,
+	moveTo = function(model, position)
+		local body = bodyOf(model)
+		body.goal = position
+		table.insert(body.moveTos, { time = clock.t, position = position })
+	end,
+	stop = function(model)
+		local body = bodyOf(model)
+		body.goal = nil
+		body.stops += 1
+	end,
+	setWalkSpeed = function(model, speed)
+		bodyOf(model).walkSpeed = speed
+	end,
+	computePath = function(from, to)
+		table.insert(pathCalls, { time = clock.t, from = from, to = to })
+		return if pathResult ~= nil then pathResult(from, to) else nil
+	end,
+	destroy = function(model)
+		bodyOf(model).destroyed = true
+		model.Parent = nil
+	end,
+}
+
+local rigBuilder = {
+	build = function(rigId, name)
+		table.insert(builds, { rigId = rigId, name = name })
+		local model = Instance.new("Model")
+		model.Name = name
+		local root = Instance.new("Part")
+		root.Name = "HumanoidRootPart"
+		root.Size = Vector3.new(2, 2, 4)
+		root.CFrame = CFrame.new(0, 0, 0)
+		root.Parent = model
+		model.PrimaryPart = root
+		local humanoid = Instance.new("Humanoid")
+		humanoid.Parent = model
+		return model
+	end,
+}
+
+local combat = {
+	enemyStrike = function(enemyId, attack, origin, facing)
+		table.insert(strikes, { time = clock.t, enemyId = enemyId, attack = attack, origin = origin, facing = facing })
+		return {}
+	end,
+}
+
+local function fresh()
+	for _, connection in connections do
+		connection:Disconnect()
+	end
+	connections = {}
+	EnemyService.reset()
+	EntityService.reset()
+	clock.t = 1000
+	sent = {}
+	strikes = {}
+	spawned = {}
+	despawned = {}
+	builds = {}
+	pathCalls = {}
+	pathResult = nil
+	deferredPaths = nil
+	physicsEnabled = true
+	players = {}
+	bodies = {}
+	folder = Instance.new("Folder")
+	folder.Name = "Enemies"
+	EntityService.bind({
+		now = function()
+			return clock.t
+		end,
+		fireAll = function(remote, payload)
+			local ok, message = Net.validate(remote, payload)
+			if not ok then
+				error(("invalid %s payload: %s"):format(remote, tostring(message)))
+			end
+			table.insert(sent, { remote = remote, payload = payload })
+		end,
+		heartbeat = nil,
+		addTag = function(instance, tag)
+			CollectionService:AddTag(instance, tag)
+		end,
+		removeTag = function(instance, tag)
+			CollectionService:RemoveTag(instance, tag)
+		end,
+		respawn = function() end,
+		playerRemoving = nil,
+	})
+	EnemyService.bind({
+		entities = EntityService,
+		combat = combat,
+		rigBuilder = rigBuilder,
+		fireAll = function(remote, payload)
+			local ok, message = Net.validate(remote, payload)
+			if not ok then
+				error(("invalid %s payload: %s"):format(remote, tostring(message)))
+			end
+			table.insert(sent, { remote = remote, payload = payload })
+		end,
+		engine = engine,
+		players = function()
+			return players
+		end,
+		heartbeat = nil,
+		serverTime = function()
+			return clock.t
+		end,
+		folder = folder,
+		random = Random.new(1),
+		spawnTask = function(fn)
+			local queue = deferredPaths
+			if queue ~= nil then
+				table.insert(queue, fn)
+			else
+				fn()
+			end
+		end,
+	})
+	table.insert(
+		connections,
+		EnemyService.Spawned:Connect(function(id, defId, model)
+			table.insert(spawned, { id = id, defId = defId, model = model })
+		end)
+	)
+	table.insert(
+		connections,
+		EnemyService.Despawned:Connect(function(id, defId, reason)
+			table.insert(despawned, { id = id, defId = defId, reason = reason })
+		end)
+	)
+end
+
+local function sentOf(remote: string)
+	local list = {}
+	for _, entry in sent do
+		if entry.remote == remote then
+			table.insert(list, entry.payload)
+		end
+	end
+	return list
+end
+
+local function putPlayer(id: number, position: Vector3)
+	for _, snapshot in players do
+		if snapshot.id == id then
+			snapshot.position = position
+			return
+		end
+	end
+	table.insert(players, { id = id, position = position })
+end
+
+-- One AI tick of the world: the service steps, bodies walk toward their MoveTo goals at their
+-- walk speed, EntityService expires timed states, the clock advances.
+local function physics(dt: number)
+	if not physicsEnabled then
+		return
+	end
+	for model, body in bodies do
+		if body.goal ~= nil and not body.destroyed then
+			local delta = body.goal - body.position
+			local distance = delta.Magnitude
+			local reach = (body.walkSpeed or 1) * dt
+			if distance <= reach then
+				body.position = body.goal
+			elseif distance > 0 then
+				body.position = body.position + delta.Unit * reach
+			end
+			writeRoot(model, body)
+		end
+	end
+end
+
+local function advance(seconds: number)
+	local remaining = seconds
+	while remaining > 1e-9 do
+		EnemyService.step(TICK)
+		physics(TICK)
+		EntityService.tick(TICK)
+		clock.t += TICK
+		remaining -= TICK
+	end
+end
+
+local function advanceUntil(predicate: () -> boolean, maxSeconds: number): boolean
+	local elapsed = 0
+	while elapsed < maxSeconds do
+		if predicate() then
+			return true
+		end
+		advance(TICK)
+		elapsed += TICK
+	end
+	return predicate()
+end
+
+-- A fake PathfindingService: the route starts under the body (as real paths do), passes the corners
+-- the body has not reached yet along the route's Z direction, and ends at the goal.
+local function routeThrough(corners: { Vector3 }, towardNegativeZ: boolean)
+	return function(from: Vector3, to: Vector3): { Vector3 }
+		local waypoints = { from }
+		for _, corner in corners do
+			local ahead = if towardNegativeZ then corner.Z < from.Z - 1 else corner.Z > from.Z + 1
+			if ahead then
+				table.insert(waypoints, corner)
+			end
+		end
+		table.insert(waypoints, to)
+		return waypoints
+	end
+end
+
+local function phaseOf(id: number): string?
+	local brain = EnemyService.brainOf(id)
+	return if brain ~= nil then brain:getPhase() else nil
+end
+
+local function spawnAt(defId: string, position: Vector3, options: any?): (number, any)
+	local id = EnemyService.spawn(defId, CFrame.new(position), options)
+	return id, EnemyService.modelOf(id)
+end
+
+-- ------------------------------------------------------------------------------------------
+-- Spawning
+-- ------------------------------------------------------------------------------------------
+
+describe("EnemyService spawn", function()
+	it("builds the rig, registers the entity, parents it under the folder and fires Spawned", function()
+		fresh()
+		local id, model = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		local def = Enemies.scaled(BOAR)
+		expect(builds).toHaveLength(1)
+		expect(builds[1].rigId).toBe(BOAR.skin)
+		expect(builds[1].name).toBe(BOAR.name)
+		expect(model.Parent).toBe(folder)
+		expect(bodyOf(model).parentAtPlace).toBe(folder) -- placed (and network-owned) only once under the folder
+		local record = EntityService.get(id)
+		expect(record).toBeTruthy()
+		expect(record.kind).toBe("Enemy")
+		expect(record.defId).toBe("FrenzyBoar")
+		expect(record.hp).toBe(def.hp)
+		expect(record.state).toBe("Idle")
+		local humanoid = model:FindFirstChildOfClass("Humanoid")
+		expect(humanoid.WalkSpeed).toBe(def.moveSpeed)
+		expect(humanoid.AutoRotate).toBe(false)
+		expect(near(engine.position(model), Vector3.new(0, 3, 0))).toBe(true)
+		expect(spawned).toHaveLength(1)
+		expect(spawned[1].id).toBe(id)
+		expect(spawned[1].defId).toBe("FrenzyBoar")
+		expect(spawned[1].model).toBe(model)
+		expect(phaseOf(id)).toBe("Idle")
+		expect(EnemyService.isAwake(id)).toBe(true)
+		expect(EnemyService.count()).toBe(1)
+		expect(EnemyService.ids()).toEqual({ id })
+		expect(EnemyService.defOf(id).id).toBe("FrenzyBoar")
+	end)
+
+	it("resolveDef applies the Elite and Night variants and a band override", function()
+		fresh()
+		local plain = EnemyService.resolveDef("FrenzyBoar")
+		expect(plain.attacks).toHaveLength(#BOAR.attacks)
+		expect(plain.band).toBe(BOAR.band)
+		local elite = EnemyService.resolveDef("FrenzyBoar", { elite = true, band = "Blight" })
+		expect(#elite.attacks).toBeGreaterThan(#BOAR.attacks)
+		expect(elite.hp).toBeGreaterThan(plain.hp)
+		expect(elite.band).toBe("Blight")
+		local night = EnemyService.resolveDef("KoboldAxeman", { night = true })
+		expect(night.attack).toBeGreaterThan(Enemies.scaled(KOBOLD).attack)
+		local id = EnemyService.spawn("FrenzyBoar", CFrame.new(0, 3, 0), { elite = true, name = "Tusked One" })
+		expect(EntityService.get(id).name).toBe("Tusked One")
+		expect(#EnemyService.defOf(id).attacks).toBe(#elite.attacks)
+	end)
+
+	it("refuses an unknown def", function()
+		fresh()
+		expect(function()
+			EnemyService.spawn("NotAnEnemy", CFrame.new())
+		end).toThrow("unknown enemy def")
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- The tick: telegraphs, strikes, payloads
+-- ------------------------------------------------------------------------------------------
+
+describe("EnemyService tick", function()
+	it("a boar telegraphs its Charge within a few seconds of a player appearing, with valid payloads", function()
+		fresh()
+		local id, model = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -20))
+		local appeared = clock.t
+		expect(advanceUntil(function()
+			return #sentOf("Telegraph") > 0
+		end, 5)).toBe(true)
+		expect(clock.t - appeared).toBeLessThan(5)
+
+		local telegraph = sentOf("Telegraph")[1]
+		expect(telegraph.entityId).toBe(id)
+		expect(telegraph.attackId).toBe(CHARGE.id)
+		expect(telegraph.kind).toBe(CHARGE.telegraph)
+		expect(telegraph.windUp).toBe(CHARGE.windUp)
+		expect(telegraph.shape.kind).toBe("Line")
+		expect(telegraph.shape.length).toBe(CHARGE.reach)
+		expect(telegraph.shape.width).toBe(Combat.strikeLineWidth)
+		local position = engine.position(model)
+		expect(near(Vector3.new(telegraph.origin[1], telegraph.origin[2], telegraph.origin[3]), position, 1e-3)).toBe(
+			true
+		)
+		expect(telegraph.facing[2]).toBe(0)
+		expect(telegraph.facing[3]).toBeLessThan(0)
+		expect(telegraph.serverTime).toBeCloseTo(clock.t - TICK, 1e-9)
+
+		local action = sentOf("ActionStarted")[1]
+		expect(action).toBeTruthy()
+		expect(action.entityId).toBe(id)
+		expect(action.clipId).toBe(("enemy/%s/%s"):format(BOAR.skin, CHARGE.clip))
+		expect(phaseOf(id)).toBe("WindUp")
+		expect(EntityService.get(id).state).toBe("Art")
+	end)
+
+	it(
+		"the strike reaches CombatService.enemyStrike after the wind-up, from the crouch point along the line",
+		function()
+			fresh()
+			local id = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+			putPlayer(1, Vector3.new(0, 3, -20))
+			expect(advanceUntil(function()
+				return #sentOf("Telegraph") > 0
+			end, 5)).toBe(true)
+			local telegraph = sentOf("Telegraph")[1]
+			local telegraphAt = clock.t
+			expect(advanceUntil(function()
+				return #strikes > 0
+			end, 3)).toBe(true)
+			local strike = strikes[1]
+			expect(strike.enemyId).toBe(id)
+			expect(strike.attack.id).toBe(CHARGE.id)
+			expect(strike.time - telegraphAt).toBeCloseTo(CHARGE.windUp + CHARGE.strike, TICK + 1e-6)
+			local origin = Vector3.new(telegraph.origin[1], telegraph.origin[2], telegraph.origin[3])
+			expect(near(strike.origin, origin, 1e-3)).toBe(true)
+			local facing = Vector3.new(telegraph.facing[1], telegraph.facing[2], telegraph.facing[3])
+			expect(near(strike.facing, facing, 1e-3)).toBe(true)
+			expect(phaseOf(id)).toBe("Strike")
+			expect(advanceUntil(function()
+				return phaseOf(id) == "Recover"
+			end, 2)).toBe(true)
+			expect(EntityService.get(id).state).toBe("PostMotion")
+		end
+	)
+
+	it("a kobold walks up at its move speed and telegraphs its Overhead cone", function()
+		fresh()
+		local id, model = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		local def = Enemies.scaled(KOBOLD)
+		putPlayer(1, Vector3.new(0, 3, -12))
+		expect(advanceUntil(function()
+			return #sentOf("Telegraph") > 0
+		end, 5)).toBe(true)
+		local body = bodyOf(model)
+		expect(body.walkSpeed).toBe(def.moveSpeed)
+		expect(#body.moveTos).toBeGreaterThan(0)
+		expect(body.position.Z).toBeLessThan(-1)
+		local telegraph = sentOf("Telegraph")[1]
+		expect(telegraph.entityId).toBe(id)
+		expect(telegraph.attackId).toBe(OVERHEAD.id)
+		expect(telegraph.kind).toBe("GuardBreak")
+		expect(telegraph.windUp).toBe(OVERHEAD.windUp)
+		expect(telegraph.shape.kind).toBe("Cone")
+		expect(telegraph.shape.width).toBe(OVERHEAD.arc)
+		expect(sentOf("ActionStarted")[1].clipId).toBe(("enemy/%s/%s"):format(KOBOLD.skin, OVERHEAD.clip))
+		expect(phaseOf(id)).toBe("WindUp")
+		local windUpAt = clock.t
+		expect(advanceUntil(function()
+			return #strikes > 0
+		end, 3)).toBe(true)
+		expect(strikes[1].time - windUpAt).toBeGreaterThanOrEqual(OVERHEAD.windUp)
+	end)
+
+	it("every payload the tick sends passes its remote schema", function()
+		fresh()
+		spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		spawnAt("KoboldAxeman", Vector3.new(10, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -15))
+		advance(6)
+		expect(#sentOf("Telegraph")).toBeGreaterThan(0)
+		expect(#sentOf("ActionStarted")).toBeGreaterThan(0)
+		for _, entry in sent do
+			local ok = Net.validate(entry.remote, entry.payload)
+			expect(ok).toBe(true)
+		end
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- Sleep
+-- ------------------------------------------------------------------------------------------
+
+describe("EnemyService sleep", function()
+	it("a brain farther than the sleep radius from every player sleeps and does not tick", function()
+		fresh()
+		local id = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		local brain = EnemyService.brainOf(id)
+		local ticks = 0
+		local original = brain.tick
+		brain.tick = function(self, dt)
+			ticks += 1
+			return original(self, dt)
+		end
+		putPlayer(1, Vector3.new(0, 3, -(AI.sleepRadius + 50)))
+		advance(AI.sleepCheckInterval + TICK * 2)
+		expect(EnemyService.isAwake(id)).toBe(false)
+		expect(brain:isAwake()).toBe(false)
+		local asleepTicks = ticks
+		advance(1)
+		expect(ticks).toBe(asleepTicks)
+		expect(sentOf("Telegraph")).toHaveLength(0)
+
+		-- The player walks in: the brain wakes and the boar attacks a few seconds later.
+		putPlayer(1, Vector3.new(0, 3, -20))
+		advance(AI.sleepCheckInterval + TICK * 2)
+		expect(EnemyService.isAwake(id)).toBe(true)
+		expect(ticks).toBeGreaterThan(asleepTicks)
+		expect(advanceUntil(function()
+			return #sentOf("Telegraph") > 0
+		end, 5)).toBe(true)
+	end)
+
+	it("with no players at all every brain sleeps", function()
+		fresh()
+		local boar = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		local kobold = spawnAt("KoboldAxeman", Vector3.new(20, 3, 0))
+		advance(AI.sleepCheckInterval + TICK * 2)
+		expect(EnemyService.isAwake(boar)).toBe(false)
+		expect(EnemyService.isAwake(kobold)).toBe(false)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- Death, interrupts, despawn
+-- ------------------------------------------------------------------------------------------
+
+describe("EnemyService lifecycle", function()
+	it("death stops the brain and fires Despawned once with reason Died; EntityService keeps the corpse", function()
+		fresh()
+		local id, model = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -20))
+		expect(advanceUntil(function()
+			return phaseOf(id) == "WindUp"
+		end, 5)).toBe(true)
+		EntityService.die(id)
+		expect(despawned).toHaveLength(1)
+		expect(despawned[1].id).toBe(id)
+		expect(despawned[1].defId).toBe("FrenzyBoar")
+		expect(despawned[1].reason).toBe("Died")
+		expect(EnemyService.brainOf(id)).toBeNil()
+		expect(EnemyService.count()).toBe(0)
+		expect(bodyOf(model).destroyed).toBe(false)
+		advance(2)
+		expect(strikes).toHaveLength(0)
+		expect(despawned).toHaveLength(1)
+		expect(EntityService.get(id)).toBeTruthy()
+		expect(EntityService.get(id).state).toBe("Dead")
+	end)
+
+	it("a Stagger during the kobold's wind-up (a parry) cancels the strike; it attacks again later", function()
+		fresh()
+		local id = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -6))
+		expect(advanceUntil(function()
+			return phaseOf(id) == "WindUp"
+		end, 5)).toBe(true)
+		advance(0.3)
+		expect(phaseOf(id)).toBe("WindUp")
+		expect(strikes).toHaveLength(0)
+		EntityService.setState(id, "Stagger", Combat.parryStagger)
+		expect(phaseOf(id)).toBe("Interrupted")
+		advance(2)
+		expect(strikes).toHaveLength(0)
+		expect(advanceUntil(function()
+			return #strikes > 0
+		end, 6)).toBe(true)
+		expect(sentOf("Telegraph")).toHaveLength(2)
+	end)
+
+	it("a Break from the record interrupts a chase and the brain resumes afterwards", function()
+		fresh()
+		local id = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -34))
+		expect(advanceUntil(function()
+			return phaseOf(id) == "Chase"
+		end, 2)).toBe(true)
+		EntityService.setState(id, "Break", Combat.breakDuration)
+		expect(phaseOf(id)).toBe("Interrupted")
+		advance(Combat.breakDuration / 2)
+		expect(phaseOf(id)).toBe("Interrupted")
+		expect(advanceUntil(function()
+			return phaseOf(id) ~= "Interrupted"
+		end, Combat.breakDuration)).toBe(true)
+	end)
+
+	it("despawn destroys the model, unregisters the entity and fires Despawned", function()
+		fresh()
+		local id, model = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		EnemyService.despawn(id)
+		expect(bodyOf(model).destroyed).toBe(true)
+		expect(model.Parent).toBeNil()
+		expect(EntityService.get(id)).toBeNil()
+		expect(EnemyService.brainOf(id)).toBeNil()
+		expect(EnemyService.count()).toBe(0)
+		expect(despawned).toHaveLength(1)
+		expect(despawned[1].reason).toBe("Despawned")
+		EnemyService.despawn(id) -- a second call is a no-op
+		expect(despawned).toHaveLength(1)
+	end)
+
+	it("EntityService dropping the record fires Despawned with reason Unregistered", function()
+		fresh()
+		local id = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		EntityService.unregister(id)
+		expect(despawned).toHaveLength(1)
+		expect(despawned[1].reason).toBe("Unregistered")
+		expect(EnemyService.count()).toBe(0)
+	end)
+
+	it("despawnAll clears the field", function()
+		fresh()
+		spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		spawnAt("KoboldAxeman", Vector3.new(10, 3, 0))
+		spawnAt("FrenzyBoar", Vector3.new(20, 3, 0))
+		expect(EnemyService.count()).toBe(3)
+		EnemyService.despawnAll()
+		expect(EnemyService.count()).toBe(0)
+		expect(despawned).toHaveLength(3)
+		expect(#EntityService.enemies()).toBe(0)
+	end)
+
+	it("the leash return forgets who hit it through EntityService.clearThreat", function()
+		fresh()
+		local id, model = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		putPlayer(5, Vector3.new(0, 3, -34))
+		EntityService.addThreat(id, 5, 10)
+		expect(advanceUntil(function()
+			return phaseOf(id) == "Chase"
+		end, 2)).toBe(true)
+		expect(EntityService.threatOf(id)[5]).toBe(10)
+		local body = bodyOf(model)
+		body.position = Vector3.new(0, 3, -(BOAR.leashRange + 5))
+		writeRoot(model, body)
+		advance(TICK)
+		expect(phaseOf(id)).toBe("Return")
+		expect(EntityService.threatOf(id)[5]).toBeNil()
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- The mover: MoveTo, re-issue, pathfinding
+-- ------------------------------------------------------------------------------------------
+
+describe("EnemyService mover", function()
+	it("re-issues MoveTo only when the goal moved or the re-issue interval passed", function()
+		fresh()
+		local id, model = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		physicsEnabled = false
+		putPlayer(1, Vector3.new(0, 3, -20))
+		expect(advanceUntil(function()
+			return phaseOf(id) == "Chase"
+		end, 2)).toBe(true)
+		local body = bodyOf(model)
+		expect(advanceUntil(function()
+			return #body.moveTos > 0
+		end, 1)).toBe(true)
+		local issued = #body.moveTos
+		expect(issued).toBe(1)
+		advance(AI.movement.reissueInterval - TICK * 2)
+		expect(#body.moveTos).toBe(issued)
+		advance(TICK * 4)
+		expect(#body.moveTos).toBe(issued + 1)
+		putPlayer(1, Vector3.new(0, 3, -24))
+		advance(TICK)
+		expect(#body.moveTos).toBe(issued + 2)
+		expect(near(body.moveTos[#body.moveTos].position, Vector3.new(0, 3, -24))).toBe(true)
+	end)
+
+	it("a stuck body asks for a path and walks its waypoints to the end", function()
+		fresh()
+		local id, model = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		physicsEnabled = false
+		local goal = Vector3.new(0, 3, -20)
+		putPlayer(1, goal)
+		pathResult = routeThrough({ Vector3.new(6, 3, -6), Vector3.new(6, 3, -14) }, true)
+		expect(advanceUntil(function()
+			return phaseOf(id) == "Chase"
+		end, 2)).toBe(true)
+		expect(pathCalls).toHaveLength(0)
+		advance(AI.movement.stuckSeconds + TICK * 2)
+		expect(#pathCalls).toBeGreaterThan(0)
+		expect(near(pathCalls[1].from, Vector3.new(0, 3, 0))).toBe(true)
+		expect(near(pathCalls[1].to, goal)).toBe(true)
+		local body = bodyOf(model)
+		-- The first waypoint is under the body and is passed; the second is the one issued.
+		expect(near(body.moveTos[#body.moveTos].position, Vector3.new(6, 3, -6))).toBe(true)
+
+		physicsEnabled = true
+		expect(advanceUntil(function()
+			return near(body.moveTos[#body.moveTos].position, Vector3.new(6, 3, -14))
+		end, 3)).toBe(true)
+		-- Progress alone does not drop the path: the body heads for the third waypoint, then the goal.
+		expect(advanceUntil(function()
+			return body.goal ~= nil and near(body.goal, goal)
+		end, 4)).toBe(true)
+		expect(advanceUntil(function()
+			return phaseOf(id) == "WindUp"
+		end, 6)).toBe(true)
+	end)
+
+	it("a goal beyond pathfindPastStuds asks for a path straight away and retries after a failure", function()
+		fresh()
+		local id, model = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -34))
+		expect(advanceUntil(function()
+			return phaseOf(id) == "Chase"
+		end, 2)).toBe(true)
+		local body = bodyOf(model)
+		body.position = Vector3.new(0, 3, -(AI.pathfindPastStuds + BOAR.leashRange))
+		writeRoot(model, body)
+		pathResult = nil
+		advance(TICK)
+		expect(phaseOf(id)).toBe("Return")
+		advance(TICK)
+		expect(#pathCalls).toBe(1)
+		expect(near(pathCalls[1].to, Vector3.new(0, 3, 0))).toBe(true)
+		-- No path: it walks straight at home and asks again after pathFailRetry.
+		expect(near(body.moveTos[#body.moveTos].position, Vector3.new(0, 3, 0))).toBe(true)
+		expect(body.walkSpeed).toBeCloseTo(BOAR.moveSpeed * AI.leash.returnSpeedMultiplier, 1e-9)
+		advance(AI.movement.pathFailRetry - TICK * 2)
+		expect(#pathCalls).toBe(1)
+		pathResult = routeThrough({ Vector3.new(0, 3, -60), Vector3.new(0, 3, -30) }, false)
+		advance(TICK * 4)
+		expect(#pathCalls).toBe(2)
+		expect(near(body.moveTos[#body.moveTos].position, Vector3.new(0, 3, -60))).toBe(true)
+	end)
+
+	it("a path that finishes computing after the goal was dropped is discarded", function()
+		fresh()
+		local id, model = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		physicsEnabled = false
+		local queue: { () -> () } = {}
+		deferredPaths = queue
+		putPlayer(1, Vector3.new(0, 3, -20))
+		pathResult = routeThrough({ Vector3.new(6, 3, -6), Vector3.new(6, 3, -14) }, true)
+		expect(advanceUntil(function()
+			return phaseOf(id) == "Chase"
+		end, 2)).toBe(true)
+		advance(AI.movement.stuckSeconds + TICK * 2)
+		expect(#queue).toBe(1) -- PathfindingService is still computing
+		expect(#pathCalls).toBe(0)
+		-- The player leaves: the brain idles and the mover stops before the path arrives.
+		players = {}
+		advance(TICK * 3)
+		expect(phaseOf(id)).toBe("Idle")
+		local body = bodyOf(model)
+		expect(body.goal).toBeNil()
+		local issued = #body.moveTos
+		table.remove(queue, 1)()
+		expect(#pathCalls).toBe(1)
+		advance(TICK)
+		expect(body.goal).toBeNil()
+		expect(#body.moveTos).toBe(issued)
+		-- The player is back: the first MoveTo goes straight at them, not along the stale waypoints.
+		deferredPaths = nil
+		pathResult = nil
+		putPlayer(1, Vector3.new(0, 3, -20))
+		expect(advanceUntil(function()
+			return #body.moveTos > issued
+		end, 2)).toBe(true)
+		expect(near(body.moveTos[#body.moveTos].position, Vector3.new(0, 3, -20))).toBe(true)
+	end)
+
+	it("the sleeping brain's mover stops the body", function()
+		fresh()
+		local id, model = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		physicsEnabled = false
+		putPlayer(1, Vector3.new(0, 3, -20))
+		expect(advanceUntil(function()
+			return phaseOf(id) == "Chase"
+		end, 2)).toBe(true)
+		local body = bodyOf(model)
+		expect(advanceUntil(function()
+			return body.goal ~= nil
+		end, 1)).toBe(true)
+		putPlayer(1, Vector3.new(0, 3, -(AI.sleepRadius + 50)))
+		advance(AI.sleepCheckInterval + TICK * 2)
+		expect(EnemyService.isAwake(id)).toBe(false)
+		expect(body.goal).toBeNil()
+		expect(body.stops).toBeGreaterThan(0)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- The step accumulator
+-- ------------------------------------------------------------------------------------------
+
+describe("EnemyService step", function()
+	it("runs whole ticks at tickHz and drops the backlog after a hitch", function()
+		fresh()
+		local id = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -20))
+		local brain = EnemyService.brainOf(id)
+		local ticks = 0
+		local original = brain.tick
+		brain.tick = function(self, dt)
+			ticks += 1
+			expect(dt).toBeCloseTo(TICK, 1e-9)
+			return original(self, dt)
+		end
+		EnemyService.step(TICK * 0.5)
+		expect(ticks).toBe(0)
+		EnemyService.step(TICK * 0.5)
+		expect(ticks).toBe(1)
+		EnemyService.step(1.0)
+		expect(ticks).toBe(1 + AI.maxTicksPerFrame)
+		EnemyService.step(TICK)
+		expect(ticks).toBe(2 + AI.maxTicksPerFrame)
+	end)
+
+	it("a brain that errors is reported and the others keep ticking", function()
+		fresh()
+		local broken = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		local healthy = spawnAt("KoboldAxeman", Vector3.new(10, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -20))
+		EnemyService.brainOf(broken).tick = function()
+			error("boom")
+		end
+		advance(1)
+		expect(phaseOf(healthy)).never.toBe("Idle")
+		local reported = false
+		for _, line in Harness.warnings() do
+			if line:find("brain of entity", 1, true) and line:find("boom", 1, true) then
+				reported = true
+			end
+		end
+		expect(reported).toBe(true)
+	end)
+end)

@@ -1,0 +1,724 @@
+-- EntityService under Lune: fake clock, fake net, fake tags; models built with Instance.new.
+Harness.stubService("CollectionService", {
+	AddTag = function(_self, instance, tag)
+		instance:AddTag(tag)
+	end,
+	RemoveTag = function(_self, instance, tag)
+		instance:RemoveTag(tag)
+	end,
+	HasTag = function(_self, instance, tag)
+		return instance:HasTag(tag)
+	end,
+})
+Harness.stubService("RunService", {
+	IsServer = function()
+		return true
+	end,
+	IsClient = function()
+		return false
+	end,
+})
+
+local EntityService = Harness.load("src/server/services/EntityService")
+local Combat = Harness.load("src/shared/data/combat")
+local Enemies = Harness.load("src/shared/data/enemies")
+local Playground = Harness.load("src/shared/data/playground")
+local Net = Harness.load("src/shared/net/Net")
+local Armor = Harness.load("src/shared/data/armor")
+local CollectionService = Harness.game():GetService("CollectionService")
+
+local BOAR = Enemies.byId("FrenzyBoar")
+local KOBOLD = Enemies.byId("KoboldAxeman")
+
+local function loadoutDefense()
+	local ids = {}
+	for _, id in Playground.loadout.armor do
+		table.insert(ids, id)
+	end
+	return Armor.totals(ids).defense
+end
+local PLAYER_DEFENSE = loadoutDefense()
+
+-- ------------------------------------------------------------------------------------------
+-- Fixtures
+-- ------------------------------------------------------------------------------------------
+
+local clock = { t = 1000 }
+local sent = {}
+local respawned = {}
+
+local function fresh()
+	EntityService.reset()
+	clock.t = 1000
+	sent = {}
+	respawned = {}
+	EntityService.bind({
+		now = function()
+			return clock.t
+		end,
+		fireAll = function(remote, payload)
+			local ok, message = Net.validate(remote, payload)
+			if not ok then
+				error(("invalid %s payload: %s"):format(remote, tostring(message)))
+			end
+			table.insert(sent, { remote = remote, payload = payload })
+		end,
+		heartbeat = nil,
+		addTag = function(instance, tag)
+			CollectionService:AddTag(instance, tag)
+		end,
+		removeTag = function(instance, tag)
+			CollectionService:RemoveTag(instance, tag)
+		end,
+		respawn = function(player)
+			table.insert(respawned, player)
+		end,
+		playerRemoving = nil,
+	})
+end
+
+local function sentOf(remote)
+	local list = {}
+	for _, entry in sent do
+		if entry.remote == remote then
+			table.insert(list, entry.payload)
+		end
+	end
+	return list
+end
+
+local function rigModel(name, position, size)
+	local model = Instance.new("Model")
+	model.Name = name
+	local root = Instance.new("Part")
+	root.Name = "HumanoidRootPart"
+	root.Size = size
+	root.CFrame = CFrame.new(position)
+	root.Parent = model
+	model.PrimaryPart = root
+	local humanoid = Instance.new("Humanoid")
+	humanoid.Parent = model
+	return model, root, humanoid
+end
+
+local function spawnBoar(position)
+	local model = rigModel("FrenzyBoar", position or Vector3.new(0, 1.6, -6), Vector3.new(2.4, 2.4, 5))
+	return EntityService.registerEnemy(model, BOAR), model
+end
+
+local function spawnPlayer(name, position)
+	local player = { Name = name or "Tester", DisplayName = name or "Tester", UserId = 7 }
+	local character = rigModel(player.Name, position or Vector3.new(0, 3, 0), Vector3.new(2, 2, 1))
+	local id = EntityService.registerPlayer(player, character, Playground.loadout)
+	return id, character, player
+end
+
+-- Advances the clock in small steps so timers, regen and expiry behave as on Heartbeat.
+local function advance(seconds, step)
+	local dt = step or 1 / 60
+	local remaining = seconds
+	while remaining > 1e-9 do
+		local slice = math.min(dt, remaining)
+		clock.t += slice
+		EntityService.tick(slice)
+		remaining -= slice
+	end
+end
+
+-- A tier-1 Horizontal from the Trialist Sword (attack 18, STR 10) on the attack side.
+local RAW_HORIZONTAL = 18 * 1.0 * (1 + 10 * Combat.strDamageScale)
+
+local function artHit(attackerId, rawDamage, gauge, hitStop)
+	return {
+		attackerId = attackerId,
+		rawDamage = rawDamage or RAW_HORIZONTAL,
+		gaugeDamage = gauge or 20,
+		crit = false,
+		parried = false,
+		guarded = false,
+		artId = "OneHandedSword.Horizontal",
+		hitIndex = 1,
+		hitStop = hitStop or "Normal",
+		position = { 0, 2, -4 },
+	}
+end
+
+-- ------------------------------------------------------------------------------------------
+-- Registration and attributes
+-- ------------------------------------------------------------------------------------------
+
+describe("EntityService registration", function()
+	it("registers a player from the Playground loadout with section 6 HP and gauge", function()
+		fresh()
+		local id, character = spawnPlayer()
+		local record = EntityService.get(id)
+		expect(record).never.toBeNil()
+		expect(record.kind).toBe("Player")
+		expect(record.maxHp).toBe(Combat.basePlayerHp + Combat.hpPerLevel * (Playground.loadout.level - 1))
+		expect(record.hp).toBe(record.maxHp)
+		expect(record.maxGauge).toBe(Combat.playerGuardGaugeBase)
+		expect(record.defense).toBe(PLAYER_DEFENSE) -- the Trialist cloth set's flat sum
+		expect(PLAYER_DEFENSE).toBeGreaterThan(0)
+		expect(record.attack).toBe(18) -- Trialist Sword
+		expect(record.weaponId).toBe("TrialistSword")
+		expect(record.proficiency.OneHandedSword).toBe(150)
+		expect(record.stats).toEqual({ str = 10, agi = 10, level = 1 })
+		expect(record.artSlots).toEqual(Playground.loadout.artSlots)
+		expect(record.artSlots).never.toBe(Playground.loadout.artSlots) -- a copy, never the shared data table
+		-- ARCHITECTURE attribute table
+		expect(character:GetAttribute("EntityId")).toBe(id)
+		expect(character:GetAttribute("EntityKind")).toBe("Player")
+		expect(character:GetAttribute("DefId")).toBe("Player")
+		expect(character:GetAttribute("Rig")).toBe("PlayerR15")
+		expect(character:GetAttribute("DisplayName")).toBe("Tester")
+		expect(character:GetAttribute("HP")).toBe(300)
+		expect(character:GetAttribute("MaxHP")).toBe(300)
+		expect(character:GetAttribute("Gauge")).toBe(100)
+		expect(character:GetAttribute("MaxGauge")).toBe(100)
+		expect(character:GetAttribute("State")).toBe("Idle")
+		expect(character:GetAttribute("Cursor")).toBe("Green")
+		expect(character:GetAttribute("Level")).toBe(1)
+		expect(character:GetAttribute("WeaponId")).toBe("TrialistSword")
+		expect(character:GetAttribute("ArtSlots")).toBe(table.concat(Playground.loadout.artSlots, ","))
+		expect(CollectionService:HasTag(character, "SkyspireEntity")).toBe(true)
+		expect(CollectionService:HasTag(character, "SkyspirePlayer")).toBe(true)
+		expect(CollectionService:HasTag(character, "SkyspireEnemy")).toBe(false)
+	end)
+
+	it("registers an enemy from its def and publishes its attributes and tags", function()
+		fresh()
+		local id, model = spawnBoar()
+		local record = EntityService.get(id)
+		expect(record.kind).toBe("Enemy")
+		expect(record.hp).toBe(BOAR.hp)
+		expect(record.maxGauge).toBe(BOAR.guardGauge)
+		expect(record.defense).toBe(BOAR.defense)
+		expect(record.attack).toBe(BOAR.attack)
+		expect(record.shatter).toBe("Beast")
+		expect(record.artSlots).toBeNil() -- no quick slots: CombatService skips the slot check for enemies
+		expect(model:GetAttribute("EntityKind")).toBe("Enemy")
+		expect(model:GetAttribute("DefId")).toBe("FrenzyBoar")
+		expect(model:GetAttribute("Rig")).toBe("Boar")
+		expect(model:GetAttribute("DisplayName")).toBe("Frenzy Boar")
+		expect(model:GetAttribute("HP")).toBe(120)
+		expect(model:GetAttribute("MaxGauge")).toBe(60)
+		expect(model:GetAttribute("Level")).toBe(1)
+		expect(model:GetAttribute("Cursor")).toBeNil()
+		expect(CollectionService:HasTag(model, "SkyspireEnemy")).toBe(true)
+	end)
+
+	it("pins the engine Humanoid's health (D-012) and re-pins it every tick", function()
+		fresh()
+		local _, model = spawnBoar()
+		local humanoid = model:FindFirstChildOfClass("Humanoid")
+		expect(humanoid.Health).toBe(Combat.humanoidPinnedHealth)
+		expect(humanoid.MaxHealth).toBe(Combat.humanoidPinnedHealth)
+		humanoid.Health = 3
+		advance(0.1)
+		expect(humanoid.Health).toBe(Combat.humanoidPinnedHealth)
+	end)
+
+	it("hands out unique integer ids and finds records by id, model, part and player", function()
+		fresh()
+		local boarId, boarModel = spawnBoar()
+		local playerId, character, player = spawnPlayer()
+		expect(boarId).never.toBe(playerId)
+		expect(boarId % 1).toBe(0)
+		expect(EntityService.fromModel(boarModel).id).toBe(boarId)
+		expect(EntityService.fromInstance(boarModel.PrimaryPart).id).toBe(boarId)
+		expect(EntityService.fromInstance(Instance.new("Part"))).toBeNil()
+		expect(EntityService.fromPlayer(player).id).toBe(playerId)
+		expect(#EntityService.all()).toBe(2)
+		expect(#EntityService.players()).toBe(1)
+		expect(#EntityService.enemies()).toBe(1)
+		expect(EntityService.players()[1].model).toBe(character)
+	end)
+
+	it("a player's new character replaces the old record", function()
+		fresh()
+		local firstId, _, player = spawnPlayer()
+		local character = rigModel("Tester", Vector3.new(0, 3, 0), Vector3.new(2, 2, 1))
+		local secondId = EntityService.registerPlayer(player, character, Playground.loadout)
+		expect(EntityService.get(firstId)).toBeNil()
+		expect(EntityService.fromPlayer(player).id).toBe(secondId)
+	end)
+
+	it("unregister clears tags and fires Unregistered", function()
+		fresh()
+		local id, model = spawnBoar()
+		local gone = nil
+		EntityService.Unregistered:Connect(function(record)
+			gone = record.id
+		end)
+		EntityService.unregister(id)
+		task.wait()
+		expect(gone).toBe(id)
+		expect(EntityService.get(id)).toBeNil()
+		expect(CollectionService:HasTag(model, "SkyspireEntity")).toBe(false)
+	end)
+
+	it("nearest finds the closest living fighter of a kind inside the radius", function()
+		fresh()
+		local nearId = spawnBoar(Vector3.new(0, 1, -5))
+		spawnBoar(Vector3.new(0, 1, -20))
+		spawnPlayer("Tester", Vector3.new(0, 3, -2))
+		expect(EntityService.nearest(Vector3.new(0, 1, 0), 50, "Enemy").id).toBe(nearId)
+		expect(EntityService.nearest(Vector3.new(0, 1, 0), 3, "Enemy")).toBeNil()
+		expect(EntityService.nearest(Vector3.new(0, 1, 0), 50, "Player").kind).toBe("Player")
+	end)
+
+	it("refuses a model without a PrimaryPart", function()
+		fresh()
+		expect(function()
+			EntityService.registerEnemy(Instance.new("Model"), BOAR)
+		end).toThrow("PrimaryPart")
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- Hits, Break, death
+-- ------------------------------------------------------------------------------------------
+
+describe("EntityService.applyHit", function()
+	it("applies defense, drops HP and gauge, adds threat, tags combat and fires HpChanged", function()
+		fresh()
+		local playerId = spawnPlayer()
+		local boarId, model = spawnBoar()
+		local changes = {}
+		EntityService.HpChanged:Connect(function(record, old, new)
+			table.insert(changes, { record.id, old, new })
+		end)
+		local result = EntityService.applyHit(boarId, artHit(playerId))
+		task.wait()
+		local expected = math.floor(RAW_HORIZONTAL - BOAR.defense + 0.5)
+		expect(result.damage).toBe(expected)
+		expect(result.killed).toBe(false)
+		expect(result.broke).toBe(false)
+		expect(result.wasInBreak).toBe(false)
+		expect(result.hitStop).toBe("Normal")
+		expect(result.gaugeDamage).toBe(20)
+		expect(result.hpAfter).toBe(BOAR.hp - expected)
+		expect(result.gaugeAfter).toBe(BOAR.guardGauge - 20)
+		expect(result.staggerDirection).toBe("Back") -- the player stands behind a boar facing -Z
+		expect(model:GetAttribute("HP")).toBe(BOAR.hp - expected)
+		expect(model:GetAttribute("Gauge")).toBe(BOAR.guardGauge - 20)
+		expect(changes[1]).toEqual({ boarId, BOAR.hp, BOAR.hp - expected })
+		expect(EntityService.threatOf(boarId)[playerId]).toBeCloseTo(expected * Combat.threatPerDamage, 1e-9)
+		expect(EntityService.topThreat(boarId)).toBe(playerId)
+		expect(EntityService.inCombat(boarId)).toBe(true)
+		expect(EntityService.inCombat(playerId)).toBe(true)
+	end)
+
+	it("a level-1 Horizontal needs 6 to 8 hits on a boar (section 9)", function()
+		fresh()
+		local playerId = spawnPlayer()
+		local boarId = spawnBoar()
+		local hits = 0
+		while EntityService.isAlive(boarId) do
+			EntityService.applyHit(boarId, artHit(playerId, RAW_HORIZONTAL, 0))
+			hits += 1
+			expect(hits).toBeLessThan(20)
+		end
+		expect(hits).toBeGreaterThanOrEqual(6)
+		expect(hits).toBeLessThanOrEqual(8)
+	end)
+
+	it("empties the gauge into Break: 2x damage, zero post-motion flag, refill when it ends", function()
+		fresh()
+		local playerId = spawnPlayer()
+		local boarId, model = spawnBoar()
+		local broke = nil
+		EntityService.Broke:Connect(function(record)
+			broke = record.id
+		end)
+		-- Two Verticals (35 gauge each) against a 60 gauge: the second one breaks.
+		local first = EntityService.applyHit(boarId, artHit(playerId, RAW_HORIZONTAL, 35))
+		expect(first.broke).toBe(false)
+		local second = EntityService.applyHit(boarId, artHit(playerId, RAW_HORIZONTAL, 35))
+		task.wait()
+		expect(second.broke).toBe(true)
+		expect(second.wasInBreak).toBe(false)
+		expect(second.gaugeAfter).toBe(0)
+		expect(broke).toBe(boarId)
+		expect(EntityService.get(boarId).state).toBe("Break")
+		expect(model:GetAttribute("State")).toBe("Break")
+		local states = sentOf("StateChanged")
+		local last = states[#states]
+		expect(last.entityId).toBe(boarId)
+		expect(last.state).toBe("Break")
+		expect(last.duration).toBe(Combat.breakDuration)
+		-- Hits on a Broken enemy do double damage and report wasInBreak; gauge damage is ignored.
+		local normal = math.floor(RAW_HORIZONTAL - BOAR.defense + 0.5)
+		local third = EntityService.applyHit(boarId, artHit(playerId, RAW_HORIZONTAL, 35))
+		expect(third.wasInBreak).toBe(true)
+		expect(third.damage).toBe(math.floor(normal * Combat.breakDamageMultiplier + 0.5))
+		expect(third.gaugeDamage).toBe(0)
+		expect(third.broke).toBe(false)
+		-- The Break expires on its own and the gauge comes back full.
+		advance(Combat.breakDuration - 0.1)
+		expect(EntityService.get(boarId).state).toBe("Break")
+		advance(0.2)
+		expect(EntityService.get(boarId).state).toBe("Idle")
+		expect(EntityService.get(boarId).gauge).toBe(BOAR.guardGauge)
+	end)
+
+	it("kills at 0 HP: Dead state, Kill hit-stop, EntityDied to all, Died signal, corpse removed later", function()
+		fresh()
+		local playerId = spawnPlayer()
+		local boarId, model = spawnBoar()
+		local died = nil
+		EntityService.Died:Connect(function(record, killerId)
+			died = { record.id, killerId }
+		end)
+		local result = EntityService.applyHit(boarId, artHit(playerId, 10000, 0, "Final"))
+		task.wait()
+		expect(result.killed).toBe(true)
+		expect(result.hitStop).toBe("Kill")
+		expect(result.hpAfter).toBe(0)
+		expect(EntityService.get(boarId).state).toBe("Dead")
+		expect(EntityService.isAlive(boarId)).toBe(false)
+		expect(model:GetAttribute("HP")).toBe(0)
+		expect(model:GetAttribute("State")).toBe("Dead")
+		expect(died).toEqual({ boarId, playerId })
+		local deaths = sentOf("EntityDied")
+		expect(#deaths).toBe(1)
+		expect(deaths[1].entityId).toBe(boarId)
+		expect(deaths[1].shatter).toBe("Beast")
+		expect(deaths[1].name).toBe("Frenzy Boar")
+		expect(deaths[1].byPlayer).toBe(true)
+		expect(#deaths[1].position).toBe(3)
+		-- Further hits do nothing to a corpse.
+		local again = EntityService.applyHit(boarId, artHit(playerId))
+		expect(again.damage).toBe(0)
+		expect(again.killed).toBe(false)
+		-- The model stays for the freeze and the shatter, then goes.
+		advance(Combat.corpseRemoveDelay - 0.2)
+		expect(EntityService.get(boarId)).never.toBeNil()
+		advance(0.4)
+		expect(EntityService.get(boarId)).toBeNil()
+	end)
+
+	it("a parried hit deals nothing and changes nothing", function()
+		fresh()
+		local playerId = spawnPlayer()
+		local boarId = spawnBoar()
+		local hit = artHit(boarId, 50, 15)
+		hit.parried = true
+		local result = EntityService.applyHit(playerId, hit)
+		expect(result.parried).toBe(true)
+		expect(result.damage).toBe(0)
+		expect(result.gaugeDamage).toBe(0)
+		expect(EntityService.get(playerId).hp).toBe(300)
+		expect(EntityService.get(playerId).gauge).toBe(100)
+	end)
+
+	it("a guarded hit takes 70% off and drains the player's gauge into GuardBroken at zero", function()
+		fresh()
+		local playerId, character = spawnPlayer()
+		local boarId = spawnBoar()
+		local raw = 40
+		local hit = artHit(boarId, raw, 60)
+		hit.guarded = true
+		hit.artId = nil
+		local first = EntityService.applyHit(playerId, hit)
+		local open = math.floor(raw - PLAYER_DEFENSE + 0.5)
+		expect(first.guarded).toBe(true)
+		expect(first.damage).toBe(math.floor(open * (1 - Combat.guardReduction) + 0.5))
+		expect(first.gaugeDamage).toBeCloseTo(60 * Combat.guardGaugeDrainFraction, 1e-9)
+		expect(first.broke).toBe(false)
+		local second = EntityService.applyHit(playerId, hit)
+		expect(second.broke).toBe(true)
+		expect(EntityService.get(playerId).state).toBe("GuardBroken")
+		expect(character:GetAttribute("State")).toBe("GuardBroken")
+		expect(EntityService.get(playerId).guardHeld).toBe(false)
+		advance(Combat.guardBreakStagger + 0.05)
+		expect(EntityService.get(playerId).state).toBe("Idle")
+		expect(EntityService.get(playerId).gauge).toBe(100)
+	end)
+
+	it("a GuardBreak telegraph empties the gauge outright and deals full damage", function()
+		fresh()
+		local playerId = spawnPlayer()
+		local boarId = spawnBoar()
+		local hit = artHit(boarId, 40, 5)
+		hit.breakGuard = true
+		local result = EntityService.applyHit(playerId, hit)
+		expect(result.damage).toBe(math.floor(40 - PLAYER_DEFENSE + 0.5))
+		expect(result.broke).toBe(true)
+		expect(result.gaugeAfter).toBe(0)
+		expect(EntityService.get(playerId).state).toBe("GuardBroken")
+	end)
+
+	it("a player who dies respawns after respawnDelay and the record goes", function()
+		fresh()
+		local playerId, _, player = spawnPlayer()
+		local boarId = spawnBoar()
+		local result = EntityService.applyHit(playerId, artHit(boarId, 10000, 0))
+		expect(result.killed).toBe(true)
+		local deaths = sentOf("EntityDied")
+		expect(deaths[1].byPlayer).toBe(false)
+		expect(deaths[1].shatter).toBe("Humanoid")
+		advance(Combat.respawnDelay - 0.1)
+		expect(#respawned).toBe(0)
+		advance(0.2)
+		expect(#respawned).toBe(1)
+		expect(respawned[1]).toBe(player)
+		expect(EntityService.get(playerId)).toBeNil()
+	end)
+
+	it("dying clears the dead fighter from every threat table", function()
+		fresh()
+		local playerId = spawnPlayer()
+		local boarId = spawnBoar()
+		EntityService.applyHit(boarId, artHit(playerId))
+		expect(EntityService.topThreat(boarId)).toBe(playerId)
+		EntityService.die(playerId)
+		expect(EntityService.threatOf(boarId)[playerId]).toBeNil()
+		expect(EntityService.topThreat(boarId)).toBeNil()
+	end)
+
+	it("errors on an unknown target", function()
+		fresh()
+		expect(function()
+			EntityService.applyHit(999, artHit(1))
+		end).toThrow("no entity")
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- States, guard, timers
+-- ------------------------------------------------------------------------------------------
+
+describe("EntityService states and timers", function()
+	it("timed states lock the body and expire back to Idle", function()
+		fresh()
+		local id, character = spawnPlayer()
+		EntityService.setState(id, "Stagger", Combat.staggerDuration, "Left")
+		local record = EntityService.get(id)
+		expect(record.state).toBe("Stagger")
+		expect(character:GetAttribute("State")).toBe("Stagger")
+		expect(record.lockUntil).toBeCloseTo(clock.t + Combat.staggerDuration, 1e-9)
+		expect(EntityService.isLocked(id)).toBe(true)
+		local states = sentOf("StateChanged")
+		expect(states[#states].direction).toBe("Left")
+		expect(states[#states].duration).toBe(Combat.staggerDuration)
+		-- Inside the request tolerance the lock already reads as open.
+		clock.t += Combat.staggerDuration - Combat.artRequestTolerance + 0.001
+		expect(EntityService.isLocked(id)).toBe(false)
+		expect(record.state).toBe("Stagger")
+		advance(Combat.artRequestTolerance)
+		expect(record.state).toBe("Idle")
+		expect(character:GetAttribute("State")).toBe("Idle")
+	end)
+
+	it("an Art lock covers the whole estimated duration and PostMotion replaces it", function()
+		fresh()
+		local id = spawnPlayer()
+		EntityService.setState(id, "Art", 1.0)
+		expect(EntityService.get(id).lockUntil).toBeCloseTo(clock.t + 1.0, 1e-9)
+		clock.t += 0.6
+		EntityService.setState(id, "PostMotion", 0.4)
+		expect(EntityService.get(id).lockUntil).toBeCloseTo(clock.t + 0.4, 1e-9)
+		advance(0.45)
+		expect(EntityService.get(id).state).toBe("Idle")
+		expect(EntityService.isLocked(id)).toBe(false)
+	end)
+
+	it("entering a lock state drops the guard; a dead fighter never changes state again", function()
+		fresh()
+		local id = spawnPlayer()
+		EntityService.setGuard(id, true, { 0, 0, -1 })
+		expect(EntityService.get(id).state).toBe("Guard")
+		EntityService.setState(id, "Stagger", Combat.staggerDuration)
+		expect(EntityService.get(id).guardHeld).toBe(false)
+		EntityService.die(id)
+		EntityService.setState(id, "Idle")
+		expect(EntityService.get(id).state).toBe("Dead")
+	end)
+
+	it("guard raise records guardSince and facing, release returns to Idle", function()
+		fresh()
+		local id = spawnPlayer()
+		expect(EntityService.setGuard(id, true, { 0, 0, -1 })).toBe(true)
+		local record = EntityService.get(id)
+		expect(record.state).toBe("Guard")
+		expect(record.guardHeld).toBe(true)
+		expect(record.guardSince).toBe(clock.t)
+		expect(record.guardFacing).toEqual({ 0, 0, -1 })
+		expect(EntityService.isLocked(id)).toBe(false)
+		clock.t += 1
+		-- Holding does not refresh the parry timestamp.
+		EntityService.setGuard(id, true, { 0, 0, -1 })
+		expect(record.guardSince).toBe(clock.t - 1)
+		EntityService.setGuard(id, false)
+		expect(record.state).toBe("Idle")
+		expect(record.guardHeld).toBe(false)
+		expect(record.guardSince).toBeNil()
+	end)
+
+	it("a raise inside parryRearmTime of the last release cannot parry; a later one can", function()
+		fresh()
+		local id = spawnPlayer()
+		EntityService.setGuard(id, true)
+		clock.t += 0.5
+		EntityService.setGuard(id, false)
+		clock.t += Combat.parryRearmTime / 2
+		EntityService.setGuard(id, true)
+		expect(EntityService.get(id).state).toBe("Guard")
+		expect(EntityService.get(id).guardSince).toBeNil()
+		EntityService.setGuard(id, false)
+		clock.t += Combat.parryRearmTime + 0.01
+		EntityService.setGuard(id, true)
+		expect(EntityService.get(id).guardSince).toBe(clock.t)
+	end)
+
+	it("a guard cannot be raised from a locked state but can cancel a basic swing", function()
+		fresh()
+		local id = spawnPlayer()
+		EntityService.setState(id, "PostMotion", 0.4)
+		expect(EntityService.setGuard(id, true)).toBe(false)
+		expect(EntityService.get(id).guardHeld).toBe(false)
+		expect(EntityService.get(id).state).toBe("PostMotion")
+		advance(0.5)
+		EntityService.setState(id, "Art", Combat.basicHitDuration, nil, "Basic")
+		expect(EntityService.canGuard(id)).toBe(true)
+		expect(EntityService.setGuard(id, true)).toBe(true)
+		expect(EntityService.get(id).state).toBe("Guard")
+	end)
+
+	it("invulnerability and targets", function()
+		fresh()
+		local id = spawnPlayer()
+		local boarId = spawnBoar()
+		EntityService.setInvulnerable(id, clock.t + Combat.dodgeInvulnerability)
+		expect(EntityService.isInvulnerable(id)).toBe(true)
+		clock.t += Combat.dodgeInvulnerability + 0.001
+		expect(EntityService.isInvulnerable(id)).toBe(false)
+		expect(EntityService.setTarget(id, boarId)).toBe(true)
+		expect(EntityService.get(id).targetId).toBe(boarId)
+		expect(EntityService.setTarget(id, 4242)).toBe(false)
+		expect(EntityService.setTarget(id, nil)).toBe(true)
+		expect(EntityService.get(id).targetId).toBeNil()
+	end)
+
+	it("setWeapon changes a player's attack and the WeaponId attribute", function()
+		fresh()
+		local id, character = spawnPlayer()
+		EntityService.setWeapon(id, "TrialistKatana")
+		expect(EntityService.get(id).weaponId).toBe("TrialistKatana")
+		expect(EntityService.get(id).attack).toBe(20)
+		expect(character:GetAttribute("WeaponId")).toBe("TrialistKatana")
+	end)
+
+	it("StateChanged payloads pass the remote schema and skip Idle -> Idle repeats", function()
+		fresh()
+		local id = spawnPlayer()
+		local before = #sentOf("StateChanged")
+		EntityService.setState(id, "Idle")
+		expect(#sentOf("StateChanged")).toBe(before)
+		EntityService.setState(id, "Dodge", Combat.dodgeDuration)
+		expect(#sentOf("StateChanged")).toBe(before + 1)
+	end)
+end)
+
+describe("EntityService regen", function()
+	it("Guard Gauge regenerates 10%/s after guardRegenDelay since the last Art hit, not before", function()
+		fresh()
+		local playerId = spawnPlayer()
+		local boarId = spawnBoar()
+		EntityService.applyHit(boarId, artHit(playerId, RAW_HORIZONTAL, 30))
+		local record = EntityService.get(boarId)
+		expect(record.gauge).toBe(30)
+		advance(Combat.guardRegenDelay - 0.1)
+		expect(record.gauge).toBe(30)
+		advance(1.1) -- 1.0 s of regen at 10% of 60 per second
+		expect(record.gauge).toBeCloseTo(36, 0.5)
+		advance(10)
+		expect(record.gauge).toBe(BOAR.guardGauge)
+	end)
+
+	it("a basic attack's gauge damage does not pause the regen", function()
+		fresh()
+		local playerId = spawnPlayer()
+		local boarId = spawnBoar()
+		local hit = artHit(playerId, RAW_HORIZONTAL * 0.3, 2)
+		hit.artId = nil
+		hit.isBasic = true
+		EntityService.applyHit(boarId, hit)
+		local record = EntityService.get(boarId)
+		expect(record.gauge).toBe(58)
+		expect(record.lastArtHitAt).toBeNil()
+		advance(0.1)
+		expect(record.gauge).toBeGreaterThan(58)
+	end)
+
+	it("HP regenerates 1%/s only after outOfCombatRegenDelay without a hit", function()
+		fresh()
+		local playerId = spawnPlayer()
+		local boarId = spawnBoar()
+		EntityService.applyHit(playerId, artHit(boarId, 50, 0))
+		local record = EntityService.get(playerId)
+		local hurt = record.hp
+		expect(hurt).toBeLessThan(300)
+		advance(Combat.outOfCombatRegenDelay - 0.1)
+		expect(record.hp).toBe(hurt)
+		expect(EntityService.inCombat(playerId)).toBe(false) -- the tag lasts combatTagDuration
+		advance(1.1)
+		expect(record.hp).toBeCloseTo(hurt + 3, 0.2) -- 1% of 300 per second
+		-- Dealing a hit counts as combat too and stops the regen.
+		local healed = record.hp
+		EntityService.applyHit(boarId, artHit(playerId))
+		advance(1)
+		expect(record.hp).toBeCloseTo(healed, 1e-6)
+		advance(60)
+		expect(record.hp).toBe(300)
+	end)
+
+	it("enemies step at enemyTickHz, players every frame", function()
+		fresh()
+		local playerId = spawnPlayer()
+		local boarId = spawnBoar()
+		EntityService.setState(playerId, "Stagger", 0.02)
+		EntityService.setState(boarId, "Stagger", 0.02)
+		clock.t += 0.025
+		EntityService.tick(0.025) -- below the enemy step: only the player expires
+		expect(EntityService.get(playerId).state).toBe("Idle")
+		expect(EntityService.get(boarId).state).toBe("Stagger")
+		clock.t += 0.03
+		EntityService.tick(0.03)
+		expect(EntityService.get(boarId).state).toBe("Idle")
+	end)
+
+	it("heal restores HP up to the maximum", function()
+		fresh()
+		local playerId = spawnPlayer()
+		local boarId = spawnBoar()
+		EntityService.applyHit(playerId, artHit(boarId, 100, 0))
+		EntityService.heal(playerId, 1000)
+		expect(EntityService.get(playerId).hp).toBe(300)
+	end)
+end)
+
+describe("EntityService with a Kobold", function()
+	it("a level-1 Horizontal needs 10 to 14 hits (section 9) and Break takes four Verticals", function()
+		fresh()
+		local playerId = spawnPlayer()
+		local model = rigModel("KoboldAxeman", Vector3.new(0, 2.2, -5), Vector3.new(2, 2, 1))
+		local koboldId = EntityService.registerEnemy(model, KOBOLD)
+		local hits = 0
+		while EntityService.isAlive(koboldId) do
+			EntityService.applyHit(koboldId, artHit(playerId, RAW_HORIZONTAL, 0))
+			hits += 1
+		end
+		expect(hits).toBeGreaterThanOrEqual(10)
+		expect(hits).toBeLessThanOrEqual(14)
+		local id2 =
+			EntityService.registerEnemy(rigModel("KoboldAxeman", Vector3.new(5, 2.2, -5), Vector3.new(2, 2, 1)), KOBOLD)
+		local verticals = 0
+		while EntityService.get(id2).state ~= "Break" do
+			EntityService.applyHit(id2, artHit(playerId, 1, 35))
+			verticals += 1
+		end
+		expect(verticals).toBe(4) -- 120 gauge / 35 per hit
+	end)
+end)
