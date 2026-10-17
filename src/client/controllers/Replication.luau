@@ -2,9 +2,13 @@
 --[[
 	Replication: every server-to-client remote becomes a client reaction (ARCHITECTURE "Client
 	reactions to remotes"): clips on other rigs, telegraphs, hit-stop, digits, highlight flashes,
-	camera nudge and shake, the HP flash, the death freeze and shatter, system lines, the Switch
-	ring. It also routes every rig's clip events (trail, smear, activation light) to the FX package,
-	so trails and smears look the same on the local fighter and on everyone else.
+	an enemy's additive directional flinch, the parry spark burst, camera nudge and shake, the HP
+	flash, the death freeze (every sound group ducked) and shatter, the death system line after the
+	shatter, other system lines, the Switch ring. A Stagger, Break, guard break or death hides the
+	wind-up telegraph it interrupted. It also routes every rig's clip events (trail, smear,
+	activation light, footsteps, clip sounds) to the FX and audio packages, so trails, smears and
+	swings look and sound the same on the local fighter and on everyone else. A TrailOn's
+	`data.kind` ("Art" | "Basic") picks the trail kind for the rest of that clip's trail events.
 
 	Every tracked rig this client does not own (other players, enemies) gets a locomotion driver
 	(Locomotion.attach) when it is watched, so it walks instead of sliding on its idle pose. The
@@ -24,6 +28,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage.Shared
 
 local Combat = require(Shared.data.combat)
+local Fx = require(Shared.data.fx)
+local UI = require(Shared.data.ui)
 local Signal = require(Shared.util.Signal)
 local ActionLogic = require(script.Parent.ActionLogic)
 local Siblings = require(script.Parent.Siblings)
@@ -39,14 +45,14 @@ export type Deps = {
 	trails: any,
 	smear: any,
 	shatter: any,
+	sparks: any, -- Sparks-like: parry(position)
 	telegraphs: any,
 	outline: any,
 	switchRing: any,
 	digits: any,
 	hud: any,
 	systemLine: any,
-	sfx: any,
-	music: any,
+	sfx: any, -- SfxPool-like: play(name, position?), footstep(model, surface?), duck(db, seconds)
 	camera: any,
 	weaponCategory: (record: any) -> string,
 	trailToken: (record: any) -> string,
@@ -67,7 +73,12 @@ local SOUNDS = {
 	systemLine = "ui.SystemLine",
 }
 
-local DEATH_LINE = " has been struck from the Roll"
+-- StateChanged states that cancel an enemy's strike (Brain.interrupt) or end the fighter: the
+-- wind-up telegraph comes down with them instead of glowing over a kneeling rig or a corpse.
+local TELEGRAPH_CANCEL: { [string]: boolean } = { Stagger = true, Break = true, GuardBroken = true, Dead = true }
+
+-- Trail kinds a clip's TrailOn may name in data.kind.
+local TRAIL_KINDS: { [string]: boolean } = { Art = true, Basic = true }
 
 local Replication = {}
 
@@ -87,6 +98,9 @@ local deps: Deps? = nil
 local stateClips: { [number]: any } = {} -- entity id -> handle of the reaction clip playing
 local watched: { [number]: { Disconnect: (self: any) -> () }? } = {}
 local drivers: { [number]: any } = {} -- entity id -> locomotion driver on a rig this client does not own
+-- entity id -> the trail kind the playing clip's TrailOn named; HitWindowOpen / Close, TrailOff and
+-- PostMotionStart carry no kind, so they reuse it while the same clip is playing.
+local trailKinds: { [number]: { clipId: string, kind: string } } = {}
 
 local function dependencies(): Deps
 	if deps == nil then
@@ -206,6 +220,7 @@ function handlers.HitConfirmed(payload: any)
 			d.trails.flashWhite(target.model, Combat.highlightFlashFrames)
 			playReaction(target, "Parry")
 		end
+		d.sparks.parry(position)
 		d.sfx.play(SOUNDS.parry, position)
 		if involved then
 			d.camera.shake("Normal")
@@ -229,6 +244,15 @@ function handlers.HitConfirmed(payload: any)
 		d.outline.flash(target.model, "SystemWhite", Combat.highlightFlashFrames)
 		if payload.guarded then
 			playReaction(target, "GuardHit")
+		end
+		local direction = payload.staggerDirection
+		if target.kind == "Enemy" and direction ~= nil and not payload.killed and not payload.broke then
+			-- The directional hit flinch rides the Additive layer, so it plays over the idle, the walk,
+			-- an attack or a Break kneel without replacing the reaction clip.
+			local flinch = reactionClip(target, "Flinch" .. direction)
+			if flinch ~= nil then
+				animatorOf(target):play(flinch)
+			end
 		end
 	end
 	if payload.isSwitch and attacker ~= nil then
@@ -254,6 +278,10 @@ function handlers.StateChanged(payload: any)
 		return
 	end
 	local isLocal = payload.entityId == d.localId()
+	if TELEGRAPH_CANCEL[payload.state] == true then
+		-- No strike follows an interrupted wind-up (a no-op when the rig shows no telegraph).
+		d.telegraphs.hide(record.model)
+	end
 	local clipName = stateClipName(payload.state, payload.direction, isLocal)
 	if clipName ~= nil then
 		playReaction(record, clipName)
@@ -277,7 +305,8 @@ function handlers.EntityDied(payload: any)
 		animator:setTimeScale(0)
 		d.trails.setActive(record.model, false, "Art")
 	end
-	d.music.duck(Combat.lowHpMusicDuck, Combat.deathFreeze)
+	-- Freeze and silence (section 6, section 11): every sound group ducks, not only the music.
+	d.sfx.duck(Combat.deathDuckDb, Combat.deathFreeze)
 	d.schedule(Combat.deathFreeze, function()
 		if record ~= nil then
 			-- Shatter.play plays the crack itself (SfxPool.shatter) at the rig.
@@ -286,10 +315,16 @@ function handlers.EntityDied(payload: any)
 			-- No rig left to shatter: the crack still sounds where the server said it died.
 			d.sfx.play(SOUNDS.shatterCrack, position)
 		end
-		if record ~= nil and record.kind == "Player" then
-			d.systemLine.show(payload.name .. DEATH_LINE, "SystemWhite", SOUNDS.systemLine)
-		end
 	end)
+	local isLocal = payload.entityId == d.localId()
+	if isLocal or (record ~= nil and record.kind == "Player") then
+		-- The line follows the shatter: the dying player reads their own line, everyone else the name.
+		local shatterTime = if payload.shatter == "Boss" then Fx.shatter.bossDuration else Fx.shatter.duration
+		local text = if isLocal then UI.systemLine.deathSelf else UI.systemLine.deathOther:format(payload.name)
+		d.schedule(Combat.deathFreeze + shatterTime, function()
+			d.systemLine.show(text, "SystemWhite", SOUNDS.systemLine)
+		end)
+	end
 end
 
 function handlers.ActionRejected(payload: any)
@@ -318,23 +353,48 @@ end
 
 Replication.handlers = handlers
 
---- Routes one clip event on a rig to the FX package (trails, smear, activation light, footsteps).
+-- The trail kind for a clip event: the kind the event names (remembered for the rest of the
+-- clip), else what this clip's TrailOn named, else the clip id ("/Basic" swings are Basic).
+local function resolveTrailKind(record: any, clipId: string, event: any): string
+	local data = event.data
+	if typeof(data) == "table" and typeof(data.kind) == "string" and TRAIL_KINDS[data.kind] == true then
+		trailKinds[record.id] = { clipId = clipId, kind = data.kind }
+		return data.kind
+	end
+	local remembered = trailKinds[record.id]
+	if remembered ~= nil and remembered.clipId == clipId then
+		return remembered.kind
+	end
+	return if string.find(clipId, "/Basic", 1, true) then "Basic" else "Art"
+end
+
+--- Routes one clip event on a rig to the FX and audio packages (trails, smear, activation light,
+--- footsteps, clip sounds).
 function Replication.routeClipEvent(record: any, clipId: string, event: any)
 	local d = dependencies()
 	local model = record.model
 	local kind = event.kind
-	local trailKind = if string.find(clipId, "/Basic", 1, true) then "Basic" else "Art"
 	if kind == "HitWindowOpen" or kind == "TrailOn" then
-		d.trails.setActive(model, true, trailKind)
+		d.trails.setActive(model, true, resolveTrailKind(record, clipId, event))
 		if kind == "HitWindowOpen" then
 			d.trails.activationLight(model, false, d.trailToken(record))
 		end
 	elseif kind == "HitWindowClose" or kind == "TrailOff" then
-		d.trails.setActive(model, false, trailKind)
+		d.trails.setActive(model, false, resolveTrailKind(record, clipId, event))
 	elseif kind == "SmearOn" then
+		-- The smear frames run the trail at full width (section 10 beat 3) on top of any Art or
+		-- Basic kind; Trails keeps the trail lit while any kind is on.
 		d.smear.apply(model, true, if event.data ~= nil then event.data.axis else nil)
+		d.trails.setActive(model, true, "Smear")
 	elseif kind == "SmearOff" then
 		d.smear.apply(model, false, if event.data ~= nil then event.data.axis else nil)
+		d.trails.setActive(model, false, "Smear")
+	elseif kind == "Sfx" or kind == "Voice" then
+		-- data.name is a sfx.luau "family.Name"; SfxPool resolves it and skips placeholders.
+		local data = event.data
+		if typeof(data) == "table" and typeof(data.name) == "string" then
+			d.sfx.play(data.name, d.positionOf(model))
+		end
 	elseif kind == "ActivationHold" then
 		local token = d.trailToken(record)
 		d.trails.activationLight(model, true, token)
@@ -344,7 +404,8 @@ function Replication.routeClipEvent(record: any, clipId: string, event: any)
 		end
 	elseif kind == "PostMotionStart" then
 		d.trails.activationLight(model, false, d.trailToken(record))
-		d.trails.setActive(model, false, trailKind)
+		d.trails.setActive(model, false, resolveTrailKind(record, clipId, event))
+		trailKinds[record.id] = nil
 	elseif kind == "Footstep" then
 		-- SfxPool resolves the surface from the event or the Humanoid's floor, and the weight
 		-- from the armor attribute.
@@ -426,6 +487,7 @@ function Replication.unwatch(record: any)
 	end
 	destroyDriver(record.id)
 	stateClips[record.id] = nil
+	trailKinds[record.id] = nil
 	d.outline.unregister(record.model)
 	d.trails.detach(record.model)
 	d.telegraphs.forget(record.model)
@@ -438,6 +500,7 @@ function Replication.bind(newDeps: Deps)
 	table.clear(stateClips)
 	table.clear(watched)
 	table.clear(drivers)
+	table.clear(trailKinds)
 	local entities = newDeps.entities
 	if typeof(entities.added) == "table" then
 		entities.added:Connect(Replication.watch)
@@ -499,6 +562,7 @@ function Replication.start()
 		trails = Siblings.load(Client, "fx.Trails"),
 		smear = Siblings.load(Client, "fx.Smear"),
 		shatter = Siblings.load(Client, "fx.Shatter"),
+		sparks = Siblings.load(Client, "fx.Sparks"),
 		telegraphs = Siblings.load(Client, "fx.Telegraphs"),
 		outline = Siblings.load(Client, "fx.OutlineManager"),
 		switchRing = Siblings.load(Client, "fx.SwitchRing"),
@@ -506,7 +570,6 @@ function Replication.start()
 		hud = Siblings.load(Client, "ui.Hud"),
 		systemLine = Siblings.load(Client, "ui.SystemLine"),
 		sfx = Siblings.load(Client, "audio.SfxPool"),
-		music = Siblings.load(Client, "audio.MusicDirector"),
 		camera = CameraController,
 		weaponCategory = function(record)
 			return WeaponInfo.categoryOf(record.weaponId)

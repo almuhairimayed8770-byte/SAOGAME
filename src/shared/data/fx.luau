@@ -1,8 +1,8 @@
 --!strict
 --[[
-	FX tunables (section 11): budgets, trails, the activation light, outlines, the shatter,
-	telegraphs, the Switch ring, floating digits, quality tiers, the cloud billboards and the
-	client audio pool. Every number the fx / audio packages use lives here; the modules under
+	FX tunables (section 11): budgets, trails, the activation light, outlines, the shatter, the
+	parry sparks, telegraphs, the Switch ring, floating digits, quality tiers, the cloud billboards
+	and the client audio pool. Every number the fx / audio packages use lives here; the modules under
 	src/client/fx and src/client/audio hold none.
 
 	Units: studs, seconds, degrees, fractions 0..1. Frames are 60 fps frames and convert through
@@ -146,6 +146,23 @@ local Fx = {
 		bossCameraPullBack = 10, -- studs the camera eases back for a boss shatter
 		poolFolderName = "ShatterPool",
 		preWarmPerFrame = 40, -- shards created per frame while pre-warming (never a hitch)
+	},
+
+	-- Perfect parry (section 6): a spark burst beside the metallic ring, from one pooled emitter.
+	parrySpark = {
+		particles = 26, -- per burst before the quality tier's particleScale
+		size = 0.3, -- studs at birth; each spark shrinks to nothing
+		lifetime = { min = 0.12, max = 0.3 }, -- seconds
+		speed = { min = 16, max = 34 }, -- studs per second at birth
+		spreadAngle = 180, -- degrees on both axes: sparks fly every way from the clash
+		drag = 7, -- per second; the burst snaps out and stalls
+		gravity = 40, -- studs per second squared pulling the sparks down
+		lightEmission = 1,
+		token = "TrailWhite", -- the hot core at birth
+		tailToken = "TrailAmber", -- the color a spark cools to as it fades
+		orientation = "VelocityParallel", -- Enum.ParticleOrientation: sparks streak along their flight
+		emitterSize = 0.2, -- studs; the invisible anchored part the burst leaves from
+		folderName = "ParrySparks", -- the workspace folder that holds the pooled emitter part
 	},
 
 	-- Telegraphs (section 11): Highlight fill on the weapon plus a flat ground decal.

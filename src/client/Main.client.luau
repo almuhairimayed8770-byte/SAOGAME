@@ -57,6 +57,7 @@ local SIBLING_ORDER = {
 	"fx.OutlineManager",
 	"fx.Trails",
 	"fx.Shatter",
+	"fx.Sparks",
 	"fx.Digits",
 	"fx.SwitchRing",
 	"fx.Telegraphs",

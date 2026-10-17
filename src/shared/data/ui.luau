@@ -181,6 +181,10 @@ local UI = {
 		defaultToken = "SystemWhite",
 		largeTokens = { CursorRed = true },
 		chimes = { default = "ui.SystemLine", WardedPurple = "ui.SystemLineWarded" },
+		-- Death lines (section 6, section 14): the dying player reads deathSelf; everyone else reads
+		-- deathOther with the fallen player's name in place of %s.
+		deathSelf = "Your name has been struck from the Roll.",
+		deathOther = "%s has been struck from the Roll",
 	},
 
 	mobile = {

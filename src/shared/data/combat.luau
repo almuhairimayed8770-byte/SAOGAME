@@ -94,6 +94,7 @@ local Combat = {
 
 	-- Death (section 6)
 	deathFreeze = 0.5, -- silence and freeze before the shatter
+	deathDuckDb = 40, -- dB the Music, SFX and UI groups drop for the freeze (section 11: all sound ducked); reads as silence
 
 	-- Server hit detection (section 6, D-010)
 	hitSampleHz = 60,

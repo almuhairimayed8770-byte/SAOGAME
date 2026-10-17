@@ -455,10 +455,18 @@ local function restPose(model: Model)
 	end
 end
 
+-- clip id -> the kind its TrailOn named; TrailOff carries no kind and must turn the same one off.
+local trailOnKinds: { [string]: string } = {}
+
 local function trailKind(def: Types.ClipDef, event: Types.ClipEvent): string
 	local data = event.data
 	if data ~= nil and typeof(data.kind) == "string" then
+		trailOnKinds[def.id] = data.kind
 		return data.kind
+	end
+	local remembered = trailOnKinds[def.id]
+	if remembered ~= nil then
+		return remembered
 	end
 	return if def.id:find("Basic", 1, true) then "Basic" else "Art"
 end
@@ -473,11 +481,22 @@ local function onClipEvent(target: Choreo.Animator, clipId: string, event: Types
 		Trails.setActive(model, true, trailKind(def, event))
 	elseif event.kind == "TrailOff" and hasTrails then
 		Trails.setActive(model, false, trailKind(def, event))
-	elseif event.kind == "SmearOn" and hasSmear then
-		local axis = if event.data ~= nil then event.data.axis else nil
-		Smear.apply(model, true, axis)
-	elseif event.kind == "SmearOff" and hasSmear then
-		Smear.apply(model, false)
+	elseif event.kind == "SmearOn" then
+		-- The smear frames run the trail at full width (section 10 beat 3), as Replication does.
+		if hasTrails then
+			Trails.setActive(model, true, "Smear")
+		end
+		if hasSmear then
+			local axis = if event.data ~= nil then event.data.axis else nil
+			Smear.apply(model, true, axis)
+		end
+	elseif event.kind == "SmearOff" then
+		if hasTrails then
+			Trails.setActive(model, false, "Smear")
+		end
+		if hasSmear then
+			Smear.apply(model, false)
+		end
 	elseif event.kind == "HitWindowOpen" and hitStopEnabled then
 		local tier: Types.HitStopTier = def.hitStop or "Normal"
 		target:hitStop(Combat.hitStopFrames[tier])

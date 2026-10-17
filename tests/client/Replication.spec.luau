@@ -1,7 +1,9 @@
 --!strict
 local Replication = Harness.load("src/client/controllers/Replication")
 local combat = Harness.load("src/shared/data/combat")
+local fx = Harness.load("src/shared/data/fx")
 local sfx = Harness.load("src/shared/data/sfx")
+local ui = Harness.load("src/shared/data/ui")
 
 -- A recorder module: every field is a function that logs its call.
 local function recorder(moduleName, calls)
@@ -143,6 +145,7 @@ local function setup(options)
 		trails = recorder("trails", calls),
 		smear = recorder("smear", calls),
 		shatter = recorder("shatter", calls),
+		sparks = recorder("sparks", calls),
 		telegraphs = recorder("telegraphs", calls),
 		outline = recorder("outline", calls),
 		switchRing = recorder("switchRing", calls),
@@ -150,7 +153,6 @@ local function setup(options)
 		hud = recorder("hud", calls),
 		systemLine = recorder("systemLine", calls),
 		sfx = recorder("sfx", calls),
-		music = recorder("music", calls),
 		camera = recorder("camera", calls),
 		weaponCategory = function()
 			return "OneHandedSword"
@@ -352,9 +354,13 @@ describe("Replication", function()
 		Replication.dispatch("HitConfirmed", hit({ attackerId = 7, targetId = 1, damage = 0, parried = true }))
 		expect(#t.find("digits", "show")).toBe(0)
 		expect(#t.find("hud", "flashHp")).toBe(0)
-		local sparks = t.find("trails", "flashWhite")
-		expect(#sparks).toBe(1)
-		expect(sparks[1].args[1]).toBe(t.models.me)
+		local whiteFlashes = t.find("trails", "flashWhite")
+		expect(#whiteFlashes).toBe(1)
+		expect(whiteFlashes[1].args[1]).toBe(t.models.me)
+		-- The spark burst leaves from the clash point the server sent.
+		local bursts = t.find("sparks", "parry")
+		expect(#bursts).toBe(1)
+		expect(bursts[1].args[1]).toBe(Vector3.new(3, 2, -5))
 		local sounds = t.find("sfx", "play")
 		expect(#sounds).toBe(1)
 		expect(sounds[1].args[1]).toBe("guard.Parry")
@@ -363,6 +369,34 @@ describe("Replication", function()
 		local plays = t.find("animator:me", "play")
 		expect(#plays).toBe(1)
 		expect(plays[1].args[1]).toBe("player/OneHandedSword/Parry")
+	end)
+
+	it("HitConfirmed: an enemy plays its additive directional flinch without replacing its reaction clip", function()
+		local t = setup()
+		Replication.dispatch("HitConfirmed", hit({ staggerDirection = "Left" }))
+		local plays = t.find("animator:boar", "play")
+		expect(#plays).toBe(1)
+		expect(plays[1].args[1]).toBe("enemy/Boar/FlinchLeft")
+		-- A Break kneel keeps playing under the flinch: nothing is stopped.
+		Replication.dispatch("StateChanged", { entityId = 7, state = "Break", duration = 3 })
+		Replication.dispatch("HitConfirmed", hit({ staggerDirection = "Back" }))
+		plays = t.find("animator:boar", "play")
+		expect(#plays).toBe(3)
+		expect(plays[2].args[1]).toBe("enemy/Boar/Break")
+		expect(plays[3].args[1]).toBe("enemy/Boar/FlinchBack")
+		expect(#t.find("animator:boar", "stop")).toBe(0)
+		-- No flinch on the killing hit, the breaking hit, a parry, a hit with no direction, or a player.
+		Replication.dispatch("HitConfirmed", hit({ staggerDirection = "Front", killed = true, hitStop = "Kill" }))
+		Replication.dispatch("HitConfirmed", hit({ staggerDirection = "Front", broke = true }))
+		Replication.dispatch("HitConfirmed", hit())
+		expect(#t.find("animator:boar", "play")).toBe(3)
+		-- A parried enemy plays its Parry reaction (the reaction slot), never a flinch on top.
+		Replication.dispatch("HitConfirmed", hit({ staggerDirection = "Front", parried = true, damage = 0 }))
+		plays = t.find("animator:boar", "play")
+		expect(#plays).toBe(4)
+		expect(plays[4].args[1]).toBe("enemy/Boar/Parry")
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 7, targetId = 2, staggerDirection = "Right" }))
+		expect(#t.find("animator:ally", "play")).toBe(0)
 	end)
 
 	it("ActionStarted plays the clip on other rigs at the server clock and skips the local player's own", function()
@@ -424,22 +458,33 @@ describe("Replication", function()
 		expect(stops[1].args[2]).toBe(combat.locomotionBlendOut)
 		Replication.dispatch("StateChanged", { entityId = 7, state = "Break", duration = 3 })
 		expect(t.find("animator:boar", "play")[3].args[1]).toBe("enemy/Boar/Break")
+		-- Stagger and Break interrupt the strike, so the wind-up telegraph comes down each time.
+		local hides = t.find("telegraphs", "hide")
+		expect(#hides).toBe(3)
+		expect(hides[3].args[1]).toBe(t.models.boar)
 		Replication.dispatch("StateChanged", { entityId = 7, state = "Idle" })
 		expect(#t.find("animator:boar", "stop")).toBe(3)
+		expect(#t.find("telegraphs", "hide")).toBe(3)
 
 		Replication.dispatch("StateChanged", { entityId = 2, state = "GuardBroken", duration = 1.2 })
 		expect(t.find("animator:ally", "play")[1].args[1]).toBe("player/OneHandedSword/GuardBreak")
 		local flashes = t.find("outline", "flash")
 		expect(#flashes).toBe(1)
 		expect(flashes[1].args[2]).toBe("HPRed")
+		expect(#t.find("telegraphs", "hide")).toBe(4)
 		-- Guard on another player plays their guard pose; the local player's guard is predicted locally.
 		Replication.dispatch("StateChanged", { entityId = 2, state = "Guard" })
 		expect(t.find("animator:ally", "play")[2].args[1]).toBe("player/OneHandedSword/Guard")
 		Replication.dispatch("StateChanged", { entityId = 1, state = "Guard" })
 		expect(#t.find("animator:me", "play")).toBe(0)
+		expect(#t.find("telegraphs", "hide")).toBe(4)
+		-- A death takes a half-shown telegraph down at once, not when the shatter starts.
+		Replication.dispatch("StateChanged", { entityId = 7, state = "Dead" })
+		expect(#t.find("telegraphs", "hide")).toBe(5)
+		expect(t.find("telegraphs", "hide")[5].args[1]).toBe(t.models.boar)
 	end)
 
-	it("EntityDied freezes the rig, ducks the music, then shatters (and reads a player's name)", function()
+	it("EntityDied freezes the rig, ducks every sound, then shatters (and reads a player's name)", function()
 		local t = setup()
 		Replication.dispatch(
 			"EntityDied",
@@ -447,10 +492,13 @@ describe("Replication", function()
 		)
 		expect(t.find("animator:boar", "play")[1].args[1]).toBe("enemy/Boar/DeathFreeze")
 		expect(t.find("animator:boar", "setTimeScale")[1].args[1]).toBe(0)
-		local ducks = t.find("music", "duck")
+		-- Freeze and silence: SfxPool.duck lowers Music, SFX and UI together for the freeze.
+		local ducks = t.find("sfx", "duck")
 		expect(#ducks).toBe(1)
+		expect(ducks[1].args[1]).toBe(combat.deathDuckDb)
 		expect(ducks[1].args[2]).toBe(combat.deathFreeze)
 		expect(#t.find("shatter", "play")).toBe(0)
+		-- An enemy's death reads no line: only the shatter is scheduled.
 		expect(#t.scheduled).toBe(1)
 		expect(t.scheduled[1].seconds).toBe(combat.deathFreeze)
 		t.scheduled[1].fn()
@@ -460,12 +508,35 @@ describe("Replication", function()
 		expect(shatters[1].args[2]).toBe("Beast")
 		expect(#t.find("systemLine", "show")).toBe(0)
 
+		-- Another player: the name line comes after the shatter, not with it.
 		Replication.dispatch("EntityDied", { entityId = 2, shatter = "Humanoid", position = { 0, 0, 0 }, name = "Ren" })
+		expect(#t.scheduled).toBe(3)
+		expect(t.scheduled[2].seconds).toBe(combat.deathFreeze)
+		expect(t.scheduled[3].seconds).toBe(combat.deathFreeze + fx.shatter.duration)
 		t.scheduled[2].fn()
+		expect(#t.find("shatter", "play")).toBe(2)
+		expect(#t.find("systemLine", "show")).toBe(0)
+		t.scheduled[3].fn()
 		local lines = t.find("systemLine", "show")
 		expect(#lines).toBe(1)
 		expect(lines[1].args[1]).toBe("Ren has been struck from the Roll")
+		expect(lines[1].args[1]).toBe(ui.systemLine.deathOther:format("Ren"))
 		expect(lines[1].args[2]).toBe("SystemWhite")
+		expect(lines[1].args[3]).toBe("ui.SystemLine")
+
+		-- The dying player reads their own line (section 6), after their shatter.
+		Replication.dispatch(
+			"EntityDied",
+			{ entityId = 1, shatter = "Humanoid", position = { 0, 0, 0 }, name = "Mira" }
+		)
+		expect(#t.scheduled).toBe(5)
+		expect(t.scheduled[5].seconds).toBe(combat.deathFreeze + fx.shatter.duration)
+		t.scheduled[4].fn()
+		t.scheduled[5].fn()
+		lines = t.find("systemLine", "show")
+		expect(#lines).toBe(2)
+		expect(lines[2].args[1]).toBe("Your name has been struck from the Roll.")
+		expect(lines[2].args[1]).toBe(ui.systemLine.deathSelf)
 	end)
 
 	it("ActionRejected becomes the rejected Signal and nothing else", function()
@@ -567,19 +638,97 @@ describe("Replication", function()
 		expect(smears[1].args[2]).toBe(true)
 		expect(smears[1].args[3]).toBe("X")
 		expect(smears[2].args[2]).toBe(false)
+		-- The smear frames turn the full-width Smear trail kind on and off beside the mesh scale.
+		actives = t.find("trails", "setActive")
+		expect(#actives).toBe(3)
+		expect(actives[2].args[1]).toBe(t.models.me)
+		expect(actives[2].args[2]).toBe(true)
+		expect(actives[2].args[3]).toBe("Smear")
+		expect(actives[3].args[2]).toBe(false)
+		expect(actives[3].args[3]).toBe("Smear")
 
 		Replication.routeClipEvent(me, "player/OneHandedSword/Horizontal", { time = 0.4, kind = "HitWindowClose" })
-		expect(t.find("trails", "setActive")[2].args[2]).toBe(false)
+		expect(t.find("trails", "setActive")[4].args[2]).toBe(false)
+		expect(t.find("trails", "setActive")[4].args[3]).toBe("Art")
 
 		-- Basic swings get the thinner trail; other rigs' activation never kicks the local FOV.
 		Replication.routeClipEvent(t.records[2], "player/OneHandedSword/Basic1", { time = 0.1, kind = "TrailOn" })
-		expect(t.find("trails", "setActive")[3].args[3]).toBe("Basic")
+		expect(t.find("trails", "setActive")[5].args[3]).toBe("Basic")
 		Replication.routeClipEvent(
 			t.records[2],
 			"player/OneHandedSword/Horizontal",
 			{ time = 0.15, kind = "ActivationHold" }
 		)
 		expect(#t.find("camera", "fovKick")).toBe(1)
+	end)
+
+	it("a TrailOn's data.kind picks the trail kind for the rest of that clip's trail events", function()
+		local t = setup()
+		local boar = t.records[7]
+		local charge = "enemy/Boar/Charge"
+		Replication.routeClipEvent(boar, charge, { time = 0.62, kind = "TrailOn", data = { kind = "Basic" } })
+		Replication.routeClipEvent(boar, charge, { time = 1.05, kind = "HitWindowOpen", data = { hit = 1 } })
+		Replication.routeClipEvent(boar, charge, { time = 1.2, kind = "HitWindowClose", data = { hit = 1 } })
+		Replication.routeClipEvent(boar, charge, { time = 1.22, kind = "TrailOff" })
+		Replication.routeClipEvent(boar, charge, { time = 1.25, kind = "PostMotionStart" })
+		local actives = t.find("trails", "setActive")
+		expect(#actives).toBe(5)
+		local expected = { true, true, false, false, false }
+		for index, on in expected do
+			expect(actives[index].args[1]).toBe(t.models.boar)
+			expect(actives[index].args[2]).toBe(on)
+			expect(actives[index].args[3]).toBe("Basic")
+		end
+		-- PostMotionStart ends the clip's memory: a later event with no kind falls back to the clip id.
+		Replication.routeClipEvent(boar, charge, { time = 1.05, kind = "HitWindowOpen" })
+		expect(t.find("trails", "setActive")[6].args[3]).toBe("Art")
+
+		-- The memory belongs to the clip that named it: a Basic swing's kind never leaks into an Art.
+		local ally = t.records[2]
+		Replication.routeClipEvent(
+			ally,
+			"player/OneHandedSword/Basic1",
+			{ time = 0.09, kind = "TrailOn", data = { kind = "Basic" } }
+		)
+		Replication.routeClipEvent(ally, "player/OneHandedSword/Horizontal", { time = 0.36, kind = "HitWindowOpen" })
+		actives = t.find("trails", "setActive")
+		expect(actives[7].args[3]).toBe("Basic")
+		expect(actives[8].args[3]).toBe("Art")
+		-- A kind outside Art / Basic is ignored rather than handed to Trails.
+		Replication.routeClipEvent(
+			ally,
+			"player/OneHandedSword/Vertical",
+			{ time = 0.3, kind = "TrailOn", data = { kind = "Glow" } }
+		)
+		expect(t.find("trails", "setActive")[9].args[3]).toBe("Art")
+	end)
+
+	it("clip Sfx and Voice events play their sfx.luau sound at the rig", function()
+		local t = setup()
+		local boar = t.records[7]
+		Replication.routeClipEvent(
+			boar,
+			"enemy/Boar/Charge",
+			{ time = 0.1, kind = "Voice", data = { name = "enemy.ChargerWindUp" } }
+		)
+		Replication.routeClipEvent(
+			boar,
+			"enemy/Boar/Charge",
+			{ time = 0.6, kind = "Sfx", data = { name = "whoosh.Large" } }
+		)
+		local plays = t.find("sfx", "play")
+		expect(#plays).toBe(2)
+		expect(plays[1].args[1]).toBe("enemy.ChargerWindUp")
+		expect(plays[1].args[2]).toBe(Vector3.zero)
+		expect(plays[2].args[1]).toBe("whoosh.Large")
+		-- An event without a name plays nothing.
+		Replication.routeClipEvent(boar, "enemy/Boar/Charge", { time = 0.7, kind = "Sfx" })
+		expect(#t.find("sfx", "play")).toBe(2)
+		-- The names used here are real registry entries.
+		expect(function()
+			sfx.get("enemy", "ChargerWindUp")
+			sfx.get("whoosh", "Large")
+		end).never.toThrow()
 	end)
 
 	it("watches rigs through their animator events and registers outlines", function()

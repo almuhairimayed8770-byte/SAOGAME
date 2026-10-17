@@ -30,6 +30,13 @@ describe("combat data", function()
 		expect(combat.telegraphMaxWindUp).toBeLessThanOrEqual(1.2)
 	end)
 
+	it("the death freeze ducks every sound group deep enough to read as silence", function()
+		expect(combat.deathDuckDb).toBe(40)
+		-- 30 dB leaves about 3% of the amplitude; anything shallower still reads as sound under the freeze.
+		expect(combat.deathDuckDb).toBeGreaterThanOrEqual(30)
+		expect(combat.deathDuckDb).toBeGreaterThan(combat.lowHpMusicDuck)
+	end)
+
 	it("section 10 camera numbers", function()
 		expect(combat.cameraNudgeStuds).toBe(0.4)
 		expect(combat.cameraShakeStuds).toEqual({ Normal = 0.15, Final = 0.3, Kill = 0.6 })
