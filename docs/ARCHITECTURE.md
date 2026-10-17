@@ -127,6 +127,14 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
   any joint key (root keys may be Linear). The runtime blend is eased too: `Mixer` shapes every fade
   with `choreo.luau` `blendEasing` before it weights a limb, and blend-space weight ramps on one
   layer share one fraction so their sum stays 1 (D-032, D-033).
+- Trail kinds: a `TrailOn`'s `data.kind` (`"Art"` or `"Basic"`) picks the trail kind, and the client
+  remembers it for the rest of that clip's trail events (`HitWindowOpen`/`Close`, `TrailOff` and
+  `PostMotionStart` carry no kind); without one, a clip id containing `/Basic` means Basic.
+  `SmearOn`/`SmearOff` also turn the full-width `Smear` trail kind on and off.
+- Sounds: a `Sfx` or `Voice` event carries `data.name = "family.Name"` from `sfx.luau`; the client
+  plays it through `SfxPool.play` at the rig, and the clips validator rejects a name `Sfx.get`
+  cannot resolve. Sounds a server remote already triggers (parry, block, guard break) are not
+  repeated as clip events (D-036).
 - Enemy attack clips: the wind-up pose must be held for the attack's `windUp` (the validator
   compares the clip's `Anticipation` beat to `enemies.luau`).
 
@@ -142,7 +150,9 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
    `NoWeapon`, `WeaponMismatch`, `Proficiency`, `NotSlotted`, `Locked`, `Busy:<state>`, `Facing`,
    `Stance` and `NoClip`. On failure it fires `ActionRejected` to that client (which cancels its
    prediction). On success it sets `State = "Art"`, fires `ActionStarted` to everyone (including the
-   requester, who ignores its own), and schedules the timeline from the clip: for each hit window it
+   requester, who ignores its own), and schedules the timeline from the clip. The timeline starts at
+   the request's `clientTime` clamped into `[now - lagAllowance, now]` (`CombatService.runStartOf`,
+   the 150 ms lag allowance, D-010), and `ActionStarted.serverTime` carries that start: for each hit window it
    samples the clip at `hitSampleHz` through `ClipSampler` + `Pose` and runs `HitSweep` between
    samples; every hit goes through `DamageMath` and `EntityService.applyHit`, then `HitConfirmed` is
    fired to all clients. After the last hit the entity enters `PostMotion` for `postMotion` seconds
@@ -151,10 +161,13 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
    shape) and `StateChanged`, holds the wind-up, then calls `CombatService.enemyStrike(enemyId,
    attackDef, origin, facing)`, which checks each player in the cone/line: dodge invulnerability,
    parry (guard pressed within `parryWindow` before the hit lands: the guard timestamp is the
-   server's receipt time of `GuardRequest {held = true}`), guard cone and reduction, then damage.
+   server's receipt time of `GuardRequest {held = true}`), guard cone (judged against the player's
+   root on the server at strike time; the request's `facing` is not read) and reduction, then damage.
+   `HitConfirmed` carries the hit's `staggerDirection` (Front, Back, Left, Right in the target's frame).
    A parry staggers the enemy (`parryStagger`) and (Phase 1) opens a Switch window.
 4. Death: `EntityService` sets `Dead`, fires `EntityDied {shatter}` to all; the client freezes the
-   rig for `deathFreeze` with sound ducked, then plays `Shatter`.
+   rig for `deathFreeze` with every sound group ducked by `deathDuckDb`, plays `Shatter`, then shows
+   the system line (D-035).
 
 Hit-stop, trails, camera, digits and highlight flashes are client reactions to `HitConfirmed`;
 nothing about animation runs on the server except the pose sampling used by the sweep.
@@ -206,9 +219,9 @@ scans every text file in the repo except `docs/GAME_SPEC.md` and the blocklist i
 | --- | --- |
 | `ActionStarted` | `Choreo.play(rig, clipId, serverTime)` on that entity's rig; local player ignores its own |
 | `Telegraph` | `Telegraphs.show(entity, kind, windUp, shape)`: weapon Highlight fill + ground decal |
-| `HitConfirmed` | hit-stop on attacker and target rigs, `Digits`, Highlight flash, `Trails` flash on Switch, camera nudge/shake, HUD HP flash |
-| `StateChanged` | stagger/break/guard-break clips, HUD status |
-| `EntityDied` | freeze `deathFreeze`, duck audio, `Shatter.play(model, shatterKind)` (which plays the crack); the crack plays directly through `SfxPool` only when the rig is already gone |
+| `HitConfirmed` | hit-stop on attacker and target rigs, `Digits`, Highlight flash, `Trails` flash on Switch, camera nudge/shake, HUD HP flash; on a parry `Sparks.parry(position)`; on an enemy hit that neither kills nor breaks, the additive `Flinch<staggerDirection>` clip |
+| `StateChanged` | stagger/break/guard-break clips, HUD status; `Stagger`, `Break`, `GuardBroken` and `Dead` hide that enemy's telegraph |
+| `EntityDied` | freeze `deathFreeze`, `SfxPool.duck(deathDuckDb, deathFreeze)` on every group, `Shatter.play(model, shatterKind)` (which plays the crack); the crack plays directly through `SfxPool` only when the rig is already gone; after the shatter the system line: `ui.luau` `systemLine.deathSelf` for the dying player, `deathOther` with the name for everyone else |
 | `ActionRejected` | cancel the predicted clip, no digit |
 | `SystemLine` | centered system text with chime |
 | `SwitchWindow` | `SwitchRing` on the enemy, SWITCH prompt (Phase 1 logic, Phase 0 visuals) |
