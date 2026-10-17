@@ -1,6 +1,6 @@
 # Phase 0 gate recordings
 
-The clips the Phase 0 gate needs (`GAME_SPEC.md` section 20, section 21 line 3), one file per shot, named exactly as
+The clips the Phase 0 gate needs (`GAME_SPEC.md` section 20, section 21 line 3), one file per shot (ten in all), named exactly as
 the Capture panel shows them. The list and the lengths come from `src/shared/data/dev.luau` (`capture.shots`); the
 panel (`src/client/dev/Capture.client.luau`) runs in the Playground place because its Workspace carries the
 `DevCapture` attribute, and it prompts each shot with a 3-2-1 countdown, hides itself, and shows a frame counter
@@ -12,6 +12,7 @@ bottom-left while you record.
 | `art-horizontal.mp4` | 5 s | start pose, activation glow, anticipation, snap, smear, hold, settle, post-motion |
 | `art-vertical.mp4` | 5 s | the overhead cut; gauge-heavy hit; same six beats |
 | `art-sharp-nail.mp4` | 5 s | three hits, three hit-stops, the trail on only in the windows |
+| `art-rising-arc.mp4` | 5 s | the sunken start pose, the rise onto the toes, two hits with Normal then Final hit-stop, the trail on only in the windows |
 | `enemy-boar-charge.mp4` | 5 s | 0.6 s crouch with the red line, the launch, the skid, readable from behind |
 | `enemy-kobold-overhead.mp4` | 5 s | 1.0 s wind-up with the yellow edge, the chop, the recovery |
 | `parry-spark.mp4` | 5 s | guard tapped inside the window; spark and ring; the enemy staggers |

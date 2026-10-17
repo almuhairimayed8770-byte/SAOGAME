@@ -1,3 +1,4 @@
+--!strict
 local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
 local Rigs = Harness.load("src/shared/data/rigs")
 local ChoreoData = Harness.load("src/shared/data/choreo")
@@ -36,6 +37,7 @@ local REQUIRED_PLAYER = {
 	"Basic3",
 	"Horizontal",
 	"Vertical",
+	"RisingArc",
 	"SharpNail",
 }
 

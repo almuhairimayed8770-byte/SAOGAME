@@ -144,6 +144,12 @@ local Dev = {
 				notes = "three hits, three hit-stops, the trail on only in the windows",
 			},
 			{
+				id = "art-rising-arc",
+				title = "Art: Rising Arc",
+				seconds = 5,
+				notes = "the sunken start pose, the rise onto the toes, two hits with Normal then Final hit-stop, the trail on only in the windows",
+			},
+			{
 				id = "enemy-boar-charge",
 				title = "Boar: Charge telegraph and strike",
 				seconds = 5,
