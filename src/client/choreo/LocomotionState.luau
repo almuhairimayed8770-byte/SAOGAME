@@ -331,11 +331,12 @@ function LocomotionState.footIKWeight(speed: number, grounded: boolean): number
 	return clamp01(1 - speed / IK.fadeSpeed)
 end
 
---- Additive lean offsets (degrees of roll into the turn): the waist leans, the head stays level.
+--- Additive lean offsets (degrees of roll into the turn): the waist leans and the head cancels
+--- lean.neckCounterFraction of it.
 function LocomotionState.leanOffsets(lean: number): ClipSampler.Offsets
 	return {
 		Waist = { pos = { 0, 0, 0 }, rot = { 0, 0, lean } },
-		Neck = { pos = { 0, 0, 0 }, rot = { 0, 0, -lean * 0.5 } },
+		Neck = { pos = { 0, 0, 0 }, rot = { 0, 0, -lean * Config.lean.neckCounterFraction } },
 	}
 end
 

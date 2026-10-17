@@ -21,6 +21,11 @@
 	weights and laid over the lower groups, so a locomotion one-shot that fires under an Art never
 	shows through it, while a lower clip blending in under a stopping higher one does.
 
+	No limb moves on a straight line between clips: a handle's envelope (`fade`) is linear progress,
+	but the limbs see it through the data blendEasing curve. Blend-space weights retargeted on one
+	layer all move by one shared fraction per step (the largest mover at weightBlendRate), so a
+	blend space whose targets sum to 1 keeps summing to 1 and never dips toward the rest pose.
+
 	Root motion is a gameplay displacement, not a visual: it is never attenuated by a clip's
 	blend-in (the dodge travels its whole dodgeDistance) and only fades with a clip that is stopping.
 ]]
@@ -31,6 +36,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Types = require(Shared.types)
 local ClipSampler = require(Shared.choreo.ClipSampler)
 local ChoreoData = require(Shared.data.choreo)
+local Easing = require(Shared.util.Easing)
 
 export type Offsets = ClipSampler.Offsets
 
@@ -57,7 +63,7 @@ export type Handle = {
 	priority: number,
 	time: number,
 	speed: number,
-	fade: number, -- blend envelope 0..1
+	fade: number, -- blend envelope 0..1 (linear progress; the limbs see it through blendEasing)
 	weight: number, -- external weight 0..1
 	targetWeight: number,
 	blendIn: number,
@@ -378,8 +384,31 @@ local function advance(handle: Handle, dt: number, paused: boolean, events: { Fi
 	handle.time = target
 end
 
+-- What the limbs see of a handle: its eased envelope times its external weight. Root motion
+-- reads the raw envelope instead (a gameplay displacement, validated by the server).
 local function visibleWeight(handle: Handle): number
-	return handle.fade * handle.weight
+	return Easing.evaluate(ChoreoData.blendEasing, handle.fade) * handle.weight
+end
+
+-- Per layer, the fraction of the remaining distance every retargeted blend-space weight moves
+-- this step: the largest mover travels `dt * weightBlendRate` and the rest keep pace, so the
+-- layer's weight sum moves straight to its target sum (and holds when the two agree). The
+-- fraction reaches 1 on the last step, so every weight lands exactly on its target.
+local function weightFractions(handles: { Handle }, dt: number, paused: boolean): { [string]: number }
+	local largest: { [string]: number } = {}
+	for _, handle in handles do
+		local frozen = paused and not handle.ignorePause
+		if not handle.fallback and not handle.done and not frozen then
+			local delta = math.abs(handle.targetWeight - handle.weight)
+			largest[handle.layer] = math.max(largest[handle.layer] or 0, delta)
+		end
+	end
+	local fractions: { [string]: number } = {}
+	local reach = dt * ChoreoData.locomotion.weightBlendRate
+	for layer, delta in largest do
+		fractions[layer] = if delta <= reach then 1 else reach / delta
+	end
+	return fractions
 end
 
 local function byPriority(a: Handle, b: Handle): boolean
@@ -483,6 +512,7 @@ function Mixer.step(self: any, dt: number): StepResult
 	local events: { FiredEvent } = {}
 	local finished: { Handle } = {}
 	local rootDelta: Types.Vec3 = { 0, 0, 0 }
+	local fractions = weightFractions(self._handles, dt, paused)
 
 	for _, handle in self._handles do
 		-- A paused handle holds everything: clock, blend envelope and blend-space weight.
@@ -503,8 +533,12 @@ function Mixer.step(self: any, dt: number): StepResult
 				local rate = dt / ChoreoData.fallbackBlend
 				handle.weight = handle.weight + math.clamp(handle.targetWeight - handle.weight, -rate, rate)
 			elseif handle.weight ~= handle.targetWeight then
-				local rate = dt * ChoreoData.locomotion.weightBlendRate
-				handle.weight = handle.weight + math.clamp(handle.targetWeight - handle.weight, -rate, rate)
+				local fraction = fractions[handle.layer] or 1
+				if fraction >= 1 then
+					handle.weight = handle.targetWeight
+				else
+					handle.weight += (handle.targetWeight - handle.weight) * fraction
+				end
 			end
 		elseif handle.stopping and handle.blendOut <= 0 then
 			-- An immediate stop still lands during a pause.

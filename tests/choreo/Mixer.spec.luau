@@ -1,6 +1,7 @@
 --!strict
 local Mixer = Harness.load("src/client/choreo/Mixer")
 local ChoreoData = Harness.load("src/shared/data/choreo")
+local Easing = Harness.load("src/shared/util/Easing")
 
 local FRAME = 1 / 60
 
@@ -262,8 +263,130 @@ describe("Mixer", function()
 		mixer:setWeight(walk, 1)
 		mixer:step(0.05)
 		expect(walk.weight).toBeCloseTo(0.05 * ChoreoData.locomotion.weightBlendRate, 1e-6)
+		-- The ramp converges exactly: the step that can reach the target lands on it.
+		local steps = math.ceil(1 / (0.05 * ChoreoData.locomotion.weightBlendRate))
+		for _ = 2, steps do
+			mixer:step(0.05)
+		end
+		expect(walk.weight).toBe(1)
 		mixer:setWeight(walk, 0.25, true)
 		expect(walk.weight).toBe(0.25)
+	end)
+
+	it("retargeted blend-space weights keep their sum, so the Base pose never dips toward rest", function()
+		local function held(id, waist)
+			return clip(id, {
+				layer = "Base",
+				loop = true,
+				keys = { { time = 0, easing = "Hold", joints = { Waist = { rot = { waist, 0, 0 } } } } },
+			})
+		end
+		local values = { 10, -20, 40 }
+		local starts = { 0.25, 0.25, 0.5 }
+		local targets = { 1, 0, 0 }
+		local mixer = Mixer.new()
+		local handles = {}
+		for index, value in values do
+			handles[index] =
+				mixer:play(held("h" .. index, value), { coexist = true, blendIn = 0, weight = starts[index] })
+		end
+		for index, handle in handles do
+			mixer:setWeight(handle, targets[index])
+		end
+		local reach = FRAME * ChoreoData.locomotion.weightBlendRate
+		for step = 1, 8 do
+			local before = handles[1].weight
+			local result = mixer:step(FRAME)
+			local total, mixed = 0, 0
+			for index, handle in handles do
+				local weight = handle.fade * handle.weight
+				total += weight
+				mixed += weight * values[index]
+			end
+			expect(total).toBeCloseTo(1, 1e-6)
+			-- The composed pose is the normalized mix alone: no share of it replaced by rest.
+			expect(result.offsets.Waist.rot[1]).toBeCloseTo(mixed / total, 1e-6)
+			if step == 1 then
+				-- The largest mover travels at the data rate; the others keep pace.
+				expect(handles[1].weight - before).toBeCloseTo(reach, 1e-6)
+				expect(handles[3].weight).toBeCloseTo(2 * handles[2].weight, 1e-9)
+			end
+		end
+		for index, handle in handles do
+			expect(handle.weight).toBe(targets[index])
+		end
+		expect(mixer:step(FRAME).offsets.Waist.rot[1]).toBeCloseTo(values[1], 1e-6)
+	end)
+
+	it("a blend envelope is eased: the limbs leave a held pose slowly, speed up, then settle", function()
+		local mixer = Mixer.new()
+		mixer:play(
+			clip("idle", {
+				layer = "Base",
+				loop = true,
+				keys = { { time = 0, easing = "Hold", joints = { RightShoulder = { rot = { 0, 0, 0 } } } } },
+			}),
+			{ coexist = true }
+		)
+		local art = mixer:play(clip("art", {
+			loop = true,
+			blendOut = 0.2,
+			keys = { { time = 0, easing = "Hold", joints = { RightShoulder = { rot = { 60, 0, 0 } } } } },
+		}))
+		local previous = mixer:step(FRAME).offsets.RightShoulder.rot[1]
+		expect(previous).toBeCloseTo(60, 1e-6)
+		mixer:stop(art, 0.2) -- 12 frames of blend-out
+		local values, deltas = {}, {}
+		for frame = 1, 11 do
+			local now = mixer:step(FRAME).offsets.RightShoulder.rot[1]
+			values[frame] = now
+			table.insert(deltas, previous - now)
+			previous = now
+			-- The limbs follow the eased envelope; the envelope itself stays linear progress.
+			expect(art.fade).toBeCloseTo(1 - frame / 12, 1e-6)
+			expect(now).toBeCloseTo(60 * Easing.evaluate(ChoreoData.blendEasing, art.fade), 1e-6)
+		end
+		-- Halfway the eased weight still matches the linear one; the ends are slow, the middle fast.
+		expect(values[6]).toBeCloseTo(30, 1e-6)
+		local mid = deltas[6]
+		expect(deltas[1]).toBeGreaterThan(0)
+		expect(deltas[1]).toBeLessThan(mid * 0.5)
+		expect(deltas[11]).toBeLessThan(mid * 0.5)
+		for _ = 1, 3 do
+			mixer:step(FRAME)
+		end
+		expect(#mixer:handles()).toBe(1)
+		expect(mixer:step(FRAME).offsets.RightShoulder.rot[1]).toBeCloseTo(0, 1e-6)
+	end)
+
+	it("an equal crossfade between two clips keeps the full pose (the eased envelopes sum to 1)", function()
+		local mixer = Mixer.new()
+		local a = mixer:play(clip("a", {
+			loop = true,
+			keys = { { time = 0, easing = "Hold", joints = { Neck = { rot = { 0, 40, 0 } } } } },
+		}))
+		mixer:step(FRAME)
+		local b = mixer:play(
+			clip("b", {
+				loop = true,
+				blendIn = 0.2,
+				blendOut = 0.2,
+				keys = { { time = 0, easing = "Hold", joints = { Neck = { rot = { 0, 80, 0 } } } } },
+			}),
+			{ blendIn = 0.2 }
+		)
+		expect(a.stopping).toBe(true)
+		local previous = 40
+		for _ = 1, 11 do
+			local now = mixer:step(FRAME).offsets.Neck.rot[2]
+			local fromA = Easing.evaluate(ChoreoData.blendEasing, a.fade)
+			local fromB = Easing.evaluate(ChoreoData.blendEasing, b.fade)
+			expect(fromA + fromB).toBeCloseTo(1, 1e-6)
+			expect(now).toBeCloseTo(fromA * 40 + fromB * 80, 1e-6)
+			expect(now).toBeGreaterThan(previous)
+			previous = now
+		end
+		expect(b.fade).toBeCloseTo(11 / 12, 1e-6)
 	end)
 
 	it("a DeathFreeze clip holds every other clock for its duration while its tremor keeps running", function()

@@ -15,6 +15,9 @@ local Choreo = {
 	blendOut = 0.2,
 	oneShotBlendIn = 0.05,
 	fallbackBlend = 0.15, -- the auto Idle fades out at this rate when a real Base clip arrives
+	-- Curve of every blend envelope (blend in, blend out, crossfade) as the limbs see it: no
+	-- linear tween on a limb, even between clips. Symmetric, so equal crossfades keep their sum.
+	blendEasing = "SineInOut",
 
 	-- Clip clock
 	frameSeconds = 1 / 60, -- hit-stop frame length (section 6)
@@ -85,7 +88,9 @@ local Choreo = {
 		runSpeed = 16,
 		sprintSpeed = 24,
 		idleSpeedThreshold = 0.5, -- below this the character is standing
-		weightBlendRate = 8, -- blend-space weights move this many units per second
+		-- Blend-space weights: the largest mover on a layer travels this many units per second and
+		-- the layer's other retargeted weights move by the same fraction, so their sum holds.
+		weightBlendRate = 8,
 		-- The 8-direction space: four axis clips; diagonals blend the two neighbours.
 		directions = { Forward = 0, Right = 90, Back = 180, Left = 270 },
 		turnInPlaceDegrees = 45,
@@ -97,7 +102,12 @@ local Choreo = {
 		jumpVelocity = 2, -- vertical speed above which airborne reads as Jump, not Fall
 		idleCycle = 12,
 		breathing = { amplitude = 1, cycle = 3.6 }, -- degrees of chest rise; the Breathe clip carries it
-		lean = { degreesPerYawRate = 0.04, max = 10, rate = 10 }, -- lean into turns from the yaw rate
+		lean = { -- lean into turns from the yaw rate
+			degreesPerYawRate = 0.04,
+			max = 10,
+			rate = 10,
+			neckCounterFraction = 0.5, -- share of the waist lean the head cancels
+		},
 		drawnSprintPose = { -- additive "weapon low and back" on top of Sprint when drawn
 			RightShoulder = { rot = { -40, 0, 18 } },
 			RightElbow = { rot = { 20, 0, 0 } },

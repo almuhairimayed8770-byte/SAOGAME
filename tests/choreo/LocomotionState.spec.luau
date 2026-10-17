@@ -205,6 +205,14 @@ describe("LocomotionState.update", function()
 		end
 		expect(out.lean).toBeCloseTo(0, 1e-3)
 	end)
+
+	it("lean offsets roll the waist into the turn and the head back by the data fraction", function()
+		local offsets = LocomotionState.leanOffsets(8)
+		expect(offsets.Waist.rot[3]).toBe(8)
+		expect(offsets.Neck.rot[3]).toBeCloseTo(-8 * Config.lean.neckCounterFraction, 1e-9)
+		expect(Config.lean.neckCounterFraction).toBeGreaterThan(0)
+		expect(Config.lean.neckCounterFraction).toBeLessThan(1)
+	end)
 end)
 
 describe("LocomotionState.footIK", function()
