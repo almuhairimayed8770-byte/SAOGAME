@@ -136,7 +136,7 @@ local clip: Types.ClipDef = {
 	events = {
 		{ time = 0.09, kind = "TrailOn", data = { kind = "Basic" } },
 		{ time = 0.1, kind = "SmearOn", data = { axis = "X" } },
-		{ time = 0.1, kind = "Sfx", data = { name = "BasicSwing" } },
+		{ time = 0.1, kind = "Sfx", data = { name = "whoosh.Basic" } },
 		{ time = 0.12, kind = "HitWindowOpen", data = { hit = 1 } },
 		{ time = 0.1333, kind = "SmearOff" },
 		{ time = 0.24, kind = "HitWindowClose", data = { hit = 1 } },

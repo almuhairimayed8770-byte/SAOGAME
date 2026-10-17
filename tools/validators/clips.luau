@@ -5,7 +5,8 @@
 	- the table has the Types.ClipDef shape: id matches its path, rig exists in rigs.luau, every
 	  joint name exists in that rig, keys sorted by time inside [0, duration], easing names valid,
 	  no "Linear" on a key that moves a joint (root-only keys may be Linear), events sorted,
-	  HitWindowOpen / HitWindowClose pairs balanced;
+	  HitWindowOpen / HitWindowClose pairs balanced, every Sfx / Voice event names its sound as a
+	  sfx.luau "family.Name" that Sfx.get resolves (the client plays it through SfxPool.play);
 	- attack clips (attack = true) define all six beats in order
 	  (Anticipation < Snap <= Smear < Hold <= Settle < Recovery), Snap 2..4 frames, Anticipation
 	  4..10 frames (a warning, not an error, on enemy clips: enemies hold longer), hitStop set, at
@@ -55,6 +56,9 @@ local EVENT_KINDS = {
 	WeaponSwap = true,
 	CameraNudge = true,
 }
+
+-- Event kinds whose data.name is a sound in src/shared/data/sfx.luau.
+local SOUND_KINDS = { Sfx = true, Voice = true }
 
 local LAYERS = { Base = true, UpperBody = true, Additive = true, FullBody = true }
 local HIT_STOPS = { Normal = true, Final = true, Kill = true }
@@ -135,6 +139,12 @@ return function(ctx: Context): { string }
 	local bosses, bossesError = tryLoad("src/shared/data/bosses")
 	if bosses == nil then
 		problem("src/shared/data/bosses.luau is missing or failed to load (%s)", bossesError or "?")
+	end
+	-- The sound registry clip Sfx / Voice events name; without it every sound event is unresolved.
+	local sfx, sfxError = tryLoad("src/shared/data/sfx")
+	if sfx == nil or typeof(sfx.get) ~= "function" then
+		problem("src/shared/data/sfx.luau is missing or failed to load (%s)", sfxError or "no Sfx.get")
+		sfx = nil
 	end
 
 	-- Phase scope (D-015). Without it every row is in scope, so a missing scope hides nothing.
@@ -277,6 +287,28 @@ return function(ctx: Context): { string }
 		end
 	end
 
+	-- A Sfx / Voice event's data.name must resolve the way SfxPool.play resolves it: split at the
+	-- first dot into family and entry, then Sfx.get(family, entry).
+	local function validateSound(label: string, event: any)
+		local data = event.data
+		local name = if typeof(data) == "table" then data.name else nil
+		if typeof(name) ~= "string" then
+			problem("%s (%s) has no data.name naming a sfx.luau sound", label, tostring(event.kind))
+			return
+		end
+		local family, entry = name:match("^([^%.]+)%.(.+)$")
+		if family == nil or entry == nil then
+			problem("%s (%s) sound '%s' is not a sfx.luau 'family.Name'", label, tostring(event.kind), name)
+			return
+		end
+		if sfx == nil then
+			return -- the missing registry is already reported
+		end
+		if not pcall(sfx.get, family, entry) then
+			problem("%s (%s) sound '%s' is not in sfx.luau", label, tostring(event.kind), name)
+		end
+	end
+
 	local function validateEvents(id: string, clip: any): { [string]: number }
 		local counts: { [string]: number } = {}
 		if typeof(clip.events) ~= "table" then
@@ -295,6 +327,9 @@ return function(ctx: Context): { string }
 				problem("%s has unknown kind '%s'", label, tostring(event.kind))
 			else
 				counts[event.kind] = (counts[event.kind] or 0) + 1
+			end
+			if SOUND_KINDS[event.kind] then
+				validateSound(label, event)
 			end
 			if typeof(event.time) ~= "number" then
 				problem("%s has no time", label)

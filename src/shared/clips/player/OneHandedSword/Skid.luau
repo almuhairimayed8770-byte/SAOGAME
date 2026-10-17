@@ -103,7 +103,7 @@ local clip: Types.ClipDef = {
 		},
 	},
 	events = {
-		{ time = 0.06, kind = "Sfx", data = { name = "Skid" } },
+		{ time = 0.06, kind = "Sfx", data = { name = "footsteps.LandSoft" } },
 	},
 }
 

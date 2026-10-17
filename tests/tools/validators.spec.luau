@@ -206,10 +206,11 @@ local function scopeOf(lists: { arts: { string }?, enemies: { string }?, bosses:
 	return { phase = 0, hasArt = has(lists.arts), hasEnemy = has(lists.enemies), hasBoss = has(lists.bosses) }
 end
 
-type ClipsExtra = { scope: any?, bosses: any?, prints: { string }? }
+type ClipsExtra = { scope: any?, bosses: any?, sfx: any?, prints: { string }? }
 
--- `extra.scope` / `extra.bosses`: nil for the defaults (everything in scope, no bosses), false for
--- a table that fails to load, or a fake module. `extra.prints` collects the printed warnings.
+-- `extra.scope` / `extra.bosses` / `extra.sfx`: nil for the defaults (everything in scope, no
+-- bosses, the real sfx.luau), false for a table that fails to load, or a fake module.
+-- `extra.prints` collects the printed warnings.
 local function runClips(clips: { [string]: any }, arts: any, enemies: any, extra: ClipsExtra?): { string }
 	local options: ClipsExtra = extra or {}
 	local validate = loadTool("tools/validators/clips", options.prints)
@@ -237,6 +238,9 @@ local function runClips(clips: { [string]: any }, arts: any, enemies: any, extra
 			end
 			if path == "src/shared/data/scope" then
 				return scope or error("no scope")
+			end
+			if path == "src/shared/data/sfx" and options.sfx ~= nil then
+				return options.sfx or error("no sfx")
 			end
 			return Harness.load(path)
 		end,
@@ -379,6 +383,34 @@ describe("clips validator", function()
 		clip.events[4] = "HitWindowOpen"
 		problems = runClips({ [GOOD_ART] = clip }, goodArts(), { rows = {} })
 		expect(hasProblem(problems, "event 4 is not a table")).toBe(true)
+	end)
+
+	it("resolves every Sfx and Voice event name through sfx.luau", function()
+		local clip = playerArtClip(GOOD_ART)
+		table.insert(clip.events, { time = 0.5, kind = "Sfx", data = { name = "whoosh.Medium" } })
+		table.insert(clip.events, { time = 0.6, kind = "Voice", data = { name = "enemy.ChargerWindUp" } })
+		expect(runClips({ [GOOD_ART] = clip }, goodArts(), { rows = {} })).toEqual({})
+
+		clip = playerArtClip(GOOD_ART)
+		table.insert(clip.events, { time = 0.5, kind = "Sfx", data = { name = "ArtSwingLight" } })
+		table.insert(clip.events, { time = 0.55, kind = "Sfx", data = { name = "whoosh.Enormous" } })
+		table.insert(clip.events, { time = 0.6, kind = "Voice", data = { name = "beast.Roar" } })
+		table.insert(clip.events, { time = 0.65, kind = "Voice" })
+		local problems = runClips({ [GOOD_ART] = clip }, goodArts(), { rows = {} })
+		expect(problems).toEqual({
+			"player/OneHandedSword/TestArt event 9 (Sfx) sound 'ArtSwingLight' is not a sfx.luau 'family.Name'",
+			"player/OneHandedSword/TestArt event 10 (Sfx) sound 'whoosh.Enormous' is not in sfx.luau",
+			"player/OneHandedSword/TestArt event 11 (Voice) sound 'beast.Roar' is not in sfx.luau",
+			"player/OneHandedSword/TestArt event 12 (Voice) has no data.name naming a sfx.luau sound",
+		})
+
+		-- Without the registry nothing resolves: the load failure is the one report for the names
+		-- that would need it, and the malformed or missing names are still reported.
+		problems = runClips({ [GOOD_ART] = clip }, goodArts(), { rows = {} }, { sfx = false })
+		expect(#problems).toBe(3)
+		expect(problems[1]).toContain("src/shared/data/sfx.luau is missing or failed to load")
+		expect(problems[2]).toContain("sound 'ArtSwingLight' is not a sfx.luau 'family.Name'")
+		expect(problems[3]).toContain("event 12 (Voice) has no data.name")
 	end)
 
 	it("cross-checks Art hits and duration against the clip", function()

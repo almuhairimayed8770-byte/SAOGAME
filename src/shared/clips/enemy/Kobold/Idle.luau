@@ -91,7 +91,7 @@ local clip: Types.ClipDef = {
 		},
 	},
 	events = {
-		{ time = 2.9, kind = "Sfx", data = { name = "KoboldGrunt" } },
+		{ time = 2.9, kind = "Sfx", data = { name = "enemy.BruteRoar" } },
 	},
 }
 

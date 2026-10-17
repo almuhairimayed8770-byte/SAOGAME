@@ -96,9 +96,9 @@ local clip: Types.ClipDef = {
 		},
 	},
 	events = {
-		{ time = 0.08, kind = "Voice", data = { name = "KoboldGroan" } },
-		{ time = 0.42, kind = "Sfx", data = { name = "BreakKneel" } },
-		{ time = 0.44, kind = "Sfx", data = { name = "AxeGround" } },
+		{ time = 0.08, kind = "Voice", data = { name = "enemy.BruteStagger" } },
+		{ time = 0.42, kind = "Sfx", data = { name = "footsteps.LandHard" } },
+		{ time = 0.44, kind = "Sfx", data = { name = "footsteps.LandSoft" } },
 	},
 }
 

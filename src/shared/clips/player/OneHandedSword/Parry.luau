@@ -96,7 +96,6 @@ local clip: Types.ClipDef = {
 	events = {
 		{ time = 0.1, kind = "TrailOn", data = { kind = "Basic" } },
 		{ time = 0.12, kind = "SmearOn", data = { axis = "Y" } },
-		{ time = 0.13, kind = "Sfx", data = { name = "ParryClash" } },
 		{ time = 0.1533, kind = "SmearOff" },
 		{ time = 0.22, kind = "TrailOff" },
 	},

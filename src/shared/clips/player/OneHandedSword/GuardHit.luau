@@ -75,9 +75,7 @@ local clip: Types.ClipDef = {
 			},
 		},
 	},
-	events = {
-		{ time = 0.04, kind = "Sfx", data = { name = "GuardBlock" } },
-	},
+	events = {},
 }
 
 return clip

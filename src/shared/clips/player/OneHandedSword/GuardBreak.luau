@@ -134,7 +134,6 @@ local clip: Types.ClipDef = {
 		},
 	},
 	events = {
-		{ time = 0.04, kind = "Sfx", data = { name = "GuardBreakCrack" } },
 		{ time = 0.32, kind = "Footstep", data = { foot = "Right" } },
 	},
 }

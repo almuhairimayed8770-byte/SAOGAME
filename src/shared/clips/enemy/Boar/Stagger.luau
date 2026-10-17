@@ -104,7 +104,7 @@ local clip: Types.ClipDef = {
 		},
 	},
 	events = {
-		{ time = 0.05, kind = "Voice", data = { name = "BoarSqueal" } },
+		{ time = 0.05, kind = "Voice", data = { name = "enemy.ChargerStagger" } },
 		{ time = 0.42, kind = "Footstep", data = { foot = "Both" } },
 	},
 }
