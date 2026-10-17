@@ -93,6 +93,10 @@ local function defaultRaycast(character: Model): Raycast
 	end
 end
 
+-- Enemy rig driver (data Idle / Walk pair), defined below Locomotion; declared here so
+-- Locomotion.destroy can dispatch to it.
+local RigDriver = {}
+
 --- Creates the locomotion driver for an animator and its character model.
 function Locomotion.new(animator: any, character: Model, deps: Dependencies?): Locomotion
 	local dependencies: Dependencies = deps or {}
@@ -224,6 +228,11 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 end
 
 function Locomotion.destroy(self: any)
+	if getmetatable(self) == RigDriver then
+		-- An enemy rig driver (Locomotion.attach) has its own teardown.
+		RigDriver.destroy(self)
+		return
+	end
 	if self.destroyed then
 		return
 	end
@@ -250,7 +259,6 @@ end
 
 -- An enemy rig's locomotion: its data Idle and Walk crossfaded by speed, the walk paced to the
 -- rig's walkSpeed. Reactions and attacks ride above on FullBody / Additive as on every rig.
-local RigDriver = {}
 RigDriver.__index = RigDriver
 
 local function newRigDriver(animator: any, idleId: string, walkId: string, walkSpeed: number): any

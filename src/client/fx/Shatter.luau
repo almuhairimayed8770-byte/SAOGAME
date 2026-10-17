@@ -254,8 +254,8 @@ function Shatter.play(model: Instance, kind: string)
 	local color = Palette.color3(token :: any)
 	local limbs = limbsOf(model)
 	local center = Engine.toVector(ShatterMath.center(limbs))
-	-- Sounds play at the rig's root: the position the server broadcast, so a crack played by the
-	-- death reaction at the same spot dedupes in SfxPool instead of doubling.
+	-- Sounds play at the rig's root (the position the server broadcast). The death reaction leaves
+	-- the crack to this call while the rig exists and plays it itself only when the rig is gone.
 	local soundPosition = Engine.modelPosition(model) or center
 	local params = Quality.params()
 	seedCounter += 1

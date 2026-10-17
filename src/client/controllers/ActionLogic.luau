@@ -1,0 +1,332 @@
+--!strict
+--[[
+	ActionLogic: the pure decisions under CharacterController (section 6 inputs, section 17
+	prediction). Which Art a key picks, when an action may start, how the local state follows the
+	server's, when root motion applies, how the held start pose stays in sync with the server's
+	clip clock. No Roblox types, no engine calls, so every rule is tested in Lune.
+
+	The hold rule (Art key held, then released): the clip starts on press and freezes at the
+	activation hold; the server starts its own copy at the release. The local clip therefore
+	stays frozen for exactly the clip time it had reached, then resumes in step with the server.
+]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Types = require(ReplicatedStorage.Shared.types)
+
+export type LocalState =
+	"Idle"
+	| "Holding"
+	| "Art"
+	| "PostMotion"
+	| "Basic"
+	| "Guard"
+	| "Dodge"
+	| "Stagger"
+	| "GuardBroken"
+	| "Dead"
+
+export type Action = "Art" | "Basic" | "Guard" | "Dodge"
+export type Stance = { moving: boolean, airborne: boolean, afterParry: boolean }
+export type Direction = "Forward" | "Back" | "Left" | "Right"
+export type Reconcile = "None" | "EndAction" | "Stagger" | "GuardBroken" | "Break" | "Die"
+export type Speeds = { walk: number, run: number, sprint: number }
+export type FallTracker = { airborneSince: number?, peakY: number }
+export type SyncPlan = { freezeClipTime: number, resumeAt: number }
+
+local ActionLogic = {}
+
+-- Local states from which each action may start; the server has the final say.
+local STARTABLE: { [Action]: { [LocalState]: boolean } } = {
+	Art = { Idle = true, Basic = true },
+	Basic = { Idle = true, Basic = true },
+	Guard = { Idle = true, Basic = true },
+	Dodge = { Idle = true, Guard = true, Basic = true, Holding = true },
+}
+
+local MOVEMENT_LOCKED: { [LocalState]: boolean } = {
+	Holding = true,
+	Art = true,
+	PostMotion = true,
+	Basic = true,
+	Dodge = true,
+	Stagger = true,
+	GuardBroken = true,
+	Dead = true,
+}
+
+local ROOT_MOTION: { [LocalState]: boolean } = {
+	Art = true,
+	Dodge = true,
+	Basic = true,
+}
+
+--- "Launch" when the key was released inside the cancel time, "Cancel" past it.
+function ActionLogic.holdOutcome(heldSeconds: number, cancelTime: number): "Launch" | "Cancel"
+	return if heldSeconds <= cancelTime then "Launch" else "Cancel"
+end
+
+--- Whether an action may start from the current local state (and, for dodges, off cooldown).
+function ActionLogic.canStart(state: LocalState, action: Action, now: number, dodgeReadyAt: number): (boolean, string?)
+	local allowed = STARTABLE[action]
+	if allowed == nil or not allowed[state] then
+		return false, "state:" .. state
+	end
+	if action == "Dodge" and now < dodgeReadyAt then
+		return false, "cooldown"
+	end
+	return true, nil
+end
+
+--- The preconditions a stance satisfies (Airborne beats Moving beats Standing; AfterParry adds).
+function ActionLogic.stances(stance: Stance): { Types.Precondition }
+	local list: { Types.Precondition } = {}
+	if stance.airborne then
+		table.insert(list, "Airborne")
+	elseif stance.moving then
+		table.insert(list, "Moving")
+	else
+		table.insert(list, "Standing")
+	end
+	if stance.afterParry then
+		table.insert(list, "AfterParry")
+	end
+	return list
+end
+
+--- True when the Art has no preconditions or one of them matches the stance.
+function ActionLogic.allowed(art: Types.ArtDef, stance: Stance): boolean
+	local preconditions = art.preconditions
+	if preconditions == nil or #preconditions == 0 then
+		return true
+	end
+	for _, satisfied in ActionLogic.stances(stance) do
+		if table.find(preconditions, satisfied) then
+			return true
+		end
+	end
+	return false
+end
+
+--- The Art a slot key launches from this stance: the slot's Art when its preconditions fit,
+--- otherwise the first other equipped Art whose preconditions fit, otherwise nil.
+function ActionLogic.pickArt(
+	slots: { [number]: Types.ArtDef },
+	slotIndex: number,
+	slotCount: number,
+	stance: Stance
+): Types.ArtDef?
+	local chosen = slots[slotIndex]
+	if chosen ~= nil and ActionLogic.allowed(chosen, stance) then
+		return chosen
+	end
+	for index = 1, slotCount do
+		local art = slots[index]
+		if index ~= slotIndex and art ~= nil and ActionLogic.allowed(art, stance) then
+			return art
+		end
+	end
+	return nil
+end
+
+--- Maps quick-slot Art ids to definitions, dropping unknown Arts and Arts without a clip.
+function ActionLogic.slotArts(
+	ids: { string },
+	byId: (string) -> Types.ArtDef?,
+	hasClip: (string) -> boolean,
+	slotCount: number
+): { [number]: Types.ArtDef }
+	local slots: { [number]: Types.ArtDef } = {}
+	for index = 1, math.min(#ids, slotCount) do
+		local art = byId(ids[index])
+		if art ~= nil and hasClip(art.clip) then
+			slots[index] = art
+		end
+	end
+	return slots
+end
+
+--- Dodge direction from the move input in the rig's local frame (-Z forward, +X right).
+function ActionLogic.dodgeDirection(localX: number, localZ: number, deadzone: number): Direction
+	if math.sqrt(localX * localX + localZ * localZ) < deadzone then
+		return "Back"
+	end
+	if math.abs(localX) > math.abs(localZ) then
+		return if localX > 0 then "Right" else "Left"
+	end
+	return if localZ < 0 then "Forward" else "Back"
+end
+
+--- The next basic-attack chain index: continues inside the window, otherwise restarts at 1.
+function ActionLogic.nextBasic(
+	chainIndex: number,
+	lastTime: number,
+	now: number,
+	window: number,
+	length: number
+): number
+	if chainIndex <= 0 or chainIndex >= length or now - lastTime > window then
+		return 1
+	end
+	return chainIndex + 1
+end
+
+--- Clip id for a rig: players use their weapon category, enemies their rig id (ARCHITECTURE "Clips").
+function ActionLogic.clipId(kind: Types.EntityKind, rig: string, weaponCategory: string, name: string): string
+	if kind == "Player" then
+		return "player/" .. weaponCategory .. "/" .. name
+	end
+	return "enemy/" .. rig .. "/" .. name
+end
+
+--- What the local fighter does when the server's State attribute changes (Replication plays the
+--- reaction clips for every rig; this only moves the local state machine).
+function ActionLogic.reconcile(localState: LocalState, serverState: string): Reconcile
+	if serverState == "Dead" then
+		return "Die"
+	elseif serverState == "Stagger" then
+		return "Stagger"
+	elseif serverState == "GuardBroken" then
+		return "GuardBroken"
+	elseif serverState == "Break" then
+		return "Break"
+	elseif serverState == "Idle" or serverState == "Moving" then
+		if
+			localState == "Art"
+			or localState == "PostMotion"
+			or localState == "Stagger"
+			or localState == "GuardBroken"
+			or localState == "Dead"
+		then
+			return "EndAction"
+		end
+	end
+	return "None"
+end
+
+--- True while Humanoid movement input must be ignored (WalkSpeed 0).
+function ActionLogic.movementLocked(state: LocalState): boolean
+	return MOVEMENT_LOCKED[state] == true
+end
+
+--- True while the clip's root motion carries the body.
+function ActionLogic.rootMotionActive(state: LocalState): boolean
+	return ROOT_MOTION[state] == true
+end
+
+--- The Humanoid speed for a state: 0 while locked, sprint while sprinting, walk while guarding.
+function ActionLogic.speedFor(state: LocalState, sprinting: boolean, speeds: Speeds): number
+	if ActionLogic.movementLocked(state) then
+		return 0
+	end
+	if state == "Guard" then
+		return speeds.walk
+	end
+	return if sprinting then speeds.sprint else speeds.run
+end
+
+local function firstNumber(table_: any, names: { string }): number?
+	if typeof(table_) ~= "table" then
+		return nil
+	end
+	for _, name in names do
+		local value = table_[name]
+		if typeof(value) == "number" then
+			return value
+		end
+	end
+	return nil
+end
+
+--- Locomotion speeds from choreo.luau (locomotion.walkSpeed / speeds.walk / walkSpeed shapes),
+--- falling back per field to `fallback` when the table does not carry one.
+function ActionLogic.resolveSpeeds(choreoData: any, fallback: Speeds): Speeds
+	local sources: { any } = {}
+	if typeof(choreoData) == "table" then
+		table.insert(sources, choreoData.locomotion)
+		table.insert(sources, choreoData.speeds)
+		table.insert(sources, choreoData)
+	end
+	local function resolve(names: { string }, default: number): number
+		for _, source in sources do
+			local value = firstNumber(source, names)
+			if value ~= nil then
+				return value
+			end
+		end
+		return default
+	end
+	return {
+		walk = resolve({ "walkSpeed", "walk" }, fallback.walk),
+		run = resolve({ "runSpeed", "run" }, fallback.run),
+		sprint = resolve({ "sprintSpeed", "sprint" }, fallback.sprint),
+	}
+end
+
+--- Drawn weapon while inside the combat tag window after the last combat action.
+function ActionLogic.drawn(lastCombatTime: number?, now: number, tagDuration: number): boolean
+	return lastCombatTime ~= nil and now - lastCombatTime <= tagDuration
+end
+
+--- Signed angle in degrees (positive = to the left) from the rig's look direction to the move
+--- direction it wants to face; 0 when there is no move input. Locomotion turns in place past
+--- choreo.locomotion.turnInPlaceDegrees.
+function ActionLogic.turnAngle(lookX: number, lookZ: number, moveX: number, moveZ: number): number
+	if moveX == 0 and moveZ == 0 then
+		return 0
+	end
+	local cross = lookZ * moveX - lookX * moveZ
+	local dot = lookX * moveX + lookZ * moveZ
+	return math.deg(math.atan2(cross, dot))
+end
+
+--- The latest the predicted Art may hold the body when the server's state never arrives: the
+--- clip resumes after `freezeClipTime`, runs to its last hit, holds the post-motion, plus `slack`.
+function ActionLogic.artFallbackEnd(
+	releasedAt: number,
+	freezeClipTime: number,
+	art: Types.ArtDef,
+	slack: number
+): number
+	return releasedAt + freezeClipTime + art.total + art.postMotion + slack
+end
+
+--- Tracks airborne height; returns the fall height on the frame the rig lands, nil otherwise.
+function ActionLogic.fallStep(tracker: FallTracker, grounded: boolean, y: number, now: number): number?
+	if not grounded then
+		if tracker.airborneSince == nil then
+			tracker.airborneSince = now
+			tracker.peakY = y
+		else
+			tracker.peakY = math.max(tracker.peakY, y)
+		end
+		return nil
+	end
+	if tracker.airborneSince ~= nil then
+		local height = math.max(tracker.peakY - y, 0)
+		tracker.airborneSince = nil
+		return height
+	end
+	return nil
+end
+
+--- When the local clip resumes after a release so its clock matches the server's, which starts
+--- the clip at the release: the clip stays frozen for the clip time it had reached.
+function ActionLogic.syncPlan(pressedAt: number, frozenClipTime: number?, releasedAt: number): SyncPlan
+	local freezeClipTime = if frozenClipTime ~= nil then frozenClipTime else releasedAt - pressedAt
+	freezeClipTime = math.max(freezeClipTime, 0)
+	return { freezeClipTime = freezeClipTime, resumeAt = releasedAt + freezeClipTime }
+end
+
+--- The local state an action puts the fighter in.
+function ActionLogic.stateForAction(action: Action): LocalState
+	if action == "Art" then
+		return "Art"
+	elseif action == "Basic" then
+		return "Basic"
+	elseif action == "Guard" then
+		return "Guard"
+	end
+	return "Dodge"
+end
+
+return ActionLogic
