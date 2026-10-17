@@ -13,7 +13,7 @@ src/shared/
   clips/                       Choreo clip data: player/<Weapon>/<Clip>.luau, enemy/<Rig>/<Clip>.luau
   choreo/ClipSampler.luau      pure clip sampling (offsets at time t, events, hit windows, root motion)
   choreo/Pose.luau             forward kinematics over Motor6Ds with offsets (server hit sweep)
-  net/Remotes.luau             remote definitions: kind, direction, schema, rate limit
+  net/Remotes.luau             remote definitions: kind, direction, schema, rate limit (from world.luau)
   net/Net.luau                 typed wrapper; server validates and rate-limits every payload
   util/                        Signal, Easing, Spring, Verlet, Rng, Check
 src/server/
@@ -124,7 +124,9 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
 - Attack clips set `attack = true`, define all six `beats`, carry `HitWindowOpen`/`HitWindowClose`
   pairs (one pair per hit), `TrailOn`/`TrailOff`, `SmearOn`/`SmearOff`, `ActivationHold` and
   `PostMotionStart` events, and `hitStop`. The clip validator enforces this and rejects `Linear` on
-  any joint key (root keys may be Linear).
+  any joint key (root keys may be Linear). The runtime blend is eased too: `Mixer` shapes every fade
+  with `choreo.luau` `blendEasing` before it weights a limb, and blend-space weight ramps on one
+  layer share one fraction so their sum stays 1 (D-032, D-033).
 - Enemy attack clips: the wind-up pose must be held for the attack's `windUp` (the validator
   compares the clip's `Anticipation` beat to `enemies.luau`).
 
@@ -179,12 +181,12 @@ nothing about animation runs on the server except the pose sampling used by the 
 | `lighting.luau` | section 11 lighting values per floor |
 | `sfx.luau` | sound ids (placeholders) by name |
 | `assets.luau` | asset ids by name; missing ids are reported |
-| `choreo.luau` | animation tunables: blend times, smear scale, idle cycle, locomotion speeds |
+| `choreo.luau` | animation tunables: blend times and the blend easing, smear scale, idle cycle, locomotion speeds |
 | `camera.luau` | section 10 camera numbers |
 | `fx.luau` | budgets, shard counts, trail lifetimes, telegraph sizes, quality tiers |
 | `playground.luau` | the Playground: field radius, rim, pillars, clouds, spawn tables, loadout |
 | `ai.luau` | every AI tunable: perception, archetype tuning, pathing, tick rates |
-| `world.luau` | world builder tunables (folders, railing, pillars, clouds, kill volume) and the anti-cheat policy |
+| `world.luau` | world builder tunables (folders, railing, pillars, clouds, kill volume) and the anti-cheat policy, including the shadow and teleport-cap fractions and the per-remote rate limits (`anticheat.remoteRates`) |
 | `weaponModels.luau` | placeholder weapon geometry per category and the names the client relies on |
 | `input.luau` | key, gamepad and touch bindings |
 | `ui.luau` | HUD, nameplate and system-line layout numbers |

@@ -9,7 +9,8 @@
 
 	Modules see `script`, `game`, `workspace`, the Roblox datatypes, `Random`, `task` and `tick`,
 	so unchanged game code runs here. Anything that needs the engine itself (rendering, physics,
-	remotes) is covered by run-in-roblox smoke scripts instead.
+	real remotes) is covered by run-in-roblox smoke scripts instead; Net's send and receive paths run
+	under Lune against recording fake remotes (tests/net/Net.spec.luau).
 ]]
 
 local fs = require("@lune/fs")
