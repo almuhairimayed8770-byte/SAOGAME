@@ -1,4 +1,5 @@
-# Built places and models (built by `rojo build` in CI; see tools/build-places.sh)
+# Built places, models and plugins (built by `rojo build` in CI; see tools/build-places.sh)
+build/
 places/*.rbxl
 places/*.rbxlx
 places/*.rbxm

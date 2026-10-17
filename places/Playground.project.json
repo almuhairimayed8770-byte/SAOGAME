@@ -29,7 +29,12 @@
 		"Workspace": {
 			"$properties": {
 				"StreamingEnabled": false,
-				"FallenPartsDestroyHeight": -600
+				"FallenPartsDestroyHeight": -600,
+				"Attributes": {
+					"Attributes": {
+						"DevCapture": { "Bool": true }
+					}
+				}
 			},
 			"Playground": {
 				"$className": "Model",

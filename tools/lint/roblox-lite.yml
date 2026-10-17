@@ -8,6 +8,7 @@ globals:
   workspace: { any: true }
   script: { any: true }
   plugin: { any: true }
+  DockWidgetPluginGuiInfo: { any: true }
   shared: { any: true }
   Instance: { any: true }
   Vector2: { any: true }

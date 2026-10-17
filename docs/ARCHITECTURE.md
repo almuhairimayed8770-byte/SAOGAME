@@ -92,8 +92,8 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
 ## Rigs, weapons and joints
 
 - Rig definitions: `src/shared/data/rigs.luau`. Joint names are Motor6D names and are the keys in
-  every clip. Player: the 15 R15 Motor6Ds plus `Weapon` (RightHand -> Weapon). Boar and Kobold: see
-  the file. `RigBuilder.build(rigId, name)` returns a Model with Motor6Ds whose `C0`/`C1` come from
+  every clip. Player: the 15 R15 Motor6Ds (the root motor is `Root`, its live R15 name, D-016) plus
+  `Weapon` (RightHand -> Weapon). Boar and Kobold: see the file. `RigBuilder.build(rigId, name)` returns a Model with Motor6Ds whose `C0`/`C1` come from
   the rest pose, with a `WeaponGrip` attachment on the grip part and `TrailStart`/`TrailEnd`
   attachments on the weapon part.
 - Weapons: `WeaponBuilder.build(weaponDef)` returns a Model named `Weapon` with a `Handle`/blade
@@ -111,7 +111,10 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
   `WalkBack`, `WalkLeft`, `WalkRight`, `Run`, `Sprint`, `Jump`, `Fall`, `Land`, `TurnLeft`,
   `TurnRight`, `Skid`, `Guard`, `GuardHit`, `GuardBreak`, `Parry`, `DodgeForward`, `DodgeBack`,
   `DodgeLeft`, `DodgeRight`, `FlinchFront`, `FlinchBack`, `FlinchLeft`, `FlinchRight`, `Stagger`,
-  `DeathFreeze`, `Basic1`, `Basic2`, `Basic3`, `Horizontal`, `Vertical`, `SharpNail`.
+  `DeathFreeze`, `Basic1`, `Basic2`, `Basic3`, `Horizontal`, `Vertical`, `RisingArc`, `SharpNail`.
+  `src/shared/data/scope.luau` lists the Arts, enemies, bosses and rigs whose clips the current
+  phase must ship; the clips validator fails on those and only summarizes the later-phase backlog
+  (D-015).
 - Required enemy clips: `enemy/Boar/{Idle,Walk,Charge,FlinchFront,FlinchBack,FlinchLeft,FlinchRight,Stagger,Break,DeathFreeze}`,
   `enemy/Kobold/{Idle,Walk,Overhead,FlinchFront,FlinchBack,FlinchLeft,FlinchRight,Stagger,Break,DeathFreeze}`.
   An enemy attack's `clip` in `enemies.luau` names one of these (`Charge`, `Overhead`).
@@ -127,8 +130,9 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
 1. Client `InputController` -> `CharacterController` sends `ArtRequest {artId, facing, clientTime}`
    and immediately starts the local clip (prediction).
 2. `CombatService` validates: entity alive and in `Idle`/`Moving`, Art unlocked (proficiency from
-   the entity record), not inside a lock (`artRequestTolerance`), facing within tolerance, weapon
-   category matches. On failure it fires `ActionRejected` to that client (which cancels its
+   the entity record), Art in the fighter's quick slots when the record has them (`NotSlotted`),
+   not inside a lock (`artRequestTolerance`), facing within tolerance, weapon category matches,
+   clip exists. On failure it fires `ActionRejected` to that client (which cancels its
    prediction). On success it sets `State = "Art"`, fires `ActionStarted` to everyone (including the
    requester, who ignores its own), and schedules the timeline from the clip: for each hit window it
    samples the clip at `hitSampleHz` through `ClipSampler` + `Pose` and runs `HitSweep` between
@@ -151,9 +155,10 @@ nothing about animation runs on the server except the pose sampling used by the 
 
 | File | Holds |
 | --- | --- |
-| `combat.luau` | section 6 tunables (written) |
-| `palette.luau` | color tokens (written) |
-| `rigs.luau` | rig joint lists and rest poses (written) |
+| `combat.luau` | section 6 tunables |
+| `palette.luau` | color tokens |
+| `rigs.luau` | rig joint lists and rest poses |
+| `scope.luau` | the Arts, enemies, bosses and rigs in the current phase (D-015) |
 | `arts.luau` | every Art row from section 8 as `Types.ArtDef`, keyed by id |
 | `weapons.luau` | weapon defs, named weapons, the starter `TrialistSword` |
 | `armor.luau` | armor defs, the Trialist cloth set |
@@ -172,6 +177,16 @@ nothing about animation runs on the server except the pose sampling used by the 
 | `camera.luau` | section 10 camera numbers |
 | `fx.luau` | budgets, shard counts, trail lifetimes, telegraph sizes, quality tiers |
 | `playground.luau` | the Playground: field radius, rim, pillars, clouds, spawn tables, loadout |
+| `ai.luau` | every AI tunable: perception, archetype tuning, pathing, tick rates |
+| `world.luau` | world builder tunables (folders, railing, pillars, clouds, kill volume) and the anti-cheat policy |
+| `weaponModels.luau` | placeholder weapon geometry per category and the names the client relies on |
+| `input.luau` | key, gamepad and touch bindings |
+| `ui.luau` | HUD, nameplate and system-line layout numbers |
+| `dev.luau` | dev tooling numbers: Capture panel, ClipLab, PoseEditor, pose server (D-028) |
+
+Row convention (D-017): tables with many rows keep them under `Module.rows` with `byId(id)` and
+`list()` functions; `list()` returns a clone. Validators read `rows` first and fall back to the
+module table.
 
 Each table has a validator in `tools/validators/`. The naming blocklist lives in
 `tools/naming/blocklist.luau` (not shipped to clients, D-014) and `tools/validators/naming.luau`
@@ -189,6 +204,14 @@ scans every text file in the repo except `docs/GAME_SPEC.md` and the blocklist i
 | `ActionRejected` | cancel the predicted clip, no digit |
 | `SystemLine` | centered system text with chime |
 | `SwitchWindow` | `SwitchRing` on the enemy, SWITCH prompt (Phase 1 logic, Phase 0 visuals) |
+
+Rig lifecycle: `EntityTracker.added` -> `Replication.watch(record)` registers the outline, attaches
+the trail, routes the rig's clip events to the FX package and, for every rig the local
+`CharacterController` does not own, drives locomotion with `Locomotion.attach(animator, model)`
+(other players run the blend space, enemies their data Idle/Walk pair). `EntityTracker.removed` ->
+`Replication.unwatch(record)` destroys that driver and releases the rig's trails, telegraph, smear
+and state clip. Clip tables are immutable after load (`ClipSampler` caches per-clip joint lists);
+editors call `ClipSampler.invalidate(clip)` after changing one.
 
 ## Places
 

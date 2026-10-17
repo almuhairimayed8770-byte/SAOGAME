@@ -1,5 +1,7 @@
 # Lune scripts: plain Luau plus the globals Lune injects.
 std = "luau"
+# The PoseEditor plugin runs in Studio and uses Roblox globals; tools/build-plugin.sh lints it.
+exclude = ["PoseEditor/src/**"]
 
 [lints]
 shadowing = "allow"

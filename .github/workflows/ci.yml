@@ -31,11 +31,17 @@ jobs:
       - name: Data validators and naming blocklist
         run: lune run tools/validate.luau
 
+      - name: Animation review report is current
+        run: lune run tools/animation-review.luau --check
+
       - name: Rojo build (game)
         run: rojo build default.project.json -o build/Skyspire.rbxl
 
       - name: Rojo build (places)
         run: tools/build-places.sh
+
+      - name: Rojo build (PoseEditor plugin)
+        run: tools/build-plugin.sh
 
       - name: Upload built places
         uses: actions/upload-artifact@v4
@@ -43,5 +49,6 @@ jobs:
           name: places
           path: |
             build/*.rbxl
+            build/*.rbxm
             places/*.rbxl
           retention-days: 14
