@@ -46,7 +46,7 @@ function Ui.column(parent: Instance, props: { [string]: any }?): Frame
 	local t = current()
 	local frame = Instance.new("Frame")
 	frame.BackgroundTransparency = 1
-	frame.Size = UDim2.new(1, 0, 0, 0)
+	frame.Size = UDim2.fromScale(1, 0)
 	frame.AutomaticSize = Enum.AutomaticSize.Y
 	local layout = Instance.new("UIListLayout")
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
@@ -97,7 +97,7 @@ function Ui.label(parent: Instance, order: number, text: string, width: number?,
 	local t = current()
 	local label = Instance.new("TextLabel")
 	label.BackgroundTransparency = 1
-	label.Size = if width then UDim2.new(0, width, 1, 0) else UDim2.new(1, 0, 1, 0)
+	label.Size = if width then UDim2.new(0, width, 1, 0) else UDim2.fromScale(1, 1)
 	label.Font = Enum.Font.Gotham
 	label.TextSize = t.textSize
 	label.TextColor3 = t.color(token or t.tokens.text)

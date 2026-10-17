@@ -348,7 +348,7 @@ do
 		laneLabel.Parent = timeline
 		local lane = El.new("Frame", {
 			Name = laneName,
-			Position = UDim2.new(0, TimelineData.labelWidth, 0, y),
+			Position = UDim2.fromOffset(TimelineData.labelWidth, y),
 			Size = UDim2.new(1, -(TimelineData.labelWidth + PanelData.buttonGap), 0, TimelineData.laneHeight),
 			BackgroundTransparency = 1,
 			ClipsDescendants = true,
@@ -359,7 +359,7 @@ do
 end
 local playhead = El.new("Frame", {
 	Name = "Playhead",
-	Position = UDim2.new(0, TimelineData.labelWidth, 0, 0),
+	Position = UDim2.fromOffset(TimelineData.labelWidth, 0),
 	Size = UDim2.new(0, TimelineData.playheadWidth, 1, 0),
 	BackgroundColor3 = El.color(TimelineData.playheadToken),
 	BorderSizePixel = 0,

@@ -174,12 +174,12 @@ local function build(parent: Instance?): Elements
 	})
 	local nameLabel = label("Name", hud.name.textSize, hud.name.token, "Bold")
 	nameLabel.AutomaticSize = Enum.AutomaticSize.X
-	nameLabel.Size = UDim2.new(0, 0, 1, 0)
+	nameLabel.Size = UDim2.fromScale(0, 1)
 	nameLabel.LayoutOrder = 1
 	nameLabel.Parent = nameRow
 	local levelLabel = label("Level", hud.level.textSize, hud.level.token)
 	levelLabel.AutomaticSize = Enum.AutomaticSize.X
-	levelLabel.Size = UDim2.new(0, 0, 1, 0)
+	levelLabel.Size = UDim2.fromScale(0, 1)
 	levelLabel.LayoutOrder = 2
 	levelLabel.Parent = nameRow
 
@@ -285,7 +285,7 @@ local function build(parent: Instance?): Elements
 		Name = "Arts",
 		AnchorPoint = Vector2.new(0.5, 1),
 		Position = UDim2.new(0.5, 0, 1, -hud.artList.bottomMargin),
-		Size = UDim2.new(0, 0, 0, hud.artList.rowHeight),
+		Size = UDim2.fromOffset(0, hud.artList.rowHeight),
 		AutomaticSize = Enum.AutomaticSize.X,
 		BackgroundTransparency = 1,
 		Visible = not (touch and UI.mobile.artListHidden),
@@ -465,19 +465,19 @@ function Hud.showArts(list: { ArtEntry })
 	for index, art in list do
 		local key = label("Key", config.keyTextSize, config.keyToken, "Bold")
 		key.AutomaticSize = Enum.AutomaticSize.X
-		key.Size = UDim2.new(0, 0, 1, 0)
+		key.Size = UDim2.fromScale(0, 1)
 		key.Text = art.key
 		key.LayoutOrder = 1
 		local name = label("Name", config.nameTextSize, config.nameToken)
 		name.AutomaticSize = Enum.AutomaticSize.X
-		name.Size = UDim2.new(0, 0, 1, 0)
+		name.Size = UDim2.fromScale(0, 1)
 		name.Text = art.name
 		name.LayoutOrder = 2
 		table.insert(ui.artLabels, key)
 		table.insert(ui.artLabels, name)
 		El.new("Frame", {
 			Name = "Art" .. index,
-			Size = UDim2.new(0, 0, 0, config.rowHeight),
+			Size = UDim2.fromOffset(0, config.rowHeight),
 			AutomaticSize = Enum.AutomaticSize.X,
 			BackgroundTransparency = 1,
 			LayoutOrder = index,
