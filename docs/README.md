@@ -18,12 +18,12 @@ for 2 to 8 players, and a code-driven animation system so every swing is authore
 
 ## Working on the repo
 
-**Clone and install the tools.** The repository on GitHub is named `SAOGAME` (the user's name for it, D-001); the
-game, every file and every name inside is Skyspire. Install [Aftman](https://github.com/LPGhatguy/aftman) or Rokit,
+**Clone and install the tools.** The repository on GitHub keeps the owner's own name for it (D-001); the game,
+every file and every name inside is Skyspire. Install [Aftman](https://github.com/LPGhatguy/aftman) or Rokit,
 then:
 
 ```sh
-git clone https://github.com/almuhairimayed8770-byte/SAOGAME.git skyspire
+git clone <repository URL> skyspire
 cd skyspire
 aftman install        # or: rokit install
 ```

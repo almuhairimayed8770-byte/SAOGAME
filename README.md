@@ -5,14 +5,13 @@ players, a brutal climb, and a code-driven animation system (Choreo) so every sw
 by frame, and never depends on an upload. `docs/GAME_SPEC.md` is the single source of truth; `docs/README.md` indexes
 the rest.
 
-The GitHub repository is named `SAOGAME` because that is what its owner called it (`docs/DECISIONS.md` D-001). The
-game, every file, every name inside and the store page use Skyspire names only; nothing in the code references the
-repo name.
+The GitHub repository keeps the name its owner gave it (`docs/DECISIONS.md` D-001). The game, every file, every
+name inside and the store page use Skyspire names only; nothing in the repo spells the repository's name.
 
 ## Quick start
 
 ```sh
-git clone https://github.com/almuhairimayed8770-byte/SAOGAME.git skyspire
+git clone <repository URL> skyspire
 cd skyspire
 aftman install                          # or: rokit install  (rojo, wally, selene, stylua, lune, run-in-roblox)
 tools/lint.sh                           # what CI runs: format check, lint, Lune tests, validators, rojo build

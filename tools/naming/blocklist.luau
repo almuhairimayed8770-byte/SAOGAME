@@ -28,6 +28,7 @@ local Blocklist: { Entry } = {
 	-- The franchise, its abbreviation and its hardware
 	sub("sword art online"),
 	whole("sao"),
+	sub("saogame"), -- the owner's repository name; D-001 keeps it out of every file
 	sub("nervegear"),
 	sub("nerve gear"),
 	whole("link start"),

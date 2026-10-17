@@ -87,7 +87,7 @@ list has been done yet from the repository side; tick the box and note the date 
 ## F. Publishing (not before the Phase 0 gate is met)
 
 19. [ ] **Publish the experience.** **File > Publish to Roblox As...** > Create new experience named "Skyspire" (the game
-    name; the repo name `SAOGAME` is never used in Roblox, D-001). Publish `places/Playground.rbxl` as the start place
+    name; the repository's GitHub name is never used in Roblox, D-001). Publish `places/Playground.rbxl` as the start place
     for now; the ClipLab stays local.
 20. [ ] **Keep it private.** **Home tab > Game Settings > Permissions > Private** until the user says otherwise.
 21. [ ] **Max players.** **Home tab > Game Settings > Places > (the place) > Edit > Max Players: 8** (verify; section 17
