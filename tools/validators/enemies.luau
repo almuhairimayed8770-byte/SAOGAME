@@ -2,9 +2,10 @@
 --[[
 	Validates src/shared/data/enemies.luau: EnemyDef fields and types, PascalCase ids matching
 	keys, a known archetype, a rig id (in rigs.luau or declared in Enemies.placeholderRigs), at
-	least one attack, every wind-up within combat's telegraph bounds, valid shatter kinds, a loot
-	table that exists, Art ids that exist, at least three regular enemies and one field boss per
-	floor 1..10, and the Phase 0 pair (Frenzy Boar, Kobold Axeman) on real rigs with their clips.
+	least one attack, every wind-up within combat's telegraph bounds, every Charger line rush
+	Unblockable (section 9's red line), valid shatter kinds, a loot table that exists, Art ids that
+	exist, at least three regular enemies and one field boss per floor 1..10, and the Phase 0 pair
+	(Frenzy Boar, Kobold Axeman) on real rigs with their clips.
 ]]
 
 type Context = {
@@ -143,6 +144,10 @@ local function validate(ctx: Context): { string }
 			if attack.multiplier > 0 and attack.reach <= 0 then
 				problem(label, "a damaging attack needs reach")
 			end
+			-- Section 9: the Charger's rush is a red line on the ground; section 6: red is unblockable.
+			if def.archetype == "Charger" and attack.groundShape == "Line" and attack.telegraph ~= "Unblockable" then
+				problem(label, "a Charger's line rush telegraphs Unblockable (section 9: a red line on the ground)")
+			end
 		end
 		if Loot.tables[def.lootTable] == nil then
 			problem(key, ("lootTable '%s' is not in loot.luau"):format(def.lootTable))
@@ -204,7 +209,13 @@ local function validate(ctx: Context): { string }
 
 	-- Phase 0 pair: real rigs and the clips ARCHITECTURE.md requires.
 	local phase0 = {
-		FrenzyBoar = { rig = "Boar", archetype = "Charger", clip = "Charge", telegraph = "Normal", shape = "Line" },
+		FrenzyBoar = {
+			rig = "Boar",
+			archetype = "Charger",
+			clip = "Charge",
+			telegraph = "Unblockable",
+			shape = "Line",
+		},
 		KoboldAxeman = {
 			rig = "Kobold",
 			archetype = "Brute",

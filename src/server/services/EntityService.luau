@@ -314,7 +314,6 @@ local function baseRecord(kind: Kind, model: Model): Record
 		guardHeld = false,
 		guardSince = nil,
 		guardReleasedAt = nil,
-		guardFacing = nil,
 		hasShield = false,
 		invulnerableUntil = now,
 		combatUntil = now,
@@ -590,8 +589,9 @@ end
 
 --- Raises or lowers a guard; returns whether the request took effect. The parry window opens at
 --- the raise unless the guard came back up inside parryRearmTime of its last release (tap spam
---- cannot fish for parries). A raise from a locked state is refused, never remembered.
-function EntityService.setGuard(id: number, held: boolean, facing: Types.Vec3?): boolean
+--- cannot fish for parries). A raise from a locked state is refused, never remembered. The guard
+--- has no stored axis: CombatService.enemyStrike judges the cone against the root's look vector.
+function EntityService.setGuard(id: number, held: boolean): boolean
 	local record = records[id]
 	if record == nil or record.state == "Dead" then
 		return false
@@ -607,9 +607,6 @@ function EntityService.setGuard(id: number, held: boolean, facing: Types.Vec3?):
 			record.guardSince = if rearmed then now else nil
 		end
 		record.guardHeld = true
-		if facing ~= nil then
-			record.guardFacing = facing
-		end
 		if record.state ~= "Guard" then
 			EntityService.setState(id, "Guard")
 		end

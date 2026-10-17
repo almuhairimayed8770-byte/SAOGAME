@@ -41,7 +41,7 @@ describe("enemies data", function()
 		expect(#boar.attacks).toBe(1)
 		local charge = boar.attacks[1]
 		expect(charge.id).toBe("Charge")
-		expect(charge.telegraph).toBe("Normal")
+		expect(charge.telegraph).toBe("Unblockable") -- section 9: a red line on the ground
 		expect(charge.windUp).toBe(0.6)
 		expect(charge.strike).toBe(0.5)
 		expect(charge.recovery).toBe(1.2)
@@ -126,7 +126,7 @@ describe("enemies data", function()
 
 	it("uses the archetype telegraphs from the section 9 table", function()
 		local expected = {
-			Charger = { "Normal", 0.6 },
+			Charger = { "Unblockable", 0.6 },
 			Brute = { "GuardBreak", 1.0 },
 			Skirmisher = { "Normal", 0.4 },
 			Lancer = { "Unblockable", 0.7 },
@@ -146,6 +146,20 @@ describe("enemies data", function()
 		expect(Enemies.byId("NepentheBloom").attacks[1].status).toBe("Poison")
 		expect(Enemies.byId("MireLeech").attacks[1].status).toBe("Paralysis")
 		expect(Enemies.byId("ScarecrowConstruct").attacks[1].groundShape).toBe("Circle")
+	end)
+
+	it("every Charger's line rush is a red (Unblockable) line, on every floor", function()
+		local chargers = 0
+		for _, def in Enemies.list() do
+			if def.archetype == "Charger" then
+				chargers += 1
+				local rush = def.attacks[1]
+				expect(rush.groundShape).toBe("Line")
+				expect(rush.telegraph).toBe("Unblockable")
+				expect(rush.windUp).toBe(0.6)
+			end
+		end
+		expect(chargers).toBe(9)
 	end)
 
 	it("Elite variant: 1.5x stats, a Mirror Shield and a second attack, without touching the row", function()

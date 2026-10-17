@@ -10,7 +10,9 @@
 	for each hit window of the clip it samples the blade through ClipSampler + Pose and spherecasts
 	along it (HitSweep); every touch becomes damage through DamageMath and EntityService.applyHit
 	and a HitConfirmed to all clients. After the last window the body is held in PostMotion (zero
-	when the target was in Break), then freed.
+	when the target was in Break), then freed. A requested Art or basic swing runs that timeline
+	from its clientTime clamped into combat.lagAllowance (runStartOf), so a lagged swing's damage
+	windows line up with what its client already showed.
 
 	Enemy strikes come from EnemyService (enemyStrike): each player in the attack's cone or line
 	is checked for dodge frames, a parry (guard raised inside parryWindow), a guard (cone and
@@ -259,6 +261,9 @@ local function hitPayload(applied: Types.AppliedHit): any
 		reflected = applied.reflected,
 		artId = applied.artId,
 		hitIndex = applied.hitIndex,
+		-- The side the blow came from in the target's frame: enemies play their directional
+		-- flinch from it (section 10, "Stagger has four directional clips").
+		staggerDirection = applied.staggerDirection,
 	}
 end
 
@@ -324,6 +329,16 @@ local function facingMatches(record: Record, facing: { number }, lookVector: Vec
 		return true
 	end
 	return reported:Dot(actual) >= 1 - Combat.facingTolerance
+end
+
+--- When a requested action's server timeline starts: the client's stamp (workspace:GetServerTimeNow
+--- on the client, the same clock as `now`) clamped into [now - lagAllowance, now], so a lagged swing
+--- catches up by at most combat.lagAllowance and never starts in the future (section 6, D-010).
+function CombatService.runStartOf(clientTime: any, now: number): number
+	if typeof(clientTime) ~= "number" or clientTime ~= clientTime then
+		return now -- missing or NaN: no rewind
+	end
+	return math.clamp(clientTime, now - Combat.lagAllowance, now)
 end
 
 -- A body is free to start an action when it is in a free state, cancelling a basic swing, or its
@@ -687,6 +702,7 @@ local function beginRun(
 	gaugePerHit: number,
 	facing: Vector3,
 	now: number,
+	startAt: number, -- clip time zero: `now`, or a request's clamped client stamp (runStartOf)
 	finalHit: boolean
 )
 	local session = sessionOf(record.id)
@@ -694,10 +710,12 @@ local function beginRun(
 	session.generation += 1
 	local windows = ClipSampler.hitWindows(clip)
 	local postMotionAt = postMotionStartOf(clip, if art ~= nil then art.total else clip.duration)
+	-- The whole timeline (windows, freeze, lock) runs on the clip clock from startAt.
+	local elapsed = now - startAt
 	if art ~= nil then
-		EntityService.setState(record.id, "Art", postMotionAt + art.postMotion)
+		EntityService.setState(record.id, "Art", postMotionAt + art.postMotion - elapsed)
 	else
-		EntityService.setState(record.id, "Art", Combat.basicHitDuration, nil, "Basic")
+		EntityService.setState(record.id, "Art", Combat.basicHitDuration - elapsed, nil, "Basic")
 	end
 	EntityService.markCombat(record.id)
 	session.run = {
@@ -708,7 +726,7 @@ local function beginRun(
 		clipId = clipId,
 		clip = clip,
 		windows = windows,
-		startedAt = now,
+		startedAt = startAt,
 		postMotionAt = postMotionAt,
 		multiplier = multiplier,
 		gaugePerHit = gaugePerHit,
@@ -724,7 +742,7 @@ local function beginRun(
 	fireAll("ActionStarted", {
 		entityId = record.id,
 		clipId = clipId,
-		serverTime = now,
+		serverTime = startAt, -- other clients start the clip at this clock position
 		facing = toVec3(facing),
 		artId = if art ~= nil then art.id else nil,
 	})
@@ -769,13 +787,14 @@ function CombatService.beginArt(entityId: number, artId: string, facing: Vector3
 		DamageMath.gaugeDamage(art.gaugeDamage * gaugeScale, false),
 		look,
 		now,
+		now,
 		true
 	)
 	return true, nil
 end
 
---- Starts the next basic-chain swing for a fighter after validation. Returns (ok, reason).
-function CombatService.beginBasic(entityId: number, facing: Vector3?): (boolean, string?)
+-- The next basic-chain swing after validation; `clientTime` (a request's stamp) or nil (code callers).
+local function startBasic(entityId: number, facing: Vector3?, clientTime: number?): (boolean, string?)
 	local record = EntityService.get(entityId)
 	local now = dependencies().now()
 	local session = if record ~= nil then sessionOf(record.id) else nil
@@ -797,8 +816,25 @@ function CombatService.beginBasic(entityId: number, facing: Vector3?): (boolean,
 	session.basicChain = index
 	session.basicLastAt = now
 	local finalHit = index >= Combat.basicChainLength
-	beginRun(record, nil, clipId, clip, Combat.basicAttackMultiplier, basicGaugeOf(weapon), look, now, finalHit)
+	local startAt = if clientTime ~= nil then CombatService.runStartOf(clientTime, now) else now
+	beginRun(
+		record,
+		nil,
+		clipId,
+		clip,
+		Combat.basicAttackMultiplier,
+		basicGaugeOf(weapon),
+		look,
+		now,
+		startAt,
+		finalHit
+	)
 	return true, nil
+end
+
+--- Starts the next basic-chain swing for a fighter after validation. Returns (ok, reason).
+function CombatService.beginBasic(entityId: number, facing: Vector3?): (boolean, string?)
+	return startBasic(entityId, facing, nil)
 end
 
 --- Starts a dodge after validation: Dodge state, invulnerability frames, cooldown, the clip to all.
@@ -831,8 +867,9 @@ function CombatService.beginDodge(entityId: number, direction: Vector3): (boolea
 	return true, nil
 end
 
---- Raises or lowers a fighter's guard after validation. Returns (ok, reason).
-function CombatService.setGuard(entityId: number, held: boolean, facing: Vector3?): (boolean, string?)
+--- Raises or lowers a fighter's guard after validation. Returns (ok, reason). The guard cone always
+--- faces the server's root (enemyStrike reads it at strike time); a client cannot aim it.
+function CombatService.setGuard(entityId: number, held: boolean): (boolean, string?)
 	local record = EntityService.get(entityId)
 	if held then
 		local ok, reason = CombatService.validateGuardRequest(record)
@@ -843,7 +880,7 @@ function CombatService.setGuard(entityId: number, held: boolean, facing: Vector3
 	elseif record == nil then
 		return false, "NoEntity"
 	end
-	EntityService.setGuard(entityId, held, if facing ~= nil then toVec3(facing) else nil)
+	EntityService.setGuard(entityId, held)
 	return true, nil
 end
 
@@ -933,9 +970,8 @@ function CombatService.enemyStrike(
 			continue -- a clean dodge: nothing to show
 		end
 		local playerPosition = candidate.position
-		local guardFacing = if player.guardFacing ~= nil
-			then asVector(player.guardFacing)
-			else (EntityService.lookVectorOf(player.id) or Vector3.zAxis * -1)
+		-- Section 6: the guard cone is the body's facing, read from the server's root at strike time.
+		local guardFacing = EntityService.lookVectorOf(player.id) or Vector3.zAxis * -1
 		local inGuardCone =
 			DamageMath.inCone(playerPosition, guardFacing, originVector, DamageMath.guardCone(player.hasShield))
 		local guarding = player.state == "Guard" and player.guardHeld and inGuardCone
@@ -1024,6 +1060,7 @@ local function onArtRequest(player: Player, payload: any)
 		DamageMath.gaugeDamage(art.gaugeDamage * gaugeScale, false),
 		facing,
 		now,
+		CombatService.runStartOf(payload.clientTime, now),
 		true
 	)
 end
@@ -1037,7 +1074,7 @@ local function onBasicAttackRequest(player: Player, payload: any)
 	elseif not facingMatches(record, payload.facing, nil) then
 		ok, reason = false, "Facing"
 	else
-		ok, reason = CombatService.beginBasic(record.id, facing)
+		ok, reason = startBasic(record.id, facing, payload.clientTime)
 	end
 	if not ok then
 		reject(record, player, "BasicAttack", reason or "Rejected", payload.clientTime)
@@ -1046,12 +1083,12 @@ end
 
 local function onGuardRequest(player: Player, payload: any)
 	local record = EntityService.fromPlayer(player)
-	local facing = unitOrNil(flat(asVector(payload.facing)))
 	if record == nil then
 		reject(nil, player, "Guard", "NoEntity", payload.clientTime)
 		return
 	end
-	local ok, reason = CombatService.setGuard(record.id, payload.held == true, facing)
+	-- The payload's facing is never read: the cone follows the server's root (section 6, 17).
+	local ok, reason = CombatService.setGuard(record.id, payload.held == true)
 	if not ok and payload.held == true then
 		reject(record, player, "Guard", reason or "Rejected", payload.clientTime)
 	end

@@ -35,8 +35,11 @@ local CollectionService = Harness.game():GetService("CollectionService")
 
 local BOAR = Enemies.byId("FrenzyBoar")
 local KOBOLD = Enemies.byId("KoboldAxeman")
-local CHARGE = BOAR.attacks[1]
-local OVERHEAD = KOBOLD.attacks[1]
+local CHARGE = BOAR.attacks[1] -- Unblockable: the red line on the ground (section 9)
+local OVERHEAD = KOBOLD.attacks[1] -- GuardBreak: the Phase 0 parry beat
+-- The boar's line rush with a white (Normal) telegraph, for the cases that exercise a held guard.
+local NORMAL_RUSH = table.clone(CHARGE)
+NORMAL_RUSH.telegraph = "Normal"
 local HORIZONTAL = Arts.byId("OneHandedSword.Horizontal")
 local FORWARD = { 0, 0, -1 }
 
@@ -245,8 +248,14 @@ local function advance(seconds, step)
 	end
 end
 
-local function artPayload(artId, facing)
-	return { artId = artId, facing = facing or FORWARD, clientTime = 12.5 }
+-- A request stamped with the server clock (what CharacterController sends with no lag), unless
+-- `clientTime` says otherwise.
+local function artPayload(artId, facing, clientTime)
+	return { artId = artId, facing = facing or FORWARD, clientTime = clientTime or clock.t }
+end
+
+local function basicPayload(clientTime)
+	return { facing = FORWARD, clientTime = clientTime or clock.t }
 end
 
 -- Expected Horizontal damage on the boar: Trialist Sword 18, STR 10, no crit, defense 2.
@@ -398,7 +407,7 @@ describe("CombatService.validateArtRequest", function()
 		expect(#sentOf("ActionStarted")).toBe(0)
 		expect(lastOf("ActionRejected").action).toBe("Art")
 		expect(lastOf("ActionRejected").reason).toBe("NotSlotted")
-		expect(lastOf("ActionRejected").clientTime).toBe(12.5)
+		expect(lastOf("ActionRejected").clientTime).toBe(payload.clientTime)
 		-- Basics are not Arts: the slots never apply to them.
 		local basic = { facing = FORWARD, clientTime = 1 }
 		expect(CombatService.validateBasicRequest(record, "player/OneHandedSword/Basic1", basic, clock.t)).toBe(true)
@@ -551,6 +560,8 @@ describe("CombatService Art timeline", function()
 			expect(confirmed[1].crit).toBe(false)
 			expect(confirmed[1].parried).toBe(false)
 			expect(#confirmed[1].position).toBe(3)
+			-- The boar faces -Z, away from the player: the blow lands on its back.
+			expect(confirmed[1].staggerDirection).toBe("Back")
 			local switch = lastOf("SwitchWindow")
 			expect(switch.entityId).toBe(boarId)
 			expect(switch.openerId).toBe(playerId)
@@ -649,7 +660,7 @@ describe("CombatService Art timeline", function()
 	it("rejects go back to the requester with the reason and the echoed clientTime", function()
 		fresh()
 		local _, player = spawnPlayer()
-		handlers.ArtRequest(player, artPayload("OneHandedSword.SonicLeap"))
+		handlers.ArtRequest(player, artPayload("OneHandedSword.SonicLeap", nil, 12.5))
 		expect(#sentOf("ActionStarted")).toBe(0)
 		local rejected = sent[#sent]
 		expect(rejected.remote).toBe("ActionRejected")
@@ -693,6 +704,104 @@ describe("CombatService Art timeline", function()
 end)
 
 -- ------------------------------------------------------------------------------------------
+-- Hit direction and the lag allowance
+-- ------------------------------------------------------------------------------------------
+
+describe("CombatService hit direction", function()
+	it("HitConfirmed names the side the blade came from, so the enemy flinches from it", function()
+		fresh()
+		local _, player = spawnPlayer()
+		-- The boar faces the player: the cut lands on its front.
+		spawnBoar(CFrame.lookAt(Vector3.new(0, 1.2, -4), Vector3.new(0, 1.2, 0)))
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		advance(0.6)
+		local hit = lastOf("HitConfirmed")
+		expect(hit).never.toBeNil()
+		expect(hit.parried).toBe(false)
+		expect(hit.staggerDirection).toBe("Front")
+	end)
+end)
+
+describe("CombatService lag allowance", function()
+	it("runStartOf clamps the client's stamp into [now - lagAllowance, now]", function()
+		expect(CombatService.runStartOf(9.9, 10)).toBeCloseTo(9.9, 1e-9)
+		expect(CombatService.runStartOf(10, 10)).toBe(10)
+		expect(CombatService.runStartOf(5, 10)).toBeCloseTo(10 - Combat.lagAllowance, 1e-9)
+		expect(CombatService.runStartOf(11, 10)).toBe(10) -- never in the future
+		expect(CombatService.runStartOf(nil, 10)).toBe(10)
+		expect(CombatService.runStartOf(0 / 0, 10)).toBe(10)
+	end)
+
+	local STEP = 1 / 240
+
+	-- Seconds from the request's receipt to its first HitConfirmed on a boar ahead, and the
+	-- broadcast start relative to the receipt.
+	local function firstHitAfter(lag)
+		fresh()
+		local _, player = spawnPlayer()
+		spawnBoar()
+		local receivedAt = clock.t
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal", nil, receivedAt - lag))
+		local started = lastOf("ActionStarted")
+		while #sentOf("HitConfirmed") == 0 and clock.t - receivedAt < 1 do
+			advance(STEP, STEP)
+		end
+		expect(#sentOf("HitConfirmed")).toBe(1)
+		return clock.t - receivedAt, started.serverTime - receivedAt
+	end
+
+	it("a request stamped 0.1 s early sweeps 0.1 s sooner; one 0.5 s early is clamped to 0.15 s", function()
+		local onTime, onTimeStart = firstHitAfter(0)
+		local late, lateStart = firstHitAfter(0.1)
+		local stale, staleStart = firstHitAfter(0.5)
+		expect(onTimeStart).toBeCloseTo(0, 1e-9)
+		expect(lateStart).toBeCloseTo(-0.1, 1e-6)
+		expect(staleStart).toBeCloseTo(-Combat.lagAllowance, 1e-6)
+		expect(onTime - late).toBeCloseTo(0.1, STEP + 1e-6)
+		expect(onTime - stale).toBeCloseTo(Combat.lagAllowance, STEP + 1e-6)
+	end)
+
+	it("the clamped start moves the broadcast, the timeline and the lock; code callers start now", function()
+		fresh()
+		local playerId, player = spawnPlayer()
+		local receivedAt = clock.t
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal", nil, receivedAt - 0.1))
+		expect(lastOf("ActionStarted").serverTime).toBeCloseTo(receivedAt - 0.1, 1e-6)
+		local _, startedAt = CombatService.currentArt(playerId)
+		expect(startedAt).toBeCloseTo(receivedAt - 0.1, 1e-6)
+		local record = EntityService.get(playerId)
+		expect(record.lockUntil).toBeCloseTo(receivedAt - 0.1 + 0.6 + HORIZONTAL.postMotion, 1e-6)
+		-- The end pose freezes 0.6 s after the clamped start, not after the receipt.
+		advance(0.6 - 0.1 + 0.01)
+		expect(record.state).toBe("PostMotion")
+		advance(HORIZONTAL.postMotion + 0.02)
+		expect(record.state).toBe("Idle")
+
+		-- A stamp from the future starts at the receipt.
+		advance(Combat.basicChainWindow + 0.1)
+		handlers.BasicAttackRequest(player, basicPayload(clock.t + 1))
+		expect(lastOf("ActionStarted").serverTime).toBe(clock.t)
+		advance(Combat.basicHitDuration + 0.05)
+		expect(record.state).toBe("Idle")
+
+		-- A lagged basic swing: the same clamp, its Art state shortened by the catch-up.
+		advance(Combat.basicChainWindow + 0.1)
+		handlers.BasicAttackRequest(player, basicPayload(clock.t - 0.05))
+		expect(lastOf("ActionStarted").serverTime).toBeCloseTo(clock.t - 0.05, 1e-6)
+		expect(lastOf("StateChanged").duration).toBeCloseTo(Combat.basicHitDuration - 0.05, 1e-6)
+		advance(Combat.basicHitDuration + 0.05)
+
+		-- beginArt / beginBasic (bosses, smoke tests) have no client stamp: they start now.
+		expect(CombatService.beginBasic(playerId)).toBe(true)
+		expect(lastOf("ActionStarted").serverTime).toBe(clock.t)
+		advance(Combat.basicHitDuration + 0.05)
+		expect(CombatService.beginArt(playerId, "OneHandedSword.Horizontal")).toBe(true)
+		expect(lastOf("ActionStarted").serverTime).toBe(clock.t)
+		expect(select(2, CombatService.currentArt(playerId))).toBe(clock.t)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
 -- Basic attacks and dodges
 -- ------------------------------------------------------------------------------------------
 
@@ -701,8 +810,7 @@ describe("CombatService basics and dodge", function()
 		fresh()
 		local playerId, player = spawnPlayer()
 		spawnBoar()
-		local basic = { facing = FORWARD, clientTime = 1 }
-		handlers.BasicAttackRequest(player, basic)
+		handlers.BasicAttackRequest(player, basicPayload())
 		expect(lastOf("ActionStarted").clipId).toBe("player/OneHandedSword/Basic1")
 		expect(lastOf("ActionStarted").artId).toBeNil()
 		local record = EntityService.get(playerId)
@@ -717,19 +825,19 @@ describe("CombatService basics and dodge", function()
 		expect(hit.gaugeDamage).toBeCloseTo(HORIZONTAL.gaugeDamage * Combat.basicAttackGaugeFraction, 1e-9)
 		expect(hit.artId).toBeNil()
 		expect(hit.hitStop).toBe("Normal") -- only the chain's third swing is the final hit
-		handlers.BasicAttackRequest(player, basic)
+		handlers.BasicAttackRequest(player, basicPayload())
 		expect(lastOf("ActionStarted").clipId).toBe("player/OneHandedSword/Basic2")
 		advance(0.3)
 		expect(lastOf("HitConfirmed").hitStop).toBe("Normal")
-		handlers.BasicAttackRequest(player, basic)
+		handlers.BasicAttackRequest(player, basicPayload())
 		expect(lastOf("ActionStarted").clipId).toBe("player/OneHandedSword/Basic3")
 		advance(0.3)
 		expect(lastOf("HitConfirmed").hitStop).toBe("Final")
-		handlers.BasicAttackRequest(player, basic)
+		handlers.BasicAttackRequest(player, basicPayload())
 		expect(lastOf("ActionStarted").clipId).toBe("player/OneHandedSword/Basic1")
 		advance(Combat.basicChainWindow + 0.5)
 		expect(record.state).toBe("Idle")
-		handlers.BasicAttackRequest(player, basic)
+		handlers.BasicAttackRequest(player, basicPayload())
 		expect(lastOf("ActionStarted").clipId).toBe("player/OneHandedSword/Basic1")
 		expect(#sentOf("ActionRejected")).toBe(0)
 	end)
@@ -737,13 +845,13 @@ describe("CombatService basics and dodge", function()
 	it("an Art can cancel a basic swing; a basic cannot interrupt an Art", function()
 		fresh()
 		local playerId, player = spawnPlayer()
-		handlers.BasicAttackRequest(player, { facing = FORWARD, clientTime = 1 })
+		handlers.BasicAttackRequest(player, basicPayload())
 		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
 		expect(#sentOf("ActionRejected")).toBe(0)
 		expect(EntityService.get(playerId).stateTag).toBeNil()
 		local art = CombatService.currentArt(playerId)
 		expect(art.id).toBe("OneHandedSword.Horizontal")
-		handlers.BasicAttackRequest(player, { facing = FORWARD, clientTime = 2 })
+		handlers.BasicAttackRequest(player, basicPayload())
 		expect(lastOf("ActionRejected").action).toBe("BasicAttack")
 		expect(lastOf("ActionRejected").reason).toBe("Locked")
 	end)
@@ -777,7 +885,6 @@ describe("CombatService basics and dodge", function()
 		handlers.GuardRequest(player, { held = true, facing = FORWARD, clientTime = 1 })
 		local record = EntityService.get(playerId)
 		expect(record.state).toBe("Guard")
-		expect(record.guardFacing).toEqual(FORWARD)
 		handlers.GuardRequest(player, { held = false, facing = FORWARD, clientTime = 2 })
 		expect(record.state).toBe("Idle")
 		EntityService.setState(playerId, "PostMotion", 0.4)
@@ -842,6 +949,7 @@ describe("CombatService.enemyStrike", function()
 		expect(hit.attackerId).toBe(koboldId)
 		expect(hit.targetId).toBe(playerId)
 		expect(hit.hitStop).toBe("Normal")
+		expect(hit.staggerDirection).toBe("Front") -- the same side the StateChanged flinch names
 	end)
 
 	it(
@@ -887,14 +995,14 @@ describe("CombatService.enemyStrike", function()
 		local boarId = spawnBoar(CFrame.lookAt(Vector3.new(0, 1.2, -6), Vector3.new(0, 1.2, 0)))
 		handlers.GuardRequest(player, { held = true, facing = FORWARD, clientTime = 1 })
 		clock.t += 1
-		local results = CombatService.enemyStrike(boarId, CHARGE, Vector3.new(0, 1.2, -6), Vector3.new(0, 0, 1))
+		local results = CombatService.enemyStrike(boarId, NORMAL_RUSH, Vector3.new(0, 1.2, -6), Vector3.new(0, 0, 1))
 		expect(#results).toBe(1)
-		local open = math.floor(BOAR.attack * CHARGE.multiplier - EntityService.get(playerId).defense + 0.5)
+		local open = math.floor(BOAR.attack * NORMAL_RUSH.multiplier - EntityService.get(playerId).defense + 0.5)
 		expect(results[1].guarded).toBe(true)
 		expect(results[1].damage).toBe(math.floor(open * (1 - Combat.guardReduction) + 0.5))
-		expect(results[1].gaugeDamage).toBeCloseTo(CHARGE.gaugeDamage * Combat.guardGaugeDrainFraction, 1e-9)
+		expect(results[1].gaugeDamage).toBeCloseTo(NORMAL_RUSH.gaugeDamage * Combat.guardGaugeDrainFraction, 1e-9)
 		expect(EntityService.get(playerId).state).toBe("Guard")
-		expect(EntityService.get(playerId).gauge).toBe(100 - CHARGE.gaugeDamage)
+		expect(EntityService.get(playerId).gauge).toBe(100 - NORMAL_RUSH.gaugeDamage)
 		expect(lastOf("HitConfirmed").guarded).toBe(true)
 	end)
 
@@ -940,6 +1048,69 @@ describe("CombatService.enemyStrike", function()
 		expect(results[1].guarded).toBe(false)
 		expect(EntityService.get(playerId).state).toBe("Stagger")
 		expect(lastOf("StateChanged").direction).toBe("Back")
+	end)
+
+	it("the guard cone follows the server's root, never the GuardRequest's facing", function()
+		fresh()
+		-- The root faces -Z; the boar rushes from behind (+Z) toward -Z.
+		local behind = CFrame.lookAt(Vector3.new(0, 1.2, 6), Vector3.new(0, 1.2, 0))
+		local playerId, player = spawnPlayer()
+		local boarId = spawnBoar(behind)
+		-- The client claims to face the boar; the server never reads that axis.
+		handlers.GuardRequest(player, { held = true, facing = { 0, 0, 1 }, clientTime = clock.t })
+		expect(#sentOf("ActionRejected")).toBe(0)
+		expect(EntityService.get(playerId).state).toBe("Guard")
+		clock.t += 1
+		local results = CombatService.enemyStrike(boarId, NORMAL_RUSH, Vector3.new(0, 1.2, 6), Vector3.new(0, 0, -1))
+		expect(#results).toBe(1)
+		local open = math.floor(BOAR.attack * NORMAL_RUSH.multiplier - EntityService.get(playerId).defense + 0.5)
+		expect(results[1].guarded).toBe(false)
+		expect(results[1].damage).toBe(open)
+		expect(EntityService.get(playerId).state).toBe("Stagger")
+		expect(lastOf("StateChanged").direction).toBe("Back")
+
+		-- A root turned toward the boar covers it, whatever facing the request reports.
+		fresh()
+		local turnedId, turned = spawnPlayer(CFrame.lookAt(Vector3.new(0, 3, 0), Vector3.new(0, 3, 1)))
+		boarId = spawnBoar(behind)
+		handlers.GuardRequest(turned, { held = true, facing = FORWARD, clientTime = clock.t })
+		clock.t += 1
+		results = CombatService.enemyStrike(boarId, NORMAL_RUSH, Vector3.new(0, 1.2, 6), Vector3.new(0, 0, -1))
+		expect(#results).toBe(1)
+		expect(results[1].guarded).toBe(true)
+		expect(EntityService.get(turnedId).state).toBe("Guard")
+	end)
+
+	it("the boar's Unblockable rush is never parried or guarded; the kobold's Overhead still parries", function()
+		fresh()
+		local playerId, player = spawnPlayer()
+		local boarId = spawnBoar(CFrame.lookAt(Vector3.new(0, 1.2, -6), Vector3.new(0, 1.2, 0)))
+		expect(CHARGE.telegraph).toBe("Unblockable")
+		handlers.GuardRequest(player, { held = true, facing = FORWARD, clientTime = clock.t })
+		clock.t += Combat.parryWindow / 2 -- inside the parry window
+		local results = CombatService.enemyStrike(boarId, CHARGE, Vector3.new(0, 1.2, -6), Vector3.new(0, 0, 1))
+		expect(#results).toBe(1)
+		local open = math.floor(BOAR.attack * CHARGE.multiplier - EntityService.get(playerId).defense + 0.5)
+		expect(results[1].parried).toBe(false)
+		expect(results[1].guarded).toBe(false)
+		expect(results[1].damage).toBe(open)
+		expect(EntityService.get(playerId).gauge).toBe(100) -- through the guard, not into it
+		expect(EntityService.get(playerId).state).toBe("Stagger")
+		expect(EntityService.get(boarId).state).toBe("Idle") -- no parry stagger
+		expect(#sentOf("SwitchWindow")).toBe(0)
+
+		-- The Phase 0 parry beat is the kobold: its yellow GuardBreak Overhead parries inside the window.
+		fresh()
+		local guardId, guard = spawnPlayer()
+		local koboldId = spawnKobold(KOBOLD_CFRAME)
+		expect(OVERHEAD.telegraph).toBe("GuardBreak")
+		handlers.GuardRequest(guard, { held = true, facing = FORWARD, clientTime = clock.t })
+		clock.t += Combat.parryWindow / 2
+		results = strikeOverhead(koboldId)
+		expect(#results).toBe(1)
+		expect(results[1].parried).toBe(true)
+		expect(EntityService.get(guardId).hp).toBe(300)
+		expect(EntityService.get(koboldId).state).toBe("Stagger")
 	end)
 
 	it("dodge frames make the strike miss entirely", function()

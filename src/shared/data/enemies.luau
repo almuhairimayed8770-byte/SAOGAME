@@ -9,11 +9,12 @@
 	Night or Gilded rules on top. EnemyService spawns from those copies, never from the raw row.
 	Floor 1 rows are tier 1, so for the Phase 0 slice the raw numbers are the final numbers.
 
-	Telegraphs follow the archetype table: Charger 0.6 s crouch (white edge, red line on the
-	ground), Brute 1.0 s overhead (yellow), Skirmisher 0.4 s dip (white), Lancer 0.7 s draw-back
-	(red line), Swarm 0.3 s hiss, Guard a 0.5 s shield bash, Caster-beast 1.2 s inhale (red cone),
-	Stalker 0.3 s shimmer, Warden-construct 1.0 s pillar glow (red circle). Every wind-up is at
-	least combat.telegraphMinWindUp.
+	Telegraphs follow the archetype table: Charger 0.6 s crouch (red line on the ground: the rush
+	is Unblockable, so it is sidestepped, never guarded or parried), Brute 1.0 s overhead (yellow),
+	Skirmisher 0.4 s dip (white), Lancer 0.7 s draw-back (red line), Swarm 0.3 s hiss, Guard a
+	0.5 s shield bash, Caster-beast 1.2 s inhale (red cone), Stalker 0.3 s shimmer,
+	Warden-construct 1.0 s pillar glow (red circle). Every wind-up is at least
+	combat.telegraphMinWindUp.
 
 	Attack `clip` is the bare clip name; the full id is enemy/<skin>/<clip>. Only the Boar and
 	Kobold rigs exist in Phase 0; every other skin is listed in `Enemies.placeholderRigs`.
@@ -268,7 +269,7 @@ local rows: { [string]: Enemy } = {
 			{
 				id = "Charge",
 				name = "Charge",
-				telegraph = "Normal",
+				telegraph = "Unblockable",
 				windUp = 0.6,
 				strike = 0.5,
 				recovery = 1.2,
@@ -471,7 +472,7 @@ local rows: { [string]: Enemy } = {
 			{
 				id = "Charge",
 				name = "Charge",
-				telegraph = "Normal",
+				telegraph = "Unblockable",
 				windUp = 0.6,
 				strike = 0.5,
 				recovery = 1.4,
@@ -806,7 +807,7 @@ local rows: { [string]: Enemy } = {
 			{
 				id = "Charge",
 				name = "Charge",
-				telegraph = "Normal",
+				telegraph = "Unblockable",
 				windUp = 0.6,
 				strike = 0.5,
 				recovery = 1.2,
@@ -1155,7 +1156,7 @@ local rows: { [string]: Enemy } = {
 			{
 				id = "Charge",
 				name = "Charge",
-				telegraph = "Normal",
+				telegraph = "Unblockable",
 				windUp = 0.6,
 				strike = 0.5,
 				recovery = 1.2,
@@ -1307,7 +1308,7 @@ local rows: { [string]: Enemy } = {
 			{
 				id = "Charge",
 				name = "Charge",
-				telegraph = "Normal",
+				telegraph = "Unblockable",
 				windUp = 0.6,
 				strike = 0.5,
 				recovery = 1.4,
@@ -1569,7 +1570,7 @@ local rows: { [string]: Enemy } = {
 			{
 				id = "Charge",
 				name = "Pounce",
-				telegraph = "Normal",
+				telegraph = "Unblockable",
 				windUp = 0.6,
 				strike = 0.5,
 				recovery = 1.2,
@@ -1734,7 +1735,7 @@ local rows: { [string]: Enemy } = {
 			{
 				id = "Charge",
 				name = "Pounce",
-				telegraph = "Normal",
+				telegraph = "Unblockable",
 				windUp = 0.6,
 				strike = 0.5,
 				recovery = 1.4,
@@ -2160,7 +2161,7 @@ local rows: { [string]: Enemy } = {
 			{
 				id = "Charge",
 				name = "Antler Charge",
-				telegraph = "Normal",
+				telegraph = "Unblockable",
 				windUp = 0.6,
 				strike = 0.5,
 				recovery = 1.4,
@@ -2266,7 +2267,7 @@ local rows: { [string]: Enemy } = {
 			{
 				id = "Charge",
 				name = "Charge",
-				telegraph = "Normal",
+				telegraph = "Unblockable",
 				windUp = 0.6,
 				strike = 0.5,
 				recovery = 1.2,

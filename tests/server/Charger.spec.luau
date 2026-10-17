@@ -138,7 +138,7 @@ describe("Charger", function()
 			local telegraph = w.telegraphs[1]
 			expect(telegraph.attack.id).toBe("Charge")
 			expect(telegraph.attack.windUp).toBe(0.6)
-			expect(telegraph.attack.telegraph).toBe("Normal")
+			expect(telegraph.attack.telegraph).toBe("Unblockable") -- the red line: sidestep, never guard
 			expect(telegraph.attack.windUp).toBeGreaterThanOrEqual(Combat.telegraphMinWindUp)
 			expect(telegraph.shape).toEqual({ kind = "Line", length = CHARGE.reach, width = AI.telegraph.lineWidth })
 			expect(telegraph.origin).toEqual(w.position)
