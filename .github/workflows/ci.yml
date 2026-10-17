@@ -35,7 +35,7 @@ jobs:
         run: lune run tools/animation-review.luau --check
 
       - name: Rojo build (game)
-        run: rojo build default.project.json -o build/Skyspire.rbxl
+        run: mkdir -p build && rojo build default.project.json -o build/Skyspire.rbxl
 
       - name: Rojo build (places)
         run: tools/build-places.sh
