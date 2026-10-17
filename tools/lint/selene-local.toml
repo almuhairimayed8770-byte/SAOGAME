@@ -1,0 +1,6 @@
+# Offline lint config: `selene --config tools/lint/selene-local.toml src`
+# (the root selene.toml uses the real Roblox std, which needs network access to generate).
+std = "roblox-lite"
+
+[lints]
+shadowing = "allow"

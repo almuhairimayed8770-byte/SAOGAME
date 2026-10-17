@@ -22,7 +22,8 @@ jobs:
       - name: Selene (lint)
         run: |
           selene src
-          selene tests tools
+          (cd tests && selene .)
+          (cd tools && selene .)
 
       - name: Lune unit tests
         run: lune run tests/run.luau

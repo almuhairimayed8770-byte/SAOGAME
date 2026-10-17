@@ -2,7 +2,7 @@ local Remotes = Harness.load("src/shared/net/Remotes")
 
 describe("Remotes", function()
 	it("every client-to-server remote has a rate limit and a strict schema", function()
-		for name, definition in Remotes do
+		for _, definition in Remotes do
 			if definition.direction == "ClientToServer" then
 				expect(definition.rate).toBeTruthy()
 				expect(definition.rate.perSecond).toBeGreaterThan(0)
