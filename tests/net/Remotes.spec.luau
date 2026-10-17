@@ -1,3 +1,4 @@
+--!strict
 local Remotes = Harness.load("src/shared/net/Remotes")
 
 describe("Remotes", function()

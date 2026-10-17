@@ -1,3 +1,4 @@
+--!strict
 -- A minimal RBXScriptSignal stand-in for RunService frame signals: Connect returns a connection
 -- with Disconnect; Fire runs the handlers in order.
 local function fakeSignal()

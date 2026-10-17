@@ -1,3 +1,4 @@
+--!strict
 -- EntityService under Lune: fake clock, fake net, fake tags; models built with Instance.new.
 Harness.stubService("CollectionService", {
 	AddTag = function(_self, instance, tag)

@@ -1,3 +1,4 @@
+--!strict
 -- Locomotion.attach: the driver for rigs the local controller does not own, run through the real
 -- Choreo animator on Lune Instances with an injected state tracker (no Humanoid physics in Lune).
 local function fakeSignal()

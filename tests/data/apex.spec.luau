@@ -1,3 +1,4 @@
+--!strict
 local Apex = Harness.load("src/shared/data/apex")
 local Weapons = Harness.load("src/shared/data/weapons")
 local Armor = Harness.load("src/shared/data/armor")

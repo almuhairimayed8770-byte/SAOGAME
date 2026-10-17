@@ -1,3 +1,4 @@
+--!strict
 local Enemies = Harness.load("src/shared/data/enemies")
 local Combat = Harness.load("src/shared/data/combat")
 local Tiers = Harness.load("src/shared/data/tiers")

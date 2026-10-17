@@ -1,3 +1,4 @@
+--!strict
 local combat = Harness.load("src/shared/data/combat")
 
 describe("combat data", function()

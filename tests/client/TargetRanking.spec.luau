@@ -1,3 +1,4 @@
+--!strict
 local TargetRanking = Harness.load("src/client/controllers/TargetRanking")
 local camera = Harness.load("src/shared/data/camera")
 

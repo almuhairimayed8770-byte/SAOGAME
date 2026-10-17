@@ -1,3 +1,4 @@
+--!strict
 local HudLogic = Harness.load("src/client/ui/HudLogic")
 local UI = Harness.load("src/shared/data/ui")
 local Combat = Harness.load("src/shared/data/combat")

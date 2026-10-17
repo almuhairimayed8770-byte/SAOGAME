@@ -1,3 +1,4 @@
+--!strict
 local ShatterMath = Harness.load("src/client/fx/ShatterMath")
 local Fx = Harness.load("src/shared/data/fx")
 

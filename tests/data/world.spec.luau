@@ -1,3 +1,4 @@
+--!strict
 local World = Harness.load("src/shared/data/world")
 local Playground = Harness.load("src/shared/data/playground")
 local Fx = Harness.load("src/shared/data/fx")

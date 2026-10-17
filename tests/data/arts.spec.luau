@@ -1,3 +1,4 @@
+--!strict
 local Arts = Harness.load("src/shared/data/arts")
 
 -- Section 8 rows: unlock, hits, startup, total, postMotion (plus root motion where the note gives it).

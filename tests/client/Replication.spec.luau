@@ -1,3 +1,4 @@
+--!strict
 local Replication = Harness.load("src/client/controllers/Replication")
 local combat = Harness.load("src/shared/data/combat")
 local sfx = Harness.load("src/shared/data/sfx")

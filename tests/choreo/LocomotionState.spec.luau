@@ -1,3 +1,4 @@
+--!strict
 local LocomotionState = Harness.load("src/client/choreo/LocomotionState")
 local ChoreoData = Harness.load("src/shared/data/choreo")
 

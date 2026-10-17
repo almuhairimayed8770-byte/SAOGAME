@@ -1,3 +1,4 @@
+--!strict
 local TelegraphShapes = Harness.load("src/client/fx/TelegraphShapes")
 local Fx = Harness.load("src/shared/data/fx")
 

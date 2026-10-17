@@ -1,3 +1,4 @@
+--!strict
 local El = Harness.load("src/client/ui/lib/El")
 local Palette = Harness.load("src/shared/data/palette")
 

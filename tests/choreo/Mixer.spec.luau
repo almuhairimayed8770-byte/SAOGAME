@@ -1,3 +1,4 @@
+--!strict
 local Mixer = Harness.load("src/client/choreo/Mixer")
 local ChoreoData = Harness.load("src/shared/data/choreo")
 

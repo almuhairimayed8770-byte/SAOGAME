@@ -1,3 +1,4 @@
+--!strict
 local CameraMath = Harness.load("src/client/camera/CameraMath")
 local Spring = Harness.load("src/shared/util/Spring")
 local camera = Harness.load("src/shared/data/camera")

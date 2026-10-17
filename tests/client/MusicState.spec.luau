@@ -1,3 +1,4 @@
+--!strict
 local MusicState = Harness.load("src/client/audio/MusicState")
 local Sfx = Harness.load("src/shared/data/sfx")
 local Combat = Harness.load("src/shared/data/combat")

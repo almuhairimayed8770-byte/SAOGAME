@@ -1,3 +1,4 @@
+--!strict
 local DamageMath = Harness.load("src/server/combat/DamageMath")
 local Combat = Harness.load("src/shared/data/combat")
 

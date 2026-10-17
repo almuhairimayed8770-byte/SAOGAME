@@ -1,3 +1,4 @@
+--!strict
 -- CombatService under Lune: fake clock, fake Net (records every fire), fake spherecast (spheres
 -- around enemy roots), rigs built with Instance.new. Timelines are stepped by hand through tick().
 Harness.stubService("CollectionService", {

@@ -82,6 +82,7 @@ publishes its state as attributes on its Model (D-006):
 | `State` | string | `Types.EntityState` |
 | `Cursor` | string | `"Green"`, `"Orange"`, `"Red"` (players only) |
 | `Level` | number | |
+| `ArtSlots` | string | players only: the quick-slot Art ids joined with commas, in slot order |
 
 Tags (CollectionService): `SkyspireEntity` on every entity model, plus `SkyspirePlayer` or
 `SkyspireEnemy`. Clients discover entities by tag and read attributes; remotes carry events only.
@@ -113,8 +114,10 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
   `DodgeLeft`, `DodgeRight`, `FlinchFront`, `FlinchBack`, `FlinchLeft`, `FlinchRight`, `Stagger`,
   `DeathFreeze`, `Basic1`, `Basic2`, `Basic3`, `Horizontal`, `Vertical`, `RisingArc`, `SharpNail`.
   `src/shared/data/scope.luau` lists the Arts, enemies, bosses and rigs whose clips the current
-  phase must ship; the clips validator fails on those and only summarizes the later-phase backlog
-  (D-015).
+  phase must ship; the clips validator fails on those and folds the later-phase backlog into one
+  summary warning (D-015). Boss attack clips (`bosses.luau` phase attacks, id
+  `enemy/<skin>/<clip>`) are cross-checked the same way as enemy attacks: `attack = true` and an
+  `Anticipation` beat that holds for the attack's `windUp`.
 - Required enemy clips: `enemy/Boar/{Idle,Walk,Charge,FlinchFront,FlinchBack,FlinchLeft,FlinchRight,Stagger,Break,DeathFreeze}`,
   `enemy/Kobold/{Idle,Walk,Overhead,FlinchFront,FlinchBack,FlinchLeft,FlinchRight,Stagger,Break,DeathFreeze}`.
   An enemy attack's `clip` in `enemies.luau` names one of these (`Charge`, `Overhead`).
@@ -130,9 +133,12 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
 1. Client `InputController` -> `CharacterController` sends `ArtRequest {artId, facing, clientTime}`
    and immediately starts the local clip (prediction).
 2. `CombatService` validates: entity alive and in `Idle`/`Moving`, Art unlocked (proficiency from
-   the entity record), Art in the fighter's quick slots when the record has them (`NotSlotted`),
-   not inside a lock (`artRequestTolerance`), facing within tolerance, weapon category matches,
-   clip exists. On failure it fires `ActionRejected` to that client (which cancels its
+   the entity record), Art in the fighter's quick slots (`artSlots` on the entity record, copied
+   from the loadout; a record without slots, such as an enemy with Arts or a stand-in, skips this
+   check), not inside a lock (`artRequestTolerance`), facing within tolerance, weapon category
+   matches, clip exists. The `ActionRejected` reasons are `NoEntity`, `Dead`, `UnknownArt`,
+   `NoWeapon`, `WeaponMismatch`, `Proficiency`, `NotSlotted`, `Locked`, `Busy:<state>`, `Facing`,
+   `Stance` and `NoClip`. On failure it fires `ActionRejected` to that client (which cancels its
    prediction). On success it sets `State = "Art"`, fires `ActionStarted` to everyone (including the
    requester, who ignores its own), and schedules the timeline from the clip: for each hit window it
    samples the clip at `hitSampleHz` through `ClipSampler` + `Pose` and runs `HitSweep` between
@@ -158,7 +164,7 @@ nothing about animation runs on the server except the pose sampling used by the 
 | `combat.luau` | section 6 tunables |
 | `palette.luau` | color tokens |
 | `rigs.luau` | rig joint lists and rest poses |
-| `scope.luau` | the Arts, enemies, bosses and rigs in the current phase (D-015) |
+| `scope.luau` | the current `phase` and the Art, enemy, boss and rig ids whose clips it must ship, with `hasArt` / `hasEnemy` / `hasBoss` / `hasRig` (D-015) |
 | `arts.luau` | every Art row from section 8 as `Types.ArtDef`, keyed by id |
 | `weapons.luau` | weapon defs, named weapons, the starter `TrialistSword` |
 | `armor.luau` | armor defs, the Trialist cloth set |
@@ -200,7 +206,7 @@ scans every text file in the repo except `docs/GAME_SPEC.md` and the blocklist i
 | `Telegraph` | `Telegraphs.show(entity, kind, windUp, shape)`: weapon Highlight fill + ground decal |
 | `HitConfirmed` | hit-stop on attacker and target rigs, `Digits`, Highlight flash, `Trails` flash on Switch, camera nudge/shake, HUD HP flash |
 | `StateChanged` | stagger/break/guard-break clips, HUD status |
-| `EntityDied` | freeze `deathFreeze`, duck audio, `Shatter.play(model, shatterKind)` |
+| `EntityDied` | freeze `deathFreeze`, duck audio, `Shatter.play(model, shatterKind)` (which plays the crack); the crack plays directly through `SfxPool` only when the rig is already gone |
 | `ActionRejected` | cancel the predicted clip, no digit |
 | `SystemLine` | centered system text with chime |
 | `SwitchWindow` | `SwitchRing` on the enemy, SWITCH prompt (Phase 1 logic, Phase 0 visuals) |
@@ -208,10 +214,21 @@ scans every text file in the repo except `docs/GAME_SPEC.md` and the blocklist i
 Rig lifecycle: `EntityTracker.added` -> `Replication.watch(record)` registers the outline, attaches
 the trail, routes the rig's clip events to the FX package and, for every rig the local
 `CharacterController` does not own, drives locomotion with `Locomotion.attach(animator, model)`
-(other players run the blend space, enemies their data Idle/Walk pair). `EntityTracker.removed` ->
-`Replication.unwatch(record)` destroys that driver and releases the rig's trails, telegraph, smear
-and state clip. Clip tables are immutable after load (`ClipSampler` caches per-clip joint lists);
-editors call `ClipSampler.invalidate(clip)` after changing one.
+(other players run the blend space, enemies their data Idle/Walk pair). Replication tells the local
+rig apart by `EntityTracker.peekLocalId`, then by `Players.LocalPlayer.Character`, and drops a
+driver that reached the local rig before its id resolved when `EntityTracker.localChanged` fires.
+`EntityTracker.removed` -> `Replication.unwatch(record)` destroys that driver and releases the rig's
+trails, telegraph, smear and state clip. `Main.client` wires
+`Telegraphs.setIntensitySource(Hud.telegraphIntensity)` so the accessibility slider drives telegraph
+intensity.
+
+Clip tables are immutable after load: `ClipSampler` caches each clip's structure (the sorted joint
+list and which key authors each joint's held value) and reads offset values live, so replacing a
+joint's offset table needs no invalidate while adding or removing a key, a joint or the root does;
+editors call `ClipSampler.invalidate(clip)` after such an edit. The PoseEditor `Session` cannot
+require shared modules (it also runs under Lune), so the plugin host registers
+`Session.setInvalidator(ClipSampler.invalidate)` and Session calls it after every edit, undo and
+redo. A stale cache degrades to rest values for keys it never saw and never errors mid-frame.
 
 ## Places
 

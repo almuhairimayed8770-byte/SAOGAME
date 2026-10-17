@@ -1,3 +1,4 @@
+--!strict
 local ActionLogic = Harness.load("src/client/controllers/ActionLogic")
 local combat = Harness.load("src/shared/data/combat")
 local choreo = Harness.load("src/shared/data/choreo")

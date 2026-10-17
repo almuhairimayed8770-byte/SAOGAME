@@ -1,3 +1,4 @@
+--!strict
 local HitSweep = Harness.load("src/server/combat/HitSweep")
 local Combat = Harness.load("src/shared/data/combat")
 local Rigs = Harness.load("src/shared/data/rigs")

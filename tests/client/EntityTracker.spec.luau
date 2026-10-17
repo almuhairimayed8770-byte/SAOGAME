@@ -1,3 +1,4 @@
+--!strict
 local EntityTracker = Harness.load("src/client/controllers/EntityTracker")
 
 -- A minimal RBXScriptSignal stand-in: Connect returns a connection with Disconnect; Fire runs handlers.

@@ -1,3 +1,4 @@
+--!strict
 local OutlineRanking = Harness.load("src/client/fx/OutlineRanking")
 local Fx = Harness.load("src/shared/data/fx")
 local Palette = Harness.load("src/shared/data/palette")

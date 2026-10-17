@@ -1,3 +1,4 @@
+--!strict
 -- Instance-level rules of the HUD package that Lune can check: pooled nameplates survive the rig
 -- they pointed at, nothing hangs over a dead or boss rig, and the SWITCH prompt never leaves the
 -- HUD's own ScreenGui (a target the server removes mid-window must not take the HUD loop down).
