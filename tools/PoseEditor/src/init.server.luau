@@ -62,6 +62,8 @@ local function init()
 	if Dev == nil or Palette == nil or Rigs == nil or ClipSampler == nil then
 		return
 	end
+	-- Session edits that change a clip's structure drop ClipSampler's per-clip cache (D-003).
+	Session.setInvalidator(ClipSampler.invalidate)
 	initialized = true
 
 	local Editor = Dev.poseEditor
@@ -385,6 +387,7 @@ local function init()
 		end
 		-- Written in place while the mouse moves; the undo snapshot was taken on MouseButton1Down.
 		current.clip.keys[key].joints[joint] = offset
+		ClipSampler.invalidate(current.clip)
 		current.dirty = true
 		applyPose()
 	end
