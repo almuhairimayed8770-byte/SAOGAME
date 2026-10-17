@@ -152,18 +152,20 @@ function Net.server(): ServerNet
 		end
 	end
 
+	-- Each step is its own statement: a line that starts with "(" right after a call would be
+	-- parsed as a call on that call's result (assert returns true), so every send would throw.
 	local function fire(name: string, player: Player, payload: any)
 		local definition = definitionOf(name)
-		assert(definition.direction == "ServerToClient", ("Net: '%s' is not server-to-client"):format(name))(
-			instances[name] :: RemoteEvent
-		):FireClient(player, payload)
+		assert(definition.direction == "ServerToClient", ("Net: '%s' is not server-to-client"):format(name))
+		local remote = instances[name] :: RemoteEvent
+		remote:FireClient(player, payload)
 	end
 
 	local function fireAll(name: string, payload: any)
 		local definition = definitionOf(name)
-		assert(definition.direction == "ServerToClient", ("Net: '%s' is not server-to-client"):format(name))(
-			instances[name] :: RemoteEvent
-		):FireAllClients(payload)
+		assert(definition.direction == "ServerToClient", ("Net: '%s' is not server-to-client"):format(name))
+		local remote = instances[name] :: RemoteEvent
+		remote:FireAllClients(payload)
 	end
 
 	local function fireExcept(name: string, except: Player, payload: any)
