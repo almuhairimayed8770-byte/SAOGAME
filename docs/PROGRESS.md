@@ -21,7 +21,7 @@ an automated solo Play session); every line that still needs a person in Studio 
 | Server | EntityService, CombatService (DamageMath, HitSweep with the per-sample blade overlap and the arc-following sweep D-010 / D-042 / D-044, the section 17 request checks including the quick-slot check), EnemyService with Brain / Charger / Brute AI, PlaygroundService, AntiCheatService (+ anticheat Rules), world builders (RigBuilder, WeaponBuilder, PlaygroundBuilder, PlaygroundLayout) and CharacterReady (D-046), `Main.server.luau` | `tests/server/*` (with the hit matrix, D-045), `tests/smoke/*.smoke.luau` (six, all pass on the owner's PC) |
 | Tools and docs | `Capture.client.luau` (gate shot prompts), the ClipLab (`places/ClipLab.project.json`, `ClipLab.server.luau`, `ClipLab.client.luau`, `ReviewMarkers`), the PoseEditor Studio plugin (`tools/PoseEditor`) with `Serialize` / `Session`, `tools/pose-server.luau`, `tools/assets.luau`, `tools/smoke.sh`, `tools/animation-review.luau`, `tools/hit-matrix.luau`, `tools/build-plugin.sh`, `data/dev.luau`, this docs set | `tests/tools/*` |
 
-Suite at the time of writing: `lune run tests/run.luau` 905 passed, 0 failed, 74 spec files. `lune run tools/validate.luau`:
+Suite at the time of writing: `lune run tests/run.luau` 910 passed, 0 failed, 75 spec files. `lune run tools/validate.luau`:
 25 validators, 0 problems; the clips validator prints one warning for the 160 later-phase clips (66 Arts, 65 enemy
 attacks, 29 boss attacks) that are not authored yet and are outside the Phase 0 scope (D-015).
 `tools/animation-review.luau` flags no review-rule finding on the 56 clips (9 attacks); the hand-filled columns are
@@ -80,9 +80,18 @@ Run over Remote Control: `tools/smoke.sh` (all six smokes) and a solo Play sessi
   the anime proportions and the sword.
 - The combat smoke now also refuses 20 Art repeats while the fighter is locked and a forged request carrying a target
   field; the perf smoke has the eight stand-ins swinging Arts the whole sample.
+- **The sword went into the ground** in 19 player clips (a new 240 Hz spec, D-047): Idle, the four walks, both turns,
+  Run, Sprint, Skid, Jump, Land, both forward and right dodges, Guard Break, Basic 3, Sharp Nail, Vertical and Rising
+  Arc. Only joint rotations changed (no times, easings, events or windows), and the hit matrix stays green; the one
+  new miss, Rising Arc hit 1 at the boar facing 11.5 studs away, is outside the real-fight range.
+- A second adversarial pass over the sweep fixed one bug (a window closing inside a frame solved its last sample from
+  where the body went on to) and corrected the cost and margin claims in D-044.
 
 ## Known review items for the Studio pass
 
+- At 0.25x: no blade in the grass anywhere (D-047 checks the blank avatar on a flat field); the hilt should not read as
+  entering the thigh in Basic 3 at 0.15 s and Sharp Nail at 0.58 s (on the blank avatar's boxes the grip sits as deep
+  as the hand already does); the Rising Arc's sword arm should read clear of the torso in its crossed start pose.
 - Kobold `Overhead` holds the raised axe for 1.3 s while the telegraph light goes out at the 1.0 s wind-up and the
   blade lands at 1.35 s (wind-up + strike, as the server times it). The clip is consistent with the server; judge at
   0.25x whether the swing should begin the moment the light goes out.
@@ -104,11 +113,11 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 | The 20-second fight: six beats on every attack, the parry sparks, the kill shatters | Needs the owner's recording (`fight-boar-kobold.mp4`) |
 | The server registered every hit | **Met** in the hit matrix (every window, both enemies, real fight distances, four frame phases; D-045) and in `combat.smoke` in Studio; the recording shows it again as a digit per hit |
 | 60 fps in Studio | Needs Play mode with the window rendering: read **View > Stats** while recording (a scripted Play session does not render, so it cannot measure this) |
-| All tests green | **Met** (905 tests, 25 validators, six smokes in Studio, CI) |
+| All tests green | **Met** (910 tests, 25 validators, six smokes in Studio, CI) |
 
 | Line | State | Evidence / what is missing |
 | --- | --- | --- |
-| CI is green: StyLua, Selene, Lune tests, data validators, naming blocklist, `rojo build` | **Met** | GitHub Actions run 39095436348 on `phase-0` (open it from the repository's Actions tab) (format, Selene with the real Roblox std, 905 tests, 25 validators, the review-report check, the game, both places and the plugin build). `tools/lint.sh --offline` reproduces every step except Selene's Roblox-only lints, which need the API dump; those run only in CI. `aftman.toml` pins the tool versions. |
+| CI is green: StyLua, Selene, Lune tests, data validators, naming blocklist, `rojo build` | **Met** | GitHub Actions run 39095436348 on `phase-0` (open it from the repository's Actions tab) (format, Selene with the real Roblox std, 910 tests, 25 validators, the review-report check, the game, both places and the plugin build). `tools/lint.sh --offline` reproduces every step except Selene's Roblox-only lints, which need the API dump; those run only in CI. `aftman.toml` pins the tool versions. |
 | Every new clip is in `docs/ANIMATION_REVIEW.md` with the six beats marked present and the hit-stop tier noted | **Met** (generated), hand columns empty | All 56 clips are in the table; 9 attacks show the six beats and a tier. The three hand-filled columns need the ClipLab pass in Studio. |
 | A recorded clip for every new Art, enemy and boss phase exists in `docs/clips/` and was watched at 0.25x | **Needs the owner's recordings** | `docs/clips/phase-0/README.md` lists the ten files the Capture panel prompts for. None recorded yet; each is reviewed frame by frame once it is in the repository. |
 | No T-pose, A-pose, frozen rig, popping limb or sliding foot appears in any clip | **Needs the owner's recordings** | Judged from the recordings. Remote rigs now walk (Replication drives their locomotion) and the root motor name matches the live R15 rig (D-016), the two defects a reviewer would have seen first. |

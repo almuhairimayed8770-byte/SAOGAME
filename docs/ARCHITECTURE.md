@@ -51,9 +51,11 @@ src/client/
   dev/ClipLab.client.luau      clip review scene at 0.25x / 0.5x / 1x with a frame counter
 tests/                         Lune specs (*.spec.luau) and run-in-roblox smoke scripts (smoke/)
 tests/project/                 project-file guards (empty Animate everywhere, HttpEnabled in dev places only)
+tests/choreo/GroundClearance   every player clip at 240 Hz on the hit matrix's body: the sword stays above the field (D-047)
 tools/validate.luau            runs tools/validators/*.luau
 tools/smoke.sh                 runs the smoke scripts in Studio through tools/smoke-wrap.luau + smoke/SmokeRunner
-tools/hit-matrix.luau          prints the server hit matrix (tools/hitmatrix/HitMatrix.luau, dev.luau hitMatrix, D-045)
+tools/hit-matrix.luau          prints the server hit matrix (tools/hitmatrix/HitMatrix.luau, dev.luau hitMatrix, D-045);
+                               HitMatrix.standing() lends its posed body and field to other specs
 tools/PoseEditor/              Studio plugin (Rojo project) + tools/pose-server.luau (Lune, writes clips)
 ```
 
