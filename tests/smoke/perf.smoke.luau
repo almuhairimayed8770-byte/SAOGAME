@@ -7,17 +7,23 @@
 	and fx.luau `budgets` (parts, draw calls).
 
 	1. Registers world.performance.testPlayers R15 stand-ins as players, spread on a ring around
-	   the Playground field. EnemyService's own player source is EntityService.players(), so a
-	   registered stand-in is a target exactly like a real character and no seam is swapped: the
-	   frame carries the production deps (real Net.fireAll, real player list, real CombatService).
-	   A stand-in is healed back to full inside the hit that hurt it (EntityService.HpChanged runs
-	   its handlers on task.spawn, before applyHit reads the HP back), so hits, staggers and
-	   attribute publishes all run but nobody dies and drops out of the brains' target lists.
+	   the Playground field, each holding the loadout weapon WeaponBuilder hangs from its hand the
+	   way PlaygroundService does for a real character. EnemyService's own player source is
+	   EntityService.players(), so a registered stand-in is a target exactly like a real character
+	   and no seam is swapped: the frame carries the production deps (real Net.fireAll, real player
+	   list, real CombatService). Every fighter is healed back to full inside the hit that hurt it
+	   (EntityService.HpChanged runs its handlers on task.spawn, before applyHit reads the HP back),
+	   so hits, staggers, Breaks and attribute publishes all run but nobody dies: no stand-in drops
+	   out of the brains' target lists and no enemy leaves the count.
 	2. Tops EnemyService up to testEnemies with EnemyService.spawn, mixing the Phase 0 archetypes
 	   in the Playground spawn-table order, clustered around the stand-ins so brains aggro,
 	   telegraph and strike (CombatService.enemyStrike -> HitSweep) through the whole sample.
 	   PlaygroundService's own first wave counts toward the total.
-	3. Waits settleSeconds, then samples every server frame for sampleSeconds:
+	3. Waits settleSeconds, then samples every server frame for sampleSeconds. Through the sample
+	   the stand-ins fight back: every stand-in that is free turns to its nearest enemy and starts
+	   the next Art of the loadout's quick slots through CombatService.beginArt, all of them on the
+	   same frame at the start, so the server sweeps up to testPlayers blades at once (the arc
+	   sub-samples of HitSweep.followArc included) on top of the enemies' strikes:
 	   - server work per frame: os.clock from the frame's first PreAnimation / PreSimulation to the
 	     end of its Heartbeat handlers (a task.defer queued from a Heartbeat handler runs after
 	     every handler of that Heartbeat). This is the number asserted against
@@ -41,8 +47,7 @@
 	Playground; see tools/smoke/SmokeRunner.luau). Errors on the first failed assertion, which the
 	runner reports as SMOKE-RESULT: FAIL. Must not return at top level. Not runnable under Lune.
 
-	Written against the services' public API; it has not been run in this environment (no Roblox
-	Studio or run-in-roblox here).
+	First run on the owner's PC on 2026-10-18 (docs/PROGRESS.md > Performance).
 ]]
 
 local Players = game:GetService("Players")
@@ -77,6 +82,8 @@ local CombatService = require(Server.services.CombatService)
 local EnemyService = require(Server.services.EnemyService)
 local AntiCheatService = require(Server.services.AntiCheatService)
 local PlaygroundLayout = require(Server.world.PlaygroundLayout)
+local WeaponBuilder = require(Server.world.WeaponBuilder)
+local Weapons = require(Shared.data.weapons)
 
 local STAND_IN_RING = 90 -- studs from the field center to each stand-in (the field is 200 in radius)
 local ENEMY_DISTANCES = { 10, 16, 22 } -- studs from its stand-in, cycled: inside both archetypes' aggro range
@@ -89,7 +96,7 @@ local MB_PER_GB = 1000
 
 local performance = World.performance
 local PERCENTILE_LABEL = ("p%d"):format(math.floor(performance.heartbeatPercentile * 100 + 0.5))
-local HOW = ("run-in-roblox, %d stand-ins, %d enemies, server only"):format(
+local HOW = ("run-in-roblox, %d stand-ins swinging Arts, %d enemies, server only"):format(
 	performance.testPlayers,
 	performance.testEnemies
 )
@@ -264,6 +271,12 @@ for index = 1, performance.testPlayers do
 	local root = rootPart :: BasePart
 	model.PrimaryPart = root -- EntityService reads the root through PrimaryPart
 	root.Anchored = true
+	-- The weapon a real character gets from PlaygroundService: without TrailStart / TrailEnd the
+	-- server cannot sweep its swings, and the sweep is the cost this smoke has to include.
+	local weaponDef = Weapons.byId(Playground.loadout.weapon)
+	check(weaponDef ~= nil, "the loadout weapon exists")
+	check(model:WaitForChild("RightHand", READY_TIMEOUT) ~= nil, model.Name .. " has a RightHand for the weapon")
+	WeaponBuilder.equip(model, weaponDef :: any)
 	local player = fakePlayer(index)
 	local id = EntityService.registerPlayer(player, model, Playground.loadout)
 	table.insert(standIns, { id = id, model = model, root = root, player = player })
@@ -271,13 +284,13 @@ for index = 1, performance.testPlayers do
 end
 check(#EntityService.players() >= performance.testPlayers, ("%d stand-ins are registered as players"):format(#standIns))
 
--- Keep every stand-in standing: heal a hurt stand-in back to full inside the hit that hurt it.
--- These two stay connected until the stand-ins are gone; the sampler's own connections go first.
+-- Keep every fighter standing: heal a hurt stand-in or enemy back to full inside the hit that
+-- hurt it. These stay connected until the stand-ins are gone; the sampler's own connections go first.
 local standInConnections: { any } = {}
 table.insert(
 	standInConnections,
 	EntityService.HpChanged:Connect(function(record: any, oldHp: number, newHp: number)
-		if standInIds[record.id] and newHp < oldHp and record.state ~= "Dead" then
+		if newHp < oldHp and record.state ~= "Dead" then
 			EntityService.heal(record.id, record.maxHp - newHp)
 		end
 	end)
@@ -342,6 +355,7 @@ check(
 )
 
 local landedOnStandIns = 0
+local landedByStandIns = 0
 local sampling = false
 local sampleConnections: { any } = {} -- engine and Signal connections alike
 table.insert(
@@ -350,8 +364,61 @@ table.insert(
 		if sampling and standInIds[hit.targetId] then
 			landedOnStandIns += 1
 		end
+		if sampling and standInIds[hit.attackerId] then
+			landedByStandIns += 1
+		end
 	end)
 )
+
+-- The stand-ins fight back: each free one turns to its nearest enemy and starts the next Art of
+-- the loadout's quick slots. An anchored root is turned in place (no travel for the anti-cheat).
+local artSlots = Playground.loadout.artSlots
+local nextArt: { [number]: number } = {}
+local artsStarted = 0
+local artsRefused: { [string]: number } = {}
+
+local function nearestEnemyPosition(from: Vector3): Vector3?
+	local best: Vector3? = nil
+	local bestDistance = math.huge
+	for _, id in EnemyService.ids() do
+		local model = EnemyService.modelOf(id)
+		local root = if model ~= nil then model.PrimaryPart else nil
+		if root ~= nil then
+			local distance = (root.Position - from).Magnitude
+			if distance < bestDistance then
+				best = root.Position
+				bestDistance = distance
+			end
+		end
+	end
+	return best
+end
+
+local function swingFreeStandIns()
+	for _, standIn in standIns do
+		local record = EntityService.get(standIn.id)
+		if record ~= nil and (record.state == "Idle" or record.state == "Moving") then
+			local at = standIn.root.Position
+			local enemy = nearestEnemyPosition(at)
+			if enemy ~= nil and (Vector3.new(enemy.X, at.Y, enemy.Z) - at).Magnitude > 0 then
+				standIn.root.CFrame = CFrame.lookAt(at, Vector3.new(enemy.X, at.Y, enemy.Z))
+			end
+			local slot = nextArt[standIn.id] or 1
+			local ok, reason =
+				CombatService.beginArt(standIn.id, artSlots[(slot - 1) % #artSlots + 1], standIn.root.CFrame.LookVector)
+			if ok then
+				artsStarted += 1
+				nextArt[standIn.id] = slot + 1
+			else
+				local key = tostring(reason)
+				artsRefused[key] = (artsRefused[key] or 0) + 1
+				if key ~= "Locked" and key:sub(1, 5) ~= "Busy:" then
+					nextArt[standIn.id] = slot + 1 -- an Art this body can never start now: try the next
+				end
+			end
+		end
+	end
+end
 
 report(("settling for %g s"):format(performance.settleSeconds))
 task.wait(performance.settleSeconds)
@@ -484,8 +551,10 @@ local windUpSeen: { [number]: boolean } = {}
 local fewestEnemies = EnemyService.count()
 sampling = true
 local sampleEndsAt = os.clock() + performance.sampleSeconds
+swingFreeStandIns() -- every stand-in on the same frame: their snaps land together
 while os.clock() < sampleEndsAt do
 	task.wait(PHASE_POLL_SECONDS)
+	swingFreeStandIns()
 	fewestEnemies = math.min(fewestEnemies, EnemyService.count())
 	for _, id in EnemyService.ids() do
 		local brain = EnemyService.brainOf(id)
@@ -549,6 +618,19 @@ report(
 		fewestEnemies,
 		standInDeaths,
 		kicks
+	)
+)
+local refusedParts: { string } = {}
+for reason, count in artsRefused do
+	table.insert(refusedParts, ("%s x%d"):format(reason, count))
+end
+table.sort(refusedParts)
+report(
+	("stand-ins fought back: %d Arts started (%s), %d hits landed on enemies; refused: %s"):format(
+		artsStarted,
+		table.concat(artSlots, ", "),
+		landedByStandIns,
+		if #refusedParts > 0 then table.concat(refusedParts, ", ") else "none"
 	)
 )
 report(
@@ -710,6 +792,10 @@ check(
 )
 check(landedOnStandIns > 0, ("enemies landed %d hits on the stand-ins during the sample"):format(landedOnStandIns))
 check(windUps > 0, ("%d enemies wound up a telegraphed attack during the sample"):format(windUps))
+check(
+	artsStarted >= #standIns,
+	("the stand-ins started %d Arts during the sample, at least one each"):format(artsStarted)
+)
 local workSummary = work :: Summary
 check(
 	workSummary.percentile < performance.maxServerHeartbeatMs,
