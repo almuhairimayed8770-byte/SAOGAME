@@ -31,6 +31,7 @@ src/server/
   world/RigBuilder.luau        part-built placeholder rigs from rigs.luau (Motor6Ds, attachments)
   world/WeaponBuilder.luau     placeholder weapons with WeaponGrip / TrailStart / TrailEnd
   world/PlaygroundBuilder.luau rim, pillars, clouds, kill volume from playground.luau
+  world/CharacterReady.luau    waits until the engine has parented, dressed and built a character (D-046)
 src/client/
   Main.client.luau             starts controllers in order
   controllers/InputController  ContextActionService bindings (PC, gamepad, mobile), Art hold/release

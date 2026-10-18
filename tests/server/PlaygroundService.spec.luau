@@ -48,7 +48,7 @@ local nextEnemyId = 100
 local fakeEnemies: any = nil
 local built = 0
 
-local function fresh()
+local function fresh(overrides: { [string]: any }?)
 	PlaygroundService.reset()
 	EntityService.reset()
 	clock.t = 1000
@@ -84,7 +84,7 @@ local function fresh()
 			return id
 		end,
 	}
-	PlaygroundService.bind({
+	local deps: { [string]: any } = {
 		now = function()
 			return clock.t
 		end,
@@ -101,7 +101,13 @@ local function fresh()
 			return parent:FindFirstChild(name)
 		end,
 		random = Random.new(21),
-	})
+	}
+	if overrides ~= nil then
+		for key, value in overrides do
+			deps[key] = value
+		end
+	end
+	PlaygroundService.bind(deps :: any)
 end
 
 local function character(name: string?): (any, any, any)
@@ -200,6 +206,62 @@ describe("PlaygroundService.onCharacter", function()
 		expect(model:GetAttribute("EntityId")).toBe(id)
 		expect(model:GetAttribute("ArtSlots")).toBe(table.concat(Playground.loadout.artSlots, ","))
 		expect(CollectionService:HasTag(model, "SkyspirePlayer")).toBe(true)
+	end)
+
+	it("waits for the engine to finish the character before it scales, arms and registers it", function()
+		-- What the engine does after CharacterAdded (D-046): parents the character, applies the
+		-- avatar's appearance (its own scale values, a new RightHand), then builds the rig.
+		local finishedHand: any = nil
+		local waited = 0
+		fresh({
+			characterReady = function(_player, model: any, timeout: number): boolean
+				waited += 1
+				expect(timeout).toBe(World.character.partWaitSeconds)
+				expect(model:GetAttribute("WeaponId")).toBeNil() -- nothing written before it is ready
+				local humanoid = model:FindFirstChildOfClass("Humanoid")
+				for _, name in World.character.scaleValues do
+					local value = Instance.new("NumberValue")
+					value.Name = name
+					value.Value = 1 -- the avatar's own proportions
+					value.Parent = humanoid
+				end
+				model:FindFirstChild("RightHand"):Destroy()
+				finishedHand = Instance.new("Part")
+				finishedHand.Name = "RightHand"
+				finishedHand.Size = Vector3.new(1, 0.4, 1)
+				finishedHand.CFrame = CFrame.new(1.5, 1.2, 0)
+				finishedHand.Parent = model
+				model.Parent = Instance.new("Folder")
+				return true
+			end,
+		})
+		local model, humanoid = character()
+		model.Parent = nil -- CharacterAdded fires before the engine parents the character
+		local id = PlaygroundService.onCharacter(player("Tester"), model)
+		expect(waited).toBe(1)
+		expect(id).toBeTruthy()
+		expect(EntityService.get(id).model).toBe(model)
+		local names = World.character.scaleValues
+		expect(humanoid:FindFirstChild(names.bodyHeight).Value).toBeCloseTo(Rigs.PlayerR15.scale.bodyHeight, 1e-6)
+		expect(humanoid:FindFirstChild(names.head).Value).toBeCloseTo(Rigs.PlayerR15.scale.head, 1e-6)
+		local weapon = model:FindFirstChild("Weapon")
+		expect(weapon).toBeTruthy()
+		expect(weapon.PrimaryPart:FindFirstChild("Weapon").Part0).toBe(finishedHand)
+		expect(model:GetAttribute("Rig")).toBe(Rigs.PlayerR15.id)
+	end)
+
+	it("leaves a character the engine never finished untouched and unregistered", function()
+		fresh({
+			characterReady = function(): boolean
+				return false
+			end,
+		})
+		local model, humanoid = character("Respawned")
+		expect(PlaygroundService.onCharacter(player("Respawned"), model)).toBeNil()
+		expect(model:FindFirstChild("Weapon")).toBeNil()
+		expect(model:GetAttribute("WeaponId")).toBeNil()
+		expect(humanoid:FindFirstChild(World.character.scaleValues.bodyHeight)).toBeNil()
+		expect(#EntityService.players()).toBe(0)
 	end)
 
 	it("skips a character whose Humanoid never arrives, and one that left before it was ready", function()

@@ -3,11 +3,12 @@
 	PlaygroundService: the Playground's game loop glue (sections 16 and 20; D-009, D-013).
 
 	start() builds the rim, pillars, clouds and kill volume through PlaygroundBuilder, then:
-	- on every character: writes the anime proportions from rigs.luau PlayerR15.scale into the
-	  Humanoid's scale NumberValues (created when the avatar lacks them), sets the baseline
-	  WalkSpeed from choreo.luau (the client controller layers walk / run / sprint on top),
-	  equips the loadout weapon through WeaponBuilder and registers the fighter with
-	  EntityService under playground.loadout;
+	- on every character, once the engine has finished it (CharacterReady: CharacterAdded fires
+	  before the character is parented and dressed, D-046): writes the anime proportions from
+	  rigs.luau PlayerR15.scale into the Humanoid's scale NumberValues (created when the avatar
+	  lacks them), sets the baseline WalkSpeed from choreo.luau (the client controller layers
+	  walk / run / sprint on top), equips the loadout weapon through WeaponBuilder and registers
+	  the fighter with EntityService under playground.loadout;
 	- spawns the spawn tables through EnemyService.spawn (pack size, scatter and facing jitter from
 	  playground.luau) and, when EnemyService reports an enemy gone, respawns that slot after
 	  playground.respawnSeconds;
@@ -42,6 +43,9 @@ export type Deps = {
 	players: any?, -- Players service (PlayerAdded, CharacterAdded); nil in tests
 	heartbeat: ((handler: (dt: number) -> ()) -> Connection?)?,
 	waitForChild: (parent: Instance, name: string, timeout: number) -> Instance?,
+	-- CharacterReady.wait: yields until the character is parented, dressed and built; false when it
+	-- was replaced or never parented in time. nil (tests) means ready when it is parented.
+	characterReady: ((player: any, character: Model, timeout: number) -> boolean)?,
 	random: Random,
 }
 
@@ -121,6 +125,15 @@ function PlaygroundService.onCharacter(player: Player, character: Model): number
 	if humanoid == nil or not humanoid:IsA("Humanoid") then
 		warn(("[PlaygroundService] %s: no Humanoid arrived; character skipped"):format(player.Name))
 		return nil
+	end
+	-- CharacterAdded fires before the engine parents the character and applies the avatar's
+	-- appearance (body parts and its own scale values); scaling, arming or registering before that
+	-- is undone or skipped (D-046).
+	local ready = if d.characterReady ~= nil
+		then d.characterReady(player, character, timeout)
+		else character.Parent ~= nil
+	if not ready then
+		return nil -- replaced (respawned) or never put in the world
 	end
 	PlaygroundService.applyScale(humanoid)
 	humanoid.WalkSpeed = PlaygroundService.walkSpeed()
@@ -357,6 +370,7 @@ function PlaygroundService.defaultDeps(overrides: { [string]: any }?): Deps
 		error("PlaygroundService: EnemyService is required")
 	end
 	local builder = sibling(world, "PlaygroundBuilder")
+	local characterReady = sibling(world, "CharacterReady")
 	local result: { [string]: any } = {
 		now = function()
 			return workspace:GetServerTimeNow()
@@ -364,6 +378,7 @@ function PlaygroundService.defaultDeps(overrides: { [string]: any }?): Deps
 		entities = entities,
 		enemies = enemies,
 		weaponBuilder = sibling(world, "WeaponBuilder"),
+		characterReady = if characterReady ~= nil then characterReady.wait else nil,
 		build = if builder ~= nil
 			then function()
 				return builder.build(nil, Random.new())

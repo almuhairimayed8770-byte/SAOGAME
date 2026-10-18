@@ -394,9 +394,15 @@ local function applyPlayerScale(character: Model)
 	end
 end
 
-local function stageCharacter(character: Model)
+local function stageCharacter(player: Player, character: Model)
 	local root = character:WaitForChild("HumanoidRootPart", Lab.stageWaitSeconds)
 	if root == nil or not root:IsA("BasePart") then
+		return
+	end
+	-- CharacterAdded fires before the engine parents and dresses the character; scaling or arming
+	-- it before that is undone (D-046).
+	local CharacterReady = optionalServerModule("world", "CharacterReady")
+	if CharacterReady ~= nil and not CharacterReady.wait(player, character, Lab.stageWaitSeconds) then
 		return
 	end
 	character.PrimaryPart = root
@@ -430,10 +436,10 @@ end
 
 local function onPlayer(player: Player)
 	player.CharacterAdded:Connect(function(character: Model)
-		task.defer(stageCharacter, character)
+		task.defer(stageCharacter, player, character)
 	end)
 	if player.Character then
-		task.defer(stageCharacter, player.Character :: Model)
+		task.defer(stageCharacter, player, player.Character :: Model)
 	end
 end
 

@@ -31,6 +31,7 @@ local SKIP_DIRECTORIES = {
 }
 
 local SKIP_FILES = {
+	[".git"] = true, -- in a git worktree .git is a file holding the main checkout's path
 	["docs/GAME_SPEC.md"] = true,
 	["tools/naming/blocklist.luau"] = true,
 }

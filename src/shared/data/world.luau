@@ -81,7 +81,7 @@ local World = {
 			bodyDepth = "BodyDepthScale",
 			head = "HeadScale",
 		},
-		partWaitSeconds = 10, -- how long CharacterAdded waits for the Humanoid and the RightHand
+		partWaitSeconds = 10, -- how long CharacterAdded waits for the Humanoid, the hand and a finished character (D-046)
 	},
 
 	anticheat = {
