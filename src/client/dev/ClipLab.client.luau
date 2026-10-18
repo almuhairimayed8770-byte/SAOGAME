@@ -9,6 +9,11 @@
 	SmearOn to the fx modules so the blade reads as it will in the game, and offers an "A/B with
 	rest pose" toggle that alternates the clip with every joint at rest.
 
+	The sword sits where the clip time says (ReviewMarkers.mountAt, D-050): on its sheath across
+	the back before a Draw's WeaponDraw, in a sheathed walk or idle, and after a WeaponSheathe; in
+	the hand otherwise. The lab reads the time, not the events, so a scrub backwards puts the
+	sword back where it was.
+
 	The lab owns the clock: Choreo is configured with silent frame signals before the first
 	animator exists, and every step comes from this script (speed, pause, single frames), so what
 	the frame counter says is exactly what the rig shows.
@@ -34,6 +39,7 @@ local El = require(Client.ui.lib.El)
 local Siblings = require(Client.controllers.Siblings)
 local Choreo = require(Client.choreo.Choreo)
 local ClipLibrary = require(Client.choreo.ClipLibrary)
+local WeaponMount = require(Client.choreo.WeaponMount)
 local ReviewMarkers = require(script.Parent.ReviewMarkers)
 
 local Trails, hasTrails = Siblings.load(Client, "fx.Trails")
@@ -139,6 +145,7 @@ local selected = 0
 local clip: Types.ClipDef? = nil
 local animator: Choreo.Animator? = nil
 local handle: Choreo.Handle? = nil
+local mount: WeaponMount.WeaponMount? = nil -- the lab rig's sword: hand or back
 local speed = Lab.defaultSpeed
 local playing = true
 local abEnabled = false
@@ -526,6 +533,23 @@ local function quietFx(model: Model)
 	end
 end
 
+-- Puts the sword where the clip time says. When the place changes, the frame is posed again so
+-- the Weapon joint is pinned (back) or free (hand) in the pose on screen.
+local function syncMount()
+	local def = clip
+	local target = animator
+	local current = handle
+	local sword = mount
+	if def == nil or target == nil or current == nil or sword == nil then
+		return
+	end
+	local place: WeaponMount.Place = ReviewMarkers.mountAt(def, current.time)
+	if sword:get() ~= place then
+		sword:set(place)
+		target:step(0)
+	end
+end
+
 local function play(startTime: number)
 	local def = clip
 	local target = animator
@@ -535,6 +559,7 @@ local function play(startTime: number)
 	quietFx(target.model)
 	handle = target:play(def.id, { startTime = startTime, blendIn = 0, blendOut = 0 })
 	target:step(0)
+	syncMount()
 end
 
 local function refreshRows()
@@ -555,6 +580,11 @@ local function selectClip(index: number)
 		previous:stop(handle, 0)
 		quietFx(previous.model)
 	end
+	local oldMount = mount
+	if oldMount ~= nil then
+		oldMount:destroy()
+		mount = nil
+	end
 	selected = index
 	local entry = entries[index]
 	local def = ClipLibrary.get(entry.id)
@@ -569,6 +599,7 @@ local function selectClip(index: number)
 		return
 	end
 	animator = animatorFor(model)
+	mount = WeaponMount.new(animator, model)
 	motorCache[model] = nil
 	abRest = false
 	abTimer = 0
@@ -600,6 +631,7 @@ local function stepFrames(count: number)
 		for _ = 1, count do
 			target:step(FRAME)
 		end
+		syncMount()
 	else
 		local time = current.time + count * FRAME
 		if def.loop and def.duration > 0 then
@@ -652,6 +684,7 @@ local function toggleAb()
 		local target = animator
 		if target ~= nil then
 			target:step(0)
+			syncMount()
 		end
 	end
 	refreshControls()
@@ -859,6 +892,7 @@ RunService.RenderStepped:Connect(function(dt: number)
 					restPose(target.model)
 				else
 					target:step(0)
+					syncMount()
 				end
 			end
 		end
@@ -869,6 +903,8 @@ RunService.RenderStepped:Connect(function(dt: number)
 			local current = handle
 			if current ~= nil and (current.ended or current.done) then
 				play(0)
+			else
+				syncMount()
 			end
 		end
 		local current = handle

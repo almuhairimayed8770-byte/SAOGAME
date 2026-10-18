@@ -487,4 +487,151 @@ describe("Choreo", function()
 		renderStepped:Fire(FRAME)
 		expect(Choreo.count()).toBe(0)
 	end)
+
+	it("pin holds a keyed joint at rest from the moment it is set; unpinning puts the keyed value back", function()
+		local model = buildRig("PlayerR15")
+		local animator = Choreo.get(model)
+		local weapon = motorOf(model, "Weapon")
+		local shoulder = motorOf(model, "RightShoulder")
+		animator:play(GUARD, { blendIn = 0 })
+		animator:setProcedural("test", { Weapon = { pos = { 0, 0, 0 }, rot = { 5, 0, 0 } } }, 1)
+		animator:step(FRAME)
+		expect(weapon.Transform == CFrame.identity).toBe(false)
+
+		animator:pin("Weapon", true)
+		-- At rest at once (a pin set from a clip event shows in that frame), and on every step after,
+		-- while the clip and the procedural channel still key it; other joints are untouched.
+		expect(weapon.Transform == CFrame.identity).toBe(true)
+		for _ = 1, 3 do
+			animator:step(FRAME)
+			expect(weapon.Transform == CFrame.identity).toBe(true)
+			expect(shoulder.Transform == CFrame.identity).toBe(false)
+		end
+
+		animator:pin("Weapon", false)
+		-- Lune stores a Transform at a little under float precision: compare within 1e-4.
+		local expected = ClipSampler.toCFrame(animator.mixer:lastOffsets().Weapon)
+		expect((weapon.Transform.Position - expected.Position).Magnitude < 1e-4).toBe(true)
+		expect((weapon.Transform.LookVector - expected.LookVector).Magnitude < 1e-4).toBe(true)
+		expect(weapon.Transform == CFrame.identity).toBe(false)
+		animator:step(FRAME)
+		expect(weapon.Transform == CFrame.identity).toBe(false)
+		Choreo.release(model)
+	end)
+
+	it("only the Base clip the limbs show most sounds its footsteps; other layers sound theirs", function()
+		local idleId = "player/OneHandedSword/Idle"
+		local runId = "player/OneHandedSword/Run"
+		local runDrawnId = "player/OneHandedSword/RunDrawn"
+		local landId = "player/OneHandedSword/Land"
+		local model = buildRig("PlayerR15")
+		local animator = Choreo.get(model)
+		local frames: { { string } } = {}
+		local current: { string } = {}
+		animator.events:Connect(function(clipId, event)
+			if event.kind == "Footstep" then
+				table.insert(current, clipId)
+			end
+		end)
+		-- The footsteps the mixer crossed, by clip, whatever their weight.
+		local crossed: { [string]: number } = {}
+		local mixerStep = animator.mixer.step
+		animator.mixer.step = function(self, dt)
+			local result = mixerStep(self, dt)
+			for _, fired in result.events do
+				if fired.event.kind == "Footstep" then
+					crossed[fired.clipId] = (crossed[fired.clipId] or 0) + 1
+				end
+			end
+			return result
+		end
+		local function run(seconds: number): { string }
+			local all = {}
+			table.clear(crossed)
+			for _ = 1, math.ceil(seconds / FRAME - 1e-9) do
+				current = {}
+				animator:step(FRAME)
+				table.insert(frames, current)
+				for _, clipId in current do
+					table.insert(all, clipId)
+				end
+			end
+			return all
+		end
+		-- The locomotion set: every walk runs at once, the ones not in use at weight zero.
+		local idle = animator:play(idleId, { coexist = true, weight = 1, blendIn = 0 })
+		local runHandle = animator:play(runId, { coexist = true, weight = 0, blendIn = 0 })
+		local runDrawn = animator:play(runDrawnId, { coexist = true, weight = 0, blendIn = 0 })
+		local cycle = ClipLibrary.get(runId).duration
+		-- Standing still: no footstep, though the mixer crosses the walks' steps.
+		expect(#run(3 * cycle)).toBe(0)
+		expect(crossed[runId] >= 3).toBe(true)
+		expect(crossed[runDrawnId]).toBe(crossed[runId])
+
+		-- Running: Run's own steps.
+		animator:setWeight(idle, 0, true)
+		animator:setWeight(runHandle, 1, true)
+		local running = run(3 * cycle)
+		expect(count(running, runId)).toBe(crossed[runId])
+		expect(count(running, runDrawnId)).toBe(0)
+
+		-- Halfway into the drawn twin (same clock, same steps): one set, the first of the two.
+		animator:setWeight(runHandle, 0.5, true)
+		animator:setWeight(runDrawn, 0.5, true)
+		local half = run(3 * cycle)
+		expect(count(half, runId)).toBe(crossed[runId])
+		expect(count(half, runDrawnId)).toBe(0)
+		animator:setWeight(runHandle, 0.3, true)
+		animator:setWeight(runDrawn, 0.7, true)
+		local mostlyDrawn = run(3 * cycle)
+		expect(count(mostlyDrawn, runDrawnId)).toBe(crossed[runDrawnId])
+		expect(count(mostlyDrawn, runId)).toBe(0)
+		for _, fired in frames do
+			expect(#fired <= 1).toBe(true)
+		end
+
+		-- A clip on another layer sounds its own steps over the walk.
+		local landSteps = 0
+		for _, event in ClipLibrary.get(landId).events do
+			if event.kind == "Footstep" then
+				landSteps += 1
+			end
+		end
+		animator:setWeight(runDrawn, 0, true)
+		animator:setWeight(idle, 1, true)
+		animator:play(landId, { blendIn = 0 })
+		expect(landSteps > 0).toBe(true)
+		expect(count(run(ClipLibrary.get(landId).duration), landId)).toBe(landSteps)
+		Choreo.release(model)
+	end)
+
+	it("joint returns the joint Choreo writes for a name, the new one after a replace", function()
+		local fire, restore = recordConnections()
+		local model = buildRig("PlayerR15")
+		local animator = Choreo.get(model)
+		local old = motorOf(model, "Weapon")
+		expect(animator:joint("Weapon")).toBe(old)
+		expect(animator:joint("NoSuchJoint")).toBeNil()
+		animator:pin("Weapon", true)
+
+		local replacement = Instance.new("Motor6D")
+		replacement.Name = "Weapon"
+		replacement.Transform = CFrame.new(0, 1, 0)
+		local parent = old.Parent
+		fire(model, "DescendantRemoving", old)
+		old.Parent = nil
+		replacement.Parent = parent
+		fire(model, "DescendantAdded", replacement)
+		expect(animator:joint("Weapon")).toBe(replacement)
+		-- The pin is by name, so the new joint is put at rest and held there too.
+		expect(replacement.Transform == CFrame.identity).toBe(true)
+		animator:play(GUARD, { blendIn = 0 })
+		animator:step(FRAME)
+		expect(replacement.Transform == CFrame.identity).toBe(true)
+		animator:pin("Weapon", false)
+		animator:step(FRAME)
+		expect(replacement.Transform == CFrame.identity).toBe(false)
+		Choreo.release(model)
+		restore()
+	end)
 end)

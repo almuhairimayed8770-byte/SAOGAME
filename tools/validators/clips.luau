@@ -22,10 +22,20 @@
 	- a TrailOn that names its trail kind (data.kind) is listed before the clip's first
 	  HitWindowOpen: the client remembers the kind from the first event that names one, and the
 	  window opens on the same frame;
+	- the sheath rules of every clip (ReviewMarkers.mountProblems, docs/DECISIONS.md D-050):
+	  `sheathed` is a boolean, WeaponDraw only in a sheathed clip and WeaponSheathe only in one
+	  that is not, at most one of each and never both, no Weapon key while the sword is on the back,
+	  a Weapon key at the WeaponDraw, no trail, smear or hit window on the back, no sheathed attack;
 	- cross-checks: every Art in arts.luau has a clip file whose hit-window count equals the Art's
 	  hits and whose duration covers the Art's total; every enemy attack clip in enemies.luau and
 	  every boss attack clip in bosses.luau exists, is an attack clip, and its Anticipation beat
-	  covers the attack's windUp - 0.05.
+	  covers the attack's windUp - 0.05;
+	- the locomotion and sheath clips of choreo.luau: every locomotion.clips and sheath.clips name
+	  has a file under locomotion.clipPrefix; the plain idle, walks, run and sprint are sheathed and
+	  their ...Drawn counterparts (and IdleDrawn) are not; each pair has the same duration and loop
+	  and the same Footstep feet at times within one 60 fps frame, so a crossfade between the sets
+	  stays in step; Draw is sheathed with one WeaponDraw, Sheathe has one WeaponSheathe, and both
+	  are UpperBody at priority.Sheath; every sheath.drawCutClips name is a clip file.
 
 	Phase scope (D-015, src/shared/data/scope.luau): a missing clip for an Art, enemy or boss in
 	the current phase's scope is a problem; missing clips for later-phase rows are collected into
@@ -65,7 +75,12 @@ local EVENT_KINDS = {
 	PostMotionStart = true,
 	WeaponSwap = true,
 	CameraNudge = true,
+	WeaponDraw = true,
+	WeaponSheathe = true,
 }
+
+-- The plain locomotion names that make the sheathed set; each has a drawn counterpart.
+local SHEATHED_SET = { "Idle", "WalkForward", "WalkBack", "WalkLeft", "WalkRight", "Run", "Sprint" }
 
 -- Event kinds whose data.name is a sound in src/shared/data/sfx.luau.
 local SOUND_KINDS = { Sfx = true, Voice = true }
@@ -567,6 +582,9 @@ return function(ctx: Context): { string }
 		end
 		validateKeys(id, clip, joints)
 		local counts = validateEvents(id, clip)
+		for _, message in ReviewMarkers.mountProblems(clip) do
+			problem("%s: %s", id, message)
+		end
 		if clip.attack == true then
 			validateAttack(id, clip, counts)
 		elseif clip.attack ~= nil and clip.attack ~= false then
@@ -724,6 +742,165 @@ return function(ctx: Context): { string }
 						tostring(attack.id or attack.name or "?")
 					)
 					crossCheckAttack(label, attack, def.skin, "boss attacks", isInScope)
+				end
+			end
+		end
+	end
+
+	-- Cross-check: the locomotion and sheath clips of choreo.luau (D-050).
+	local choreo, choreoError = tryLoad("src/shared/data/choreo")
+	if choreo == nil then
+		problem("src/shared/data/choreo.luau is missing or failed to load (%s)", choreoError or "?")
+	else
+		local locomotion = if typeof(choreo.locomotion) == "table" then choreo.locomotion else {}
+		local sheath = if typeof(choreo.sheath) == "table" then choreo.sheath else {}
+		local prefix = if typeof(locomotion.clipPrefix) == "string" then locomotion.clipPrefix else ""
+		local locomotionClips = if typeof(locomotion.clips) == "table" then locomotion.clips else {}
+		local sheathClips = if typeof(sheath.clips) == "table" then sheath.clips else {}
+
+		-- The loaded clip a choreo name points at, or nil (a missing file is reported once, here).
+		local function clipFor(label: string, key: string, name: any): any
+			if typeof(name) ~= "string" then
+				problem("%s %s is not a clip name", label, key)
+				return nil
+			end
+			local id = prefix .. name
+			if not present[id] then
+				problem("%s %s: clip file %s/%s.luau is missing", label, key, CLIPS_DIRECTORY, id)
+				return nil
+			end
+			return loaded[id]
+		end
+		for _, row in sortedRows(locomotionClips) do
+			clipFor("locomotion.clips", row.key, row.def)
+		end
+		for _, row in sortedRows(sheathClips) do
+			clipFor("sheath.clips", row.key, row.def)
+		end
+
+		local function footsteps(clip: any): { { time: number, foot: any } }
+			local list = {}
+			if typeof(clip.events) == "table" then
+				for _, event in ipairs(clip.events) do
+					if typeof(event) == "table" and event.kind == "Footstep" and typeof(event.time) == "number" then
+						local foot = if typeof(event.data) == "table" then event.data.foot else nil
+						table.insert(list, { time = event.time, foot = foot })
+					end
+				end
+			end
+			return list
+		end
+
+		-- The sheathed set and its drawn counterparts: a crossfade between them stays in step.
+		for _, name in SHEATHED_SET do
+			local drawnName = if name == "Idle" then "IdleDrawn" else name .. "Drawn"
+			if locomotionClips[name] == nil and locomotionClips[drawnName] == nil then
+				continue
+			end
+			if locomotionClips[name] == nil or locomotionClips[drawnName] == nil then
+				problem("locomotion.clips needs both %s and %s", name, drawnName)
+				continue
+			end
+			local plain = loaded[prefix .. tostring(locomotionClips[name])]
+			local drawn = loaded[prefix .. tostring(locomotionClips[drawnName])]
+			if plain ~= nil and plain.sheathed ~= true then
+				problem("%s: the sheathed set's %s must set sheathed = true", plain.id, name)
+			end
+			if drawn ~= nil and drawn.sheathed == true then
+				problem("%s: the drawn set's %s must not be sheathed", drawn.id, drawnName)
+			end
+			if plain == nil or drawn == nil then
+				continue
+			end
+			if plain.duration ~= drawn.duration then
+				problem(
+					"%s: duration %s differs from %s's %s (the sets crossfade in step)",
+					plain.id,
+					tostring(plain.duration),
+					drawn.id,
+					tostring(drawn.duration)
+				)
+			end
+			if plain.loop ~= drawn.loop then
+				problem("%s: loop differs from %s's", plain.id, drawn.id)
+			end
+			local a, b = footsteps(plain), footsteps(drawn)
+			if #a ~= #b then
+				problem("%s: %d Footstep events but %s has %d", plain.id, #a, drawn.id, #b)
+			else
+				for index = 1, #a do
+					if math.abs(a[index].time - b[index].time) > FRAME + EPSILON then
+						problem(
+							"%s: Footstep %d at %s s is more than a frame from %s's at %s s",
+							plain.id,
+							index,
+							tostring(a[index].time),
+							drawn.id,
+							tostring(b[index].time)
+						)
+					end
+					if a[index].foot ~= b[index].foot then
+						problem(
+							"%s: Footstep %d plants the %s foot but %s plants the %s foot",
+							plain.id,
+							index,
+							tostring(a[index].foot),
+							drawn.id,
+							tostring(b[index].foot)
+						)
+					end
+				end
+			end
+		end
+
+		-- Draw and Sheathe: one event each, UpperBody at the Sheath priority.
+		local sheathPriority = if typeof(choreo.priority) == "table" then choreo.priority.Sheath else nil
+		local function eventCount(clip: any, kind: string): number
+			local count = 0
+			if typeof(clip.events) == "table" then
+				for _, event in ipairs(clip.events) do
+					if typeof(event) == "table" and event.kind == kind then
+						count += 1
+					end
+				end
+			end
+			return count
+		end
+		for _, case in { { key = "draw", kind = "WeaponDraw" }, { key = "sheathe", kind = "WeaponSheathe" } } do
+			local name = sheathClips[case.key]
+			local clip = if typeof(name) == "string" then loaded[prefix .. name] else nil
+			if clip == nil then
+				continue -- missing or failed to load: already reported
+			end
+			if case.key == "draw" and clip.sheathed ~= true then
+				problem("%s: the draw clip must be sheathed (the sword starts on the back)", clip.id)
+			end
+			local count = eventCount(clip, case.kind)
+			if count ~= 1 then
+				problem("%s: needs exactly one %s event (has %d)", clip.id, case.kind, count)
+			end
+			if clip.layer ~= "UpperBody" then
+				problem("%s: must be on the UpperBody layer (got %s)", clip.id, tostring(clip.layer))
+			end
+			if clip.priority ~= sheathPriority then
+				problem(
+					"%s: priority %s must equal choreo priority.Sheath (%s)",
+					clip.id,
+					tostring(clip.priority),
+					tostring(sheathPriority)
+				)
+			end
+		end
+		if typeof(sheath.drawCutClips) == "table" then
+			for _, name in ipairs(sheath.drawCutClips) do
+				local id = prefix .. tostring(name)
+				if not present[id] then
+					problem(
+						"sheath.drawCutClips %s: clip file %s/%s.luau is missing",
+						tostring(name),
+						CLIPS_DIRECTORY,
+						id
+					)
 				end
 			end
 		end

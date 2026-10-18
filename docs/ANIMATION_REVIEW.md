@@ -37,6 +37,7 @@ regeneration, matched by clip id.
 | `player/OneHandedSword/DodgeForward` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none |  |  |  |
 | `player/OneHandedSword/DodgeLeft` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none |  |  |  |
 | `player/OneHandedSword/DodgeRight` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none |  |  |  |
+| `player/OneHandedSword/Draw` | PlayerR15 | one-shot | 0.62 s / 37f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Fall` | PlayerR15 | loop | 0.80 s / 48f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/FlinchBack` | PlayerR15 | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/FlinchFront` | PlayerR15 | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
@@ -51,15 +52,22 @@ regeneration, matched by clip id.
 | `player/OneHandedSword/Land` | PlayerR15 | one-shot | 0.45 s / 27f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Parry` | PlayerR15 | one-shot | 0.40 s / 24f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Run` | PlayerR15 | loop | 0.60 s / 36f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/RunDrawn` | PlayerR15 | loop | 0.60 s / 36f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/Sheathe` | PlayerR15 | one-shot | 0.70 s / 42f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Skid` | PlayerR15 | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Sprint` | PlayerR15 | loop | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/SprintDrawn` | PlayerR15 | loop | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Stagger` | PlayerR15 | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 1.50 | none |  |  |  |
 | `player/OneHandedSword/TurnLeft` | PlayerR15 | one-shot | 0.40 s / 24f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/TurnRight` | PlayerR15 | one-shot | 0.40 s / 24f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/WalkBack` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/WalkBackDrawn` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/WalkForward` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/WalkForwardDrawn` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/WalkLeft` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/WalkLeftDrawn` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/WalkRight` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/WalkRightDrawn` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `enemy/Boar/Charge` | Boar | attack | 2.30 s / 138f | Y 36f | Y 3f | Y 2f | Y 3f | Y 9f | Y 63f | Normal | 1 | on 0.0f before, off 1.2f after | 0.00 | none |  |  |  |
 | `enemy/Boar/Break` | Boar | one-shot | 3.00 s / 180f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `enemy/Boar/DeathFreeze` | Boar | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
@@ -83,5 +91,5 @@ regeneration, matched by clip id.
 
 ## Summary
 
-- 56 clips (9 attacks) across 3 rigs; 0 with problems found by the rules; 0 that do not load.
+- 64 clips (9 attacks) across 3 rigs; 0 with problems found by the rules; 0 that do not load.
 - Watch every attack at 0.25x in `places/ClipLab.rbxl` before a gate and fill the last three columns.

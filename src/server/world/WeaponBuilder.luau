@@ -14,6 +14,13 @@
 	hand on a Motor6D named Weapon: C0 is the rigs.luau PlayerR15 "Weapon" joint, C1 puts the grip's
 	center at the hand so the blade points out of the fist. The character gets the WeaponId attribute
 	and a WeaponGrip attachment on the hand. The blade's long axis is +Y with the tip at +Y.
+
+	When the weapon's category has a weaponModels.luau `sheaths` row and the character has that
+	row's part, equip also builds the sheath: a Model named Sheath next to the Weapon model, holding
+	one Scabbard part welded to the body part by a Weld named ScabbardWeld at the row's back mount.
+	The scabbard never collides, touches or answers a spatial query, and it carries no attachment.
+	The server's Weapon motor never leaves the right hand: each client moves the sword to the back
+	mount on its own, from the Drawn attribute, so hits and the hit matrix see the same rig as before.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -188,7 +195,16 @@ function WeaponBuilder.equipped(character: Model): Model?
 	return nil
 end
 
---- Removes a character's weapon model and its Motor6D; clears the WeaponId attribute.
+--- The sheath Model a character carries (the scabbard on its back mount), or nil.
+function WeaponBuilder.sheathOf(character: Model): Model?
+	local existing = character:FindFirstChild(WeaponModels.sheathModelName)
+	if existing ~= nil and existing:IsA("Model") then
+		return existing
+	end
+	return nil
+end
+
+--- Removes a character's weapon model, its Motor6D and its sheath; clears the WeaponId attribute.
 function WeaponBuilder.unequip(character: Model)
 	local joint = WeaponBuilder.gripJoint()
 	local hand = character:FindFirstChild(joint.part0)
@@ -202,11 +218,71 @@ function WeaponBuilder.unequip(character: Model)
 	if existing ~= nil then
 		existing:Destroy()
 	end
+	for _, child in character:GetChildren() do
+		if child.Name == WeaponModels.sheathModelName and child:IsA("Model") then
+			child:Destroy()
+		end
+	end
 	character:SetAttribute(WeaponModels.attributes.weaponId, nil)
 end
 
+--- The ScabbardWeld's C0 on the sheath part: the back mount, moved along the blade to the scabbard's center.
+function WeaponBuilder.scabbardC0(category: Types.WeaponCategory): CFrame?
+	local row = WeaponModels.sheath(category)
+	if row == nil then
+		return nil
+	end
+	local along = WeaponModels.holdOffset(category) + row.scabbard.clearance / 2
+	return RigBuilder.frameOf(row.mount) * CFrame.new(0, along, 0)
+end
+
+-- The scabbard on the category's back mount, or nil when the category has no sheath row or the
+-- character lacks the row's part (the Lune stand-ins have only a root and a hand).
+local function buildSheath(character: Model, category: Types.WeaponCategory): Model?
+	local row = WeaponModels.sheath(category)
+	local c0 = WeaponBuilder.scabbardC0(category)
+	if row == nil or c0 == nil then
+		return nil
+	end
+	local body = character:FindFirstChild(row.part)
+	if body == nil or not body:IsA("BasePart") then
+		return nil
+	end
+	local blade = WeaponModels.get(category).blade
+	local scabbard = row.scabbard
+	local model = Instance.new("Model")
+	model.Name = WeaponModels.sheathModelName
+	local part = makePart(
+		WeaponModels.scabbardPart,
+		Vector3.new(
+			blade.width + 2 * scabbard.wall,
+			blade.length + scabbard.clearance,
+			blade.thickness + 2 * scabbard.wall
+		),
+		scabbard.color :: Palette.Token,
+		nil
+	)
+	-- Spatial queries skip it (D-042): no sweep or cast ever stops on the scabbard.
+	part.CanQuery = false
+	-- Start it where the weld holds it, so nothing flashes at the origin for a frame.
+	part.CFrame = body.CFrame * c0
+	part.Parent = model
+	model.PrimaryPart = part
+	local joint = Instance.new("Weld")
+	joint.Name = WeaponModels.scabbardWeld
+	joint.Part0 = body
+	joint.Part1 = part
+	joint.C0 = c0
+	joint.C1 = CFrame.identity
+	joint.Parent = part
+	model:AddTag(WeaponModels.tag)
+	model.Parent = character
+	return model
+end
+
 --- Builds the weapon, parents it into the character and hangs it from the right hand on a Motor6D named
---- Weapon (C0 from rigs.luau, C1 at the grip). Replaces any weapon already carried. Returns the Model.
+--- Weapon (C0 from rigs.luau, C1 at the grip); welds the category's scabbard to its back mount when the
+--- category has one. Replaces any weapon and sheath already carried. Returns the weapon Model.
 function WeaponBuilder.equip(character: Model, weaponDef: Types.WeaponDef): Model
 	local joint = WeaponBuilder.gripJoint()
 	local hand = character:FindFirstChild(joint.part0)
@@ -241,6 +317,8 @@ function WeaponBuilder.equip(character: Model, weaponDef: Types.WeaponDef): Mode
 	motor.C0 = c0
 	motor.C1 = c1
 	motor.Parent = bladePart
+
+	buildSheath(character, weaponDef.category)
 
 	character:SetAttribute(WeaponModels.attributes.weaponId, weaponDef.id)
 	return model

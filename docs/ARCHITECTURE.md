@@ -43,7 +43,10 @@ src/client/
   controllers/Replication      remote events -> Choreo, FX, HUD, camera
   choreo/Choreo.luau           per-rig animator: layers, clock, blend, root motion, events
   choreo/ClipLibrary.luau      loads clip modules by id
-  choreo/Locomotion.luau       8-direction blend space, turn-in-place, skid, landing squash, foot IK
+  choreo/Locomotion.luau       8-direction blend space, turn-in-place, skid, landing squash, foot IK, the sheath
+  choreo/LocomotionState.luau  pure blend-space weights: sheathed and drawn sets, gaits, turns, stops
+  choreo/WeaponMount.luau      moves the client's copy of the sword between hand and back (D-050)
+  choreo/SheathState.luau      pure: when Draw and Sheathe play, stop and move the sword (D-050)
   camera/CameraController      spring follow, FOV, nudge, shake, lock-on framing, orbit presets
   fx/Trails, Smear, Shatter, Sparks, Telegraphs, OutlineManager, SwitchRing, Digits, Quality
   ui/lib/                      el(), state cells
@@ -92,6 +95,12 @@ publishes its state as attributes on its Model (D-006):
 | `Cursor` | string | `"Green"`, `"Orange"`, `"Red"` (players only) |
 | `Level` | number | |
 | `ArtSlots` | string | players only: the quick-slot Art ids joined with commas, in slot order |
+| `Drawn` | boolean | players only (nil means false): true while the combat tag holds; clients move the sword between hand and back from it (D-050) |
+
+A hit dealt or taken marks `lastCombatAt` and `combatUntil`; an Art, a basic swing, a guard or a
+lock-on refreshes `combatUntil` only, and Art, PostMotion, Guard and a lock-on on a live target keep
+it fresh. `EntityService.inCombat` and `Drawn` follow `combatUntil`; a new record (a respawn)
+starts with `Drawn` false.
 
 Tags (CollectionService): `SkyspireEntity` on every entity model, plus `SkyspirePlayer` or
 `SkyspireEnemy`. Clients discover entities by tag and read attributes; remotes carry events only.
@@ -113,6 +122,55 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
   part named `Weapon`, `TrailStart` at the guard and `TrailEnd` at the tip; the server attaches it to
   the player's `RightHand` with a Motor6D named `Weapon` (C0 from `rigs.luau`). The player's
   equipped weapon def id is the attribute `WeaponId` on the character.
+- Sheaths (D-050): when the weapon's category has a `weaponModels.luau` `sheaths` row and the
+  character has that part, `WeaponBuilder.equip` also parents a Model `Sheath` (tagged Placeholder)
+  next to `Weapon`. It holds one `Scabbard` part welded by a Weld `ScabbardWeld` at the back mount
+  (UpperTorso for the one-handed sword), with CanCollide, CanTouch and CanQuery off and no
+  attachments. A Weld is not a joint, so Joints, Pose and the rigs smoke never see it. The server's
+  `Weapon` Motor6D always stays on RightHand (hits and the hit matrix never see the back); clients
+  move their copy. `unequip` removes the sheath. Helpers: `WeaponBuilder.sheathOf(character)` and
+  `WeaponBuilder.scabbardC0(category)`.
+
+## Sheathed weapon (client, D-050)
+
+- `Locomotion` (local and remote players) owns a `WeaponMount` and a `SheathState`. A step hook runs
+  before the mixer: Locomotion scans the live handles (drawing, sheathing, cut, covered), SheathState
+  plays or stops Draw and Sheathe, then WeaponMount sets the Weapon motor's Part0 and C0.
+- The target is the `Drawn` attribute; the local player predicts `true` for `choreo.luau`
+  `sheath.predictSeconds` after an attack, guard, parry or lock-on (`ActionLogic.drawnTarget`,
+  `CharacterController.predictDraw()`, which `Main.client` calls when `TargetController.targetChanged`
+  gets a target). Locomotion follows `Drawn` and `State` through `GetAttributeChangedSignal` (the
+  `attributeSignal` dependency replaces it in tests; an instance with no signals falls back to one
+  read per step); `locomotion:serverDrawn()` gives Drawn to CharacterController, and remote rigs feed
+  `humanoidTracker` from the driver (`drawnOf`). No attribute is read per frame.
+- Every attack clip and the clips in `sheath.drawCutClips` (Guard, GuardHit, Parry) are draw-cuts:
+  the sword is in the hand on their first posed frame and a playing Draw stops. A lock-on or a hit taken plays Draw; Sheathe
+  starts `sheath.sheatheDelay` after the target turns false. Dodges do not draw.
+- The `WeaponDraw` and `WeaponSheathe` events move the sword mid-clip, only when they come from the
+  live handle of that clip (not stopping, not done, its clock past the event) and the arm is not
+  covered. Covered: a live FullBody clip, or an UpperBody clip above `priority.Sheath`, keys a joint
+  Draw or Sheathe keys (Weapon excluded). While covered no Draw or Sheathe starts, one that has not
+  moved the sword stops and plays again once the arm is free; a draw-cut still takes the sword at
+  once. A clip that ends before its event, or a build without the clip, lands the sword where the
+  target wants it.
+- The drawn sprint additive follows SprintDrawn's live weight, scaled by 1 minus the visible weight of
+  Draw or Sheathe, and is 0 while the sword is on the back.
+- `WeaponMount`: `new(animator, model)`, `:set("Hand"|"Back")`, `:get()`, `:sheathable()`,
+  `:refresh()`, `:generation()`, `:destroy()`, `WeaponMount.handFrame()`,
+  `WeaponMount.backFrame(category)`. It writes only the client copy's Part0 and C0 (never C1), looks
+  the hand and back parts up once per new Weapon motor, and pins the Weapon joint at rest while the
+  sword is on the back. Mounts on one animator form a stack and the newest drives the sword; a new
+  motor bumps `generation()`, which snaps the sword to the target with no clip.
+- `SheathState` (pure, no Instances): `new(place, config?)`,
+  `:step(dt, { target, cut, covered, drawing, sheathing, hold }) -> { place?, play?, stop? }`,
+  `:onEvent(kind, input) -> place?`.
+- Choreo: `animator:joint(name)` returns the joint Choreo writes for a name (or the new one after a
+  replace); `animator:pin(name, on)` holds a joint at rest whatever any clip, additive or procedural
+  key says, acts at once, and survives a joint rebuild.
+- Footsteps (D-051): the Base layer runs every walk clip and its drawn twin at once. Only the Base
+  clip with Footstep events that the limbs show most (eased fade times weight; the first wins a tie;
+  nothing at weight 0) passes its Footstep on, so a rig standing still is silent. FullBody and
+  Additive clips (Land, a dodge, Stagger) fire their own.
 
 ## Clips
 
@@ -121,10 +179,24 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
 - Files: `src/shared/clips/player/OneHandedSword/SharpNail.luau` returns one `Types.ClipDef`.
   `ClipLibrary.get(id)` maps the id to the module path.
 - Required player clips (OneHandedSword, Phase 0): `Idle`, `IdleDrawn`, `WalkForward`,
-  `WalkBack`, `WalkLeft`, `WalkRight`, `Run`, `Sprint`, `Jump`, `Fall`, `Land`, `TurnLeft`,
+  `WalkBack`, `WalkLeft`, `WalkRight`, `Run`, `Sprint`, `WalkForwardDrawn`, `WalkBackDrawn`,
+  `WalkLeftDrawn`, `WalkRightDrawn`, `RunDrawn`, `SprintDrawn`, `Draw`, `Sheathe`, `Jump`, `Fall`, `Land`, `TurnLeft`,
   `TurnRight`, `Skid`, `Guard`, `GuardHit`, `GuardBreak`, `Parry`, `DodgeForward`, `DodgeBack`,
   `DodgeLeft`, `DodgeRight`, `FlinchFront`, `FlinchBack`, `FlinchLeft`, `FlinchRight`, `Stagger`,
   `DeathFreeze`, `Basic1`, `Basic2`, `Basic3`, `Horizontal`, `Vertical`, `RisingArc`, `SharpNail`.
+  The plain `Idle`, walk, `Run` and `Sprint` names are the sheathed set (`sheathed = true`, sword on
+  the back, empty hands); the `…Drawn` names are the drawn set. `LocomotionState.clipFor(name, drawn)`
+  maps a plain name to its twin. The clips validator checks that every name in
+  `choreo.locomotion.clips`, `sheath.clips` and `sheath.drawCutClips` has a file, that each sheathed
+  clip matches its drawn twin (duration, loop, Footstep times and feet), and that Draw and Sheathe are
+  UpperBody at `priority.Sheath` with one `WeaponDraw` or `WeaponSheathe` each.
+- Sheath events: `WeaponDraw` (the hand takes the sword from its sheath) and `WeaponSheathe` (the
+  sword goes back into it) carry no data. At the event the clip's Weapon key lines the blade up with
+  the back mount. `ReviewMarkers.mountAt(clip, time)` ("Hand" or "Back") is the one source for where
+  the sword is; `ReviewMarkers.mountProblems(clip)` lists the sheath rules. The clips validator,
+  GroundClearance, the review and the ClipLab use them. GroundClearance also checks the handoff
+  (`dev.luau` `groundClearance.handoff`), the sheathed set against the body (`backOverlap`) and the
+  pull along the sheath (`sheathSlide`).
   `src/shared/data/scope.luau` lists the Arts, enemies, bosses and rigs whose clips the current
   phase must ship; the clips validator fails on those and folds the later-phase backlog into one
   summary warning (D-015). Boss attack clips (`bosses.luau` phase attacks, id
@@ -225,16 +297,16 @@ nothing about animation runs on the server except the pose sampling used by the 
 | `lighting.luau` | section 11 lighting values per floor |
 | `sfx.luau` | sound ids (placeholders) by name |
 | `assets.luau` | asset ids by name; missing ids are reported |
-| `choreo.luau` | animation tunables: blend times and the blend easing, smear scale, idle cycle, locomotion speeds |
+| `choreo.luau` | animation tunables: blend times and the blend easing, smear scale, idle cycle, locomotion speeds and clip names, `priority.Sheath` and the `sheath` table (clips, draw-cuts, predictSeconds, sheatheDelay, stopBlend) |
 | `camera.luau` | section 10 camera numbers |
 | `fx.luau` | budgets, shard counts, trail lifetimes, telegraph sizes, the parry spark burst, quality tiers |
 | `playground.luau` | the Playground: field radius, rim, pillars, clouds, spawn tables, loadout |
 | `ai.luau` | every AI tunable: perception, archetype tuning, pathing, tick rates |
 | `world.luau` | world builder tunables (folders, railing, pillars, clouds, kill volume) and the anti-cheat policy, including the shadow and teleport-cap fractions and the per-remote rate limits (`anticheat.remoteRates`) |
-| `weaponModels.luau` | placeholder weapon geometry per category and the names the client relies on |
+| `weaponModels.luau` | placeholder weapon geometry per category, the names the client relies on, and the back mounts (`sheaths`, `sheath(category)`, D-050) |
 | `input.luau` | key, gamepad and touch bindings |
 | `ui.luau` | HUD, nameplate and system-line layout numbers, and the death system-line text |
-| `dev.luau` | dev tooling numbers: Capture panel, ClipLab, PoseEditor, pose server (D-028), clip review tolerances (D-043), hit matrix setups and real-fight ranges (D-045) |
+| `dev.luau` | dev tooling numbers: Capture panel, ClipLab, PoseEditor, pose server (D-028), clip review tolerances (D-043), hit matrix setups and real-fight ranges (D-045), ground clearance and the sheath checks (D-047, D-050), the WeaponDraw and WeaponSheathe tokens |
 
 Row convention (D-017): tables with many rows keep them under `Module.rows` with `byId(id)` and
 `list()` functions; `list()` returns a clone. Validators read `rows` first and fall back to the

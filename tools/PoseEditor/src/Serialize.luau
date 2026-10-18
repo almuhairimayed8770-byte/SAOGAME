@@ -40,7 +40,8 @@ type Token = {
 	comments: { Comment }, -- comments that preceded this token
 }
 
-local TOP_FIELDS = { "id", "rig", "duration", "loop", "layer", "priority", "attack", "hitStop", "blendIn", "blendOut" }
+local TOP_FIELDS =
+	{ "id", "rig", "duration", "loop", "sheathed", "layer", "priority", "attack", "hitStop", "blendIn", "blendOut" }
 local BEATS = { "Anticipation", "Snap", "Smear", "Hold", "Settle", "Recovery" }
 local HELPERS: { [string]: boolean } = { rot = true, posRot = true, pos = true }
 local INDENT = "\t"

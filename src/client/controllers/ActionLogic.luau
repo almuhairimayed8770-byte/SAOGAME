@@ -269,9 +269,15 @@ function ActionLogic.resolveSpeeds(choreoData: any, fallback: Speeds): Speeds
 	}
 end
 
---- Drawn weapon while inside the combat tag window after the last combat action.
-function ActionLogic.drawn(lastCombatTime: number?, now: number, tagDuration: number): boolean
-	return lastCombatTime ~= nil and now - lastCombatTime <= tagDuration
+--- Whether the local fighter's sword should be drawn: the server's Drawn attribute, or a combat
+--- request this client sent in the last `predictSeconds` (until the attribute lands).
+function ActionLogic.drawnTarget(
+	attributeDrawn: boolean,
+	lastPredictAt: number?,
+	now: number,
+	predictSeconds: number
+): boolean
+	return attributeDrawn or (lastPredictAt ~= nil and now - lastPredictAt <= predictSeconds)
 end
 
 --- Signed angle in degrees (positive = to the left) from the rig's look direction to the move

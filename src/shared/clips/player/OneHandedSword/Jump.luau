@@ -1,8 +1,8 @@
 --!strict
 --[[
-	player/OneHandedSword/Jump: take-off. A 0.08 s crouch (the point level, off the grass), an
-	ExpoOut extension with the arms thrown up and back, then the legs tuck with BackOut. Fall takes
-	over when the clip ends.
+	player/OneHandedSword/Jump: take-off. A 0.08 s crouch (the point level, off the grass, the arms
+	back and a little out so the left hand clears the scabbard), an ExpoOut extension with the arms
+	thrown up and back, then the legs tuck with BackOut. Fall takes over when the clip ends.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -40,10 +40,10 @@ local clip: Types.ClipDef = {
 				RightHip = rot(30, 0, 4),
 				RightKnee = rot(-50, 0, 0),
 				RightAnkle = rot(20, 0, 0),
-				LeftShoulder = rot(-30, 0, -8),
+				LeftShoulder = rot(-30, 0, -17),
 				LeftElbow = rot(20, 0, 0),
 				LeftWrist = rot(0, 0, 0),
-				RightShoulder = rot(-30, 0, 8),
+				RightShoulder = rot(-30, 0, 17),
 				RightElbow = rot(20, 0, 0),
 				RightWrist = rot(-6, 0, 0),
 				Weapon = rot(4, 0, 0),

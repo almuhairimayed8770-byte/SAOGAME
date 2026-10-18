@@ -16,6 +16,11 @@
 	  linking the Part0 / Part1 rigs.luau names inside the character, and its Rig attribute must be
 	  PlayerR15 and known to Choreo. Prints StarterPlayer.AvatarJointUpgrade (when the property is
 	  readable) and the stand-in's joint classes, IsKinematic flags and BallSocketConstraints.
+	- The player's sheath: the loadout sword's category has a weaponModels.luau back mount, so the
+	  stand-in carries one Sheath model whose Scabbard is welded (a Weld, never a joint) to the
+	  row's body part at the mount, sits where the weld holds it, and never collides, touches or
+	  answers a spatial query. The joint check above still sees exactly the rigs.luau joints, so
+	  the weld adds none. The freshly registered stand-in reads Drawn = false (sword on the back).
 	- Enemies: for every rig in scope.luau other than the player's, one in-scope enemy that uses
 	  that rig is spawned through EnemyService.spawn. Its Rig attribute must equal the rig id (and be
 	  known to Choreo) and its joint names must be exactly that rig's joint list, no missing, no
@@ -70,6 +75,9 @@ local ChoreoData = require(Shared.data.choreo)
 local Joints = require(Shared.choreo.Joints)
 local Pose = require(Shared.choreo.Pose)
 local World = require(Shared.data.world)
+local Weapons = require(Shared.data.weapons)
+local WeaponModels = require(Shared.data.weaponModels)
+local Playground = require(Shared.data.playground)
 local EntityService = require(Server.services.EntityService)
 local EnemyService = require(Server.services.EnemyService)
 local PlaygroundService = require(Server.services.PlaygroundService)
@@ -299,6 +307,63 @@ local function checkRigAttribute(label: string, model: Model, rigId: string)
 	)
 end
 
+-- Asserts the stand-in carries the loadout weapon's sheath: one Sheath model, its Scabbard welded
+-- to the row's body part where the weld holds it, out of every collision, touch and query.
+local function checkSheath(label: string, model: Model)
+	local weaponDef = Weapons.byId(Playground.loadout.weapon)
+	check(weaponDef ~= nil, "the loadout weapon exists")
+	local category = (weaponDef :: any).category
+	local row = WeaponModels.sheath(category)
+	check(row ~= nil, ("weaponModels.luau has a back mount for the loadout's %s"):format(category))
+	local mount: any = row
+	local count = 0
+	for _, child in model:GetChildren() do
+		if child.Name == WeaponModels.sheathModelName then
+			count += 1
+		end
+	end
+	check(count == 1, ("%s carries one %s model (found %d)"):format(label, WeaponModels.sheathModelName, count))
+	local sheath = model:FindFirstChild(WeaponModels.sheathModelName)
+	check(sheath ~= nil and sheath:IsA("Model"), ("%s's %s is a Model"):format(label, WeaponModels.sheathModelName))
+	local scabbard = (sheath :: Instance):FindFirstChild(WeaponModels.scabbardPart)
+	check(
+		scabbard ~= nil and scabbard:IsA("BasePart"),
+		("%s's sheath holds a %s part"):format(label, WeaponModels.scabbardPart)
+	)
+	local part = scabbard :: BasePart
+	check(
+		not part.CanCollide and not part.CanQuery and not part.CanTouch and part.Massless,
+		("%s's scabbard never collides, touches or answers a query, and weighs nothing"):format(label)
+	)
+	local weld = part:FindFirstChild(WeaponModels.scabbardWeld)
+	check(
+		weld ~= nil and weld.ClassName == "Weld",
+		("%s's scabbard hangs on a Weld named %s (not a joint)"):format(label, WeaponModels.scabbardWeld)
+	)
+	local joint = weld :: Weld
+	local body = model:FindFirstChild(mount.part)
+	check(
+		body ~= nil and joint.Part0 == body and joint.Part1 == part,
+		("the weld links %s -> %s inside %s"):format(mount.part, WeaponModels.scabbardPart, label)
+	)
+	local held = (body :: BasePart).CFrame * joint.C0 * joint.C1:Inverse()
+	local gap = (part.Position - held.Position).Magnitude
+	check(
+		gap <= POSE_TOLERANCE,
+		("%s's scabbard sits where the weld holds it on the back (gap %.4f studs)"):format(label, gap)
+	)
+	print(
+		("[rigs.smoke] %s's scabbard: %.2f x %.2f x %.2f studs, %s, center at %s"):format(
+			label,
+			part.Size.X,
+			part.Size.Y,
+			part.Size.Z,
+			mount.part,
+			tostring((body :: BasePart).CFrame:PointToObjectSpace(part.Position))
+		)
+	)
+end
+
 local summaries: { string } = {}
 local function summarize(rigId: string, label: string, count: number, classes: string, poseGap: number)
 	table.insert(
@@ -363,12 +428,21 @@ check(
 check(typeof(result) == "number", "onCharacter registered the stand-in and returned its entity id")
 local standInId = result :: number
 check(EntityService.get(standInId) ~= nil, "the stand-in is in the EntityService registry")
+check(
+	standIn:GetAttribute("Drawn") == false,
+	("a freshly registered player reads Drawn = false (found %s)"):format(tostring(standIn:GetAttribute("Drawn")))
+)
 task.wait(SETTLE_SECONDS)
 
 describeStandIn(standIn)
 local playerCount, playerClasses = checkJoints("the player stand-in", standIn, playerRig.id)
 checkRigAttribute("the player stand-in", standIn, playerRig.id)
 local playerGap = checkPose("the player stand-in", standIn, playerRig.id)
+checkSheath("the player stand-in", standIn)
+check(
+	standIn:GetAttribute("Drawn") == false,
+	("with no combat the stand-in still reads Drawn = false (found %s)"):format(tostring(standIn:GetAttribute("Drawn")))
+)
 summarize(playerRig.id, "player stand-in through PlaygroundService.onCharacter", playerCount, playerClasses, playerGap)
 
 EntityService.unregister(standInId)

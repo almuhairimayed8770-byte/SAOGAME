@@ -212,10 +212,22 @@ describe("ActionLogic", function()
 		expect(ActionLogic.speedFor("Guard", true, speeds)).toBe(speeds.walk)
 	end)
 
-	it("keeps the weapon drawn for the combat tag duration", function()
-		expect(ActionLogic.drawn(nil, 10, combat.combatTagDuration)).toBe(false)
-		expect(ActionLogic.drawn(10, 12, combat.combatTagDuration)).toBe(true)
-		expect(ActionLogic.drawn(10, 10 + combat.combatTagDuration + 0.1, combat.combatTagDuration)).toBe(false)
+	it("wants the sword drawn while the server says so or a request went out inside the prediction", function()
+		local predict = choreo.sheath.predictSeconds
+		-- attribute, last prediction, now -> drawn
+		local cases: { { any } } = {
+			{ false, nil, 10, false },
+			{ true, nil, 10, true },
+			{ false, 10, 10, true },
+			{ false, 10, 10 + predict, true },
+			{ false, 10, 10 + predict + 0.01, false },
+			{ true, 10, 10 + predict + 0.01, true },
+			{ true, 10, 10, true },
+		}
+		for _, case in cases do
+			expect(ActionLogic.drawnTarget(case[1], case[2], case[3], predict)).toBe(case[4])
+		end
+		expect(ActionLogic.drawn).toBeNil()
 	end)
 
 	it("measures the signed degrees from the facing to the move direction (positive = left)", function()

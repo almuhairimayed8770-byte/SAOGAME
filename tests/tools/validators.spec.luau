@@ -250,11 +250,20 @@ local function scopeOf(lists: { arts: { string }?, enemies: { string }?, bosses:
 	return { phase = 0, hasArt = has(lists.arts), hasEnemy = has(lists.enemies), hasBoss = has(lists.bosses) }
 end
 
-type ClipsExtra = { scope: any?, bosses: any?, sfx: any?, prints: { string }? }
+type ClipsExtra = { scope: any?, bosses: any?, sfx: any?, choreo: any?, prints: { string }? }
 
--- `extra.scope` / `extra.bosses` / `extra.sfx`: nil for the defaults (everything in scope, no
--- bosses, the real sfx.luau), false for a table that fails to load, or a fake module.
--- `extra.prints` collects the printed warnings.
+-- A choreo.luau stand-in that names no locomotion or sheath clips (the synthetic trees hold none).
+local function emptyChoreo(): any
+	return {
+		priority = { Sheath = 8 },
+		locomotion = { clipPrefix = "player/OneHandedSword/", clips = {} },
+		sheath = { clips = {}, drawCutClips = {} },
+	}
+end
+
+-- `extra.scope` / `extra.bosses` / `extra.sfx` / `extra.choreo`: nil for the defaults (everything
+-- in scope, no bosses, the real sfx.luau, a choreo naming no clips), false for a table that fails
+-- to load, or a fake module. `extra.prints` collects the printed warnings.
 local function runClips(clips: { [string]: any }, arts: any, enemies: any, extra: ClipsExtra?): { string }
 	local options: ClipsExtra = extra or {}
 	local validate = loadTool("tools/validators/clips", options.prints)
@@ -285,6 +294,12 @@ local function runClips(clips: { [string]: any }, arts: any, enemies: any, extra
 			end
 			if path == "src/shared/data/sfx" and options.sfx ~= nil then
 				return options.sfx or error("no sfx")
+			end
+			if path == "src/shared/data/choreo" then
+				if options.choreo == nil then
+					return emptyChoreo()
+				end
+				return options.choreo or error("no choreo")
 			end
 			return Harness.load(path)
 		end,
@@ -700,6 +715,153 @@ describe("clips validator", function()
 		expect(prints).toEqual({})
 	end)
 
+	-- The sheathed weapon (D-050): a sheathed Run with its RunDrawn, and the Draw and Sheathe clips.
+	local function sheathTree(): { [string]: any }
+		local function loco(id: string, sheathed: boolean?): any
+			return {
+				id = id,
+				rig = "PlayerR15",
+				duration = 0.6,
+				loop = true,
+				sheathed = sheathed,
+				layer = "Base",
+				keys = {
+					{ time = 0, easing = "SineInOut", joints = { LeftHip = { rot = { 30, 0, 0 } } } },
+					{ time = 0.3, easing = "SineInOut", joints = { LeftHip = { rot = { -30, 0, 0 } } } },
+				},
+				events = {
+					{ time = 0.02, kind = "Footstep", data = { foot = "Left" } },
+					{ time = 0.32, kind = "Footstep", data = { foot = "Right" } },
+				},
+			}
+		end
+		local runDrawn = loco("player/OneHandedSword/RunDrawn", nil)
+		runDrawn.keys[1].joints.Weapon = { rot = { -50, 0, 0 } }
+		return {
+			["player/OneHandedSword/Run"] = loco("player/OneHandedSword/Run", true),
+			["player/OneHandedSword/RunDrawn"] = runDrawn,
+			["player/OneHandedSword/Draw"] = {
+				id = "player/OneHandedSword/Draw",
+				rig = "PlayerR15",
+				duration = 0.6,
+				loop = false,
+				sheathed = true,
+				layer = "UpperBody",
+				priority = 8,
+				keys = {
+					{ time = 0, easing = "SineInOut", joints = { RightShoulder = { rot = { 30, 0, 10 } } } },
+					{
+						time = 0.22,
+						easing = "QuadOut",
+						joints = { RightShoulder = { rot = { 170, 30, 0 } }, Weapon = { rot = { -6, -77, -3 } } },
+					},
+				},
+				events = { { time = 0.22, kind = "WeaponDraw" } },
+			},
+			["player/OneHandedSword/Sheathe"] = {
+				id = "player/OneHandedSword/Sheathe",
+				rig = "PlayerR15",
+				duration = 0.7,
+				loop = false,
+				layer = "UpperBody",
+				priority = 8,
+				keys = {
+					{
+						time = 0,
+						easing = "SineInOut",
+						joints = { RightShoulder = { rot = { 3, 0, 4 } }, Weapon = { rot = { 0, 0, 0 } } },
+					},
+					{ time = 0.42, easing = "QuadOut", joints = { RightShoulder = { rot = { 170, 30, 0 } } } },
+				},
+				events = { { time = 0.42, kind = "WeaponSheathe" } },
+			},
+			["player/OneHandedSword/Guard"] = idleClip("player/OneHandedSword/Guard", "PlayerR15"),
+		}
+	end
+
+	local function sheathChoreo(): any
+		return {
+			priority = { Sheath = 8 },
+			locomotion = { clipPrefix = "player/OneHandedSword/", clips = { Run = "Run", RunDrawn = "RunDrawn" } },
+			sheath = { clips = { draw = "Draw", sheathe = "Sheathe" }, drawCutClips = { "Guard" } },
+		}
+	end
+
+	-- The choreo stand-in names only the Run pair; the validator skips the names it does not list.
+	it("accepts WeaponDraw and WeaponSheathe events, the sheathed field and a matching pair", function()
+		local problems = runClips(sheathTree(), { rows = {} }, { rows = {} }, { choreo = sheathChoreo() })
+		expect(problems).toEqual({})
+		local choreo = sheathChoreo()
+		choreo.locomotion.clips.RunDrawn = nil
+		problems = runClips(sheathTree(), { rows = {} }, { rows = {} }, { choreo = choreo })
+		expect(problems).toEqual({ "locomotion.clips needs both Run and RunDrawn" })
+	end)
+
+	it("names a missing RunDrawn file by its key and path", function()
+		local clips = sheathTree()
+		clips["player/OneHandedSword/RunDrawn"] = nil
+		local problems = runClips(clips, { rows = {} }, { rows = {} }, { choreo = sheathChoreo() })
+		expect(problems).toEqual({
+			"locomotion.clips RunDrawn: clip file src/shared/clips/player/OneHandedSword/RunDrawn.luau is missing",
+		})
+	end)
+
+	it("flags a sheathed Run whose duration, loop or footsteps differ from RunDrawn", function()
+		local clips = sheathTree()
+		clips["player/OneHandedSword/Run"].duration = 0.65
+		local problems = runClips(clips, { rows = {} }, { rows = {} }, { choreo = sheathChoreo() })
+		expect(problems).toEqual({
+			"player/OneHandedSword/Run: duration 0.65 differs from player/OneHandedSword/RunDrawn's 0.6 (the sets crossfade in step)",
+		})
+
+		clips = sheathTree()
+		clips["player/OneHandedSword/Run"].events[2].time = 0.35
+		clips["player/OneHandedSword/Run"].events[1].data.foot = "Right"
+		problems = runClips(clips, { rows = {} }, { rows = {} }, { choreo = sheathChoreo() })
+		expect(hasProblem(problems, "Footstep 2 at 0.35 s is more than a frame from")).toBe(true)
+		expect(hasProblem(problems, "Footstep 1 plants the Right foot but player/OneHandedSword/RunDrawn")).toBe(true)
+	end)
+
+	it("flags a sheathed clip that keys Weapon and a drawn clip marked sheathed", function()
+		local clips = sheathTree()
+		clips["player/OneHandedSword/Run"].keys[1].joints.Weapon = { rot = { -50, 0, 0 } }
+		clips["player/OneHandedSword/RunDrawn"].sheathed = true
+		clips["player/OneHandedSword/RunDrawn"].keys[1].joints.Weapon = nil
+		local problems = runClips(clips, { rows = {} }, { rows = {} }, { choreo = sheathChoreo() })
+		expect(problems).toEqual({
+			"player/OneHandedSword/Run: key 1 moves Weapon while the sword is on the back",
+			"player/OneHandedSword/RunDrawn: the drawn set's RunDrawn must not be sheathed",
+		})
+	end)
+
+	it("holds Draw and Sheathe to one event each, UpperBody, the Sheath priority, and a sheathed Draw", function()
+		local clips = sheathTree()
+		local draw = clips["player/OneHandedSword/Draw"]
+		draw.sheathed = nil
+		draw.keys[2].joints.Weapon = nil
+		draw.events = {}
+		clips["player/OneHandedSword/Sheathe"].layer = "FullBody"
+		clips["player/OneHandedSword/Sheathe"].priority = 5
+		local problems = runClips(clips, { rows = {} }, { rows = {} }, { choreo = sheathChoreo() })
+		expect(problems).toEqual({
+			"player/OneHandedSword/Draw: the draw clip must be sheathed (the sword starts on the back)",
+			"player/OneHandedSword/Draw: needs exactly one WeaponDraw event (has 0)",
+			"player/OneHandedSword/Sheathe: must be on the UpperBody layer (got FullBody)",
+			"player/OneHandedSword/Sheathe: priority 5 must equal choreo priority.Sheath (8)",
+		})
+	end)
+
+	it("names a missing draw-cut clip, an unknown sheath event and a missing choreo.luau", function()
+		local clips = sheathTree()
+		clips["player/OneHandedSword/Guard"] = nil
+		local problems = runClips(clips, { rows = {} }, { rows = {} }, { choreo = sheathChoreo() })
+		expect(problems).toEqual({
+			"sheath.drawCutClips Guard: clip file src/shared/clips/player/OneHandedSword/Guard.luau is missing",
+		})
+		problems = runClips(sheathTree(), { rows = {} }, { rows = {} }, { choreo = false })
+		expect(hasProblem(problems, "src/shared/data/choreo.luau is missing or failed to load")).toBe(true)
+	end)
+
 	it("without scope.luau the missing table is reported and every missing clip stays a problem", function()
 		local arts = goodArts()
 		arts.rows["OneHandedSword.Ghost"] = art("OneHandedSword.Ghost", "player/OneHandedSword/Ghost", 1)
@@ -938,6 +1100,28 @@ describe("data validators on the real tables", function()
 		expect(validate(context)).toEqual({
 			"Art OneHandedSword.SharpNail: clip file src/shared/clips/player/OneHandedSword/SharpNail.luau is missing",
 			"enemy FrenzyBoar attack Charge: clip file src/shared/clips/enemy/Boar/Charge.luau is missing",
+		})
+	end)
+
+	it("clips demands every locomotion and sheath clip the real choreo.luau names", function()
+		local hidden = {
+			["src/shared/clips/player/OneHandedSword/RunDrawn.luau"] = true,
+			["src/shared/clips/player/OneHandedSword/Draw.luau"] = true,
+		}
+		local context = table.clone(realContext)
+		context.listFiles = function(directory: string, pattern: string?): { string }
+			local files = {}
+			for _, file in Harness.listFiles(directory, pattern) do
+				if not hidden[file] then
+					table.insert(files, file)
+				end
+			end
+			return files
+		end
+		local validate = loadTool("tools/validators/clips")
+		expect(validate(context)).toEqual({
+			"locomotion.clips RunDrawn: clip file src/shared/clips/player/OneHandedSword/RunDrawn.luau is missing",
+			"sheath.clips draw: clip file src/shared/clips/player/OneHandedSword/Draw.luau is missing",
 		})
 	end)
 end)

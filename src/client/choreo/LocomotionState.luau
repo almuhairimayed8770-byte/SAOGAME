@@ -10,7 +10,8 @@
 	     clip a TurnLeft / TurnRight one-shot fires, so a rig that is rotated by lock-on or by the
 	     engine (no desired-facing input) still steps round instead of pivoting on a planted foot.
 	Out: target weights for the Base-layer clips (the 8-direction walk blend space, Run, Sprint,
-	     Idle or IdleDrawn), the one-shot to start this frame (Jump, Fall, Land with its squash
+	     Idle or IdleDrawn; with the weapon drawn the walks, Run and Sprint are the ...Drawn set,
+	     sheathed the plain set), the one-shot to start this frame (Jump, Fall, Land with its squash
 	     weight, TurnLeft/TurnRight, Skid), the lean into the turn and the drawn-sprint additive
 	     weight. The two-step stop decays a virtual speed through the walk gait; a stop from above
 	     the skid threshold plays Skid instead.
@@ -67,8 +68,42 @@ export type State = {
 local LocomotionState = {}
 LocomotionState.__index = LocomotionState
 
-local WEIGHT_NAMES = { "Idle", "IdleDrawn", "WalkForward", "WalkBack", "WalkLeft", "WalkRight", "Run", "Sprint" }
+-- The Base-layer clips the blend space weighs: the sheathed set under the plain names, the drawn
+-- set under the ...Drawn names (data/choreo.luau locomotion.clips).
+local WEIGHT_NAMES = {
+	"Idle",
+	"IdleDrawn",
+	"WalkForward",
+	"WalkBack",
+	"WalkLeft",
+	"WalkRight",
+	"Run",
+	"Sprint",
+	"WalkForwardDrawn",
+	"WalkBackDrawn",
+	"WalkLeftDrawn",
+	"WalkRightDrawn",
+	"RunDrawn",
+	"SprintDrawn",
+}
 LocomotionState.WEIGHT_NAMES = WEIGHT_NAMES
+
+-- A plain clip name -> its drawn-set name.
+local DRAWN: { [string]: string } = {
+	Idle = "IdleDrawn",
+	WalkForward = "WalkForwardDrawn",
+	WalkBack = "WalkBackDrawn",
+	WalkLeft = "WalkLeftDrawn",
+	WalkRight = "WalkRightDrawn",
+	Run = "RunDrawn",
+	Sprint = "SprintDrawn",
+}
+
+--- The clip that carries a plain locomotion name in the set `drawn` picks (Run -> RunDrawn).
+function LocomotionState.clipFor(name: string, drawn: boolean): string
+	return if drawn then DRAWN[name] or name else name
+end
+local clipFor = LocomotionState.clipFor
 
 local function clamp01(value: number): number
 	return math.clamp(value, 0, 1)
@@ -168,12 +203,12 @@ function LocomotionState.update(self: any, dt: number, input: Input): Output
 		local walk, run, sprint = LocomotionState.gaitWeights(speed)
 		if speed > Config.idleSpeedThreshold then
 			for name, share in LocomotionState.directionWeights(input.forward, input.right) do
-				weights[name] = share * walk
+				weights[clipFor(name, input.drawn)] = share * walk
 			end
-			weights.Run = run
-			weights.Sprint = sprint
+			weights[clipFor("Run", input.drawn)] = run
+			weights[clipFor("Sprint", input.drawn)] = sprint
 		else
-			weights[if input.drawn then "IdleDrawn" else "Idle"] = 1
+			weights[clipFor("Idle", input.drawn)] = 1
 		end
 		return {
 			weights = weights,
@@ -243,15 +278,15 @@ function LocomotionState.update(self: any, dt: number, input: Input): Output
 			then { WalkForward = 1, WalkRight = 0, WalkBack = 0, WalkLeft = 0 }
 			else LocomotionState.directionWeights(input.forward, input.right)
 		for name, share in direction do
-			weights[name] = share * walk
+			weights[clipFor(name, input.drawn)] = share * walk
 		end
-		weights.Run = run
-		weights.Sprint = sprint
+		weights[clipFor("Run", input.drawn)] = run
+		weights[clipFor("Sprint", input.drawn)] = sprint
 		if input.drawn then
 			drawnSprint = sprint
 		end
 	else
-		weights[if input.drawn then "IdleDrawn" else "Idle"] = 1
+		weights[clipFor("Idle", input.drawn)] = 1
 		-- Turn in place when the body wants to face elsewhere (or has already turned that far
 		-- on the spot) and nothing else is playing.
 		self.turnAccumulated += input.yawRate * dt

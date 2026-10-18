@@ -14,8 +14,14 @@
 		animator.events:Connect(function(clipId, event) ... end)
 		animator:hitStop(frames)                      -- the rig holds; camera/FX read isPaused()
 		animator:currentRootMotionDelta()             -- Vector3, rig-local studs since last frame
+		animator:joint("Weapon")                      -- the joint Choreo writes for that name
+		animator:pin("Weapon", true)                  -- the joint rests at identity, whatever is keyed
 		Choreo.hitStopAll(models, "Final")
 		Choreo.setQuality("Medium")
+
+	Footsteps: the Base layer blends many walk clips (and a drawn twin of each), all running at
+	once, and each has its own steps. Only the one the limbs show most sounds its Footstep events,
+	so a still rig is silent and a blend of walks steps once.
 
 	Update rates: the local character and the nearest rigs step on RenderStepped; the rest step
 	on Heartbeat at the quality tier's distant / far rate (data/choreo.luau quality). A clip id
@@ -34,6 +40,7 @@ local Types = require(Shared.types)
 local ClipSampler = require(Shared.choreo.ClipSampler)
 local Joints = require(Shared.choreo.Joints)
 local Signal = require(Shared.util.Signal)
+local Easing = require(Shared.util.Easing)
 local ChoreoData = require(Shared.data.choreo)
 local CombatData = require(Shared.data.combat)
 local Mixer = require(script.Parent.Mixer)
@@ -70,6 +77,8 @@ export type Animator = {
 	setSpeed: (self: Animator, handle: Handle, speed: number) -> (),
 	setProcedural: (self: Animator, name: string, offsets: ClipSampler.Offsets?, weight: number?) -> (),
 	onStep: (self: Animator, fn: (dt: number) -> ()) -> () -> (),
+	joint: (self: Animator, name: string) -> Instance?,
+	pin: (self: Animator, name: string, pinned: boolean) -> (),
 	step: (self: Animator, dt: number) -> (),
 	destroy: (self: Animator) -> (),
 }
@@ -139,21 +148,30 @@ end
 
 -- Name -> joint (Motor6D or AnimationConstraint). Rebuilt on the next step whenever a joint
 -- arrives or leaves, so a rig whose joints replicate after the animator attached still animates.
+-- A pinned name's new joint is put at rest at once.
 local function rebuildMotors(self: any)
 	self.motors = Joints.map(self.model)
 	self.motorsDirty = false
+	for name in self.pinned do
+		local joint = self.motors[name]
+		if joint ~= nil then
+			Joints.setTransform(joint, CFrame.identity)
+		end
+	end
 end
 
 -- Writes the blended offsets to the joints' Transform; joints that stopped being keyed return to
--- rest. The two touched sets are reused frame to frame (no per-frame table on RenderStepped).
+-- rest. A pinned joint is skipped, so it returns to rest too and stays there. The two touched sets
+-- are reused frame to frame (no per-frame table on RenderStepped).
 local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 	local motors = self.motors
+	local pinned: { [string]: boolean } = self.pinned
 	local touched: { [string]: boolean } = self.touchedScratch
 	table.clear(touched)
 	if not self.rbxActive then
 		for name, offset in offsets do
 			local motor = motors[name]
-			if motor ~= nil then
+			if motor ~= nil and not pinned[name] then
 				motor.Transform = ClipSampler.toCFrame(offset)
 				touched[name] = true
 			end
@@ -227,6 +245,8 @@ local EVENT_KINDS: { Types.ClipEventKind } = {
 	"PostMotionStart",
 	"WeaponSwap",
 	"CameraNudge",
+	"WeaponDraw",
+	"WeaponSheathe",
 }
 
 local function playRbx(self: any, clipId: string, options: PlayOptions): Handle
@@ -399,6 +419,80 @@ function AnimatorClass.onStep(self: any, fn: (dt: number) -> ()): () -> ()
 	end
 end
 
+--- The joint Choreo writes for a name (a Motor6D or an AnimationConstraint), or nil. A map that a
+--- joint arriving or leaving marked dirty is rebuilt first.
+function AnimatorClass.joint(self: any, name: string): Instance?
+	if self.motorsDirty then
+		rebuildMotors(self)
+	end
+	return self.motors[name]
+end
+
+--- Pins a joint at rest: while pinned, its Transform stays identity whatever any clip, additive
+--- or procedural channel keys (the sword on its back mount). The change lands on the joint at
+--- once, so a pin set from a clip event already shows in the frame that fired it.
+function AnimatorClass.pin(self: any, name: string, pinned: boolean)
+	local pins: { [string]: boolean } = self.pinned
+	if (pins[name] == true) == pinned then
+		return
+	end
+	if pinned then
+		pins[name] = true
+	else
+		pins[name] = nil
+	end
+	local joint = self:joint(name)
+	if joint == nil then
+		return
+	end
+	if pinned then
+		Joints.setTransform(joint :: any, CFrame.identity)
+		self.touched[name] = nil
+		return
+	end
+	local offset = if self.rbxActive then nil else self.mixer:lastOffsets()[name]
+	if offset ~= nil then
+		Joints.setTransform(joint :: any, ClipSampler.toCFrame(offset))
+		self.touched[name] = true
+	end
+end
+
+local FOOTSTEP: Types.ClipEventKind = "Footstep"
+
+-- Clip id -> whether the clip has a Footstep event.
+local footstepsById: { [string]: boolean } = {}
+local function hasFootsteps(clip: Types.ClipDef): boolean
+	local cached = footstepsById[clip.id]
+	if cached == nil then
+		cached = false
+		for _, event in clip.events do
+			if event.kind == FOOTSTEP then
+				cached = true
+				break
+			end
+		end
+		footstepsById[clip.id] = cached
+	end
+	return cached :: boolean
+end
+
+-- The Base handle whose footsteps sound: of the Base clips with steps, the one the limbs show
+-- most (the first one on a tie). Nil when none shows at all, so a still rig makes no sound.
+local function footstepSource(self: any): Handle?
+	local best: Handle? = nil
+	local bestWeight = 0
+	for _, handle in self.mixer:handles() do
+		if handle.layer == "Base" and hasFootsteps(handle.clip) then
+			local shown = Easing.evaluate(ChoreoData.blendEasing, handle.fade) * handle.weight
+			if shown > bestWeight then
+				best = handle
+				bestWeight = shown
+			end
+		end
+	end
+	return best
+end
+
 function AnimatorClass.step(self: any, dt: number)
 	if self.destroyed then
 		return
@@ -417,7 +511,18 @@ function AnimatorClass.step(self: any, dt: number)
 	local delta = result.rootDelta
 	self.rootDelta = Vector3.new(delta[1], delta[2], delta[3])
 	applyOffsets(self, result.offsets)
+	local stepSource: Handle? = nil
+	local sourceKnown = false
 	for _, fired in result.events do
+		if fired.event.kind == FOOTSTEP and fired.handle.layer == "Base" then
+			if not sourceKnown then
+				stepSource = footstepSource(self)
+				sourceKnown = true
+			end
+			if fired.handle ~= stepSource then
+				continue
+			end
+		end
 		self.events:Fire(fired.clipId, fired.event)
 	end
 	for _, handle in result.finished do
@@ -461,6 +566,7 @@ local function newAnimator(model: Model): any
 		finished = Signal.new() :: Signal.Signal<Handle>,
 		motors = {} :: { [string]: Joints.Joint },
 		motorsDirty = true,
+		pinned = {} :: { [string]: boolean },
 		touched = {} :: { [string]: boolean },
 		touchedScratch = {} :: { [string]: boolean },
 		stepHooks = {} :: { (dt: number) -> () },

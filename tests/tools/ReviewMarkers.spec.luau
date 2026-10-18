@@ -463,3 +463,195 @@ describe("ReviewMarkers rows and markdown", function()
 		end
 	end)
 end)
+
+-- A clean draw: sheathed, the hand takes the sword at 0.2 s, where a key lines the blade up.
+local function drawClip(): any
+	return {
+		id = "player/OneHandedSword/TestDraw",
+		rig = "PlayerR15",
+		duration = 0.6,
+		loop = false,
+		sheathed = true,
+		layer = "UpperBody",
+		priority = 8,
+		keys = {
+			{ time = 0, easing = "SineInOut", joints = { RightShoulder = { rot = { 30, 0, 10 } } } },
+			{
+				time = 0.2,
+				easing = "QuadOut",
+				joints = { RightShoulder = { rot = { 170, 30, 0 } }, Weapon = { rot = { -6, -77, -3 } } },
+			},
+			{
+				time = 0.6,
+				easing = "Spring",
+				joints = { RightShoulder = { rot = { 30, 0, 10 } }, Weapon = { rot = { -50, 0, 0 } } },
+			},
+		},
+		events = { { time = 0.2, kind = "WeaponDraw" } },
+	}
+end
+
+-- A clean sheathe: the sword starts in the hand and goes to the back at 0.42 s.
+local function sheatheClip(): any
+	return {
+		id = "player/OneHandedSword/TestSheathe",
+		rig = "PlayerR15",
+		duration = 0.7,
+		loop = false,
+		layer = "UpperBody",
+		priority = 8,
+		keys = {
+			{
+				time = 0,
+				easing = "SineInOut",
+				joints = { RightShoulder = { rot = { 3, 0, 4 } }, Weapon = { rot = { 0, 0, 0 } } },
+			},
+			{
+				time = 0.42,
+				easing = "QuadOut",
+				joints = { RightShoulder = { rot = { 170, 30, 0 } }, Weapon = { rot = { -6, -77, -3 } } },
+			},
+			{ time = 0.7, easing = "Spring", joints = { RightShoulder = { rot = { 3, 0, 4 } } } },
+		},
+		events = { { time = 0.42, kind = "WeaponSheathe" } },
+	}
+end
+
+local function count(list: { string }, item: string): number
+	local n = 0
+	for _, value in list do
+		if value == item then
+			n += 1
+		end
+	end
+	return n
+end
+
+describe("ReviewMarkers sheath mount", function()
+	it("puts the sword on the back before a WeaponDraw and after a WeaponSheathe", function()
+		local draw = drawClip()
+		expect(ReviewMarkers.mountAt(draw, 0)).toBe("Back")
+		expect(ReviewMarkers.mountAt(draw, 0.199)).toBe("Back")
+		expect(ReviewMarkers.mountAt(draw, 0.2)).toBe("Hand")
+		expect(ReviewMarkers.mountAt(draw, 0.6)).toBe("Hand")
+		local sheathe = sheatheClip()
+		expect(ReviewMarkers.mountAt(sheathe, 0)).toBe("Hand")
+		expect(ReviewMarkers.mountAt(sheathe, 0.419)).toBe("Hand")
+		expect(ReviewMarkers.mountAt(sheathe, 0.42)).toBe("Back")
+		expect(ReviewMarkers.mountAt(sheathe, 0.7)).toBe("Back")
+	end)
+
+	it("keeps an unsheathed clip in the hand and a sheathed loop on the back", function()
+		expect(ReviewMarkers.mountAt(attackClip(), 0)).toBe("Hand")
+		expect(ReviewMarkers.mountAt(attackClip(), 1)).toBe("Hand")
+		local walk = drawClip()
+		walk.events = {}
+		for _, key in walk.keys do
+			key.joints.Weapon = nil
+		end
+		expect(ReviewMarkers.mountAt(walk, 0)).toBe("Back")
+		expect(ReviewMarkers.mountAt(walk, 0.6)).toBe("Back")
+		expect(ReviewMarkers.mountProblems(walk)).toEqual({})
+	end)
+
+	it("passes a clean draw, a clean sheathe and the real Draw and Sheathe clips", function()
+		expect(ReviewMarkers.mountProblems(drawClip())).toEqual({})
+		expect(ReviewMarkers.mountProblems(sheatheClip())).toEqual({})
+		expect(ReviewMarkers.problems(drawClip())).toEqual({})
+		expect(ReviewMarkers.problems(sheatheClip())).toEqual({})
+		for _, name in { "Draw", "Sheathe", "Idle", "WalkForward", "Run", "Sprint" } do
+			local clip = ClipLibrary.get("player/OneHandedSword/" .. name)
+			expect(ReviewMarkers.problems(clip)).toEqual({})
+		end
+	end)
+
+	it("flags sheathed when it is not a boolean", function()
+		local clip = drawClip()
+		clip.sheathed = "yes"
+		expect(count(ReviewMarkers.mountProblems(clip), "sheathed must be a boolean")).toBe(1)
+	end)
+
+	it("flags a second WeaponDraw, a second WeaponSheathe, both kinds, and event data", function()
+		local twice = drawClip()
+		table.insert(twice.events, { time = 0.3, kind = "WeaponDraw" })
+		expect(ReviewMarkers.mountProblems(twice)).toEqual({ "2 WeaponDraw events (at most one)" })
+
+		local twiceBack = sheatheClip()
+		table.insert(twiceBack.events, { time = 0.5, kind = "WeaponSheathe" })
+		expect(ReviewMarkers.mountProblems(twiceBack)).toEqual({ "2 WeaponSheathe events (at most one)" })
+
+		local both = sheatheClip()
+		table.insert(both.events, 1, { time = 0.1, kind = "WeaponDraw" })
+		local problems = ReviewMarkers.mountProblems(both)
+		expect(count(problems, "both WeaponDraw and WeaponSheathe (one clip moves the sword one way)")).toBe(1)
+
+		local withData = drawClip()
+		withData.events[1].data = { foot = "Left" }
+		expect(ReviewMarkers.mountProblems(withData)).toEqual({ "WeaponDraw carries data" })
+	end)
+
+	it("flags a WeaponDraw in an unsheathed clip and a WeaponSheathe in a sheathed one", function()
+		local draw = drawClip()
+		draw.sheathed = nil
+		expect(ReviewMarkers.mountProblems(draw)).toEqual({ "WeaponDraw in a clip that is not sheathed" })
+		local sheathe = sheatheClip()
+		sheathe.sheathed = true
+		local problems = ReviewMarkers.mountProblems(sheathe)
+		expect(count(problems, "WeaponSheathe in a sheathed clip")).toBe(1)
+	end)
+
+	it("flags a Weapon key on the back and a WeaponDraw with no Weapon key at its time", function()
+		local early = drawClip()
+		early.keys[1].joints.Weapon = { rot = { -50, 0, 0 } }
+		expect(ReviewMarkers.mountProblems(early)).toEqual({ "key 1 moves Weapon while the sword is on the back" })
+
+		local missing = drawClip()
+		missing.keys[2].joints.Weapon = nil
+		expect(ReviewMarkers.mountProblems(missing)).toEqual({ "no key at the WeaponDraw (0.200 s) moves Weapon" })
+	end)
+
+	it("flags a Weapon key after the WeaponSheathe", function()
+		local clip = sheatheClip()
+		clip.keys[3].joints.Weapon = { rot = { 0, 0, 0 } }
+		expect(ReviewMarkers.mountProblems(clip)).toEqual({ "key 3 moves Weapon after the WeaponSheathe" })
+	end)
+
+	it("flags a trail, smear or hit window while the sword is on the back", function()
+		local clip = drawClip()
+		table.insert(clip.events, 1, { time = 0.1, kind = "TrailOn" })
+		expect(ReviewMarkers.mountProblems(clip)).toEqual({ "TrailOn at 0.100 s while the sword is on the back" })
+		local late = sheatheClip()
+		table.insert(late.events, { time = 0.5, kind = "SmearOn" })
+		expect(ReviewMarkers.mountProblems(late)).toEqual({ "SmearOn at 0.500 s while the sword is on the back" })
+	end)
+
+	it("flags a sheathed attack (attacks are draw-cuts)", function()
+		local clip = attackClip({ sheathed = true })
+		local problems = ReviewMarkers.mountProblems(clip)
+		expect(count(problems, "an attack is never sheathed (attacks are draw-cuts)")).toBe(1)
+		expect(count(ReviewMarkers.problems(clip), "an attack is never sheathed (attacks are draw-cuts)")).toBe(1)
+	end)
+
+	it("lists the sheath problems of a non-attack clip in the review", function()
+		local clip = drawClip()
+		clip.sheathed = nil
+		expect(ReviewMarkers.problems(clip)).toEqual({ "WeaponDraw in a clip that is not sheathed" })
+	end)
+
+	it("draws WeaponDraw and WeaponSheathe in the Events lane with their palette tokens", function()
+		local Palette = Harness.load("src/shared/data/palette")
+		local tokens = Dev.clipLab.timeline.eventTokens
+		for _, case in { { drawClip(), "WeaponDraw" }, { sheatheClip(), "WeaponSheathe" } } do
+			local found = nil
+			for _, marker in ReviewMarkers.markers(case[1]) do
+				if marker.kind == case[2] then
+					found = marker
+				end
+			end
+			expect(found).never.toBeNil()
+			expect(found.lane).toBe("Events")
+			expect(found.token).toBe(tokens[case[2]])
+			expect(Palette.tokens[found.token]).never.toBeNil()
+		end
+	end)
+end)

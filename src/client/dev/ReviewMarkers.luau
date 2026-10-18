@@ -13,6 +13,11 @@
 	(tools/validators/clips.luau) pairs each hit window with it, so the review report and CI read
 	the snaps the same way.
 
+	It owns the sheath rules too (docs/DECISIONS.md D-050): mountAt says where the sword is at a
+	time (on the back or in the hand, from the clip's `sheathed` field and its WeaponDraw and
+	WeaponSheathe events), and mountProblems lists the clip's sheath mistakes. The ClipLab, the
+	ground clearance spec, the clips validator and the review all read the sword's place from here.
+
 	No Instances, no Roblox datatypes: ClipLab and the Lune tool both call it.
 ]]
 
@@ -333,12 +338,142 @@ local function isPlayerAttack(clip: Types.ClipDef): boolean
 	return clip.id:sub(1, 7) == "player/"
 end
 
+export type Mount = "Hand" | "Back"
+
+-- The first event of a kind with a number time, or nil. Malformed events are skipped here; the
+-- clips validator reports them on their own.
+local function firstEventTime(clip: Types.ClipDef, kind: string): number?
+	local events: any = clip.events
+	if typeof(events) ~= "table" then
+		return nil
+	end
+	for _, event in events do
+		if typeof(event) == "table" and event.kind == kind and typeof(event.time) == "number" then
+			return event.time
+		end
+	end
+	return nil
+end
+
+--- Where the sword is at `time` in a clip: on its sheath ("Back") or in the hand ("Hand"). A
+--- sheathed clip starts on the back and the hand takes the sword at its WeaponDraw; a clip with a
+--- WeaponSheathe puts it back on the back from that event on. The ClipLab, the ground clearance
+--- spec and the rules below all read the mount from here.
+function ReviewMarkers.mountAt(clip: Types.ClipDef, time: number): Mount
+	local draw = firstEventTime(clip, "WeaponDraw")
+	if clip.sheathed == true and (draw == nil or time < draw) then
+		return "Back"
+	end
+	local sheathe = firstEventTime(clip, "WeaponSheathe")
+	if sheathe ~= nil and time >= sheathe then
+		return "Back"
+	end
+	return "Hand"
+end
+
+-- Kinds that light or sweep the blade: none of them may fire while the sword is on the back.
+local BLADE_KINDS = { "TrailOn", "SmearOn", "HitWindowOpen" }
+
+--- The sheath rules of one clip (the sword on the back, docs/DECISIONS.md D-050):
+--- `sheathed` is a boolean or nil; at most one WeaponDraw and one WeaponSheathe, never both, with
+--- no data; WeaponDraw only in a sheathed clip and WeaponSheathe only in one that is not; no key
+--- moves Weapon while the sword is on the back, and a key at the WeaponDraw time moves it (the
+--- blade lines up with the sheath there); no trail, smear or hit window on the back; attacks are
+--- draw-cuts, never sheathed.
+function ReviewMarkers.mountProblems(clip: Types.ClipDef): { string }
+	local problems = {}
+	local sheathedField: any = clip.sheathed
+	if sheathedField ~= nil and typeof(sheathedField) ~= "boolean" then
+		table.insert(problems, "sheathed must be a boolean")
+	end
+	local sheathed = sheathedField == true
+	local events: any = clip.events
+	local draws, sheathes = 0, 0
+	if typeof(events) == "table" then
+		for _, event in events do
+			if typeof(event) ~= "table" then
+				continue
+			end
+			if event.kind == "WeaponDraw" or event.kind == "WeaponSheathe" then
+				if event.kind == "WeaponDraw" then
+					draws += 1
+				else
+					sheathes += 1
+				end
+				if event.data ~= nil then
+					table.insert(problems, ("%s carries data"):format(event.kind))
+				end
+			end
+		end
+	end
+	if draws > 1 then
+		table.insert(problems, ("%d WeaponDraw events (at most one)"):format(draws))
+	end
+	if sheathes > 1 then
+		table.insert(problems, ("%d WeaponSheathe events (at most one)"):format(sheathes))
+	end
+	if draws > 0 and sheathes > 0 then
+		table.insert(problems, "both WeaponDraw and WeaponSheathe (one clip moves the sword one way)")
+	end
+	if draws > 0 and not sheathed then
+		table.insert(problems, "WeaponDraw in a clip that is not sheathed")
+	end
+	if sheathes > 0 and sheathed then
+		table.insert(problems, "WeaponSheathe in a sheathed clip")
+	end
+	if clip.attack == true and sheathed then
+		table.insert(problems, "an attack is never sheathed (attacks are draw-cuts)")
+	end
+
+	local draw = firstEventTime(clip, "WeaponDraw")
+	local sheathe = firstEventTime(clip, "WeaponSheathe")
+	local keys: any = clip.keys
+	if typeof(keys) == "table" then
+		local keyAtDraw = false
+		for index, key in keys do
+			if typeof(key) ~= "table" or typeof(key.time) ~= "number" or typeof(key.joints) ~= "table" then
+				continue
+			end
+			if key.joints.Weapon == nil then
+				continue
+			end
+			if sheathed and (draw == nil or key.time < draw - EPSILON) then
+				table.insert(problems, ("key %d moves Weapon while the sword is on the back"):format(index))
+			end
+			if draw ~= nil and math.abs(key.time - draw) <= EPSILON then
+				keyAtDraw = true
+			end
+			if sheathe ~= nil and key.time > sheathe + EPSILON then
+				table.insert(problems, ("key %d moves Weapon after the WeaponSheathe"):format(index))
+			end
+		end
+		if draw ~= nil and not keyAtDraw then
+			table.insert(problems, ("no key at the WeaponDraw (%.3f s) moves Weapon"):format(draw))
+		end
+	end
+
+	if typeof(events) == "table" then
+		for _, event in events do
+			if typeof(event) ~= "table" or typeof(event.time) ~= "number" then
+				continue
+			end
+			if table.find(BLADE_KINDS, event.kind) and ReviewMarkers.mountAt(clip, event.time) == "Back" then
+				table.insert(problems, ("%s at %.3f s while the sword is on the back"):format(event.kind, event.time))
+			end
+		end
+	end
+	return problems
+end
+
 --- The problems a reviewer flags from the data alone (what cannot be seen without recording).
 function ReviewMarkers.problems(clip: Types.ClipDef): { string }
 	local problems = {}
 	local linear = ReviewMarkers.linearLimbKeys(clip)
 	if #linear > 0 then
 		table.insert(problems, ("Linear on a limb at key %s"):format(table.concat(linear, ",")))
+	end
+	for _, problem in ReviewMarkers.mountProblems(clip) do
+		table.insert(problems, problem)
 	end
 	if not clip.attack then
 		return problems

@@ -11,7 +11,13 @@
 	of the hand. The hold point (where the Motor6D's C1 puts the hand) is the center of the grip:
 	`WeaponModels.holdOffset(category)` studs below the blade center along -Y.
 
-	Units: studs. Colors are palette tokens.
+	Sheaths: a category with a `sheaths` row carries its weapon on the body out of combat. The row
+	names the body part, the Weapon joint's C0 on that part while sheathed (the hold point; the
+	joint's +Y runs down the blade to the tip, as in the hand) and the scabbard's shape. The server
+	welds a scabbard there and keeps the sword in the hand; each client moves the sword between
+	hand and back from the Drawn attribute.
+
+	Units: studs and degrees. Colors are palette tokens.
 ]]
 
 local Types = require(script.Parent.Parent.types)
@@ -25,6 +31,13 @@ export type CategoryModel = {
 	grip: Grip,
 	shape: ("Block" | "Ball" | "Cylinder")?, -- the blade part's shape (Block when nil)
 	note: string,
+}
+export type SheathMount = {
+	part: string, -- the body part that carries the scabbard and the sheathed sword (a PlayerR15 part)
+	-- The Weapon joint's C0 on `part` while sheathed: the grip's center (the hold point) in the
+	-- part's space. The joint's +Y runs down the blade to the tip, as in the hand. Studs, degrees.
+	mount: { pos: Types.Vec3, rot: Types.Vec3 },
+	scabbard: { wall: number, clearance: number, color: string },
 }
 
 local WeaponModels = {
@@ -123,6 +136,28 @@ local WeaponModels = {
 			note = "broad blade; the tower shield mount is Phase 1",
 		},
 	} :: { [Types.WeaponCategory]: CategoryModel },
+
+	-- The sheath WeaponBuilder hangs on the body: a Model next to the Weapon model holding one
+	-- scabbard part, welded to the row's part by a Weld.
+	sheathModelName = "Sheath",
+	scabbardPart = "Scabbard",
+	scabbardWeld = "ScabbardWeld",
+
+	-- A category without a row keeps its weapon in the hand (no scabbard, no back mount).
+	-- Later: Dual Wielder two crossed back sheaths, Flashdraw a katana sheath high at the hip, rapiers at the hip.
+	sheaths = {
+		OneHandedSword = {
+			part = "UpperTorso",
+			-- Hilt above the right shoulder, blade diagonal across the back, flat against it, the tip
+			-- by the left hip. Rotating 140 degrees about Z points +Y down and to the left.
+			mount = { pos = { 0.75, 1.05, 0.7 }, rot = { 0, 0, 140 } },
+			scabbard = {
+				wall = 0.06, -- added on each side of the blade's width and thickness
+				clearance = 0.15, -- how far the scabbard runs past the tip
+				color = "PlaceholderWood",
+			},
+		},
+	} :: { [Types.WeaponCategory]: SheathMount },
 }
 
 --- The stand-in geometry of a weapon category; errors on an unknown category so a bad weapon row fails loudly.
@@ -144,6 +179,11 @@ end
 function WeaponModels.totalLength(category: Types.WeaponCategory): number
 	local model = WeaponModels.get(category)
 	return model.blade.length + model.guard.height + model.grip.length
+end
+
+--- The category's back mount, or nil when its weapon stays in the hand.
+function WeaponModels.sheath(category: Types.WeaponCategory): SheathMount?
+	return WeaponModels.sheaths[category]
 end
 
 return WeaponModels

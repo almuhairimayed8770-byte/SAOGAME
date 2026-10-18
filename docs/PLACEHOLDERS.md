@@ -18,6 +18,7 @@ package's behaviour as read from the tree.
 | `BoarRig` (Mesh) | Frenzy Boar (`enemies.luau`), `enemy/Boar/*` clips, ClipLab pedestal | part-built by `RigBuilder` from `rigs.luau` (torso, head, snout, tusks, four legs, tail; `PlaceholderBoar` blue) | skinned mesh rig with the same joint names and rest pose | author in Blender; own work | Phase 1 |
 | `KoboldRig` (Mesh) | Kobold Axeman, `enemy/Kobold/*` clips, ClipLab pedestal | part-built by `RigBuilder` (`PlaceholderKobold` brown), big hands, a `Weapon` part on the right arm | mesh rig, same joints | author in Blender; own work | Phase 1 |
 | `TrialistSword` (Mesh) | starter weapon (`weapons.luau`, `playground.luau` loadout, `loot.luau`) | blade-shaped part from `WeaponBuilder` / `weaponModels.luau` with `TrailStart` / `TrailEnd` attachments; the ClipLab builds its own fallback blade when WeaponBuilder is absent | sword mesh; blade length must match `weapons.luau` reach | author in Blender or CC0 (Kenney / Poly Haven) | Phase 1 |
+| `TrialistScabbard` (Mesh) | the one-handed sword's back sheath (D-050), `WeaponBuilder` | one `PlaceholderWood` SmoothPlastic block (`Sheath/Scabbard`, 0.44 x 3.35 x 0.22 studs) welded to UpperTorso at `weaponModels.luau` `sheaths.OneHandedSword` | modeled scabbard with a mouth fitting, chape and strap, sized to the sword mesh; keep the mount data | author in Blender or CC0 (Kenney / Poly Haven) | Phase 1 |
 
 ## FX textures and meshes
 

@@ -14,6 +14,12 @@
 	health, removes corpses and reloads dead players' characters. `EntityService.bind(deps)`
 	swaps the engine (clock, net, tags, respawn, heartbeat) for fakes so every rule runs in Lune.
 
+	The combat tag (combatUntil) also says whether a player's sword is out: a player character
+	carries the Drawn attribute, true while the tag holds. Hits dealt or taken set the tag; an Art,
+	a basic swing, a guard and a lock-on refresh it, and Art, PostMotion, Guard and a live lock-on
+	keep refreshing it, so it ends combat.combatTagDuration after the last of them. A refresh never
+	moves lastCombatAt, so HP regen still waits on the last hit only.
+
 	Other services talk to this one through its functions and Signals; nobody writes a record.
 ]]
 
@@ -70,6 +76,9 @@ local LOCK_STATES: { [string]: boolean } = {
 
 -- States a guard can be raised from (and that a held guard returns to).
 local FREE_STATES: { [string]: boolean } = { Idle = true, Moving = true, Guard = true }
+
+-- States that keep a player's combat tag (and so the drawn sword) fresh for as long as they last.
+local HOLD_STATES: { [string]: boolean } = { Art = true, PostMotion = true, Guard = true }
 
 local EntityService = {}
 
@@ -243,12 +252,33 @@ local function publish(record: Record)
 	if record.kind == "Player" then
 		setAttribute(record, "Cursor", "Green")
 		setAttribute(record, "WeaponId", record.weaponId)
+		setAttribute(record, "Drawn", dependencies().now() < record.combatUntil)
 	end
 end
 
+-- A hit dealt or taken: HP regen waits from now and the combat tag runs from now.
 local function markCombat(record: Record, now: number)
 	record.lastCombatAt = now
 	record.combatUntil = now + Combat.combatTagDuration
+end
+
+-- A combat action that is not a hit (an Art, a guard, a lock-on): the player's tag runs at least
+-- combatTagDuration from now. HP regen is left alone. Enemies never carry the tag this way.
+local function refreshTag(record: Record, now: number)
+	if record.kind ~= "Player" then
+		return
+	end
+	record.combatUntil = math.max(record.combatUntil, now + Combat.combatTagDuration)
+end
+
+-- True while the lock-on target is a live fighter.
+local function hasLiveTarget(record: Record): boolean
+	local targetId = record.targetId
+	if targetId == nil then
+		return false
+	end
+	local target = records[targetId]
+	return target ~= nil and target.state ~= "Dead"
 end
 
 local function setHp(record: Record, value: number)
@@ -561,6 +591,9 @@ function EntityService.setState(id: number, state: State, duration: number?, dir
 	else
 		record.lockUntil = now
 	end
+	if HOLD_STATES[state] then
+		refreshTag(record, now)
+	end
 	publish(record)
 	if previous == state and state == "Idle" and duration == nil then
 		return
@@ -607,8 +640,11 @@ function EntityService.setGuard(id: number, held: boolean): boolean
 			record.guardSince = if rearmed then now else nil
 		end
 		record.guardHeld = true
+		refreshTag(record, now)
 		if record.state ~= "Guard" then
 			EntityService.setState(id, "Guard")
+		else
+			publish(record)
 		end
 		return true
 	end
@@ -640,7 +676,8 @@ function EntityService.isInvulnerable(id: number, now: number?): boolean
 	return (now or dependencies().now()) < record.invulnerableUntil
 end
 
---- Stores the lock-on target (nil clears it); the target must be a registered fighter.
+--- Stores the lock-on target (nil clears it); the target must be a registered fighter. A lock-on
+--- refreshes a player's combat tag (the sword comes out); clearing it lets the tag run out.
 function EntityService.setTarget(id: number, targetId: number?): boolean
 	local record = records[id]
 	if record == nil then
@@ -650,6 +687,10 @@ function EntityService.setTarget(id: number, targetId: number?): boolean
 		return false
 	end
 	record.targetId = targetId
+	if targetId ~= nil then
+		refreshTag(record, dependencies().now())
+		publish(record)
+	end
 	return true
 end
 
@@ -667,15 +708,16 @@ function EntityService.setWeapon(id: number, weaponId: string?)
 	publish(record)
 end
 
---- Marks a fighter as in combat now (HP regen waits, the combat tag refreshes).
+--- Marks a fighter as in combat now (HP regen waits, the combat tag refreshes) and publishes it.
 function EntityService.markCombat(id: number)
 	local record = records[id]
 	if record ~= nil then
 		markCombat(record, dependencies().now())
+		publish(record)
 	end
 end
 
---- True while the combat tag holds.
+--- True while the combat tag holds (for a player: while its sword is drawn).
 function EntityService.inCombat(id: number, now: number?): boolean
 	local record = records[id]
 	if record == nil then
@@ -801,6 +843,7 @@ function EntityService.applyHit(targetId: number, hit: Types.HitRequest): Types.
 	markCombat(target, now)
 	if attacker ~= nil then
 		markCombat(attacker, now)
+		publish(attacker)
 	end
 
 	local attackerPosition = if attacker ~= nil then positionOf(attacker) else nil
@@ -811,6 +854,7 @@ function EntityService.applyHit(targetId: number, hit: Types.HitRequest): Types.
 
 	if hit.parried then
 		result.parried = true
+		publish(target)
 		return result
 	end
 
@@ -923,6 +967,11 @@ local function stepAlive(record: Record, dt: number, now: number)
 		if lastCombatAt == nil or now - lastCombatAt >= Combat.outOfCombatRegenDelay then
 			setHp(record, record.hp + record.maxHp * Combat.outOfCombatRegenPerSecond * dt)
 		end
+	end
+
+	-- A held Art, post-motion or guard, or a live lock-on, keeps a player's sword out.
+	if HOLD_STATES[record.state] or hasLiveTarget(record) then
+		refreshTag(record, now)
 	end
 
 	pinHumanoid(record)

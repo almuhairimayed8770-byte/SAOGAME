@@ -48,6 +48,13 @@ InputController.switchCall:Connect(function()
 	net.fire("SwitchCallRequest", {})
 end)
 
+-- A lock-on draws the sword at once; the server's Drawn attribute follows.
+TargetController.targetChanged:Connect(function(record: any)
+	if record ~= nil then
+		CharacterController.predictDraw()
+	end
+end)
+
 -- Sibling packages that may not be in this build yet: load each once, start the ones that exist
 -- (every start is idempotent). Quality first: the fx budgets and the HUD read its tier.
 local SIBLING_ORDER = {

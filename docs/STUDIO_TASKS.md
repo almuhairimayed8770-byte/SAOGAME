@@ -97,6 +97,8 @@ and the smoke scripts (D-039, D-038).
     The arc sub-sample cap went from 4 to 12 after that run (D-044): rerun `tools/smoke.sh perf` and keep 12 only if the
     server work stays at or under p95 2.72 ms and max 8.27 ms; otherwise set `combat.luau` `sweepMaxSubdivisions = 8`,
     rerun the smoke and `lune run tools/hit-matrix.luau --check`, and write both runs into D-044.
+    Rerun on the owner's PC with cap 12 (2026-10-18): server work p95 2.01 ms, so 12 stays; the max of that run still
+    goes into the table.
 
 ## E. Assets (as they arrive; see `docs/ASSETS.md`)
 
@@ -152,3 +154,32 @@ and the smoke scripts (D-039, D-038).
 26. [ ] **Watch the write order.** In Play mode open **View tab > Script Performance** (verify) and confirm the
     Choreo RenderStepped step is the last thing that touches `Transform` each frame: a rig that snaps to rest for a
     frame means something else (an `AnimationTrack`, a plugin) writes after it.
+
+## H. The sheathed sword (D-050; do before recording `locomotion.mp4`)
+
+27. [ ] **Rerun the rigs and combat smokes** (`tools/smoke.sh rigs`, `tools/smoke.sh combat`). Rigs now also checks that
+    `Sheath/Scabbard` is welded to UpperTorso by `ScabbardWeld` with CanQuery off and that a freshly registered
+    stand-in has `Drawn` = false. Combat now also checks `Drawn` false, then true as the Horizontal starts, the `Weapon`
+    Motor6D on RightHand at the strike, and `Drawn` false again about 6 s after the post-motion (about 7 s longer).
+28. [ ] **Draw at 0.25x in the ClipLab.** Play `Draw` over IdleDrawn and over RunDrawn. The hand dips, takes the hilt over
+    the right shoulder at 0.22 s, and the blade slides straight up out of the scabbard with no edge through its side; the
+    wrist turns a little on the grip, the blade swings out over the top and settles a little past the carry with a
+    small spring. At 0.28 to 0.29 s the last 2 studs of blade leave the sheath by swinging: note whether that reads as
+    cutting through the mouth.
+29. [ ] **Sheathe at 0.25x.** Play `Sheathe` over Idle and over Run. The point finds the mouth at 0.37 s and the blade
+    slides home; at 0.42 s the hand lets go with a snap and falls to the side. Fill the Draw and Sheathe cells of
+    `docs/ANIMATION_REVIEW.md`.
+30. [ ] **The hilt behind a real head.** With your avatar (hair and accessories on), watch from the side: the sheathed
+    idle (the glance at 10 s), the walks, Run and Sprint. The hilt must stay behind the head, not through hair or ears.
+    If it goes through, the mount in `weaponModels.luau` `sheaths.OneHandedSword` moves back and the Draw and Sheathe
+    grab keys are solved again (ask in the project). Also watch IdleDrawn, the attacks and DodgeBack from behind and
+    note whether the scabbard's lower end visibly enters the hips on waist twists.
+31. [ ] **The arm rule in the Playground**, sheathed: lock on and at once turn in place; take a hit (Draw plays after the
+    Stagger). In each, Draw plays after the other clip ends with no frame where the sword jumps from the back to the
+    hand. Then lock on while sprinting and check that the hand meets the hilt.
+32. [ ] **Two clients** (**Test tab > Clients and Servers > 2 Players**, verify), both near an enemy. Player A locks on
+    and off and attacks while player B watches A's sword: B sees it draw, sheathe and draw-cut, with no one- or
+    two-frame Draw flash before a draw-cut. Then A taps the lock key six or more times quickly and ends unlocked: A's
+    sword sheathes about 6 s later.
+33. [ ] **Footsteps, once real step sounds exist:** standing still is silent; walking, running and sprinting make one
+    step per foot plant, drawn or sheathed; an idle enemy makes none.

@@ -200,6 +200,24 @@ local Dev = {
 		-- drawn stance a fight layers them on (Mixer: an UpperBody clip overrides the joints it keys,
 		-- an Additive one adds to them); Base and FullBody clips are posed alone.
 		layeredOver = "IdleDrawn",
+		-- The Base clip under a clip that puts the sword away (a WeaponSheathe event): the sheathed
+		-- set is already playing when Sheathe starts (D-050).
+		layeredOverSheathed = "Idle",
+		-- The sword changes hands (WeaponDraw, WeaponSheathe) where the hand is: posed once on the
+		-- hand (the clip's Weapon key) and once on the back mount, the grip moves at most
+		-- maxDistance studs and the blade turns at most maxDegrees, so the swap does not pop.
+		handoff = { maxDistance = 0.4, maxDegrees = 30 },
+		-- How deep the sword on the back (blade, guard, grip) or its scabbard may go into a body
+		-- part in the sheathed set (the idle, the walks, Run and Sprint), the sheath's own part
+		-- aside: zero, so they may touch but never pass inside. A hilt in the head or a hand through
+		-- the scabbard on every step reads as a broken model, not a stance.
+		backOverlap = 0,
+		-- For `seconds` after a WeaponDraw (the pull) and before a WeaponSheathe (the slide home)
+		-- the blade runs along its sheath: every edge and face of it that is still within the
+		-- scabbard's length must stay inside the scabbard's walls, coming out by at most `poke`
+		-- studs. A blade that cuts out through the side of its sheath reads as a broken model.
+		-- After that the arm's reach is spent and the rest of the blade swings out over the top.
+		sheathSlide = { seconds = 0.05, poke = 0 },
 	},
 
 	-- Gate recordings (section 20 Phase 0 gate; section 1: the capture script's on-screen prompts).
@@ -310,8 +328,8 @@ local Dev = {
 			{
 				id = "locomotion",
 				title = "Locomotion pass",
-				seconds = 10,
-				notes = "walk, run, sprint drawn and sheathed, turn in place, skid stop, jump and land; no T-pose, no sliding foot",
+				seconds = 14,
+				notes = "sheathed: walk, run, sprint with the sword on the back; lock on to draw; drawn: walk, run, sprint with the blade low and back; turn in place, skid stop, jump and land; no T-pose, no sliding foot",
 			},
 		} :: { Shot },
 	},
@@ -422,6 +440,8 @@ local Dev = {
 				Voice = "TorchWarm",
 				CameraNudge = "CursorOrange",
 				WeaponSwap = "TrailOrange",
+				WeaponDraw = "PlaceholderSteel",
+				WeaponSheathe = "ShatterSilver",
 			},
 		},
 	},
@@ -471,6 +491,8 @@ local Dev = {
 			"PostMotionStart",
 			"WeaponSwap",
 			"CameraNudge",
+			"WeaponDraw",
+			"WeaponSheathe",
 		},
 	},
 }

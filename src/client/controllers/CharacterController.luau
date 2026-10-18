@@ -11,6 +11,11 @@
 	hold, glowing); release launches it (the request goes out and the clip resumes in step with
 	the server's copy, see ActionLogic.syncPlan); holding past the cancel time lets go of it.
 
+	The sheathed sword: the server's Drawn attribute says whether the sword is out. Every combat
+	request this client sends (an Art, a basic attack, a guard), a hit dealt or taken and a lock-on
+	also predict it for choreo.luau sheath.predictSeconds, so the draw shows at once; a dodge does
+	not. Locomotion moves the sword and plays Draw and Sheathe from that target.
+
 	Every decision is in ActionLogic (tested); this file is the engine glue around it.
 ]]
 
@@ -82,9 +87,8 @@ local locomotion: any = nil
 local state: ActionLogic.LocalState = "Idle"
 local sprinting = false
 local timeScale = 1
-local lastCombatTime: number? = nil
+local lastPredictAt: number? = nil
 local lastParryAt: number? = nil
-local lastDrawn: boolean? = nil
 local lastWalkSpeed: number? = nil
 local dodgeReadyAt = 0
 local basicChain = 0
@@ -173,9 +177,12 @@ local function stance(): ActionLogic.Stance
 	return { moving = moving, airborne = airborne, afterParry = afterParry }
 end
 
-local function markCombat()
-	lastCombatTime = now()
+--- Shows the sword drawn now, ahead of the server's Drawn attribute (a combat request was sent,
+--- a hit landed, or a target was locked).
+function CharacterController.predictDraw()
+	lastPredictAt = now()
 end
+local predictDraw = CharacterController.predictDraw
 
 -- ------------------------------------------------------------------ Art hold / launch / cancel
 
@@ -228,7 +235,7 @@ function CharacterController.beginArt(slot: number)
 		token = holdToken,
 	}
 	setState("Holding")
-	markCombat()
+	predictDraw()
 	Siblings.call(Hud, "noteArtUse")
 	-- If the clip carries no ActivationHold event the freeze still lands at the section 6 time.
 	task.delay(Combat.startPoseTime + Combat.activationHold, function()
@@ -260,7 +267,7 @@ function CharacterController.releaseArt(slot: number, heldSeconds: number)
 	setState("Art")
 	-- The server's Idle normally ends the Art; this is the fallback if that state never arrives.
 	actionEndsAt = ActionLogic.artFallbackEnd(releasedAt, plan.freezeClipTime, current.art, Combat.lagAllowance)
-	markCombat()
+	predictDraw()
 	fire("ArtRequest", { artId = current.art.id, facing = facingTable(), clientTime = serverNow() })
 	task.delay(plan.freezeClipTime, function()
 		if predicted ~= nil and (predicted :: Predicted).token == launchToken then
@@ -304,7 +311,7 @@ function CharacterController.basicAttack()
 	predicted = { action = "Basic", clipId = clipId, handle = animator:play(clipId), token = basicToken }
 	setState("Basic")
 	actionEndsAt = t + Combat.basicHitDuration
-	markCombat()
+	predictDraw()
 	fire("BasicAttackRequest", { facing = facingTable(), clientTime = serverNow() })
 end
 
@@ -327,7 +334,7 @@ function CharacterController.setGuard(held: boolean)
 			token = guardToken,
 		}
 		setState("Guard")
-		markCombat()
+		predictDraw()
 		fire("GuardRequest", { held = true, facing = facingTable(), clientTime = serverNow() })
 	elseif state == "Guard" then
 		if predicted ~= nil then
@@ -376,7 +383,6 @@ function CharacterController.dodge()
 	setState("Dodge")
 	actionEndsAt = t + Combat.dodgeDuration
 	dodgeReadyAt = t + Combat.dodgeCooldown
-	markCombat()
 	CameraController.fovKick("Dash")
 	fire("DodgeRequest", { direction = { world.X, world.Y, world.Z }, clientTime = serverNow() })
 end
@@ -443,7 +449,6 @@ local function onServerState(serverState: string)
 	else
 		setState("Stagger")
 	end
-	markCombat()
 end
 
 local function onHit(payload: any)
@@ -452,12 +457,12 @@ local function onHit(payload: any)
 		return
 	end
 	if payload.targetId == localId then
-		markCombat()
+		predictDraw()
 		if payload.parried then
 			lastParryAt = now()
 		end
 	elseif payload.attackerId == localId then
-		markCombat()
+		predictDraw()
 	end
 end
 
@@ -527,13 +532,13 @@ local function step(dt: number)
 		lastWalkSpeed = walkSpeed
 	end
 
-	local drawn = ActionLogic.drawn(lastCombatTime, t, Combat.combatTagDuration)
-	if drawn ~= lastDrawn then
-		lastDrawn = drawn
-		if locomotion ~= nil then
-			locomotion:setDrawn(drawn)
-		end
-	end
+	-- Locomotion keeps the Drawn attribute from its change signal, so no attribute is read per frame.
+	local drawn = ActionLogic.drawnTarget(
+		if locomotion ~= nil then locomotion:serverDrawn() else false,
+		lastPredictAt,
+		t,
+		ChoreoData.sheath.predictSeconds
+	)
 
 	local velocity = rootPart.AssemblyLinearVelocity
 	local speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
@@ -580,7 +585,7 @@ local function clearCharacter()
 	predicted = nil
 	actionEndsAt = nil
 	lastWalkSpeed = nil
-	lastDrawn = nil
+	lastPredictAt = nil
 	fallTracker = { airborneSince = nil, peakY = 0 }
 	setState("Idle")
 end

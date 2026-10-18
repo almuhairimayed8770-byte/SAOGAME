@@ -210,6 +210,8 @@ export type ClipEventKind =
 	| "PostMotionStart"
 	| "WeaponSwap"
 	| "CameraNudge"
+	| "WeaponDraw" -- the hand takes the sword from its sheath
+	| "WeaponSheathe" -- the sword goes back into its sheath
 
 export type ClipEvent = {
 	time: number,
@@ -229,6 +231,7 @@ export type ClipDef = {
 	rig: string, -- rig id from rigs.luau
 	duration: number, -- seconds
 	loop: boolean,
+	sheathed: boolean?, -- the sword starts this clip on its sheath (back mount), not in the hand
 	layer: ClipLayer,
 	keys: { ClipKey },
 	events: { ClipEvent },

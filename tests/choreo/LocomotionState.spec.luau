@@ -98,10 +98,65 @@ describe("LocomotionState.update", function()
 		local state = LocomotionState.new()
 		local out =
 			state:update(FRAME, input({ forward = 1, speed = Config.sprintSpeed, sprinting = true, drawn = true }))
-		expect(out.weights.Sprint).toBeCloseTo(1)
-		expect(out.drawnSprint).toBeCloseTo(1)
+		expect(out.weights.SprintDrawn).toBeCloseTo(1)
+		expect(out.drawnSprint).toBeCloseTo(out.weights.SprintDrawn, 1e-9)
 		out = state:update(FRAME, input({ forward = 1, speed = Config.sprintSpeed, sprinting = true, drawn = false }))
 		expect(out.drawnSprint).toBe(0)
+	end)
+
+	it("drawn moves the walks, Run and Sprint to the ...Drawn clips; sheathed keeps the plain ones", function()
+		local cases = {
+			{ input = { forward = 1, speed = Config.walkSpeed }, name = "WalkForward" },
+			{ input = { forward = -1, speed = Config.walkSpeed }, name = "WalkBack" },
+			{ input = { right = -1, speed = Config.walkSpeed }, name = "WalkLeft" },
+			{ input = { right = 1, speed = Config.walkSpeed }, name = "WalkRight" },
+			{ input = { forward = 1, speed = Config.runSpeed }, name = "Run" },
+			{ input = { forward = 1, speed = Config.sprintSpeed, sprinting = true }, name = "Sprint" },
+			{ input = { forward = 1, speed = Config.runSpeed, grounded = false, verticalVelocity = -1 }, name = "Run" },
+		}
+		for _, case in cases do
+			local sheathed = LocomotionState.new():update(FRAME, input(case.input))
+			expect(sheathed.weights[case.name]).toBeCloseTo(1, 1e-6)
+			expect(sheathed.weights[case.name .. "Drawn"]).toBe(0)
+			local drawnInput = input(case.input)
+			drawnInput.drawn = true
+			local drawn = LocomotionState.new():update(FRAME, drawnInput)
+			expect(drawn.weights[case.name .. "Drawn"]).toBeCloseTo(1, 1e-6)
+			expect(drawn.weights[case.name]).toBe(0)
+		end
+		expect(LocomotionState.clipFor("Run", true)).toBe("RunDrawn")
+		expect(LocomotionState.clipFor("Idle", true)).toBe("IdleDrawn")
+		expect(LocomotionState.clipFor("Run", false)).toBe("Run")
+	end)
+
+	it("weighs all fourteen clips and the weights sum to one, drawn or sheathed", function()
+		expect(#LocomotionState.WEIGHT_NAMES).toBe(14)
+		for _, name in LocomotionState.WEIGHT_NAMES do
+			expect(Config.clips[name]).toBeTruthy()
+		end
+		for _, drawn in { false, true } do
+			local state = LocomotionState.new()
+			for speed = 0, Config.sprintSpeed + 2, 0.5 do
+				for _, direction in { { 1, 0 }, { 1, 1 }, { 0, -1 }, { -1, 0.3 } } do
+					local out = state:update(
+						FRAME,
+						input({
+							forward = direction[1],
+							right = direction[2],
+							speed = speed,
+							sprinting = speed > Config.runSpeed,
+							drawn = drawn,
+						})
+					)
+					local count = 0
+					for _ in out.weights do
+						count += 1
+					end
+					expect(count).toBe(14)
+					expect(sum(out.weights)).toBeCloseTo(1, 1e-6)
+				end
+			end
+		end
 	end)
 
 	it("turns in place past the threshold, once per turn clip", function()

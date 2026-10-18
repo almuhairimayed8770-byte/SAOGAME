@@ -37,6 +37,7 @@ local Choreo = {
 		Breathing = 0,
 		OneShot = 5,
 		Flinch = 5,
+		Sheath = 8, -- Draw and Sheathe: above locomotion, below Guard
 		Guard = 10,
 		Basic = 15,
 		Art = 20,
@@ -108,7 +109,7 @@ local Choreo = {
 			rate = 10,
 			neckCounterFraction = 0.5, -- share of the waist lean the head cancels
 		},
-		drawnSprintPose = { -- additive "weapon low and back" on top of Sprint when drawn
+		drawnSprintPose = { -- additive "weapon low and back" on top of SprintDrawn
 			RightShoulder = { rot = { -40, 0, 18 } },
 			RightElbow = { rot = { 20, 0, 0 } },
 			RightWrist = { rot = { -10, 0, 0 } },
@@ -123,7 +124,9 @@ local Choreo = {
 			fadeSpeed = 6, -- IK fades out as speed rises toward this
 			footSpacing = 0.5, -- half the distance between the feet, from the root
 		},
-		clips = { -- clip name -> clip id suffix under player/OneHandedSword
+		-- Clip name -> clip id suffix under player/OneHandedSword. The plain walk, run and sprint
+		-- names are the sheathed set (empty hands); the ...Drawn names are the drawn set.
+		clips = {
 			Idle = "Idle",
 			IdleDrawn = "IdleDrawn",
 			WalkForward = "WalkForward",
@@ -132,6 +135,12 @@ local Choreo = {
 			WalkRight = "WalkRight",
 			Run = "Run",
 			Sprint = "Sprint",
+			WalkForwardDrawn = "WalkForwardDrawn",
+			WalkBackDrawn = "WalkBackDrawn",
+			WalkLeftDrawn = "WalkLeftDrawn",
+			WalkRightDrawn = "WalkRightDrawn",
+			RunDrawn = "RunDrawn",
+			SprintDrawn = "SprintDrawn",
 			Jump = "Jump",
 			Fall = "Fall",
 			Land = "Land",
@@ -140,6 +149,17 @@ local Choreo = {
 			Skid = "Skid",
 		},
 		clipPrefix = "player/OneHandedSword/",
+	},
+
+	-- The sheathed weapon (weaponModels.luau sheaths): the server's Drawn attribute says where the
+	-- sword should be; each client plays Draw and Sheathe and moves the sword between hand and back.
+	sheath = {
+		clips = { draw = "Draw", sheathe = "Sheathe" }, -- suffixes under locomotion.clipPrefix
+		-- These clips start with the sword in the hand (a draw-cut), as every clip with `attack` does.
+		drawCutClips = { "Guard", "GuardHit", "Parry" },
+		predictSeconds = 1.5, -- the local player shows drawn this long after sending a combat request, until the attribute lands
+		sheatheDelay = 0.3, -- Drawn must stay false this long before the Sheathe clip starts
+		stopBlend = 0.1, -- blend-out of a Draw or Sheathe that is cut short
 	},
 }
 

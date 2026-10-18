@@ -3,6 +3,7 @@ local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
 local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
 local ReviewMarkers = Harness.load("src/client/dev/ReviewMarkers")
 local Combat = Harness.load("src/shared/data/combat")
+local Choreo = Harness.load("src/shared/data/choreo")
 
 local FRAME = 1 / 60
 local EPSILON = 1e-6
@@ -327,5 +328,139 @@ describe("clip data", function()
 			end
 			expect(moved).toBe(true)
 		end
+	end)
+end)
+
+-- The sheathed weapon (D-050): the plain locomotion names are the sheathed set (the sword on the
+-- back, empty hands), the ...Drawn names the drawn set; Draw and Sheathe move the sword between.
+local SHEATHED_SET = { "Idle", "WalkForward", "WalkBack", "WalkLeft", "WalkRight", "Run", "Sprint" }
+
+local function counterpart(name: string): string
+	return if name == "Idle" then "IdleDrawn" else name .. "Drawn"
+end
+
+local function footsteps(clip: any): { { time: number, foot: string } }
+	local list = {}
+	for _, event in clip.events do
+		if event.kind == "Footstep" then
+			table.insert(list, { time = event.time, foot = event.data and event.data.foot })
+		end
+	end
+	return list
+end
+
+local function keysWeapon(clip: any): { number }
+	local times = {}
+	for _, key in clip.keys do
+		if key.joints.Weapon ~= nil then
+			table.insert(times, key.time)
+		end
+	end
+	return times
+end
+
+describe("sheathed and drawn sets", function()
+	it("every locomotion and sheath clip in choreo.luau exists", function()
+		local prefix = Choreo.locomotion.clipPrefix
+		for key, name in Choreo.locomotion.clips do
+			if not ClipLibrary.has(prefix .. name) then
+				error(("locomotion.clips %s: %s%s is missing"):format(key, prefix, name))
+			end
+		end
+		for key, name in Choreo.sheath.clips do
+			if not ClipLibrary.has(prefix .. name) then
+				error(("sheath.clips %s: %s%s is missing"):format(key, prefix, name))
+			end
+		end
+	end)
+
+	it("each sheathed clip matches its drawn counterpart: duration, loop and footsteps", function()
+		for _, name in SHEATHED_SET do
+			local plain = ClipLibrary.get("player/OneHandedSword/" .. name)
+			local drawn = ClipLibrary.get("player/OneHandedSword/" .. counterpart(name))
+			expect(plain.sheathed).toBe(true)
+			expect(drawn.sheathed).never.toBe(true)
+			expect(plain.duration).toBe(drawn.duration)
+			expect(plain.loop).toBe(drawn.loop)
+			expect(plain.layer).toBe(drawn.layer)
+			local a, b = footsteps(plain), footsteps(drawn)
+			expect(#a).toBe(#b)
+			for index = 1, #a do
+				if math.abs(a[index].time - b[index].time) > FRAME + EPSILON or a[index].foot ~= b[index].foot then
+					error(
+						("%s Footstep %d (%s at %.3f s) is not %s's (%s at %.3f s)"):format(
+							plain.id,
+							index,
+							tostring(a[index].foot),
+							a[index].time,
+							drawn.id,
+							tostring(b[index].foot),
+							b[index].time
+						)
+					)
+				end
+			end
+		end
+	end)
+
+	it("the sheathed set keys no Weapon; Draw keys it only from its WeaponDraw", function()
+		for _, name in SHEATHED_SET do
+			local clip = ClipLibrary.get("player/OneHandedSword/" .. name)
+			expect(keysWeapon(clip)).toEqual({})
+		end
+		local draw = ClipLibrary.get("player/OneHandedSword/Draw")
+		local at = eventTimes(draw, "WeaponDraw")[1]
+		local times = keysWeapon(draw)
+		expect(times[1]).toBeCloseTo(at, EPSILON)
+		for _, time in times do
+			expect(time).toBeGreaterThanOrEqual(at - EPSILON)
+		end
+	end)
+
+	it("Draw and Sheathe each carry exactly one of their events and play over the upper body", function()
+		local draw = ClipLibrary.get("player/OneHandedSword/" .. Choreo.sheath.clips.draw)
+		local sheathe = ClipLibrary.get("player/OneHandedSword/" .. Choreo.sheath.clips.sheathe)
+		expect(#eventTimes(draw, "WeaponDraw")).toBe(1)
+		expect(#eventTimes(draw, "WeaponSheathe")).toBe(0)
+		expect(#eventTimes(sheathe, "WeaponSheathe")).toBe(1)
+		expect(#eventTimes(sheathe, "WeaponDraw")).toBe(0)
+		expect(draw.sheathed).toBe(true)
+		expect(sheathe.sheathed).never.toBe(true)
+		for _, clip in { draw, sheathe } do
+			expect(clip.layer).toBe("UpperBody")
+			expect(clip.priority).toBe(Choreo.priority.Sheath)
+			expect(clip.loop).toBe(false)
+			expect(ReviewMarkers.mountProblems(clip)).toEqual({})
+		end
+		-- After the sword goes home, no key moves it.
+		local home = eventTimes(sheathe, "WeaponSheathe")[1]
+		for _, time in keysWeapon(sheathe) do
+			expect(time).toBeLessThanOrEqual(home + EPSILON)
+		end
+	end)
+
+	it("the sheathed Idle keeps its 12 s cycle with empty hands", function()
+		local idle = ClipLibrary.get("player/OneHandedSword/Idle")
+		expect(idle.sheathed).toBe(true)
+		expect(idle.duration).toBe(Choreo.locomotion.idleCycle)
+		expect(keysWeapon(idle)).toEqual({})
+	end)
+
+	it("the pose editor writes sheathed right after loop when it rewrites a clip", function()
+		local fs = require("@lune/fs")
+		local luau = require("@lune/luau")
+		local path = "tools/PoseEditor/src/Serialize.luau"
+		local Serialize = luau.load(fs.readFile(Harness.repoRoot() .. "/" .. path), {
+			debugName = path,
+			environment = {
+				require = function(_target: any)
+					error("Serialize must not require anything")
+				end,
+			} :: any,
+		})()
+		local source = Harness.readFile("src/shared/clips/player/OneHandedSword/Draw.luau")
+		local parsed, meta = Serialize.parse(source)
+		local written = Serialize.toSource(parsed, { meta = meta })
+		expect(written).toContain('\tloop = false,\n\tsheathed = true,\n\tlayer = "UpperBody",')
 	end)
 end)

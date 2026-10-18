@@ -13,18 +13,18 @@ an automated solo Play session); every line that still needs a person in Studio 
 | --- | --- | --- |
 | Foundation | Rojo project (`default.project.json`, `places/`), `aftman.toml` / `rokit.toml`, StyLua + Selene (online and offline configs), GitHub Actions CI, Lune test harness with a virtual DataModel (D-002), `tools/validate.luau` with 25 validators, the naming blocklist (D-014), the phase scope (D-015) | `tests/tools/validators.spec.luau`, `naming.spec.luau` |
 | Shared data | 28 tables under `src/shared/data/` (combat, arts, weapons, armor, apex, enemies, bosses, floors, loot, origins, paths, tiers, ai, camera, choreo, fx, input, lighting, palette, playground, rigs, scope, sfx, assets, ui, weaponModels, world, dev), `types.luau`, `util/` (Signal, Spring, Easing, Verlet, Rng, Check) | `tests/data/*`, `tests/util/*` |
-| Clips | 56 Choreo clips: 36 `player/OneHandedSword/*` (locomotion, guard, parry, dodges, flinches, Basic1-3, Horizontal, Vertical, RisingArc, SharpNail, DeathFreeze), 10 `enemy/Boar/*`, 10 `enemy/Kobold/*` | `tests/choreo/clips.spec.luau`, `ClipLibrary.spec.luau`, clips validator |
-| Choreo (client) | `ClipSampler` (per-clip structure cache), `Pose`, `Mixer` (layers, pause, time scale, catch-up), `Choreo` (animator per rig, quality tiers, Roblox Animation fallback), `ClipLibrary`, `Locomotion` + `LocomotionState` | `tests/choreo/*` |
+| Clips | 64 Choreo clips: 44 `player/OneHandedSword/*` (locomotion in a sheathed and a drawn set, Draw and Sheathe, guard, parry, dodges, flinches, Basic1-3, Horizontal, Vertical, RisingArc, SharpNail, DeathFreeze), 10 `enemy/Boar/*`, 10 `enemy/Kobold/*` | `tests/choreo/clips.spec.luau`, `ClipLibrary.spec.luau`, clips validator |
+| Choreo (client) | `ClipSampler` (per-clip structure cache), `Pose`, `Mixer` (layers, pause, time scale, catch-up), `Choreo` (animator per rig, quality tiers, Roblox Animation fallback), `ClipLibrary`, `Locomotion` + `LocomotionState`, the sheathed weapon (`WeaponMount`, `SheathState`, D-050) | `tests/choreo/*` |
 | Controllers, camera, net | Input, Character, Target, EntityTracker, Replication (drives every remote rig's locomotion), ActionLogic, WeaponInfo, Siblings; CameraController + CameraMath; `Net` / `Remotes` (D-008) | `tests/client/*`, `tests/net/*` |
 | FX | Trails, Smear, Shatter (+ ShatterMath), Sparks, Telegraphs (+ TelegraphShapes), OutlineManager (+ OutlineRanking), Digits, SwitchRing, Quality, FrameClock, Engine | `tests/client/*` |
 | UI and audio | `El` component library (D-007), Hud (+ HudLogic), Nameplates, SystemLine; MusicDirector (+ MusicState), SfxPool | `tests/client/*` |
 | Server | EntityService, CombatService (DamageMath, HitSweep with the per-sample blade overlap and the arc-following sweep D-010 / D-042 / D-044, the section 17 request checks including the quick-slot check), EnemyService with Brain / Charger / Brute AI, PlaygroundService, AntiCheatService (+ anticheat Rules), world builders (RigBuilder, WeaponBuilder, PlaygroundBuilder, PlaygroundLayout) and CharacterReady (D-046), `Main.server.luau` | `tests/server/*` (with the hit matrix, D-045), `tests/smoke/*.smoke.luau` (six, all pass on the owner's PC) |
 | Tools and docs | `Capture.client.luau` (gate shot prompts), the ClipLab (`places/ClipLab.project.json`, `ClipLab.server.luau`, `ClipLab.client.luau`, `ReviewMarkers`), the PoseEditor Studio plugin (`tools/PoseEditor`) with `Serialize` / `Session`, `tools/pose-server.luau`, `tools/assets.luau`, `tools/smoke.sh`, `tools/animation-review.luau`, `tools/hit-matrix.luau`, `tools/build-plugin.sh`, `data/dev.luau`, this docs set | `tests/tools/*` |
 
-Suite at the time of writing: `lune run tests/run.luau` 910 passed, 0 failed, 75 spec files. `lune run tools/validate.luau`:
+Suite at the time of writing: `lune run tests/run.luau` 1044 passed, 0 failed, 77 spec files. `lune run tools/validate.luau`:
 25 validators, 0 problems; the clips validator prints one warning for the 160 later-phase clips (66 Arts, 65 enemy
 attacks, 29 boss attacks) that are not authored yet and are outside the Phase 0 scope (D-015).
-`tools/animation-review.luau` flags no review-rule finding on the 56 clips (9 attacks); the hand-filled columns are
+`tools/animation-review.luau` flags no review-rule finding on the 64 clips (9 attacks); the hand-filled columns are
 still empty (they come from watching the recordings at 0.25x). `lune run tools/hit-matrix.luau --check`: every real-fight
 placement registered on its strike at every frame phase. `tools/lint.sh --offline` (StyLua, Selene, tests, validators, every Rojo build) passes.
 
@@ -88,11 +88,31 @@ Run over Remote Control: `tools/smoke.sh` (all six smokes) and a solo Play sessi
   where the body went on to) and corrected the cost and margin claims in D-044.
 - **Sweep hardening** after that pass: a root that jumps (a teleport, a snap back) is no longer swept across (D-048);
   teammates, the attacker and dead enemies no longer use up the target cap (D-049); joints are read once per fighter
-  per frame, which pays for raising the arc sub-sample cap from 4 to 12 (D-044). Studio perf check of cap 12 pending.
+  per frame, which pays for raising the arc sub-sample cap from 4 to 12 (D-044). Studio perf rerun with cap 12 on the
+  owner's PC: server work p95 2.01 ms (2.72 before), so the cap stays at 12.
   Known and older: a server hitch of 0.25 s that lands a basic swing past its 0.35 s Art state loses that window (34 of
   14,400 hitch swings in a Lune study).
 
+- **The sword is sheathed on the back out of combat** (D-050): a placeholder scabbard across the back, a server-owned
+  `Drawn` attribute from the combat tag (the server's sword never leaves the hand, so hits are unchanged), Draw and
+  Sheathe clips that only move the sword where the hand is, draw-cuts for attacks, guard and parry, and a sheathed
+  locomotion set (empty hands; the anime run with both arms pumping) next to the drawn set (renamed `…Drawn`). Walked
+  end to end in Lune (spawn, Art draw-cut, tag expiry, lock-on, a remote copy, a hit taken, respawn, the ClipLab).
+  Three adversarial passes fixed: the sword jumping 2.75 studs when a turn, jump or stagger hid the Draw's arm; a
+  stopped Draw's late event moving the sword; per-frame part and attribute lookups; footsteps from every walk at weight
+  0 (332 events in 10 s standing still, now 0; D-051); the hilt up to 0.28 stud into the head and the left hand into
+  the scabbard in the sheathed set; the blade cutting through the scabbard wall on the pull. GroundClearance now also
+  checks the handoff, the sheathed set against the body and the pull along the sheath. The rigs and combat smokes check
+  the scabbard and `Drawn`.
+
 ## Known review items for the Studio pass
+
+- The sheathed sword at 0.25x in the ClipLab: Draw and Sheathe (the hand meets the hilt at 0.22 s and 0.42 s; the last
+  2 studs of blade leave the sheath by swinging over the top in about 2 frames at 1x, so judge whether that reads as a
+  whip or a glitch), the hilt behind the head with a real avatar's hair, and whether the scabbard's lower end visibly
+  enters the hips on drawn-set waist twists (up to 0.18 stud on the test body's boxes).
+- The shared one-shots (turns, jump, fall, land, skid, dodges, stagger) key a sword grip, so while sheathed they show a
+  gripping empty hand; sheathed twins are later work.
 
 - At 0.25x: no blade in the grass anywhere (D-047 checks the blank avatar on a flat field); the hilt should not read as
   entering the thigh in Basic 3 at 0.15 s and Sharp Nail at 0.58 s (on the blank avatar's boxes the grip sits as deep
@@ -118,12 +138,12 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 | The 20-second fight: six beats on every attack, the parry sparks, the kill shatters | Needs the owner's recording (`fight-boar-kobold.mp4`) |
 | The server registered every hit | **Met** in the hit matrix (every window, both enemies, real fight distances, four frame phases; D-045) and in `combat.smoke` in Studio; the recording shows it again as a digit per hit |
 | 60 fps in Studio | Needs Play mode with the window rendering: read **View > Stats** while recording (a scripted Play session does not render, so it cannot measure this) |
-| All tests green | **Met** (910 tests, 25 validators, six smokes in Studio, CI) |
+| All tests green | **Met** (1044 tests, 25 validators, six smokes in Studio, CI) |
 
 | Line | State | Evidence / what is missing |
 | --- | --- | --- |
-| CI is green: StyLua, Selene, Lune tests, data validators, naming blocklist, `rojo build` | **Met** | GitHub Actions run 39095436348 on `phase-0` (open it from the repository's Actions tab) (format, Selene with the real Roblox std, 910 tests, 25 validators, the review-report check, the game, both places and the plugin build). `tools/lint.sh --offline` reproduces every step except Selene's Roblox-only lints, which need the API dump; those run only in CI. `aftman.toml` pins the tool versions. |
-| Every new clip is in `docs/ANIMATION_REVIEW.md` with the six beats marked present and the hit-stop tier noted | **Met** (generated), hand columns empty | All 56 clips are in the table; 9 attacks show the six beats and a tier. The three hand-filled columns need the ClipLab pass in Studio. |
+| CI is green: StyLua, Selene, Lune tests, data validators, naming blocklist, `rojo build` | **Met** | GitHub Actions run 39095436348 on `phase-0` (open it from the repository's Actions tab) (format, Selene with the real Roblox std, 1044 tests, 25 validators, the review-report check, the game, both places and the plugin build). `tools/lint.sh --offline` reproduces every step except Selene's Roblox-only lints, which need the API dump; those run only in CI. `aftman.toml` pins the tool versions. |
+| Every new clip is in `docs/ANIMATION_REVIEW.md` with the six beats marked present and the hit-stop tier noted | **Met** (generated), hand columns empty | All 64 clips are in the table; 9 attacks show the six beats and a tier. The three hand-filled columns need the ClipLab pass in Studio. |
 | A recorded clip for every new Art, enemy and boss phase exists in `docs/clips/` and was watched at 0.25x | **Needs the owner's recordings** | `docs/clips/phase-0/README.md` lists the ten files the Capture panel prompts for. None recorded yet; each is reviewed frame by frame once it is in the repository. |
 | No T-pose, A-pose, frozen rig, popping limb or sliding foot appears in any clip | **Needs the owner's recordings** | Judged from the recordings. Remote rigs now walk (Replication drives their locomotion) and the root motor name matches the live R15 rig (D-016), the two defects a reviewer would have seen first. |
 | Every enemy attack has a wind-up of at least 0.3 s with a colored telegraph that reads from behind | **Met in data**, seen in the recordings | `enemies.luau` wind-ups (boar 0.6 s, kobold 1.0 s) and the clips validator's Anticipation-covers-windUp check pass; Telegraphs FX exist. |
@@ -143,7 +163,7 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 | Frame rate, 2020 phone | 30 fps | | device test |
 | Parts loaded | under 60,000 | 1,158 BaseParts in workspace (Stats.PrimitivesCount max 1,173) | `tools/smoke.sh perf` on the owner's PC, 2026-10-18: 8 stand-ins with swords, 60 enemies, server only |
 | Draw calls | under 1,500 | | MicroProfiler (Ctrl+F6) render thread (verify) |
-| Server heartbeat with 8 players and 60 enemies | under 12 ms | p95 2.72 ms, mean 1.68 ms, max 8.27 ms (timed server work per frame over 1,198 frames, 59.9 steps/s); Stats.HeartbeatTime p95 0.62 ms. With the stand-ins idle: p95 1.77 ms | `tools/smoke.sh perf` on the owner's PC, 2026-10-18: 8 registered stand-ins swinging Arts back to back (142 Arts, 565 hits on enemies; the arc sweep of D-044 included), 60 enemies winding up and striking (94 hits on the stand-ins), server only. Recheck with real players in a test server (F9 > Server > ServerJobs) |
+| Server heartbeat with 8 players and 60 enemies | under 12 ms | p95 2.72 ms, mean 1.68 ms, max 8.27 ms (timed server work per frame over 1,198 frames, 59.9 steps/s); Stats.HeartbeatTime p95 0.62 ms. With the stand-ins idle: p95 1.77 ms. Rerun after the sub-sample cap rose to 12 (D-044): p95 2.01 ms | `tools/smoke.sh perf` on the owner's PC, 2026-10-18: 8 registered stand-ins swinging Arts back to back (142 Arts, 565 hits on enemies; the arc sweep of D-044 included), 60 enemies winding up and striking (94 hits on the stand-ins), server only. Recheck with real players in a test server (F9 > Server > ServerJobs) |
 | Memory, PC | under 1.2 GB | not yet: 1,909 MB is the whole Studio process in a Run session, not a server or client | read a client in Play mode (View > Stats > Memory) or a live server |
 | Memory, mobile | under 600 MB | | device test |
 
@@ -172,4 +192,4 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 | `docs/clips/phase-0/enemy-kobold-overhead.mp4` | 5 s | 1.0 s wind-up with the yellow edge, the chop, the recovery |
 | `docs/clips/phase-0/parry-spark.mp4` | 5 s | guard tapped inside the window against the kobold's overhead (the boar's charge is unblockable); spark and ring; the enemy staggers |
 | `docs/clips/phase-0/kill-shatter.mp4` | 5 s | the 10-frame kill hit-stop, the 0.5 s freeze and silence, the shards rising |
-| `docs/clips/phase-0/locomotion.mp4` | 10 s | walk, run, sprint drawn and sheathed, turn in place, skid stop, jump and land; no T-pose, no sliding foot |
+| `docs/clips/phase-0/locomotion.mp4` | 14 s | sheathed: walk, run, sprint with the sword on the back; lock on to draw; drawn: walk, run, sprint with the blade low and back; turn in place, skid stop, jump and land; no T-pose, no sliding foot |
