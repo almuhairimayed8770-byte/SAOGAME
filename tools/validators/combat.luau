@@ -4,11 +4,12 @@
 	the sample rate, hit radius and target cap are positive, the lag allowance is not negative, and
 	the arc sweep (HitSweep.followArc) is tied to the hit radius and has a positive whole cap.
 
-	sweepMaxTipStep is how far either end of the blade may move between two samples of the sweep.
-	Every point the blade passes between two samples lies within half a step of one of them, and the
-	overlap test reaches one hit radius from each sampled blade, so a step of at most two radii is
-	what guarantees that a blade passing through a target touches it at a sample; past that, a
-	thin target can sit in the gap between two sampled blades.
+	sweepMaxTipStep is how far either end of the blade may move between two samples of the sweep
+	while sweepMaxSubdivisions lasts (a step the cap leaves longer is covered by its ends' chords
+	instead, HitSweep.castBladePath). Every point the blade passes between two samples lies within
+	half a step of one of them, and the overlap test reaches one hit radius from each sampled blade,
+	so a step of at most two radii is what guarantees that a blade passing through a target touches
+	it at a sample; past that, a thin target can sit in the gap between two sampled blades.
 ]]
 
 type Context = {

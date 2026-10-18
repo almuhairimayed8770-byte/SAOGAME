@@ -616,14 +616,16 @@ local function landHit(run: ArtRun, attacker: Record, hit: HitSweep.Hit, now: nu
 end
 
 -- Sweeps the blade over this frame's sample times; returns how many arc sub-samples it spent out
--- of `subdivisions` (what is left of this frame's combat.sweepMaxSubdivisions).
+-- of `subdivisions` (what is left of this frame's combat.sweepMaxSubdivisions). `clipTime` is the
+-- clip time the live root belongs to (this frame's).
 local function sweep(
 	run: ArtRun,
 	session: Session,
 	record: Record,
 	times: { number },
 	now: number,
-	subdivisions: number
+	subdivisions: number,
+	clipTime: number
 ): number
 	if #times == 0 then
 		return 0
@@ -643,8 +645,19 @@ local function sweep(
 	-- This frame's samples are solved from the live root (the body the clients see, carried by the
 	-- clip's root motion); each keeps its root so the next frame can interpolate from it. A frame
 	-- that sweeps several sample times (a hitch) spreads the root's travel since the previous frame's
-	-- last sample over them in clip time; the last one is solved from the live root.
-	local samples = HitSweep.bladePath(record.model, root.CFrame, run.clip, times, trailStart, trailEnd, run.lastSample)
+	-- last sample over them in clip time. The live root is where the body is at `clipTime`; when the
+	-- window closed earlier in the frame, its last sample is solved from the root the body had
+	-- reached at the close on that same walk, not from where it went on to.
+	local rootCFrame = root.CFrame
+	local previous = run.lastSample
+	local lastTime = times[#times]
+	if previous ~= nil and clipTime > lastTime and lastTime > previous.time then
+		local previousRoot = previous.root
+		if previousRoot ~= nil then
+			rootCFrame = previousRoot:Lerp(rootCFrame, (lastTime - previous.time) / (clipTime - previous.time))
+		end
+	end
+	local samples = HitSweep.bladePath(record.model, rootCFrame, run.clip, times, trailStart, trailEnd, previous)
 	if samples == nil then
 		if not session.warnedNoBlade then
 			session.warnedNoBlade = true
@@ -719,7 +732,7 @@ local function stepRun(session: Session, run: ArtRun, now: number)
 		local fromTime = run.sampledTo or window.open
 		local toTime = math.min(clipTime, window.close)
 		local times = HitSweep.sampleTimes(fromTime, toTime, Combat.hitSampleHz, run.sampledTo == nil)
-		subdivisions -= sweep(run, session, record, times, now, subdivisions)
+		subdivisions -= sweep(run, session, record, times, now, subdivisions, clipTime)
 		if session.run ~= run then
 			return -- cancelled from inside a reaction
 		end

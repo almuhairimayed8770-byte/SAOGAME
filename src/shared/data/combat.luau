@@ -110,14 +110,22 @@ local Combat = {
 	-- of one of them, so a blade that passes through a target always touches it with half the radius
 	-- to spare. tools/validators/combat.luau keeps it at or under two radii, where that margin is 0.
 	-- Where the cap below leaves a step longer than this, the sweep also casts the chord of each end
-	-- of the blade that moved farther (HitSweep.castBladePath), so the tip's arc is still covered.
+	-- of the blade that moved farther (HitSweep.castBladePath). A chord cuts the corner of its end's
+	-- arc, so on such a step the half-radius margin above does not hold: a target the true blade only
+	-- grazes can fall between the casts, and a chord can reach a little past the true blade. The cap
+	-- binds on the snap frame of every Phase 0 attack.
 	sweepMaxTipStep = HIT_SPHERE_RADIUS,
 	-- Sub-samples one fighter's sweep may add in one server frame, spent where the blade moves
 	-- farthest (an expo-out snap carries most of its cut in one frame). Each costs a Pose.solve, a
-	-- GetPartBoundsInRadius and a Spherecast (two more casts on a step the cap leaves long): 8
-	-- fighters in a snap frame at once is 8 x (1 + 4) solves and queries, estimated at 3 to 6 ms of
-	-- the 12 ms server frame (world.performance.maxServerHeartbeatMs) and not yet measured in Studio.
-	-- Pose.solve walks the whole character for its joints, so accessories raise the cost.
+	-- GetPartBoundsInRadius and a Spherecast, and a step the cap leaves long two more casts. A
+	-- window's first frame also solves the blade at its open, and the snap frame's steps are all long,
+	-- so one fighter's snap frame is 6 solves, 6 bounds queries and up to 15 casts (one more for each
+	-- fighter a cast meets): 8 fighters at once is 48, 48 and about 120. perf.smoke measured 8
+	-- stand-ins swinging Arts well inside the 12 ms server frame
+	-- (world.performance.maxServerHeartbeatMs; docs/DECISIONS.md D-044). The cap bounds only the
+	-- sub-samples: a hitch or a rewound swing adds a solve, a query and up to three casts for each
+	-- frame sample it catches up. Pose.solve walks the whole character for its joints, so
+	-- accessories raise the cost.
 	sweepMaxSubdivisions = 4,
 	facingTolerance = 0.35, -- cosine slack when comparing reported facing to the server's
 

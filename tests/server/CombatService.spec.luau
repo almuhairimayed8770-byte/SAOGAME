@@ -966,6 +966,54 @@ describe("CombatService hit sweep", function()
 		end
 	end)
 
+	it("a frame that ends past a window's close solves the close from the root the body had there", function()
+		fresh()
+		local centers = {}
+		useOverlap(function(center, radius, exclude)
+			table.insert(centers, center)
+			return fakeOverlap(center, radius, exclude)
+		end)
+		local playerId, player, character = spawnPlayer()
+		local window = ClipSampler.hitWindows(Horizontal)[1]
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		local _, startedAt = CombatService.currentArt(playerId)
+		while clock.t - startedAt < window.close - 3 / 60 do
+			advance(1 / 60)
+		end
+		local lastTime = clock.t - startedAt -- the clip time of last frame's sample
+		-- One server frame four sample times long that ends past the close, while the replicated
+		-- root travelled 6 studs: the body reached the live root only after the window closed.
+		local root = character.PrimaryPart
+		local from = root.CFrame
+		local to = from * CFrame.new(0, 0, -6)
+		root.CFrame = to
+		table.clear(centers)
+		advance(4 / 60, 4 / 60)
+		local clipTime = clock.t - startedAt
+		expect(clipTime).toBeGreaterThan(window.close + 0.5 / 60) -- the premise: the close is inside the frame
+		local times = HitSweep.sampleTimes(lastTime, window.close, Combat.hitSampleHz)
+		expect(times[#times]).toBe(window.close)
+		-- Every frame sample, the close included, is the blade solved from the root a straight walk
+		-- from last frame's root to the live one had reached at its clip time.
+		local trailStart, trailEnd = HitSweep.trailAttachments(character)
+		for _, time in times do
+			local alpha = (time - lastTime) / (clipTime - lastTime)
+			local blade = HitSweep.bladeAt(character, from:Lerp(to, alpha), Horizontal, time, trailStart, trailEnd)
+			local found = false
+			for _, center in centers do
+				if (center - blade.mid).Magnitude < 1e-4 then
+					found = true
+				end
+			end
+			expect(found).toBe(true)
+		end
+		-- The close is never solved from the live root.
+		local late = HitSweep.bladeAt(character, to, Horizontal, window.close, trailStart, trailEnd)
+		for _, center in centers do
+			expect((center - late.mid).Magnitude).toBeGreaterThan(1e-3)
+		end
+	end)
+
 	it("a frame that sweeps two windows shares one cap between them", function()
 		fresh()
 		local playerId, player, character = spawnPlayer()
