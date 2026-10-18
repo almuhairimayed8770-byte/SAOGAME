@@ -17,8 +17,12 @@
 
 	It checks the server can solve the blade through the stand-in's joints, prints where the blade
 	is against the boar through the hit window, runs a Horizontal through CombatService's own entry
-	point and asserts HitLanded fired, HitConfirmed went out, and the boar's HP dropped by the
-	section 6 number.
+	point and asserts HitLanded fired once and the boar's HP dropped by the section 6 number.
+
+	It also plays the scripted client of the Phase 0 gate (section 17): the Art requested again
+	and again while the first one runs is refused every time and lands nothing extra, and no
+	client-to-server remote lets a client report a hit (each request's schema refuses a payload
+	that carries a target or damage). The teleport half of that gate line is playground.smoke.
 
 	Run: tools/smoke.sh combat (installs this file as a server Script in a Run session of the
 	Playground; see tools/smoke/SmokeRunner.luau). Errors on the first failed assertion, which the
@@ -43,6 +47,8 @@ local ClipSampler = require(Shared.choreo.ClipSampler)
 local EntityService = require(Server.services.EntityService)
 local CombatService = require(Server.services.CombatService)
 local HitSweep = require(Server.combat.HitSweep)
+local Net = require(Shared.net.Net)
+local Remotes = require(Shared.net.Remotes)
 
 local READY_ATTRIBUTE = "SkyspireReady"
 local READY_TIMEOUT = 15
@@ -54,6 +60,7 @@ local ENEMIES_FOLDER = "Enemies" -- D-027: EnemyService parents every enemy here
 local ARENA = Vector3.new(0, 0, 24)
 local FLANK_DISTANCE = 3 -- studs from the stand-in's root to the boar's, the boar side-on
 local GROUND_TOLERANCE = 0.3 -- studs the boar's feet may sit above or below the field
+local SPAM_COUNT = 20 -- repeats of the Art a scripted client sends while the first one runs
 
 local function check(condition: boolean, message: string)
 	if not condition then
@@ -223,8 +230,30 @@ end)
 
 local hpBefore = EntityService.get(boarId).hp
 local ok, reason = CombatService.beginArt(playerId, ART_ID, standInRoot.CFrame.LookVector)
-check(ok, "beginArt accepted the Horizontal (" .. tostring(reason) .. ")")
+check(ok, if ok then "beginArt accepted the Horizontal" else "beginArt refused the Horizontal: " .. tostring(reason))
 check(EntityService.get(playerId).state == "Art", "the stand-in is in the Art state")
+
+-- A scripted client mashing the Art while the first one runs: every repeat is refused.
+local refusedWith: { [string]: number } = {}
+local accepted = 0
+for _ = 1, SPAM_COUNT do
+	local again, why = CombatService.beginArt(playerId, ART_ID, standInRoot.CFrame.LookVector)
+	if again then
+		accepted += 1
+	else
+		local key = tostring(why)
+		refusedWith[key] = (refusedWith[key] or 0) + 1
+	end
+end
+local reasons: { string } = {}
+for key, count in refusedWith do
+	table.insert(reasons, ("%s x%d"):format(key, count))
+end
+table.sort(reasons)
+check(
+	accepted == 0,
+	("all %d repeats of the Art while it runs are refused (%s)"):format(SPAM_COUNT, table.concat(reasons, ", "))
+)
 
 local elapsed = 0
 while #landed == 0 and elapsed < HIT_TIMEOUT do
@@ -249,8 +278,43 @@ while not ended and elapsed < HIT_TIMEOUT do
 	elapsed += task.wait()
 end
 check(ended, "the Art reached its end pose")
+check(#landed == 1, ("the Horizontal landed once, the spam added nothing (%d hits)"):format(#landed))
 check(EntityService.get(playerId).state == "PostMotion", "the stand-in is held in PostMotion")
 task.wait(Combat.postMotionMin + 0.5)
 check(EntityService.get(playerId).state == "Idle", "post-motion released the body")
+
+-- ------------------------------------------------------------------------------------------
+-- No remote lets a client report a hit (section 17: the server sweeps; clients only ask)
+-- ------------------------------------------------------------------------------------------
+
+local netFolder = game:GetService("ReplicatedStorage"):FindFirstChild("Net")
+check(netFolder ~= nil, "Net made its remotes folder in ReplicatedStorage")
+local requests: { string } = {}
+for name, definition in Remotes do
+	if definition.direction == "ClientToServer" then
+		table.insert(requests, name)
+		check((netFolder :: Instance):FindFirstChild(name) ~= nil, "the " .. name .. " remote exists")
+	end
+end
+table.sort(requests)
+for _, name in requests do
+	local lowered = name:lower()
+	check(
+		lowered:find("hit", 1, true) == nil and lowered:find("damage", 1, true) == nil,
+		name .. " is a request, not a hit report"
+	)
+end
+local forged = {
+	artId = ART_ID,
+	facing = { 0, 0, -1 },
+	clientTime = 0,
+	targetId = boarId,
+	damage = 9999,
+}
+local forgedOk, forgedWhy = Net.validate("ArtRequest", forged)
+check(not forgedOk, "an ArtRequest that carries a target and damage is refused (" .. tostring(forgedWhy) .. ")")
+local honestOk, honestWhy = Net.validate("ArtRequest", { artId = ART_ID, facing = forged.facing, clientTime = 0 })
+check(honestOk, "the same ArtRequest without them passes the schema (" .. tostring(honestWhy) .. ")")
+print(("[combat.smoke] client-to-server remotes: %s"):format(table.concat(requests, ", ")))
 
 print("[combat.smoke] all checks passed")
