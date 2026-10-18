@@ -1,28 +1,34 @@
 # Studio tasks
 
 Everything that needs Roblox Studio (or a machine with it) by hand, in the order to do it. Menu paths are for Studio
-as of 2026; a path marked **(verify)** was written without Studio at hand and may have moved a tab. Nothing on this
-list has been done yet from the repository side; tick the box and note the date when you do one.
+as of 2026; a path marked **(verify)** was written without Studio at hand and may have moved a tab. Tick the box and
+note the date when you do one. Steps marked "done on the owner's PC" were run by a remote session on that PC
+(Windows, Studio build `version-4f087c32742644ab` of 2026-10-14) with the repository cloned to
+`Downloads\skyspire`; on another machine they still need doing. Steps 4, 24 and most of 25 are now done by the build
+and the smoke scripts (D-039, D-038).
 
 ## A. First-time setup
 
-1. [ ] **Install the command-line tools.** Install [Aftman](https://github.com/LPGhatguy/aftman) (or Rokit), then in the
+1. [x] (2026-10-18, done on the owner's PC with Rokit 1.2.0) **Install the command-line tools.** Install [Aftman](https://github.com/LPGhatguy/aftman) (or Rokit), then in the
    repo root run `aftman install` (or `rokit install`). This gives you `rojo`, `wally`, `selene`, `stylua`, `lune` and
    `run-in-roblox` at the versions in `aftman.toml`.
-2. [ ] **Install the Rojo Studio plugin.** In a terminal: `rojo plugin install`. Then in Studio: **Plugins tab > Manage
+2. [x] (2026-10-18, done on the owner's PC; `rojo plugin install` wrote `RojoManagedPlugin.rbxm`) **Install the Rojo Studio plugin.** In a terminal: `rojo plugin install`. Then in Studio: **Plugins tab > Manage
    Plugins** and confirm "Rojo" is listed and enabled. (Alternative: Creator Store > search "Rojo" > Install.)
-3. [ ] **Install the PoseEditor plugin.** `tools/build-plugin.sh` writes `build/SkyspirePoseEditor.rbxm`. In Studio:
+3. [x] (2026-10-18, done on the owner's PC; `--install` copied it to `%LOCALAPPDATA%\Roblox\Plugins`) **Install the PoseEditor plugin.** `tools/build-plugin.sh` writes `build/SkyspirePoseEditor.rbxm`. In Studio:
    **Plugins tab > Plugins Folder** (opens your local plugins directory); copy the `.rbxm` there; restart Studio or
    **Plugins tab > Manage Plugins > (the plugin) > reload**. A "Skyspire" toolbar with a "PoseEditor" button appears.
    `tools/build-plugin.sh --install` does the copy on macOS and Windows (verify the folder it picks).
-4. [ ] **Allow HTTP requests** so the PoseEditor can post to the pose server: **Home tab > Game Settings > Security >
-   Allow HTTP Requests: On** (verify the exact label). This is per place file; do it in the Playground and the ClipLab.
+4. [x] **HTTP requests are allowed by the build** (D-039). `places/Playground.project.json` and
+   `places/ClipLab.project.json` set `HttpService.HttpEnabled = true`; the shipped game (`default.project.json`) never
+   does, and `tests/project/projectFiles.spec.luau` keeps it that way. Rebuild old place files with
+   `tools/build-places.sh`. Check once: **Home tab > Game Settings > Security > Allow HTTP Requests** reads On
+   (verify). The first PoseEditor **Save (server)** may show Studio's plugin permission prompt for `localhost`; allow it.
 5. [ ] **Enable Studio access to API services** (needed by run-in-roblox smoke scripts that touch DataStores later;
    harmless now): **Home tab > Game Settings > Security > Enable Studio Access to API Services: On** (verify).
 
 ## B. Open and sync the dev places
 
-6. [ ] **Build the places.** `tools/build-places.sh` writes `places/Playground.rbxl` and `places/ClipLab.rbxl` (gitignored,
+6. [x] (2026-10-18, done on the owner's PC) **Build the places.** `tools/build-places.sh` writes `places/Playground.rbxl` and `places/ClipLab.rbxl` (gitignored,
    D-005). `rojo build default.project.json -o build/Skyspire.rbxl` builds the game without a world.
 7. [ ] **Open the Playground.** Studio: **File > Open from File...** > `places/Playground.rbxl`. In a terminal:
    `rojo serve places/Playground.project.json`. In Studio: **Plugins tab > Rojo > Connect** (default `localhost:34872`).
@@ -63,13 +69,22 @@ list has been done yet from the repository side; tick the box and note the date 
 
 ## D. Smoke tests and performance
 
-14. [ ] **Run the smoke scripts** on this machine (Studio installed and logged in): `tools/smoke.sh` builds the Playground
-    and runs every `tests/smoke/*.smoke.luau` through `run-in-roblox`; `tools/smoke.sh --list` only lists them. A failed
-    assertion prints the line that stopped it.
-15. [ ] **Measure section 16 numbers in the Playground** and paste them into the table in `docs/PROGRESS.md`: **View tab >
-    Stats > Summary / Render / Memory** for fps, part count and memory; **MicroProfiler** (Ctrl+F6, or **View tab >
-    MicroProfiler**) for draw calls and frame time (verify); **Developer Console** (F9) **> Server > ServerJobs** for the
-    heartbeat time (verify). Do it with the spawn tables filled (8 players is a test server; note what you had).
+14. [ ] **Run the smoke scripts** on a machine with Studio installed and logged in, with every Studio window closed
+    (the script refuses to start otherwise): `tools/smoke.sh` builds the Playground and runs every
+    `tests/smoke/*.smoke.luau` through `run-in-roblox` (on Windows use Git Bash by its full path,
+    `"C:\Program Files\Git\bin\bash.exe" tools/smoke.sh`; a bare `bash` may be WSL's). `tools/smoke.sh --list`
+    only lists them; `tools/smoke.sh perf` runs the ones whose name contains `perf`. run-in-roblox runs a script in a
+    plugin in Edit mode, so each one is wrapped (`tools/smoke-wrap.luau`) into a runner that installs it as a server
+    Script and starts a Run session (D-038). A script passes on its one `SMOKE-RESULT: PASS <name>` line; a failure
+    prints the assertion or error that stopped it, and each run's full output is kept in `build/smoke/<name>.log`.
+    First run on the owner's PC (2026-10-18): archetypes and playground pass; combat fails (the Horizontal did not
+    register on the boar, being fixed); rigs and perf were added after it.
+15. [ ] **Measure section 16 numbers in the Playground** and paste them into the table in `docs/PROGRESS.md`. The server
+    rows come from `tools/smoke.sh perf` (8 stand-ins and 60 enemies, `world.luau` `performance`): it asserts the
+    95th-percentile server frame time and the part count and prints Markdown rows to paste. The rest needs Play mode
+    (F5) by hand: **View tab > Stats > Summary / Render** for fps and part count, **MicroProfiler** (Ctrl+F6, or
+    **View tab > MicroProfiler**) for draw calls and frame time (verify), **Developer Console** (F9) **> Server >
+    ServerJobs** for the heartbeat time with real players (verify). Note what was on the field.
 
 ## E. Assets (as they arrive; see `docs/ASSETS.md`)
 
@@ -99,16 +114,18 @@ list has been done yet from the repository side; tick the box and note the date 
 
 ## G. Choreo (the animator; do before recording the gate clips)
 
-24. [ ] **Ship an empty `Animate` script.** The engine's default character animations write
-    `Motor6D.Transform` too and would fight Choreo. In Studio: **Explorer > StarterPlayer > StarterCharacterScripts
-    > + > LocalScript**, name it exactly `Animate`, leave it empty (verify the default `Animate` no longer appears
-    under your character in Play mode; Choreo also destroys one it finds). Keep the Humanoid's `Animator`.
-25. [ ] **Confirm the Motor6D names and the `Rig` attribute.** With the Playground in Play mode, select your
-    character and each enemy in the Explorer: the Motor6Ds must be named as `src/shared/data/rigs.luau` lists them
-    (player: the 15 R15 joints plus `Weapon` on `RightHand`; Boar: `Root`, `Neck`, `Jaw`, `TuskLeft`, `TuskRight`,
-    the four `..Hip`s, `TailJoint`; Kobold: `Root`, `Neck`, the two `Shoulder`s and `Hip`s, `Weapon`) and every
-    enemy Model must carry the `Rig` attribute (**Properties > Attributes**) the server sets, or Choreo poses it as a
-    player. A rig whose joints are misnamed shows in its rest pose instead of its idle.
+24. [x] **The empty `Animate` script ships with the build** (D-039). Every project file puts an empty LocalScript named
+    `Animate` in **StarterPlayer > StarterCharacterScripts**, so the engine never adds its default animation script,
+    which writes `Motor6D.Transform` too and would fight Choreo; `tests/project/projectFiles.spec.luau` guards it.
+    Check once in Play mode: your character has no running default `Animate` (Choreo also destroys the empty copy on
+    the client) and its Humanoid keeps its `Animator`.
+25. [ ] **Confirm the Motor6D names and the `Rig` attribute.** `tools/smoke.sh rigs` now asserts this for a stand-in
+    R15 character (through the same `PlaygroundService` character path a player takes) and for every in-scope enemy
+    rig (through `EnemyService.spawn`), from `rigs.luau`. What is left by hand is your own avatar: in Play mode, select
+    your character in the Explorer and check its Motor6Ds are the 15 R15 joints `rigs.luau` lists plus `Weapon` on
+    `RightHand`, with no extra joints from layered clothing or a custom body (Choreo ignores extras, but a renamed joint
+    leaves that limb in its rest pose). An enemy whose `Rig` attribute is missing is posed as a player; the smoke
+    catches that for the spawn path, so a mismatch seen by hand means something else replaced the model.
 26. [ ] **Watch the write order.** In Play mode open **View tab > Script Performance** (verify) and confirm the
     Choreo RenderStepped step is the last thing that touches `Transform` each frame: a rig that snaps to rest for a
     frame means something else (an `AnimationTrack`, a plugin) writes after it.

@@ -48,7 +48,9 @@ src/client/
   dev/Capture.client.luau      on-screen prompts for gate clips (Playground / ClipLab only)
   dev/ClipLab.client.luau      clip review scene at 0.25x / 0.5x / 1x with a frame counter
 tests/                         Lune specs (*.spec.luau) and run-in-roblox smoke scripts (smoke/)
+tests/project/                 project-file guards (empty Animate everywhere, HttpEnabled in dev places only)
 tools/validate.luau            runs tools/validators/*.luau
+tools/smoke.sh                 runs the smoke scripts in Studio through tools/smoke-wrap.luau + smoke/SmokeRunner
 tools/PoseEditor/              Studio plugin (Rojo project) + tools/pose-server.luau (Lune, writes clips)
 ```
 
@@ -256,3 +258,18 @@ redo. A stale cache degrades to rest values for keys it never saw and never erro
 - `places/ClipLab.project.json`: the clip review scene (`ClipLab.client.luau` runs when
   `workspace:GetAttribute("ClipLab") == true`).
 - Built with `tools/build-places.sh`; outputs are gitignored.
+- Every project file (the game and each place) carries an empty LocalScript `Animate` in
+  StarterCharacterScripts so Choreo is the only writer of `Motor6D.Transform` on characters;
+  `HttpService.HttpEnabled` is set in the dev places only (D-039).
+
+## Smoke scripts (D-038)
+
+`tests/smoke/*.smoke.luau` are plain server scripts: they wait for `workspace.SkyspireReady`, drive
+the real services, and raise `error("[<name>] FAILED: ...", 0)` from a `check()` helper on the first
+failed assertion. They never return at top level (the runner appends a done line). `tools/smoke.sh`
+wraps each into a runner that run-in-roblox executes in a plugin: it installs the script as a
+Script in ServerScriptService, starts a Run session (no player; stand-ins are registered through
+`EntityService.registerPlayer` with a table for the Player), and prints one
+`SMOKE-RESULT: PASS|FAIL <name>` line. Current scripts: playground, combat, archetypes, rigs
+(joint names and `Rig` attributes from `rigs.luau`) and perf (section 16 server numbers from
+`world.luau` `performance`).
