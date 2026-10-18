@@ -113,20 +113,41 @@ local Combat = {
 	-- of the blade that moved farther (HitSweep.castBladePath). A chord cuts the corner of its end's
 	-- arc, so on such a step the half-radius margin above does not hold: a target the true blade only
 	-- grazes can fall between the casts, and a chord can reach a little past the true blade. The cap
-	-- binds on the snap frame of every Phase 0 attack.
+	-- binds on the snap frames of the Vertical, the Rising Arc, Sharp Nail and the third basic swing
+	-- (they would need 17 to 22 sub-samples); the Horizontal (12) and the first two basics fit.
 	sweepMaxTipStep = HIT_SPHERE_RADIUS,
 	-- Sub-samples one fighter's sweep may add in one server frame, spent where the blade moves
 	-- farthest (an expo-out snap carries most of its cut in one frame). Each costs a Pose.solve, a
-	-- GetPartBoundsInRadius and a Spherecast, and a step the cap leaves long two more casts. A
-	-- window's first frame also solves the blade at its open, and the snap frame's steps are all long,
-	-- so one fighter's snap frame is 6 solves, 6 bounds queries and up to 15 casts (one more for each
-	-- fighter a cast meets): 8 fighters at once is 48, 48 and about 120. perf.smoke measured 8
-	-- stand-ins swinging Arts well inside the 12 ms server frame
-	-- (world.performance.maxServerHeartbeatMs; docs/DECISIONS.md D-044). The cap bounds only the
-	-- sub-samples: a hitch or a rewound swing adds a solve, a query and up to three casts for each
-	-- frame sample it catches up. Pose.solve walks the whole character for its joints, so
-	-- accessories raise the cost.
-	sweepMaxSubdivisions = 4,
+	-- GetPartBoundsInRadius and a Spherecast, and a step the cap leaves long up to two more casts.
+	-- The frame reads the fighter's joints once (Pose.chain) and solves every sample from that
+	-- read. The read walks the whole character, accessories too, and costs more than a solve; at
+	-- the old cap of 4 every solve walked it again. One fighter's worst frame (a window's first
+	-- frame solves its open too) is now 1 joint read, 14 solves, 14 bounds queries and up to 39
+	-- casts, 3 on each of its 13 steps (24 at most on the Phase 0 clips), plus one for each
+	-- fighter a cast meets; at 4 it was 6 reads, 6 solves, 6 queries and up to 15 casts. Timed in
+	-- Lune on the hit matrix's body, that frame takes 2.2 to 2.8 ms, against 3.6 to 4.4 ms at 4; a
+	-- cap of 16 took up to 3.7 ms, so 12 is the highest cap that is clearly cheaper. The
+	-- Vertical's snap would need 22 to keep every step within sweepMaxTipStep. perf.smoke with 8
+	-- stand-ins swinging Arts must stay at or under what it measured at 4 (p95 2.72 ms, max 8.27
+	-- ms; the budget is world.performance.maxServerHeartbeatMs, 12 ms; docs/DECISIONS.md D-044);
+	-- if it does not, use 8. The cap bounds only the sub-samples: a hitch or a rewound swing adds
+	-- a solve, a query and up to three casts for each frame sample it catches up.
+	sweepMaxSubdivisions = 12,
+	-- A root that moved farther since the sweep's last sample than an honest body can travel has
+	-- jumped (a teleport, a snap back), and the sweep does not follow it across: the frame starts
+	-- a new chain at the live root (HitSweep.jumped). The bound is this speed times the time since
+	-- that sample, plus what is left of the window's lag credit: this speed times lagAllowance
+	-- when full (a replicated root can arrive late, then catch up in one step). A longer step
+	-- spends the credit and a shorter one refills it, never above full, so the lag is spent once
+	-- (the anti-cheat's rule, D-034) and a jump split over frames is not followed past it. The
+	-- speed is the fastest honest travel over any span of at least lagAllowance, times
+	-- sweepRootSpeedMargin: the sprint cap (maxSpeedStudsPerSecond, 24) plus the longest path any
+	-- player clip's root motion carries the body in that span (a dodge: 7.0 studs in 0.15 s), 70.8
+	-- studs a second, so 88.4 with the margin. tools/validators/combat.luau derives it from the
+	-- clips, the dodge and the anti-cheat allowances. One 60 Hz frame with the full credit allows
+	-- 15 studs; a second step at once allows 1.5 more and what the first left.
+	sweepMaxRootSpeed = 90,
+	sweepRootSpeedMargin = 1.25, -- how much faster than the fastest honest travel a jump must be
 	facingTolerance = 0.35, -- cosine slack when comparing reported facing to the server's
 
 	-- Anti-cheat basics (section 17)

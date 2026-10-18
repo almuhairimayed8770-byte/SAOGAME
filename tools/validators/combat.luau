@@ -10,6 +10,23 @@
 	half a step of one of them, and the overlap test reaches one hit radius from each sampled blade,
 	so a step of at most two radii is what guarantees that a blade passing through a target touches
 	it at a sample; past that, a thin target can sit in the gap between two sampled blades.
+
+	sweepMaxRootSpeed decides when the body jumped (HitSweep.jumped): a root step longer than it
+	times the time since the last sample, plus what is left of the window's lag credit (it times
+	lagAllowance when full; a longer step spends it, a shorter one refills it). So over any stretch
+	of a window the root may travel the speed times (the stretch + lagAllowance). An honest body
+	must never jump, so the speed is at least sweepRootSpeedMargin times the fastest honest travel
+	over any span of at least lagAllowance, from every source of travel:
+	- walking: the sprint cap (maxSpeedStudsPerSecond) or choreo.luau's sprintSpeed, the faster;
+	- root motion: walking plus the longest path any player clip's root motion carries the body in
+	  the span (read at dev.luau groundClearance.sampleHz, every frame of the 0.25x review);
+	- the dodge: walking plus dodgeDistance over dodgeDuration;
+	- the anti-cheat: what it lets a body travel in one of its samples (anticheatSampleInterval)
+	  with its full lag credit, plus a dodge or the largest in-scope Art's rootMotion with
+	  rootMotionSlack, over that sample and the lag.
+	A move the anti-cheat calls a teleport must never be swept across, so the farthest the sweep
+	follows the root over one anti-cheat sample (the speed over the sample, or one frame if that is
+	longer, plus the full credit) stays under teleportFlagDistance.
 ]]
 
 type Context = {
@@ -22,8 +39,53 @@ type Context = {
 -- The widest step that still guarantees a pass-through touches a sample, in hit radii.
 local MAX_STEP_IN_RADII = 2
 
+local PLAYER_CLIPS = "src/shared/clips/player"
+
 local function isNumber(value: any): boolean
 	return typeof(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
+-- The fastest a clip's root motion carries the body over any span of at least `minimum` seconds,
+-- in studs per second, with the root read `hz` times a second. It is the path the root travels in
+-- the span, not the straight line across it: the sweep's lag credit is spent by the sum of its
+-- frame steps, and a root that goes back and forth spends it on every step. Spans start at
+-- `minimum` (rounded up to a reading) and grow a reading at a time until they cover the whole clip.
+local function fastestRootMotion(ClipSampler: any, clip: any, minimum: number, hz: number): number
+	local duration = clip.duration
+	if not isNumber(duration) or duration <= 0 then
+		return 0
+	end
+	local count = math.ceil(duration * hz)
+	-- along[index]: the root's path length from the clip's start to reading `index`.
+	local along: { [number]: number } = { [0] = 0 }
+	local previous = ClipSampler.rootMotionAt(clip, 0)
+	for index = 1, count do
+		local root = ClipSampler.rootMotionAt(clip, math.min(index / hz, duration))
+		local dx, dy, dz = root[1] - previous[1], root[2] - previous[2], root[3] - previous[3]
+		along[index] = along[index - 1] + math.sqrt(dx * dx + dy * dy + dz * dz)
+		previous = root
+	end
+	-- The whole path: no span can carry the root farther, so once that over the span is no faster
+	-- than the fastest span found, longer spans cannot be faster either.
+	local length = along[count]
+	if length <= 0 then
+		return 0
+	end
+	local fastest = 0
+	local span = math.max(math.ceil(minimum * hz - 1e-9), 1)
+	while length / (span / hz) > fastest do
+		local farthest = 0
+		for from = 0, math.max(count - span, 0) do
+			local to = math.min(from + span, count)
+			farthest = math.max(farthest, along[to] - along[from])
+		end
+		fastest = math.max(fastest, farthest / (span / hz))
+		if span >= count then
+			break
+		end
+		span += 1
+	end
+	return fastest
 end
 
 return function(ctx: Context): { string }
@@ -52,9 +114,10 @@ return function(ctx: Context): { string }
 		return true
 	end
 
-	positive("hitSampleHz")
+	local rateOk = positive("hitSampleHz")
 	positiveWhole("maxTargetsPerWindow")
-	if not isNumber(combat.lagAllowance) or combat.lagAllowance < 0 then
+	local lagOk = isNumber(combat.lagAllowance) and combat.lagAllowance >= 0
+	if not lagOk then
 		problem(("lagAllowance must be a number of seconds, 0 or more (got %s)"):format(tostring(combat.lagAllowance)))
 	end
 
@@ -67,6 +130,101 @@ return function(ctx: Context): { string }
 				tostring(combat.sweepMaxTipStep),
 				MAX_STEP_IN_RADII,
 				tostring(combat.hitSphereRadius)
+			)
+		)
+	end
+
+	-- When the body jumped: the root speed bound and its margin over honest travel.
+	local speedOk = positive("sweepMaxRootSpeed")
+	local margin = combat.sweepRootSpeedMargin
+	local marginOk = isNumber(margin) and margin >= 1
+	if not marginOk then
+		problem(("sweepRootSpeedMargin must be a number, 1 or more (got %s)"):format(tostring(margin)))
+	end
+	local sourcesOk = positive("maxSpeedStudsPerSecond")
+		and positive("dodgeDistance")
+		and positive("dodgeDuration")
+		and positive("anticheatSampleInterval")
+		and positive("teleportFlagDistance")
+		and isNumber(combat.rootMotionSlack)
+	if not (speedOk and marginOk and sourcesOk and rateOk and lagOk) then
+		return problems
+	end
+
+	local choreo = ctx.load("src/shared/data/choreo")
+	local dev = ctx.load("src/shared/data/dev")
+	local ClipSampler = ctx.load("src/shared/choreo/ClipSampler")
+	local lag = combat.lagAllowance
+	local walking = math.max(combat.maxSpeedStudsPerSecond, choreo.locomotion.sprintSpeed)
+	local sources: { { name: string, speed: number } } = {
+		{ name = "walking", speed = walking },
+		{
+			name = "the dodge",
+			speed = walking + combat.dodgeDistance / math.max(combat.dodgeDuration, lag),
+		},
+	}
+
+	-- Root motion: every player clip, over spans of at least the lag (at least one reading).
+	local hz = dev.groundClearance.sampleHz
+	local fastestClip, fastestSpeed = "", 0
+	for _, file in ctx.listFiles(PLAYER_CLIPS, "%.luau$") do
+		local id = file:match("^src/shared/clips/(.-)%.luau$")
+		if id == nil then
+			continue
+		end
+		local ok, clip = pcall(ctx.load, "src/shared/clips/" .. id)
+		if not ok or typeof(clip) ~= "table" then
+			continue -- the clips validator reports a clip that does not load
+		end
+		local speed = fastestRootMotion(ClipSampler, clip, lag, hz)
+		if speed > fastestSpeed then
+			fastestClip, fastestSpeed = id, speed
+		end
+	end
+	table.insert(sources, { name = "root motion (" .. fastestClip .. ")", speed = walking + fastestSpeed })
+
+	-- The anti-cheat: one sample interval with the full lag credit and the largest burst it grants.
+	local arts = ctx.load("src/shared/data/arts")
+	local scope = ctx.load("src/shared/data/scope")
+	local largestArt = 0
+	for _, artId in scope.arts do
+		local art = arts.byId(artId)
+		if art ~= nil then
+			largestArt = math.max(largestArt, art.rootMotion)
+		end
+	end
+	local interval = combat.anticheatSampleInterval
+	local burst = math.max(combat.dodgeDistance, largestArt + combat.rootMotionSlack)
+	local allowed = combat.maxSpeedStudsPerSecond * (interval + lag) + burst
+	table.insert(sources, { name = "the anti-cheat allowance", speed = allowed / (interval + lag) })
+
+	local honest, honestName = 0, ""
+	for _, source in sources do
+		if source.speed > honest then
+			honest, honestName = source.speed, source.name
+		end
+	end
+	if combat.sweepMaxRootSpeed < honest * margin then
+		problem(
+			("sweepMaxRootSpeed %s is under %s x the fastest honest travel (%.2f studs a second, %s): an honest body would break the sweep's chain"):format(
+				tostring(combat.sweepMaxRootSpeed),
+				tostring(margin),
+				honest,
+				honestName
+			)
+		)
+	end
+	-- The farthest the sweep follows the root over one anti-cheat sample (or one frame, if longer):
+	-- the speed over it plus the full lag credit.
+	local span = math.max(1 / combat.hitSampleHz, interval)
+	local followed = combat.sweepMaxRootSpeed * (span + lag)
+	if followed >= combat.teleportFlagDistance then
+		problem(
+			("sweepMaxRootSpeed %s lets the sweep follow the root %.1f studs in %.2f s (one anti-cheat sample and the lag credit), not under teleportFlagDistance (%s): it would sweep across a move the anti-cheat calls a teleport"):format(
+				tostring(combat.sweepMaxRootSpeed),
+				followed,
+				span,
+				tostring(combat.teleportFlagDistance)
 			)
 		)
 	end

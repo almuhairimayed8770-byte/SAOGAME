@@ -321,3 +321,135 @@ describe("HitSweep.bladePath on an AnimationConstraint rig", function()
 		expect((path[#path].finish - path[1].finish).Magnitude).toBeGreaterThan(1)
 	end)
 end)
+
+describe("Pose.chain: a rig's joints read once", function()
+	local Joints = Harness.load("src/shared/choreo/Joints")
+
+	-- How many times `body` reads a rig's joints (Joints.collect walks every descendant).
+	local function readsDuring(body: () -> ()): number
+		local original = Joints.collect
+		local reads = 0
+		Joints.collect = function(model: any): any
+			reads += 1
+			return original(model)
+		end
+		local ok, err = pcall(body)
+		Joints.collect = original
+		if not ok then
+			error(err, 0)
+		end
+		return reads
+	end
+
+	-- The Weapon Motor6D WeaponBuilder adds (the blade part is named Weapon too).
+	local function weaponJoint(rig: any): any
+		for _, descendant in rig:GetDescendants() do
+			if descendant:IsA("Motor6D") and descendant.Name == "Weapon" then
+				return descendant
+			end
+		end
+		error("no Weapon joint")
+	end
+
+	it("reads the joints once, each after the joint that places its Part0", function()
+		for _, kind: Kind in { "Motor6D", "AnimationConstraint" } :: { Kind } do
+			local rig = buildCharacter(kind)
+			local chain: any = nil
+			expect(readsDuring(function()
+				chain = Pose.chain(rig)
+			end)).toBe(1)
+			expect(chain.rootName).toBe("HumanoidRootPart")
+			expect(#chain.links).toBe(16) -- the 15 R15 joints and the Weapon
+			local placed = { HumanoidRootPart = true }
+			for _, link in chain.links do
+				expect(placed[link.part0]).toBe(true)
+				expect(placed[link.part1]).toBeNil()
+				placed[link.part1] = true
+			end
+		end
+	end)
+
+	it("a solve through a chain reads nothing and gives exactly the solve through the rig", function()
+		for _, kind: Kind in { "Motor6D", "AnimationConstraint" } :: { Kind } do
+			local rig = buildCharacter(kind)
+			local chain = Pose.chain(rig)
+			local compared = 0
+			for _, clip in { Horizontal, SharpNail } do
+				for _, time in windowTimes(clip) do
+					local offsets = ClipSampler.sample(clip, time)
+					local plain = Pose.solve(rig, ROOT, offsets)
+					local chained: any = nil
+					expect(readsDuring(function()
+						chained = Pose.solve(rig, ROOT, offsets, chain)
+					end)).toBe(0)
+					expect(count(chained)).toBe(count(plain))
+					for name, frame in plain do
+						expect(chained[name]).toBe(frame)
+					end
+					compared += 1
+				end
+			end
+			expect(compared).toBeGreaterThan(20)
+		end
+	end)
+
+	it("a chain is a snapshot: a joint changed or removed after the read does not move it", function()
+		local rig = buildCharacter("Motor6D")
+		local chain = Pose.chain(rig)
+		local before = Pose.solve(rig, ROOT, {}, chain)
+		local weapon = weaponJoint(rig)
+		weapon.C0 = weapon.C0 * CFrame.new(0, 2, 0)
+		local same, problem = sameSolve(before, Pose.solve(rig, ROOT, {}, chain))
+		expect(problem).toBeNil()
+		expect(same).toBe(true)
+		-- A new read sees the change.
+		local reread = Pose.solve(rig, ROOT, {}, Pose.chain(rig))
+		expect((reread.Weapon.Position - before.Weapon.Position).Magnitude).toBeGreaterThan(1)
+		-- The elbow removed: the old chain still reaches the hand, a new read no longer does.
+		local elbow = rig:FindFirstChild("RightLowerArm"):FindFirstChild("RightElbow")
+		elbow:Destroy()
+		expect(Pose.solve(rig, ROOT, {}, chain).RightHand).never.toBeNil()
+		expect(Pose.solve(rig, ROOT, {}).RightHand).toBeNil()
+	end)
+
+	it("leaves out the joints a solve could never use, and errors without a PrimaryPart", function()
+		local cluttered = buildCharacter("AnimationConstraint")
+		local looseA = Instance.new("Part")
+		looseA.Name = "LooseA"
+		looseA.Parent = cluttered
+		local looseB = Instance.new("Part")
+		looseB.Name = "LooseB"
+		looseB.Parent = cluttered
+		local attachmentA = Instance.new("Attachment")
+		attachmentA.Parent = looseA
+		local attachmentB = Instance.new("Attachment")
+		attachmentB.Parent = looseB
+		local off = Instance.new("AnimationConstraint")
+		off.Name = "Loose"
+		off.Attachment0 = attachmentA
+		off.Attachment1 = attachmentB
+		off.Parent = looseB
+		-- A stale second RightShoulder on the same attachments.
+		local upperArm = cluttered:FindFirstChild("RightUpperArm")
+		local original = upperArm:FindFirstChild("RightShoulder")
+		local duplicate = Instance.new("AnimationConstraint")
+		duplicate.Name = "RightShoulder"
+		duplicate.Attachment0 = original.Attachment0
+		duplicate.Attachment1 = original.Attachment1
+		duplicate.Parent = upperArm
+		local chain = Pose.chain(cluttered)
+		expect(#chain.links).toBe(16)
+		for _, link in chain.links do
+			expect(link.name).never.toBe("Loose")
+		end
+		local offsets = ClipSampler.sample(Horizontal, 0.4)
+		local same, problem =
+			sameSolve(Pose.solve(cluttered, ROOT, offsets, chain), Pose.solve(cluttered, ROOT, offsets))
+		expect(problem).toBeNil()
+		expect(same).toBe(true)
+		local bare = Instance.new("Model")
+		expect(function()
+			Pose.chain(bare)
+		end).toThrow("has no PrimaryPart")
+	end)
+end)

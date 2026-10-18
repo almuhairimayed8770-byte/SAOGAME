@@ -892,8 +892,9 @@ describe("CombatService hit sweep", function()
 		while clock.t - startedAt < (window.open + window.close) / 2 do
 			advance(1 / 60)
 		end
-		-- Between two frames the replicated root lands 12 studs ahead: ten step limits, far more than
-		-- one frame's cap can split.
+		-- Between two frames the replicated root lands 12 studs ahead: ten step limits, which with the
+		-- blade's own motion is more than one frame's cap can split, yet short of a jump.
+		expect(12).toBeLessThan(Combat.sweepMaxRootSpeed * (1 / 60 + Combat.lagAllowance))
 		local root = character.PrimaryPart
 		local from = root.CFrame
 		root.CFrame = from * CFrame.new(0, 0, -12)
@@ -1058,6 +1059,357 @@ describe("CombatService hit sweep", function()
 			end
 		end
 		expect(warnings).toBe(1)
+	end)
+
+	-- Rebinds the engine so every bounds query center and every cast is recorded, then answered
+	-- by the fakes.
+	local function recordEngine(centers: { Vector3 }, casts: { Vector3 })
+		CombatService.bind({
+			now = function()
+				return clock.t
+			end,
+			net = fakeNet,
+			heartbeat = nil,
+			cast = function(origin, radius, direction, exclude)
+				table.insert(casts, origin)
+				return fakeCast(origin, radius, direction, exclude)
+			end,
+			overlap = function(center, radius, exclude)
+				table.insert(centers, center)
+				return fakeOverlap(center, radius, exclude)
+			end,
+			random = noCrit,
+		})
+	end
+
+	-- Steps a Horizontal one frame at a time into the middle of its window (after the snap).
+	local function intoWindow(playerId: number): (number, any)
+		local window = ClipSampler.hitWindows(Horizontal)[1]
+		local _, startedAt = CombatService.currentArt(playerId)
+		while clock.t - startedAt < (window.open + window.close) / 2 do
+			advance(1 / 60)
+		end
+		return startedAt, window
+	end
+
+	it("a root that jumps mid-window is not followed: no sub-sample and no cast on the jump", function()
+		fresh()
+		local centers, casts = {}, {}
+		recordEngine(centers, casts)
+		local playerId, player, character = spawnPlayer()
+		-- A boar beside the swordsman, out of the blade's reach.
+		spawnBoar(CFrame.new(10, 3, 0))
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		local startedAt = intoWindow(playerId)
+		expect(#sentOf("HitConfirmed")).toBe(0)
+		-- Between two frames the root lands 20 studs to the side, past the boar: farther than a body
+		-- goes in a frame and the lag, though the anti-cheat does not call it a teleport.
+		expect(Combat.sweepMaxRootSpeed * (1 / 60 + Combat.lagAllowance)).toBeLessThan(20)
+		expect(20).toBeLessThan(Combat.teleportFlagDistance)
+		local root = character.PrimaryPart
+		root.CFrame += Vector3.new(20, 0, 0)
+		table.clear(centers)
+		table.clear(casts)
+		advance(1 / 60)
+		-- One blade, solved from the live root, tested where it is; nothing between it and the
+		-- blade before the jump.
+		local trailStart, trailEnd = HitSweep.trailAttachments(character)
+		local here = HitSweep.bladeAt(character, root.CFrame, Horizontal, clock.t - startedAt, trailStart, trailEnd)
+		expect(#centers).toBe(1)
+		expect((centers[1] - here.mid).Magnitude).toBeLessThan(1e-4)
+		expect(#casts).toBe(0)
+		-- The swing goes on from the new root and never reaches the boar.
+		advance(0.6)
+		expect(#casts).toBeGreaterThan(0)
+		expect(#sentOf("HitConfirmed")).toBe(0)
+	end)
+
+	it("a jump keeps the window's hits: the boar already cut is not cut again, a new one is", function()
+		fresh()
+		local playerId, player, character = spawnPlayer()
+		local firstId, firstModel = spawnBoar()
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		local startedAt = intoWindow(playerId)
+		expect(#sentOf("HitConfirmed")).toBe(1) -- the snap cut the boar ahead
+		local root = character.PrimaryPart
+		root.CFrame += Vector3.new(20, 0, 0)
+		-- The first boar, and a second, stand where the blade is on the next frame.
+		local trailStart, trailEnd = HitSweep.trailAttachments(character)
+		local there =
+			HitSweep.bladeAt(character, root.CFrame, Horizontal, clock.t + 1 / 60 - startedAt, trailStart, trailEnd)
+		firstModel.PrimaryPart.CFrame = CFrame.new(there.mid)
+		local secondId = spawnBoar(CFrame.new(there.mid))
+		advance(1 / 60)
+		local confirmed = sentOf("HitConfirmed")
+		expect(#confirmed).toBe(2)
+		expect(confirmed[1].targetId).toBe(firstId)
+		expect(confirmed[2].targetId).toBe(secondId)
+		advance(0.6)
+		expect(#sentOf("HitConfirmed")).toBe(2)
+	end)
+
+	it("a jump split over frames is followed only as far as the lag credit, then not at all", function()
+		fresh()
+		local centers, casts = {}, {}
+		recordEngine(centers, casts)
+		local playerId, player, character = spawnPlayer()
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		local startedAt, window = intoWindow(playerId)
+		-- Each frame the root lands 14 studs farther to the side: inside one frame's reach with the
+		-- full lag credit, but two such frames spend far more than the credit holds.
+		local step = Vector3.new(14, 0, 0)
+		local frameReach = Combat.sweepMaxRootSpeed / 60
+		local credit = Combat.sweepMaxRootSpeed * Combat.lagAllowance
+		expect(step.Magnitude).toBeLessThan(frameReach + credit)
+		expect(step.Magnitude * 2).toBeGreaterThan(frameReach * 2 + credit)
+		expect(clock.t + 3 / 60 - startedAt).toBeLessThan(window.close)
+		-- Where the blade is now and on each of the next three frames.
+		local root = character.PrimaryPart
+		local trailStart, trailEnd = HitSweep.trailAttachments(character)
+		local blades = {}
+		for frame = 0, 3 do
+			local at = root.CFrame + step * frame
+			blades[frame] =
+				HitSweep.bladeAt(character, at, Horizontal, clock.t + frame / 60 - startedAt, trailStart, trailEnd)
+		end
+		-- A boar halfway along each step, out of the blade's reach on every frame.
+		local boars = {}
+		for frame = 1, 3 do
+			local boarId, boarModel = spawnBoar(CFrame.new((blades[frame - 1].mid + blades[frame].mid) / 2))
+			local boarRoot = boarModel.PrimaryPart
+			for _, blade in blades do
+				local distance = HitSweep.segmentBoxDistance(blade.start, blade.finish, boarRoot.CFrame, boarRoot.Size)
+				expect(distance).toBeGreaterThan(Combat.hitSphereRadius + 1)
+			end
+			table.insert(boars, boarId)
+		end
+		for _ = 1, 3 do
+			root.CFrame += step
+			advance(1 / 60)
+		end
+		advance(0.6)
+		local hit = {}
+		for _, payload in sentOf("HitConfirmed") do
+			hit[payload.targetId] = true
+		end
+		-- The first step spends the credit and is swept along; the next two are jumps.
+		expect(hit[boars[1]]).toBe(true)
+		expect(hit[boars[2]]).toBeNil()
+		expect(hit[boars[3]]).toBeNil()
+	end)
+
+	it("an honest body never breaks the chain: sprints, a late dodge, hitches, Art root motion, rewinds", function()
+		local SharpNail = Harness.load("src/shared/clips/player/OneHandedSword/SharpNail")
+		local sprint = Combat.maxSpeedStudsPerSecond
+		local lag = Combat.lagAllowance
+		-- A sprint over the frame and the lag plus a whole dodge, reaching the server in one step.
+		local function burst(dt: number): number
+			return sprint * (dt + lag) + Combat.dodgeDistance
+		end
+		local horizontalOpen = ClipSampler.hitWindows(Horizontal)[1].open
+		type Case = {
+			name: string,
+			clip: any,
+			basic: boolean?,
+			rewind: number?,
+			-- The next frame's length and the root's travel over it, from the clip time it starts at.
+			frame: (clipTime: number) -> (number, Vector3),
+		}
+		local function sprinting(_clipTime: number): (number, Vector3)
+			return 1 / 60, Vector3.new(0, 0, -sprint / 60)
+		end
+		-- One frame `dt` long a frame into the window, carrying a burst sideways; a sprint otherwise.
+		local function hitchAt(dt: number): (number) -> (number, Vector3)
+			local done = false
+			return function(clipTime: number): (number, Vector3)
+				if not done and clipTime > horizontalOpen then
+					done = true
+					return dt, Vector3.new(burst(dt), 0, 0)
+				end
+				return sprinting(clipTime)
+			end
+		end
+		local cases: { Case } = {
+			{ name = "sprinting into a Horizontal", clip = Horizontal, frame = sprinting },
+			{ name = "a dodge's whole travel arriving late in one frame", clip = Horizontal, frame = hitchAt(1 / 60) },
+			{
+				name = "Sharp Nail's root motion with a sprint on top",
+				clip = SharpNail,
+				frame = function(clipTime: number): (number, Vector3)
+					local a = ClipSampler.rootMotionAt(SharpNail, clipTime)
+					local b = ClipSampler.rootMotionAt(SharpNail, clipTime + 1 / 60)
+					return 1 / 60, Vector3.new(b[1] - a[1], b[2] - a[2], b[3] - a[3] - sprint / 60)
+				end,
+			},
+			{
+				name = "a basic stamped a lag early, sprinting",
+				clip = Harness.load("src/shared/clips/player/OneHandedSword/Basic1"),
+				basic = true,
+				rewind = lag,
+				frame = sprinting,
+			},
+		}
+		for _, frames in { 2, 4, 6, 10, 15 } do
+			table.insert(cases, {
+				name = ("a %d-frame hitch carrying a sprint and a dodge"):format(frames),
+				clip = Horizontal,
+				frame = hitchAt(frames / 60),
+			})
+		end
+
+		local original = HitSweep.castBladePath
+		local newChains = 0
+		HitSweep.castBladePath = function(samples, options)
+			if not options.continued then
+				newChains += 1
+			end
+			return original(samples, options)
+		end
+		local ok, err = pcall(function()
+			for _, case in cases do
+				fresh()
+				newChains = 0
+				local playerId, player, character = spawnPlayer()
+				-- The boar ahead goes wherever the body goes, so the blade still meets it.
+				local _, boarModel = spawnBoar()
+				advance(1) -- free well before any stamp
+				local stamp = clock.t - (case.rewind or 0)
+				if case.basic then
+					handlers.BasicAttackRequest(player, basicPayload(stamp))
+				else
+					local artId = if case.clip == SharpNail
+						then "OneHandedSword.SharpNail"
+						else "OneHandedSword.Horizontal"
+					handlers.ArtRequest(player, artPayload(artId, nil, stamp))
+				end
+				local _, startedAt = CombatService.currentArt(playerId)
+				local windows = ClipSampler.hitWindows(case.clip)
+				local root, boarRoot = character.PrimaryPart, boarModel.PrimaryPart
+				while clock.t - startedAt < windows[#windows].close + 0.05 do
+					local dt, travel = case.frame(clock.t - startedAt)
+					root.CFrame += travel
+					boarRoot.CFrame += travel
+					advance(dt, dt)
+				end
+				-- A new chain only where each window opens, and the boar still cut.
+				if newChains ~= #windows or #sentOf("HitConfirmed") == 0 then
+					error(
+						("%s: %d new chains for %d windows, %d hits"):format(
+							case.name,
+							newChains,
+							#windows,
+							#sentOf("HitConfirmed")
+						)
+					)
+				end
+			end
+		end)
+		HitSweep.castBladePath = original
+		if not ok then
+			error(err, 0)
+		end
+	end)
+
+	it("teammates on the arc never use up the target cap: the boar past them is cut once", function()
+		fresh()
+		local _, player = spawnPlayer()
+		-- More teammates than the cap on the arc in front, the boar past them on the same arc.
+		local teammates = {}
+		for index = 1, 8 do
+			local angle = math.rad(75 - 17 * (index - 1))
+			local id = spawnPlayer(CFrame.new(math.sin(angle) * 3, 3, -math.cos(angle) * 3))
+			table.insert(teammates, id)
+		end
+		expect(#teammates).toBeGreaterThan(Combat.maxTargetsPerWindow)
+		local boarId = spawnBoar(CFrame.new(math.sin(math.rad(-70)) * 3, 1.2, -math.cos(math.rad(-70)) * 3))
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		advance(1.2)
+		local confirmed = sentOf("HitConfirmed")
+		expect(#confirmed).toBe(1)
+		expect(confirmed[1].targetId).toBe(boarId)
+		for _, id in teammates do
+			expect(EntityService.get(id).hp).toBe(EntityService.get(id).maxHp)
+		end
+	end)
+
+	it("dead enemies on the arc never use up the target cap: the live boar past them is cut once", function()
+		fresh()
+		local _, player = spawnPlayer()
+		-- As many dead boars as the cap on the arc in front, the live boar past them on the same arc.
+		for index = 1, Combat.maxTargetsPerWindow do
+			local angle = math.rad(75 - 20 * (index - 1))
+			EntityService.die((spawnBoar(CFrame.new(math.sin(angle) * 3, 1.2, -math.cos(angle) * 3))))
+		end
+		local boarId = spawnBoar(CFrame.new(math.sin(math.rad(-70)) * 3, 1.2, -math.cos(math.rad(-70)) * 3))
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		advance(1.2)
+		local confirmed = sentOf("HitConfirmed")
+		expect(#confirmed).toBe(1)
+		expect(confirmed[1].targetId).toBe(boarId)
+		expect(EntityService.get(boarId).hp).toBe(BOAR.hp - HORIZONTAL_DAMAGE)
+	end)
+
+	it("each frame reads the swordsman's joints once, however many samples and windows it sweeps", function()
+		local Joints = Harness.load("src/shared/choreo/Joints")
+		local SharpNail = Harness.load("src/shared/clips/player/OneHandedSword/SharpNail")
+		local windows = ClipSampler.hitWindows(SharpNail)
+		local original = Joints.collect
+		local reads = 0
+		Joints.collect = function(model)
+			reads += 1
+			return original(model)
+		end
+		local ok, err = pcall(function()
+			fresh()
+			local playerId, player = spawnPlayer()
+			spawnBoar(CFrame.new(0, 1.2, -40))
+			handlers.ArtRequest(player, artPayload("OneHandedSword.SharpNail"))
+			local _, startedAt = CombatService.currentArt(playerId)
+			-- Frame by frame through the first window, its snap included.
+			local sweeps = 0
+			local before = 0
+			while clock.t - startedAt < windows[1].close + 2 / 60 do
+				reads = 0
+				advance(1 / 60)
+				local clipTime = clock.t - startedAt
+				local swept = clipTime >= windows[1].open and before < windows[1].close
+				expect(reads).toBe(if swept then 1 else 0)
+				sweeps += if swept then 1 else 0
+				before = clipTime
+			end
+			expect(sweeps).toBeGreaterThan(4)
+			-- One hitch frame that closes the second window and opens the third: still one read.
+			reads = 0
+			local hitch = startedAt + windows[3].open + 0.02 - clock.t
+			expect(clock.t - startedAt).toBeLessThan(windows[2].open)
+			advance(hitch, hitch)
+			expect(reads).toBe(1)
+		end)
+		Joints.collect = original
+		if not ok then
+			error(err, 0)
+		end
+	end)
+
+	it("never keeps a frame's joints: a grip changed between frames moves the next frame's blade", function()
+		fresh()
+		local centers = {}
+		recordEngine(centers, {})
+		local playerId, player, character = spawnPlayer()
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		local startedAt = intoWindow(playerId)
+		local trailStart, trailEnd = HitSweep.trailAttachments(character)
+		local root = character.PrimaryPart.CFrame
+		local nextTime = clock.t + 1 / 60 - startedAt
+		local unchanged = HitSweep.bladeAt(character, root, Horizontal, nextTime, trailStart, trailEnd)
+		-- The blade slides 2 studs up the grip between two frames.
+		local grip = character:FindFirstChild("RightHand"):FindFirstChild("Weapon")
+		grip.C0 = grip.C0 * CFrame.new(0, 2, 0)
+		local moved = HitSweep.bladeAt(character, root, Horizontal, nextTime, trailStart, trailEnd)
+		expect((moved.mid - unchanged.mid).Magnitude).toBeGreaterThan(1.5)
+		table.clear(centers)
+		advance(1 / 60)
+		expect((centers[#centers] - moved.mid).Magnitude).toBeLessThan(1e-4)
 	end)
 end)
 

@@ -190,6 +190,164 @@ describe("HitSweep.bladePath", function()
 		expect(none).toBeNil()
 		expect(none2).toBeNil()
 	end)
+
+	it("reads the rig's joints once for a whole path; with a chain read this frame, not at all", function()
+		local Joints = Harness.load("src/shared/choreo/Joints")
+		local Pose = Harness.load("src/shared/choreo/Pose")
+		local root = CFrame.new(0, 3, 0)
+		local model, trailStart, trailEnd = buildPlayerRig(root)
+		local times = HitSweep.samplePath(Horizontal, ClipSampler.hitWindows(Horizontal)[1])
+		expect(#times).toBeGreaterThan(4)
+		local original = Joints.collect
+		local reads = 0
+		Joints.collect = function(rig)
+			reads += 1
+			return original(rig)
+		end
+		local ok, err = pcall(function()
+			local plain = HitSweep.bladePath(model, root, Horizontal, times, trailStart, trailEnd)
+			expect(reads).toBe(1)
+			local chain = Pose.chain(model)
+			reads = 0
+			local chained = HitSweep.bladePath(model, root, Horizontal, times, trailStart, trailEnd, nil, chain)
+			local one = HitSweep.bladeAt(model, root, Horizontal, times[2], trailStart, trailEnd, chain)
+			local solved = HitSweep.solver(model, Horizontal, trailStart, trailEnd, chain)(times[3], root)
+			expect(reads).toBe(0)
+			-- The same blade, to the last bit.
+			for index, sample in plain do
+				expect(chained[index].start).toBe(sample.start)
+				expect(chained[index].finish).toBe(sample.finish)
+			end
+			expect(one.finish).toBe(plain[2].finish)
+			expect(solved.finish).toBe(plain[3].finish)
+		end)
+		Joints.collect = original
+		if not ok then
+			error(err, 0)
+		end
+	end)
+end)
+
+describe("HitSweep.jumped", function()
+	-- The farthest a root may go in `elapsed` seconds since the last sample before it jumped.
+	local function reach(elapsed: number): number
+		return Combat.sweepMaxRootSpeed * (elapsed + Combat.lagAllowance)
+	end
+
+	local FROM = CFrame.new(0, 3, 0)
+
+	local function sampleAt(time: number, root: CFrame?)
+		return { time = time, start = Vector3.zero, finish = Vector3.zero, mid = Vector3.zero, root = root }
+	end
+
+	it("a root farther than the bound over the time and the lag has jumped, in any direction", function()
+		local previous = sampleAt(0.4, FROM)
+		for _, elapsed in { 1 / 60, 4 / 60, 0.25 } do
+			for _, direction in { Vector3.xAxis, -Vector3.zAxis, Vector3.new(1, 1, 1).Unit } do
+				local inside = FROM + direction * (reach(elapsed) - 0.01)
+				local outside = FROM + direction * (reach(elapsed) + 0.01)
+				expect(HitSweep.jumped(previous, inside, 0.4 + elapsed)).toBe(false)
+				expect(HitSweep.jumped(previous, outside, 0.4 + elapsed)).toBe(true)
+			end
+		end
+		-- Turning in place is never a jump.
+		expect(HitSweep.jumped(previous, FROM * CFrame.Angles(0, math.pi, 0), 0.4 + 1 / 60)).toBe(false)
+	end)
+
+	it("an honest frame never jumps: a sprint and a whole dodge that reach the server at once", function()
+		local previous = sampleAt(0.4, FROM)
+		for _, elapsed in { 1 / 60, 2 / 60, 4 / 60, 6 / 60, 10 / 60, 15 / 60 } do
+			local honest = Combat.maxSpeedStudsPerSecond * (elapsed + Combat.lagAllowance) + Combat.dodgeDistance
+			expect(HitSweep.jumped(previous, FROM + Vector3.xAxis * honest, 0.4 + elapsed)).toBe(false)
+		end
+		-- 20 studs in one frame has jumped, though the anti-cheat does not call it a teleport.
+		expect(20).toBeLessThan(Combat.teleportFlagDistance)
+		expect(HitSweep.jumped(previous, FROM + Vector3.xAxis * 20, 0.4 + 1 / 60)).toBe(true)
+	end)
+
+	it("spends the lag credit once: a long step spends it, a short one refills it, a jump leaves it", function()
+		local full = Combat.sweepMaxRootSpeed * Combat.lagAllowance
+		expect(HitSweep.fullRootCredit()).toBeCloseTo(full, 1e-9)
+		local frame = 1 / 60
+		local own = Combat.sweepMaxRootSpeed * frame -- what one frame allows with no credit
+		local previous = sampleAt(0.4, FROM)
+		local function step(distance: number, credit: number?, elapsed: number?): (boolean, number)
+			return HitSweep.jumped(previous, FROM + Vector3.xAxis * distance, 0.4 + (elapsed or frame), credit)
+		end
+		-- A step 10 studs past the frame's own allowance spends 10 of the credit.
+		local jumped, left = step(own + 10, full)
+		expect(jumped).toBe(false)
+		expect(left).toBeCloseTo(full - 10, 1e-9)
+		-- A step past what is left is a jump, and leaves the credit as it was.
+		jumped, left = step(own + full - 10 + 0.01, full - 10)
+		expect(jumped).toBe(true)
+		expect(left).toBeCloseTo(full - 10, 1e-9)
+		-- A step short of the frame's own allowance refills the credit by what it leaves over.
+		jumped, left = step(own - 1, full - 10)
+		expect(jumped).toBe(false)
+		expect(left).toBeCloseTo(full - 9, 1e-9)
+		-- Never past full, and no credit given means a full one.
+		jumped, left = step(0, full - 10, 1)
+		expect(left).toBeCloseTo(full, 1e-9)
+		jumped, left = step(0, full * 3)
+		expect(left).toBeCloseTo(full, 1e-9)
+		expect((step(own + full - 0.01))).toBe(false)
+		expect((step(own + full + 0.01))).toBe(true)
+		-- With the credit spent a frame allows its own share alone.
+		expect((step(own - 0.01, 0))).toBe(false)
+		expect((step(own + 0.01, 0))).toBe(true)
+	end)
+
+	it("a jump split over frames is followed only as far as the credit; honest late roots never jump", function()
+		local frame = 1 / 60
+		-- Runs a stream of roots, one a frame, along x from the clip time 0.4; returns the frame
+		-- index of the first jump (nil when none).
+		local function firstJump(positions: { number }): number?
+			local credit = HitSweep.fullRootCredit()
+			local previous = sampleAt(0.4, FROM)
+			for index, x in positions do
+				local time = 0.4 + index * frame
+				local root = FROM + Vector3.xAxis * x
+				local jumped, left = HitSweep.jumped(previous, root, time, credit)
+				if jumped then
+					return index
+				end
+				credit = left
+				previous = sampleAt(time, root)
+			end
+			return nil
+		end
+		-- 20 studs over two frames: the first half is within the credit, the second is a jump.
+		expect(firstJump({ 10, 20 })).toBe(2)
+		-- 14 studs a frame, each under one frame's reach with a full credit: the second jumps.
+		expect(firstJump({ 14, 28, 42, 56 })).toBe(2)
+		-- An honest body at the fastest honest speed, seen up to the lag late: it stalls for the
+		-- whole lag, then catches up at once, or catches up over a few frames, again and again.
+		local honest = Combat.sweepMaxRootSpeed / Combat.sweepRootSpeedMargin
+		local stallFrames = math.floor(Combat.lagAllowance / frame + 0.5)
+		for _, catchUpFrames in { 1, 2, 4, stallFrames } do
+			local positions = {}
+			local seen = 0 -- body time the server sees
+			for index = 1, 240 do
+				local cycle = (index - 1) % (stallFrames + catchUpFrames)
+				if cycle >= stallFrames then
+					-- catch up to the present in `catchUpFrames` steps
+					local now = index * frame
+					seen += (now - seen) / (stallFrames + catchUpFrames - cycle)
+				end
+				positions[index] = honest * seen
+			end
+			expect(firstJump(positions)).toBeNil()
+		end
+	end)
+
+	it("a clip time at or before the sample's allows the lag alone; a sample with no root never jumped", function()
+		local previous = sampleAt(0.4, FROM)
+		expect(HitSweep.jumped(previous, FROM + Vector3.xAxis * (reach(0) - 0.01), 0.4)).toBe(false)
+		expect(HitSweep.jumped(previous, FROM + Vector3.xAxis * (reach(0) + 0.01), 0.4)).toBe(true)
+		expect(HitSweep.jumped(previous, FROM + Vector3.xAxis * (reach(0) + 0.01), 0.3)).toBe(true)
+		expect(HitSweep.jumped(sampleAt(0.4, nil), CFrame.new(1000, 0, 0), 0.4 + 1 / 60)).toBe(false)
+	end)
 end)
 
 -- ------------------------------------------------------------------------------------------
@@ -488,6 +646,61 @@ describe("HitSweep.castPath", function()
 		expect(hits[1].targetId).toBe(5)
 	end)
 
+	it("passes through fighters the blade may not damage: never a hit, never counted toward the cap", function()
+		local targets = {}
+		for index = 1, 5 do
+			table.insert(targets, makeTarget(index, Vector3.new(index * 3, 3, -3), 1))
+		end
+		local world = fakeWorld(targets)
+		-- The first three on the path are the attacker's teammates.
+		local asked = {}
+		local function eligible(targetId: number): boolean
+			asked[targetId] = (asked[targetId] or 0) + 1
+			return targetId > 3
+		end
+		local alreadyHit = {}
+		local hits = HitSweep.castPath(
+			{ Vector3.new(-3, 3, -3), Vector3.new(20, 3, -3) },
+			world.options({ maxTargets = 2, alreadyHit = alreadyHit, eligible = eligible, overlap = noOverlap })
+		)
+		expect(#hits).toBe(2)
+		expect(hits[1].targetId).toBe(4)
+		expect(hits[2].targetId).toBe(5)
+		expect(alreadyHit).toEqual({ [4] = true, [5] = true })
+		-- Each fighter is asked once in the call.
+		expect(asked).toEqual({ [1] = 1, [2] = 1, [3] = 1, [4] = 1, [5] = 1 })
+	end)
+
+	it("a caster that ignores the exclude list cannot loop on a fighter it already met", function()
+		local teammate = makeTarget(1, Vector3.new(3, 3, -3), 1)
+		local world = fakeWorld({ teammate })
+		local casts = 0
+		local function stubborn(origin, radius, direction, _exclude)
+			casts += 1
+			return world.cast(origin, radius, direction, {})
+		end
+		local hits = HitSweep.castPath(
+			{ Vector3.new(-3, 3, -3), Vector3.new(20, 3, -3) },
+			world.options({
+				cast = stubborn,
+				overlap = noOverlap,
+				eligible = function()
+					return false
+				end,
+			})
+		)
+		expect(#hits).toBe(0)
+		expect(casts).toBe(2) -- met once, then met again: the segment ends there
+		-- The same for a fighter the window already hit.
+		casts = 0
+		hits = HitSweep.castPath(
+			{ Vector3.new(-3, 3, -3), Vector3.new(20, 3, -3) },
+			world.options({ cast = stubborn, overlap = noOverlap, alreadyHit = { [1] = true } })
+		)
+		expect(#hits).toBe(0)
+		expect(casts).toBe(2)
+	end)
+
 	it("never hits the attacker or anything on the exclude list", function()
 		local attacker = makeTarget(7, Vector3.new(0, 3, 0), 1)
 		local enemy = makeTarget(1, Vector3.new(0, 3, -4), 1)
@@ -742,6 +955,37 @@ describe("HitSweep.castBladePath", function()
 		end
 		expect(count).toBe(3)
 	end)
+
+	it("the overlap test and the casts skip fighters the blade may not damage, asking once each", function()
+		-- Five small fighters along a resting blade; the three nearest the guard are teammates.
+		local targets = {}
+		for index = 1, 5 do
+			table.insert(targets, makeTarget(index, Vector3.new(0, 3, -1 - index), 0.3))
+		end
+		local world = fakeWorld(targets)
+		local asked = {}
+		local alreadyHit = {}
+		local options = world.options({
+			maxTargets = 2,
+			alreadyHit = alreadyHit,
+			eligible = function(targetId: number): boolean
+				asked[targetId] = (asked[targetId] or 0) + 1
+				return targetId > 3
+			end,
+		})
+		-- The blade lies along all five, then slides sideways through them.
+		local blade = bladeSample(0, Vector3.new(0.5, 3, -1.5), Vector3.new(0.5, 3, -6.5))
+		local slid = bladeSample(1 / 60, Vector3.new(-0.5, 3, -1.5), Vector3.new(-0.5, 3, -6.5))
+		local hits = HitSweep.castBladePath({ blade, slid }, options)
+		expect(#hits).toBe(2)
+		local ids = { hits[1].targetId, hits[2].targetId }
+		table.sort(ids)
+		expect(ids).toEqual({ 4, 5 })
+		expect(alreadyHit).toEqual({ [4] = true, [5] = true })
+		for id = 1, 5 do
+			expect(asked[id]).toBe(1)
+		end
+	end)
 end)
 
 -- ------------------------------------------------------------------------------------------
@@ -868,9 +1112,9 @@ describe("HitSweep.followArc", function()
 		local snap = snapSolver()
 		local frames = snap.frames()
 		local _, needed = HitSweep.followArc(frames, snapSolver().solve, Combat.sweepMaxTipStep, math.huge)
-		expect(needed).toBeGreaterThan(Combat.sweepMaxSubdivisions) -- the premise: the cap binds
+		expect(needed).toBeGreaterThan(4) -- the premise: every cap below binds
 		local previousLargest = largestStep(frames)
-		for _, cap in { 1, 2, 3, Combat.sweepMaxSubdivisions } do
+		for _, cap in { 1, 2, 3, needed - 1 } do
 			snap.calls = 0
 			local path, added = HitSweep.followArc(frames, snap.solve, Combat.sweepMaxTipStep, cap)
 			expect(added).toBe(cap)
@@ -885,8 +1129,13 @@ describe("HitSweep.followArc", function()
 		local path = HitSweep.followArc(frames, snap.solve, Combat.sweepMaxTipStep, 1)
 		expect(path[2].time).toBeGreaterThan(frames[1].time)
 		expect(path[2].time).toBeLessThan(frames[2].time)
-		-- The default is the data's cap.
-		local _, added = HitSweep.followArc(frames, snap.solve)
+		-- The default is the data's cap: one step far longer than the cap can split.
+		local reach = (Combat.sweepMaxSubdivisions + 5) * Combat.sweepMaxTipStep
+		local long = {
+			bladeSample(0, Vector3.new(0, 3, -1), Vector3.new(0, 3, -5)),
+			bladeSample(1 / 60, Vector3.new(reach, 3, -1), Vector3.new(reach, 3, -5)),
+		}
+		local _, added = HitSweep.followArc(long, linearSolver(long))
 		expect(added).toBe(Combat.sweepMaxSubdivisions)
 	end)
 

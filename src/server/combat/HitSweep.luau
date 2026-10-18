@@ -36,7 +36,18 @@
 	it), and the root is never frozen during a window. A sample keeps the root it was solved from,
 	and the roots of the samples after the previous frame's last are spread in clip time between
 	that sample's root and the live one (bladePath's `from`, followArc's sub-samples), so a frame
-	that sweeps several sample times carries the body's travel across them as it happened.
+	that sweeps several sample times carries the body's travel across them as it happened. A root
+	that went farther than a body can travel in that time (jumped: a teleport, a snap back) is not
+	followed: the caller starts a new chain at the live root, with no sample, sub-sample or cast on
+	the jump. The lag a late root may catch up is a credit spent once per chain, so a jump split
+	over several frames is not followed past it either.
+
+	Only fighters the blade may damage (CastOptions.eligible) are hits: a teammate, the attacker's
+	own side or a dying enemy on the blade's path never uses up the window's target cap, and the
+	blade passes through them.
+
+	Every solve of one frame can share one read of the rig's joints (Pose.chain): bladeAt, bladePath
+	and solver take it as their last argument, and read the rig themselves without it.
 
 	Pure pieces (Lune-tested): samplePath / sampleTimes, bladeAt / bladePath (Pose over Lune
 	Instances), bladeStep and followArc with an injectable solver, segmentBoxDistance, castPath and
@@ -87,6 +98,10 @@ export type CastOptions = {
 	radius: number?, -- default combat.hitSphereRadius
 	exclude: { Instance }, -- the attacker's model (its weapon hangs inside it) and anything else the blade may not hit
 	resolve: (instance: Instance) -> (number?, Model?), -- hit part -> (entity id, entity model)
+	-- Whether the blade may damage this fighter (default: every fighter). One it may not is never a
+	-- hit, never counts toward maxTargets or alreadyHit, and never stops a cast: the blade passes
+	-- through it. Asked at most once per fighter per call.
+	eligible: ((targetId: number) -> boolean)?,
 	maxTargets: number?, -- default combat.maxTargetsPerWindow, counting the window's earlier hits
 	alreadyHit: { [number]: boolean }?, -- entity ids this window already hit (mutated)
 	cast: Caster?, -- default workspace:Spherecast
@@ -171,14 +186,17 @@ function HitSweep.samplePath(clip: Types.ClipDef, window: Window, hz: number?): 
 end
 
 --- Where the blade is at one clip time: TrailStart, TrailEnd and their midpoint, solved through Pose
---- from `rootCFrame` with the clip's joint offsets. Returns nil when an attachment is not on the rig.
+--- from `rootCFrame` with the clip's joint offsets. `chain` is the rig's joints read this frame
+--- (Pose.chain); without it the rig is read for this solve. Returns nil when an attachment is not
+--- on the rig.
 function HitSweep.bladeAt(
 	model: Model,
 	rootCFrame: CFrame,
 	clip: Types.ClipDef,
 	time: number,
 	trailStart: Attachment,
-	trailEnd: Attachment
+	trailEnd: Attachment,
+	chain: Pose.Chain?
 ): BladeSample?
 	local startPart = trailStart.Parent
 	local endPart = trailEnd.Parent
@@ -186,7 +204,7 @@ function HitSweep.bladeAt(
 		return nil
 	end
 	local offsets = ClipSampler.sample(clip, time)
-	local solved = Pose.solve(model, rootCFrame, offsets)
+	local solved = Pose.solve(model, rootCFrame, offsets, chain)
 	local startCFrame = solved[startPart.Name]
 	local endCFrame = solved[endPart.Name]
 	if startCFrame == nil or endCFrame == nil then
@@ -208,7 +226,8 @@ end
 --- it was solved from), each sample's root is interpolated in clip time from `from.root` to
 --- `rootCFrame`, which the last time reaches: a frame that sweeps several sample times (a server
 --- hitch) spreads the body's travel over them instead of solving the earlier ones where the body
---- only is now. Returns nil when an attachment is not on the rig.
+--- only is now. `chain` is the rig's joints read this frame (Pose.chain); without it the rig is
+--- read once for the whole path. Returns nil when an attachment is not on the rig.
 function HitSweep.bladePath(
 	model: Model,
 	rootCFrame: CFrame,
@@ -216,18 +235,20 @@ function HitSweep.bladePath(
 	times: { number },
 	trailStart: Attachment,
 	trailEnd: Attachment,
-	from: BladeSample?
+	from: BladeSample?,
+	chain: Pose.Chain?
 ): { BladeSample }?
 	local fromRoot: CFrame? = if from ~= nil then from.root else nil
 	local fromTime = if from ~= nil then from.time else 0
 	local span = if #times > 0 then times[#times] - fromTime else 0
+	local joints = if chain == nil and #times > 0 then Pose.chain(model) else chain
 	local samples: { BladeSample } = {}
 	for index, time in times do
 		local root = rootCFrame
 		if fromRoot ~= nil and span > 0 and index < #times then
 			root = fromRoot:Lerp(rootCFrame, math.clamp((time - fromTime) / span, 0, 1))
 		end
-		local sample = HitSweep.bladeAt(model, root, clip, time, trailStart, trailEnd)
+		local sample = HitSweep.bladeAt(model, root, clip, time, trailStart, trailEnd, joints)
 		if sample == nil then
 			return nil
 		end
@@ -236,14 +257,50 @@ function HitSweep.bladePath(
 	return samples
 end
 
---- The solver followArc uses for one fighter's clip: bladeAt from the root it is given.
-function HitSweep.solver(model: Model, clip: Types.ClipDef, trailStart: Attachment, trailEnd: Attachment): BladeSolver
+--- The solver followArc uses for one fighter's clip: bladeAt from the root it is given, through
+--- `chain` (the rig's joints read this frame) when one is given.
+function HitSweep.solver(
+	model: Model,
+	clip: Types.ClipDef,
+	trailStart: Attachment,
+	trailEnd: Attachment,
+	chain: Pose.Chain?
+): BladeSolver
 	return function(time: number, rootCFrame: CFrame?): BladeSample?
 		if rootCFrame == nil then
 			return nil
 		end
-		return HitSweep.bladeAt(model, rootCFrame, clip, time, trailStart, trailEnd)
+		return HitSweep.bladeAt(model, rootCFrame, clip, time, trailStart, trailEnd, chain)
 	end
+end
+
+--- The lag credit a window's chain starts with: how far combat.sweepMaxRootSpeed goes in
+--- combat.lagAllowance (a replicated root can arrive up to the lag late, then catch up in one step).
+function HitSweep.fullRootCredit(): number
+	return Combat.sweepMaxRootSpeed * Combat.lagAllowance
+end
+
+--- Whether the body jumped since `previous`: its root now (`rootCFrame`, at clip time `time`) is
+--- farther from the root `previous` was solved from than combat.sweepMaxRootSpeed goes in the time
+--- between the two, plus `credit`, what is left of the chain's lag credit (default: full,
+--- HitSweep.fullRootCredit). The credit works like the anti-cheat's (docs/DECISIONS.md D-034): a
+--- step longer than the speed allows spends it, a shorter one refills it, never above full. So the
+--- lag is spent once, not on every frame, and a run of long steps (a jump split over frames) is not
+--- followed past it. A jump leaves the credit as it was. Returns whether the body jumped and the
+--- credit left. A sample with no root never jumps.
+function HitSweep.jumped(previous: BladeSample, rootCFrame: CFrame, time: number, credit: number?): (boolean, number)
+	local full = HitSweep.fullRootCredit()
+	local left = math.clamp(credit or full, 0, full)
+	local from = previous.root
+	if from == nil then
+		return false, left
+	end
+	local allowed = Combat.sweepMaxRootSpeed * math.max(time - previous.time, 0)
+	local travel = (rootCFrame.Position - from.Position).Magnitude
+	if travel > allowed + left then
+		return true, left
+	end
+	return false, math.min(left + allowed - travel, full)
 end
 
 --- How far the blade moves from sample `a` to sample `b`: the farther of its two ends (in a cut,
@@ -452,9 +509,31 @@ local function budgetOf(options: CastOptions, alreadyHit: { [number]: boolean })
 	return (options.maxTargets or Combat.maxTargetsPerWindow) - countOf(alreadyHit)
 end
 
+local function always(_targetId: number): boolean
+	return true
+end
+
+-- options.eligible, asked at most once per fighter for one call (every fighter without it).
+local function eligibilityOf(options: CastOptions): (number) -> boolean
+	local eligible = options.eligible
+	if eligible == nil then
+		return always
+	end
+	local known: { [number]: boolean } = {}
+	return function(targetId: number): boolean
+		local answer = known[targetId]
+		if answer == nil then
+			answer = eligible(targetId)
+			known[targetId] = answer
+		end
+		return answer
+	end
+end
+
 -- The overlap test: every fighter the blade (segment start -> finish grown by `radius`) touches
--- right now. The broad phase gathers nearby parts; only fighter parts not hit yet this window are
--- measured, so the floor, a pillar or the attacker's own body is never a hit, and nothing blocks.
+-- right now. The broad phase gathers nearby parts; only parts of fighters the blade may damage and
+-- has not hit yet this window are measured, so the floor, a pillar, the attacker's own body or a
+-- teammate is never a hit, and nothing blocks.
 local function overlapBlade(
 	start: Vector3,
 	finish: Vector3,
@@ -463,7 +542,8 @@ local function overlapBlade(
 	alreadyHit: { [number]: boolean },
 	hits: { Hit },
 	budget: number,
-	overlap: Overlapper
+	overlap: Overlapper,
+	eligible: (number) -> boolean
 )
 	if #hits >= budget then
 		return
@@ -475,7 +555,7 @@ local function overlapBlade(
 			continue
 		end
 		local targetId, targetModel = options.resolve(part)
-		if targetId == nil or targetModel == nil or alreadyHit[targetId] then
+		if targetId == nil or targetModel == nil or alreadyHit[targetId] or not eligible(targetId) then
 			continue
 		end
 		if isExcluded(part, targetModel, options.exclude) then
@@ -510,17 +590,17 @@ local function castSegment(
 	alreadyHit: { [number]: boolean },
 	hits: { Hit },
 	budget: number,
-	cast: Caster
+	cast: Caster,
+	eligible: (number) -> boolean
 )
 	if direction.Magnitude < MIN_CAST_LENGTH then
 		return
 	end
-	-- Each cast either ends the segment, lands a new fighter, or meets a fighter the window already
-	-- hit (by an earlier frame or by the overlap test) and excludes it; each of those can come up
-	-- once, so this bounds the loop even against a caster that ignores the exclude list.
-	local safety = countOf(alreadyHit) + math.max(budget - #hits, 0) + 1
-	while #hits < budget and safety > 0 do
-		safety -= 1
+	-- Each cast either ends the segment or meets a fighter and excludes it: a new hit, one the
+	-- window already hit, or one the blade may not damage. A fighter met twice means the caster
+	-- ignored the exclude list, so the loop stops there instead of spinning.
+	local met: { [number]: boolean } = {}
+	while #hits < budget do
 		local result = cast(origin, radius, direction, exclude)
 		if result == nil then
 			return
@@ -530,11 +610,16 @@ local function castSegment(
 			-- Something that is not a fighter (a pillar, the floor): the blade stops here.
 			return
 		end
-		if not alreadyHit[targetId] then
+		if met[targetId] then
+			return
+		end
+		met[targetId] = true
+		if not alreadyHit[targetId] and eligible(targetId) then
 			alreadyHit[targetId] = true
 			table.insert(hits, { targetId = targetId, position = result.Position })
 		end
-		-- Already-hit fighters are excluded from every later cast so one target never blocks another.
+		-- Every fighter met is excluded from the later casts, so one never blocks another and the
+		-- blade passes through a fighter it may not damage.
 		if table.find(exclude, targetModel) == nil then
 			table.insert(exclude, targetModel)
 		end
@@ -555,14 +640,15 @@ function HitSweep.castPath(points: { Vector3 }, options: CastOptions): { Hit }
 	local cast = options.cast or defaultCaster
 	local overlap = options.overlap or defaultOverlap
 	local exclude = table.clone(options.exclude)
+	local eligible = eligibilityOf(options)
 
-	overlapBlade(points[1], points[1], radius, options, alreadyHit, hits, budget, overlap)
+	overlapBlade(points[1], points[1], radius, options, alreadyHit, hits, budget, overlap, eligible)
 	for index = 2, #points do
 		if #hits >= budget then
 			break
 		end
 		local origin = points[index - 1]
-		castSegment(origin, points[index] - origin, radius, exclude, options, alreadyHit, hits, budget, cast)
+		castSegment(origin, points[index] - origin, radius, exclude, options, alreadyHit, hits, budget, cast, eligible)
 	end
 	return hits
 end
@@ -578,11 +664,12 @@ local function castLongChord(
 	alreadyHit: { [number]: boolean },
 	hits: { Hit },
 	budget: number,
-	cast: Caster
+	cast: Caster,
+	eligible: (number) -> boolean
 )
 	local chord = to - from
 	if chord.Magnitude > Combat.sweepMaxTipStep then
-		castSegment(from, chord, radius, exclude, options, alreadyHit, hits, budget, cast)
+		castSegment(from, chord, radius, exclude, options, alreadyHit, hits, budget, cast, eligible)
 	end
 end
 
@@ -591,8 +678,8 @@ end
 --- a resting blade and a thrust along the blade all register; between samples the blade's midpoint
 --- is spherecast, so a cut that crosses a target between two samples registers too. A step in
 --- which the tip or the guard still moves more than combat.sweepMaxTipStep (followArc's cap ran out)
---- also casts that end's chord. Each fighter counts once per window (`alreadyHit`), up to the
---- window's target cap.
+--- also casts that end's chord. Each fighter the blade may damage counts once per window
+--- (`alreadyHit`), up to the window's target cap; the others are passed through (`eligible`).
 function HitSweep.castBladePath(samples: { BladeSample }, options: CastOptions): { Hit }
 	local hits: { Hit } = {}
 	if #samples == 0 then
@@ -604,6 +691,7 @@ function HitSweep.castBladePath(samples: { BladeSample }, options: CastOptions):
 	local cast = options.cast or defaultCaster
 	local overlap = options.overlap or defaultOverlap
 	local exclude = table.clone(options.exclude)
+	local eligible = eligibilityOf(options)
 
 	for index, sample in samples do
 		if #hits >= budget then
@@ -612,12 +700,34 @@ function HitSweep.castBladePath(samples: { BladeSample }, options: CastOptions):
 		if index > 1 then
 			local previous = samples[index - 1]
 			local origin = previous.mid
-			castSegment(origin, sample.mid - origin, radius, exclude, options, alreadyHit, hits, budget, cast)
-			castLongChord(previous.finish, sample.finish, radius, exclude, options, alreadyHit, hits, budget, cast)
-			castLongChord(previous.start, sample.start, radius, exclude, options, alreadyHit, hits, budget, cast)
+			castSegment(origin, sample.mid - origin, radius, exclude, options, alreadyHit, hits, budget, cast, eligible)
+			castLongChord(
+				previous.finish,
+				sample.finish,
+				radius,
+				exclude,
+				options,
+				alreadyHit,
+				hits,
+				budget,
+				cast,
+				eligible
+			)
+			castLongChord(
+				previous.start,
+				sample.start,
+				radius,
+				exclude,
+				options,
+				alreadyHit,
+				hits,
+				budget,
+				cast,
+				eligible
+			)
 		end
 		if index > 1 or not options.continued then
-			overlapBlade(sample.start, sample.finish, radius, options, alreadyHit, hits, budget, overlap)
+			overlapBlade(sample.start, sample.finish, radius, options, alreadyHit, hits, budget, overlap, eligible)
 		end
 	end
 	return hits

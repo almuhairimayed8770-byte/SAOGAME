@@ -12,7 +12,12 @@
 	touch becomes damage through DamageMath and EntityService.applyHit and a HitConfirmed to all
 	clients. The sweep follows the blade's arc, not the frame chords: where the blade moves more
 	than combat.sweepMaxTipStep between two samples it solves sub-samples in between, at most
-	combat.sweepMaxSubdivisions per fighter per frame (HitSweep.followArc). After the last window
+	combat.sweepMaxSubdivisions per fighter per frame (HitSweep.followArc). Each frame reads a
+	fighter's joints once (Pose.chain) and solves every sample of that frame from them. A root that
+	jumped farther than a body can travel (HitSweep.jumped, with a lag credit spent once per window)
+	is not followed: the frame starts a new chain at the live root and keeps the window's hits.
+	Only fighters the blade may damage count
+	toward the window's target cap (mayDamage). After the last window
 	the body is held in PostMotion (zero when the target was in Break), then freed. A requested Art
 	or basic swing runs that timeline from its clientTime clamped into combat.lagAllowance and
 	floored at the moment the body was last free (runStartOf), so a lagged swing's damage windows
@@ -38,6 +43,7 @@ local Weapons = require(Shared.data.weapons)
 local Net = require(Shared.net.Net)
 local Signal = require(Shared.util.Signal)
 local ClipSampler = require(Shared.choreo.ClipSampler)
+local Pose = require(Shared.choreo.Pose)
 local DamageMath = require(script.Parent.Parent.combat.DamageMath)
 local HitSweep = require(script.Parent.Parent.combat.HitSweep)
 local EntityService = require(script.Parent.EntityService)
@@ -100,10 +106,17 @@ type ArtRun = {
 	windowIndex: number,
 	sampledTo: number?, -- clip time the current window has been swept up to
 	lastSample: HitSweep.BladeSample?,
+	rootCredit: number, -- the window chain's lag credit left (HitSweep.jumped); full at each window
 	windowHits: { [number]: boolean },
 	hitAny: boolean,
 	hitBreak: boolean, -- a target was in Break: zero post-motion
 	switchShown: boolean,
+}
+
+-- What one server frame of one fighter's timeline shares across the windows it sweeps.
+type Frame = {
+	subdivisions: number, -- arc sub-samples left of combat.sweepMaxSubdivisions
+	chain: Pose.Chain?, -- the fighter's joints, read once this frame (never kept to the next)
 }
 
 local STAGE_PLAYER = "player"
@@ -575,14 +588,17 @@ local function finishRun(session: Session, run: ArtRun, record: Record)
 	-- A basic swing's Art state expires on EntityService's timer (basicHitDuration).
 end
 
+-- Whether the attacker's blade may damage the target: alive, not itself, and (Phase 0: no PvP)
+-- not on its own side, so a player's blade passes through other players. The sweep asks it before
+-- a fighter counts toward the window's target cap.
+local function mayDamage(attacker: Record, target: Record?): boolean
+	return target ~= nil and target.state ~= "Dead" and target.id ~= attacker.id and target.kind ~= attacker.kind
+end
+
 -- A blade touch becomes a hit: crit roll, attack value, applyHit, HitConfirmed to all.
 local function landHit(run: ArtRun, attacker: Record, hit: HitSweep.Hit, now: number)
 	local target = EntityService.get(hit.targetId)
-	if target == nil or target.state == "Dead" or target.id == attacker.id then
-		return
-	end
-	-- Phase 0: no PvP; a player's blade passes through other players.
-	if target.kind == attacker.kind then
+	if target == nil or not mayDamage(attacker, target) then
 		return
 	end
 	local d = dependencies()
@@ -615,24 +631,25 @@ local function landHit(run: ArtRun, attacker: Record, hit: HitSweep.Hit, now: nu
 	end
 end
 
--- Sweeps the blade over this frame's sample times; returns how many arc sub-samples it spent out
--- of `subdivisions` (what is left of this frame's combat.sweepMaxSubdivisions). `clipTime` is the
--- clip time the live root belongs to (this frame's).
+-- Sweeps the blade over this frame's sample times, spending arc sub-samples from
+-- `frame.subdivisions` (what is left of this frame's combat.sweepMaxSubdivisions) and solving
+-- through `frame.chain` (read on the frame's first sweep). `clipTime` is the clip time the live
+-- root belongs to (this frame's).
 local function sweep(
 	run: ArtRun,
 	session: Session,
 	record: Record,
 	times: { number },
 	now: number,
-	subdivisions: number,
+	frame: Frame,
 	clipTime: number
-): number
+)
 	if #times == 0 then
-		return 0
+		return
 	end
 	local root = record.model.PrimaryPart
 	if root == nil then
-		return 0
+		return
 	end
 	local trailStart, trailEnd = HitSweep.trailAttachments(record.model)
 	if trailStart == nil or trailEnd == nil then
@@ -640,7 +657,14 @@ local function sweep(
 			session.warnedNoTrail = true
 			warn(("[CombatService] %s has no TrailStart/TrailEnd; its swings cannot hit"):format(record.name))
 		end
-		return 0
+		return
+	end
+	-- One read of the rig's joints serves every sample and sub-sample of this frame, in every window
+	-- it sweeps. It is never kept to the next frame: a respawn, an equip or an accessory changes them.
+	local joints = frame.chain
+	if joints == nil then
+		joints = Pose.chain(record.model)
+		frame.chain = joints
 	end
 	-- This frame's samples are solved from the live root (the body the clients see, carried by the
 	-- clip's root motion); each keeps its root so the next frame can interpolate from it. A frame
@@ -648,8 +672,20 @@ local function sweep(
 	-- last sample over them in clip time. The live root is where the body is at `clipTime`; when the
 	-- window closed earlier in the frame, its last sample is solved from the root the body had
 	-- reached at the close on that same walk, not from where it went on to.
+	-- A root that went farther since that sample than a body can travel (a teleport, a snap back)
+	-- is not followed: nothing is solved, overlap-tested or cast on the jump. This frame's samples
+	-- start a new chain at the live root, and the window keeps its hits, so nothing is hit twice.
+	-- The lag a late root may catch up is spent once per window (run.rootCredit), so a jump split
+	-- over several frames is not followed past it.
 	local rootCFrame = root.CFrame
 	local previous = run.lastSample
+	if previous ~= nil then
+		local jumped, credit = HitSweep.jumped(previous, rootCFrame, clipTime, run.rootCredit)
+		run.rootCredit = credit
+		if jumped then
+			previous = nil
+		end
+	end
 	local lastTime = times[#times]
 	if previous ~= nil and clipTime > lastTime and lastTime > previous.time then
 		local previousRoot = previous.root
@@ -657,7 +693,8 @@ local function sweep(
 			rootCFrame = previousRoot:Lerp(rootCFrame, (lastTime - previous.time) / (clipTime - previous.time))
 		end
 	end
-	local samples = HitSweep.bladePath(record.model, rootCFrame, run.clip, times, trailStart, trailEnd, previous)
+	local samples =
+		HitSweep.bladePath(record.model, rootCFrame, run.clip, times, trailStart, trailEnd, previous, joints)
 	if samples == nil then
 		if not session.warnedNoBlade then
 			session.warnedNoBlade = true
@@ -667,31 +704,31 @@ local function sweep(
 				)
 			)
 		end
-		return 0
+		return
 	end
 	-- Connect this frame's path to where the blade was at the end of the previous one; that sample
 	-- was overlap-tested last frame, so the sweep continues from it without testing it again.
-	local continued = run.lastSample ~= nil
-	local chain: { HitSweep.BladeSample } = {}
-	if run.lastSample ~= nil then
-		table.insert(chain, run.lastSample :: HitSweep.BladeSample)
+	local path: { HitSweep.BladeSample } = {}
+	if previous ~= nil then
+		table.insert(path, previous)
 	end
 	for _, sample in samples do
-		table.insert(chain, sample)
+		table.insert(path, sample)
 	end
 	run.lastSample = samples[#samples]
 	-- Follow the arc between the samples, not their chords. The root is not frozen during a window,
 	-- so a sub-sample between last frame's sample and this frame's first is solved from a root
 	-- interpolated between the two frames' roots (HitSweep.followArc): the body's own travel is
 	-- spread over the interval as it happened, instead of landing in one step no split can shrink.
-	local path, added = HitSweep.followArc(
-		chain,
-		HitSweep.solver(record.model, run.clip, trailStart, trailEnd),
+	local refined, added = HitSweep.followArc(
+		path,
+		HitSweep.solver(record.model, run.clip, trailStart, trailEnd, joints),
 		Combat.sweepMaxTipStep,
-		subdivisions
+		frame.subdivisions
 	)
+	frame.subdivisions -= added
 	local d = dependencies()
-	local hits = HitSweep.castBladePath(path, {
+	local hits = HitSweep.castBladePath(refined, {
 		exclude = { record.model },
 		resolve = function(instance: Instance): (number?, Model?)
 			local target = EntityService.fromInstance(instance)
@@ -700,18 +737,20 @@ local function sweep(
 			end
 			return target.id, target.model
 		end,
+		eligible = function(targetId: number): boolean
+			return mayDamage(record, EntityService.get(targetId))
+		end,
 		alreadyHit = run.windowHits,
 		cast = d.cast,
 		overlap = d.overlap,
-		continued = continued,
+		continued = previous ~= nil,
 	})
 	for _, hit in hits do
 		landHit(run, record, hit, now)
 		if EntityService.get(record.id) == nil or record.state ~= "Art" then
-			return added -- the attacker fell or was knocked out of the Art by a reaction
+			return -- the attacker fell or was knocked out of the Art by a reaction
 		end
 	end
-	return added
 end
 
 local function stepRun(session: Session, run: ArtRun, now: number)
@@ -721,9 +760,10 @@ local function stepRun(session: Session, run: ArtRun, now: number)
 		return
 	end
 	local clipTime = now - run.startedAt
-	-- The frame's arc sub-samples, shared by every window this frame sweeps (a caught-up frame can
-	-- close one window and open the next), so one fighter never adds more than the cap per frame.
-	local subdivisions = Combat.sweepMaxSubdivisions
+	-- The frame's arc sub-samples and joint read, shared by every window this frame sweeps (a
+	-- caught-up frame can close one window and open the next), so one fighter never adds more than
+	-- the cap per frame and reads its joints once.
+	local frame: Frame = { subdivisions = Combat.sweepMaxSubdivisions, chain = nil }
 	while run.windowIndex <= #run.windows do
 		local window = run.windows[run.windowIndex]
 		if clipTime < window.open then
@@ -732,7 +772,7 @@ local function stepRun(session: Session, run: ArtRun, now: number)
 		local fromTime = run.sampledTo or window.open
 		local toTime = math.min(clipTime, window.close)
 		local times = HitSweep.sampleTimes(fromTime, toTime, Combat.hitSampleHz, run.sampledTo == nil)
-		subdivisions -= sweep(run, session, record, times, now, subdivisions, clipTime)
+		sweep(run, session, record, times, now, frame, clipTime)
 		if session.run ~= run then
 			return -- cancelled from inside a reaction
 		end
@@ -741,6 +781,7 @@ local function stepRun(session: Session, run: ArtRun, now: number)
 			run.windowIndex += 1
 			run.sampledTo = nil
 			run.lastSample = nil
+			run.rootCredit = HitSweep.fullRootCredit()
 			run.windowHits = {}
 		else
 			break
@@ -803,6 +844,7 @@ local function beginRun(
 		windowIndex = 1,
 		sampledTo = nil,
 		lastSample = nil,
+		rootCredit = HitSweep.fullRootCredit(),
 		windowHits = {},
 		hitAny = false,
 		hitBreak = false,

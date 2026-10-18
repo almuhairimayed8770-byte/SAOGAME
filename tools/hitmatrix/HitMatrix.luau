@@ -753,11 +753,11 @@ local function instrument(ctx: Context, probe: Probe, attribute: boolean): () ->
 	end
 	local originalCast = HitSweep.castBladePath
 	local originalPath = HitSweep.bladePath
-	HitSweep.bladePath = function(model, rootCFrame, clip, times, trailStart, trailEnd)
+	HitSweep.bladePath = function(model, rootCFrame, clip, times, ...)
 		for _, time in times do
 			probe.frameTimes[time] = true
 		end
-		return originalPath(model, rootCFrame, clip, times, trailStart, trailEnd)
+		return originalPath(model, rootCFrame, clip, times, ...) -- pass the ends, `from` and the chain through
 	end
 	HitSweep.castBladePath = function(samples, options)
 		local before = table.clone(options.alreadyHit or {})
@@ -946,9 +946,10 @@ export type Options = {
 	skipAttribution: boolean?,
 }
 
--- Pose.solve walks the rig for its joints on every call. Nothing here changes a rig's joints while
--- the matrix runs, so the walk is done once per model: the same joints, read once (a speedup only;
--- every solve still runs Pose's own forward kinematics). Returns the undo.
+-- A Pose.solve made without a Pose.chain walks the rig for its joints (the live sweep reads one
+-- chain per fighter per frame). Nothing here changes a rig's joints while the matrix runs, so the
+-- walk is done once per model: the same joints, read once (a speedup only; every solve still runs
+-- Pose's own forward kinematics). Returns the undo.
 local function rememberJoints(ctx: Context): () -> ()
 	local Joints = ctx.Harness.load("src/shared/choreo/Joints")
 	local original = Joints.collect
