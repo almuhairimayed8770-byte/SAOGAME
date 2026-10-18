@@ -7,21 +7,23 @@
 	TargetRequest); this service validates each one against the entity record and the data tables,
 	answers a bad one with ActionRejected, and on a good one changes the entity's state through
 	EntityService, tells every client with ActionStarted, and runs the authoritative timeline:
-	for each hit window of the clip it samples the blade through ClipSampler + Pose and spherecasts
-	along it (HitSweep); every touch becomes damage through DamageMath and EntityService.applyHit
-	and a HitConfirmed to all clients. After the last window the body is held in PostMotion (zero
-	when the target was in Break), then freed. A requested Art or basic swing runs that timeline
-	from its clientTime clamped into combat.lagAllowance and floored at the moment the body was last
-	free (runStartOf), so a lagged swing's damage windows line up with what its client already
-	showed without ever overlapping the lock before it.
+	for each hit window of the clip it samples the blade through ClipSampler + Pose, tests the whole
+	blade for overlap at every sample and spherecasts its midpoint between samples (HitSweep); every
+	touch becomes damage through DamageMath and EntityService.applyHit and a HitConfirmed to all
+	clients. After the last window the body is held in PostMotion (zero when the target was in
+	Break), then freed. A requested Art or basic swing runs that timeline from its clientTime
+	clamped into combat.lagAllowance and floored at the moment the body was last free
+	(runStartOf), so a lagged swing's damage windows line up with what its client already showed
+	without ever overlapping the lock before it.
 
 	Enemy strikes come from EnemyService (enemyStrike): each player in the attack's cone or line
 	is checked for dodge frames, a parry (guard raised inside parryWindow), a guard (cone and
 	reduction, GuardBreak telegraphs smash through), then damage.
 
 	Timelines are stepped from one Heartbeat (`tick`), never from task.wait, so they are
-	deterministic and run under Lune with a fake clock and a fake spherecast. `bind(deps)` swaps
-	the engine; `start()` binds the real one and registers the Net handlers.
+	deterministic and run under Lune with a fake clock, a fake spherecast and a fake overlap
+	query. `bind(deps)` swaps the engine; `start()` binds the real one and registers the Net
+	handlers.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -54,6 +56,7 @@ export type Deps = {
 	net: NetLike?,
 	heartbeat: ((handler: (dt: number) -> ()) -> Connection?)?,
 	cast: HitSweep.Caster?, -- nil: workspace:Spherecast
+	overlap: HitSweep.Overlapper?, -- nil: workspace:GetPartBoundsInRadius
 	random: Random,
 }
 
@@ -76,6 +79,7 @@ type Session = {
 	run: ArtRun?,
 	ready: boolean,
 	warnedNoTrail: boolean,
+	warnedNoBlade: boolean,
 }
 
 type ArtRun = {
@@ -154,6 +158,7 @@ local function sessionOf(id: number): Session
 			run = nil,
 			ready = false,
 			warnedNoTrail = false,
+			warnedNoBlade = false,
 		}
 		sessions[id] = session
 	end
@@ -626,9 +631,19 @@ local function sweep(run: ArtRun, session: Session, record: Record, times: { num
 	end
 	local samples = HitSweep.bladePath(record.model, root.CFrame, run.clip, times, trailStart, trailEnd)
 	if samples == nil then
+		if not session.warnedNoBlade then
+			session.warnedNoBlade = true
+			warn(
+				("[CombatService] %s: the blade cannot be solved through the rig's joints; its swings cannot hit"):format(
+					record.name
+				)
+			)
+		end
 		return
 	end
-	-- Connect this frame's path to where the blade was at the end of the previous one.
+	-- Connect this frame's path to where the blade was at the end of the previous one; that sample
+	-- was overlap-tested last frame, so the sweep continues from it without testing it again.
+	local continued = run.lastSample ~= nil
 	local chain: { HitSweep.BladeSample } = {}
 	if run.lastSample ~= nil then
 		table.insert(chain, run.lastSample :: HitSweep.BladeSample)
@@ -637,6 +652,7 @@ local function sweep(run: ArtRun, session: Session, record: Record, times: { num
 		table.insert(chain, sample)
 	end
 	run.lastSample = samples[#samples]
+	local d = dependencies()
 	local hits = HitSweep.castBladePath(chain, {
 		exclude = { record.model },
 		resolve = function(instance: Instance): (number?, Model?)
@@ -647,7 +663,9 @@ local function sweep(run: ArtRun, session: Session, record: Record, times: { num
 			return target.id, target.model
 		end,
 		alreadyHit = run.windowHits,
-		cast = dependencies().cast,
+		cast = d.cast,
+		overlap = d.overlap,
+		continued = continued,
 	})
 	for _, hit in hits do
 		landHit(run, record, hit, now)
@@ -1181,6 +1199,7 @@ local function engineDeps(): Deps
 			return RunService.Heartbeat:Connect(handler)
 		end,
 		cast = nil,
+		overlap = nil,
 		random = Random.new(),
 	}
 end

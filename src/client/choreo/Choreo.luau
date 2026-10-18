@@ -1,10 +1,13 @@
 --!strict
 --[[
 	Choreo: the data-driven animator (section 10 "Choreo"). One animator per rig model; every
-	frame it samples the active clips through the Mixer and writes the result as Motor6D.Transform
-	on the named joints. Nothing here decides gameplay: it predicts motion, fires clip events and
-	hands the root-motion delta to the CharacterController, which moves the HumanoidRootPart so
-	the server can validate the displacement.
+	frame it samples the active clips through the Mixer and writes the result as the Transform of
+	the named joints. A joint is a Motor6D (RigBuilder enemies, the Weapon joint) or an
+	AnimationConstraint (the default player character since the Avatar Joint Upgrade); Transform
+	means the same on both (shared/choreo/Joints.luau), and Choreo writes nothing else on a joint.
+	Nothing here decides gameplay: it predicts motion, fires clip events and hands the root-motion
+	delta to the CharacterController, which moves the HumanoidRootPart so the server can validate
+	the displacement.
 
 		local animator = Choreo.get(model)            -- posed the same frame (no T-pose, ever)
 		local handle = animator:play("player/OneHandedSword/Horizontal", { serverTime = t })
@@ -29,6 +32,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 
 local Types = require(Shared.types)
 local ClipSampler = require(Shared.choreo.ClipSampler)
+local Joints = require(Shared.choreo.Joints)
 local Signal = require(Shared.util.Signal)
 local ChoreoData = require(Shared.data.choreo)
 local CombatData = require(Shared.data.combat)
@@ -133,19 +137,15 @@ end
 -- Animator
 -- ---------------------------------------------------------------------------------------------
 
+-- Name -> joint (Motor6D or AnimationConstraint). Rebuilt on the next step whenever a joint
+-- arrives or leaves, so a rig whose joints replicate after the animator attached still animates.
 local function rebuildMotors(self: any)
-	local motors: { [string]: Motor6D } = {}
-	for _, descendant in self.model:GetDescendants() do
-		if descendant:IsA("Motor6D") then
-			motors[descendant.Name] = descendant
-		end
-	end
-	self.motors = motors
+	self.motors = Joints.map(self.model)
 	self.motorsDirty = false
 end
 
--- Writes the blended offsets to the joints; joints that stopped being keyed return to rest.
--- The two touched sets are reused frame to frame (no per-frame table on RenderStepped).
+-- Writes the blended offsets to the joints' Transform; joints that stopped being keyed return to
+-- rest. The two touched sets are reused frame to frame (no per-frame table on RenderStepped).
 local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 	local motors = self.motors
 	local touched: { [string]: boolean } = self.touchedScratch
@@ -459,7 +459,7 @@ local function newAnimator(model: Model): any
 		mixer = Mixer.new(),
 		events = Signal.new() :: Signal.Signal<string, Types.ClipEvent>,
 		finished = Signal.new() :: Signal.Signal<Handle>,
-		motors = {} :: { [string]: Motor6D },
+		motors = {} :: { [string]: Joints.Joint },
 		motorsDirty = true,
 		touched = {} :: { [string]: boolean },
 		touchedScratch = {} :: { [string]: boolean },
@@ -479,18 +479,23 @@ local function newAnimator(model: Model): any
 	silenceDefaultAnimations(model)
 	rebuildMotors(self)
 
-	local function markDirty()
-		self.motorsDirty = true
-	end
-	-- The character's parts (and the engine's Animate script) can arrive after the model does.
+	-- The character's joints (and the engine's Animate script) can arrive after the model does: a
+	-- replicated rig streams in part by part, and the engine can rebuild its joints (a respawn, a
+	-- scale change). Any joint of either kind arriving or leaving rescans the map on the next step.
 	local function onDescendantAdded(descendant: Instance)
-		markDirty()
-		if descendant.Name == DEFAULT_ANIMATE_SCRIPT and descendant:IsA("LuaSourceContainer") then
+		if Joints.isJoint(descendant) then
+			self.motorsDirty = true
+		elseif descendant.Name == DEFAULT_ANIMATE_SCRIPT and descendant:IsA("LuaSourceContainer") then
 			descendant:Destroy()
 		end
 	end
+	local function onDescendantRemoving(descendant: Instance)
+		if Joints.isJoint(descendant) then
+			self.motorsDirty = true
+		end
+	end
 	table.insert(self.connections, engine.connect(model, "DescendantAdded", onDescendantAdded))
-	table.insert(self.connections, engine.connect(model, "DescendantRemoving", markDirty))
+	table.insert(self.connections, engine.connect(model, "DescendantRemoving", onDescendantRemoving))
 	table.insert(
 		self.connections,
 		engine.connect(model, "AncestryChanged", function()

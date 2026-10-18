@@ -1,31 +1,22 @@
 --!strict
 --[[
-	Pose: forward kinematics over a rig's Motor6Ds with Choreo offsets applied.
+	Pose: forward kinematics over a rig's joints with Choreo offsets applied.
 
-	The client lets the engine do this when it writes Motor6D.Transform; the server uses it to
+	The client lets the engine do this when it writes each joint's Transform; the server uses it to
 	find where the weapon is during a damage window (section 6: a server-side sweep along the
 	weapon's path), so hits are checked against the same motion the client plays.
 
-	Part CFrames follow Roblox's Motor6D rule: Part1.CFrame = Part0.CFrame * C0 * Transform * C1:Inverse().
+	A joint is a Motor6D or an AnimationConstraint (the default player character since the Avatar
+	Joint Upgrade; Joints.luau reads both). Part CFrames follow the rule both share:
+	Part1.CFrame = Part0.CFrame * C0 * Transform * C1:Inverse().
 ]]
 
 local ClipSampler = require(script.Parent.ClipSampler)
+local Joints = require(script.Parent.Joints)
 
 export type Solved = { [string]: CFrame }
 
 local Pose = {}
-
-type Joint = { motor: Motor6D, part0: BasePart, part1: BasePart }
-
-local function collectJoints(model: Model): { Joint }
-	local joints = {}
-	for _, descendant in model:GetDescendants() do
-		if descendant:IsA("Motor6D") and descendant.Part0 and descendant.Part1 then
-			table.insert(joints, { motor = descendant, part0 = descendant.Part0, part1 = descendant.Part1 })
-		end
-	end
-	return joints
-end
 
 --- Solves every part's world CFrame from the root part, given the root's CFrame and joint offsets.
 function Pose.solve(model: Model, rootCFrame: CFrame, offsets: ClipSampler.Offsets): Solved
@@ -34,20 +25,23 @@ function Pose.solve(model: Model, rootCFrame: CFrame, offsets: ClipSampler.Offse
 		error(("Pose.solve: %s has no PrimaryPart"):format(model:GetFullName()))
 	end
 	local solved: Solved = { [root.Name] = rootCFrame }
-	local joints = collectJoints(model)
+	local joints = Joints.collect(model)
 	local remaining = #joints
-	-- Propagate outward from the root; a joint resolves once its Part0 is known.
-	local guard = 0
-	while remaining > 0 and guard < 64 do
-		guard += 1
+	-- Propagate outward from the root; a joint resolves once its Part0 is known. A pass that
+	-- resolves nothing ends the solve: what is left (a joint off the root's tree, a second joint
+	-- on an already solved part) can never resolve, so the server sweep does not spin on it.
+	local progressed = true
+	while remaining > 0 and progressed do
+		progressed = false
 		for _, joint in joints do
 			local part0Name = joint.part0.Name
 			local part1Name = joint.part1.Name
 			if solved[part1Name] == nil and solved[part0Name] ~= nil then
-				local offset = offsets[joint.motor.Name]
+				local offset = offsets[joint.name]
 				local transform = if offset then ClipSampler.toCFrame(offset) else CFrame.identity
-				solved[part1Name] = solved[part0Name] * joint.motor.C0 * transform * joint.motor.C1:Inverse()
+				solved[part1Name] = solved[part0Name] * joint.c0 * transform * joint.c1:Inverse()
 				remaining -= 1
+				progressed = true
 			end
 		end
 	end

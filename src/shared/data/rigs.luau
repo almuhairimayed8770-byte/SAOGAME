@@ -1,11 +1,18 @@
 --!strict
 --[[
-	Rig definitions (section 10). The Motor6D names here are the joint names every clip uses.
+	Rig definitions (section 10). The joint names here are the names every clip uses. A joint is
+	a Motor6D or an AnimationConstraint (src/shared/choreo/Joints.luau reads both): the same name,
+	Part0 / Part1 and Transform either way.
 
-	PlayerR15 lists the 15 standard R15 Motor6Ds (kept so layered clothing and accessories work);
-	the engine builds the character, so its part sizes come from the avatar. Enemy rigs are
-	part-built placeholders assembled by src/server/world/RigBuilder.luau (D-009): every joint
-	names its Part0, Part1, rest pose (C0, studs and degrees), placeholder size and color.
+	PlayerR15 lists the 15 standard R15 joints (kept so layered clothing and accessories work);
+	the engine builds the character, so its part sizes and joint frames come from the avatar. Under
+	the Avatar Joint Upgrade (the default) those 15 are AnimationConstraints whose C0 / C1 are the
+	rig attachments; in older places they are Motor6Ds. Their c0 values below are the stand-in rest
+	pose for Lune and the fallback rigs and are never written onto a live character's joints. The
+	Weapon joint is always a Motor6D that WeaponBuilder adds, with its c0 as C0. Enemy rigs are
+	part-built placeholders assembled by src/server/world/RigBuilder.luau (D-009) with a Motor6D
+	per joint: every joint names its Part0, Part1, rest pose (C0, studs and degrees), placeholder
+	size and color.
 
 	Conventions: parts face -Z (Roblox forward). c0.pos is the joint's position relative to the
 	Part0 center; C1 is the joint's position relative to the Part1 center (RigBuilder derives C1
@@ -119,7 +126,8 @@ local Rigs: { [string]: Rig } = {
 				part1 = "RightFoot",
 				c0 = { pos = { 0, -0.6, 0 }, rot = { 0, 0, 0 } },
 			},
-			-- The weapon hangs from the right hand on its own Motor6D so Arts can re-grip it.
+			-- The weapon hangs from the right hand on its own Motor6D (whatever kind the R15 joints
+			-- are) so Arts can re-grip it.
 			{
 				name = "Weapon",
 				part0 = "RightHand",

@@ -1,21 +1,30 @@
 --!strict
 --[[
 	Rig smoke (run-in-roblox, Playground place). Plain Luau run on the server after Main has
-	started everything; it turns the hand check "confirm the Motor6D names and the Rig attribute"
+	started everything; it turns the hand check "confirm the joint names and the Rig attribute"
 	into assertions. Every expected name comes from src/shared/data/rigs.luau and scope.luau.
+
+	A joint is a Motor6D or an AnimationConstraint (src/shared/choreo/Joints.luau): under the
+	Avatar Joint Upgrade, the default for new experiences, the engine builds R15 characters with
+	AnimationConstraints and no Motor6Ds; the RigBuilder enemies and the Weapon joint are Motor6Ds.
+	Either class passes; the summary line says which one each rig carries.
 
 	- Player: an R15 stand-in from a blank HumanoidDescription goes through
 	  PlaygroundService.onCharacter, the function CharacterAdded runs for a real player (scale, walk
-	  speed, the loadout weapon through WeaponBuilder, EntityService registration). Its Motor6D names
+	  speed, the loadout weapon through WeaponBuilder, EntityService registration). Its joint names
 	  must be exactly the PlayerR15 joint list (the 15 R15 joints plus Weapon on RightHand), each one
 	  linking the Part0 / Part1 rigs.luau names inside the character, and its Rig attribute must be
-	  PlayerR15 and known to Choreo.
+	  PlayerR15 and known to Choreo. Prints StarterPlayer.AvatarJointUpgrade (when the property is
+	  readable) and the stand-in's joint classes, IsKinematic flags and BallSocketConstraints.
 	- Enemies: for every rig in scope.luau other than the player's, one in-scope enemy that uses
 	  that rig is spawned through EnemyService.spawn. Its Rig attribute must equal the rig id (and be
-	  known to Choreo) and its Motor6D names must be exactly that rig's joint list, no missing, no
+	  known to Choreo) and its joint names must be exactly that rig's joint list, no missing, no
 	  extras, no duplicates, each linking the parts rigs.luau names inside the model.
+	- Every rig: Pose.solve from the live root with no clip offsets puts every jointed part where
+	  the engine holds it (the server plays no animation, so every Transform is identity). This is
+	  the server hit sweep's view of the rig checked against the engine's own, for either joint kind.
 
-	Prints one summary line per rig with its joint count, then cleans up what it spawned.
+	Prints one summary line per rig with its joint count and classes, then cleans up what it spawned.
 
 	Run: tools/smoke.sh rigs (installs this file as a server Script in a Run session of the
 	Playground; see tools/smoke/SmokeRunner.luau). Errors on the first failed assertion, which the
@@ -28,12 +37,14 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
+local StarterPlayer = game:GetService("StarterPlayer")
 
 local READY_ATTRIBUTE = "SkyspireReady"
 local READY_TIMEOUT = 15
 local SETTLE_SECONDS = 0.5 -- lets the Humanoid apply the scale values before the joints are read
 local ROW_Z = 25 -- studs: where the enemies under test stand, clear of the stand-in at the origin
 local ROW_SPACING = 15 -- studs between them
+local POSE_TOLERANCE = 0.05 -- studs: how far a live part may sit from where Pose.solve puts it
 
 local function check(condition: boolean, message: string)
 	if not condition then
@@ -56,6 +67,8 @@ local Rigs = require(Shared.data.rigs)
 local Scope = require(Shared.data.scope)
 local Enemies = require(Shared.data.enemies)
 local ChoreoData = require(Shared.data.choreo)
+local Joints = require(Shared.choreo.Joints)
+local Pose = require(Shared.choreo.Pose)
 local World = require(Shared.data.world)
 local EntityService = require(Server.services.EntityService)
 local EnemyService = require(Server.services.EnemyService)
@@ -78,36 +91,18 @@ check(workspace:GetAttribute(READY_ATTRIBUTE) == true, "server services are up")
 
 type JointSpec = { name: string, part0: string, part1: string }
 
--- Every Motor6D under the model, grouped by name (Choreo keys joints by name, so a duplicate is a bug).
-local function motorsByName(model: Model): { [string]: { Motor6D } }
-	local byName: { [string]: { Motor6D } } = {}
-	for _, descendant in model:GetDescendants() do
-		if descendant:IsA("Motor6D") then
-			local list = byName[descendant.Name]
-			if list == nil then
-				list = {}
-				byName[descendant.Name] = list
-			end
-			table.insert(list, descendant)
-		end
-	end
-	return byName
-end
-
--- The first thing wrong with one rigs.luau joint on the model, or nil when the Motor6D matches it.
-local function jointProblem(model: Model, joint: JointSpec, byName: { [string]: { Motor6D } }): string?
+-- The first thing wrong with one rigs.luau joint on the model, or nil when the joint matches it.
+local function jointProblem(model: Model, joint: JointSpec, byName: { [string]: { Instance } }): string?
 	local list = byName[joint.name]
 	if list == nil then
-		return "no Motor6D of that name"
+		return "no Motor6D or AnimationConstraint of that name"
 	end
 	if #list ~= 1 then
-		return ("%d Motor6Ds share the name"):format(#list)
+		return ("%d joints share the name"):format(#list)
 	end
-	local motor = list[1]
-	local part0 = motor.Part0
-	local part1 = motor.Part1
+	local part0, part1 = Joints.parts(list[1])
 	if part0 == nil or part1 == nil then
-		return ("Part0 is %s, Part1 is %s"):format(tostring(part0), tostring(part1))
+		return ("%s: Part0 is %s, Part1 is %s"):format(list[1].ClassName, tostring(part0), tostring(part1))
 	end
 	if not part0:IsDescendantOf(model) then
 		return ("Part0 %s is outside the model"):format(part0:GetFullName())
@@ -124,11 +119,30 @@ local function jointProblem(model: Model, joint: JointSpec, byName: { [string]: 
 	return nil
 end
 
--- Asserts the model's Motor6Ds are exactly the rig's joint list; returns the joint count.
-local function checkJoints(label: string, model: Model, rigId: string): number
+-- "15 AnimationConstraint, 1 Motor6D": how many joints of each class the model carries.
+local function classSummary(byName: { [string]: { Instance } }): string
+	local counts: { [string]: number } = {}
+	for _, list in byName do
+		for _, joint in list do
+			counts[joint.ClassName] = (counts[joint.ClassName] or 0) + 1
+		end
+	end
+	local parts: { string } = {}
+	for _, className in Joints.CLASSES do
+		local count = counts[className]
+		if count ~= nil then
+			table.insert(parts, ("%d %s"):format(count, className))
+		end
+	end
+	return if #parts > 0 then table.concat(parts, ", ") else "no joints"
+end
+
+-- Asserts the model's joints (either class) are exactly the rig's joint list; returns the joint
+-- count and the class summary.
+local function checkJoints(label: string, model: Model, rigId: string): (number, string)
 	local rig = Rigs[rigId]
 	local joints: { JointSpec } = rig.joints
-	local byName = motorsByName(model)
+	local byName = Joints.byName(model)
 
 	local expected: { [string]: boolean } = {}
 	for _, joint in joints do
@@ -143,7 +157,7 @@ local function checkJoints(label: string, model: Model, rigId: string): number
 	table.sort(extras)
 	check(
 		#extras == 0,
-		("%s has no Motor6D that rigs.luau %s leaves out%s"):format(
+		("%s has no joint that rigs.luau %s leaves out%s"):format(
 			label,
 			rigId,
 			if #extras > 0 then " (extra: " .. table.concat(extras, ", ") .. ")" else ""
@@ -152,10 +166,13 @@ local function checkJoints(label: string, model: Model, rigId: string): number
 
 	for _, joint in joints do
 		local problem = jointProblem(model, joint, byName)
+		local found = byName[joint.name]
+		local className = if found ~= nil and #found == 1 then found[1].ClassName else "joint"
 		check(
 			problem == nil,
-			("%s Motor6D %s links %s -> %s inside the model%s"):format(
+			("%s %s %s links %s -> %s inside the model%s"):format(
 				label,
+				className,
 				joint.name,
 				joint.part0,
 				joint.part1,
@@ -168,8 +185,105 @@ local function checkJoints(label: string, model: Model, rigId: string): number
 	for _, list in byName do
 		count += #list
 	end
-	check(count == #joints, ("%s carries %d Motor6Ds, one per rigs.luau %s joint"):format(label, count, rigId))
-	return count
+	local classes = classSummary(byName)
+	check(
+		count == #joints,
+		("%s carries %d joints (%s), one per rigs.luau %s joint"):format(label, count, classes, rigId)
+	)
+	return count, classes
+end
+
+-- Asserts Pose.solve, from the live root with no offsets, reaches every rigs.luau joint's Part1
+-- (down to the blade on the player) and puts every jointed part where the engine holds it.
+-- Returns the largest gap (studs) and the part it was on.
+local function checkPose(label: string, model: Model, rigId: string): (number, string)
+	local root = model.PrimaryPart
+	check(root ~= nil, ("%s has a PrimaryPart for the pose check"):format(label))
+	local solved = Pose.solve(model, (root :: BasePart).CFrame, {})
+	local unreached: { string } = {}
+	for _, joint in Rigs[rigId].joints :: { JointSpec } do
+		if solved[joint.part1] == nil then
+			table.insert(unreached, joint.part1)
+		end
+	end
+	check(
+		#unreached == 0,
+		("%s: Pose.solve reaches every rigs.luau %s part from the root (the server sweep's view)%s"):format(
+			label,
+			rigId,
+			if #unreached > 0 then " (unreached: " .. table.concat(unreached, ", ") .. ")" else ""
+		)
+	)
+	local worst, worstPart, compared = 0, "none", 0
+	for _, descendant in model:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			local expected = solved[descendant.Name]
+			if expected ~= nil then
+				compared += 1
+				local gap = (descendant.Position - expected.Position).Magnitude
+				-- Orientation as the distance between the two frames' axis tips one stud out.
+				local turn = math.max(
+					(descendant.CFrame.RightVector - expected.RightVector).Magnitude,
+					(descendant.CFrame.UpVector - expected.UpVector).Magnitude
+				)
+				if math.max(gap, turn) > worst then
+					worst = math.max(gap, turn)
+					worstPart = descendant.Name
+				end
+			end
+		end
+	end
+	check(compared > 1, ("%s: Pose.solve reached %d parts from the root"):format(label, compared))
+	check(
+		worst <= POSE_TOLERANCE,
+		("%s: every jointed part sits where Pose.solve puts it (worst %.4f studs, on %s)"):format(
+			label,
+			worst,
+			worstPart
+		)
+	)
+	return worst, worstPart
+end
+
+-- What the engine built the stand-in with: the upgrade setting, kinematic flags, ball sockets.
+local function describeStandIn(model: Model)
+	local readable, setting = pcall(function(): any
+		return (StarterPlayer :: any).AvatarJointUpgrade
+	end)
+	print(
+		("[rigs.smoke] StarterPlayer.AvatarJointUpgrade: %s"):format(
+			if readable then tostring(setting) else "not readable (" .. tostring(setting) .. ")"
+		)
+	)
+	local constraints, kinematic = 0, 0
+	for _, joint in Joints.list(model) do
+		if joint:IsA("AnimationConstraint") then
+			constraints += 1
+			local ok, value = pcall(function(): any
+				return (joint :: any).IsKinematic
+			end)
+			if ok and value == true then
+				kinematic += 1
+			end
+		end
+	end
+	local sockets, socketsOn = 0, 0
+	for _, descendant in model:GetDescendants() do
+		if descendant:IsA("BallSocketConstraint") then
+			sockets += 1
+			if descendant.Enabled then
+				socketsOn += 1
+			end
+		end
+	end
+	print(
+		("[rigs.smoke] stand-in: %d AnimationConstraints (%d kinematic), %d BallSocketConstraints (%d enabled)"):format(
+			constraints,
+			kinematic,
+			sockets,
+			socketsOn
+		)
+	)
 end
 
 -- Asserts the model's Rig attribute names this rig and that Choreo has clips for it.
@@ -186,8 +300,17 @@ local function checkRigAttribute(label: string, model: Model, rigId: string)
 end
 
 local summaries: { string } = {}
-local function summarize(rigId: string, label: string, count: number)
-	table.insert(summaries, ("[rigs.smoke] rig %s: %d joints match rigs.luau (%s)"):format(rigId, count, label))
+local function summarize(rigId: string, label: string, count: number, classes: string, poseGap: number)
+	table.insert(
+		summaries,
+		("[rigs.smoke] rig %s: %d joints match rigs.luau (%s; %s; pose gap %.4f studs)"):format(
+			rigId,
+			count,
+			classes,
+			label,
+			poseGap
+		)
+	)
 end
 
 -- ------------------------------------------------------------------------------------------
@@ -242,9 +365,11 @@ local standInId = result :: number
 check(EntityService.get(standInId) ~= nil, "the stand-in is in the EntityService registry")
 task.wait(SETTLE_SECONDS)
 
-local playerCount = checkJoints("the player stand-in", standIn, playerRig.id)
+describeStandIn(standIn)
+local playerCount, playerClasses = checkJoints("the player stand-in", standIn, playerRig.id)
 checkRigAttribute("the player stand-in", standIn, playerRig.id)
-summarize(playerRig.id, "player stand-in through PlaygroundService.onCharacter", playerCount)
+local playerGap = checkPose("the player stand-in", standIn, playerRig.id)
+summarize(playerRig.id, "player stand-in through PlaygroundService.onCharacter", playerCount, playerClasses, playerGap)
 
 EntityService.unregister(standInId)
 standIn:Destroy()
@@ -312,8 +437,9 @@ for _, entry in spawned do
 	local enemyModel = model :: Model
 	local label = ("%s (rig %s)"):format(entry.defId, entry.rigId)
 	checkRigAttribute(label, enemyModel, entry.rigId)
-	local count = checkJoints(label, enemyModel, entry.rigId)
-	summarize(entry.rigId, entry.defId .. " through EnemyService.spawn", count)
+	local count, classes = checkJoints(label, enemyModel, entry.rigId)
+	local gap = checkPose(label, enemyModel, entry.rigId)
+	summarize(entry.rigId, entry.defId .. " through EnemyService.spawn", count, classes, gap)
 end
 
 -- ------------------------------------------------------------------------------------------

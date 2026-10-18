@@ -191,13 +191,15 @@ local function init()
 		return nil
 	end
 
-	local function motors(): { [string]: Motor6D }
-		local found: { [string]: Motor6D } = {}
+	-- Animatable joints by name: Motor6Ds (enemy rigs, the Weapon joint) and AnimationConstraints
+	-- (player avatars under the Avatar Joint Upgrade); Transform means the same on both.
+	local function motors(): { [string]: Motor6D | AnimationConstraint }
+		local found: { [string]: Motor6D | AnimationConstraint } = {}
 		local model = rigModel
 		if model ~= nil then
 			for _, descendant in model:GetDescendants() do
-				if descendant:IsA("Motor6D") then
-					found[descendant.Name] = descendant
+				if descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint") then
+					found[descendant.Name] = descendant :: any
 				end
 			end
 		end

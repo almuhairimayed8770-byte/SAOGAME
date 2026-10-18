@@ -33,7 +33,9 @@ local WeaponModels = {
 	bladePart = "Weapon",
 	guardPart = "Guard",
 	gripPart = "Grip",
-	motorName = "Weapon", -- the Motor6D RightHand -> Weapon; its C0 is the rigs.luau PlayerR15 joint
+	-- The Motor6D RightHand -> Weapon (a Motor6D even when the R15 joints are AnimationConstraints);
+	-- its C0 is the rigs.luau PlayerR15 joint.
+	motorName = "Weapon",
 	attachments = { grip = "WeaponGrip", trailStart = "TrailStart", trailEnd = "TrailEnd" },
 	lightName = "ActivationLight",
 	trailName = "Trail",

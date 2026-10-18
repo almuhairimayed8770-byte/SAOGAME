@@ -5,7 +5,7 @@
 	One Mixer per rig. It owns the clip handles on four layers, advances their clocks, blends them
 	into one set of joint offsets per step and reports crossed events, the root-motion delta and
 	finished handles. It never touches an Instance, so every rule here is Lune-tested; Choreo.luau
-	binds it to RenderStepped and Motor6D.Transform.
+	binds it to RenderStepped and to each joint's Transform (a Motor6D or an AnimationConstraint).
 
 	Layers (data/choreo.luau layerOrder): Base (locomotion blend space), UpperBody (actions that
 	leave the legs to locomotion), FullBody (Arts, dodges, staggers: override everything below for

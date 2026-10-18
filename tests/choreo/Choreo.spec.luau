@@ -91,6 +91,122 @@ local function motorOf(model, name)
 	return nil
 end
 
+-- The player character under the Avatar Joint Upgrade: a Humanoid model whose R15 joints are
+-- AnimationConstraints between rig attachments (parented to Part1, no Motor6D), with ball sockets
+-- on the same attachments and the Weapon on a Motor6D as WeaponBuilder hangs it. With
+-- `withJoints` false only the parts exist; the returned function adds the joints later (a
+-- replicated rig whose joints arrive after the animator attached) and returns them.
+local function buildUpgradedCharacter(withJoints: boolean)
+	local model = Instance.new("Model")
+	model.Name = "UpgradedCharacter"
+	local humanoid = Instance.new("Humanoid")
+	humanoid.Parent = model
+	local parts = {}
+	local function part(name)
+		local existing = parts[name]
+		if existing then
+			return existing
+		end
+		local created = Instance.new("Part")
+		created.Name = name
+		created.Position = Vector3.zero
+		created.Parent = model
+		parts[name] = created
+		return created
+	end
+	for _, joint in Rigs.PlayerR15.joints do
+		part(joint.part0)
+		part(joint.part1)
+	end
+	model.PrimaryPart = parts.HumanoidRootPart
+	local function addJoints()
+		local added = {}
+		for _, joint in Rigs.PlayerR15.joints do
+			local part0, part1 = parts[joint.part0], parts[joint.part1]
+			if joint.name == "Weapon" then
+				local motor = Instance.new("Motor6D")
+				motor.Name = joint.name
+				motor.Part0 = part0
+				motor.Part1 = part1
+				motor.Parent = part1
+				table.insert(added, motor)
+				continue
+			end
+			local attachment0 = Instance.new("Attachment")
+			attachment0.Name = joint.name .. "RigAttachment"
+			attachment0.Parent = part0
+			local attachment1 = Instance.new("Attachment")
+			attachment1.Name = joint.name .. "RigAttachment"
+			attachment1.Parent = part1
+			local constraint = Instance.new("AnimationConstraint")
+			constraint.Name = joint.name
+			constraint.Attachment0 = attachment0
+			constraint.Attachment1 = attachment1
+			constraint.Parent = part1
+			table.insert(added, constraint)
+			if joint.name ~= "Root" then
+				local socket = Instance.new("BallSocketConstraint")
+				socket.Name = joint.name .. "BallSocket"
+				socket.Attachment0 = attachment0
+				socket.Attachment1 = attachment1
+				socket.Parent = part1
+				table.insert(added, socket)
+			end
+		end
+		return added
+	end
+	if withJoints then
+		addJoints()
+	end
+	return model, addJoints
+end
+
+-- The joint (either kind) with this name.
+local function jointOf(model, name)
+	for _, descendant in model:GetDescendants() do
+		if (descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint")) and descendant.Name == name then
+			return descendant
+		end
+	end
+	return nil
+end
+
+-- Records the instance signals Choreo connects to, so a test can fire DescendantAdded by hand
+-- (Lune's instances have no events). Returns the recorder and a function that restores the
+-- engine's own connect (which fails quietly under Lune, as before).
+local function recordConnections()
+	local recorded = {}
+	Choreo.configure({
+		connect = function(instance, eventName, fn)
+			local entry = { instance = instance, eventName = eventName, fn = fn, connected = true }
+			table.insert(recorded, entry)
+			return {
+				Disconnect = function()
+					entry.connected = false
+				end,
+			}
+		end,
+	})
+	local function fire(instance, eventName, ...)
+		for _, entry in recorded do
+			if entry.connected and entry.instance == instance and entry.eventName == eventName then
+				entry.fn(...)
+			end
+		end
+	end
+	local function restore()
+		Choreo.configure({
+			connect = function(instance, eventName, fn)
+				local ok, result = pcall(function()
+					return instance[eventName]:Connect(fn)
+				end)
+				return if ok then result else nil
+			end,
+		})
+	end
+	return fire, restore
+end
+
 local function eventKinds(animator)
 	local kinds = {}
 	animator.events:Connect(function(_clipId, event)
@@ -125,6 +241,93 @@ describe("Choreo", function()
 		Choreo.release(model)
 		expect(Choreo.find(model)).toBeNil()
 		expect(Choreo.count()).toBe(0)
+	end)
+
+	it("poses an AnimationConstraint rig (the Avatar Joint Upgrade character) by writing Transform", function()
+		local model = buildUpgradedCharacter(true)
+		local shoulder = jointOf(model, "RightShoulder")
+		expect(shoulder:IsA("AnimationConstraint")).toBe(true)
+		expect(shoulder.Transform == CFrame.identity).toBe(true)
+		local animator = Choreo.get(model)
+		expect(animator.rigId).toBe("PlayerR15")
+		-- Posed the frame it appears, on the constraints and on the Weapon Motor6D alike.
+		expect(shoulder.Transform == CFrame.identity).toBe(false)
+		expect(jointOf(model, "Root").Transform == CFrame.identity).toBe(false)
+		expect(motorOf(model, "Weapon").Transform == CFrame.identity).toBe(false)
+		-- An Art drives the constraints frame by frame.
+		animator:play(HORIZONTAL, { startTime = HIT_OPEN_TIME - 0.1, blendIn = 0 })
+		animator:step(0)
+		local before = shoulder.Transform
+		for _ = 1, 6 do
+			animator:step(FRAME)
+		end
+		expect(shoulder.Transform == before).toBe(false)
+		-- Only Transform is written: the rig attachments the Humanoid owns are untouched.
+		expect(shoulder.Attachment0.CFrame == CFrame.identity).toBe(true)
+		expect(shoulder.Attachment1.CFrame == CFrame.identity).toBe(true)
+		Choreo.release(model)
+	end)
+
+	it("rescans when the joints arrive after the animator attached (a replicated rig)", function()
+		local fire, restore = recordConnections()
+		local model, addJoints = buildUpgradedCharacter(false)
+		local animator = Choreo.get(model)
+		animator:step(FRAME)
+
+		local added = addJoints()
+		local shoulder = jointOf(model, "RightShoulder")
+		animator:step(FRAME)
+		-- No DescendantAdded yet: the joint map is still the empty one.
+		expect(shoulder.Transform == CFrame.identity).toBe(true)
+
+		for _, instance in added do
+			fire(model, "DescendantAdded", instance)
+		end
+		animator:step(FRAME)
+		expect(shoulder.Transform == CFrame.identity).toBe(false)
+		expect(motorOf(model, "Weapon").Transform == CFrame.identity).toBe(false)
+
+		-- A joint that leaves is dropped: its replacement is the one written from then on.
+		local replacement = Instance.new("AnimationConstraint")
+		replacement.Name = "RightShoulder"
+		replacement.Attachment0 = shoulder.Attachment0
+		replacement.Attachment1 = shoulder.Attachment1
+		local parent = shoulder.Parent
+		fire(model, "DescendantRemoving", shoulder)
+		shoulder.Parent = nil
+		replacement.Parent = parent
+		fire(model, "DescendantAdded", replacement)
+		animator:step(FRAME)
+		expect(replacement.Transform == CFrame.identity).toBe(false)
+
+		-- Two joints of one name for a moment (a rebuild that adds the new joint before the old one
+		-- leaves): either may be the one written while both are there, so both orders are played
+		-- out, and once one leaves the other is written from the next step on.
+		local function sameName(): any
+			local joint = Instance.new("AnimationConstraint")
+			joint.Name = "RightShoulder"
+			joint.Attachment0 = shoulder.Attachment0
+			joint.Attachment1 = shoulder.Attachment1
+			joint.Parent = parent
+			fire(model, "DescendantAdded", joint)
+			animator:step(FRAME)
+			return joint
+		end
+		local function leaves(gone: any, stays: any)
+			fire(model, "DescendantRemoving", gone)
+			gone.Parent = nil
+			gone.Transform = CFrame.identity
+			stays.Transform = CFrame.identity
+			animator:step(FRAME)
+			expect(stays.Transform == CFrame.identity).toBe(false)
+			expect(gone.Transform == CFrame.identity).toBe(true)
+		end
+		leaves(sameName(), replacement) -- the newcomer leaves again
+		local rebuilt = sameName()
+		leaves(replacement, rebuilt) -- the old joint leaves
+
+		Choreo.release(model)
+		restore()
 	end)
 
 	it("a Humanoid model without a Rig attribute is a PlayerR15; a bare model is an error", function()

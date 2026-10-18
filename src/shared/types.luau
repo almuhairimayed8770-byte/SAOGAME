@@ -245,7 +245,7 @@ export type ClipDef = {
 -- ---------------------------------------------------------------------------------------------
 
 export type RigJoint = {
-	name: string, -- Motor6D name, e.g. "RightShoulder"
+	name: string, -- joint name (a Motor6D or AnimationConstraint), e.g. "RightShoulder"
 	part0: string, -- parent part name
 	part1: string, -- child part name
 	c0: { pos: Vec3, rot: Vec3 }, -- rest pose

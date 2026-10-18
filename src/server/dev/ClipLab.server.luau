@@ -11,6 +11,9 @@
 	the lighting preset from lighting.luau, one Boar and one Kobold rig (through RigBuilder when it
 	is in the build, otherwise a part-built fallback from rigs.luau), and puts every joining
 	player's own character on the PlayerR15 pedestal with the starter weapon in its right hand.
+	The enemy rigs pose through Motor6Ds; the player's character through AnimationConstraints
+	under the Avatar Joint Upgrade (Motor6Ds in older places). Choreo drives either kind
+	(shared/choreo/Joints.luau), and nothing here writes a joint the engine built.
 	Nothing here is gameplay: no entities, no HP, no services.
 ]]
 
@@ -33,6 +36,7 @@ local Rigs = require(Shared.data.rigs)
 local LightingData = require(Shared.data.lighting)
 local Weapons = require(Shared.data.weapons)
 local Playground = require(Shared.data.playground)
+local Joints = require(Shared.choreo.Joints)
 
 local Lab = Dev.clipLab
 
@@ -400,6 +404,22 @@ local function stageCharacter(character: Model)
 	applyPlayerScale(character)
 	attachWeapon(character)
 	placeOnPedestal(character, "PlayerR15")
+	-- Every PlayerR15 joint by name, of either kind: the engine's 15 and the Weapon one above.
+	local missing: { string } = {}
+	local byName = Joints.byName(character)
+	for _, joint in Rigs.PlayerR15.joints do
+		if byName[joint.name] == nil then
+			table.insert(missing, joint.name)
+		end
+	end
+	if #missing > 0 then
+		warn(
+			("[ClipLab] %s has no Motor6D or AnimationConstraint named %s; Choreo cannot pose those joints"):format(
+				character.Name,
+				table.concat(missing, ", ")
+			)
+		)
+	end
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if humanoid then
 		humanoid.WalkSpeed = 0

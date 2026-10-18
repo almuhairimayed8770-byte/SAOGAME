@@ -28,6 +28,7 @@ end
 
 local Types = require(Shared.types)
 local Combat = require(Shared.data.combat)
+local Joints = require(Shared.choreo.Joints)
 local Client = script.Parent.Parent
 local El = require(Client.ui.lib.El)
 local Siblings = require(Client.controllers.Siblings)
@@ -432,26 +433,23 @@ local function modelFor(rig: string): Model?
 	return rigModels[rig]
 end
 
-local motorCache: { [Model]: { Motor6D } } = {}
+-- Every joint of the rig, Motor6D or AnimationConstraint (the player's own character carries
+-- AnimationConstraints under the Avatar Joint Upgrade). Cleared on every clip selection.
+local motorCache: { [Model]: { Joints.Joint } } = {}
 
-local function motorsOf(model: Model): { Motor6D }
+local function motorsOf(model: Model): { Joints.Joint }
 	local cached = motorCache[model]
 	if cached ~= nil then
 		return cached
 	end
-	local motors: { Motor6D } = {}
-	for _, descendant in model:GetDescendants() do
-		if descendant:IsA("Motor6D") then
-			table.insert(motors, descendant)
-		end
-	end
+	local motors = Joints.list(model)
 	motorCache[model] = motors
 	return motors
 end
 
 local function restPose(model: Model)
 	for _, motor in motorsOf(model) do
-		motor.Transform = CFrame.identity
+		Joints.setTransform(motor, CFrame.identity)
 	end
 end
 

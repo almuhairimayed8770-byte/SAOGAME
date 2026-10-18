@@ -1,6 +1,8 @@
 --!strict
--- CombatService under Lune: fake clock, fake Net (records every fire), fake spherecast (spheres
--- around enemy roots), rigs built with Instance.new. Timelines are stepped by hand through tick().
+-- CombatService under Lune: fake clock, fake Net (records every fire), a fake engine for the hit
+-- sweep that follows the real one's rules (a spherecast against spheres around fighter roots that
+-- never reports what it starts inside, a bounds query over every fighter part), rigs built with
+-- Instance.new. Timelines are stepped by hand through tick().
 Harness.stubService("CollectionService", {
 	AddTag = function(_self, instance, tag)
 		instance:AddTag(tag)
@@ -30,6 +32,7 @@ local Rigs = Harness.load("src/shared/data/rigs")
 local Playground = Harness.load("src/shared/data/playground")
 local Net = Harness.load("src/shared/net/Net")
 local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
+local HitSweep = Harness.load("src/server/combat/HitSweep")
 local Horizontal = Harness.load("src/shared/clips/player/OneHandedSword/Horizontal")
 local CollectionService = Harness.game():GetService("CollectionService")
 
@@ -103,6 +106,7 @@ local function segmentDistance(point, origin, direction)
 end
 
 -- Spherecast stand-in: every registered fighter is a sphere of its body radius around its root.
+-- Like workspace:Spherecast it never reports a fighter the sphere already overlaps at the origin.
 local function fakeCast(origin, radius, direction, exclude)
 	local best, bestAlong = nil, math.huge
 	for _, record in EntityService.all() do
@@ -111,7 +115,8 @@ local function fakeCast(origin, radius, direction, exclude)
 			local position = root.CFrame.Position
 			local size = math.max(root.Size.X, root.Size.Z) / 2
 			local distance, along = segmentDistance(position, origin, direction)
-			if distance <= radius + size and along < bestAlong then
+			local startsInside = (position - origin).Magnitude <= radius + size
+			if not startsInside and distance <= radius + size and along < bestAlong then
 				best = { Instance = root, Position = position }
 				bestAlong = along
 			end
@@ -120,12 +125,54 @@ local function fakeCast(origin, radius, direction, exclude)
 	return best
 end
 
+-- Half size of a part's axis-aligned bounds.
+local function boundsHalf(part)
+	local cframe = part.CFrame
+	local half = part.Size / 2
+	local right, up, back = cframe.RightVector, cframe.UpVector, cframe.LookVector
+	return Vector3.new(
+		math.abs(right.X) * half.X + math.abs(up.X) * half.Y + math.abs(back.X) * half.Z,
+		math.abs(right.Y) * half.X + math.abs(up.Y) * half.Y + math.abs(back.Y) * half.Z,
+		math.abs(right.Z) * half.X + math.abs(up.Z) * half.Y + math.abs(back.Z) * half.Z
+	)
+end
+
+local overlapQueries = 0
+
+-- workspace:GetPartBoundsInRadius stand-in over every fighter's parts: each queryable part (CanQuery
+-- or CanCollide on) whose axis-aligned bounds come within the radius, none under an excluded
+-- Instance. HitSweep measures the real boxes of what it returns.
+local function fakeOverlap(center, radius, exclude)
+	overlapQueries += 1
+	local found = {}
+	for _, record in EntityService.all() do
+		if table.find(exclude, record.model) == nil then
+			for _, part in record.model:GetDescendants() do
+				if part:IsA("BasePart") and (part.CanQuery or part.CanCollide) then
+					local half = boundsHalf(part)
+					local offset = center - part.CFrame.Position
+					local outside = Vector3.new(
+						math.max(math.abs(offset.X) - half.X, 0),
+						math.max(math.abs(offset.Y) - half.Y, 0),
+						math.max(math.abs(offset.Z) - half.Z, 0)
+					)
+					if outside.Magnitude <= radius then
+						table.insert(found, part)
+					end
+				end
+			end
+		end
+	end
+	return found
+end
+
 local function fresh()
 	CombatService.reset()
 	EntityService.reset()
 	clock.t = 500
 	sent = {}
 	handlers = {}
+	overlapQueries = 0
 	local now = function()
 		return clock.t
 	end
@@ -147,6 +194,7 @@ local function fresh()
 		net = fakeNet,
 		heartbeat = nil,
 		cast = fakeCast,
+		overlap = fakeOverlap,
 		random = noCrit,
 	})
 	CombatService.start()
@@ -700,6 +748,133 @@ describe("CombatService Art timeline", function()
 		local ok, reason = CombatService.beginArt(playerId, "OneHandedSword.Horizontal")
 		expect(ok).toBe(false)
 		expect(reason).toBe("Locked")
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- The sweep under the engine's rules: casts never see what they start inside
+-- ------------------------------------------------------------------------------------------
+
+describe("CombatService hit sweep", function()
+	-- Rebinds the engine with another broad phase (the casts stay the engine-like fake).
+	local function useOverlap(overlap)
+		CombatService.bind({
+			now = function()
+				return clock.t
+			end,
+			net = fakeNet,
+			heartbeat = nil,
+			cast = fakeCast,
+			overlap = overlap,
+			random = noCrit,
+		})
+	end
+
+	local function noOverlap()
+		return {}
+	end
+
+	-- Where the swordsman's blade is at clip time `time`, solved the way the server solves it.
+	local function bladeAt(character, time)
+		local trailStart, trailEnd = HitSweep.trailAttachments(character)
+		local samples =
+			HitSweep.bladePath(character, character.PrimaryPart.CFrame, Horizontal, { time }, trailStart, trailEnd)
+		return samples[1]
+	end
+
+	it("a Horizontal that opens its window with the blade buried in the boar lands once", function()
+		local window = ClipSampler.hitWindows(Horizontal)[1]
+		for _, overlap in { fakeOverlap, noOverlap } do
+			fresh()
+			useOverlap(overlap)
+			local _, player, character = spawnPlayer()
+			local opening = bladeAt(character, window.open)
+			local boarId, boarModel = spawnBoar(CFrame.new(opening.mid))
+			local boarRoot = boarModel.PrimaryPart
+			-- The whole blade lies inside the boar's body when the window opens.
+			expect(HitSweep.segmentBoxDistance(opening.start, opening.finish, boarRoot.CFrame, boarRoot.Size)).toBe(0)
+			handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+			advance(0.6)
+			local confirmed = sentOf("HitConfirmed")
+			if overlap == fakeOverlap then
+				expect(#confirmed).toBe(1)
+				expect(confirmed[1].targetId).toBe(boarId)
+				expect(EntityService.get(boarId).hp).toBe(BOAR.hp - HORIZONTAL_DAMAGE)
+			else
+				-- The engine's casts alone never report it: every one starts inside the boar.
+				expect(#confirmed).toBe(0)
+			end
+		end
+	end)
+
+	it("a boar that steps onto the resting blade during the Hold lands on the next frame", function()
+		for _, overlap in { fakeOverlap, noOverlap } do
+			fresh()
+			useOverlap(overlap)
+			local _, player, character = spawnPlayer()
+			local boarId, boarModel = spawnBoar(CFrame.new(0, 1.2, -40))
+			handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+			-- Into the clip's Hold (0.40 to 0.43): the window is open and the blade is still.
+			advance(0.41)
+			expect(#sentOf("HitConfirmed")).toBe(0)
+			local holding = bladeAt(character, 0.41)
+			expect((bladeAt(character, 0.425).finish - holding.finish).Magnitude).toBeLessThan(1e-4)
+			boarModel.PrimaryPart.CFrame = CFrame.new(holding.mid)
+			advance(1 / 60)
+			if overlap == fakeOverlap then
+				expect(#sentOf("HitConfirmed")).toBe(1)
+				expect(lastOf("HitConfirmed").targetId).toBe(boarId)
+			else
+				expect(#sentOf("HitConfirmed")).toBe(0)
+			end
+			-- Still one hit (or none) by the end of the Art.
+			advance(0.2)
+			expect(#sentOf("HitConfirmed")).toBe(if overlap == fakeOverlap then 1 else 0)
+		end
+	end)
+
+	it("every sample of a window is tested for overlap once", function()
+		fresh()
+		local _, player = spawnPlayer()
+		spawnBoar(CFrame.new(0, 1.2, -40))
+		local window = ClipSampler.hitWindows(Horizontal)[1]
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		-- Count the samples the timeline takes, frame by frame, the way stepRun asks for them.
+		local expected = 0
+		local sampledTo = nil
+		local elapsed = 0
+		while elapsed < 0.6 do
+			advance(1 / 60)
+			elapsed += 1 / 60
+			if elapsed >= window.open and (sampledTo == nil or sampledTo < window.close) then
+				local toTime = math.min(elapsed, window.close)
+				local from = sampledTo or window.open
+				expected += #HitSweep.sampleTimes(from, toTime, Combat.hitSampleHz, sampledTo == nil)
+				sampledTo = toTime
+			end
+		end
+		expect(expected).toBeGreaterThan(5)
+		expect(overlapQueries).toBe(expected)
+	end)
+
+	it("a swordsman whose blade the joints cannot reach warns once and never hits", function()
+		fresh()
+		local _, player, character = spawnPlayer()
+		spawnBoar()
+		character:FindFirstChild("RightHand"):FindFirstChild("Weapon"):Destroy()
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		advance(1.2)
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Vertical"))
+		advance(1.2)
+		expect(#sentOf("ActionStarted")).toBe(2)
+		expect(#sentOf("HitConfirmed")).toBe(0)
+		local warnings = 0
+		for _, line in Harness.warnings() do
+			if line:find("cannot be solved", 1, true) then
+				warnings += 1
+			end
+		end
+		expect(warnings).toBe(1)
 	end)
 end)
 
