@@ -83,7 +83,11 @@ and the smoke scripts (D-039, D-038).
     starts inside, D-042). After those fixes all six pass: archetypes, combat (the Horizontal lands on the boar for the
     section 6 damage), hitsweep, perf, playground and rigs. run-in-roblox exits 1 on archetypes, combat and perf only
     because Studio warns "Remote event invocation discarded ... did you forget to implement OnClientEvent?" when the
-    server fires remotes with no client connected; the `SMOKE-RESULT` line is the verdict.
+    server fires remotes with no client connected; the `SMOKE-RESULT` line is the verdict. Two more log lines are
+    expected: the playground smoke's anti-cheat warns "system line failed: Unable to cast value to Object" after it
+    kicks its stand-in (a stand-in is not a `Player`, so the kick line has no client to go to), and Studio's own
+    MaterialManager plugin can print "debug.profileEnd() - No active profile annotation". Rerun after D-046
+    (2026-10-18): all six pass.
 15. [ ] **Measure section 16 numbers in the Playground** and paste them into the table in `docs/PROGRESS.md`. The server
     rows come from `tools/smoke.sh perf` (8 stand-ins and 60 enemies, `world.luau` `performance`): it asserts the
     95th-percentile server frame time and the part count and prints Markdown rows to paste. The rest needs Play mode
@@ -123,8 +127,10 @@ and the smoke scripts (D-039, D-038).
     `Animate` in **StarterPlayer > StarterCharacterScripts**, so the engine never adds its default animation script,
     which writes `Motor6D.Transform` too and would fight Choreo; `tests/project/projectFiles.spec.luau` guards it.
     Check once in Play mode: your character has no running default `Animate` (Choreo also destroys the empty copy on
-    the client) and its Humanoid keeps its `Animator`.
-25. [ ] **Confirm the joint names and the `Rig` attribute.** `tools/smoke.sh rigs` asserts this for a stand-in R15
+    the client) and its Humanoid keeps its `Animator`. Checked on the owner's PC (2026-10-18) by an automated solo
+    Play session (a run-in-roblox script that starts Play through `StudioTestService` and reads the client): no
+    `Animate` under the character, `Animator` present.
+25. [x] **Confirm the joint names and the `Rig` attribute.** `tools/smoke.sh rigs` asserts this for a stand-in R15
     character (through the same `PlaygroundService` character path a player takes) and for every in-scope enemy rig
     (through `EnemyService.spawn`), from `rigs.luau`. On the owner's PC (2026-10-18) it passed: the stand-in carries the
     15 R15 joints as `AnimationConstraint`s (Avatar Joint Upgrade, D-041) plus the `Weapon` Motor6D, and the server's
@@ -134,6 +140,12 @@ and the smoke scripts (D-039, D-038).
     `rigs.luau` lists plus `Weapon` on `RightHand`, with no extra joints from layered clothing or a custom body (Choreo
     ignores extras, but a renamed joint leaves that limb in its rest pose). An enemy whose `Rig` attribute is missing is posed as a player; the smoke
     catches that for the spawn path, so a mismatch seen by hand means something else replaced the model.
+    Your own avatar was checked on 2026-10-18 by the automated solo Play session (step 24). The first run found the
+    character never registered (no `Rig` attribute) and the sword gone, because the server prepared it before the
+    engine had parented and dressed it; fixed by D-046. Rerun after the fix: the 15 R15 joints as
+    `AnimationConstraint`s plus the `Weapon` Motor6D, no extra or missing joints (3 accessories), `Rig` = `PlayerR15`
+    on the client and the server, registered as a fighter with 300 HP, and the scale values at `rigs.luau`'s
+    1.08 / 0.92 / 0.95 / 1.06. Recheck by hand only if you change avatars to layered clothing or a custom body.
 26. [ ] **Watch the write order.** In Play mode open **View tab > Script Performance** (verify) and confirm the
     Choreo RenderStepped step is the last thing that touches `Transform` each frame: a rig that snaps to rest for a
     frame means something else (an `AnimationTrack`, a plugin) writes after it.
