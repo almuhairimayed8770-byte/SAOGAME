@@ -1,7 +1,8 @@
 --!strict
 --[[
 	player/OneHandedSword/Run: 16 studs/s, a 0.6 s cycle. The anime run: leaned forward, the free
-	arm pumping, long strides with a real flight phase (the body rides high between plants).
+	arm pumping (the sword arm pumps shorter, its wrist keeping the point forward and off the
+	grass), long strides with a real flight phase (the body rides high between plants).
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -42,7 +43,7 @@ local clip: Types.ClipDef = {
 				LeftShoulder = rot(-36, 0, -6),
 				LeftElbow = rot(80, 0, 0),
 				LeftWrist = rot(0, 0, 0),
-				RightShoulder = rot(40, 0, 8),
+				RightShoulder = rot(24, 0, 8),
 				RightElbow = rot(70, 0, 0),
 				RightWrist = rot(-10, 0, 0),
 				Weapon = rot(-80, 0, 0),
@@ -66,6 +67,7 @@ local clip: Types.ClipDef = {
 				LeftElbow = rot(85, 0, 0),
 				RightShoulder = rot(0, 0, 8),
 				RightElbow = rot(75, 0, 0),
+				RightWrist = rot(0, 0, 0),
 			},
 		},
 		{
@@ -84,8 +86,9 @@ local clip: Types.ClipDef = {
 				RightAnkle = rot(-18, 0, 0),
 				LeftShoulder = rot(40, 0, -6),
 				LeftElbow = rot(70, 0, 0),
-				RightShoulder = rot(-36, 0, 8),
+				RightShoulder = rot(-20, 0, 8),
 				RightElbow = rot(80, 0, 0),
+				RightWrist = rot(8, 0, 0),
 			},
 		},
 		{
@@ -105,6 +108,7 @@ local clip: Types.ClipDef = {
 				LeftElbow = rot(75, 0, 0),
 				RightShoulder = rot(0, 0, 8),
 				RightElbow = rot(85, 0, 0),
+				RightWrist = rot(-9, 0, 0),
 			},
 		},
 	},

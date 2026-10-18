@@ -1,7 +1,8 @@
 --!strict
 --[[
 	player/OneHandedSword/WalkBack: backpedal, a 0.9 s cycle. The legs reach behind, the torso
-	stays upright and the head stays on the target. Shorter arm swing than the forward walk.
+	stays upright and the head stays on the target. Shorter arm swing than the forward walk; the
+	sword rides low, the point forward.
 	Rotations: X+ swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -43,9 +44,9 @@ local clip: Types.ClipDef = {
 				LeftElbow = rot(14, 0, 0),
 				LeftWrist = rot(0, 0, 0),
 				RightShoulder = rot(-10, 0, 6),
-				RightElbow = rot(10, 0, 0),
+				RightElbow = rot(16, 0, 0),
 				RightWrist = rot(-6, 0, 0),
-				Weapon = rot(-80, 0, 0),
+				Weapon = rot(-28, 0, 0),
 			},
 		},
 		{

@@ -11,7 +11,7 @@
 	  0.25-0.33  Anticipation (5 frames): the coil deepens
 	  0.33-0.38  Snap 1: the diagonal cut down and across to the left     (hit 1: 0.33-0.45)
 	  0.38-0.42  Hold, then Settle to 0.52
-	  0.50-0.58  re-wind: the wrist turns, the point dips low on the left
+	  0.50-0.58  re-wind: the wrist turns, the point dips low on the left, just off the grass
 	  0.58-0.63  Snap 2: the return cut up and to the right                 (hit 2: 0.58-0.70)
 	  0.75-0.85  draw back for the thrust: the blade along the forearm, torso wound
 	  0.85-0.90  Snap 3: the lunge, the left leg far forward                (hit 3: 0.85-0.98)
@@ -125,7 +125,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(28, 0, -38),
 				RightElbow = rot(8, 0, 0),
 				RightWrist = rot(0, 0, 10),
-				Weapon = rot(-62, 0, -22),
+				Weapon = rot(-36, 0, -22),
 				LeftShoulder = rot(-26, 0, -30),
 				LeftElbow = rot(40, 0, 0),
 				LeftWrist = rot(0, 0, 0),
@@ -156,7 +156,7 @@ local clip: Types.ClipDef = {
 				Neck = rot(3, -16, -1),
 				RightShoulder = rot(34, 0, -32),
 				RightElbow = rot(12, 0, 0),
-				Weapon = rot(-60, 0, -18),
+				Weapon = rot(-34, 0, -18),
 			},
 			root = { pos = { 0, 0, -0.7 } },
 		},
@@ -168,7 +168,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(14, 0, -40),
 				RightElbow = rot(20, 0, 0),
 				RightWrist = rot(-20, 0, 24),
-				Weapon = rot(-70, 0, -30),
+				Weapon = rot(-20, 0, -30),
 				Waist = rot(-16, 30, 8),
 				Neck = rot(3, -22, -2),
 				LeftShoulder = rot(-20, 0, -26),

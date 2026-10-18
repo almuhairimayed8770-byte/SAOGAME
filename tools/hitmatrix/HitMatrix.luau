@@ -138,7 +138,7 @@ type Context = {
 	ReviewMarkers: any,
 }
 
-type Avatar = { model: any, root: any, rootHeight: number, base: any, top: number }
+export type Avatar = { model: any, root: any, rootHeight: number, base: any, top: number }
 
 export type World = {
 	parts: { any },
@@ -432,6 +432,14 @@ local function fieldPart(ctx: Context): any
 	part.CFrame =
 		CFrame.new(p[1], p[2], p[3], o[1][1], o[1][2], o[1][3], o[2][1], o[2][2], o[2][3], o[3][1], o[3][2], o[3][3])
 	return part
+end
+
+--- The matrix's player standing on the Playground field, and the Field part, for checks that pose
+--- the same body the matrix swings (tests/choreo/GroundClearance.spec.luau): the avatar's root
+--- stands at `base`, its feet on the field's top face.
+function HitMatrix.standing(Harness: any): (Avatar, any)
+	local ctx = load(Harness)
+	return buildAvatar(ctx), fieldPart(ctx)
 end
 
 -- ------------------------------------------------------------------------------------------

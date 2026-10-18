@@ -1,8 +1,9 @@
 --!strict
 --[[
-	player/OneHandedSword/Sprint: 24 studs/s, a 0.5 s cycle. Deeper lean, bigger arm pumps, the
-	head driving forward. With a drawn weapon the locomotion layer adds the "low and back" pose
-	from data/choreo.luau on top of this clip.
+	player/OneHandedSword/Sprint: 24 studs/s, a 0.5 s cycle. Deeper lean, a bigger free-arm pump,
+	the head driving forward; the sword arm pumps shorter, its wrist keeping the point off the
+	grass. With a drawn weapon the locomotion layer adds the "low and back" pose from
+	data/choreo.luau on top of this clip.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -42,9 +43,9 @@ local clip: Types.ClipDef = {
 				LeftShoulder = rot(-48, 0, -8),
 				LeftElbow = rot(88, 0, 0),
 				LeftWrist = rot(0, 0, 0),
-				RightShoulder = rot(50, 0, 10),
+				RightShoulder = rot(30, 0, 10),
 				RightElbow = rot(78, 0, 0),
-				RightWrist = rot(-10, 0, 0),
+				RightWrist = rot(-14, 0, 0),
 				Weapon = rot(-80, 0, 0),
 			},
 		},
@@ -65,6 +66,7 @@ local clip: Types.ClipDef = {
 				LeftElbow = rot(92, 0, 0),
 				RightShoulder = rot(0, 0, 10),
 				RightElbow = rot(84, 0, 0),
+				RightWrist = rot(2, 0, 0),
 			},
 		},
 		{
@@ -82,8 +84,9 @@ local clip: Types.ClipDef = {
 				RightAnkle = rot(-24, 0, 0),
 				LeftShoulder = rot(50, 0, -8),
 				LeftElbow = rot(78, 0, 0),
-				RightShoulder = rot(-48, 0, 10),
+				RightShoulder = rot(-28, 0, 10),
 				RightElbow = rot(88, 0, 0),
+				RightWrist = rot(18, 0, 0),
 			},
 		},
 		{
@@ -103,6 +106,7 @@ local clip: Types.ClipDef = {
 				LeftElbow = rot(84, 0, 0),
 				RightShoulder = rot(0, 0, 10),
 				RightElbow = rot(92, 0, 0),
+				RightWrist = rot(-6, 0, 0),
 			},
 		},
 	},

@@ -1,7 +1,8 @@
 --!strict
 --[[
-	player/OneHandedSword/Idle: sheathed idle, the 12-second cycle (section 10 "Locomotion").
-	The sword hangs point-down beside the right leg. A weight shift onto the left leg at 4.5 s,
+	player/OneHandedSword/Idle: sheathed idle, the 12-second cycle (section 10 "Locomotion"). The
+	sword rides low in the right hand beside the right leg, the point forward and down but clear of
+	the grass (tests/choreo/GroundClearance.spec.luau). A weight shift onto the left leg at 4.5 s,
 	back at 7.5 s, a glance to the right at 10 s. Breathing rides on the Additive Breathe clip.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
@@ -37,9 +38,9 @@ local clip: Types.ClipDef = {
 				LeftElbow = rot(8, 0, 0),
 				LeftWrist = rot(0, 0, 0),
 				RightShoulder = rot(2, 0, 5),
-				RightElbow = rot(6, 0, 0),
+				RightElbow = rot(16, 0, 0),
 				RightWrist = rot(-6, 0, 0),
-				Weapon = rot(-80, 0, 0),
+				Weapon = rot(-34, 0, 0),
 				LeftHip = rot(2, 0, -3),
 				LeftKnee = rot(-6, 0, 0),
 				LeftAnkle = rot(4, 0, 0),

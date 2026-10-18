@@ -8,13 +8,16 @@
 	  0.15-0.25  activation hold: the blade lights, the arch breathes
 	  0.25-0.35  Anticipation (6 frames): up onto the toes, the arch deepens, the free hand opens
 	  0.35-0.40  Snap (3 frames): the chop, the whole body folding down behind it, the torso
-	             squaring left so the blade falls on the centre line
+	             squaring left so the blade falls on the centre line; it ends low and committed,
+	             the blade angled forward and down, the point just above the ground
 	  0.35-0.38  Smear
 	  0.35-0.48  Hit window: opens on the snap's first frame (the trail ignites with it), so the
 	             server sweeps the whole chop, and closes in the settle
 	  0.40-0.43  Hold
-	  0.43-0.55  Settle (Spring): the blade rebounds a few degrees off the ground
-	  0.60-1.00  Recovery / post-motion: bent low over the blade, breathing
+	  0.43-0.55  Settle (Spring): the torso and the sword arm spring back 5-6 degrees, the point
+	             lifts about half a stud off the ground
+	  0.60-1.00  Recovery / post-motion: bent low over the blade, breathing, the point hovering
+	             about half a stud above the ground
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -113,17 +116,17 @@ local clip: Types.ClipDef = {
 			},
 		},
 		{
-			-- snap: the chop
+			-- snap: the chop, ending low with the point just above the ground
 			time = 0.4,
 			easing = "ExpoOut",
 			joints = {
 				Root = posRot(0, -0.42, -0.06, 0, 4, 0),
 				Waist = rot(-36, 12, 2),
 				Neck = rot(-6, -12, 0),
-				RightShoulder = rot(28, 0, 2),
+				RightShoulder = rot(40, 0, 2),
 				RightElbow = rot(6, 0, 0),
 				RightWrist = rot(-8, 0, 0),
-				Weapon = rot(-84, 0, 0),
+				Weapon = rot(-19, 0, 0),
 				LeftShoulder = rot(-26, 0, -28),
 				LeftElbow = rot(40, 0, 0),
 				LeftWrist = rot(0, 0, 0),
@@ -143,16 +146,16 @@ local clip: Types.ClipDef = {
 			},
 		},
 		{
-			-- settle: the blade rebounds a few degrees
+			-- settle: the torso and the sword arm spring back 5-6 degrees, the point lifts off the ground
 			time = 0.55,
 			easing = "Spring",
 			joints = {
-				Root = posRot(0, -0.38, -0.05, 0, 3, 0),
-				Waist = rot(-30, 10, 2),
+				Root = posRot(0, -0.4, -0.05, 0, 3, 0),
+				Waist = rot(-31, 10, 2),
 				Neck = rot(-2, -10, 0),
-				RightShoulder = rot(34, 0, 4),
-				RightElbow = rot(10, 0, 0),
-				Weapon = rot(-80, 0, 0),
+				RightShoulder = rot(46, 0, 4),
+				RightElbow = rot(6, 0, 0),
+				Weapon = rot(-27, 0, 0),
 				LeftShoulder = rot(-22, 0, -26),
 			},
 		},
@@ -160,9 +163,9 @@ local clip: Types.ClipDef = {
 			time = 0.75,
 			easing = "SineInOut",
 			joints = {
-				Waist = rot(-31, 10, 2),
+				Waist = rot(-32, 10, 2),
 				Neck = rot(-1, -10, 0),
-				Weapon = rot(-79, 0, 1),
+				Weapon = rot(-26, 0, 1),
 				RightWrist = rot(-7, 0, 1),
 			},
 		},
@@ -170,9 +173,9 @@ local clip: Types.ClipDef = {
 			time = 0.9,
 			easing = "SineInOut",
 			joints = {
-				Waist = rot(-30, 10, 2),
+				Waist = rot(-31, 10, 2),
 				Neck = rot(-3, -10, 0),
-				Weapon = rot(-81, 0, -1),
+				Weapon = rot(-28, 0, -1),
 				RightWrist = rot(-9, 0, -1),
 			},
 		},
@@ -181,7 +184,7 @@ local clip: Types.ClipDef = {
 			easing = "SineInOut",
 			joints = {
 				LeftShoulder = rot(-20, 0, -26),
-				RightShoulder = rot(33, 0, 4),
+				RightShoulder = rot(45, 0, 4),
 				RightWrist = rot(-8, 0, 0),
 			},
 		},

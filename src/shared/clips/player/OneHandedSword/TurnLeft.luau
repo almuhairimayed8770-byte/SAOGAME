@@ -3,6 +3,7 @@
 	player/OneHandedSword/TurnLeft: turn in place to the left (section 10: at 45 degrees with no
 	movement). The head and torso lead, the left foot lifts and plants outward, the right foot
 	drags round, then the torso settles with a spring. The controller yaws the root over the clip.
+	The sword rides low, the point forward.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -43,9 +44,9 @@ local clip: Types.ClipDef = {
 				LeftElbow = rot(10, 0, 0),
 				LeftWrist = rot(0, 0, 0),
 				RightShoulder = rot(2, 0, 5),
-				RightElbow = rot(8, 0, 0),
+				RightElbow = rot(16, 0, 0),
 				RightWrist = rot(-6, 0, 0),
-				Weapon = rot(-80, 0, 0),
+				Weapon = rot(-28, 0, 0),
 			},
 		},
 		{

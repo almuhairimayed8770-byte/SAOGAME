@@ -1,8 +1,9 @@
 --!strict
 --[[
 	player/OneHandedSword/WalkForward: 8 studs/s walk, a 0.9 s cycle (two steps). Contact poses
-	snap in with QuadOut so the plant reads; passing poses glide with SineInOut. The sword hangs
-	point-down and the free arm counter-swings. Footsteps just after each plant.
+	snap in with QuadOut so the plant reads; passing poses glide with SineInOut. The sword rides
+	low with the point forward, the wrist easing it up as the arm swings back so the point stays
+	clear of the grass, and the free arm counter-swings. Footsteps just after each plant.
 	Rotations: X+ swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -44,9 +45,9 @@ local clip: Types.ClipDef = {
 				LeftElbow = rot(12, 0, 0),
 				LeftWrist = rot(0, 0, 0),
 				RightShoulder = rot(18, 0, 5),
-				RightElbow = rot(10, 0, 0),
-				RightWrist = rot(-6, 0, 0),
-				Weapon = rot(-80, 0, 0),
+				RightElbow = rot(16, 0, 0),
+				RightWrist = rot(-12, 0, 0),
+				Weapon = rot(-22, 0, 0),
 			},
 		},
 		{
@@ -65,6 +66,7 @@ local clip: Types.ClipDef = {
 				RightAnkle = rot(28, 0, 0),
 				LeftShoulder = rot(0, 0, -4),
 				RightShoulder = rot(0, 0, 5),
+				RightWrist = rot(-6, 0, 0),
 			},
 		},
 		{
@@ -83,6 +85,7 @@ local clip: Types.ClipDef = {
 				RightAnkle = rot(-14, 0, 0),
 				LeftShoulder = rot(18, 0, -4),
 				RightShoulder = rot(-18, 0, 5),
+				RightWrist = rot(0, 0, 0),
 			},
 		},
 		{
@@ -101,6 +104,7 @@ local clip: Types.ClipDef = {
 				RightAnkle = rot(2, 0, 0),
 				LeftShoulder = rot(0, 0, -4),
 				RightShoulder = rot(0, 0, 5),
+				RightWrist = rot(-6, 0, 0),
 			},
 		},
 	},

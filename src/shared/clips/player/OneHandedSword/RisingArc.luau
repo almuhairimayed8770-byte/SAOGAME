@@ -9,10 +9,11 @@
 
 	Timeline (the beats table describes the first strike; the flick repeats the pattern with a
 	short re-cock, a 3-frame snap, a hold and a spring settle):
-	  0.00-0.15  start pose: the body sinks, the blade hangs low across the body on the left
-	             with the point by the left knee, torso wound left, the free hand opens
+	  0.00-0.15  start pose: the body sinks into the low crouch, the sword held low and back at
+	             the left hip with the point trailing behind, just above the ground, torso wound
+	             left, the free hand opens
 	  0.15-0.25  activation hold: the blade lights, the crouch breathes
-	  0.25-0.33  Anticipation (5 frames): the crouch deepens, the point drags lower and further left
+	  0.25-0.33  Anticipation (5 frames): the crouch deepens, the point drags lower and further back
 	  0.33-0.38  Snap 1 (3 frames, ExpoOut): the rising cut, the legs drive the hips up onto the
 	             toes, the torso whips right                                   (hit 1: 0.33-0.45)
 	  0.33-0.37  Smear (2 frames, X: the diagonal)
@@ -78,17 +79,17 @@ local clip: Types.ClipDef = {
 			root = { pos = { 0, 0, 0 } },
 		},
 		{
-			-- start pose: the body sinks, the blade hangs low across the body on the left
+			-- start pose: the body sinks, the sword low and back at the left hip, the point trailing
 			time = 0.15,
 			easing = "ExpoOut",
 			joints = {
 				Root = posRot(-0.06, -0.34, 0.04, 0, 8, 2),
 				Waist = rot(-10, 30, 6),
 				Neck = rot(8, -28, -2),
-				RightShoulder = rot(18, 0, -44),
-				RightElbow = rot(24, 0, 0),
-				RightWrist = rot(-22, 0, 26),
-				Weapon = rot(-70, 0, -32),
+				RightShoulder = rot(36, 0, -28),
+				RightElbow = rot(12, 0, 0),
+				RightWrist = rot(-10, 0, 0),
+				Weapon = rot(-82, 0, 38),
 				LeftShoulder = rot(36, 0, -24),
 				LeftElbow = rot(30, 0, 0),
 				LeftWrist = rot(0, 0, 22),
@@ -107,23 +108,23 @@ local clip: Types.ClipDef = {
 			joints = {
 				Root = posRot(-0.06, -0.36, 0.04, 0, 9, 2),
 				Waist = rot(-11, 32, 6),
-				RightShoulder = rot(17, 0, -46),
-				Weapon = rot(-72, 0, -34),
+				RightShoulder = rot(36, 0, -29),
+				Weapon = rot(-84, 0, 39),
 				LeftWrist = rot(0, 0, 26),
 			},
 		},
 		{
-			-- anticipation: the crouch deepens, the point drags further left
+			-- anticipation: the crouch deepens, the point drags lower and further back
 			time = 0.3333,
 			easing = "QuadIn",
 			joints = {
 				Root = posRot(-0.08, -0.42, 0.06, 0, 12, 3),
 				Waist = rot(-14, 40, 8),
 				Neck = rot(10, -34, -3),
-				RightShoulder = rot(10, 0, -52),
-				RightElbow = rot(30, 0, 0),
-				RightWrist = rot(-26, 0, 30),
-				Weapon = rot(-76, 0, -38),
+				RightShoulder = rot(36, 0, -28),
+				RightElbow = rot(14, 0, 0),
+				RightWrist = rot(-12, 0, 2),
+				Weapon = rot(-90, 0, 38),
 				LeftShoulder = rot(44, 0, -32),
 				LeftElbow = rot(24, 0, 0),
 				LeftKnee = rot(-42, 0, 0),

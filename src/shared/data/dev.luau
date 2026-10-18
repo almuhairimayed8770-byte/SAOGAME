@@ -180,6 +180,28 @@ local Dev = {
 		},
 	},
 
+	-- Ground clearance (tests/choreo/GroundClearance.spec.luau): no player clip drives the sword
+	-- into the ground. Every clip of the loadout weapon's category is posed on the hit matrix's
+	-- player (hitMatrix.avatar above, feet on the Playground field) at sampleHz and at every key
+	-- time, and fails when the blade's tip or guard end (TrailEnd / TrailStart) sinks below the
+	-- field's top face by more than bladeMargin, or any corner of a hand goes below it.
+	groundClearance = {
+		-- Every frame of the 0.25x review loop (section 10), and of a 240 Hz display at 1x. At 60 Hz
+		-- the first frame of an ExpoOut key, where most of its motion happens, and the peak of a
+		-- BackOut or Spring overshoot fall between samples: a side dodge authored with its point
+		-- 0.23 stud in the field 1/240 s into its ExpoOut extension passes at 60 Hz.
+		sampleHz = 240,
+		-- How deep the blade's tip or guard end may sink below the field: a tenth of a stud, under a
+		-- third of the blade's 0.32 width. The two ends are points on the blade's center line; one
+		-- that deep reads as a point resting on the grass, the way the anime's low cuts finish at the
+		-- floor, while anything deeper shows the blade going into the ground. Hands get no margin.
+		bladeMargin = 0.1,
+		-- UpperBody and Additive clips are posed over this Base clip at the same clock time, the
+		-- drawn stance a fight layers them on (Mixer: an UpperBody clip overrides the joints it keys,
+		-- an Additive one adds to them); Base and FullBody clips are posed alone.
+		layeredOver = "IdleDrawn",
+	},
+
 	-- Gate recordings (section 20 Phase 0 gate; section 1: the capture script's on-screen prompts).
 	capture = {
 		phase = "phase-0",

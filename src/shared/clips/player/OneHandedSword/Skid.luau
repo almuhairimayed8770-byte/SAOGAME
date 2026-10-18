@@ -1,9 +1,9 @@
 --!strict
 --[[
-	player/OneHandedSword/Skid: the stop above run speed. Brakes in 5 frames: the torso leans
-	back, the right leg shoots forward flat-footed, the left leg folds under, the arms fly back,
-	the body drops. A long spring settle into the ready stance. The controller decelerates the
-	root; the clip carries no root motion.
+	player/OneHandedSword/Skid: the stop above run speed. Brakes in 5 frames: the torso leans back,
+	the right leg shoots forward flat-footed, the left leg folds under, the arms fly back (the
+	wrist keeps the point up off the grass), the body drops. A long spring settle into the ready
+	stance. The controller decelerates the root; the clip carries no root motion.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -68,7 +68,7 @@ local clip: Types.ClipDef = {
 				LeftElbow = rot(20, 0, 0),
 				RightShoulder = rot(-36, 0, 26),
 				RightElbow = rot(22, 0, 0),
-				Weapon = rot(-70, 0, 0),
+				Weapon = rot(-16, 0, 0),
 			},
 		},
 		{
@@ -98,7 +98,7 @@ local clip: Types.ClipDef = {
 				LeftElbow = rot(30, 0, 0),
 				RightShoulder = rot(8, 0, 8),
 				RightElbow = rot(20, 0, 0),
-				Weapon = rot(-80, 0, 0),
+				Weapon = rot(-34, 0, 0),
 			},
 		},
 	},

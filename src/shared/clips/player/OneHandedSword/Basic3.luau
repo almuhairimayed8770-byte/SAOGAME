@@ -1,8 +1,9 @@
 --!strict
 --[[
-	player/OneHandedSword/Basic3: the third basic: a diagonal cut from high right down to the left with a committed step, the chain finisher
-	(combat.luau basicHitDuration 0.35; the clip runs to 0.45 so the pose drifts toward ready inside
-	the chain window and blends cleanly into the next basic). Six beats like every attack: a
+	player/OneHandedSword/Basic3: the third basic: a diagonal cut from high right down to the left
+	with a committed step, the chain finisher, ending low on the left with the point just off the
+	grass (combat.luau basicHitDuration 0.35; the clip runs to 0.45 so the pose drifts toward ready
+	inside the chain window and blends cleanly into the next basic). Six beats like every attack: a
 	6-frame anticipation from the ready stance, a 3-frame ExpoOut snap with a thin white trail and
 	the hit window opening on its first frame, a 2-frame hold on contact, a spring settle, a short
 	recovery. No activation hold: basics have no tell.
@@ -86,7 +87,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(22, 0, -32),
 				RightElbow = rot(8, 0, 0),
 				RightWrist = rot(-4, 0, 8),
-				Weapon = rot(-72, 0, -16),
+				Weapon = rot(-20, 0, -16),
 				LeftShoulder = rot(-24, 0, -28),
 				LeftElbow = rot(42, 0, 0),
 				LeftWrist = rot(0, 0, 0),
@@ -117,7 +118,7 @@ local clip: Types.ClipDef = {
 				Neck = rot(5, -10, -1),
 				RightShoulder = rot(28, 0, -26),
 				RightElbow = rot(12, 0, 0),
-				Weapon = rot(-70, 0, -12),
+				Weapon = rot(-18, 0, -12),
 				LeftShoulder = rot(-18, 0, -26),
 			},
 			root = { pos = { 0, 0, -0.6 } },

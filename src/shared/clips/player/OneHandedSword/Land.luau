@@ -1,8 +1,9 @@
 --!strict
 --[[
-	player/OneHandedSword/Land: landing squash. Contact, a 4-frame ExpoOut drop into a deep
-	crouch with the arms thrown forward and out, a short hold, then a BackOut rise that overshoots
-	tall and settles. The locomotion layer scales this clip's weight by fall height.
+	player/OneHandedSword/Land: landing squash. Contact, a 4-frame ExpoOut drop into a deep crouch
+	with the arms thrown forward and out (the point stays up off the grass), a short hold, then a
+	BackOut rise that overshoots tall and settles. The locomotion layer scales this clip's weight
+	by fall height.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -46,7 +47,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(16, 0, 30),
 				RightElbow = rot(20, 0, 0),
 				RightWrist = rot(-6, 0, 0),
-				Weapon = rot(-76, 0, 0),
+				Weapon = rot(-56, 0, 0),
 			},
 		},
 		{
@@ -67,7 +68,7 @@ local clip: Types.ClipDef = {
 				LeftElbow = rot(12, 0, 0),
 				RightShoulder = rot(40, 0, 36),
 				RightElbow = rot(12, 0, 0),
-				Weapon = rot(-60, 0, 0),
+				Weapon = rot(-46, 0, 0),
 			},
 		},
 		{
@@ -94,8 +95,8 @@ local clip: Types.ClipDef = {
 				LeftShoulder = rot(4, 0, -6),
 				LeftElbow = rot(10, 0, 0),
 				RightShoulder = rot(2, 0, 6),
-				RightElbow = rot(8, 0, 0),
-				Weapon = rot(-80, 0, 0),
+				RightElbow = rot(16, 0, 0),
+				Weapon = rot(-30, 0, 0),
 			},
 		},
 		{

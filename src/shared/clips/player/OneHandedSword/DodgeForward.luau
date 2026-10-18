@@ -1,7 +1,8 @@
 --!strict
 --[[
 	player/OneHandedSword/DodgeForward: the 0.25 s dodge step (combat.luau dodgeDuration) carrying
-	dodgeDistance studs of root motion, forward: a low lunge, head down, the blade trailing behind; the coat flares procedurally. Two frames of lean
+	dodgeDistance studs of root motion, forward: a low lunge, head down, the blade held low and
+	forward, its point clear of the grass; the coat flares procedurally. Two frames of lean
 	(anticipation), a 4-frame ExpoOut extension, then a BackOut recovery into the ready stance.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
@@ -37,7 +38,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(30, 0, 10),
 				RightElbow = rot(35, 0, 0),
 				RightWrist = rot(-25, 0, 0),
-				Weapon = rot(-50, 0, 0),
+				Weapon = rot(-26, 0, 0),
 				LeftShoulder = rot(25, 0, -15),
 				LeftElbow = rot(50, 0, 0),
 				LeftWrist = rot(0, 0, 10),
@@ -66,9 +67,10 @@ local clip: Types.ClipDef = {
 				RightAnkle = rot(60, 0, 0),
 				LeftShoulder = rot(-30, 0, -24),
 				LeftElbow = rot(30, 0, 0),
-				RightShoulder = rot(-46, 0, 22),
-				RightElbow = rot(34, 0, 0),
-				Weapon = rot(-60, 0, 0),
+				RightShoulder = rot(-10, 0, 22),
+				RightElbow = rot(40, 0, 0),
+				Weapon = rot(-8, 0, 0),
+				RightWrist = rot(0, 0, 0),
 			},
 			root = { pos = { 0, 0, -4.8 } },
 		},

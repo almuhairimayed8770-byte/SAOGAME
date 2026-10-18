@@ -2,8 +2,8 @@
 --[[
 	player/OneHandedSword/GuardBreak: the 1.2 s guard-break stagger (combat.luau
 	guardBreakStagger). The guard is smashed open: arms flung wide and up, torso thrown back, a
-	stumbling step back (1 stud of root motion), knees buckle, then a sag with the head down and a
-	slow rise back into the ready stance.
+	stumbling step back (1 stud of root motion), knees buckle, then a sag with the head down, the
+	point drooping to just above the grass, and a slow rise back into the ready stance.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -99,7 +99,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(10, 0, 20),
 				RightElbow = rot(30, 0, 0),
 				RightWrist = rot(-20, 0, 0),
-				Weapon = rot(-70, 0, 0),
+				Weapon = rot(-23, 0, 0),
 				LeftShoulder = rot(6, 0, -24),
 				LeftElbow = rot(36, 0, 0),
 				LeftKnee = rot(-44, 0, 0),

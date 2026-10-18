@@ -2,7 +2,7 @@
 --[[
 	player/OneHandedSword/WalkRight: side-step to the right, a 0.9 s cycle; the mirror of
 	WalkLeft. The right (sword) leg reaches out, the left leg crosses behind, the torso leans
-	into the direction, the head stays on the target.
+	into the direction, the head stays on the target. The sword rides low, the point forward.
 	Rotations: X+ swings a hanging limb forward, Y+ turns left, Z+ rolls left (a hanging right leg
 	with Z+ swings out to the right).
 ]]
@@ -42,9 +42,9 @@ local clip: Types.ClipDef = {
 				LeftKnee = rot(-10, 0, 0),
 				LeftAnkle = rot(6, 0, 0),
 				RightShoulder = rot(4, 0, 14),
-				RightElbow = rot(12, 0, 0),
+				RightElbow = rot(16, 0, 0),
 				RightWrist = rot(-6, 0, 0),
-				Weapon = rot(-80, 0, 0),
+				Weapon = rot(-34, 0, 0),
 				LeftShoulder = rot(2, 0, -4),
 				LeftElbow = rot(8, 0, 0),
 				LeftWrist = rot(0, 0, 0),
