@@ -94,6 +94,9 @@ and the smoke scripts (D-039, D-038).
     (F5) by hand: **View tab > Stats > Summary / Render** for fps and part count, **MicroProfiler** (Ctrl+F6, or
     **View tab > MicroProfiler**) for draw calls and frame time (verify), **Developer Console** (F9) **> Server >
     ServerJobs** for the heartbeat time with real players (verify). Note what was on the field.
+    The arc sub-sample cap went from 4 to 12 after that run (D-044): rerun `tools/smoke.sh perf` and keep 12 only if the
+    server work stays at or under p95 2.72 ms and max 8.27 ms; otherwise set `combat.luau` `sweepMaxSubdivisions = 8`,
+    rerun the smoke and `lune run tools/hit-matrix.luau --check`, and write both runs into D-044.
 
 ## E. Assets (as they arrive; see `docs/ASSETS.md`)
 

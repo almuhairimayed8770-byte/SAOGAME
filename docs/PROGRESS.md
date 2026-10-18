@@ -86,6 +86,11 @@ Run over Remote Control: `tools/smoke.sh` (all six smokes) and a solo Play sessi
   new miss, Rising Arc hit 1 at the boar facing 11.5 studs away, is outside the real-fight range.
 - A second adversarial pass over the sweep fixed one bug (a window closing inside a frame solved its last sample from
   where the body went on to) and corrected the cost and margin claims in D-044.
+- **Sweep hardening** after that pass: a root that jumps (a teleport, a snap back) is no longer swept across (D-048);
+  teammates, the attacker and dead enemies no longer use up the target cap (D-049); joints are read once per fighter
+  per frame, which pays for raising the arc sub-sample cap from 4 to 12 (D-044). Studio perf check of cap 12 pending.
+  Known and older: a server hitch of 0.25 s that lands a basic swing past its 0.35 s Art state loses that window (34 of
+  14,400 hitch swings in a Lune study).
 
 ## Known review items for the Studio pass
 

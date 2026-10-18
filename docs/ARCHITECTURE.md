@@ -13,7 +13,8 @@ src/shared/
   clips/                       Choreo clip data: player/<Weapon>/<Clip>.luau, enemy/<Rig>/<Clip>.luau
   choreo/ClipSampler.luau      pure clip sampling (offsets at time t, events, hit windows, root motion)
   choreo/Joints.luau           one view of a rig joint: Motor6D or AnimationConstraint (D-041)
-  choreo/Pose.luau             forward kinematics over the rig's joints with offsets (server hit sweep)
+  choreo/Pose.luau             forward kinematics over the rig's joints with offsets (server hit sweep);
+                               Pose.chain reads the joints once for many solves
   net/Remotes.luau             remote definitions: kind, direction, schema, rate limit (from world.luau)
   net/Net.luau                 typed wrapper; server validates and rate-limits every payload
   util/                        Signal, Easing, Spring, Verlet, Rng, Check
@@ -25,7 +26,8 @@ src/server/
   services/PlaygroundService   Playground spawn tables, player loadout, respawns
   services/AntiCheatService    speed/teleport/timing checks, Net abuse policy, shadow flag
   combat/DamageMath.luau       pure damage, crit, gauge and guard math (Lune-tested)
-  combat/HitSweep.luau         overlap-tests the blade and casts along its arc per damage window (D-042, D-044)
+  combat/HitSweep.luau         overlap-tests the blade and casts along its arc per damage window (D-042, D-044);
+                               never across a jumped root (D-048); only damageable targets count (D-049)
   ai/Brain.luau                archetype base: perception, threat target, decision loop
   ai/Charger.luau  ai/Brute.luau
   world/RigBuilder.luau        part-built placeholder rigs from rigs.luau (Motor6Ds, attachments)
@@ -180,7 +182,10 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
    per frame, `HitSweep.followArc`), and runs `HitSweep` over them: the whole blade is overlap-tested
    at every sample, the midpoint is cast between samples, plus the tip's or the guard's chord on a
    step the cap left longer than `sweepMaxTipStep`; in a hitch frame the samples' roots are spread
-   between the two frames' roots (D-042, D-044). Every hit goes through `DamageMath` and `EntityService.applyHit`, then `HitConfirmed` is
+   between the two frames' roots (D-042, D-044). Each frame reads the fighter's joints once
+   (`Pose.chain`) and every solve of that frame uses that list; a root that jumped farther than an
+   honest body can travel starts a new chain at the live root instead of being swept across (D-048);
+   only fighters `mayDamage` allows become hits or count toward the target cap (D-049). Every hit goes through `DamageMath` and `EntityService.applyHit`, then `HitConfirmed` is
    fired to all clients. After the last hit the entity enters `PostMotion` for `postMotion` seconds
    (zero if the target was in `Break`), then `Idle`.
 3. Enemy attacks: `EnemyService` picks an attack, fires `Telegraph` (with `windUp` and the ground
