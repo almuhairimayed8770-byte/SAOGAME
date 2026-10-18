@@ -75,7 +75,8 @@ local function execute(
 	runner: string,
 	onRun: (fake: Fake) -> (),
 	preset: { [string]: any }?,
-	errorLocked: boolean?
+	errorLocked: boolean?,
+	alreadyRunning: boolean?
 ): Fake
 	local fake: Fake = {
 		attributes = if preset then table.clone(preset) else {},
@@ -108,6 +109,9 @@ local function execute(
 		},
 		ServerScriptService = { Name = "ServerScriptService" },
 		RunService = {
+			IsRunning = function()
+				return alreadyRunning == true
+			end,
 			Run = function()
 				fake.ran = true
 				onRun(fake)
@@ -127,7 +131,10 @@ local function execute(
 		Instance = {
 			new = function(className: string)
 				assert(className == "Script", "the runner only creates a Script")
-				local instance = { ClassName = className }
+				local instance = { ClassName = className } :: any
+				function instance.GetFullName(self: any): string
+					return (if self.Parent then self.Parent.Name .. "." else "") .. self.Name
+				end
 				fake.installed = instance
 				return instance
 			end,
@@ -136,6 +143,9 @@ local function execute(
 		task = {
 			wait = function(seconds: number): number
 				fake.waited += seconds
+				if fake.waited > 1e5 then
+					error("the runner never stopped waiting", 0)
+				end
 				return seconds
 			end,
 		},
@@ -235,6 +245,16 @@ describe("SmokeRunner naming and embedding", function()
 		end
 	end)
 
+	it("rejects a smoke script that returns at top level, and allows nested returns", function()
+		expect(SmokeRunner.hasTopLevelReturn("print(1)\nreturn nil\n")).toBe(true)
+		expect(SmokeRunner.hasTopLevelReturn("return")).toBe(true)
+		expect(SmokeRunner.hasTopLevelReturn("local function f()\n\treturn 1\nend\n")).toBe(false)
+		expect(SmokeRunner.hasTopLevelReturn("local returned = 1\nreturnValue = 2\n")).toBe(false)
+		expect(function()
+			SmokeRunner.build({ path = "tests/smoke/bad.smoke.luau", source = "print(1)\nreturn true\n" })
+		end).toThrow("returns at top level")
+	end)
+
 	it("rejects a non-positive timeout", function()
 		expect(function()
 			SmokeRunner.build({ path = "x.smoke.luau", source = "", timeoutSeconds = 0 })
@@ -275,6 +295,27 @@ describe("SmokeRunner against a fake engine", function()
 		expect(line).toContain("FAIL tricky.smoke: attempt to index nil")
 		expect(line).toContain("Line 3")
 		expect(fake.waited).toBe(0)
+	end)
+
+	it("fails on an error raised in a module the script called (origin is the module)", function()
+		local runner = SmokeRunner.build({ path = path, source = TRICKY })
+		local fake = execute(runner, function(f)
+			f.scriptError.fire(
+				"ServerScriptService.Server.services.EnemyService:88: attempt to index nil",
+				"ServerScriptService.Server.services.EnemyService, line 88\nServerScriptService.tricky.smoke, line 12",
+				{ Name = "EnemyService" }
+			)
+		end)
+		expect(resultLine(fake) :: string).toContain(
+			"FAIL tricky.smoke: ServerScriptService.Server.services.EnemyService:88"
+		)
+	end)
+
+	it("never installs or runs a second copy when loaded inside a running session", function()
+		local runner = SmokeRunner.build({ path = path, source = TRICKY })
+		expect(function()
+			execute(runner, runInstalled, nil, nil, true)
+		end).toThrow("never stopped waiting")
 	end)
 
 	it("fails on the script's own tagged check() failure in the output", function()

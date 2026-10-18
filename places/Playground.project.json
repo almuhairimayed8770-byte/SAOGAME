@@ -24,6 +24,11 @@
 				"Client": {
 					"$path": "../src/client"
 				}
+			},
+			"StarterCharacterScripts": {
+				"Animate": {
+					"$className": "LocalScript"
+				}
 			}
 		},
 		"Workspace": {
@@ -152,6 +157,11 @@
 					"Cover": 0.55,
 					"Density": 0.3
 				}
+			}
+		},
+		"HttpService": {
+			"$properties": {
+				"HttpEnabled": true
 			}
 		},
 		"SoundService": {

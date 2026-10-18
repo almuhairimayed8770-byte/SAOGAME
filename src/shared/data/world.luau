@@ -4,6 +4,8 @@
 	rim, pillars, clouds and kill volume are; this table says how PlaygroundBuilder makes them:
 	rail count and heights, pillar material and the SurfaceLights that light the ceiling underside,
 	the cloud billboards' particle shape, the kill volume part, folder names and the part budget.
+	`performance` holds the section 16 per-place targets and the load the perf smoke measures them
+	under (tests/smoke/perf.smoke.luau).
 
 	Environment colors here are {r, g, b} triples like lighting.luau (the palette is for UI and FX
 	only). Distances are studs, times are seconds, angles are degrees, fractions are 0..1.
@@ -109,6 +111,23 @@ local World = {
 			TargetRequest = { perSecond = 8, burst = 4 },
 			SwitchCallRequest = { perSecond = 2, burst = 2 },
 		},
+	},
+
+	performance = {
+		-- Section 16 "Performance targets per place". Parts and draw calls are fx.budgets.parts and
+		-- fx.budgets.drawCalls (the section 11 scene budgets carry the same numbers); they are not
+		-- repeated here. tests/smoke/perf.smoke.luau loads the Playground with testPlayers stand-ins
+		-- and testEnemies enemies, lets it settle, samples every server frame and asserts the
+		-- server work per frame at heartbeatPercentile and the part count. Memory is printed, not
+		-- asserted: in Studio the engine reports the whole Studio process.
+		maxServerHeartbeatMs = 12, -- server work per frame, at heartbeatPercentile of the sampled frames
+		heartbeatPercentile = 0.95, -- fraction of sampled frames that must come in under the target
+		maxMemoryMbPc = 1200, -- 1.2 GB
+		maxMemoryMbMobile = 600,
+		testPlayers = 8, -- section 16: "with 8 players and 60 enemies" (section 17: MaxPlayers 8)
+		testEnemies = 60,
+		settleSeconds = 5, -- after the last spawn, before sampling: brains aggro, paths compute, spawn hitches pass
+		sampleSeconds = 20,
 	},
 }
 

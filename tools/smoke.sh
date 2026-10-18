@@ -10,9 +10,16 @@
 # each smoke script is first wrapped by tools/smoke-wrap.luau (tools/smoke/SmokeRunner.luau):
 # the runner installs the smoke script as a server Script, starts a Run session (Main and the
 # smoke script run as on a server, without a player), and prints "SMOKE-RESULT: PASS <name>" or
-# "SMOKE-RESULT: FAIL <name>: <reason>". A script passes only on its PASS line; run-in-roblox's
-# own exit code also turns red on errors Studio's built-in plugins print, so it is reported but
-# not trusted. Each run's output is kept in build/smoke/<name>.log.
+# "SMOKE-RESULT: FAIL <name>: <reason>". A script passes only when its log holds exactly one
+# result line for it and that line is PASS; run-in-roblox's own exit code also turns red on
+# errors Studio's built-in plugins print, so it is reported but not trusted. Each run's output
+# is kept in build/smoke/<name>.log.
+#
+# Close Roblox Studio first: run-in-roblox drops its plugin into Studio's shared plugins folder,
+# and an open Studio could load it and run the smoke script inside your own place. The script
+# refuses to start while Studio is running (Windows only; set SMOKE_ALLOW_OPEN_STUDIO=1 to skip
+# the check). Each run is killed after RUN_LIMIT seconds (run-in-roblox itself never times out
+# once Studio is up, so a crashed or frozen Studio would otherwise hang here).
 # It cannot run in CI or on Linux; the Lune suite (lune run tests/run.luau) covers the pure
 # modules, these cover the parts that need the engine.
 set -uo pipefail
@@ -60,6 +67,24 @@ for tool in rojo lune; do
 	fi
 done
 
+if [[ "${SMOKE_ALLOW_OPEN_STUDIO:-0}" != "1" ]] && command -v tasklist.exe >/dev/null 2>&1; then
+	if tasklist.exe //FI "IMAGENAME eq RobloxStudioBeta.exe" 2>/dev/null | grep -qi "RobloxStudioBeta"; then
+		echo "Roblox Studio is running. Close every Studio window, then run tools/smoke.sh again." >&2
+		echo "(run-in-roblox's plugin would also load in an open Studio; SMOKE_ALLOW_OPEN_STUDIO=1 skips this check.)" >&2
+		exit 2
+	fi
+fi
+
+# The runner's own budget (tools/smoke/SmokeRunner.luau defaultTimeoutSeconds, 240 s) plus time
+# for Studio to start, load the place and shut down.
+RUN_LIMIT=420
+limit=()
+if timeout --version >/dev/null 2>&1; then
+	limit=(timeout "$RUN_LIMIT")
+else
+	echo "note: GNU timeout not found; a frozen Studio will hang this script (Ctrl+C ends it)."
+fi
+
 place="places/Playground.rbxl"
 echo "== rojo build places/Playground.project.json -> $place"
 rojo build places/Playground.project.json -o "$place" || exit 1
@@ -80,12 +105,26 @@ for script in "${scripts[@]}"; do
 		continue
 	fi
 	echo "== run-in-roblox --place $place --script $runner"
-	NO_COLOR=1 run-in-roblox --place "$place" --script "$runner" 2>&1 | tee "$log"
+	NO_COLOR=1 ${limit[@]+"${limit[@]}"} run-in-roblox --place "$place" --script "$runner" 2>&1 | tee "$log"
 	exit_code=${PIPESTATUS[0]}
-	if grep -qF "SMOKE-RESULT: PASS $name" "$log"; then
+	name_re="${name//./\\.}"
+	results=$(grep -cE "^SMOKE-RESULT: (PASS|FAIL) $name_re(:|\s*$)" "$log" || true)
+	if [[ $exit_code -eq 124 ]]; then
+		echo "   FAIL $script (killed after $RUN_LIMIT s: Studio hung or never finished; output in $log)"
+		# run-in-roblox closes Studio only when it exits normally; close the one it left (no other
+		# Studio was open when this script started, see the check above).
+		if command -v taskkill.exe >/dev/null 2>&1; then
+			taskkill.exe //IM RobloxStudioBeta.exe //F >/dev/null 2>&1 || true
+		fi
+		failed=$((failed + 1))
+		status=1
+	elif [[ "$results" == "1" ]] && grep -qE "^SMOKE-RESULT: PASS $name_re\s*$" "$log"; then
 		echo "   PASS $script (run-in-roblox exit $exit_code)"
 		passed=$((passed + 1))
 	else
+		if [[ "$results" != "1" ]]; then
+			echo "   ($results result lines for $name; expected exactly one)"
+		fi
 		echo "   FAIL $script (run-in-roblox exit $exit_code; output in $log)"
 		failed=$((failed + 1))
 		status=1

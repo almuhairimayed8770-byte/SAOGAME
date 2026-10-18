@@ -5,7 +5,10 @@
 	distance and time is positive; colors are {r, g, b} in 0..1; the folder EnemyService spawns
 	into is still called Enemies; the Humanoid scale value names are the engine's; the anti-cheat
 	fractions keep the shadow flag before the kick and a single teleport under it; every
-	client-to-server remote in net/Remotes.luau has exactly one anticheat.remoteRates entry.
+	client-to-server remote in net/Remotes.luau has exactly one anticheat.remoteRates entry; the
+	section 16 performance targets are positive, the heartbeat target leaves room inside a 60 Hz
+	server step, mobile memory sits under PC memory, the perf smoke's load fits a server and the
+	part and draw-call budgets it reads from fx.luau are positive whole numbers.
 ]]
 
 type Context = {
@@ -16,6 +19,8 @@ type Context = {
 }
 
 local SCALE_VALUES = { "BodyHeightScale", "BodyWidthScale", "BodyDepthScale", "HeadScale" }
+local SERVER_STEP_MS = 1000 / 60 -- the server simulates at 60 Hz; a heartbeat target must fit one step
+local MAX_SERVER_PLAYERS = 8 -- section 17: MaxPlayers 8 on every floor place
 
 local function validate(ctx: Context): { string }
 	local problems: { string } = {}
@@ -106,6 +111,16 @@ local function validate(ctx: Context): { string }
 			}),
 			remoteRates = Check.map(Check.string(64), Check.strictInterface({ perSecond = positive, burst = count })),
 		}),
+		performance = Check.strictInterface({
+			maxServerHeartbeatMs = positive,
+			heartbeatPercentile = Check.number(0.5, 1),
+			maxMemoryMbPc = positive,
+			maxMemoryMbMobile = positive,
+			testPlayers = count,
+			testEnemies = count,
+			settleSeconds = Check.number(0),
+			sampleSeconds = positive,
+		}),
 	})
 	local ok, message = schema(World)
 	if not ok then
@@ -171,6 +186,32 @@ local function validate(ctx: Context): { string }
 		end
 		if not found then
 			problem(("character.scaleValues must include the engine's %s"):format(name))
+		end
+	end
+
+	-- Section 16 targets and the load the perf smoke measures them under.
+	local performance = World.performance
+	if performance.maxServerHeartbeatMs >= SERVER_STEP_MS then
+		problem(
+			("performance.maxServerHeartbeatMs %s must fit inside one 60 Hz server step (%.2f ms)"):format(
+				tostring(performance.maxServerHeartbeatMs),
+				SERVER_STEP_MS
+			)
+		)
+	end
+	if performance.maxMemoryMbMobile >= performance.maxMemoryMbPc then
+		problem("performance.maxMemoryMbMobile must be under performance.maxMemoryMbPc")
+	end
+	if performance.testPlayers > MAX_SERVER_PLAYERS then
+		problem(("performance.testPlayers must not exceed a server's %d players"):format(MAX_SERVER_PLAYERS))
+	end
+	if performance.testEnemies < performance.testPlayers then
+		problem("performance.testEnemies must give every stand-in at least one enemy")
+	end
+	for _, key in { "parts", "drawCalls" } do
+		local value = Fx.budgets[key]
+		if typeof(value) ~= "number" or value < 1 or value % 1 ~= 0 then
+			problem(("fx.budgets.%s (read by the perf smoke) must be a positive whole number"):format(key))
 		end
 	end
 

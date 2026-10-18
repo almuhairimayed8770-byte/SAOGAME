@@ -24,11 +24,16 @@ local SmokeRunner = {}
 --- The result line prefix tools/smoke.sh greps for.
 SmokeRunner.resultPrefix = "SMOKE-RESULT:"
 
+--- Prefix of the runner's own progress lines (kept apart from the result prefix so a result
+--- line is only ever a verdict).
+SmokeRunner.notePrefix = "SMOKE-RUNNER:"
+
 --- Workspace attribute the installed smoke script sets on its last line.
 SmokeRunner.doneAttribute = "SkyspireSmokeDone"
 
 --- Seconds a smoke script may run before the runner reports it as timed out (tooling budget,
---- not a game number: the slowest script, perf.smoke, samples for well under a minute).
+--- not a game number: the slowest script, perf.smoke, settles and samples for well under a
+--- minute). tools/smoke.sh kills a run that outlives this by its own margin.
 SmokeRunner.defaultTimeoutSeconds = 240
 
 --- Seconds between the runner's checks while the smoke script runs.
@@ -58,6 +63,12 @@ function SmokeRunner.longString(text: string): string
 	return "[" .. equals .. "[\n" .. text .. "]" .. equals .. "]"
 end
 
+--- True when the source has a `return` at the start of a line (top level as written), which
+--- would make the appended done line unreachable or a syntax error.
+function SmokeRunner.hasTopLevelReturn(source: string): boolean
+	return ("\n" .. source):find("\nreturn[%s%(;]") ~= nil or ("\n" .. source):match("\nreturn$") ~= nil
+end
+
 --- The line appended to the smoke script so the runner knows it reached the end.
 function SmokeRunner.doneLine(): string
 	return ('\nworkspace:SetAttribute("%s", true)\n'):format(SmokeRunner.doneAttribute)
@@ -77,11 +88,23 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local NAME = {{NAME}}
 local PREFIX = {{PREFIX}}
+local NOTE = {{NOTE}}
 local DONE_ATTRIBUTE = {{DONE}}
 local TIMEOUT = {{TIMEOUT}}
 local POLL = {{POLL}}
 local SOURCE = {{SOURCE}}
 local DONE_LINE = {{DONE_LINE}}
+
+-- Guard: if Studio ever loads this plugin again inside a running session (a Run or Play
+-- DataModel), this copy must not install a second smoke script or start another run. It idles
+-- instead of returning, because the run-in-roblox plugin ends the whole run 0.2 s after its
+-- script returns; the edit-side copy finishes the run.
+if RunService:IsRunning() then
+	print(("%s %s: already in a running session; this copy stays idle"):format(NOTE, NAME))
+	while true do
+		task.wait(3600)
+	end
+end
 
 workspace:SetAttribute(DONE_ATTRIBUTE, nil)
 
@@ -93,18 +116,22 @@ smoke.Parent = ServerScriptService
 
 local failure: string? = nil
 local tag = "[" .. NAME .. "]"
+local fullName = smoke:GetFullName() -- "ServerScriptService.<name>", as stack traces print it
 
 -- A script error, reported with the script it came from (pcall: if this Studio build refuses the
 -- connection at plugin security, the tagged-output fallback below still catches check() failures).
 local errorConnected, errorConnection = pcall(function()
 	return ScriptContext.Error:Connect(function(message: string, trace: string, origin: Instance?)
-		if origin == smoke and failure == nil then
+		-- The smoke script itself, or a module it called (the origin is then that module, but the
+		-- trace still runs through the smoke script).
+		local fromSmoke = origin == smoke or string.find(trace, fullName, 1, true) ~= nil
+		if fromSmoke and failure == nil then
 			failure = message .. "\n" .. trace
 		end
 	end)
 end)
 if not errorConnected then
-	print(("%s note: ScriptContext.Error unavailable here (%s); relying on tagged output"):format(PREFIX, tostring(errorConnection)))
+	print(("%s ScriptContext.Error unavailable here (%s); relying on tagged output"):format(NOTE, tostring(errorConnection)))
 end
 -- Fallback: the smoke script's own check() failures carry its [name] tag.
 local logConnection = LogService.MessageOut:Connect(function(message: string, kind: Enum.MessageType)
@@ -113,7 +140,7 @@ local logConnection = LogService.MessageOut:Connect(function(message: string, ki
 	end
 end)
 
-print(("%s starting a Run session for %s"):format(PREFIX, NAME))
+print(("%s starting a Run session for %s"):format(NOTE, NAME))
 local started, startError = pcall(function()
 	RunService:Run()
 end)
@@ -159,10 +186,15 @@ function SmokeRunner.build(options: Options): string
 	local name = SmokeRunner.nameOf(options.path)
 	local timeout = options.timeoutSeconds or SmokeRunner.defaultTimeoutSeconds
 	assert(timeout > 0, "SmokeRunner: timeoutSeconds must be positive")
+	assert(
+		not SmokeRunner.hasTopLevelReturn(options.source),
+		("SmokeRunner: %s returns at top level, which would skip the done line"):format(options.path)
+	)
 	local fields: { [string]: string } = {
 		PATH = options.path,
 		NAME = quote(name),
 		PREFIX = quote(SmokeRunner.resultPrefix),
+		NOTE = quote(SmokeRunner.notePrefix),
 		DONE = quote(SmokeRunner.doneAttribute),
 		TIMEOUT = tostring(timeout),
 		POLL = tostring(SmokeRunner.pollSeconds),

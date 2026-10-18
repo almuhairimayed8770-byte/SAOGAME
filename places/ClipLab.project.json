@@ -29,6 +29,11 @@
 				"Client": {
 					"$path": "../src/client"
 				}
+			},
+			"StarterCharacterScripts": {
+				"Animate": {
+					"$className": "LocalScript"
+				}
 			}
 		},
 		"Workspace": {
@@ -137,6 +142,11 @@
 					"MoonAngularSize": 8,
 					"StarCount": 1500
 				}
+			}
+		},
+		"HttpService": {
+			"$properties": {
+				"HttpEnabled": true
 			}
 		},
 		"SoundService": {
