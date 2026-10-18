@@ -8,8 +8,9 @@
 	ActionStarted clip ids follow enemy/<Rig>/<clip>, and that the kobold's overhead lands on the
 	idle stand-in through CombatService.enemyStrike (HitLanded).
 
-	Run: run-in-roblox --place build/Playground.rbxl --script tests/smoke/archetypes.smoke.luau
-	Exits non-zero (error) on the first failed assertion. Not runnable under Lune.
+	Run: tools/smoke.sh archetypes (installs this file as a server Script in a Run session of the
+	Playground; see tools/smoke/SmokeRunner.luau). Errors on the first failed assertion, which the
+	runner reports as SMOKE-RESULT: FAIL. Must not return at top level. Not runnable under Lune.
 ]]
 
 local Players = game:GetService("Players")

@@ -7,8 +7,9 @@
 	teleports a registered player stand-in 200 studs five times inside a second is shadow-flagged
 	and kicked by AntiCheatService through a system line (never on the first teleport).
 
-	Run: run-in-roblox --place build/Playground.rbxl --script tests/smoke/playground.smoke.luau
-	Exits non-zero (error) on the first failed assertion. Not runnable under Lune.
+	Run: tools/smoke.sh playground (installs this file as a server Script in a Run session of the
+	Playground; see tools/smoke/SmokeRunner.luau). Errors on the first failed assertion, which the
+	runner reports as SMOKE-RESULT: FAIL. Must not return at top level. Not runnable under Lune.
 
 	Written against the services' public API; it has not been run in this environment (no Roblox
 	Studio or run-in-roblox here). See docs/STUDIO_TASKS.md for the manual pass.

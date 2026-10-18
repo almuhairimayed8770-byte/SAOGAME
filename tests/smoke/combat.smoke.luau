@@ -7,8 +7,9 @@
 	loadout, runs a Horizontal through CombatService's own entry point and asserts that
 	HitLanded fired, HitConfirmed went out, and the boar's HP dropped by the section 6 number.
 
-	Run: run-in-roblox --place build/Playground.rbxl --script tests/smoke/combat.smoke.luau
-	Exits non-zero (error) on the first failed assertion. Not runnable under Lune.
+	Run: tools/smoke.sh combat (installs this file as a server Script in a Run session of the
+	Playground; see tools/smoke/SmokeRunner.luau). Errors on the first failed assertion, which the
+	runner reports as SMOKE-RESULT: FAIL. Must not return at top level. Not runnable under Lune.
 ]]
 
 local Players = game:GetService("Players")
