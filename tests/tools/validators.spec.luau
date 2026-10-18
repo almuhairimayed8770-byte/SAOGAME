@@ -156,6 +156,50 @@ local function enemyChargeClip(id: string, anticipationSeconds: number): any
 	}
 end
 
+-- A three-hit Art shaped like Sharp Nail: the first strike is the beats table's Snap (6f..9f);
+-- the second and third re-wind (QuadIn) and snap (ExpoOut, 3 frames) at 26f..29f and 44f..47f.
+-- Each hit window opens on its snap's first frame and closes in the settle.
+local function threeHitArtClip(id: string): any
+	local function arm(x: number): any
+		return { RightShoulder = { rot = { x, 0, 0 } } }
+	end
+	local clip = playerArtClip(id)
+	clip.duration = 1.2
+	clip.beats.Recovery = { start = 60 * F, finish = 1.2 }
+	clip.keys = {
+		{ time = 0, easing = "Hold", joints = arm(0) },
+		{ time = 6 * F, easing = "ExpoIn", joints = arm(-80) },
+		{ time = 9 * F, easing = "ExpoOut", joints = arm(60) },
+		{ time = 20 * F, easing = "Spring", joints = arm(54) },
+		{ time = 26 * F, easing = "QuadIn", joints = arm(70) },
+		{ time = 29 * F, easing = "ExpoOut", joints = arm(-40) },
+		{ time = 38 * F, easing = "Spring", joints = arm(-34) },
+		{ time = 44 * F, easing = "QuadIn", joints = arm(-60) },
+		{ time = 47 * F, easing = "ExpoOut", joints = arm(85) },
+		{ time = 60 * F, easing = "Spring", joints = arm(80) },
+		{ time = 1.2, easing = "SineInOut", joints = arm(78), root = { pos = { 0, 0, -2 } } },
+	}
+	clip.events = {
+		{ time = 0, kind = "ActivationHold" },
+		{ time = 6 * F, kind = "TrailOn" },
+		{ time = 6 * F, kind = "SmearOn" },
+		{ time = 6 * F, kind = "HitWindowOpen" },
+		{ time = 8 * F, kind = "SmearOff" },
+		{ time = 14 * F, kind = "HitWindowClose" },
+		{ time = 26 * F, kind = "SmearOn" },
+		{ time = 26 * F, kind = "HitWindowOpen" },
+		{ time = 28 * F, kind = "SmearOff" },
+		{ time = 34 * F, kind = "HitWindowClose" },
+		{ time = 44 * F, kind = "SmearOn" },
+		{ time = 44 * F, kind = "HitWindowOpen" },
+		{ time = 46 * F, kind = "SmearOff" },
+		{ time = 54 * F, kind = "HitWindowClose" },
+		{ time = 56 * F, kind = "TrailOff" },
+		{ time = 60 * F, kind = "PostMotionStart" },
+	}
+	return clip
+end
+
 local function idleClip(id: string, rig: string): any
 	return {
 		id = id,
@@ -436,6 +480,87 @@ describe("clips validator", function()
 		expect(problems).toEqual({})
 		problems = runClips({ [GOOD_ART] = clip }, { rows = {} }, { rows = {} })
 		expect(hasProblem(problems, "no HitWindowOpen/HitWindowClose pair")).toBe(true)
+	end)
+
+	it("every hit window covers its strike's snap: on or before the snap start, through the snap end", function()
+		-- Passing: windows on their snaps (one hit and three), and a window that opens a little early.
+		expect(runClips({ [GOOD_ART] = playerArtClip(GOOD_ART) }, goodArts(), { rows = {} })).toEqual({})
+		local threeHits = goodArts()
+		threeHits.rows["OneHandedSword.TestArt"].hits = 3
+		expect(runClips({ [GOOD_ART] = threeHitArtClip(GOOD_ART) }, threeHits, { rows = {} })).toEqual({})
+		local early = playerArtClip(GOOD_ART)
+		local open = table.remove(early.events, 4) -- HitWindowOpen at 6f
+		open.time = 4 * F
+		table.insert(early.events, 2, open)
+		expect(runClips({ [GOOD_ART] = early }, goodArts(), { rows = {} })).toEqual({})
+
+		-- Failing: the window opens 0.6 frames into the 3-frame ExpoOut snap (the cut is mostly done
+		-- before the server sweeps), and one closes before its snap has landed.
+		local late = playerArtClip(GOOD_ART)
+		late.events[4].time = 6.6 * F
+		expect(runClips({ [GOOD_ART] = late }, goodArts(), { rows = {} })).toEqual({
+			"player/OneHandedSword/TestArt: hit window 1 opens 0.60 frames after its snap starts (f 6.00)",
+		})
+		local short = playerArtClip(GOOD_ART)
+		local close = table.remove(short.events, 6) -- HitWindowClose, moved inside the 6f..9f snap
+		close.time = 8.5 * F
+		table.insert(short.events, 5, close)
+		expect(runClips({ [GOOD_ART] = short }, goodArts(), { rows = {} })).toEqual({
+			"player/OneHandedSword/TestArt: hit window 1 closes 0.50 frames before its snap ends (f 9.00)",
+		})
+
+		-- A later hit of a combo is paired with its own strike: hit 2 regressed, hit 3 cut short.
+		local regressed = threeHitArtClip(GOOD_ART)
+		regressed.events[8].time = 27 * F -- the second HitWindowOpen, a frame into its snap
+		regressed.events[14].time = 46 * F -- the third HitWindowClose, before its snap lands at 47f
+		expect(runClips({ [GOOD_ART] = regressed }, threeHits, { rows = {} })).toEqual({
+			"player/OneHandedSword/TestArt: hit window 2 opens 1.00 frames after its snap starts (f 26.00)",
+			"player/OneHandedSword/TestArt: hit window 3 closes 1.00 frames before its snap ends (f 47.00)",
+		})
+
+		-- A strike with no snap in the budget leaves a window unpaired.
+		local unpaired = threeHitArtClip(GOOD_ART)
+		unpaired.keys[9].easing = "QuadOut" -- the third strike no longer snaps
+		expect(runClips({ [GOOD_ART] = unpaired }, threeHits, { rows = {} })).toEqual({
+			"player/OneHandedSword/TestArt: 3 hit windows but 2 strike snaps (ExpoOut keys 2..4 frames after the key before)",
+		})
+
+		-- Enemy clips are held to the same rule: a Charger whose window waits for the end of the rush.
+		local rush = enemyChargeClip(GOOD_CHARGE, 0.6)
+		rush.events[3].time = 0.6 + 10 * F -- HitWindowOpen
+		local closeAt = table.remove(rush.events, 5) -- HitWindowClose
+		closeAt.time = 0.6 + 14 * F
+		table.insert(rush.events, closeAt)
+		table.sort(rush.events, function(a, b)
+			return a.time < b.time
+		end)
+		expect(runClips({ [GOOD_CHARGE] = rush }, { rows = {} }, goodEnemies())).toEqual({
+			"enemy/Boar/TestCharge: hit window 1 opens 10.00 frames after its snap starts (f 36.00)",
+		})
+
+		-- Malformed keys are reported once and never reach the snap derivation.
+		local broken = playerArtClip(GOOD_ART)
+		broken.keys = "none"
+		local problems = runClips({ [GOOD_ART] = broken }, goodArts(), { rows = {} })
+		expect(problems).toEqual({ "player/OneHandedSword/TestArt: keys must be an array" })
+	end)
+
+	it("lists the TrailOn that names the trail kind before the first HitWindowOpen on the same frame", function()
+		-- The trail ignites with the window on the snap's first frame; the kind it names must come first.
+		local named = enemyChargeClip(GOOD_CHARGE, 0.6)
+		named.events[1].time = 0.6
+		named.events[1].data = { kind = "Basic" }
+		expect(runClips({ [GOOD_CHARGE] = named }, { rows = {} }, goodEnemies())).toEqual({})
+
+		-- The same events with the window listed first: the client would light the Art trail.
+		local swapped = enemyChargeClip(GOOD_CHARGE, 0.6)
+		local trailOn = table.remove(swapped.events, 1)
+		trailOn.time = 0.6
+		trailOn.data = { kind = "Basic" }
+		table.insert(swapped.events, 3, trailOn) -- after SmearOn and HitWindowOpen at 0.6
+		expect(runClips({ [GOOD_CHARGE] = swapped }, { rows = {} }, goodEnemies())).toEqual({
+			"enemy/Boar/TestCharge: HitWindowOpen (event 2) is listed before the TrailOn that names the trail kind (event 3)",
+		})
 	end)
 
 	it("cross-checks enemy wind-ups against the Anticipation beat", function()

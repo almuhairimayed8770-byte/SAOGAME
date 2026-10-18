@@ -2,9 +2,10 @@
 --[[
 	player/OneHandedSword/RisingArc: the launcher (section 8: 2 hits, startup 0.3, total 0.9,
 	post-motion 0.5, 1 stud of root motion; launches small enemies). A rising diagonal cut from
-	low left to high right that carries the blade over the head, then a follow-through flick at
-	the top. The body sinks into the start pose and drives up through the legs on the snap, so
-	the whole rig rises with the blade; from behind it reads as a crouch that uncoils upward.
+	low left to high right that carries the blade over the head, then a flick from the top that
+	whips it back over and down onto the target. The body sinks into the start pose and drives
+	up through the legs on the snap, so the whole rig rises with the blade and stays up on the
+	toes through the flick; from behind it reads as a crouch that uncoils upward.
 
 	Timeline (the beats table describes the first strike; the flick repeats the pattern with a
 	short re-cock, a 3-frame snap, a hold and a spring settle):
@@ -13,15 +14,18 @@
 	  0.15-0.25  activation hold: the blade lights, the crouch breathes
 	  0.25-0.33  Anticipation (5 frames): the crouch deepens, the point drags lower and further left
 	  0.33-0.38  Snap 1 (3 frames, ExpoOut): the rising cut, the legs drive the hips up onto the
-	             toes, the torso whips right                                   (hit 1: 0.35-0.45)
+	             toes, the torso whips right                                   (hit 1: 0.33-0.45)
 	  0.33-0.37  Smear (2 frames, X: the diagonal)
 	  0.38-0.42  Hold (hit-stop pauses the clock here on a hit)
 	  0.42-0.52  Settle (Spring, 6 frames): the pose comes back 5-8 degrees from the extreme
 	  0.52-0.56  re-cock: the blade carries over the head, the elbow and wrist cock back
-	  0.56-0.61  Snap 2: the follow-through flick at the top, elbow and wrist   (hit 2: 0.58-0.68)
-	  0.61-0.64  Hold, then Settle to 0.75
-	  0.75-0.90  the heels come down, the knees take the weight, the blade stays high
-	  0.90-1.40  Recovery / post-motion: caught under the raised blade, breathing, the point trembling
+	  0.56-0.61  Snap 2: the flick from the top, over and down onto the target, the hips unwind,
+	             the torso leans in, the point ends level at the target's centre  (hit 2: 0.56-0.68)
+	  0.61-0.64  Hold, then Settle to 0.75 (the arm springs back up)
+	  0.75-0.90  the heels come down, the knees take the weight, the point stays on the target
+	  0.90-1.40  Recovery / post-motion: caught with the blade out, breathing, the point trembling
+	Each hit window opens on its snap's first frame (the trail ignites with the first), so the
+	server sweeps the whole cut, and closes in the settle.
 	Hit-stop: Normal on hit 1, Final on hit 2 (the server tiers an Art's last window, as it does
 	for Sharp Nail). Root motion: 1 stud forward over the two snaps (-Z is forward).
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
@@ -194,17 +198,18 @@ local clip: Types.ClipDef = {
 			root = { pos = { 0, 0, -0.6 } },
 		},
 		{
-			-- snap 2: the follow-through flick at the top, past the final pose
+			-- snap 2: the flick whips over the top and down onto the target, past the final pose;
+			-- the hips unwind and the torso leans into it, the point ends level on the target's centre
 			time = 0.61,
 			easing = "ExpoOut",
 			joints = {
-				Root = posRot(0.02, -0.08, -0.14, 0, -14, -4),
-				Waist = rot(-4, -28, -10),
-				Neck = rot(4, 24, 2),
-				RightShoulder = rot(124, 0, 36),
+				Root = posRot(0.02, -0.08, -0.14, 0, -8, -4),
+				Waist = rot(-10, -8, -6),
+				Neck = rot(8, 16, 2),
+				RightShoulder = rot(100, 0, 0),
 				RightElbow = rot(6, 0, 0),
-				RightWrist = rot(18, 0, -22),
-				Weapon = rot(-78, 0, 24),
+				RightWrist = rot(-24, 0, -34),
+				Weapon = rot(-84, 0, 18),
 				LeftShoulder = rot(-28, 0, -38),
 				LeftElbow = rot(34, 0, 0),
 				LeftKnee = rot(-12, 0, 0),
@@ -219,37 +224,37 @@ local clip: Types.ClipDef = {
 			time = 0.64,
 			easing = "Hold",
 			joints = {
-				Root = posRot(0.02, -0.08, -0.14, 0, -14, -4),
+				Root = posRot(0.02, -0.08, -0.14, 0, -8, -4),
 			},
 			root = { pos = { 0, 0, -0.9 } },
 		},
 		{
-			-- settle 2: the flick springs back 5-8 degrees
+			-- settle 2: the flick springs back up 5-8 degrees
 			time = 0.75,
 			easing = "Spring",
 			joints = {
-				Root = posRot(0.02, -0.12, -0.14, 0, -12, -3),
-				Waist = rot(2, -22, -8),
-				Neck = rot(2, 20, 2),
-				RightShoulder = rot(118, 0, 30),
-				RightElbow = rot(12, 0, 0),
-				RightWrist = rot(12, 0, -16),
-				Weapon = rot(-72, 0, 18),
+				Root = posRot(0.02, -0.12, -0.14, 0, -7, -3),
+				Waist = rot(-8, -8, -5),
+				Neck = rot(6, 15, 2),
+				RightShoulder = rot(106, 0, 4),
+				RightElbow = rot(10, 0, 0),
+				RightWrist = rot(-18, 0, -28),
+				Weapon = rot(-80, 0, 14),
 				LeftShoulder = rot(-22, 0, -36),
 			},
 			root = { pos = { 0, 0, -1 } },
 		},
 		{
-			-- end pose: the heels come down, the knees take the weight, the blade stays high
+			-- end pose: the heels come down, the knees take the weight, the point stays on the target
 			time = 0.9,
 			easing = "QuadOut",
 			joints = {
-				Root = posRot(0, -0.24, -0.1, 0, -10, -2),
-				Waist = rot(0, -20, -6),
-				Neck = rot(4, 18, 1),
-				RightShoulder = rot(116, 0, 30),
+				Root = posRot(0, -0.24, -0.1, 0, -6, -2),
+				Waist = rot(-4, -8, -4),
+				Neck = rot(6, 14, 1),
+				RightShoulder = rot(104, 0, 6),
 				RightElbow = rot(14, 0, 0),
-				Weapon = rot(-70, 0, 16),
+				Weapon = rot(-78, 0, 12),
 				LeftShoulder = rot(-20, 0, -34),
 				LeftHip = rot(22, 0, -6),
 				LeftKnee = rot(-28, 0, 0),
@@ -261,24 +266,24 @@ local clip: Types.ClipDef = {
 			root = { pos = { 0, 0, -1 } },
 		},
 		{
-			-- post-motion micro keys: caught under the raised blade
+			-- post-motion micro keys: caught with the blade out, the point trembling
 			time = 1.05,
 			easing = "SineInOut",
 			joints = {
-				Waist = rot(1, -20, -6),
-				Neck = rot(5, 18, 1),
-				Weapon = rot(-69, 0, 17),
-				RightWrist = rot(13, 0, -15),
+				Waist = rot(-3, -8, -4),
+				Neck = rot(7, 14, 1),
+				Weapon = rot(-77, 0, 13),
+				RightWrist = rot(-17, 0, -27),
 			},
 		},
 		{
 			time = 1.2,
 			easing = "SineInOut",
 			joints = {
-				Waist = rot(0, -20, -6),
-				Neck = rot(3, 17, 1),
-				Weapon = rot(-71, 0, 15),
-				RightWrist = rot(11, 0, -17),
+				Waist = rot(-4, -8, -4),
+				Neck = rot(5, 13, 1),
+				Weapon = rot(-79, 0, 11),
+				RightWrist = rot(-19, 0, -29),
 			},
 		},
 		{
@@ -286,22 +291,22 @@ local clip: Types.ClipDef = {
 			easing = "SineInOut",
 			joints = {
 				LeftShoulder = rot(-18, 0, -34),
-				RightShoulder = rot(115, 0, 30),
-				RightWrist = rot(12, 0, -16),
+				RightShoulder = rot(103, 0, 6),
+				RightWrist = rot(-18, 0, -28),
 			},
 		},
 	},
 	events = {
 		{ time = 0.15, kind = "ActivationHold", data = { hold = 0.1 } },
-		{ time = 0.32, kind = "TrailOn", data = { kind = "Art" } },
+		{ time = 0.3333, kind = "TrailOn", data = { kind = "Art" } },
 		{ time = 0.3333, kind = "SmearOn", data = { axis = "X" } },
+		{ time = 0.3333, kind = "HitWindowOpen", data = { hit = 1 } },
 		{ time = 0.34, kind = "Sfx", data = { name = "whoosh.Medium" } },
-		{ time = 0.35, kind = "HitWindowOpen", data = { hit = 1 } },
 		{ time = 0.3667, kind = "SmearOff" },
 		{ time = 0.45, kind = "HitWindowClose", data = { hit = 1 } },
 		{ time = 0.56, kind = "SmearOn", data = { axis = "Y" } },
+		{ time = 0.56, kind = "HitWindowOpen", data = { hit = 2 } },
 		{ time = 0.57, kind = "Sfx", data = { name = "whoosh.Medium" } },
-		{ time = 0.58, kind = "HitWindowOpen", data = { hit = 2 } },
 		{ time = 0.5933, kind = "SmearOff" },
 		{ time = 0.68, kind = "HitWindowClose", data = { hit = 2 } },
 		{ time = 0.72, kind = "TrailOff" },

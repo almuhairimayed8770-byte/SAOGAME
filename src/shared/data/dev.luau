@@ -64,8 +64,120 @@ local Dev = {
 		-- may linger before it counts as "trail outside a window".
 		trailLeadFramesMax = 6,
 		trailLagFramesMax = 8,
+		-- How far a hit window may open after its strike's snap starts (or close before the snap
+		-- ends) and still cover it. A hundredth of a frame: wide enough for clip times written to
+		-- four decimals (0.3333 for frame 20 is 0.002 frames off), narrow enough that an ExpoOut
+		-- snap has done at most 3.4% of its arc before the server starts sweeping (a 2-frame snap).
+		-- Half a frame would let a window skip about two thirds of a 3-frame snap.
+		windowSnapToleranceFrames = 0.01,
 		beats = { "Anticipation", "Snap", "Smear", "Hold", "Settle", "Recovery" },
 		humanColumns = { "Watched at 0.25x", "Problems seen", "Fixed" },
+	},
+
+	-- The server hit matrix (section 20 Phase 0 gate: "the server registered every hit").
+	-- tools/hit-matrix.luau prints it and tests/server/HitMatrix.spec.luau fails on any miss at a
+	-- real-fight placement. Every Phase 0 player attack (playground.luau loadout.artSlots, then the
+	-- basic chain) and every hit of it is swung through the server's own path (CombatService and
+	-- HitSweep over an engine-faithful fake world) at an enemy placed in front of the player.
+	-- Distances are studs, root to root on the ground plane; angles are degrees.
+	hitMatrix = {
+		-- The player character as the engine builds it for a blank avatar (classic blocky R15, body
+		-- type and proportion scale 0): part sizes and each joint's rig attachments at scale 1, the
+		-- Part0-side position then the Part1-side one (rigs.luau PlayerR15 names the joints). At
+		-- scale 1 the feet hang 2.35 below the root's center, so the engine's HipHeight is 1.35.
+		-- The matrix scales every part and attachment by rigs.luau PlayerR15.scale the way the
+		-- avatar scaling system does once PlaygroundService.applyScale writes the scale values
+		-- (width, height, depth on the body and the root; head scale on the head), joins the
+		-- parts with AnimationConstraints (the Avatar Joint Upgrade) and stands the feet on the
+		-- field, which is where the Humanoid's recomputed HipHeight holds the root.
+		avatar = {
+			parts = {
+				HumanoidRootPart = { 2, 2, 1 },
+				LowerTorso = { 2, 0.4, 1 },
+				UpperTorso = { 2, 1.6, 1 },
+				Head = { 2, 1, 1 },
+				RightUpperArm = { 1, 1.1687, 1 },
+				RightLowerArm = { 1, 1.0519, 1 },
+				RightHand = { 1, 0.3, 1 },
+				LeftUpperArm = { 1, 1.1687, 1 },
+				LeftLowerArm = { 1, 1.0519, 1 },
+				LeftHand = { 1, 0.3, 1 },
+				RightUpperLeg = { 1, 1.2166, 1 },
+				RightLowerLeg = { 1, 1.1931, 1 },
+				RightFoot = { 1, 0.3, 1 },
+				LeftUpperLeg = { 1, 1.2166, 1 },
+				LeftLowerLeg = { 1, 1.1931, 1 },
+				LeftFoot = { 1, 0.3, 1 },
+			},
+			attachments = {
+				Root = { { 0, -0.35, 0 }, { 0, -0.2, 0 } },
+				Waist = { { 0, 0.2, 0 }, { 0, -0.8, 0 } },
+				Neck = { { 0, 0.8, 0 }, { 0, -0.5, 0 } },
+				RightShoulder = { { 1, 0.563, 0 }, { -0.5, 0.3943, 0 } },
+				RightElbow = { { 0, -0.3342, 0 }, { 0, 0.2586, 0 } },
+				RightWrist = { { 0, -0.5009, 0 }, { 0, 0.125, 0 } },
+				LeftShoulder = { { -1, 0.563, 0 }, { 0.5, 0.3943, 0 } },
+				LeftElbow = { { 0, -0.3341, 0 }, { 0, 0.2587, 0 } },
+				LeftWrist = { { 0, -0.5009, 0 }, { 0, 0.125, 0 } },
+				RightHip = { { 0.5, -0.2, 0 }, { 0, 0.4208, 0 } },
+				RightKnee = { { 0, -0.4009, 0 }, { 0, 0.3792, 0 } },
+				RightAnkle = { { 0, -0.5472, 0 }, { 0, 0.1019, 0 } },
+				LeftHip = { { -0.5, -0.2, 0 }, { 0, 0.4208, 0 } },
+				LeftKnee = { { 0, -0.4011, 0 }, { 0, 0.379, 0 } },
+				LeftAnkle = { { 0, -0.5472, 0 }, { 0, 0.1019, 0 } },
+			},
+		},
+		-- Where the first server frame after the swing starts lands, as a fraction of a 60 Hz frame:
+		-- the clip clock and the Heartbeat are not in step, so every hit is swung at each phase and
+		-- must register at all of them.
+		framePhases = { 0, 0.25, 0.5, 0.75 },
+		-- How finely the report traces the true blade to say how close it came to a target it missed.
+		clearanceSampleHz = 600,
+		-- Real-fight ranges are written rounded inward to this step (the spec re-derives them).
+		rangeStep = 0.05,
+		-- The vertical span of the player's body the "nearest surface" is measured from (studs above
+		-- the ground: the avatar's feet to above its head).
+		bodyColumnHeight = 8,
+		-- Each setup stands one enemy in front of the player, its root on the line straight ahead.
+		-- yaw turns the enemy from facing the player toward its own left (90: side-on, the head
+		-- pointing to the player's right). A real fight stands between realFight.min, where the
+		-- two bodies touch (any enemy body part, its held weapon aside, against the player's rest
+		-- pose), and realFight.max, where the nearest point of the enemy's body is the loadout
+		-- weapon's reach (weapons.luau) from the player's root: the idea enemy strikes use for
+		-- their reach (HitSweep.coneTargets: distance minus the target's radius), measured to the
+		-- nearest body point rather than the root part's half-extent, which only widens the range
+		-- the matrix must cover. `distances` are the placements swung at; the ones outside
+		-- realFight are reported, never required.
+		setups = {
+			{
+				id = "BoarFacing",
+				enemy = "FrenzyBoar",
+				yaw = 0,
+				-- The snout reaches 5.6 in front of the root, the player's chest 0.475 in front of
+				-- his: they touch at 6.075. The snout tip is at reach (4.5) from 10.1.
+				realFight = { min = 6.1, max = 10.1 },
+				distances = { 6.1, 7, 8, 9, 10.1, 11.5 },
+			},
+			{
+				id = "BoarSide",
+				enemy = "FrenzyBoar",
+				yaw = 90,
+				-- The flank (torso and legs) is 1.3 from the boar's root: touching at 1.775, at reach
+				-- from 5.8. The Charger's counter (section 9: sidestep, hit the flank).
+				realFight = { min = 1.8, max = 5.8 },
+				distances = { 1.8, 2.5, 3.5, 4.5, 5.8, 7 },
+			},
+			{
+				id = "Kobold",
+				enemy = "KoboldAxeman",
+				yaw = 0,
+				-- The head reaches 0.75 in front of the root and meets the player's (0.53) at 1.28;
+				-- the body is at reach from 5.25. 3.5 is where the Brute stops walking in (ai.luau
+				-- stopDistance) and 4.8 where it starts its overhead (reach 6 x engageFraction 0.8).
+				realFight = { min = 1.3, max = 5.25 },
+				distances = { 1.3, 2.3, 3.5, 4.8, 5.25, 6.5 },
+			},
+		},
 	},
 
 	-- Gate recordings (section 20 Phase 0 gate; section 1: the capture script's on-screen prompts).

@@ -1,6 +1,7 @@
 --!strict
 local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
 local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
+local ReviewMarkers = Harness.load("src/client/dev/ReviewMarkers")
 local Combat = Harness.load("src/shared/data/combat")
 
 local FRAME = 1 / 60
@@ -201,7 +202,30 @@ describe("clip data", function()
 			expect(clip.beats.Anticipation.start).toBe(0)
 			local windows = ClipSampler.hitWindows(clip)
 			expect(#windows).toBe(1)
-			expect(windows[1].open).toBeGreaterThan(attack.windUp)
+			-- The window never opens inside the wind-up: it opens with the strike's snap (the boar's
+			-- launch snap starts the instant its 0.6 s crouch ends) and holds through it.
+			expect(windows[1].open).toBeGreaterThanOrEqual(attack.windUp - EPSILON)
+			expect(windows[1].open).toBeCloseTo(clip.beats.Snap.start, EPSILON)
+			expect(windows[1].close).toBeGreaterThanOrEqual(clip.beats.Snap.finish)
+		end
+	end)
+
+	it("every hit window opens on its strike's snap start (beat 2) and stays open through the snap", function()
+		for _, clip in attackClips() do
+			local windows = ClipSampler.hitWindows(clip)
+			local snaps = ReviewMarkers.strikeSnaps(clip)
+			if #snaps ~= #windows then
+				error(("%s has %d hit windows but %d strike snaps"):format(clip.id, #windows, #snaps))
+			end
+			for index, window in windows do
+				-- On the snap's first frame: not during the wind-up, not into the ExpoOut cut.
+				expect(window.open).toBeCloseTo(snaps[index].start, EPSILON)
+				expect(window.close).toBeGreaterThanOrEqual(snaps[index].finish)
+				-- The trail and the smear ignite on the same frame as the strike (section 10).
+				local smearOn = eventTimes(clip, "SmearOn")[index]
+				expect(smearOn).toBeCloseTo(window.open, EPSILON)
+			end
+			expect(eventTimes(clip, "TrailOn")[1]).toBeCloseTo(windows[1].open, EPSILON)
 		end
 	end)
 
@@ -236,7 +260,8 @@ describe("clip data", function()
 			expect(wound.RightShoulder.rot[3]).toBeLessThan(0)
 			expect(snapped.RightShoulder.rot[3]).toBeGreaterThan(0)
 			expect(snapped.RightShoulder.rot[1]).toBeGreaterThan(90)
-			-- The arm climbs highest (the blade over the head) between the two hit windows.
+			-- The arm climbs highest (the blade over the head) between the two hits: on the re-cock the
+			-- second snap starts from, which is where the second window opens.
 			local windows = ClipSampler.hitWindows(clip)
 			local highest
 			for _, key in clip.keys do
@@ -246,7 +271,7 @@ describe("clip data", function()
 				end
 			end
 			expect(highest.time).toBeGreaterThan(windows[1].close)
-			expect(highest.time).toBeLessThan(windows[2].open)
+			expect(highest.time).toBeLessThanOrEqual(windows[2].open + EPSILON)
 			-- Both strikes settle (Spring) 5..8 degrees back from their snap (ExpoOut) on the sword arm.
 			local settles = 0
 			for index, key in clip.keys do

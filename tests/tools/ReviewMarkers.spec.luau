@@ -115,6 +115,7 @@ describe("ReviewMarkers trail timing", function()
 	end)
 
 	it("the smear frames count as an allowed trail region (a Charger's rush)", function()
+		-- The smear on the launch snap, the trail lit from it through a rush to a window at its end.
 		local clip = attackClip({
 			events = {
 				{ time = 6 * F, kind = "SmearOn" },
@@ -128,6 +129,21 @@ describe("ReviewMarkers trail timing", function()
 		local timing = ReviewMarkers.trailTiming(clip)
 		expect(timing.leadFrames).toBeCloseTo(0)
 		expect(timing.lagFrames).toBeCloseTo(1)
+		expect(timing.stray).toBe(0)
+		-- The trail is fine; the window is not: it opens long after the strike's snap (6f..9f), so
+		-- the cut itself is never swept. The window must open on the snap and run through the rush.
+		expect(ReviewMarkers.problems(clip)).toEqual({
+			"hit window 1 opens 34.00 frames after its snap starts (f 6.00)",
+		})
+		-- Opened on the snap with the trail, the same rush reviews clean.
+		clip.events = {
+			{ time = 6 * F, kind = "TrailOn" },
+			{ time = 6 * F, kind = "SmearOn" },
+			{ time = 6 * F, kind = "HitWindowOpen" },
+			{ time = 8 * F, kind = "SmearOff" },
+			{ time = 48 * F, kind = "HitWindowClose" },
+			{ time = 49 * F, kind = "TrailOff" },
+		}
 		expect(ReviewMarkers.problems(clip)).toEqual({})
 	end)
 
@@ -249,6 +265,133 @@ describe("ReviewMarkers problems", function()
 		expect(ReviewMarkers.problems(idle)).toEqual({ "Linear on a limb at key 2" })
 		idle.keys[2].easing = "SineInOut"
 		expect(ReviewMarkers.problems(idle)).toEqual({})
+	end)
+end)
+
+-- A three-strike Art like Sharp Nail: a start pose eased in over 9 frames (ExpoOut, not a strike),
+-- then three anticipation / re-wind keys each followed by an ExpoOut snap of 3, 2 and 4 frames, and
+-- a last ExpoOut flourish over 5 frames (outside the Snap budget, so not a strike). Each hit window
+-- opens on its snap's first frame and closes in the settle.
+local function threeStrikeClip(): any
+	local function arm(x: number): any
+		return { RightShoulder = { rot = { x, 0, 0 } } }
+	end
+	local clip = attackClip({ duration = 1.4 })
+	clip.keys = {
+		{ time = 0, easing = "QuadOut", joints = arm(0), root = { pos = { 0, 0, 0 } } },
+		{ time = 9 * F, easing = "ExpoOut", joints = arm(-40) },
+		{ time = 15 * F, easing = "QuadIn", joints = arm(-60) },
+		{ time = 18 * F, easing = "ExpoOut", joints = arm(70) },
+		{ time = 26 * F, easing = "Spring", joints = arm(64) },
+		{ time = 30 * F, easing = "QuadIn", joints = arm(80) },
+		{ time = 32 * F, easing = "ExpoOut", joints = arm(-30) },
+		{ time = 40 * F, easing = "Spring", joints = arm(-24) },
+		{ time = 44 * F, easing = "QuadIn", joints = arm(-50) },
+		{ time = 48 * F, easing = "ExpoOut", joints = arm(90) },
+		{ time = 56 * F, easing = "Spring", joints = arm(84) },
+		{ time = 61 * F, easing = "ExpoOut", joints = arm(100), root = { pos = { 0, 0, 0 } } },
+		{ time = 1.4, easing = "SineInOut", joints = arm(98), root = { pos = { 0, 0, -2 } } },
+	}
+	clip.events = {
+		{ time = 15 * F, kind = "TrailOn" },
+		{ time = 15 * F, kind = "SmearOn" },
+		{ time = 15 * F, kind = "HitWindowOpen" },
+		{ time = 17 * F, kind = "SmearOff" },
+		{ time = 24 * F, kind = "HitWindowClose" },
+		{ time = 30 * F, kind = "SmearOn" },
+		{ time = 30 * F, kind = "HitWindowOpen" },
+		{ time = 32 * F, kind = "SmearOff" },
+		{ time = 38 * F, kind = "HitWindowClose" },
+		{ time = 44 * F, kind = "SmearOn" },
+		{ time = 44 * F, kind = "HitWindowOpen" },
+		{ time = 46 * F, kind = "SmearOff" },
+		{ time = 54 * F, kind = "HitWindowClose" },
+		{ time = 56 * F, kind = "TrailOff" },
+		{ time = 62 * F, kind = "PostMotionStart" },
+	}
+	clip.beats = {
+		Anticipation = { start = 9 * F, finish = 15 * F },
+		Snap = { start = 15 * F, finish = 18 * F },
+		Smear = { start = 15 * F, finish = 17 * F },
+		Hold = { start = 18 * F, finish = 20 * F },
+		Settle = { start = 20 * F, finish = 26 * F },
+		Recovery = { start = 62 * F, finish = 1.4 },
+	}
+	return clip
+end
+
+local function expectSpans(actual: { { start: number, finish: number } }, expected: { { number } })
+	expect(#actual).toBe(#expected)
+	for index, span in expected do
+		expect(actual[index].start).toBeCloseTo(span[1], 1e-9)
+		expect(actual[index].finish).toBeCloseTo(span[2], 1e-9)
+	end
+end
+
+describe("ReviewMarkers strike snaps and hit windows", function()
+	it(
+		"the first strike is the beats Snap; each later one is an ExpoOut key 2..4 frames after the key before",
+		function()
+			expectSpans(ReviewMarkers.strikeSnaps(attackClip()), { { 6 * F, 9 * F } })
+			local clip = threeStrikeClip()
+			local strikes = { { 15 * F, 18 * F }, { 30 * F, 32 * F }, { 44 * F, 48 * F } }
+			expectSpans(ReviewMarkers.strikeSnaps(clip), strikes)
+			-- Without a beats Snap the first strike is read from the keys too; the 9-frame start pose
+			-- and the 5-frame flourish stay out.
+			clip.beats.Snap = nil
+			expectSpans(ReviewMarkers.strikeSnaps(clip), strikes)
+			-- A root-only ExpoOut key is not a strike.
+			clip = threeStrikeClip()
+			clip.keys[7].joints = {}
+			expectSpans(ReviewMarkers.strikeSnaps(clip), { { 15 * F, 18 * F }, { 44 * F, 48 * F } })
+		end
+	)
+
+	it("passes windows that open on (or before) their snap's start and close after its end", function()
+		expect(ReviewMarkers.windowSnapProblems(threeStrikeClip())).toEqual({})
+		expect(ReviewMarkers.problems(threeStrikeClip())).toEqual({})
+		local early = threeStrikeClip()
+		early.events[3].time = 14 * F -- the first window opens a frame before its snap
+		table.insert(early.events, 1, table.remove(early.events, 3))
+		expect(ReviewMarkers.windowSnapProblems(early)).toEqual({})
+		-- A window written to four decimals (0.3667 for frame 22, 0.002 frames late) is within the
+		-- tolerance, which stays far under half a frame (that would skip most of an ExpoOut cut).
+		local written = attackClip()
+		written.beats.Snap = { start = 22 * F, finish = 25 * F }
+		written.events = {
+			{ time = 0.3667, kind = "HitWindowOpen" },
+			{ time = 0.45, kind = "HitWindowClose" },
+		}
+		expect(Dev.review.windowSnapToleranceFrames).toBeLessThan(0.5)
+		expect(ReviewMarkers.windowSnapProblems(written)).toEqual({})
+		-- A clip without hit windows has nothing to pair.
+		expect(ReviewMarkers.windowSnapProblems(attackClip({ events = {} }))).toEqual({})
+	end)
+
+	it("names a window that opens into its snap, one that closes inside it, and a count mismatch", function()
+		local clip = threeStrikeClip()
+		clip.events[7].time = 31.2 * F -- the second window opens 1.2 frames into its 2-frame snap
+		clip.events[13].time = 47 * F -- the third closes a frame before its snap lands
+		local expected = {
+			"hit window 2 opens 1.20 frames after its snap starts (f 30.00)",
+			"hit window 3 closes 1.00 frames before its snap ends (f 48.00)",
+		}
+		expect(ReviewMarkers.windowSnapProblems(clip)).toEqual(expected)
+		for _, message in expected do
+			expect(ReviewMarkers.problems(clip)).toContain(message)
+		end
+		-- Just past the tolerance is already late.
+		local late = attackClip()
+		late.events[4].time = 6 * F + 2 * Dev.review.windowSnapToleranceFrames * F
+		expect(ReviewMarkers.windowSnapProblems(late)).toEqual({
+			"hit window 1 opens 0.02 frames after its snap starts (f 6.00)",
+		})
+		-- The third strike eased over 5 frames is no snap: three windows, two strikes.
+		local slow = threeStrikeClip()
+		slow.keys[9].time = 43 * F
+		expect(ReviewMarkers.windowSnapProblems(slow)).toEqual({
+			"3 hit windows but 2 strike snaps (ExpoOut keys 2..4 frames after the key before)",
+		})
 	end)
 end)
 

@@ -24,13 +24,13 @@ regeneration, matched by clip id.
 
 | Clip | Rig | Kind | Duration | Anticipation | Snap | Smear | Hold | Settle | Recovery | Hit-stop | Hits | Trail vs windows | Root motion | Problems found | Watched at 0.25x | Problems seen | Fixed |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `player/OneHandedSword/Basic1` | PlayerR15 | attack | 0.45 s / 27f | Y 6f | Y 3f | Y 2f | Y 2f | Y 6f | Y 9f | Normal | 1 | on 0.6f before, off 1.8f after | 0.40 | none |  |  |  |
-| `player/OneHandedSword/Basic2` | PlayerR15 | attack | 0.45 s / 27f | Y 6f | Y 3f | Y 2f | Y 2f | Y 6f | Y 9f | Normal | 1 | on 0.6f before, off 1.8f after | 0.40 | none |  |  |  |
-| `player/OneHandedSword/Basic3` | PlayerR15 | attack | 0.45 s / 27f | Y 6f | Y 3f | Y 2f | Y 2f | Y 6f | Y 9f | Normal | 1 | on 0.6f before, off 1.8f after | 0.60 | none |  |  |  |
-| `player/OneHandedSword/Horizontal` | PlayerR15 | attack | 1.00 s / 60f | Y 6f | Y 3f | Y 2f | Y 2f | Y 7f | Y 24f | Normal | 1 | on 1.2f before, off 2.4f after | 1.00 | none |  |  |  |
-| `player/OneHandedSword/RisingArc` | PlayerR15 | attack | 1.40 s / 84f | Y 5f | Y 3f | Y 2f | Y 2f | Y 6f | Y 30f | Normal | 2 | on 0.8f before, off 2.4f after | 1.00 | none |  |  |  |
-| `player/OneHandedSword/SharpNail` | PlayerR15 | attack | 1.70 s / 102f | Y 5f | Y 3f | Y 2f | Y 2f | Y 6f | Y 36f | Normal | 3 | on 0.8f before, off 2.4f after | 2.00 | none |  |  |  |
-| `player/OneHandedSword/Vertical` | PlayerR15 | attack | 1.00 s / 60f | Y 6f | Y 3f | Y 2f | Y 2f | Y 7f | Y 24f | Normal | 1 | on 1.2f before, off 2.4f after | 0.00 | none |  |  |  |
+| `player/OneHandedSword/Basic1` | PlayerR15 | attack | 0.45 s / 27f | Y 6f | Y 3f | Y 2f | Y 2f | Y 6f | Y 9f | Normal | 1 | on 0.0f before, off 1.8f after | 0.40 | none |  |  |  |
+| `player/OneHandedSword/Basic2` | PlayerR15 | attack | 0.45 s / 27f | Y 6f | Y 3f | Y 2f | Y 2f | Y 6f | Y 9f | Normal | 1 | on 0.0f before, off 1.8f after | 0.40 | none |  |  |  |
+| `player/OneHandedSword/Basic3` | PlayerR15 | attack | 0.45 s / 27f | Y 6f | Y 3f | Y 2f | Y 2f | Y 6f | Y 9f | Normal | 1 | on 0.0f before, off 1.8f after | 0.60 | none |  |  |  |
+| `player/OneHandedSword/Horizontal` | PlayerR15 | attack | 1.00 s / 60f | Y 6f | Y 3f | Y 2f | Y 2f | Y 7f | Y 24f | Normal | 1 | on 0.0f before, off 2.4f after | 1.00 | none |  |  |  |
+| `player/OneHandedSword/RisingArc` | PlayerR15 | attack | 1.40 s / 84f | Y 5f | Y 3f | Y 2f | Y 2f | Y 6f | Y 30f | Normal | 2 | on 0.0f before, off 2.4f after | 1.00 | none |  |  |  |
+| `player/OneHandedSword/SharpNail` | PlayerR15 | attack | 1.70 s / 102f | Y 5f | Y 3f | Y 2f | Y 2f | Y 6f | Y 36f | Normal | 3 | on 0.0f before, off 2.4f after | 2.00 | none |  |  |  |
+| `player/OneHandedSword/Vertical` | PlayerR15 | attack | 1.00 s / 60f | Y 6f | Y 3f | Y 2f | Y 2f | Y 7f | Y 24f | Normal | 1 | on 0.0f before, off 2.4f after | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Breathe` | PlayerR15 | loop | 3.60 s / 216f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/DeathFreeze` | PlayerR15 | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/DodgeBack` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none |  |  |  |
@@ -70,7 +70,7 @@ regeneration, matched by clip id.
 | `enemy/Boar/Idle` | Boar | loop | 4.00 s / 240f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `enemy/Boar/Stagger` | Boar | one-shot | 1.00 s / 60f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `enemy/Boar/Walk` | Boar | loop | 0.70 s / 42f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `enemy/Kobold/Overhead` | Kobold | attack | 2.75 s / 165f | Y 78f | Y 3f | Y 2f | Y 3f | Y 9f | Y 72f | Normal | 1 | on 1.2f before, off 1.2f after | 0.00 | none |  |  |  |
+| `enemy/Kobold/Overhead` | Kobold | attack | 2.75 s / 165f | Y 78f | Y 3f | Y 2f | Y 3f | Y 9f | Y 72f | Normal | 1 | on 0.0f before, off 1.2f after | 0.00 | none |  |  |  |
 | `enemy/Kobold/Break` | Kobold | one-shot | 3.00 s / 180f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `enemy/Kobold/DeathFreeze` | Kobold | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `enemy/Kobold/FlinchBack` | Kobold | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |

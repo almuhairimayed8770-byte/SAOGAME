@@ -9,13 +9,15 @@
 	  0.00-0.15  start pose: blade high on the right, torso wound right, weight back
 	  0.15-0.25  activation hold
 	  0.25-0.33  Anticipation (5 frames): the coil deepens
-	  0.33-0.38  Snap 1: the diagonal cut down and across to the left     (hit 1: 0.35-0.45)
+	  0.33-0.38  Snap 1: the diagonal cut down and across to the left     (hit 1: 0.33-0.45)
 	  0.38-0.42  Hold, then Settle to 0.52
 	  0.50-0.58  re-wind: the wrist turns, the point dips low on the left
-	  0.58-0.63  Snap 2: the return cut up and to the right                 (hit 2: 0.60-0.70)
+	  0.58-0.63  Snap 2: the return cut up and to the right                 (hit 2: 0.58-0.70)
 	  0.75-0.85  draw back for the thrust: the blade along the forearm, torso wound
-	  0.85-0.90  Snap 3: the lunge, the left leg far forward                (hit 3: 0.87-0.98)
+	  0.85-0.90  Snap 3: the lunge, the left leg far forward                (hit 3: 0.85-0.98)
 	  1.10-1.70  Recovery / post-motion: extended in the lunge, breathing, the point trembling
+	Each hit window opens on its snap's first frame (the trail ignites with the first), so the
+	server sweeps the whole cut, and closes in the settle.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -318,20 +320,20 @@ local clip: Types.ClipDef = {
 	},
 	events = {
 		{ time = 0.15, kind = "ActivationHold", data = { hold = 0.1 } },
-		{ time = 0.32, kind = "TrailOn", data = { kind = "Art" } },
+		{ time = 0.3333, kind = "TrailOn", data = { kind = "Art" } },
 		{ time = 0.3333, kind = "SmearOn", data = { axis = "X" } },
+		{ time = 0.3333, kind = "HitWindowOpen", data = { hit = 1 } },
 		{ time = 0.34, kind = "Sfx", data = { name = "whoosh.Medium" } },
-		{ time = 0.35, kind = "HitWindowOpen", data = { hit = 1 } },
 		{ time = 0.3667, kind = "SmearOff" },
 		{ time = 0.45, kind = "HitWindowClose", data = { hit = 1 } },
 		{ time = 0.58, kind = "SmearOn", data = { axis = "X" } },
+		{ time = 0.58, kind = "HitWindowOpen", data = { hit = 2 } },
 		{ time = 0.59, kind = "Sfx", data = { name = "whoosh.Medium" } },
-		{ time = 0.6, kind = "HitWindowOpen", data = { hit = 2 } },
 		{ time = 0.6133, kind = "SmearOff" },
 		{ time = 0.7, kind = "HitWindowClose", data = { hit = 2 } },
 		{ time = 0.85, kind = "SmearOn", data = { axis = "Z" } },
+		{ time = 0.85, kind = "HitWindowOpen", data = { hit = 3 } },
 		{ time = 0.86, kind = "Sfx", data = { name = "whoosh.Small" } },
-		{ time = 0.87, kind = "HitWindowOpen", data = { hit = 3 } },
 		{ time = 0.8833, kind = "SmearOff" },
 		{ time = 0.98, kind = "HitWindowClose", data = { hit = 3 } },
 		{ time = 1.02, kind = "TrailOff" },

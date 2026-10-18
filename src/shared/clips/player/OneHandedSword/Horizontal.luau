@@ -10,6 +10,8 @@
 	  0.25-0.35  Anticipation (6 frames): the coil deepens, hips turn further right
 	  0.35-0.40  Snap (3 frames, ExpoOut): the cut, torso whipped left, weight onto the left foot
 	  0.35-0.38  Smear (2 frames)
+	  0.35-0.48  Hit window: opens on the snap's first frame (the trail ignites with it), so the
+	             server sweeps the whole cut, and closes in the settle
 	  0.40-0.43  Hold (the contact; hit-stop pauses the clock here on a hit)
 	  0.43-0.55  Settle (Spring): the pose comes back 5-8 degrees from the extreme
 	  0.60-1.00  Recovery / post-motion: caught in the stance with micro-motion only
@@ -196,10 +198,10 @@ local clip: Types.ClipDef = {
 	},
 	events = {
 		{ time = 0.15, kind = "ActivationHold", data = { hold = 0.1 } },
-		{ time = 0.33, kind = "TrailOn", data = { kind = "Art" } },
+		{ time = 0.35, kind = "TrailOn", data = { kind = "Art" } },
 		{ time = 0.35, kind = "SmearOn", data = { axis = "X" } },
 		{ time = 0.35, kind = "Sfx", data = { name = "whoosh.Medium" } },
-		{ time = 0.36, kind = "HitWindowOpen", data = { hit = 1 } },
+		{ time = 0.35, kind = "HitWindowOpen", data = { hit = 1 } },
 		{ time = 0.3833, kind = "SmearOff" },
 		{ time = 0.48, kind = "HitWindowClose", data = { hit = 1 } },
 		{ time = 0.52, kind = "TrailOff" },

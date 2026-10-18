@@ -10,7 +10,8 @@
 	  0.60-0.65  Snap: the launch. The body stretches flat, head and tusks come up, rear legs fire.
 	  0.65-0.70  Hold, then Settle: the first gallop stride springs in
 	  0.70-1.10  the rush: gallop strides (the server moves the model; the clip carries no root)
-	  1.05-1.20  hit window: the tusks at the end of the rush
+	  0.60-1.20  hit window: opens on the launch snap with the trail and stays open through the rush
+	             to the tusks (the server resolves the Charger's line at windUp + strike = 1.10 s)
 	  1.20-2.30  Recovery: a skidding stop, then the slow turn (the head and body swing round)
 	Rig: Boar. Root X- pitches the nose down; Neck X- lowers the head; Hip X+ swings a leg
 	forward; TailJoint X- lifts the tail.
@@ -228,13 +229,13 @@ local clip: Types.ClipDef = {
 	},
 	events = {
 		{ time = 0.1, kind = "Voice", data = { name = "enemy.ChargerWindUp" } },
+		{ time = 0.6, kind = "TrailOn", data = { kind = "Basic" } },
 		{ time = 0.6, kind = "SmearOn", data = { axis = "Z" } },
 		{ time = 0.6, kind = "Sfx", data = { name = "enemy.ChargerStrike" } },
-		{ time = 0.62, kind = "TrailOn", data = { kind = "Basic" } },
+		{ time = 0.6, kind = "HitWindowOpen", data = { hit = 1 } },
 		{ time = 0.6333, kind = "SmearOff" },
 		{ time = 0.72, kind = "Footstep", data = { foot = "FrontLeft" } },
 		{ time = 0.97, kind = "Footstep", data = { foot = "FrontRight" } },
-		{ time = 1.05, kind = "HitWindowOpen", data = { hit = 1 } },
 		{ time = 1.2, kind = "HitWindowClose", data = { hit = 1 } },
 		{ time = 1.22, kind = "TrailOff" },
 		{ time = 1.25, kind = "PostMotionStart" },

@@ -128,11 +128,50 @@ describe("HitSweep.bladePath", function()
 			expect(sample.time).toBe(times[index])
 			expect((sample.finish - sample.start).Magnitude).toBeCloseTo(4, 1e-3)
 			expect((sample.mid - sample.start:Lerp(sample.finish, 0.5)).Magnitude).toBeCloseTo(0, 1e-6)
+			-- Each sample keeps the root it was solved from (the arc sweep interpolates from it).
+			expect(sample.root).toBe(CFrame.new(0, 3, 0))
 		end
+		-- bladeAt is one of those samples.
+		local one = HitSweep.bladeAt(model, CFrame.new(0, 3, 0), Horizontal, times[2], trailStart, trailEnd)
+		expect((one.finish - samples[2].finish).Magnitude).toBe(0)
+		expect((one.start - samples[2].start).Magnitude).toBe(0)
 		-- A right-to-left cut: the tip travels sideways across the window.
 		local first = samples[1].finish
 		local last = samples[#samples].finish
 		expect((last - first).Magnitude).toBeGreaterThan(1)
+	end)
+
+	it("spreads the body's travel since the sample it continues from over a hitch frame's samples", function()
+		local model, trailStart, trailEnd = buildPlayerRig(CFrame.new(0, 3, 0))
+		local window = ClipSampler.hitWindows(Horizontal)[1]
+		-- Last frame's sample, then one server frame that sweeps four sample times while the body
+		-- travelled 6 studs and turned 30 degrees.
+		local fromRoot = CFrame.new(0, 3, 0)
+		local liveRoot = CFrame.new(0, 3, -6) * CFrame.Angles(0, math.rad(30), 0)
+		local from = HitSweep.bladeAt(model, fromRoot, Horizontal, window.open, trailStart, trailEnd)
+		local times = HitSweep.sampleTimes(window.open, window.open + 4 / 60, Combat.hitSampleHz)
+		expect(#times).toBe(4)
+		local samples = HitSweep.bladePath(model, liveRoot, Horizontal, times, trailStart, trailEnd, from)
+		expect(#samples).toBe(4)
+		for index, sample in samples do
+			local root = fromRoot:Lerp(liveRoot, (times[index] - window.open) / (4 / 60))
+			expect((sample.root.Position - root.Position).Magnitude).toBeLessThan(1e-6)
+			local solved = HitSweep.bladeAt(model, root, Horizontal, times[index], trailStart, trailEnd)
+			expect((solved.finish - sample.finish).Magnitude).toBeLessThan(1e-4)
+			expect((solved.start - sample.start).Magnitude).toBeLessThan(1e-4)
+		end
+		-- A quarter of the travel per sample; the last is the live root itself.
+		expect(samples[1].root.Position.Z).toBeCloseTo(-1.5, 1e-6)
+		expect(samples[#samples].root).toBe(liveRoot)
+		-- Without a sample to continue from, or from one that kept no root, every sample is solved
+		-- from the live root.
+		for _, sample in HitSweep.bladePath(model, liveRoot, Horizontal, times, trailStart, trailEnd) do
+			expect(sample.root).toBe(liveRoot)
+		end
+		local rootless = { time = from.time, start = from.start, finish = from.finish, mid = from.mid }
+		for _, sample in HitSweep.bladePath(model, liveRoot, Horizontal, times, trailStart, trailEnd, rootless) do
+			expect(sample.root).toBe(liveRoot)
+		end
 	end)
 
 	it("returns nil when an attachment is not under a part of the rig", function()
@@ -702,6 +741,428 @@ describe("HitSweep.castBladePath", function()
 			count += 1
 		end
 		expect(count).toBe(3)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- Following the arc
+-- ------------------------------------------------------------------------------------------
+
+-- Expo-out, the snap's easing (section 10): most of the move lands in the first frame.
+local function expoOut(u: number): number
+	if u >= 1 then
+		return 1
+	end
+	return 1 - 2 ^ (-10 * u)
+end
+
+local SNAP_FRAMES = 3
+local SNAP_TIME = SNAP_FRAMES / 60
+local SNAP_DEGREES = 120
+local SHOULDER = CFrame.new(0, 3, 0) -- faces -Z
+
+-- A blade swung flat round a shoulder at the root: the guard 1 stud out, the tip 5, turning from
+-- straight ahead (-Z) toward +X by SNAP_DEGREES with expo-out over SNAP_TIME, then held. `solve`
+-- is the BladeSolver followArc calls (it counts its calls); `at` places the frame samples.
+local function snapSolver()
+	local snap = { calls = 0 }
+	function snap.at(time: number, rootCFrame: CFrame)
+		local angle = math.rad(SNAP_DEGREES) * expoOut(math.clamp(time / SNAP_TIME, 0, 1))
+		local along = Vector3.new(math.sin(angle), 0, -math.cos(angle))
+		local start = rootCFrame:PointToWorldSpace(along)
+		local finish = rootCFrame:PointToWorldSpace(along * 5)
+		return { time = time, start = start, finish = finish, mid = start:Lerp(finish, 0.5), root = rootCFrame }
+	end
+	function snap.solve(time: number, rootCFrame: CFrame?)
+		snap.calls += 1
+		return snap.at(time, rootCFrame or SHOULDER)
+	end
+	-- The frame samples a window opened at the snap's first frame gets: 0, 1/60, 2/60, 3/60.
+	function snap.frames()
+		local samples = {}
+		for _, time in HitSweep.sampleTimes(0, SNAP_TIME, 60, true) do
+			table.insert(samples, snap.at(time, SHOULDER))
+		end
+		return samples
+	end
+	return snap
+end
+
+-- The point `radius` studs out from the shoulder at `degrees` round the snap.
+local function onArc(degrees: number, radius: number): Vector3
+	local angle = math.rad(degrees)
+	return SHOULDER.Position + Vector3.new(math.sin(angle), 0, -math.cos(angle)) * radius
+end
+
+local function largestStep(path): number
+	local largest = 0
+	for index = 2, #path do
+		largest = math.max(largest, HitSweep.bladeStep(path[index - 1], path[index]))
+	end
+	return largest
+end
+
+-- A BladeSolver that moves the blade's ends in straight lines between the samples of `path`.
+local function linearSolver(path)
+	return function(time: number, rootCFrame: CFrame?)
+		for index = 2, #path do
+			local a, b = path[index - 1], path[index]
+			if time >= a.time and time <= b.time then
+				local alpha = (time - a.time) / (b.time - a.time)
+				local start, finish = a.start:Lerp(b.start, alpha), a.finish:Lerp(b.finish, alpha)
+				return { time = time, start = start, finish = finish, mid = start:Lerp(finish, 0.5), root = rootCFrame }
+			end
+		end
+		return nil
+	end
+end
+
+describe("HitSweep.followArc", function()
+	it("a 120-degree expo-out snap over 3 frames registers a small target the frame chords cut past", function()
+		local snap = snapSolver()
+		local frames = snap.frames()
+		expect(#frames).toBe(SNAP_FRAMES + 1)
+		-- The first frame carries 90% of the cut: its step is several hit radii.
+		local firstFrameDegrees = SNAP_DEGREES * expoOut(1 / SNAP_FRAMES)
+		expect(firstFrameDegrees).toBeGreaterThan(SNAP_DEGREES * 0.85)
+		expect(HitSweep.bladeStep(frames[1], frames[2])).toBeGreaterThan(4 * Combat.hitSphereRadius)
+		-- A small target inside that frame's arc, near the tip, halfway round it.
+		local target = makeTarget(1, onArc(firstFrameDegrees / 2, 4.5), 0.3)
+		local world = fakeWorld({ target })
+		-- The chords: no frame sample's blade and no cast between them (midpoint, tip or guard)
+		-- comes near it.
+		expect(#HitSweep.castBladePath(frames, world.options())).toBe(0)
+		-- Following the arc: one hit, inside the cap.
+		local path, added = HitSweep.followArc(frames, snap.solve)
+		expect(added).toBeGreaterThan(0)
+		expect(added).toBeLessThanOrEqual(Combat.sweepMaxSubdivisions)
+		expect(snap.calls).toBe(added)
+		local hits = HitSweep.castBladePath(path, world.options())
+		expect(#hits).toBe(1)
+		expect(hits[1].targetId).toBe(1)
+	end)
+
+	it("keeps the frame samples in order and puts each sub-sample between its neighbours in time", function()
+		local snap = snapSolver()
+		local frames = snap.frames()
+		local path, added = HitSweep.followArc(frames, snap.solve, Combat.sweepMaxTipStep, math.huge)
+		expect(#path).toBe(#frames + added)
+		expect(path[1]).toBe(frames[1])
+		expect(path[#path]).toBe(frames[#frames])
+		local nextFrame = 1
+		for index, sample in path do
+			if sample == frames[nextFrame] then
+				nextFrame += 1
+			end
+			if index > 1 then
+				expect(sample.time).toBeGreaterThan(path[index - 1].time)
+			end
+		end
+		expect(nextFrame).toBe(#frames + 1) -- every frame sample, in order
+		-- Uncapped, it stops exactly when no step is longer than the limit.
+		expect(largestStep(path)).toBeLessThanOrEqual(Combat.sweepMaxTipStep)
+		expect(largestStep(frames)).toBeGreaterThan(Combat.sweepMaxTipStep)
+	end)
+
+	it("never adds more sub-samples than the cap, and spends them where the blade moves farthest", function()
+		local snap = snapSolver()
+		local frames = snap.frames()
+		local _, needed = HitSweep.followArc(frames, snapSolver().solve, Combat.sweepMaxTipStep, math.huge)
+		expect(needed).toBeGreaterThan(Combat.sweepMaxSubdivisions) -- the premise: the cap binds
+		local previousLargest = largestStep(frames)
+		for _, cap in { 1, 2, 3, Combat.sweepMaxSubdivisions } do
+			snap.calls = 0
+			local path, added = HitSweep.followArc(frames, snap.solve, Combat.sweepMaxTipStep, cap)
+			expect(added).toBe(cap)
+			expect(snap.calls).toBe(cap)
+			expect(#path).toBe(#frames + cap)
+			-- More sub-samples never leave a longer step.
+			local largest = largestStep(path)
+			expect(largest).toBeLessThanOrEqual(previousLargest)
+			previousLargest = largest
+		end
+		-- One sub-sample goes to the first frame, where 90% of the cut happens.
+		local path = HitSweep.followArc(frames, snap.solve, Combat.sweepMaxTipStep, 1)
+		expect(path[2].time).toBeGreaterThan(frames[1].time)
+		expect(path[2].time).toBeLessThan(frames[2].time)
+		-- The default is the data's cap.
+		local _, added = HitSweep.followArc(frames, snap.solve)
+		expect(added).toBe(Combat.sweepMaxSubdivisions)
+	end)
+
+	it("a slow blade adds no sub-samples and never calls the solver", function()
+		local calls = 0
+		local function solve(): any
+			calls += 1
+			return nil
+		end
+		-- A blade sliding sideways 0.5 studs a frame, then just under the step limit in a frame.
+		local slow = {}
+		for index = 0, 4 do
+			local x = index * 0.5
+			table.insert(slow, bladeSample(index / 60, Vector3.new(x, 3, -2), Vector3.new(x, 3, -6)))
+		end
+		local x = 2 + Combat.sweepMaxTipStep * 0.99
+		table.insert(slow, bladeSample(5 / 60, Vector3.new(x, 3, -2), Vector3.new(x, 3, -6)))
+		local path, added = HitSweep.followArc(slow, solve)
+		expect(added).toBe(0)
+		expect(path).toBe(slow)
+		-- A blade at rest, a single sample and an empty path likewise.
+		local resting = bladeSample(0, Vector3.new(0, 3, -2), Vector3.new(0, 3, -6))
+		expect(select(2, HitSweep.followArc({ resting, resting, resting }, solve))).toBe(0)
+		expect(select(2, HitSweep.followArc({ resting }, solve))).toBe(0)
+		expect(select(2, HitSweep.followArc({}, solve))).toBe(0)
+		expect(calls).toBe(0)
+	end)
+
+	it("hits found in sub-samples are deduplicated with frame samples, within a frame and across frames", function()
+		local snap = snapSolver()
+		local frames = snap.frames()
+		-- Near the end of the first frame's arc: a sub-sample reaches it first, the blade at the
+		-- second frame sample lies on it, and the rest of the snap keeps touching it.
+		local target = makeTarget(1, onArc(100, 4), 0.8)
+		local world = fakeWorld({ target })
+		local firstFrame = { frames[1], frames[2] }
+		-- Each piece of the blade touches it on its own: the second frame sample...
+		expect(#HitSweep.castBladePath({ frames[2] }, world.options())).toBe(1)
+		-- ...and some sub-sample before it.
+		local path, added = HitSweep.followArc(firstFrame, snap.solve)
+		expect(added).toBeGreaterThan(0)
+		local touchedBySub = false
+		for index = 2, #path - 1 do
+			if #HitSweep.castBladePath({ path[index] }, world.options()) == 1 then
+				touchedBySub = true
+			end
+		end
+		expect(touchedBySub).toBe(true)
+		-- Swept as one frame: a single hit.
+		local alreadyHit = {}
+		local hits = HitSweep.castBladePath(path, world.options({ alreadyHit = alreadyHit }))
+		expect(#hits).toBe(1)
+		expect(hits[1].targetId).toBe(1)
+		-- The next frames continue from the second frame sample with the window's set: nothing new.
+		local rest = HitSweep.followArc({ frames[2], frames[3], frames[4] }, snap.solve)
+		expect(#HitSweep.castBladePath(rest, world.options({ alreadyHit = alreadyHit, continued = true }))).toBe(0)
+	end)
+
+	it("a sub-sample's root lies between its neighbours', so a body's travel is spread over the step", function()
+		local snap = snapSolver()
+		-- The cut is over and the blade holds still in the hand; the body travels 4 studs forward
+		-- between two frames (an Art's root motion as the replicated root reports it).
+		local moved = SHOULDER * CFrame.new(0, 0, -4)
+		local before = snap.at(SNAP_TIME, SHOULDER)
+		local after = snap.at(SNAP_TIME + 1 / 60, moved)
+		expect(HitSweep.bladeStep(before, after)).toBeCloseTo(4, 1e-4)
+		local path, added = HitSweep.followArc({ before, after }, snap.solve)
+		-- Halving the root's travel twice brings every step to 1 stud: three sub-samples.
+		expect(added).toBe(3)
+		for index = 2, #path do
+			local step = HitSweep.bladeStep(path[index - 1], path[index])
+			expect(step).toBeCloseTo(1, 1e-4)
+			expect(path[index].root.Position.Z).toBeLessThan(path[index - 1].root.Position.Z)
+		end
+		expect(path[3].root.Position.Z).toBeCloseTo(SHOULDER.Position.Z - 2, 1e-4)
+		expect(path[3].time).toBeCloseTo(SNAP_TIME + 0.5 / 60, 1e-9)
+		-- Samples built without a root hand the solver none; the server's solver then places nothing.
+		local loose = { bladeSample(0, Vector3.new(0, 3, -2), Vector3.new(0, 3, -6)) }
+		table.insert(loose, bladeSample(1 / 60, Vector3.new(4, 3, -2), Vector3.new(4, 3, -6)))
+		local seen: { any } = {}
+		local _, none = HitSweep.followArc(loose, function(_time, rootCFrame)
+			table.insert(seen, rootCFrame or false)
+			return nil
+		end)
+		expect(none).toBe(0)
+		expect(seen).toEqual({ false })
+	end)
+
+	it("follows the Horizontal's snap on the rig: every sub-sample is the rig's own pose at its time", function()
+		local rootCFrame = CFrame.new(0, 3, 0)
+		local model, trailStart, trailEnd = buildPlayerRig(rootCFrame)
+		local window = ClipSampler.hitWindows(Horizontal)[1]
+		-- The window's first frames, sampled the way the timeline samples them.
+		local times = HitSweep.sampleTimes(window.open, window.open + 3 / 60, Combat.hitSampleHz, true)
+		local frames = HitSweep.bladePath(model, rootCFrame, Horizontal, times, trailStart, trailEnd)
+		local solve = HitSweep.solver(model, Horizontal, trailStart, trailEnd)
+		expect(solve(window.open, nil)).toBeNil()
+		local path, added = HitSweep.followArc(frames, solve, Combat.sweepMaxTipStep, math.huge)
+		expect(added).toBeGreaterThan(0)
+		expect(largestStep(path)).toBeLessThanOrEqual(Combat.sweepMaxTipStep)
+		for _, sample in path do
+			local solved = HitSweep.bladeAt(model, rootCFrame, Horizontal, sample.time, trailStart, trailEnd)
+			expect((solved.finish - sample.finish).Magnitude).toBeLessThan(1e-4)
+			expect((solved.start - sample.start).Magnitude).toBeLessThan(1e-4)
+			expect((sample.finish - sample.start).Magnitude).toBeCloseTo(4, 1e-3)
+		end
+	end)
+
+	it("measures the guard as well as the tip: a blade pivoting on its point is split too", function()
+		-- The point stays put while the guard swings about 3.3 studs round it (a parry wrist, a
+		-- thrust that levers on its point).
+		local tip = Vector3.new(0, 3, -6)
+		local before = bladeSample(0, Vector3.new(0, 3, -2), tip)
+		local after = bladeSample(1 / 60, Vector3.new(3, 3, -6 + math.sqrt(16 - 9)), tip)
+		expect((after.finish - after.start).Magnitude).toBeCloseTo(4, 1e-9)
+		local guardMoved = (after.start - before.start).Magnitude
+		expect(guardMoved).toBeGreaterThan(2 * Combat.sweepMaxTipStep)
+		expect(guardMoved).toBeLessThan(4 * Combat.sweepMaxTipStep)
+		expect(HitSweep.bladeStep(before, after)).toBe(guardMoved)
+		local path, added = HitSweep.followArc({ before, after }, linearSolver({ before, after }), nil, math.huge)
+		-- Halving it twice brings it under the step.
+		expect(added).toBe(3)
+		expect(largestStep(path)).toBeLessThanOrEqual(Combat.sweepMaxTipStep)
+	end)
+
+	it("spends a capped budget on the longest step first, wherever it lies", function()
+		-- A blade sliding sideways 2 studs, then 5, then 2: every step is over the limit.
+		local path = {}
+		for index, x in { 0, 2, 7, 9 } do
+			path[index] = bladeSample((index - 1) / 60, Vector3.new(x, 3, -2), Vector3.new(x, 3, -6))
+		end
+		local solve = linearSolver(path)
+		-- One sub-sample: the middle step.
+		local one = HitSweep.followArc(path, solve, Combat.sweepMaxTipStep, 1)
+		expect(one[3].time).toBeCloseTo(1.5 / 60, 1e-9)
+		-- Three: the 5-stud step's halves (2.5) outrank the 2-stud steps, then their halves (1.25)
+		-- do not; all three land inside the middle step.
+		local three = HitSweep.followArc(path, solve, Combat.sweepMaxTipStep, 3)
+		expect(#three).toBe(7)
+		expect(three[2]).toBe(path[2])
+		expect(three[6]).toBe(path[3])
+		for index = 3, 5 do
+			expect(three[index].time).toBeGreaterThan(1 / 60)
+			expect(three[index].time).toBeLessThan(2 / 60)
+		end
+		-- The fourth goes to a 2-stud step: everything inside the middle step is 1.25 now.
+		local four = HitSweep.followArc(path, solve, Combat.sweepMaxTipStep, 4)
+		expect(largestStep(four)).toBeCloseTo(2, 1e-9)
+	end)
+
+	it("keeps the sub-samples it placed when the solver gives up part way", function()
+		local snap = snapSolver()
+		local frames = snap.frames()
+		local path, added = HitSweep.followArc(frames, function(time, rootCFrame)
+			if snap.calls >= 2 then
+				return nil
+			end
+			return snap.solve(time, rootCFrame)
+		end, Combat.sweepMaxTipStep, math.huge)
+		expect(added).toBe(2)
+		expect(#path).toBe(#frames + 2)
+		expect(largestStep(path)).toBeLessThan(largestStep(frames))
+	end)
+
+	it("a sub-sample next to a sample that kept no root is solved from its other neighbour's", function()
+		local rooted = snapSolver().at(0, SHOULDER)
+		local rootless = bladeSample(1 / 60, Vector3.new(4, 3, -2), Vector3.new(4, 3, -6))
+		for _, pair in { { rooted, rootless }, { rootless, rooted } } do
+			local seen = {}
+			HitSweep.followArc(pair, function(_time, rootCFrame)
+				table.insert(seen, rootCFrame or false)
+				return nil
+			end)
+			expect(seen).toEqual({ SHOULDER })
+		end
+	end)
+end)
+
+describe("HitSweep.castBladePath: steps the arc's cap left long", function()
+	it("casts only the midpoint across a step the blade's ends cover within sweepMaxTipStep", function()
+		local world = fakeWorld({})
+		local samples = {}
+		for index = 0, 4 do
+			local x = index * Combat.sweepMaxTipStep * 0.99
+			table.insert(samples, bladeSample(index / 60, Vector3.new(x, 3, -2), Vector3.new(x, 3, -6)))
+		end
+		HitSweep.castBladePath(samples, world.options())
+		expect(world.casts).toBe(4)
+		-- Just over it, both ends' chords are cast as well: three casts a step.
+		local over = fakeWorld({})
+		local faster = {}
+		for index = 0, 4 do
+			local x = index * Combat.sweepMaxTipStep * 1.01
+			table.insert(faster, bladeSample(index / 60, Vector3.new(x, 3, -2), Vector3.new(x, 3, -6)))
+		end
+		HitSweep.castBladePath(faster, over.options())
+		expect(over.casts).toBe(4 * 3)
+	end)
+
+	it("also casts the chord of each end that moved farther than that", function()
+		-- A cut pivoting on the guard: only the tip moves far (and the midpoint half as far).
+		local world = fakeWorld({})
+		local cut = {
+			bladeSample(0, Vector3.new(0, 3, -2), Vector3.new(0, 3, -6)),
+			bladeSample(1 / 60, Vector3.new(0, 3, -2), Vector3.new(4, 3, -2)),
+		}
+		HitSweep.castBladePath(cut, world.options())
+		expect(world.casts).toBe(2)
+		-- The body carried 3 studs with the blade held: the guard's chord is cast as well.
+		local carried = fakeWorld({})
+		local held = {
+			bladeSample(0, Vector3.new(0, 3, -2), Vector3.new(0, 3, -6)),
+			bladeSample(1 / 60, Vector3.new(3, 3, -2), Vector3.new(3, 3, -6)),
+		}
+		HitSweep.castBladePath(held, carried.options())
+		expect(carried.casts).toBe(3)
+	end)
+
+	it("a snap the cap leaves long still registers a small target on the tip's arc", function()
+		local snap = snapSolver()
+		local path = HitSweep.followArc(snap.frames(), snap.solve, Combat.sweepMaxTipStep, 2)
+		-- The longest step the cap left, and the tip's arc halfway along it.
+		local worstIndex, worst = 0, 0
+		for index = 2, #path do
+			local step = HitSweep.bladeStep(path[index - 1], path[index])
+			if step > worst then
+				worstIndex, worst = index, step
+			end
+		end
+		expect(worst).toBeGreaterThan(2 * Combat.hitSphereRadius) -- the premise: the overlaps leave a gap
+		local function degreesOf(sample): number
+			local out = sample.finish - SHOULDER.Position
+			return math.deg(math.atan2(out.X, -out.Z))
+		end
+		local degrees = (degreesOf(path[worstIndex - 1]) + degreesOf(path[worstIndex])) / 2
+		local target = makeTarget(1, onArc(degrees, 5), 0.1)
+		-- No sampled blade reaches it, nor does the midpoint's path...
+		for _, sample in path do
+			local gap = HitSweep.segmentBoxDistance(sample.start, sample.finish, target.root.CFrame, target.root.Size)
+			expect(gap).toBeGreaterThan(Combat.hitSphereRadius)
+		end
+		for index = 2, #path do
+			local origin = path[index - 1].mid
+			local gap = segmentDistance(target.position, origin, path[index].mid - origin)
+			expect(gap).toBeGreaterThan(Combat.hitSphereRadius + target.size)
+		end
+		-- ...but the tip passes through it, and the tip's chord registers it.
+		local hits = HitSweep.castBladePath(path, fakeWorld({ target }).options())
+		expect(#hits).toBe(1)
+		expect(hits[1].targetId).toBe(1)
+	end)
+
+	it("an end's chord that meets a fighter already hit, or a wall, changes nothing else", function()
+		local target = makeTarget(1, Vector3.new(4, 3, -4), 0.5)
+		local world = fakeWorld({ target })
+		local cut = {
+			bladeSample(0, Vector3.new(0, 3, -2), Vector3.new(0, 3, -6)),
+			bladeSample(1 / 60, Vector3.new(0, 3, -2), Vector3.new(4, 3, -2)),
+		}
+		local alreadyHit = {}
+		expect(#HitSweep.castBladePath(cut, world.options({ alreadyHit = alreadyHit }))).toBe(1)
+		-- The same window sweeping it again finds nothing new.
+		expect(#HitSweep.castBladePath(cut, world.options({ alreadyHit = alreadyHit }))).toBe(0)
+		-- A pillar across the tip's chord stops that cast like any other: the fighter behind it is not
+		-- reached, while one the second sample's blade lies on (just past the tip's chord, which the
+		-- pillar cut short) still registers through the overlap test.
+		local pillar = makeObstacle(Vector3.new(2.8, 3, -4.8), 0.4)
+		local beside = makeTarget(2, Vector3.new(4.6, 3, -1.6), 0.3)
+		local walled = fakeWorld({ makeTarget(1, Vector3.new(4, 3, -4), 0.5), beside }, { pillar })
+		local hits = HitSweep.castBladePath(cut, walled.options())
+		expect(#hits).toBe(1)
+		expect(hits[1].targetId).toBe(2)
+		-- Without the pillar the tip's chord reaches both.
+		expect(#HitSweep.castBladePath(cut, fakeWorld({ makeTarget(1, Vector3.new(4, 3, -4), 0.5), beside }).options())).toBe(
+			2
+		)
 	end)
 end)
 

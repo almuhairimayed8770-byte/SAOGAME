@@ -4,6 +4,9 @@
 	Times are seconds, distances are studs, fractions are 0..1.
 ]]
 
+-- The blade's hit radius (section 6, D-010). The arc sweep's step is tied to it below.
+local HIT_SPHERE_RADIUS = 1.2
+
 local Combat = {
 	-- Blade Art timeline
 	startPoseTime = 0.15, -- the body moves into the stance
@@ -99,8 +102,23 @@ local Combat = {
 	-- Server hit detection (section 6, D-010)
 	hitSampleHz = 60,
 	lagAllowance = 0.15,
-	hitSphereRadius = 1.2,
+	hitSphereRadius = HIT_SPHERE_RADIUS,
 	maxTargetsPerWindow = 6,
+	-- The sweep follows the blade's arc, not the 60 Hz chords (HitSweep.followArc): between two
+	-- samples it adds clip-time sub-samples until neither end of the blade moves farther than this.
+	-- One hit radius: every point the blade passes between two sub-samples lies within half a step
+	-- of one of them, so a blade that passes through a target always touches it with half the radius
+	-- to spare. tools/validators/combat.luau keeps it at or under two radii, where that margin is 0.
+	-- Where the cap below leaves a step longer than this, the sweep also casts the chord of each end
+	-- of the blade that moved farther (HitSweep.castBladePath), so the tip's arc is still covered.
+	sweepMaxTipStep = HIT_SPHERE_RADIUS,
+	-- Sub-samples one fighter's sweep may add in one server frame, spent where the blade moves
+	-- farthest (an expo-out snap carries most of its cut in one frame). Each costs a Pose.solve, a
+	-- GetPartBoundsInRadius and a Spherecast (two more casts on a step the cap leaves long): 8
+	-- fighters in a snap frame at once is 8 x (1 + 4) solves and queries, estimated at 3 to 6 ms of
+	-- the 12 ms server frame (world.performance.maxServerHeartbeatMs) and not yet measured in Studio.
+	-- Pose.solve walks the whole character for its joints, so accessories raise the cost.
+	sweepMaxSubdivisions = 4,
 	facingTolerance = 0.35, -- cosine slack when comparing reported facing to the server's
 
 	-- Anti-cheat basics (section 17)

@@ -9,7 +9,8 @@
 	  1.00-1.30  the final loading: up onto the toes, the axe a hair higher (QuadIn)
 	  1.30-1.35  Snap: the chop. The whole body folds down behind the axe, the weight drops.
 	  1.35-1.40  Hold, then Settle: the axe bites the ground and rebounds
-	  1.33-1.50  hit window
+	  1.30-1.50  hit window: opens on the snap's first frame with the trail and closes in the settle
+	             (the server resolves the Brute's cone at windUp + strike = 1.35 s, inside it)
 	  1.55-2.75  Recovery: the axe is stuck low; two tugs free it, then the stance returns
 	Rig: Kobold. Root X+ arches back / X- bends forward; Shoulder X+ raises an arm forward and up;
 	Weapon X- tips the axe head down.
@@ -195,10 +196,10 @@ local clip: Types.ClipDef = {
 	},
 	events = {
 		{ time = 0.15, kind = "Voice", data = { name = "enemy.BruteWindUp" } },
-		{ time = 1.28, kind = "TrailOn", data = { kind = "Basic" } },
+		{ time = 1.3, kind = "TrailOn", data = { kind = "Basic" } },
 		{ time = 1.3, kind = "SmearOn", data = { axis = "Y" } },
 		{ time = 1.3, kind = "Sfx", data = { name = "whoosh.Large" } },
-		{ time = 1.33, kind = "HitWindowOpen", data = { hit = 1 } },
+		{ time = 1.3, kind = "HitWindowOpen", data = { hit = 1 } },
 		{ time = 1.3333, kind = "SmearOff" },
 		{ time = 1.37, kind = "Sfx", data = { name = "footsteps.LandHard" } },
 		{ time = 1.5, kind = "HitWindowClose", data = { hit = 1 } },

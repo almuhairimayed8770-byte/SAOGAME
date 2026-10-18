@@ -6,7 +6,12 @@
 	tools/animation-review.luau writes into docs/ANIMATION_REVIEW.md: the six beats with their
 	frame counts at 60 fps, the hit windows, the trail and smear spans, the trail timing relative
 	to the hit windows, the root motion in studs, and the problems a reviewer would flag (missing
-	beats, Linear on a limb, a trail outside a window, a Snap or Anticipation outside its budget).
+	beats, Linear on a limb, a trail outside a window, a Snap or Anticipation outside its budget, a
+	hit window that does not cover its strike's snap).
+
+	It also derives the strike snap of every hit (strikeSnaps): the clips validator
+	(tools/validators/clips.luau) pairs each hit window with it, so the review report and CI read
+	the snaps the same way.
 
 	No Instances, no Roblox datatypes: ClipLab and the Lune tool both call it.
 ]]
@@ -90,8 +95,8 @@ function ReviewMarkers.frameLabel(time: number, duration: number): string
 end
 
 local function spanOf(clip: Types.ClipDef, beat: Types.Beat): Span?
-	local beats = clip.beats
-	if beats == nil then
+	local beats: any = clip.beats
+	if typeof(beats) ~= "table" then
 		return nil
 	end
 	local span = (beats :: any)[beat]
@@ -245,6 +250,83 @@ local function inRange(frames: number, range: { min: number, max: number }): boo
 	return frames >= range.min - EPSILON and frames <= range.max + EPSILON
 end
 
+--- The strike snaps of an attack clip in clip order (section 10 beat 2), one per strike. The first
+--- is the beats table's Snap. The beats table describes only the first strike, so every later one
+--- is read from the keys the way that Snap is authored: a key that moves a joint with ExpoOut
+--- easing and lands 2..4 frames (the Snap budget) after the key before it; the snap runs from that
+--- earlier key (the end of the anticipation or re-wind) to the struck pose. An ExpoOut key outside
+--- the budget is not a strike (a start pose eased in over 9 frames, a wind-up crouch, a gore at the
+--- end of a rush). Without a beats Snap every such key counts, the first included.
+function ReviewMarkers.strikeSnaps(clip: Types.ClipDef): { Span }
+	local snaps: { Span } = {}
+	local first = spanOf(clip, "Snap")
+	if first ~= nil then
+		table.insert(snaps, first)
+	end
+	local after = if first ~= nil then first.finish else -math.huge
+	for index = 2, #clip.keys do
+		local key = clip.keys[index]
+		local previous = clip.keys[index - 1]
+		if key.easing == "ExpoOut" and next(key.joints) ~= nil and previous.time >= after - EPSILON then
+			if inRange(ReviewMarkers.frames(key.time - previous.time), Review.snapFrames) then
+				table.insert(snaps, { start = previous.time, finish = key.time })
+			end
+		end
+	end
+	return snaps
+end
+
+--- Hit windows against their strikes: the n-th window must open by the n-th snap's start and stay
+--- open through that snap's end (within Review.windowSnapToleranceFrames), so the server's sweep
+--- covers the whole cut and not only its follow-through. A clip without hit windows has nothing to
+--- pair (a guard Art; a missing window is reported on its own). A count mismatch is reported once
+--- and the windows that do have a snap are still checked.
+function ReviewMarkers.windowSnapProblems(clip: Types.ClipDef): { string }
+	local problems = {}
+	local windows = ClipSampler.hitWindows(clip)
+	if #windows == 0 then
+		return problems
+	end
+	local snaps = ReviewMarkers.strikeSnaps(clip)
+	if #snaps ~= #windows then
+		table.insert(
+			problems,
+			("%d hit windows but %d strike snaps (ExpoOut keys %d..%d frames after the key before)"):format(
+				#windows,
+				#snaps,
+				Review.snapFrames.min,
+				Review.snapFrames.max
+			)
+		)
+	end
+	local tolerance = Review.windowSnapToleranceFrames / FPS
+	for index = 1, math.min(#windows, #snaps) do
+		local window = windows[index]
+		local snap = snaps[index]
+		if window.open > snap.start + tolerance then
+			table.insert(
+				problems,
+				("hit window %d opens %.2f frames after its snap starts (f %.2f)"):format(
+					index,
+					ReviewMarkers.frames(window.open - snap.start),
+					ReviewMarkers.frames(snap.start)
+				)
+			)
+		end
+		if window.close < snap.finish - tolerance then
+			table.insert(
+				problems,
+				("hit window %d closes %.2f frames before its snap ends (f %.2f)"):format(
+					index,
+					ReviewMarkers.frames(snap.finish - window.close),
+					ReviewMarkers.frames(snap.finish)
+				)
+			)
+		end
+	end
+	return problems
+end
+
 -- Section 10 budgets the Anticipation of every player attack (Arts and basics alike); an enemy's
 -- Anticipation is its wind-up from enemies.luau, which the clips validator checks instead.
 local function isPlayerAttack(clip: Types.ClipDef): boolean
@@ -306,6 +388,9 @@ function ReviewMarkers.problems(clip: Types.ClipDef): { string }
 	local windows = ClipSampler.hitWindows(clip)
 	if #windows == 0 then
 		table.insert(problems, "no hit window")
+	end
+	for _, problem in ReviewMarkers.windowSnapProblems(clip) do
+		table.insert(problems, problem)
 	end
 	local trail = ReviewMarkers.trailTiming(clip)
 	if #trail.spans == 0 then

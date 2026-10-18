@@ -12,6 +12,16 @@
 	  4..10 frames (a warning, not an error, on enemy clips: enemies hold longer), hitStop set, at
 	  least one hit window (unless the Art it belongs to has 0 hits), TrailOn/TrailOff and
 	  SmearOn/SmearOff present, and for player Arts ActivationHold and PostMotionStart present;
+	- every hit window of an attack clip covers its strike's snap: the n-th window opens at or
+	  before the n-th snap's start and closes at or after its end, within dev.luau
+	  review.windowSnapToleranceFrames (a hundredth of a frame), and there are as many snaps as
+	  windows. The snaps come from ReviewMarkers.strikeSnaps (the beats table's Snap, then every
+	  later ExpoOut key 2..4 frames after the key before it), the same derivation the review report
+	  uses. The server sweeps the blade only inside the windows; a window that opens after its
+	  snap starts sweeps the follow-through of an ExpoOut cut, not the cut;
+	- a TrailOn that names its trail kind (data.kind) is listed before the clip's first
+	  HitWindowOpen: the client remembers the kind from the first event that names one, and the
+	  window opens on the same frame;
 	- cross-checks: every Art in arts.luau has a clip file whose hit-window count equals the Art's
 	  hits and whose duration covers the Art's total; every enemy attack clip in enemies.luau and
 	  every boss attack clip in bosses.luau exists, is an attack clip, and its Anticipation beat
@@ -116,6 +126,7 @@ return function(ctx: Context): { string }
 
 	local Easing = ctx.load("src/shared/util/Easing")
 	local ClipSampler = ctx.load("src/shared/choreo/ClipSampler")
+	local ReviewMarkers = ctx.load("src/client/dev/ReviewMarkers")
 	local rigs = ctx.load("src/shared/data/rigs")
 
 	local rigJoints: { [string]: { [string]: boolean } } = {}
@@ -452,6 +463,20 @@ return function(ctx: Context): { string }
 		return #ClipSampler.hitWindows(clip)
 	end
 
+	-- Keys the snap derivation can read (times and joint tables); a malformed key is already
+	-- reported by validateKeys and must not reach ReviewMarkers.
+	local function keysReadable(clip: any): boolean
+		if typeof(clip.keys) ~= "table" then
+			return false
+		end
+		for _, key in ipairs(clip.keys) do
+			if typeof(key) ~= "table" or typeof(key.time) ~= "number" or typeof(key.joints) ~= "table" then
+				return false
+			end
+		end
+		return true
+	end
+
 	local function validateAttack(id: string, clip: any, counts: { [string]: number })
 		validateBeats(id, clip)
 		if not HIT_STOPS[clip.hitStop] then
@@ -462,9 +487,45 @@ return function(ctx: Context): { string }
 		if windows == 0 and not (art and art.hits == 0) then
 			problem("%s: attack clip has no HitWindowOpen/HitWindowClose pair", id)
 		end
+		-- Every hit window covers its strike's snap (opens by the snap start, closes after its end).
+		if windows ~= nil and windows > 0 and keysReadable(clip) then
+			for _, message in ReviewMarkers.windowSnapProblems(clip) do
+				problem("%s: %s", id, message)
+			end
+		end
 		for _, kind in { "TrailOn", "TrailOff", "SmearOn", "SmearOff" } do
 			if (counts[kind] or 0) == 0 then
 				problem("%s: attack clip has no %s event", id, kind)
+			end
+		end
+		-- The client lights each window with the trail kind the clip's TrailOn names, remembered from
+		-- the first event that names one (Replication). Windows open on the snap's first frame, the
+		-- same time as that TrailOn, so the list order decides: a HitWindowOpen listed first lights
+		-- the kind the clip id implies (an enemy's window would light the player Art trail).
+		if typeof(clip.events) == "table" then
+			local firstWindow, firstNamed = nil, nil
+			for index, event in ipairs(clip.events) do
+				if typeof(event) ~= "table" then
+					continue
+				end
+				if event.kind == "HitWindowOpen" and firstWindow == nil then
+					firstWindow = index
+				elseif
+					event.kind == "TrailOn"
+					and firstNamed == nil
+					and typeof(event.data) == "table"
+					and typeof(event.data.kind) == "string"
+				then
+					firstNamed = index
+				end
+			end
+			if firstWindow ~= nil and firstNamed ~= nil and firstWindow < firstNamed then
+				problem(
+					"%s: HitWindowOpen (event %d) is listed before the TrailOn that names the trail kind (event %d)",
+					id,
+					firstWindow,
+					firstNamed
+				)
 			end
 		end
 		if isPlayerArtClip(id) then

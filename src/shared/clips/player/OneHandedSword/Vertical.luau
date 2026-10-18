@@ -7,8 +7,11 @@
 	  0.00-0.15  start pose: the blade rises high behind the head, the back arches, weight back
 	  0.15-0.25  activation hold: the blade lights, the arch breathes
 	  0.25-0.35  Anticipation (6 frames): up onto the toes, the arch deepens, the free hand opens
-	  0.35-0.40  Snap (3 frames): the chop, the whole body folding down behind it
+	  0.35-0.40  Snap (3 frames): the chop, the whole body folding down behind it, the torso
+	             squaring left so the blade falls on the centre line
 	  0.35-0.38  Smear
+	  0.35-0.48  Hit window: opens on the snap's first frame (the trail ignites with it), so the
+	             server sweeps the whole chop, and closes in the settle
 	  0.40-0.43  Hold
 	  0.43-0.55  Settle (Spring): the blade rebounds a few degrees off the ground
 	  0.60-1.00  Recovery / post-motion: bent low over the blade, breathing
@@ -115,8 +118,8 @@ local clip: Types.ClipDef = {
 			easing = "ExpoOut",
 			joints = {
 				Root = posRot(0, -0.42, -0.06, 0, 4, 0),
-				Waist = rot(-36, 6, 2),
-				Neck = rot(-6, -6, 0),
+				Waist = rot(-36, 12, 2),
+				Neck = rot(-6, -12, 0),
 				RightShoulder = rot(28, 0, 2),
 				RightElbow = rot(6, 0, 0),
 				RightWrist = rot(-8, 0, 0),
@@ -145,8 +148,8 @@ local clip: Types.ClipDef = {
 			easing = "Spring",
 			joints = {
 				Root = posRot(0, -0.38, -0.05, 0, 3, 0),
-				Waist = rot(-30, 4, 2),
-				Neck = rot(-2, -4, 0),
+				Waist = rot(-30, 10, 2),
+				Neck = rot(-2, -10, 0),
 				RightShoulder = rot(34, 0, 4),
 				RightElbow = rot(10, 0, 0),
 				Weapon = rot(-80, 0, 0),
@@ -157,8 +160,8 @@ local clip: Types.ClipDef = {
 			time = 0.75,
 			easing = "SineInOut",
 			joints = {
-				Waist = rot(-31, 4, 2),
-				Neck = rot(-1, -4, 0),
+				Waist = rot(-31, 10, 2),
+				Neck = rot(-1, -10, 0),
 				Weapon = rot(-79, 0, 1),
 				RightWrist = rot(-7, 0, 1),
 			},
@@ -167,8 +170,8 @@ local clip: Types.ClipDef = {
 			time = 0.9,
 			easing = "SineInOut",
 			joints = {
-				Waist = rot(-30, 4, 2),
-				Neck = rot(-3, -4, 0),
+				Waist = rot(-30, 10, 2),
+				Neck = rot(-3, -10, 0),
 				Weapon = rot(-81, 0, -1),
 				RightWrist = rot(-9, 0, -1),
 			},
@@ -185,10 +188,10 @@ local clip: Types.ClipDef = {
 	},
 	events = {
 		{ time = 0.15, kind = "ActivationHold", data = { hold = 0.1 } },
-		{ time = 0.33, kind = "TrailOn", data = { kind = "Art" } },
+		{ time = 0.35, kind = "TrailOn", data = { kind = "Art" } },
 		{ time = 0.35, kind = "SmearOn", data = { axis = "Y" } },
 		{ time = 0.35, kind = "Sfx", data = { name = "whoosh.Large" } },
-		{ time = 0.36, kind = "HitWindowOpen", data = { hit = 1 } },
+		{ time = 0.35, kind = "HitWindowOpen", data = { hit = 1 } },
 		{ time = 0.3833, kind = "SmearOff" },
 		{ time = 0.48, kind = "HitWindowClose", data = { hit = 1 } },
 		{ time = 0.52, kind = "TrailOff" },

@@ -19,10 +19,30 @@
 	each once per window; a part that is not a fighter is never a hit, and stops a cast like a
 	wall. The Art timeline in CombatService turns hits into damage. Nothing here decides damage.
 
-	Pure pieces (Lune-tested): samplePath / sampleTimes, bladePath (Pose over Lune Instances),
-	segmentBoxDistance, castPath and castBladePath with an injectable caster and broad phase, and the
-	cone / line tests enemy strikes use. The only engine calls are the defaults: workspace:Spherecast
-	and workspace:GetPartBoundsInRadius.
+	The sweep follows the blade's arc, not the frame chords (followArc). A snap is expo-out over 2 to
+	4 frames (section 10), so one 60 Hz step can carry the blade through most of its cut, and the
+	straight line between two frame samples cuts the corner of that arc: a target inside the arc but
+	off the chord is never touched. Between consecutive samples followArc inserts clip-time
+	sub-samples, solved through the same Pose, until neither end of the blade moves more than
+	combat.sweepMaxTipStep between two of them, spending at most combat.sweepMaxSubdivisions per
+	frame on the intervals where the blade moves fastest. A blade that moves less than the step adds
+	nothing. Each sub-sample is an ordinary sample to castBladePath: overlap-tested, its midpoint
+	cast to the next one, its hits counted against the same window set. Where the cap runs out
+	first and an end of the blade still moves more than the step between two samples, castBladePath
+	also casts that end's own chord: the overlap tests no longer close the gap there, and the
+	midpoint's cast passes half a blade inside the tip's arc.
+
+	The body moves between server frames (the clip's root motion, as the replicated root reports
+	it), and the root is never frozen during a window. A sample keeps the root it was solved from,
+	and the roots of the samples after the previous frame's last are spread in clip time between
+	that sample's root and the live one (bladePath's `from`, followArc's sub-samples), so a frame
+	that sweeps several sample times carries the body's travel across them as it happened.
+
+	Pure pieces (Lune-tested): samplePath / sampleTimes, bladeAt / bladePath (Pose over Lune
+	Instances), bladeStep and followArc with an injectable solver, segmentBoxDistance, castPath and
+	castBladePath with an injectable caster and broad phase, and the cone / line tests enemy strikes
+	use. The only engine calls are the defaults: workspace:Spherecast and
+	workspace:GetPartBoundsInRadius.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -40,7 +60,14 @@ export type BladeSample = {
 	start: Vector3, -- TrailStart (the guard)
 	finish: Vector3, -- TrailEnd (the tip)
 	mid: Vector3,
+	-- The root CFrame the blade was solved from (bladeAt sets it). followArc places a sub-sample's
+	-- root between its neighbours' roots; a hand-built sample may leave it out.
+	root: CFrame?,
 }
+
+-- Where the blade is at one clip time from one root CFrame, or nil when the rig cannot place it.
+-- followArc calls it for each sub-sample; HitSweep.solver builds the one CombatService uses.
+export type BladeSolver = (time: number, rootCFrame: CFrame?) -> BladeSample?
 
 export type Hit = { targetId: number, position: Vector3 }
 
@@ -143,40 +170,156 @@ function HitSweep.samplePath(clip: Types.ClipDef, window: Window, hz: number?): 
 	return HitSweep.sampleTimes(open, close, rate, true)
 end
 
---- Where the blade is at each clip time: TrailStart, TrailEnd and their midpoint, solved through Pose
+--- Where the blade is at one clip time: TrailStart, TrailEnd and their midpoint, solved through Pose
 --- from `rootCFrame` with the clip's joint offsets. Returns nil when an attachment is not on the rig.
+function HitSweep.bladeAt(
+	model: Model,
+	rootCFrame: CFrame,
+	clip: Types.ClipDef,
+	time: number,
+	trailStart: Attachment,
+	trailEnd: Attachment
+): BladeSample?
+	local startPart = trailStart.Parent
+	local endPart = trailEnd.Parent
+	if startPart == nil or endPart == nil or not startPart:IsA("BasePart") or not endPart:IsA("BasePart") then
+		return nil
+	end
+	local offsets = ClipSampler.sample(clip, time)
+	local solved = Pose.solve(model, rootCFrame, offsets)
+	local startCFrame = solved[startPart.Name]
+	local endCFrame = solved[endPart.Name]
+	if startCFrame == nil or endCFrame == nil then
+		return nil
+	end
+	local startPosition = (startCFrame * trailStart.CFrame).Position
+	local endPosition = (endCFrame * trailEnd.CFrame).Position
+	return {
+		time = time,
+		start = startPosition,
+		finish = endPosition,
+		mid = startPosition:Lerp(endPosition, 0.5),
+		root = rootCFrame,
+	}
+end
+
+--- Where the blade is at each clip time (bladeAt for every time), solved from `rootCFrame`. When
+--- `from` is given (the sample this path continues from, the previous frame's last, with the root
+--- it was solved from), each sample's root is interpolated in clip time from `from.root` to
+--- `rootCFrame`, which the last time reaches: a frame that sweeps several sample times (a server
+--- hitch) spreads the body's travel over them instead of solving the earlier ones where the body
+--- only is now. Returns nil when an attachment is not on the rig.
 function HitSweep.bladePath(
 	model: Model,
 	rootCFrame: CFrame,
 	clip: Types.ClipDef,
 	times: { number },
 	trailStart: Attachment,
-	trailEnd: Attachment
+	trailEnd: Attachment,
+	from: BladeSample?
 ): { BladeSample }?
-	local startPart = trailStart.Parent
-	local endPart = trailEnd.Parent
-	if startPart == nil or endPart == nil or not startPart:IsA("BasePart") or not endPart:IsA("BasePart") then
-		return nil
-	end
+	local fromRoot: CFrame? = if from ~= nil then from.root else nil
+	local fromTime = if from ~= nil then from.time else 0
+	local span = if #times > 0 then times[#times] - fromTime else 0
 	local samples: { BladeSample } = {}
-	for _, time in times do
-		local offsets = ClipSampler.sample(clip, time)
-		local solved = Pose.solve(model, rootCFrame, offsets)
-		local startCFrame = solved[startPart.Name]
-		local endCFrame = solved[endPart.Name]
-		if startCFrame == nil or endCFrame == nil then
+	for index, time in times do
+		local root = rootCFrame
+		if fromRoot ~= nil and span > 0 and index < #times then
+			root = fromRoot:Lerp(rootCFrame, math.clamp((time - fromTime) / span, 0, 1))
+		end
+		local sample = HitSweep.bladeAt(model, root, clip, time, trailStart, trailEnd)
+		if sample == nil then
 			return nil
 		end
-		local startPosition = (startCFrame * trailStart.CFrame).Position
-		local endPosition = (endCFrame * trailEnd.CFrame).Position
-		table.insert(samples, {
-			time = time,
-			start = startPosition,
-			finish = endPosition,
-			mid = startPosition:Lerp(endPosition, 0.5),
-		})
+		table.insert(samples, sample)
 	end
 	return samples
+end
+
+--- The solver followArc uses for one fighter's clip: bladeAt from the root it is given.
+function HitSweep.solver(model: Model, clip: Types.ClipDef, trailStart: Attachment, trailEnd: Attachment): BladeSolver
+	return function(time: number, rootCFrame: CFrame?): BladeSample?
+		if rootCFrame == nil then
+			return nil
+		end
+		return HitSweep.bladeAt(model, rootCFrame, clip, time, trailStart, trailEnd)
+	end
+end
+
+--- How far the blade moves from sample `a` to sample `b`: the farther of its two ends (in a cut,
+--- the tip; in a thrust or a body carried by root motion, the guard can match it).
+function HitSweep.bladeStep(a: BladeSample, b: BladeSample): number
+	return math.max((b.finish - a.finish).Magnitude, (b.start - a.start).Magnitude)
+end
+
+-- The root a sub-sample is solved from, `alpha` of the way from `a` to `b`: the body moves between
+-- two frames the way the replicated root did, so a root that moved with the clip's root motion is
+-- spread over the interval instead of landing as one jump that no clip-time split can shrink.
+local function rootBetween(a: BladeSample, b: BladeSample, alpha: number): CFrame?
+	local from, to = a.root, b.root
+	if from ~= nil and to ~= nil then
+		return from:Lerp(to, alpha)
+	end
+	return to or from
+end
+
+--- Follows the blade's arc between consecutive samples of `path`: while the blade moves more than
+--- `maxStep` (combat.sweepMaxTipStep) between two neighbours, the interval it moves farthest in is
+--- split at its clip-time midpoint with a sub-sample from `solve`, until every step is at most
+--- `maxStep` or `maxSubdivisions` (combat.sweepMaxSubdivisions) sub-samples were added. Largest
+--- first, so a capped frame spends its sub-samples on the snap, not the settle. The path's own
+--- samples are kept in order (the first and last stay first and last); a blade that never moves
+--- more than `maxStep` gets the same path back and `solve` is never called. Returns the refined
+--- path and how many sub-samples it added. A sub-sample `solve` cannot place ends the refinement.
+function HitSweep.followArc(
+	path: { BladeSample },
+	solve: BladeSolver,
+	maxStep: number?,
+	maxSubdivisions: number?
+): ({ BladeSample }, number)
+	local limit = maxStep or Combat.sweepMaxTipStep
+	local budget = maxSubdivisions or Combat.sweepMaxSubdivisions
+	if #path < 2 or budget <= 0 then
+		return path, 0
+	end
+	-- steps[index] is the blade's step from refined[index - 1] to refined[index] (steps[1] unused).
+	local refined: { BladeSample } = {}
+	local steps: { number } = {}
+	local needsSplit = false
+	for index, sample in path do
+		refined[index] = sample
+		local step = if index > 1 then HitSweep.bladeStep(path[index - 1], sample) else 0
+		steps[index] = step
+		if step > limit then
+			needsSplit = true
+		end
+	end
+	if not needsSplit then
+		return path, 0
+	end
+	local added = 0
+	while added < budget do
+		local worstIndex, worstStep = 0, limit
+		for index = 2, #refined do
+			if steps[index] > worstStep then
+				worstIndex, worstStep = index, steps[index]
+			end
+		end
+		if worstIndex == 0 then
+			break
+		end
+		local before, after = refined[worstIndex - 1], refined[worstIndex]
+		local time = before.time + (after.time - before.time) * 0.5
+		local sample = solve(time, rootBetween(before, after, 0.5))
+		if sample == nil then
+			break
+		end
+		table.insert(refined, worstIndex, sample)
+		steps[worstIndex] = HitSweep.bladeStep(before, sample)
+		table.insert(steps, worstIndex + 1, HitSweep.bladeStep(sample, after))
+		added += 1
+	end
+	return refined, added
 end
 
 -- The cut points of segmentBoxDistance, reused across calls (it never yields).
@@ -424,11 +567,32 @@ function HitSweep.castPath(points: { Vector3 }, options: CastOptions): { Hit }
 	return hits
 end
 
+-- Casts the chord one end of the blade travelled from `from` to `to` when it is longer than the arc
+-- sweep's step: the step followArc could not reach before its cap ran out.
+local function castLongChord(
+	from: Vector3,
+	to: Vector3,
+	radius: number,
+	exclude: { Instance },
+	options: CastOptions,
+	alreadyHit: { [number]: boolean },
+	hits: { Hit },
+	budget: number,
+	cast: Caster
+)
+	local chord = to - from
+	if chord.Magnitude > Combat.sweepMaxTipStep then
+		castSegment(from, chord, radius, exclude, options, alreadyHit, hits, budget, cast)
+	end
+end
+
 --- Full sweep of a blade path, in time order: at every sample the whole blade (guard to tip) is
 --- tested for overlap, so a blade that starts the window inside a target, a target that walks onto
 --- a resting blade and a thrust along the blade all register; between samples the blade's midpoint
---- is spherecast, so a cut that crosses a target between two samples registers too. Each fighter
---- counts once per window (`alreadyHit`), up to the window's target cap.
+--- is spherecast, so a cut that crosses a target between two samples registers too. A step in
+--- which the tip or the guard still moves more than combat.sweepMaxTipStep (followArc's cap ran out)
+--- also casts that end's chord. Each fighter counts once per window (`alreadyHit`), up to the
+--- window's target cap.
 function HitSweep.castBladePath(samples: { BladeSample }, options: CastOptions): { Hit }
 	local hits: { Hit } = {}
 	if #samples == 0 then
@@ -446,8 +610,11 @@ function HitSweep.castBladePath(samples: { BladeSample }, options: CastOptions):
 			break
 		end
 		if index > 1 then
-			local origin = samples[index - 1].mid
+			local previous = samples[index - 1]
+			local origin = previous.mid
 			castSegment(origin, sample.mid - origin, radius, exclude, options, alreadyHit, hits, budget, cast)
+			castLongChord(previous.finish, sample.finish, radius, exclude, options, alreadyHit, hits, budget, cast)
+			castLongChord(previous.start, sample.start, radius, exclude, options, alreadyHit, hits, budget, cast)
 		end
 		if index > 1 or not options.continued then
 			overlapBlade(sample.start, sample.finish, radius, options, alreadyHit, hits, budget, overlap)

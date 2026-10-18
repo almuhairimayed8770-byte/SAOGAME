@@ -35,11 +35,14 @@ local Choreo = Harness.load("src/client/choreo/Choreo")
 local ChoreoData = Harness.load("src/shared/data/choreo")
 local Combat = Harness.load("src/shared/data/combat")
 local Rigs = Harness.load("src/shared/data/rigs")
+local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
+local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
 
 local FRAME = 1 / 60
 local HORIZONTAL = "player/OneHandedSword/Horizontal"
 local GUARD = "player/OneHandedSword/Guard"
-local HIT_OPEN_TIME = 0.36 -- the Horizontal clip's first HitWindowOpen
+-- The Horizontal clip's first HitWindowOpen, read from the clip so the spec follows the data.
+local HIT_OPEN_TIME: number = ClipSampler.hitWindows(ClipLibrary.get(HORIZONTAL))[1].open
 
 local clock = 0
 local camera = Vector3.zero
@@ -361,7 +364,9 @@ describe("Choreo", function()
 		animator.finished:Connect(function()
 			finished += 1
 		end)
-		local started = 0.1
+		-- Half a frame off the 60 Hz grid: the clip's events sit on frame boundaries (the window opens
+		-- on the snap key), and which step crosses a boundary event would come down to float rounding.
+		local started = 0.1 + FRAME * 0.5
 		local handle = animator:play(HORIZONTAL, { serverTime = clock - started, blendIn = 0 })
 		expect(animator:isPlaying(HORIZONTAL)).toBe(true)
 		expect(handle.clipId).toBe(HORIZONTAL)

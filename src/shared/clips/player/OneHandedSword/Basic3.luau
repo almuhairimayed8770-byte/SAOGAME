@@ -3,9 +3,9 @@
 	player/OneHandedSword/Basic3: the third basic: a diagonal cut from high right down to the left with a committed step, the chain finisher
 	(combat.luau basicHitDuration 0.35; the clip runs to 0.45 so the pose drifts toward ready inside
 	the chain window and blends cleanly into the next basic). Six beats like every attack: a
-	6-frame anticipation from the ready stance, a 3-frame ExpoOut snap with a thin white trail, a
-	2-frame hold on contact, a spring settle, a short recovery. No activation hold: basics have no
-	tell.
+	6-frame anticipation from the ready stance, a 3-frame ExpoOut snap with a thin white trail and
+	the hit window opening on its first frame, a 2-frame hold on contact, a spring settle, a short
+	recovery. No activation hold: basics have no tell.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -141,10 +141,10 @@ local clip: Types.ClipDef = {
 		},
 	},
 	events = {
-		{ time = 0.09, kind = "TrailOn", data = { kind = "Basic" } },
+		{ time = 0.1, kind = "TrailOn", data = { kind = "Basic" } },
 		{ time = 0.1, kind = "SmearOn", data = { axis = "Y" } },
 		{ time = 0.1, kind = "Sfx", data = { name = "whoosh.Basic" } },
-		{ time = 0.12, kind = "HitWindowOpen", data = { hit = 1 } },
+		{ time = 0.1, kind = "HitWindowOpen", data = { hit = 1 } },
 		{ time = 0.1333, kind = "SmearOff" },
 		{ time = 0.24, kind = "HitWindowClose", data = { hit = 1 } },
 		{ time = 0.27, kind = "TrailOff" },

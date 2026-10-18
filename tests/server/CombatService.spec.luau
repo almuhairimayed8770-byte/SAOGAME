@@ -833,28 +833,163 @@ describe("CombatService hit sweep", function()
 		end
 	end)
 
-	it("every sample of a window is tested for overlap once", function()
+	it("every sample of a window, frame samples and arc sub-samples alike, is tested for overlap once", function()
 		fresh()
-		local _, player = spawnPlayer()
+		local playerId, player, character = spawnPlayer()
 		spawnBoar(CFrame.new(0, 1.2, -40))
 		local window = ClipSampler.hitWindows(Horizontal)[1]
+		local trailStart, trailEnd = HitSweep.trailAttachments(character)
+		local rootCFrame = character.PrimaryPart.CFrame
+		local solve = HitSweep.solver(character, Horizontal, trailStart, trailEnd)
 		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
-		-- Count the samples the timeline takes, frame by frame, the way stepRun asks for them.
-		local expected = 0
-		local sampledTo = nil
-		local elapsed = 0
-		while elapsed < 0.6 do
+		local _, startedAt = CombatService.currentArt(playerId)
+		-- Mirror the timeline frame by frame, the way stepRun asks for samples: this frame's samples
+		-- after the last one, the arc between them, every one tested but the one it continues from.
+		local expected, frameSamples, subSamples = 0, 0, 0
+		local sampledTo, last = nil, nil
+		while clock.t - startedAt < 0.6 do
+			local before = overlapQueries
 			advance(1 / 60)
-			elapsed += 1 / 60
-			if elapsed >= window.open and (sampledTo == nil or sampledTo < window.close) then
-				local toTime = math.min(elapsed, window.close)
-				local from = sampledTo or window.open
-				expected += #HitSweep.sampleTimes(from, toTime, Combat.hitSampleHz, sampledTo == nil)
+			local clipTime = clock.t - startedAt
+			local thisFrame = 0
+			if clipTime >= window.open and (sampledTo == nil or sampledTo < window.close) then
+				local toTime = math.min(clipTime, window.close)
+				local times =
+					HitSweep.sampleTimes(sampledTo or window.open, toTime, Combat.hitSampleHz, sampledTo == nil)
+				local chain = { last }
+				for _, sample in HitSweep.bladePath(character, rootCFrame, Horizontal, times, trailStart, trailEnd) do
+					table.insert(chain, sample)
+				end
+				local path, added = HitSweep.followArc(chain, solve)
+				expect(added).toBeLessThanOrEqual(Combat.sweepMaxSubdivisions)
+				thisFrame = #path - (if last ~= nil then 1 else 0)
+				frameSamples += #times
+				subSamples += added
+				last = path[#path]
 				sampledTo = toTime
 			end
+			expect(overlapQueries - before).toBe(thisFrame)
+			expected += thisFrame
 		end
-		expect(expected).toBeGreaterThan(5)
+		expect(frameSamples).toBeGreaterThan(5)
+		expect(subSamples).toBeGreaterThan(0) -- the snap moves the tip farther than the step between frames
 		expect(overlapQueries).toBe(expected)
+		expect(expected).toBe(frameSamples + subSamples)
+	end)
+
+	it("a frame never adds more than sweepMaxSubdivisions; a root that moved is spread over them", function()
+		fresh()
+		local centers = {}
+		useOverlap(function(center, radius, exclude)
+			table.insert(centers, center)
+			return fakeOverlap(center, radius, exclude)
+		end)
+		local playerId, player, character = spawnPlayer()
+		local window = ClipSampler.hitWindows(Horizontal)[1]
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		local _, startedAt = CombatService.currentArt(playerId)
+		-- Into the window's second half, where the blade holds and settles, one frame at a time.
+		while clock.t - startedAt < (window.open + window.close) / 2 do
+			advance(1 / 60)
+		end
+		-- Between two frames the replicated root lands 12 studs ahead: ten step limits, far more than
+		-- one frame's cap can split.
+		local root = character.PrimaryPart
+		local from = root.CFrame
+		root.CFrame = from * CFrame.new(0, 0, -12)
+		table.clear(centers)
+		advance(1 / 60)
+		-- The frame's one sample plus exactly the cap of sub-samples (the sample it continues from
+		-- was tested last frame).
+		expect(#centers).toBe(1 + Combat.sweepMaxSubdivisions)
+		-- Solved from roots between the two frames' roots, in order: the blade walks forward with the
+		-- body instead of jumping.
+		for index = 2, #centers do
+			expect(centers[index].Z).toBeLessThan(centers[index - 1].Z)
+		end
+		expect(centers[1].Z).toBeLessThan(from.Position.Z)
+		expect(centers[#centers].Z).toBeGreaterThan(root.CFrame.Position.Z - 12)
+		expect(#sentOf("HitConfirmed")).toBe(0)
+	end)
+
+	it("a hitch frame solves each of its samples from the root its clip time reached", function()
+		fresh()
+		local centers = {}
+		useOverlap(function(center, radius, exclude)
+			table.insert(centers, center)
+			return fakeOverlap(center, radius, exclude)
+		end)
+		local playerId, player, character = spawnPlayer()
+		local window = ClipSampler.hitWindows(Horizontal)[1]
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		local _, startedAt = CombatService.currentArt(playerId)
+		while clock.t - startedAt < window.open + 2 / 60 do
+			advance(1 / 60)
+		end
+		local lastTime = clock.t - startedAt -- the clip time of last frame's sample
+		-- One server frame four sample times long, while the replicated root travelled 6 studs.
+		local root = character.PrimaryPart
+		local from = root.CFrame
+		local to = from * CFrame.new(0, 0, -6)
+		root.CFrame = to
+		table.clear(centers)
+		advance(4 / 60, 4 / 60)
+		local clipTime = clock.t - startedAt
+		expect(clipTime).toBeLessThan(window.close) -- the premise: still inside the window
+		local times = HitSweep.sampleTimes(lastTime, clipTime, Combat.hitSampleHz)
+		expect(#times).toBe(4)
+		-- Every frame sample, in order, is the blade solved from the root a straight walk from last
+		-- frame's root to this one had reached at its clip time: the last from the live root.
+		local trailStart, trailEnd = HitSweep.trailAttachments(character)
+		local nextFrame = 1
+		for _, center in centers do
+			if nextFrame <= #times then
+				local alpha = (times[nextFrame] - lastTime) / (clipTime - lastTime)
+				local blade = HitSweep.bladeAt(
+					character,
+					from:Lerp(to, alpha),
+					Horizontal,
+					times[nextFrame],
+					trailStart,
+					trailEnd
+				)
+				if (center - blade.mid).Magnitude < 1e-4 then
+					nextFrame += 1
+				end
+			end
+		end
+		expect(nextFrame).toBe(#times + 1)
+		-- Never all four at the live root: the first frame sample sits a quarter of the walk along.
+		local early = HitSweep.bladeAt(character, to, Horizontal, times[1], trailStart, trailEnd)
+		for _, center in centers do
+			expect((center - early.mid).Magnitude).toBeGreaterThan(1e-3)
+		end
+	end)
+
+	it("a frame that sweeps two windows shares one cap between them", function()
+		fresh()
+		local playerId, player, character = spawnPlayer()
+		local SharpNail = Harness.load("src/shared/clips/player/OneHandedSword/SharpNail")
+		local windows = ClipSampler.hitWindows(SharpNail)
+		local trailStart, trailEnd = HitSweep.trailAttachments(character)
+		local rootCFrame = character.PrimaryPart.CFrame
+		local solve = HitSweep.solver(character, SharpNail, trailStart, trailEnd)
+		-- What each of the first two windows would take on its own, swept in one frame.
+		local frameSamples, alone = 0, 0
+		for index = 1, 2 do
+			local times = HitSweep.sampleTimes(windows[index].open, windows[index].close, Combat.hitSampleHz, true)
+			local samples = HitSweep.bladePath(character, rootCFrame, SharpNail, times, trailStart, trailEnd)
+			local _, added = HitSweep.followArc(samples, solve)
+			frameSamples += #times
+			alone += added
+		end
+		expect(alone).toBeGreaterThan(Combat.sweepMaxSubdivisions) -- the premise: a cap per window would exceed it
+		handlers.ArtRequest(player, artPayload("OneHandedSword.SharpNail"))
+		local _, startedAt = CombatService.currentArt(playerId)
+		-- One server frame (a hitch) from the request to just past the second window's close.
+		local hitch = startedAt + windows[2].close + 0.001 - clock.t
+		advance(hitch, hitch)
+		expect(overlapQueries).toBe(frameSamples + Combat.sweepMaxSubdivisions)
 	end)
 
 	it("a swordsman whose blade the joints cannot reach warns once and never hits", function()
@@ -951,6 +1086,55 @@ describe("CombatService lag allowance", function()
 		expect(staleStart).toBeCloseTo(-Combat.lagAllowance, 1e-6)
 		expect(onTime - late).toBeCloseTo(0.1, STEP + 1e-6)
 		expect(onTime - stale).toBeCloseTo(Combat.lagAllowance, STEP + 1e-6)
+	end)
+
+	it("a rewound swing still starts its sweep at the window's open, the arc between the caught-up samples", function()
+		fresh()
+		local centers = {}
+		CombatService.bind({
+			now = function()
+				return clock.t
+			end,
+			net = fakeNet,
+			heartbeat = nil,
+			cast = fakeCast,
+			overlap = function(center, radius, exclude)
+				table.insert(centers, center)
+				return fakeOverlap(center, radius, exclude)
+			end,
+			random = noCrit,
+		})
+		local playerId, player, character = spawnPlayer()
+		advance(1) -- free well before the stamp: the spawn instant does not floor the rewind
+		local Basic1 = Harness.load("src/shared/clips/player/OneHandedSword/Basic1")
+		local window = ClipSampler.hitWindows(Basic1)[1]
+		local receivedAt = clock.t
+		handlers.BasicAttackRequest(player, basicPayload(receivedAt - Combat.lagAllowance))
+		expect(lastOf("ActionStarted").clipId).toBe("player/OneHandedSword/Basic1")
+		local _, startedAt = CombatService.currentArt(playerId)
+		expect(startedAt).toBeCloseTo(receivedAt - Combat.lagAllowance, 1e-9)
+		expect(#centers).toBe(0)
+		advance(1 / 60)
+		-- The premise: on its first frame the rewound clock is already frames past the window's open.
+		local clipTime = clock.t - startedAt
+		expect(clipTime).toBeGreaterThan(window.open + 2 / 60)
+		local times = HitSweep.sampleTimes(window.open, math.min(clipTime, window.close), Combat.hitSampleHz, true)
+		local trailStart, trailEnd = HitSweep.trailAttachments(character)
+		local frames = HitSweep.bladePath(character, character.PrimaryPart.CFrame, Basic1, times, trailStart, trailEnd)
+		-- The first blade tested is the one at the window's open, as before the arc sweep...
+		expect((centers[1] - frames[1].mid).Magnitude).toBeLessThan(1e-4)
+		-- ...every frame sample of the caught-up span follows in order...
+		local nextFrame = 1
+		for _, center in centers do
+			if nextFrame <= #frames and (center - frames[nextFrame].mid).Magnitude < 1e-4 then
+				nextFrame += 1
+			end
+		end
+		expect(nextFrame).toBe(#frames + 1)
+		expect((centers[#centers] - frames[#frames].mid).Magnitude).toBeLessThan(1e-4)
+		-- ...with the arc's sub-samples between them, inside the one frame's cap.
+		expect(#centers).toBeGreaterThan(#frames)
+		expect(#centers - #frames).toBeLessThanOrEqual(Combat.sweepMaxSubdivisions)
 	end)
 
 	it("the clamped start moves the broadcast, the timeline and the lock; code callers start now", function()
