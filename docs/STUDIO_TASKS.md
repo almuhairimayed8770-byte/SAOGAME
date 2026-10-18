@@ -51,8 +51,9 @@ and the smoke scripts (D-039, D-038).
     `poseEditor.positionHandleStuds` / `rotationHandleDegrees`. **Save (server)** writes `src/shared/clips/<id>.luau`,
     runs StyLua and shows the validators' verdict; **Write Source** edits the module in Studio instead (Rojo two-way sync
     then writes the file; **Plugins > Rojo > Settings > Two-way sync** must be on (verify)). Then `git diff` the clip.
-    (verify) that `Motor6D.Transform` moves the rig in edit mode on your Studio build; if it does not, scrub in Play mode
-    with the ClipLab instead and use the editor for the numbers.
+    (verify) that the joint `Transform` moves the rig in edit mode on your Studio build (the editor drives Motor6Ds and
+    the `AnimationConstraint` joints of the upgraded avatar rig alike, D-041); if it does not, scrub in Play mode with
+    the ClipLab instead and use the editor for the numbers.
 12. [ ] **Review every attack in the ClipLab at 0.25x.** Play the ClipLab, pick the clip in the left list (Up / Down),
     `1` / `2` / `3` for 0.25x / 0.5x / 1x, Space to pause, `,` / `.` to step a frame, `R` to restart, `B` for the A/B
     with the rest pose, `H` toggles the hit-stop preview, Left / Right orbit the camera. The timeline bar shows the six
@@ -69,7 +70,7 @@ and the smoke scripts (D-039, D-038).
 
 ## D. Smoke tests and performance
 
-14. [ ] **Run the smoke scripts** on a machine with Studio installed and logged in, with every Studio window closed
+14. [x] (2026-10-18, done on the owner's PC; rerun after every change to the server, the rigs or a smoke) **Run the smoke scripts** on a machine with Studio installed and logged in, with every Studio window closed
     (the script refuses to start otherwise): `tools/smoke.sh` builds the Playground and runs every
     `tests/smoke/*.smoke.luau` through `run-in-roblox` (on Windows use Git Bash by its full path,
     `"C:\Program Files\Git\bin\bash.exe" tools/smoke.sh`; a bare `bash` may be WSL's). `tools/smoke.sh --list`
@@ -77,8 +78,12 @@ and the smoke scripts (D-039, D-038).
     plugin in Edit mode, so each one is wrapped (`tools/smoke-wrap.luau`) into a runner that installs it as a server
     Script and starts a Run session (D-038). A script passes on its one `SMOKE-RESULT: PASS <name>` line; a failure
     prints the assertion or error that stopped it, and each run's full output is kept in `build/smoke/<name>.log`.
-    First run on the owner's PC (2026-10-18): archetypes and playground pass; combat fails (the Horizontal did not
-    register on the boar, being fixed); rigs and perf were added after it.
+    First run on the owner's PC (2026-10-18): archetypes and playground passed; combat failed (the Horizontal never
+    registered on the boar: the upgraded avatar rig has no body Motor6Ds, D-041, and a shapecast misses a boar the blade
+    starts inside, D-042). After those fixes all six pass: archetypes, combat (the Horizontal lands on the boar for the
+    section 6 damage), hitsweep, perf, playground and rigs. run-in-roblox exits 1 on archetypes, combat and perf only
+    because Studio warns "Remote event invocation discarded ... did you forget to implement OnClientEvent?" when the
+    server fires remotes with no client connected; the `SMOKE-RESULT` line is the verdict.
 15. [ ] **Measure section 16 numbers in the Playground** and paste them into the table in `docs/PROGRESS.md`. The server
     rows come from `tools/smoke.sh perf` (8 stand-ins and 60 enemies, `world.luau` `performance`): it asserts the
     95th-percentile server frame time and the part count and prints Markdown rows to paste. The rest needs Play mode
@@ -119,12 +124,15 @@ and the smoke scripts (D-039, D-038).
     which writes `Motor6D.Transform` too and would fight Choreo; `tests/project/projectFiles.spec.luau` guards it.
     Check once in Play mode: your character has no running default `Animate` (Choreo also destroys the empty copy on
     the client) and its Humanoid keeps its `Animator`.
-25. [ ] **Confirm the Motor6D names and the `Rig` attribute.** `tools/smoke.sh rigs` now asserts this for a stand-in
-    R15 character (through the same `PlaygroundService` character path a player takes) and for every in-scope enemy
-    rig (through `EnemyService.spawn`), from `rigs.luau`. What is left by hand is your own avatar: in Play mode, select
-    your character in the Explorer and check its Motor6Ds are the 15 R15 joints `rigs.luau` lists plus `Weapon` on
-    `RightHand`, with no extra joints from layered clothing or a custom body (Choreo ignores extras, but a renamed joint
-    leaves that limb in its rest pose). An enemy whose `Rig` attribute is missing is posed as a player; the smoke
+25. [ ] **Confirm the joint names and the `Rig` attribute.** `tools/smoke.sh rigs` asserts this for a stand-in R15
+    character (through the same `PlaygroundService` character path a player takes) and for every in-scope enemy rig
+    (through `EnemyService.spawn`), from `rigs.luau`. On the owner's PC (2026-10-18) it passed: the stand-in carries the
+    15 R15 joints as `AnimationConstraint`s (Avatar Joint Upgrade, D-041) plus the `Weapon` Motor6D, and the server's
+    pose solve puts every part within 0.0001 studs of where the engine has it; the boar and the kobold match `rigs.luau`
+    joint for joint. What is left by hand is your own avatar: in Play mode, select your character in the Explorer and
+    check its joints (`AnimationConstraint`s on current Studio builds, Motor6Ds on older ones) are the 15 R15 joints
+    `rigs.luau` lists plus `Weapon` on `RightHand`, with no extra joints from layered clothing or a custom body (Choreo
+    ignores extras, but a renamed joint leaves that limb in its rest pose). An enemy whose `Rig` attribute is missing is posed as a player; the smoke
     catches that for the spawn path, so a mismatch seen by hand means something else replaced the model.
 26. [ ] **Watch the write order.** In Play mode open **View tab > Script Performance** (verify) and confirm the
     Choreo RenderStepped step is the last thing that touches `Transform` each frame: a rig that snaps to rest for a

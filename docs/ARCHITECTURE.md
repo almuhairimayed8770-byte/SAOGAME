@@ -12,7 +12,8 @@ src/shared/
   data/                        every number in the game (see "Data tables")
   clips/                       Choreo clip data: player/<Weapon>/<Clip>.luau, enemy/<Rig>/<Clip>.luau
   choreo/ClipSampler.luau      pure clip sampling (offsets at time t, events, hit windows, root motion)
-  choreo/Pose.luau             forward kinematics over Motor6Ds with offsets (server hit sweep)
+  choreo/Joints.luau           one view of a rig joint: Motor6D or AnimationConstraint (D-041)
+  choreo/Pose.luau             forward kinematics over the rig's joints with offsets (server hit sweep)
   net/Remotes.luau             remote definitions: kind, direction, schema, rate limit (from world.luau)
   net/Net.luau                 typed wrapper; server validates and rate-limits every payload
   util/                        Signal, Easing, Spring, Verlet, Rng, Check
@@ -94,9 +95,12 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
 
 ## Rigs, weapons and joints
 
-- Rig definitions: `src/shared/data/rigs.luau`. Joint names are Motor6D names and are the keys in
-  every clip. Player: the 15 R15 Motor6Ds (the root motor is `Root`, its live R15 name, D-016) plus
-  `Weapon` (RightHand -> Weapon). Boar and Kobold: see the file. `RigBuilder.build(rigId, name)` returns a Model with Motor6Ds whose `C0`/`C1` come from
+- Rig definitions: `src/shared/data/rigs.luau`. Joint names are the rig's joint names and are the
+  keys in every clip. Player: the 15 R15 joints (the root joint is `Root`, its live R15 name, D-016)
+  plus `Weapon` (RightHand -> Weapon). On current Studio builds a player character carries the 15
+  body joints as `AnimationConstraint`s (Avatar Joint Upgrade) and only `Weapon` as a Motor6D; the
+  part-built enemy rigs are all Motor6Ds. Every reader goes through `choreo/Joints.luau`, which takes
+  both classes, reads part and offset frames from either, and writes only `Transform` (D-041). Boar and Kobold: see the file. `RigBuilder.build(rigId, name)` returns a Model with Motor6Ds whose `C0`/`C1` come from
   the rest pose, with a `WeaponGrip` attachment on the grip part and `TrailStart`/`TrailEnd`
   attachments on the weapon part.
 - Weapons: `WeaponBuilder.build(weaponDef)` returns a Model named `Weapon` with a `Handle`/blade
@@ -259,7 +263,7 @@ redo. A stale cache degrades to rest values for keys it never saw and never erro
   `workspace:GetAttribute("ClipLab") == true`).
 - Built with `tools/build-places.sh`; outputs are gitignored.
 - Every project file (the game and each place) carries an empty LocalScript `Animate` in
-  StarterCharacterScripts so Choreo is the only writer of `Motor6D.Transform` on characters;
+  StarterCharacterScripts so Choreo is the only writer of joint `Transform`s on characters;
   `HttpService.HttpEnabled` is set in the dev places only (D-039).
 
 ## Smoke scripts (D-038)
