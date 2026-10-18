@@ -1,30 +1,32 @@
 # Progress
 
-Phase **0: Foundations and the vertical slice (the feel)**. Branch `phase-0`. Last update 2026-10-17.
+Phase **0: Foundations and the vertical slice (the feel)**. Branch `phase-0`. Last update 2026-10-18.
 
 This file is the one the spec asks for in section 1 ("phase, what shipped, what is stubbed, next three tasks") and
 section 21 (the gate checklist, pasted with its results). Everything below was run from a clean clone with the pinned
-toolchain (`aftman.toml`); nothing has run inside Roblox Studio yet, and every line that needs Studio says so.
+toolchain (`aftman.toml`). The Studio lines were run on the owner's PC over Remote Control (the run-in-roblox smokes and
+an automated solo Play session); every line that still needs a person in Studio says so.
 
 ## Shipped, by package
 
 | Package | What is in the tree | Tests |
 | --- | --- | --- |
-| Foundation | Rojo project (`default.project.json`, `places/`), `aftman.toml` / `rokit.toml`, StyLua + Selene (online and offline configs), GitHub Actions CI, Lune test harness with a virtual DataModel (D-002), `tools/validate.luau` with 24 validators, the naming blocklist (D-014), the phase scope (D-015) | `tests/tools/validators.spec.luau`, `naming.spec.luau` |
+| Foundation | Rojo project (`default.project.json`, `places/`), `aftman.toml` / `rokit.toml`, StyLua + Selene (online and offline configs), GitHub Actions CI, Lune test harness with a virtual DataModel (D-002), `tools/validate.luau` with 25 validators, the naming blocklist (D-014), the phase scope (D-015) | `tests/tools/validators.spec.luau`, `naming.spec.luau` |
 | Shared data | 28 tables under `src/shared/data/` (combat, arts, weapons, armor, apex, enemies, bosses, floors, loot, origins, paths, tiers, ai, camera, choreo, fx, input, lighting, palette, playground, rigs, scope, sfx, assets, ui, weaponModels, world, dev), `types.luau`, `util/` (Signal, Spring, Easing, Verlet, Rng, Check) | `tests/data/*`, `tests/util/*` |
 | Clips | 56 Choreo clips: 36 `player/OneHandedSword/*` (locomotion, guard, parry, dodges, flinches, Basic1-3, Horizontal, Vertical, RisingArc, SharpNail, DeathFreeze), 10 `enemy/Boar/*`, 10 `enemy/Kobold/*` | `tests/choreo/clips.spec.luau`, `ClipLibrary.spec.luau`, clips validator |
 | Choreo (client) | `ClipSampler` (per-clip structure cache), `Pose`, `Mixer` (layers, pause, time scale, catch-up), `Choreo` (animator per rig, quality tiers, Roblox Animation fallback), `ClipLibrary`, `Locomotion` + `LocomotionState` | `tests/choreo/*` |
 | Controllers, camera, net | Input, Character, Target, EntityTracker, Replication (drives every remote rig's locomotion), ActionLogic, WeaponInfo, Siblings; CameraController + CameraMath; `Net` / `Remotes` (D-008) | `tests/client/*`, `tests/net/*` |
 | FX | Trails, Smear, Shatter (+ ShatterMath), Sparks, Telegraphs (+ TelegraphShapes), OutlineManager (+ OutlineRanking), Digits, SwitchRing, Quality, FrameClock, Engine | `tests/client/*` |
 | UI and audio | `El` component library (D-007), Hud (+ HudLogic), Nameplates, SystemLine; MusicDirector (+ MusicState), SfxPool | `tests/client/*` |
-| Server | EntityService, CombatService (DamageMath, HitSweep D-010, the section 17 request checks including the quick-slot check), EnemyService with Brain / Charger / Brute AI, PlaygroundService, AntiCheatService (+ anticheat Rules), world builders (RigBuilder, WeaponBuilder, PlaygroundBuilder, PlaygroundLayout), `Main.server.luau` | `tests/server/*`, `tests/smoke/*.smoke.luau` (need Studio) |
-| Tools and docs | `Capture.client.luau` (gate shot prompts), the ClipLab (`places/ClipLab.project.json`, `ClipLab.server.luau`, `ClipLab.client.luau`, `ReviewMarkers`), the PoseEditor Studio plugin (`tools/PoseEditor`) with `Serialize` / `Session`, `tools/pose-server.luau`, `tools/assets.luau`, `tools/smoke.sh`, `tools/animation-review.luau`, `tools/build-plugin.sh`, `data/dev.luau`, this docs set | `tests/tools/*` |
+| Server | EntityService, CombatService (DamageMath, HitSweep with the per-sample blade overlap and the arc-following sweep D-010 / D-042 / D-044, the section 17 request checks including the quick-slot check), EnemyService with Brain / Charger / Brute AI, PlaygroundService, AntiCheatService (+ anticheat Rules), world builders (RigBuilder, WeaponBuilder, PlaygroundBuilder, PlaygroundLayout) and CharacterReady (D-046), `Main.server.luau` | `tests/server/*` (with the hit matrix, D-045), `tests/smoke/*.smoke.luau` (six, all pass on the owner's PC) |
+| Tools and docs | `Capture.client.luau` (gate shot prompts), the ClipLab (`places/ClipLab.project.json`, `ClipLab.server.luau`, `ClipLab.client.luau`, `ReviewMarkers`), the PoseEditor Studio plugin (`tools/PoseEditor`) with `Serialize` / `Session`, `tools/pose-server.luau`, `tools/assets.luau`, `tools/smoke.sh`, `tools/animation-review.luau`, `tools/hit-matrix.luau`, `tools/build-plugin.sh`, `data/dev.luau`, this docs set | `tests/tools/*` |
 
-Suite at the time of writing: `lune run tests/run.luau` 794 passed, 0 failed, 68 spec files. `lune run tools/validate.luau`:
-24 validators, 0 problems; the clips validator prints one warning for the 160 later-phase clips (66 Arts, 65 enemy
+Suite at the time of writing: `lune run tests/run.luau` 905 passed, 0 failed, 74 spec files. `lune run tools/validate.luau`:
+25 validators, 0 problems; the clips validator prints one warning for the 160 later-phase clips (66 Arts, 65 enemy
 attacks, 29 boss attacks) that are not authored yet and are outside the Phase 0 scope (D-015).
 `tools/animation-review.luau` flags no review-rule finding on the 56 clips (9 attacks); the hand-filled columns are
-still empty (no Studio pass yet). `tools/lint.sh --offline` (StyLua, Selene, tests, validators, every Rojo build) passes.
+still empty (they come from watching the recordings at 0.25x). `lune run tools/hit-matrix.luau --check`: every real-fight
+placement registered on its strike at every frame phase. `tools/lint.sh --offline` (StyLua, Selene, tests, validators, every Rojo build) passes.
 
 ## Stubbed or not started
 
@@ -37,7 +39,7 @@ still empty (no Studio pass yet). `tools/lint.sh --offline` (StyLua, Selene, tes
 - Boss fights: `bosses.luau` holds the data; no BossService, no `Boss` attribute for the nameplates yet (Phase 3).
 - Wally: zero packages by design (D-004); `wally.toml` lists the planned ones commented out.
 - Mobile layout and touch controls: the data (`input.luau` touch buttons) exists; no layout pass has been made.
-- Nothing has been published to Roblox; nothing has run inside Studio from this environment (no Studio here).
+- Nothing has been published to Roblox. Studio runs on the owner's PC only (the cloud environment has no Studio).
 
 ## Review pass (2026-10-17)
 
@@ -59,6 +61,26 @@ before it was fixed. The fixes that matter most for the gate:
   gate clip is against the kobold's overhead. Clip sound events name real `sfx.luau` entries and
   are validated (D-036). The repository's GitHub name is kept out of every file (D-001).
 
+## Studio pass on the owner's PC (2026-10-18)
+
+Run over Remote Control: `tools/smoke.sh` (all six smokes) and a solo Play session started from a script through
+`StudioTestService`, which reads the player's own character from the client. What it found and what changed:
+
+- **Player rigs have no body Motor6Ds.** Current Studio builds give an R15 character 15 `AnimationConstraint` joints
+  (Avatar Joint Upgrade); every rig reader accepts both classes now (D-041).
+- **A cast never reports a part it starts inside**, so the first hit of a close strike was lost; the sweep also
+  overlap-tests the whole blade at every sample (D-042).
+- **Hit windows opened after most of the snap had passed**; every window now opens on its snap's first frame (D-043),
+  and the sweep follows the blade's arc between server frames instead of a straight chord (D-044).
+- **The gate's "server registered every hit" is a test** now: the hit matrix swings every window against both enemies
+  at real fight distances and four frame phases (D-045). It caught the Rising Arc's second hit passing clear and the
+  Vertical falling short; both were re-authored.
+- **The player's own character never joined the fight**: the server prepared it before the engine had parented and
+  dressed it, so it was never registered and its sword fell off. Fixed (D-046); the rerun shows it registered with
+  the anime proportions and the sword.
+- The combat smoke now also refuses 20 Art repeats while the fighter is locked and a forged request carrying a target
+  field; the perf smoke has the eight stand-ins swinging Arts the whole sample.
+
 ## Known review items for the Studio pass
 
 - Kobold `Overhead` holds the raised axe for 1.3 s while the telegraph light goes out at the 1.0 s wind-up and the
@@ -77,15 +99,22 @@ before it was fixed. The fixes that matter most for the gate:
 Gate: *a 20-second clip of a player fighting a boar and a kobold where every attack shows the six beats, the parry
 sparks, the kill shatters, and the server registered every hit; 60 fps in Studio; all tests green.*
 
+| Part of the gate sentence | State |
+| --- | --- |
+| The 20-second fight: six beats on every attack, the parry sparks, the kill shatters | Needs the owner's recording (`fight-boar-kobold.mp4`) |
+| The server registered every hit | **Met** in the hit matrix (every window, both enemies, real fight distances, four frame phases; D-045) and in `combat.smoke` in Studio; the recording shows it again as a digit per hit |
+| 60 fps in Studio | Needs Play mode with the window rendering: read **View > Stats** while recording (a scripted Play session does not render, so it cannot measure this) |
+| All tests green | **Met** (905 tests, 25 validators, six smokes in Studio, CI) |
+
 | Line | State | Evidence / what is missing |
 | --- | --- | --- |
-| CI is green: StyLua, Selene, Lune tests, data validators, naming blocklist, `rojo build` | **Met** | GitHub Actions run 39006502106 on `phase-0` (open it from the repository's Actions tab) (format, Selene with the real Roblox std, 741 tests, 24 validators, the review-report check, the game, both places and the plugin build). `tools/lint.sh --offline` reproduces every step except Selene's Roblox-only lints, which need the API dump; those run only in CI. `aftman.toml` pins the tool versions. |
+| CI is green: StyLua, Selene, Lune tests, data validators, naming blocklist, `rojo build` | **Met** | GitHub Actions run 39095436348 on `phase-0` (open it from the repository's Actions tab) (format, Selene with the real Roblox std, 905 tests, 25 validators, the review-report check, the game, both places and the plugin build). `tools/lint.sh --offline` reproduces every step except Selene's Roblox-only lints, which need the API dump; those run only in CI. `aftman.toml` pins the tool versions. |
 | Every new clip is in `docs/ANIMATION_REVIEW.md` with the six beats marked present and the hit-stop tier noted | **Met** (generated), hand columns empty | All 56 clips are in the table; 9 attacks show the six beats and a tier. The three hand-filled columns need the ClipLab pass in Studio. |
-| A recorded clip for every new Art, enemy and boss phase exists in `docs/clips/` and was watched at 0.25x | **Needs Studio** | `docs/clips/phase-0/README.md` lists the ten files the Capture panel prompts for. None recorded yet. |
-| No T-pose, A-pose, frozen rig, popping limb or sliding foot appears in any clip | **Needs Studio** | Judged from the recordings. Remote rigs now walk (Replication drives their locomotion) and the root motor name matches the live R15 rig (D-016), the two defects a reviewer would have seen first. |
-| Every enemy attack has a wind-up of at least 0.3 s with a colored telegraph that reads from behind | **Met in data, needs Studio to see** | `enemies.luau` wind-ups (boar 0.6 s, kobold 1.0 s) and the clips validator's Anticipation-covers-windUp check pass; Telegraphs FX exist. |
-| The server rejects a scripted client that spams Arts, teleports, or reports its own hits | **Met in tests**, smoke pending | `CombatService` validates every request (section 17 list, including the quick slot), `AntiCheatService` + `anticheat/Rules` and the Net rate limits have Lune specs; clients never send hits (the server sweeps). The run-in-roblox smoke needs Studio. |
-| Part count, draw calls, server heartbeat and memory are measured in the Playground and within section 16 | **Needs Studio** | Table below is empty until someone runs the MicroProfiler and Stats in the Playground. |
+| A recorded clip for every new Art, enemy and boss phase exists in `docs/clips/` and was watched at 0.25x | **Needs the owner's recordings** | `docs/clips/phase-0/README.md` lists the ten files the Capture panel prompts for. None recorded yet; each is reviewed frame by frame once it is in the repository. |
+| No T-pose, A-pose, frozen rig, popping limb or sliding foot appears in any clip | **Needs the owner's recordings** | Judged from the recordings. Remote rigs now walk (Replication drives their locomotion) and the root motor name matches the live R15 rig (D-016), the two defects a reviewer would have seen first. |
+| Every enemy attack has a wind-up of at least 0.3 s with a colored telegraph that reads from behind | **Met in data**, seen in the recordings | `enemies.luau` wind-ups (boar 0.6 s, kobold 1.0 s) and the clips validator's Anticipation-covers-windUp check pass; Telegraphs FX exist. |
+| The server rejects a scripted client that spams Arts, teleports, or reports its own hits | **Met** | `CombatService` validates every request (section 17 list, including the quick slot), `AntiCheatService` + `anticheat/Rules` and the Net rate limits have Lune specs; clients never send hits (the server sweeps). In Studio on the owner's PC: `combat.smoke` refuses 20 Art repeats while locked (one hit lands) and a forged request with a target field, and no client remote is named for hits or damage; `playground.smoke` shadow-flags and then kicks a teleporting stand-in. The smokes drive the same request checks the remotes call, from the server. |
+| Part count, draw calls, server heartbeat and memory are measured in the Playground and within section 16 | **Partly met** | Part count and server frame time measured and well inside the targets (table below). Client fps, draw calls and client memory need Play mode with the game window rendering, read by hand while recording. |
 | `docs/PLACEHOLDERS.md` lists every stand-in asset with a replacement plan | **Met** | Written from `tools/assets.luau` plus the dev-scene stand-ins. |
 | `docs/STUDIO_TASKS.md` lists every manual Studio step with exact menu paths | **Met** (paths marked "(verify)" where unsure) | |
 | Every number introduced this phase lives in `src/shared/data/`, not in a script | **Met** | `numbers` validator green over every gameplay directory; dev tooling numbers live in `data/dev.luau`. |
@@ -106,14 +135,13 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 
 ## Next three tasks
 
-1. Build `places/Playground.rbxl` and `places/ClipLab.rbxl`, open them in Studio, record the ten gate shots with the
-   Capture panel (`P` starts the countdown) and watch every attack in the ClipLab at 0.25x; fill the hand columns of
-   `docs/ANIMATION_REVIEW.md`. Anything that reads wrong at 0.25x is fixed with the PoseEditor, then the report is
-   regenerated (`lune run tools/animation-review.luau`).
-2. Run `tools/smoke.sh` on a machine with Studio; measure the section 16 numbers in the Playground and fill the table
-   above.
-3. Upload the first real assets or confirm the placeholders for the gate (every row in `PLACEHOLDERS.md` has a plan);
-   merge `phase-0` into `main` and tag it once every gate line reads Met.
+1. The owner records the ten gate shots in the Playground with the Capture panel (`docs/clips/phase-0/README.md`), with
+   **View > Stats** open during the fight for the fps reading, and hands the files over (here in the project or in
+   `docs/clips/phase-0/` on the PC).
+2. Review every recording frame by frame at 0.25x, fill the hand columns of `docs/ANIMATION_REVIEW.md`, and fix with the
+   PoseEditor anything that reads wrong (that shot is then recorded again).
+3. Fill the client rows of the performance table, then merge `phase-0` into `main` and tag it once every gate line reads
+   Met.
 
 ## Expected gate recordings
 

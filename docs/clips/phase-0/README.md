@@ -34,7 +34,6 @@ None of these files exists yet.
 
 ## Committing
 
-`.gitattributes` routes `docs/clips/*.mp4` through Git LFS; files in this sub-folder need the pattern
-`docs/clips/**/*.mp4 filter=lfs diff=lfs merge=lfs -text` added before the first commit (integrator: confirm; `git lfs
-install` once per machine). Re-recordings replace the file under the same name; the review table is keyed by clip id,
-not by recording, so nothing else changes.
+`.gitattributes` routes `docs/clips/**/*.mp4` (and `.mov`, `.gif`) through Git LFS; run `git lfs install` once per
+machine before the first commit (Git for Windows ships Git LFS). Re-recordings replace the file under the same name; the
+review table is keyed by clip id, not by recording, so nothing else changes.
