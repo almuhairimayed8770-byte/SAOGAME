@@ -98,10 +98,10 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 | --- | --- | --- | --- |
 | Frame rate, mid-range PC, 8 players + 30 enemies on screen | 60 fps | | Studio play test, View > Stats > Summary (verify) |
 | Frame rate, 2020 phone | 30 fps | | device test |
-| Parts loaded | under 60,000 | | View > Stats > Render: instance / part count (verify) |
+| Parts loaded | under 60,000 | 1,134 BaseParts in workspace (Stats.PrimitivesCount max 1,149) | `tools/smoke.sh perf` on the owner's PC, 2026-10-18: 8 stand-ins, 60 enemies, server only |
 | Draw calls | under 1,500 | | MicroProfiler (Ctrl+F6) render thread (verify) |
-| Server heartbeat with 8 players and 60 enemies | under 12 ms | | Developer Console (F9) > Server > ServerJobs Heartbeat (verify) |
-| Memory, PC | under 1.2 GB | | View > Stats > Memory |
+| Server heartbeat with 8 players and 60 enemies | under 12 ms | p95 1.77 ms, mean 1.34 ms, max 3.39 ms (timed server work per frame over 1,201 frames, 59.9 steps/s); Stats.HeartbeatTime p95 0.30 ms | `tools/smoke.sh perf` on the owner's PC, 2026-10-18: 8 registered stand-ins (enemies landed 126 hits on them), 60 enemies all winding up attacks, server only. Recheck with real players in a test server (F9 > Server > ServerJobs) |
+| Memory, PC | under 1.2 GB | not yet: 1,909 MB is the whole Studio process in a Run session, not a server or client | read a client in Play mode (View > Stats > Memory) or a live server |
 | Memory, mobile | under 600 MB | | device test |
 
 ## Next three tasks
