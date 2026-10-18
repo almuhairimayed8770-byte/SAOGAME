@@ -25,7 +25,7 @@ src/server/
   services/PlaygroundService   Playground spawn tables, player loadout, respawns
   services/AntiCheatService    speed/teleport/timing checks, Net abuse policy, shadow flag
   combat/DamageMath.luau       pure damage, crit, gauge and guard math (Lune-tested)
-  combat/HitSweep.luau         spherecasts along the weapon path per damage window
+  combat/HitSweep.luau         overlap-tests the blade and casts along its arc per damage window (D-042, D-044)
   ai/Brain.luau                archetype base: perception, threat target, decision loop
   ai/Charger.luau  ai/Brute.luau
   world/RigBuilder.luau        part-built placeholder rigs from rigs.luau (Motor6Ds, attachments)
@@ -52,6 +52,7 @@ tests/                         Lune specs (*.spec.luau) and run-in-roblox smoke 
 tests/project/                 project-file guards (empty Animate everywhere, HttpEnabled in dev places only)
 tools/validate.luau            runs tools/validators/*.luau
 tools/smoke.sh                 runs the smoke scripts in Studio through tools/smoke-wrap.luau + smoke/SmokeRunner
+tools/hit-matrix.luau          prints the server hit matrix (tools/hitmatrix/HitMatrix.luau, dev.luau hitMatrix, D-045)
 tools/PoseEditor/              Studio plugin (Rojo project) + tools/pose-server.luau (Lune, writes clips)
 ```
 
@@ -145,6 +146,14 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
   repeated as clip events (D-036).
 - Enemy attack clips: the wind-up pose must be held for the attack's `windUp` (the validator
   compares the clip's `Anticipation` beat to `enemies.luau`).
+- Hit windows sit on the strike (D-043): the n-th `HitWindowOpen` is at or before the n-th snap's
+  start and its `HitWindowClose` at or after that snap's end, within `dev.luau`
+  `review.windowSnapToleranceFrames`. Snaps come from `ReviewMarkers.strikeSnaps`: the beats table's
+  `Snap`, then each later ExpoOut key that moves a joint 2 to 4 frames after the key before it; the
+  snap count must equal the window count. A `TrailOn` that names a trail kind is listed before the
+  clip's first `HitWindowOpen` (they share the snap's first frame, and the client keeps the kind
+  from the first event that names one). The clips validator and `ReviewMarkers.problems` both apply
+  these rules.
 
 ## Combat flow (server authority)
 
@@ -163,8 +172,12 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
    `freeAt` is the fighter's `lockUntil` before the new action (`CombatService.runStartOf`, the 150 ms
    lag allowance, D-010), so a rewound action never overlaps the lock before it; a basic swing's chain
    index uses the same start, and `ActionStarted.serverTime` carries it: for each hit window it
-   samples the clip at `hitSampleHz` through `ClipSampler` + `Pose` and runs `HitSweep` between
-   samples; every hit goes through `DamageMath` and `EntityService.applyHit`, then `HitConfirmed` is
+   samples the clip at `hitSampleHz` through `ClipSampler` + `Pose`, adds arc sub-samples where the
+   blade moves more than `sweepMaxTipStep` between two (at most `sweepMaxSubdivisions` per fighter
+   per frame, `HitSweep.followArc`), and runs `HitSweep` over them: the whole blade is overlap-tested
+   at every sample, the midpoint is cast between samples, plus the tip's or the guard's chord on a
+   step the cap left longer than `sweepMaxTipStep`; in a hitch frame the samples' roots are spread
+   between the two frames' roots (D-042, D-044). Every hit goes through `DamageMath` and `EntityService.applyHit`, then `HitConfirmed` is
    fired to all clients. After the last hit the entity enters `PostMotion` for `postMotion` seconds
    (zero if the target was in `Break`), then `Idle`.
 3. Enemy attacks: `EnemyService` picks an attack, fires `Telegraph` (with `windUp` and the ground
@@ -213,7 +226,7 @@ nothing about animation runs on the server except the pose sampling used by the 
 | `weaponModels.luau` | placeholder weapon geometry per category and the names the client relies on |
 | `input.luau` | key, gamepad and touch bindings |
 | `ui.luau` | HUD, nameplate and system-line layout numbers, and the death system-line text |
-| `dev.luau` | dev tooling numbers: Capture panel, ClipLab, PoseEditor, pose server (D-028) |
+| `dev.luau` | dev tooling numbers: Capture panel, ClipLab, PoseEditor, pose server (D-028), clip review tolerances (D-043), hit matrix setups and real-fight ranges (D-045) |
 
 Row convention (D-017): tables with many rows keep them under `Module.rows` with `byId(id)` and
 `list()` functions; `list()` returns a clone. Validators read `rows` first and fall back to the
