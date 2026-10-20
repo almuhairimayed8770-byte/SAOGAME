@@ -1125,3 +1125,203 @@ describe("data validators on the real tables", function()
 		})
 	end)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- Impact frames: the flash safety limits and the sequences that ride on hit-stop
+-- ------------------------------------------------------------------------------------------
+
+describe("impact validator", function()
+	local function deepCopy(value: any): any
+		if typeof(value) ~= "table" then
+			return value
+		end
+		local copy = {}
+		for key, element in value do
+			copy[key] = deepCopy(element)
+		end
+		return copy
+	end
+
+	-- Runs the impact validator on a copy of the real impact.luau that `mutate` breaks.
+	local function runImpact(mutate: (impact: any) -> ()): { string }
+		local impact = deepCopy(Harness.load("src/shared/data/impact"))
+		mutate(impact)
+		local validate = loadTool("tools/validators/impact")
+		return validate({
+			load = function(path: string)
+				if path == "src/shared/data/impact" then
+					return impact
+				end
+				return Harness.load(path)
+			end,
+			listFiles = Harness.listFiles,
+			readFile = Harness.readFile,
+			repoRoot = root,
+		})
+	end
+
+	it("is clean on the real table", function()
+		expect(runImpact(function() end)).toEqual({})
+		expect(loadTool("tools/validators/impact")(realContext)).toEqual({})
+	end)
+
+	it("catches look tokens that are not in the palette and a bright look with nothing drawn on it", function()
+		local problems = runImpact(function(impact)
+			impact.looks.Dark.figures = "Magenta"
+			impact.looks.Ink.background = "#FFFFFF"
+			-- A plain white frame: a bare flash with no fighter in it.
+			impact.looks.Blank = { background = "SystemWhite", figures = nil, strokes = false }
+		end)
+		expect(problems).toEqual({
+			"impact: looks.Blank draws nothing on a bright field (relative luminance 0.95, at most 0.20): a bare flash",
+			"impact: looks.Dark.figures 'Magenta' is not a palette token",
+			"impact: looks.Ink.background '#FFFFFF' is not a palette token",
+		})
+	end)
+
+	it("catches a missing or shared rank: which sequence replaces which must be clear", function()
+		local problems = runImpact(function(impact)
+			impact.sequences.Final.rank = impact.sequences.Kill.rank
+			impact.sequences.Parry.rank = 0.5
+		end)
+		expect(problems).toEqual({
+			"impact: sequences.Kill.rank 3 is also sequences.Final's: which one replaces the other?",
+			"impact: sequences.Parry.rank 0.5 must be a whole number of at least 1",
+		})
+	end)
+
+	it("catches a sequence that outlasts the hit-stop it rides on", function()
+		local problems = runImpact(function(impact)
+			impact.sequences.Final.steps = { { look = "Dark", frames = 7 } }
+			impact.sequences.Parry.tier = "Normal"
+			impact.sequences.Parry.steps = { { look = "Inverted", frames = 4 } }
+		end)
+		expect(problems).toEqual({
+			"impact: sequences.Final holds 7 frames, more than the Final hit-stop's 6",
+			"impact: sequences.Parry holds 4 frames, more than the Normal hit-stop's 3",
+		})
+	end)
+
+	it("catches a step with an unknown look, a fractional frame count and an unknown tier", function()
+		local problems = runImpact(function(impact)
+			impact.sequences.Kill.steps[2] = { look = "Nope", frames = 1.5 }
+			impact.sequences.Final.tier = "Huge"
+		end)
+		expect(hasProblem(problems, "sequences.Kill.steps[2] look 'Nope' is not a look")).toBe(true)
+		expect(hasProblem(problems, "sequences.Kill.steps[2] frames 1.5 must be a whole number of at least 1")).toBe(
+			true
+		)
+		expect(hasProblem(problems, "sequences.Final.tier 'Huge' is not a combat.hitStopFrames tier")).toBe(true)
+		expect(#problems).toBe(3)
+	end)
+
+	it("catches a sequence that flashes more than the window allows", function()
+		local problems = runImpact(function(impact)
+			-- Eight one-frame flips fit the Kill's 10 frames but cost 5 flashes.
+			local steps = {}
+			for index = 1, 8 do
+				table.insert(steps, { look = if index % 2 == 1 then "Dark" else "Light", frames = 1 })
+			end
+			impact.sequences.Kill.steps = steps
+		end)
+		expect(problems).toEqual({
+			"impact: sequences.Kill costs 5 flashes, more than flash.maxPerWindow allows (3)",
+		})
+	end)
+
+	it("counts a strobe in any region, not just the field", function()
+		local problems = runImpact(function(impact)
+			-- Six frames of a dark field whose figures blink white and gone: the field never
+			-- changes, the figures flash 4 times.
+			local steps = {}
+			for index = 1, 6 do
+				table.insert(steps, { look = if index % 2 == 1 then "Dark" else "Black", frames = 1 })
+			end
+			impact.sequences.Kill.steps = steps
+			-- Ink strokes blinking on white paper: the field and figures hold, the strokes flash 3.
+			impact.sequences.Final.steps = {
+				{ look = "Ink", frames = 1 },
+				{ look = "Light", frames = 1 },
+				{ look = "Ink", frames = 1 },
+				{ look = "Light", frames = 1 },
+			}
+		end)
+		expect(problems).toEqual({
+			"impact: sequences.Kill costs 4 flashes, more than flash.maxPerWindow allows (3)",
+		})
+	end)
+
+	it("holds the hard limit: never more than 3 flashes in a window of at least 1 second", function()
+		local problems = runImpact(function(impact)
+			impact.flash.maxPerWindow = 13
+			impact.flash.windowSeconds = 0.5
+			impact.flash.transitionDelta = 0.3
+			local steps = {}
+			for index = 1, 8 do
+				table.insert(steps, { look = if index % 2 == 1 then "Dark" else "Light", frames = 1 })
+			end
+			impact.sequences.Kill.steps = steps
+		end)
+		expect(problems).toEqual({
+			"impact: flash.maxPerWindow 13 must be a whole number from 1 to 3",
+			"impact: flash.windowSeconds 0.5 must be at least 1",
+			"impact: flash.transitionDelta 0.3 must be above 0 and at most 0.1 (a smaller change still counts)",
+			-- A looser budget never lets a 5-flash sequence through: the cost check uses the limit.
+			"impact: sequences.Kill costs 5 flashes, more than flash.maxPerWindow allows (3)",
+		})
+		expect(runImpact(function(impact)
+			impact.flash.maxPerWindow = 4
+		end)).toEqual({ "impact: flash.maxPerWindow 4 must be a whole number from 1 to 3" })
+	end)
+
+	it("keeps the dim soft: a low opacity, at least 2 frames in and at least as many out", function()
+		local problems = runImpact(function(impact)
+			impact.reduced.opacity = 0.9
+			impact.reduced.fadeInFrames = 1
+			impact.reduced.fadeOutFrames = 0
+			impact.reduced.fadeOutEasing = "Bounce"
+		end)
+		expect(problems).toEqual({
+			"impact: reduced.opacity 0.9 must be above 0 and at most 0.4 (a soft dim, not a flash)",
+			"impact: reduced.fadeInFrames 1 must be at least 2 (never an instant change)",
+			"impact: reduced.fadeOutFrames must be at least reduced.fadeInFrames (out over more)",
+			"impact: reduced.fadeOutEasing 'Bounce' is not an easing",
+		})
+	end)
+
+	it("charges the dim when its dip over the brightest scene is a flash", function()
+		local problems = runImpact(function(impact)
+			impact.reduced.flashCost = 0
+		end)
+		expect(problems).toEqual({
+			"impact: reduced dips the TrailWhite scene by 0.53 relative luminance, a flash: its flashCost must be at least 1",
+		})
+		-- A dim too faint to be a flash may be free.
+		expect(runImpact(function(impact)
+			impact.reduced.flashCost = 0
+			impact.reduced.opacity = 0.04
+		end)).toEqual({})
+		expect(runImpact(function(impact)
+			impact.reduced.flashCost = 4
+			impact.reduced.referenceScene = "Chalk"
+		end)).toEqual({
+			"impact: reduced.referenceScene 'Chalk' is not a palette token",
+			"impact: reduced.flashCost 4 must be a whole number from 0 to 3",
+		})
+	end)
+
+	it("keeps the overlay above the HUD and every quality tier covered, each drawing the figures", function()
+		local problems = runImpact(function(impact)
+			impact.overlay.displayOrder = 5
+			impact.quality.Low = nil
+			impact.quality.Medium.silhouettes = false
+			impact.quality.High.maxPartsPerRig = 0
+		end)
+		expect(problems).toEqual({
+			"impact: overlay.displayOrder must sit above the HUD's (ui.hud.displayOrder)",
+			"impact: quality.High.maxPartsPerRig must be a whole number of at least 1",
+			"impact: quality.Low needs silhouettes and strokes booleans",
+			"impact: quality.Medium must draw the silhouettes: an impact frame without its figures is a bare blink",
+		})
+	end)
+end)

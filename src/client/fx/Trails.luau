@@ -21,12 +21,19 @@
 	Budget: at most fx.quality[tier].maxTrails trails are enabled at once; when more rigs are
 	swinging, the farthest from the viewer are disabled first. Trails past the tier's distance
 	stay off. Every instance is reused; nothing is created per frame.
+
+	`swingDirection(model)`: every Heartbeat the module records each tracked blade tip's
+	(TrailEnd's) world position in a short ring (accents.swing.samples long) and answers with
+	the unit motion from the oldest of those samples to the newest, or nil when the tip moved
+	less than accents.swing.minTravel (or jumped more than maxTravel: a respawn, a teleport).
+	The slash crescent and the slash line read it for their tangent.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage.Shared
 
 local Fx = require(Shared.data.fx)
+local Accents = require(Shared.data.accents)
 local Palette = require(Shared.data.palette)
 local Weapons = require(Shared.data.weapons)
 local Assets = require(Shared.data.assets)
@@ -52,9 +59,14 @@ type Entry = {
 	flashing: boolean,
 	allowed: boolean, -- inside the budget and the distance
 	removedCancel: () -> (), -- stops watching the rig for removal
+	tip: Attachment, -- TrailEnd: the blade tip swingDirection follows
+	tips: { Vector3 }, -- ring of the tip's last world positions
+	tipHead: number, -- index of the newest sample in `tips`
+	tipCount: number, -- samples recorded so far (at most SWING_SAMPLES)
 }
 
 local KIND_PRIORITY: { Kind } = { "Art", "Smear", "Basic" }
+local SWING_SAMPLES = math.max(2, Accents.swing.samples)
 
 local Trails = {}
 
@@ -270,6 +282,10 @@ function Trails.attach(model: Instance): boolean
 		removedCancel = Engine.onRemoved(model, function()
 			Trails.detach(model)
 		end),
+		tip = finish,
+		tips = {},
+		tipHead = 0,
+		tipCount = 0,
 	}
 	entry.light.Color = color
 	entries[model] = entry
@@ -354,6 +370,33 @@ function Trails.isEnabled(model: Instance): boolean
 	return entry ~= nil and entry.trail.Enabled
 end
 
+--- Records each tracked blade tip's world position in its ring (Heartbeat runs it; specs call it).
+function Trails.sample()
+	for _, entry in entries do
+		-- The attachment's world position: its part's frame times its own (Attachment.WorldPosition).
+		local position = (entry.weapon.CFrame * entry.tip.CFrame).Position
+		entry.tipHead = entry.tipHead % SWING_SAMPLES + 1
+		entry.tips[entry.tipHead] = position
+		entry.tipCount = math.min(entry.tipCount + 1, SWING_SAMPLES)
+	end
+end
+
+--- The unit direction the blade tip moved over the last few samples; nil when unknown or still.
+function Trails.swingDirection(model: Instance): Vector3?
+	local entry = entries[model]
+	if entry == nil or entry.tipCount < 2 then
+		return nil
+	end
+	local back = entry.tipCount - 1
+	local oldest = entry.tips[(entry.tipHead - 1 - back) % SWING_SAMPLES + 1]
+	local motion = entry.tips[entry.tipHead] - oldest
+	local travel = motion.Magnitude
+	if travel <= Accents.swing.minTravel or travel > Accents.swing.maxTravel then
+		return nil
+	end
+	return motion / travel
+end
+
 --- Starts the periodic budget re-rank (rigs move) and follows quality changes.
 function Trails.start()
 	if stopLoop ~= nil then
@@ -363,6 +406,7 @@ function Trails.start()
 		rebalance()
 	end)
 	stopLoop = Engine.onHeartbeat(function(dt: number)
+		Trails.sample()
 		sinceRank += dt
 		if sinceRank >= Fx.trail.rankInterval then
 			sinceRank = 0

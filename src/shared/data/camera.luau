@@ -6,6 +6,10 @@
 	fighters in view, a low tight orbit in duels, a high wide orbit in raids. Mobile uses the same
 	system with wider defaults.
 
+	The punch (the reel's push in on the big hit): an Art's final hit and a kill narrow the FOV by
+	a few degrees, eased in inside the hit-stop, then spring back past rest a little and settle.
+	It rides on top of the FOV spring, so the Art and dash kicks and the shake are untouched.
+
 	The nudge and shake amplitudes are section 6 numbers already in combat.luau; this table points
 	at them so there is one source. Angles are degrees, distances are studs, times are seconds.
 	Conventions used by CameraMath: yaw 0 puts the camera behind a rig that faces -Z; pitch is the
@@ -13,6 +17,15 @@
 ]]
 
 local Combat = require(script.Parent.combat)
+
+-- One FOV punch (CameraMath.punchOffset). Named by the hit-stop tier it lands on.
+export type Punch = {
+	degrees: number, -- FOV narrowing at the peak
+	attack: number, -- seconds to the peak, eased out (fast push, soft arrival); inside the tier's hit-stop
+	settle: number, -- seconds the spring takes from the peak to within `band` of rest
+	damping: number, -- spring damping ratio; under 1 it springs a little past rest before it settles
+	band: number, -- fraction of `degrees` the spring is inside by `settle`
+}
 
 export type Orbit = {
 	distance: number, -- studs from the focus to the camera
@@ -41,6 +54,25 @@ local Camera = {
 	nudge = {
 		studs = Combat.cameraNudgeStuds, -- peak displacement of the impulse toward the hit point
 	},
+
+	-- The push in on the big hit. Each attack lands inside its tier's hit-stop (6 and 10 frames),
+	-- so the narrowing reads on the frozen frame and the spring back plays as the fight resumes.
+	punch = {
+		Final = {
+			degrees = 3,
+			attack = 3 * Combat.hitStopFrameSeconds,
+			settle = 0.3,
+			damping = 0.55,
+			band = 0.02,
+		} :: Punch,
+		Kill = {
+			degrees = 5,
+			attack = 4 * Combat.hitStopFrameSeconds,
+			settle = 0.45,
+			damping = 0.5,
+			band = 0.02,
+		} :: Punch,
+	} :: { [string]: Punch },
 
 	shake = {
 		amplitude = Combat.cameraShakeStuds, -- per hit-stop tier

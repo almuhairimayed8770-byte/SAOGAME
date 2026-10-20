@@ -3,7 +3,9 @@
 	CameraController (section 10): a Scriptable third-person camera driven on RenderStepped. A
 	spring on the position gives the 0.12 s follow lag; the orbit comes from the mouse, the right
 	stick or a touch drag; the FOV sits on its own spring at 60 degrees and kicks +8 on Art
-	activation and dashes; `nudge` is an impulse on the position spring toward a hit point; `shake`
+	activation and dashes; `punch` narrows it a few degrees on an Art's final hit or a kill, eased
+	in and sprung back (CameraMath.punchOffset), added after the FOV spring so the kick's spring
+	and the shake are untouched; `nudge` is an impulse on the position spring toward a hit point; `shake`
 	is summed-sine noise with a fast exponential decay; lock-on frames both fighters from behind
 	the player; Duel and Raid presets change the orbit; a spherecast from the focus pulls the
 	camera in front of walls. Every number is in camera.luau; the math is in CameraMath (tested).
@@ -49,6 +51,12 @@ local distanceSpring = Spring.new(
 	CameraData.follow.damping
 )
 local fovKickAmount = 0
+-- The punch showing: its numbers, seconds since it started, the offset it started from (a punch
+-- over a punch eases on from where the first one is) and the offset it shows now.
+local punchParams: CameraMath.PunchParams? = nil
+local punchElapsed = 0
+local punchFrom = 0
+local punchOffset = 0
 local shakeEnergy = 0
 local shakeTime = 0
 local scripted: Scripted? = nil
@@ -130,7 +138,18 @@ local function step(dt: number)
 	-- FOV: rest plus a decaying kick, on its own spring.
 	fovKickAmount = CameraMath.decay(fovKickAmount, CameraData.fov.kickDecay, dt)
 	fovSpring.target = CameraData.fov.rest + fovKickAmount + (if mobile then CameraData.mobile.fovAdd else 0)
-	camera.FieldOfView = fovSpring:Step(dt)
+	-- The punch rides on top of the spring: the spring would smooth a 3-frame push away.
+	local params = punchParams
+	if params ~= nil then
+		punchElapsed += dt
+		local offset, done = CameraMath.punchOffset(punchElapsed, params, punchFrom)
+		punchOffset = offset
+		if done then
+			punchParams = nil
+			punchOffset = 0
+		end
+	end
+	camera.FieldOfView = fovSpring:Step(dt) + punchOffset
 
 	if scripted ~= nil then
 		stepScripted(dt, camera)
@@ -262,6 +281,18 @@ end
 function CameraController.fovKick(kind: KickKind?)
 	local amount = if kind == "Dash" then CameraData.fov.dashKick else CameraData.fov.artKick
 	fovKickAmount = math.max(fovKickAmount, amount)
+end
+
+--- Pushes the FOV in by camera.luau punch[kind] ("Final" | "Kill"), eased in and sprung back; a
+--- punch over a punch starts from the offset showing, so the FOV never jumps.
+function CameraController.punch(kind: string)
+	local params = CameraData.punch[kind]
+	if params == nil then
+		return
+	end
+	punchFrom = punchOffset
+	punchParams = params
+	punchElapsed = 0
 end
 
 --- Locks the framing on a model (nil clears it).

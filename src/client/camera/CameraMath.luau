@@ -19,6 +19,15 @@ export type LockParams = {
 	distancePerSeparation: number,
 }
 
+-- The FOV punch's numbers (camera.luau punch rows).
+export type PunchParams = {
+	degrees: number,
+	attack: number,
+	settle: number,
+	damping: number,
+	band: number,
+}
+
 export type LockFrame = {
 	focus: Vec,
 	yaw: number,
@@ -196,6 +205,57 @@ function CameraMath.easeBlend(elapsed: number, duration: number): number
 	end
 	local t = math.clamp(elapsed / duration, 0, 1)
 	return -(math.cos(math.pi * t) - 1) / 2
+end
+
+--- A damped spring's unit step back: 1 at `elapsed` 0 with zero velocity, inside `band` of 0 by
+--- `settle` seconds. Under-damped (`damping` < 1) it swings a little past 0 before it settles;
+--- at or over 1 it is the critically damped curve. Never linear.
+function CameraMath.springBack(elapsed: number, settle: number, damping: number, band: number): number
+	if elapsed <= 0 then
+		return 1
+	end
+	if damping >= 1 then
+		-- (1 + x) e^-x = band has no closed form; three fixed-point steps of x = L + ln(1 + x)
+		-- (L = -ln band) land within a tenth of a percent of it.
+		local scaled = -math.log(band)
+		local x = scaled + math.log(1 + scaled)
+		x = scaled + math.log(1 + x)
+		x = scaled + math.log(1 + x)
+		local omega = x / settle
+		return (1 + omega * elapsed) * math.exp(-omega * elapsed)
+	end
+	local omega = -math.log(band) / (damping * settle)
+	local decay = damping * omega
+	local damped = omega * math.sqrt(1 - damping * damping)
+	local envelope = math.exp(-decay * elapsed)
+	return envelope * (math.cos(damped * elapsed) + decay / damped * math.sin(damped * elapsed))
+end
+
+--- The FOV offset in degrees (negative narrows) `elapsed` seconds into a punch that starts from
+--- `from` (the offset a punch already showing has, else 0): eased out to -degrees over `attack`,
+--- arriving with zero slope, then sprung back to rest by `settle`. The second value is true once
+--- the punch is over (the offset is then 0).
+function CameraMath.punchOffset(elapsed: number, params: PunchParams, from: number?): (number, boolean)
+	local start = from or 0
+	local peak = -params.degrees
+	if elapsed <= 0 then
+		return start, false
+	end
+	if elapsed < params.attack then
+		local remaining = 1 - elapsed / params.attack
+		local eased = 1 - remaining * remaining -- QuadOut: the push is fastest at the start
+		return start + (peak - start) * eased, false
+	end
+	local since = elapsed - params.attack
+	if since >= params.settle then
+		return 0, true
+	end
+	return peak * CameraMath.springBack(since, params.settle, params.damping, params.band), false
+end
+
+--- Seconds a punch lasts, push to settled.
+function CameraMath.punchSeconds(params: PunchParams): number
+	return params.attack + params.settle
 end
 
 return CameraMath

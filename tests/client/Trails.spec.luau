@@ -188,3 +188,156 @@ describe("Trails", function()
 		end)
 	end)
 end)
+
+-- Trails.swingDirection: the module samples each tracked blade tip (TrailEnd) into a short ring
+-- on its own Heartbeat; under Lune there is no Heartbeat, so the spec calls Trails.sample() once
+-- per fake frame after moving the weapon part by hand.
+local accents = Harness.load("src/shared/data/accents")
+
+local SAMPLES = accents.swing.samples
+
+-- Places the weapon part and records one sample.
+local function sampleAt(weapon: BasePart, frame: CFrame)
+	weapon.CFrame = frame
+	Trails.sample()
+end
+
+local function expectUnit(actual: Vector3?, expected: Vector3)
+	expect(actual).never.toBeNil()
+	local direction = actual :: Vector3
+	local want = expected.Unit
+	expect(direction.Magnitude).toBeCloseTo(1, 1e-4)
+	expect(direction.X).toBeCloseTo(want.X, 1e-3)
+	expect(direction.Y).toBeCloseTo(want.Y, 1e-3)
+	expect(direction.Z).toBeCloseTo(want.Z, 1e-3)
+end
+
+describe("Trails.swingDirection", function()
+	it("reports the unit motion of the blade tip over the last samples", function()
+		local model, weapon = rig()
+		Trails.attach(model)
+		for step = 1, SAMPLES do
+			sampleAt(weapon, CFrame.new(step * 0.8, 1, -step * 0.4))
+		end
+		expectUnit(Trails.swingDirection(model), Vector3.new(0.8, 0, -0.4))
+		Trails.detach(model)
+	end)
+
+	it("only counts the last samples: an older swing the other way is forgotten", function()
+		local model, weapon = rig()
+		Trails.attach(model)
+		for step = 1, SAMPLES * 2 do
+			sampleAt(weapon, CFrame.new(0, 0, step))
+		end
+		-- Then the blade turns along +X for one step fewer than the ring: the oldest sample left is
+		-- the last one of the +Z run, so the answer is pure +X.
+		for step = 1, SAMPLES - 1 do
+			sampleAt(weapon, CFrame.new(step, 0, SAMPLES * 2))
+		end
+		expectUnit(Trails.swingDirection(model), Vector3.xAxis)
+		Trails.detach(model)
+	end)
+
+	it("measures across the whole ring, from the oldest sample it keeps", function()
+		local model, weapon = rig()
+		Trails.attach(model)
+		-- One step along +Z, then the rest along +X: only a direction over the whole ring keeps
+		-- the +Z step (a shorter window would see pure +X).
+		sampleAt(weapon, CFrame.new(0, 0, 0))
+		sampleAt(weapon, CFrame.new(0, 0, 1))
+		for step = 1, SAMPLES - 2 do
+			sampleAt(weapon, CFrame.new(step, 0, 1))
+		end
+		expectUnit(Trails.swingDirection(model), Vector3.new(SAMPLES - 2, 0, 1))
+		Trails.detach(model)
+	end)
+
+	it("follows the tip, not the part: a blade turning about its middle still has a direction", function()
+		local model, weapon = rig()
+		Trails.attach(model)
+		local tip = weapon:FindFirstChild("TrailEnd") :: Attachment
+		local angles = {}
+		for step = 1, SAMPLES do
+			local angle = step * 0.12
+			table.insert(angles, angle)
+			sampleAt(weapon, CFrame.new(5, 2, 0) * CFrame.Angles(0, 0, angle))
+		end
+		local first = (CFrame.new(5, 2, 0) * CFrame.Angles(0, 0, angles[1]) * tip.CFrame).Position
+		local last = (CFrame.new(5, 2, 0) * CFrame.Angles(0, 0, angles[#angles]) * tip.CFrame).Position
+		expectUnit(Trails.swingDirection(model), last - first)
+		-- Tipped toward -X as it turns counterclockwise about Z.
+		expect((Trails.swingDirection(model) :: Vector3).X).toBeLessThan(0)
+		Trails.detach(model)
+	end)
+
+	it("reads a weapon's own TrailEnd where the builder put it", function()
+		local model, weapon = rig()
+		local tip = Instance.new("Attachment")
+		tip.Name = "TrailEnd"
+		tip.CFrame = CFrame.new(0.3, 1.5, 0)
+		tip.Parent = weapon
+		Trails.attach(model)
+		for step = 1, SAMPLES do
+			sampleAt(weapon, CFrame.Angles(step * 0.1, 0, 0))
+		end
+		local first = (CFrame.Angles(0.1, 0, 0) * tip.CFrame).Position
+		local last = (CFrame.Angles(SAMPLES * 0.1, 0, 0) * tip.CFrame).Position
+		expectUnit(Trails.swingDirection(model), last - first)
+		Trails.detach(model)
+	end)
+
+	it("is nil before two samples, for a tip that barely moved, across a jump and for an unknown rig", function()
+		local model, weapon = rig()
+		Trails.attach(model)
+		expect(Trails.swingDirection(model)).toBeNil()
+		sampleAt(weapon, CFrame.new(0, 0, 0))
+		expect(Trails.swingDirection(model)).toBeNil()
+		-- Under minTravel across the whole ring: still.
+		local creep = accents.swing.minTravel * 0.5 / SAMPLES
+		for step = 1, SAMPLES do
+			sampleAt(weapon, CFrame.new(step * creep, 0, 0))
+		end
+		expect(Trails.swingDirection(model)).toBeNil()
+		-- A move just past minTravel is a direction.
+		sampleAt(weapon, CFrame.new(accents.swing.minTravel * 2, 0, 0))
+		expectUnit(Trails.swingDirection(model), Vector3.xAxis)
+		-- A respawn or teleport: farther than maxTravel inside the ring.
+		sampleAt(weapon, CFrame.new(accents.swing.maxTravel * 2, 0, 0))
+		expect(Trails.swingDirection(model)).toBeNil()
+		expect(Trails.swingDirection(Instance.new("Model"))).toBeNil()
+		Trails.detach(model)
+	end)
+
+	it("forgets a rig's ring on detach and starts over on the next attach", function()
+		local model, weapon = rig()
+		Trails.attach(model)
+		for step = 1, SAMPLES do
+			sampleAt(weapon, CFrame.new(step, 0, 0))
+		end
+		expect(Trails.swingDirection(model)).never.toBeNil()
+		Trails.detach(model)
+		expect(Trails.swingDirection(model)).toBeNil()
+		Trails.attach(model)
+		sampleAt(weapon, CFrame.new(SAMPLES + 1, 0, 0))
+		expect(Trails.swingDirection(model)).toBeNil()
+		Trails.detach(model)
+	end)
+
+	it("sampling leaves the trail itself alone", function()
+		atViewer(function()
+			local model, weapon = rig()
+			Trails.setActive(model, true, "Basic")
+			local enabled = trailOf(weapon).Enabled
+			local color = colorOf(weapon)
+			local width = headWidth(weapon)
+			for step = 1, SAMPLES * 2 do
+				sampleAt(weapon, CFrame.new(step, 0, 0))
+			end
+			expect(trailOf(weapon).Enabled).toBe(enabled)
+			expectColor(colorOf(weapon), color)
+			expect(headWidth(weapon)).toBeCloseTo(width, 1e-6)
+			Trails.setActive(model, false, "Basic")
+			Trails.detach(model)
+		end)
+	end)
+end)
