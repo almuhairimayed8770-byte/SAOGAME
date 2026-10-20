@@ -8,6 +8,9 @@ local Impact = Harness.load("src/client/fx/Impact")
 local ActionLogic = Harness.load("src/client/controllers/ActionLogic")
 local moments = Harness.load("src/shared/data/moments")
 local combat = Harness.load("src/shared/data/combat")
+local accents = Harness.load("src/shared/data/accents")
+
+local TILT = accents.slashArc.tilt
 
 local TOKEN = "TrailCyanWhite"
 local HIT_POINT = Vector3.new(0, 3, -4)
@@ -101,11 +104,14 @@ local function newWorld(): any
 	return world
 end
 
--- Runs what the director scheduled, in order; returns the delays it asked for.
-local function flush(world: any): { number }
+-- Runs what the director scheduled, in order; returns the delays it asked for. The waits are
+-- over, so the impact frames are down by then, unless `stillHidden` says a picture still hides
+-- the world for that long.
+local function flush(world: any, stillHidden: number?): { number }
 	local delays = {}
 	local list = world.scheduled
 	world.scheduled = {}
+	world.hidden = stillHidden or 0
 	for _, item in list do
 		table.insert(delays, item.seconds)
 		item.fn()
@@ -171,6 +177,17 @@ local function expectVector(actual: any, expected: Vector3)
 	expect((actual - expected).Magnitude).toBeLessThan(1e-6)
 end
 
+-- Vector3 is single precision: a turned normal is near, not on, its double-precision answer.
+local function expectNear(actual: any, expected: Vector3)
+	expect(typeof(actual)).toBe("Vector3")
+	expect((actual - expected).Magnitude).toBeLessThan(1e-5)
+end
+
+-- Degrees between a crescent's face (either side of its plane) and the direction to the camera.
+local function faceOff(normal: Vector3, toCamera: Vector3): number
+	return math.deg(math.acos(math.clamp(math.abs(normal.Unit:Dot(toCamera.Unit)), 0, 1)))
+end
+
 -- Warnings the harness captured since `from` (Harness.warnings() keeps the whole run's).
 local function warningsSince(from: number, needle: string): number
 	local count = 0
@@ -201,6 +218,16 @@ describe("Impact moment selection", function()
 			{ { tier = "Final" }, "Hit" },
 			{ { crit = true, isSwitch = true }, "Crit" },
 			{ { isSwitch = true }, "Switch" },
+			-- A player's basic swing: BasicHit, the third swing's Final hit-stop too, unless a
+			-- parry, a kill, a guard or a crit claims it first.
+			{ { art = false }, "BasicHit" },
+			{ { art = false, tier = "Final" }, "BasicHit" },
+			{ { art = false, parried = true }, "Parry" },
+			{ { art = false, killed = true, tier = "Kill" }, "Kill" },
+			{ { art = false, guarded = true }, "Guarded" },
+			{ { art = false, crit = true, tier = "Final" }, "Crit" },
+			-- An enemy's strike (art nil) and an Art's non-final hit stay Hit.
+			{ { tier = "Normal", art = true }, "Hit" },
 			{ {}, "Hit" },
 		}
 		for _, case in cases do
@@ -212,15 +239,25 @@ describe("Impact moment selection", function()
 	it("a basic chain's last swing gets the basic hit's treatment, never the Art's", function()
 		local world = bind(newWorld())
 		world.swing = Vector3.new(1, 0, 0)
-		expect(Impact.hit(hitInfo(world, { tier = "Final" }))).toBe("Hit")
+		expect(Impact.hit(hitInfo(world, { tier = "Final", art = false }))).toBe("BasicHit")
 		expect(only(world, "glint.play")[2]).toBe("Small")
-		expect(only(world, "sfx.cue")[1]).toBe("HitNormal")
+		-- Its own 4-layer hit, the crack and the body down (sfx HitBasic).
+		local cue = only(world, "sfx.cue")
+		expect(cue[1]).toBe("HitBasic")
+		expectVector(cue[2], HIT_POINT)
 		for _, fn in { "impactFrames.play", "sfx.contour", "camera.punch", "slashArc.play", "slashArc.line" } do
 			none(world, fn)
 		end
 		-- Replication's white flash stays.
 		none(world, "outline.flash")
-		expect(Impact.ownsHighlight(hitInfo(world, { tier = "Final" }))).toBe(false)
+		expect(Impact.ownsHighlight(hitInfo(world, { tier = "Final", art = false }))).toBe(false)
+	end)
+
+	it("an enemy's strike (no Art, no basic swing) plays the plain hit", function()
+		local world = bind(newWorld())
+		expect(Impact.hit(hitInfo(world, { art = nil, localAttacker = false }))).toBe("Hit")
+		expect(only(world, "sfx.cue")[1]).toBe("HitNormal")
+		expect(only(world, "glint.play")[2]).toBe("Small")
 	end)
 end)
 
@@ -271,8 +308,16 @@ describe("Impact.hit, involved", function()
 		local arc = only(world, "slashArc.play")
 		expectVector(arc[1], HIT_POINT)
 		expectVector(arc[2], Vector3.new(1, 0, 0))
-		-- tangent x up: (1, 0, 0) x (0, 1, 0) = (0, 0, 1)
-		expectVector(arc[3], Vector3.new(0, 0, 1))
+		-- The true swing plane: radius (0, 0, -1) x tangent (1, 0, 0) = (0, -1, 0), a flat swing
+		-- whose crescent bulges away from the attacker (tangent x normal = the radius). The camera
+		-- (0, 5, 8) looks at it nearly edge-on, so it turns about the tangent toward the camera by
+		-- the cap.
+		local turn = math.rad(TILT.maxDegrees)
+		expectNear(arc[3], Vector3.new(0, -math.cos(turn), -math.sin(turn)))
+		-- It still bulges away from the attacker, now leaning toward the camera.
+		local outward = (arc[2] :: Vector3):Cross(arc[3] :: Vector3)
+		expect(outward:Dot(Vector3.new(0, 0, -1))).toBeCloseTo(math.cos(turn), 1e-5)
+		expect(faceOff(arc[3], Vector3.new(0, 5, 8) - HIT_POINT)).toBeLessThan(90 - TILT.maxDegrees + 1)
 		expect(arc[4]).toBe(TOKEN)
 		expect(arc[5]).toBe("Medium")
 		local line = only(world, "slashArc.line")
@@ -389,10 +434,12 @@ describe("Impact.hit, bystanders", function()
 		none(world, "glint.play")
 		expect(only(world, "sfx.cue")[1]).toBe("HitNormal")
 		table.clear(world.calls)
+		world.clock += 1 -- the next swing, not the same sweep
 		Impact.hit(hitInfo(world, { tier = "Final", art = true, involved = false, localAttacker = false }))
 		only(world, "glint.play")
 
 		table.clear(world.calls)
+		world.clock += 1
 		world.viewer = HIT_POINT + Vector3.new(moments.rangeOf("FinalHit") + 1, 0, 0)
 		Impact.hit(
 			hitInfo(world, { tier = "Final", art = true, involved = false, localAttacker = false, isSwitch = true })
@@ -440,6 +487,30 @@ describe("Impact.hit, after the impact frames", function()
 		only(world, "slashArc.line")
 		expect(only(world, "outline.flash")[2]).toBe("SystemWhite")
 		expect(#callsTo(world, "trails.flashWhite")).toBe(2)
+	end)
+
+	it("holds the earlier hits' accents too when a stronger picture of the same sweep takes over", function()
+		local world = bind(newWorld())
+		world.swing = Vector3.new(1, 0, 0)
+		-- A final hit draws its two frames; the kill confirmed in the same frame turns the picture
+		-- into the kill's, which hides the world for longer.
+		world.hiddenAfterPlay = 2 / 60
+		Impact.hit(hitInfo(world, { tier = "Final", art = true }))
+		world.hiddenAfterPlay = 6 / 60
+		Impact.hit(hitInfo(world, { tier = "Kill", killed = true }))
+		none(world, "glint.play")
+		-- The final hit's wait is over while the kill's frames are still up: it waits for them.
+		local delays = flush(world, 4 / 60)
+		expect(delays[1]).toBeCloseTo(2 / 60, 1e-12)
+		expect(delays[2]).toBeCloseTo(6 / 60, 1e-12)
+		none(world, "glint.play")
+		none(world, "outline.flash")
+		delays = flush(world)
+		expect(#delays).toBe(2)
+		expect(delays[1]).toBeCloseTo(4 / 60, 1e-12)
+		expect(#callsTo(world, "glint.play")).toBe(2)
+		expect(#callsTo(world, "outline.flash")).toBe(2)
+		expect(#world.scheduled).toBe(0)
 	end)
 
 	it("plays the accents at once when nothing hides the world (no frames, or the soft dim)", function()
@@ -505,8 +576,10 @@ describe("Impact swing tangent", function()
 		Impact.hit(hitInfo(world, { tier = "Final", art = true }))
 		local arc = only(world, "slashArc.play")
 		expectVector(arc[2], Vector3.new(-1, 0, 0))
-		-- (-1, 0, 0) x (0, 1, 0) = (0, 0, -1)
-		expectVector(arc[3], Vector3.new(0, 0, -1))
+		-- The radius (0, 3, -4) / 5 x (-1, 0, 0) = (0, 0.8, 0.6), already facing the camera
+		-- within tilt.faceDegrees: no turn.
+		expectNear(arc[3], Vector3.new(0, 0.8, 0.6))
+		expect(faceOff(arc[3], Vector3.new(0, 5, 8) - HIT_POINT)).toBeLessThan(TILT.faceDegrees)
 	end)
 
 	it("a vertical swing takes the camera's right vector as the crescent's normal", function()
@@ -619,6 +692,20 @@ describe("Impact.activation", function()
 		none(world, "sfx.playEndingAt")
 	end)
 
+	it("a hold a late start jumped over still ends the riser on the first damage frame", function()
+		local world = bind(newWorld())
+		local minimum = moments.rows.Activation.riser.minLeadSeconds
+		world.clips["player/OneHandedSword/Fake"] = artClip(0.15, { 0.15 + minimum * 4 })
+		-- At speed 2 the window comes minimum * 2 after the hold; heard minimum * 0.5 late, it is
+		-- minimum * 1.5 away.
+		Impact.activation(world.target, "player/OneHandedSword/Fake", TOKEN, false, 2, minimum * 0.5)
+		expect(only(world, "sfx.playEndingAt")[2]).toBeCloseTo(minimum * 1.5, 1e-9)
+		table.clear(world.calls)
+		-- Too close to the window for a riser to build.
+		Impact.activation(world.target, "player/OneHandedSword/Fake", TOKEN, false, 2, minimum * 1.5)
+		none(world, "sfx.playEndingAt")
+	end)
+
 	it("plays no riser for a clip with no hold, no window after it, or no clip at all", function()
 		local world = bind(newWorld())
 		world.clips["player/OneHandedSword/Basic1"] = artClip(nil, { 0.2 })
@@ -675,6 +762,419 @@ describe("Impact.death", function()
 	end)
 end)
 
+describe("Impact swing plane", function()
+	it("lies in the true swing plane: the radius crossed with the swing, bulging away from the attacker", function()
+		local world = bind(newWorld())
+		world.right = nil
+		-- A flat swing in front: the plane is flat, the crescent bulges outward along the radius.
+		local flat = Impact.planeNormal(Vector3.new(1, 0, 0), Vector3.new(0, 0, -5)) :: Vector3
+		expectNear(flat, Vector3.new(0, -1, 0))
+		expectNear(Vector3.new(1, 0, 0):Cross(flat), Vector3.new(0, 0, -1))
+		-- An overhead chop: the plane stands upright through the attacker, never the camera's.
+		local chop = Impact.planeNormal(Vector3.new(0, -1, 0), Vector3.new(0, 0, -3)) :: Vector3
+		expectNear(chop, Vector3.new(-1, 0, 0))
+		expectNear(Vector3.new(0, -1, 0):Cross(chop), Vector3.new(0, 0, -1))
+		-- A rising diagonal keeps its own tilt.
+		local rising = Impact.planeNormal(Vector3.new(1, 1, 0).Unit, Vector3.new(0, 0, -2)) :: Vector3
+		expect(math.abs(rising:Dot(Vector3.new(1, 1, 0).Unit))).toBeLessThan(1e-5)
+		expectNear(Vector3.new(1, 1, 0).Unit:Cross(rising), Vector3.new(0, 0, -1))
+	end)
+
+	it("a thrust (a swing along its radius) stands upright along the swing", function()
+		local world = bind(newWorld())
+		world.right = nil
+		expectNear(Impact.planeNormal(Vector3.new(0, 0, -1), Vector3.new(0, 0, -3)) :: Vector3, Vector3.new(1, 0, 0))
+		-- Just inside asin(minPlaneSine) of the radius is still a thrust.
+		local angle = math.asin(TILT.minPlaneSine) * 0.9
+		local near = Vector3.new(math.sin(angle), 0, -math.cos(angle))
+		expectNear(Impact.planeNormal(Vector3.new(0, 0, -1), near * 3) :: Vector3, Vector3.new(1, 0, 0))
+		-- Just past it, the swing has a plane of its own.
+		local past = math.asin(TILT.minPlaneSine) * 1.1
+		local across = Vector3.new(math.sin(past), 0, -math.cos(past))
+		local normal = Impact.planeNormal(Vector3.new(0, 0, -1), across) :: Vector3
+		expectNear(normal, across:Cross(Vector3.new(0, 0, -1)).Unit)
+		-- No attacker: tangent x up, as before.
+		expectNear(Impact.planeNormal(Vector3.new(0, 0, 1)) :: Vector3, Vector3.new(-1, 0, 0))
+	end)
+
+	it("turns toward the camera only as far as the face needs, and never past the cap", function()
+		local world = bind(newWorld())
+		world.right = nil
+		local t = Vector3.new(1, 0, 0)
+		local radial = Vector3.new(0, 0, -4)
+		-- Facing the camera already: unchanged.
+		expectNear(Impact.planeNormal(t, radial, Vector3.new(0, -3, 0)) :: Vector3, Vector3.new(0, -1, 0))
+		expectNear(Impact.planeNormal(t, radial, Vector3.new(0, 3, -1)) :: Vector3, Vector3.new(0, -1, 0))
+		-- 60 degrees off: turned to exactly faceDegrees off, about the swing (the tangent stays).
+		local sixty = Vector3.new(0, -math.cos(math.rad(60)), -math.sin(math.rad(60)))
+		local turned = Impact.planeNormal(t, radial, sixty) :: Vector3
+		expect(faceOff(turned, sixty)).toBeCloseTo(TILT.faceDegrees, 1e-3)
+		expect(math.abs(turned:Dot(t))).toBeLessThan(1e-6)
+		-- Edge-on: the cap, toward the camera.
+		local edge = Vector3.new(0, 0, 5)
+		local capped = Impact.planeNormal(t, radial, edge) :: Vector3
+		expect(faceOff(capped, edge)).toBeCloseTo(90 - TILT.maxDegrees, 1e-3)
+		expect(math.abs(capped:Dot(t))).toBeLessThan(1e-6)
+		-- The same from the other side of the plane, and from below.
+		local under = Vector3.new(0, 0.2, -5)
+		expect(faceOff(Impact.planeNormal(t, radial, under) :: Vector3, under)).toBeLessThan(
+			faceOff(Vector3.new(0, -1, 0), under)
+		)
+		-- Looking straight along the swing: nothing to turn toward.
+		expectNear(Impact.planeNormal(t, radial, Vector3.new(7, 0, 0)) :: Vector3, Vector3.new(0, -1, 0))
+	end)
+end)
+
+describe("Impact sweep", function()
+	local function sweepOf(world: any, count: number, changes: { [string]: any }): { any }
+		local targets = {}
+		for index = 1, count do
+			local target = { name = "target" .. index }
+			world.positions[target] = Vector3.new(index * 2, 3, -6)
+			table.insert(targets, target)
+		end
+		for index, target in targets do
+			local info = hitInfo(world, changes)
+			info.target = target
+			info.position = Vector3.new(index * 2, 3, -5)
+			Impact.hit(info)
+		end
+		return targets
+	end
+
+	it(
+		"twelve targets of one swing are one cue, one contour and one punch; every target's accents still play",
+		function()
+			local world = bind(newWorld())
+			world.swing = Vector3.new(1, 0, 0)
+			world.hiddenAfterPlay = 2 * combat.hitStopFrameSeconds -- the picture shows
+			sweepOf(world, 12, { tier = "Final", art = true })
+			expect(only(world, "sfx.cue")[1]).toBe("HitFinal")
+			expect(only(world, "sfx.contour")[1]).toBe("FinalHit")
+			expect(only(world, "camera.punch")[1]).toBe("Final")
+			-- ImpactFrames joins the twelve plays into one picture (its own spec).
+			expect(#callsTo(world, "impactFrames.play")).toBe(12)
+			flush(world)
+			expect(#callsTo(world, "glint.play")).toBe(12)
+			expect(#callsTo(world, "outline.flash")).toBe(12)
+		end
+	)
+
+	it(
+		"a kill among the sweep's hits adds its own cue and takes the mix over; a later final hit never undoes it",
+		function()
+			local world = bind(newWorld())
+			world.swing = Vector3.new(1, 0, 0)
+			sweepOf(world, 3, { tier = "Final", art = true })
+			sweepOf(world, 1, { tier = "Kill", killed = true })
+			sweepOf(world, 3, { tier = "Final", art = true })
+			local cues = {}
+			for _, args in callsTo(world, "sfx.cue") do
+				table.insert(cues, args[1])
+			end
+			expect(cues).toEqual({ "HitFinal", "HitKill" })
+			local contours = {}
+			for _, args in callsTo(world, "sfx.contour") do
+				table.insert(contours, args[1])
+			end
+			expect(contours).toEqual({ "FinalHit", "KillCut" })
+			local punches = {}
+			for _, args in callsTo(world, "camera.punch") do
+				table.insert(punches, args[1])
+			end
+			expect(punches).toEqual({ "Final", "Kill" })
+		end
+	)
+
+	it(
+		"a sweep's cues sound at its first hit, so the layers they share play once; a weaker cue after the kill adds none",
+		function()
+			local world = bind(newWorld())
+			world.swing = Vector3.new(1, 0, 0)
+			-- A kill confirmed first: the final hits of the same sweep add no cue under it.
+			sweepOf(world, 1, { tier = "Kill", killed = true })
+			sweepOf(world, 3, { tier = "Final", art = true })
+			local cues = callsTo(world, "sfx.cue")
+			expect(#cues).toBe(1)
+			expect(cues[1][1]).toBe("HitKill")
+			-- The next swing: a final hit at one end, the kill at the far end (farther apart than
+			-- SfxPool's same-spot dedupe reaches). Both cues play, the kill's at the sweep's first
+			-- hit, so the crack and the flesh they share are one sound.
+			world.clock += 1
+			table.clear(world.calls)
+			local near = hitInfo(world, { tier = "Final", art = true, position = Vector3.new(-10, 3, -5) })
+			local far = hitInfo(world, { tier = "Kill", killed = true, position = Vector3.new(10, 3, -5) })
+			Impact.hit(near)
+			Impact.hit(far)
+			cues = callsTo(world, "sfx.cue")
+			expect(#cues).toBe(2)
+			expect(cues[1][1]).toBe("HitFinal")
+			expect(cues[2][1]).toBe("HitKill")
+			expectVector(cues[1][2], near.position)
+			expectVector(cues[2][2], near.position)
+			-- The kill's other accents stay at its own target.
+			flush(world)
+			local glints = callsTo(world, "glint.play")
+			expectVector(glints[#glints][1], far.position)
+		end
+	)
+
+	it("a sweep confirmed over several frames draws one picture; only a stronger hit draws again", function()
+		local world = bind(newWorld())
+		world.swing = Vector3.new(1, 0, 0)
+		-- The server confirms a wide sweep's targets over a few frames; the first picture (two
+		-- frames) is over before the last of them arrive.
+		local frame = combat.hitStopFrameSeconds
+		Impact.hit(hitInfo(world, { tier = "Final", art = true }))
+		expect(#callsTo(world, "impactFrames.play")).toBe(1)
+		world.clock += 2 * frame
+		Impact.hit(hitInfo(world, { tier = "Final", art = true }))
+		world.clock += frame
+		Impact.hit(hitInfo(world, { tier = "Final", art = true }))
+		expect(#callsTo(world, "impactFrames.play")).toBe(1)
+		-- One cue, one contour, one punch for the whole sweep.
+		only(world, "sfx.cue")
+		only(world, "sfx.contour")
+		only(world, "camera.punch")
+		-- A kill among them is a stronger moment: its picture plays; a final hit after it does not.
+		world.clock += frame
+		Impact.hit(hitInfo(world, { tier = "Kill", killed = true }))
+		world.clock += frame
+		Impact.hit(hitInfo(world, { tier = "Final", art = true }))
+		local plays = callsTo(world, "impactFrames.play")
+		expect(#plays).toBe(2)
+		expect(plays[2][1]).toBe("Kill")
+		-- Every target's accents still play.
+		flush(world)
+		expect(#callsTo(world, "glint.play")).toBe(5)
+	end)
+
+	it("the local player's own hit is its own sweep: heard at the player, never folded into another's", function()
+		local world = bind(newWorld())
+		local ally = { name = "ally" }
+		local me = { name = "me" }
+		world.positions[ally] = Vector3.new(6, 3, 0)
+		world.positions[me] = Vector3.new(-2, 3, 0)
+		local allyPoint = Vector3.new(6, 3, 0)
+		local myPoint = Vector3.new(-2, 3, 0)
+		local function strike(target: any, point: Vector3, changes: { [string]: any })
+			local info = hitInfo(world, changes)
+			info.target = target
+			info.position = point
+			info.localAttacker = false
+			info.art = nil
+			Impact.hit(info)
+		end
+		-- An enemy's cleave in one frame: the ally guards it, the local player takes it clean.
+		strike(ally, allyPoint, { involved = false, guarded = true })
+		strike(me, myPoint, { involved = true })
+		local cues = callsTo(world, "sfx.cue")
+		expect(#cues).toBe(2)
+		expect(cues[1][1]).toBe("Block")
+		expectVector(cues[1][2], allyPoint)
+		expect(cues[2][1]).toBe("HitNormal")
+		expectVector(cues[2][2], myPoint)
+		-- The next cleave kills the ally and hits the player: the player's hit is not dropped
+		-- behind the ally's kill.
+		world.clock += 1
+		table.clear(world.calls)
+		strike(ally, allyPoint, { involved = false, tier = "Kill", killed = true })
+		strike(me, myPoint, { involved = true })
+		cues = callsTo(world, "sfx.cue")
+		expect(#cues).toBe(2)
+		expect(cues[1][1]).toBe("HitKill")
+		expectVector(cues[1][2], allyPoint)
+		expect(cues[2][1]).toBe("HitNormal")
+		expectVector(cues[2][2], myPoint)
+	end)
+
+	it("a parry or a block sounds after a kill of the same strike, in either order", function()
+		local world = bind(newWorld())
+		local ally = { name = "ally" }
+		local other = { name = "other" }
+		world.positions[ally] = Vector3.new(6, 3, 0)
+		world.positions[other] = Vector3.new(-6, 3, 0)
+		local function strike(target: any, changes: { [string]: any })
+			local info = hitInfo(world, changes)
+			info.target = target
+			info.position = world.positions[target] or HIT_POINT
+			info.localAttacker = false
+			info.art = nil
+			Impact.hit(info)
+		end
+		local function cueNames(): { string }
+			local names = {}
+			for _, args in callsTo(world, "sfx.cue") do
+				table.insert(names, args[1])
+			end
+			return names
+		end
+		-- The strike kills the ally, then the local player parries it.
+		strike(ally, { involved = false, tier = "Kill", killed = true })
+		strike(world.target, { involved = true, parried = true })
+		expect(cueNames()).toEqual({ "HitKill", "Parry" })
+		-- The strike kills the ally, then another fighter blocks it (both seen from outside).
+		world.clock += 1
+		table.clear(world.calls)
+		strike(ally, { involved = false, tier = "Kill", killed = true })
+		strike(other, { involved = false, guarded = true })
+		expect(cueNames()).toEqual({ "HitKill", "Block" })
+		-- The other way round gives the same sounds.
+		world.clock += 1
+		table.clear(world.calls)
+		strike(other, { involved = false, guarded = true })
+		strike(ally, { involved = false, tier = "Kill", killed = true })
+		expect(cueNames()).toEqual({ "Block", "HitKill" })
+	end)
+
+	it("another attacker's hit in the same frame is its own sound", function()
+		local world = bind(newWorld())
+		Impact.hit(hitInfo(world))
+		Impact.hit(hitInfo(world, { attacker = world.partner, localAttacker = false }))
+		expect(#callsTo(world, "sfx.cue")).toBe(2)
+	end)
+
+	it("the next swing (past the merge window) sounds again; a Switch's land sound plays once per sweep", function()
+		local world = bind(newWorld())
+		Impact.hit(hitInfo(world, { isSwitch = true, partner = world.partner }))
+		Impact.hit(hitInfo(world, { isSwitch = true, partner = world.partner }))
+		expect(#callsTo(world, "sfx.cue")).toBe(1)
+		expect(#callsTo(world, "sfx.play")).toBe(1)
+		world.clock += moments.sweep.mergeSeconds * 0.5
+		Impact.hit(hitInfo(world))
+		expect(#callsTo(world, "sfx.cue")).toBe(1)
+		world.clock += moments.sweep.mergeSeconds * 1.01
+		Impact.hit(hitInfo(world))
+		expect(#callsTo(world, "sfx.cue")).toBe(2)
+		-- Binding again forgets every sweep.
+		bind(world)
+		Impact.hit(hitInfo(world))
+		expect(#callsTo(world, "sfx.cue")).toBe(3)
+	end)
+
+	it("an effect this client did not get does not use up the sweep's", function()
+		local world = bind(newWorld())
+		world.swing = Vector3.new(1, 0, 0)
+		-- One swing through a mob and the local player: the mob's hit is a bystander's view (no
+		-- contour, no punch), the player's own hit then gets both, and its own cue at its point.
+		Impact.hit(hitInfo(world, { tier = "Final", art = true, involved = false, localAttacker = false }))
+		none(world, "sfx.contour")
+		none(world, "camera.punch")
+		local mine = hitInfo(world, {
+			tier = "Final",
+			art = true,
+			involved = true,
+			localAttacker = false,
+			position = Vector3.new(-3, 3, -4),
+		})
+		Impact.hit(mine)
+		expect(only(world, "sfx.contour")[1]).toBe("FinalHit")
+		expect(only(world, "camera.punch")[1]).toBe("Final")
+		local cues = callsTo(world, "sfx.cue")
+		expect(#cues).toBe(2)
+		expect(cues[2][1]).toBe("HitFinal")
+		expectVector(cues[2][2], mine.position)
+	end)
+end)
+
+describe("Impact guard and death sounds", function()
+	it("a guard break plays the GuardBreak cue at the fighter for everyone", function()
+		local world = bind(newWorld())
+		Impact.guardBreak(world.target, false)
+		local cue = only(world, "sfx.cue")
+		expect(cue[1]).toBe("GuardBreak")
+		expectVector(cue[2], world.positions[world.target])
+		table.clear(world.calls)
+		Impact.guardBreak(world.attacker, true)
+		expect(only(world, "sfx.cue")[1]).toBe("GuardBreak")
+	end)
+
+	it("a guard going up plays the raise near it, and on the guarding fighter's own client", function()
+		local world = bind(newWorld())
+		Impact.guardRaise(world.attacker, true)
+		local sound = only(world, "sfx.play")
+		expect(sound[1]).toBe("guard.GuardRaise")
+		expectVector(sound[2], world.positions[world.attacker])
+		table.clear(world.calls)
+		world.viewer = world.positions[world.target] + Vector3.new(moments.rangeOf("GuardRaise") + 1, 0, 0)
+		Impact.guardRaise(world.target, false)
+		none(world, "sfx.play")
+		table.clear(world.calls)
+		world.viewer = world.positions[world.target] + Vector3.new(moments.rangeOf("GuardRaise") - 1, 0, 0)
+		Impact.guardRaise(world.target, false)
+		only(world, "sfx.play")
+	end)
+
+	it("names the shatter's cue: the boss's, a player's or an Elite's heavy one, else a mob's", function()
+		bind(newWorld())
+		expect(Impact.shatterCue(true)).toBe("BossShatter")
+		expect(Impact.shatterCue(true, true)).toBe("BossShatter")
+		expect(Impact.shatterCue(false, true)).toBe("ShatterHeavy")
+		expect(Impact.shatterCue(false, false)).toBe("Shatter")
+		expect(Impact.shatterCue(false)).toBe("Shatter")
+	end)
+
+	it("a heavy death blooms the mix like any death", function()
+		local world = bind(newWorld())
+		Impact.death(world.target, HIT_POINT, false, true)
+		expect(only(world, "sfx.contour")[1]).toBe(moments.rows.HeavyDeath.contour)
+		none(world, "sfx.cue")
+	end)
+
+	it("reports how long the impact frames still hide the world, 0 without the module", function()
+		local world = bind(newWorld())
+		world.hidden = 0.08
+		expect(Impact.hiddenSeconds()).toBe(0.08)
+		world.hidden = -1
+		expect(Impact.hiddenSeconds()).toBe(0)
+		world.deps.impactFrames = nil
+		bind(world)
+		expect(Impact.hiddenSeconds()).toBe(0)
+	end)
+end)
+
+describe("Impact start order", function()
+	-- Main.client.luau's SIBLING_ORDER, in order.
+	local function siblingOrder(): { string }
+		local source = Harness.readFile("src/client/Main.client.luau")
+		local block = source:match("local SIBLING_ORDER = (%b{})")
+		expect(block).never.toBeNil()
+		local order = {}
+		for path in (block :: string):gmatch('"([%w%.]+)"') do
+			table.insert(order, path)
+		end
+		return order
+	end
+
+	it("Main starts the director after everything it fires, and the ambience right after the pool", function()
+		local order = siblingOrder()
+		local function at(path: string): number
+			local index = table.find(order, path)
+			if index == nil then
+				error(path .. " is not in SIBLING_ORDER", 2)
+			end
+			return index :: number
+		end
+		local impact = at("fx.Impact")
+		for _, path in
+			{
+				"audio.SfxPool",
+				"fx.OutlineManager",
+				"fx.Trails",
+				"fx.Shatter",
+				"fx.ImpactFrames",
+				"fx.Glint",
+				"fx.SlashArc",
+				"fx.SpeedLines",
+			}
+		do
+			expect(at(path)).toBeLessThan(impact)
+		end
+		expect(at("audio.Ambience")).toBe(at("audio.SfxPool") + 1)
+		expect(at("fx.Quality")).toBe(1)
+	end)
+end)
+
 describe("Impact dependencies", function()
 	it("a missing module logs once and the moment's other effects still play", function()
 		local world = newWorld()
@@ -682,6 +1182,7 @@ describe("Impact dependencies", function()
 		bind(world)
 		local before = #Harness.warnings()
 		Impact.hit(hitInfo(world, { tier = "Final", art = true }))
+		world.clock += 1
 		Impact.hit(hitInfo(world, { tier = "Final", art = true }))
 		expect(warningsSince(before, "slashArc")).toBe(1)
 		expect(#callsTo(world, "glint.play")).toBe(2)
@@ -695,6 +1196,7 @@ describe("Impact dependencies", function()
 		bind(world)
 		local before = #Harness.warnings()
 		Impact.hit(hitInfo(world, { killed = true }))
+		world.clock += 1
 		Impact.hit(hitInfo(world, { killed = true }))
 		expect(warningsSince(before, "sfx.contour")).toBe(1)
 		expect(#callsTo(world, "camera.punch")).toBe(2)
@@ -708,6 +1210,7 @@ describe("Impact dependencies", function()
 		bind(world)
 		local before = #Harness.warnings()
 		Impact.hit(hitInfo(world))
+		world.clock += 1
 		Impact.hit(hitInfo(world))
 		expect(warningsSince(before, "glint.play failed")).toBe(1)
 		expect(#callsTo(world, "sfx.cue")).toBe(2)

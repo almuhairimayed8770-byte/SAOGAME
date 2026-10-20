@@ -196,9 +196,10 @@ local clip: Types.ClipDef = {
 	},
 	events = {
 		{ time = 0.15, kind = "Voice", data = { name = "enemy.BruteWindUp" } },
+		{ time = 1.14, kind = "Sfx", data = { name = "whoosh.Large" } },
 		{ time = 1.3, kind = "TrailOn", data = { kind = "Basic" } },
 		{ time = 1.3, kind = "SmearOn", data = { axis = "Y" } },
-		{ time = 1.3, kind = "Sfx", data = { name = "whoosh.Large" } },
+		{ time = 1.3, kind = "Voice", data = { name = "enemy.BruteStrike" } },
 		{ time = 1.3, kind = "HitWindowOpen", data = { hit = 1 } },
 		{ time = 1.3333, kind = "SmearOff" },
 		{ time = 1.37, kind = "Sfx", data = { name = "footsteps.LandHard" } },

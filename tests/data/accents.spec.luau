@@ -107,6 +107,32 @@ describe("accents data", function()
 		end
 		expect(accents.tier("Ultra")).toBe(accents.quality.High)
 	end)
+
+	it("turns a crescent toward the camera by a bounded angle and knows a thrust from a swing", function()
+		local tilt = accents.slashArc.tilt
+		-- A face more than faceDegrees off the camera turns, by at most maxDegrees: a full turn
+		-- from edge-on (90) leaves it no nearer than faceDegrees, so the swing plane still reads.
+		expect(tilt.maxDegrees).toBeGreaterThan(0)
+		expect(tilt.faceDegrees).toBeGreaterThan(0)
+		expect(tilt.faceDegrees).toBeLessThan(90)
+		expect(90 - tilt.maxDegrees).toBeGreaterThanOrEqual(tilt.faceDegrees)
+		-- The sine of the smallest angle between a swing and its radius that still has a plane.
+		expect(tilt.minPlaneSine).toBeGreaterThan(0)
+		expect(tilt.minPlaneSine).toBeLessThan(1)
+	end)
+
+	it("remembers a swing long enough for a late confirmation and never into the next swing", function()
+		local memory = accents.swing.memorySeconds
+		expect(memory).toBeGreaterThan(accents.swing.samples * combat.hitStopFrameSeconds)
+		-- A basic chain's next swing starts within a second; the memory never reaches that far.
+		expect(memory).toBeLessThan(1)
+	end)
+
+	it("reads a strike's snap over the smear's frames, well inside the memory", function()
+		expect(accents.swing.snapFrames).toBe(fx.smear.frames)
+		expect(accents.swing.snapFrames).toBeGreaterThanOrEqual(1)
+		expect(accents.swing.snapFrames * accents.frameSeconds).toBeLessThan(accents.swing.memorySeconds)
+	end)
 end)
 
 describe("accents validator", function()

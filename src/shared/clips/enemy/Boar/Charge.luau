@@ -231,7 +231,7 @@ local clip: Types.ClipDef = {
 		{ time = 0.1, kind = "Voice", data = { name = "enemy.ChargerWindUp" } },
 		{ time = 0.6, kind = "TrailOn", data = { kind = "Basic" } },
 		{ time = 0.6, kind = "SmearOn", data = { axis = "Z" } },
-		{ time = 0.6, kind = "Sfx", data = { name = "enemy.ChargerStrike" } },
+		{ time = 0.6, kind = "Voice", data = { name = "enemy.ChargerStrike" } },
 		{ time = 0.6, kind = "HitWindowOpen", data = { hit = 1 } },
 		{ time = 0.6333, kind = "SmearOff" },
 		{ time = 0.72, kind = "Footstep", data = { foot = "FrontLeft" } },

@@ -50,14 +50,22 @@
 	  startAt after a wait of seconds - (end - startAt) / PlaybackSpeed. A sound whose asset has
 	  not loaded yet is skipped, never played out of time, and asked to load for the next one. A
 	  riser whose hit is now or already past (seconds <= 0) is skipped too.
+	- `playLate(name, lateBy, position?)` plays a sound as if it had started `lateBy` seconds ago
+	  (a clip sound a network catch-up jumped over): its speed is picked first, then it starts
+	  lateBy x PlaybackSpeed into its region, so its peak and its fade land where they would have;
+	  one already over by now (past stopAt, else the library length) is not played.
 	- `preload()` (run by `start()`) creates the voices of every combat sound and asks the engine
 	  to load them, so the first hit of a session is not silent: sfx.preload, every cue's layers,
 	  and the families the hit, tick and parry helpers play from (`preloadNames()`). Loop beds
 	  (ambience, the heartbeat) are not pooled and never preloaded here.
 
 	Helpers: `hit(tier, position, surface)` (impact plus the metallic ring), `hitStopTick(tier)`,
-	`parry(position)`, `shatter(position, boss)` (the Shatter / BossShatter cue; the reverb bloom
-	is the impact director's), `footstep(model, surface?, weight?)` (surface from the Humanoid's
+	`parry(position)`, `shatter(position, weight)` (the caller's weight, or the cue's own name,
+	picks sfx.shatterCues: Shatter for a mob, ShatterHeavy for a player or an Elite, BossShatter
+	for a boss; the old boolean still means boss or normal; the reverb bloom is the impact
+	director's; shatters of one cue inside fx.audio.dedupeSeconds and within sfx.mix's rolloff
+	distance of each other are one sound, so a sweep's kills crack once and a kill across the map
+	does not mute the one here), `footstep(model, surface?, weight?)` (surface from the Humanoid's
 	FloorMaterial when the clip event carries none), `loop(name, gain)` for the heartbeat and the
 	ambience beds (Looped over startAt .. stopAt; the caller's gain ramp is the fade, and stopping
 	resets Looped and the regions), `duck(db, seconds)` for the system voice.
@@ -80,6 +88,9 @@ local Engine = require(script.Parent.Parent.fx.Engine)
 local MusicState = require(script.Parent.MusicState)
 
 export type StepFn = (dt: number) -> ()
+
+-- Which sfx.shatterCues a death plays: a mob's, a player's or an Elite's, a boss's.
+export type ShatterWeight = "normal" | "heavy" | "boss"
 
 export type Deps = {
 	now: () -> number, -- monotonic seconds (dedupe, voices, contours, fades)
@@ -180,6 +191,9 @@ local fades: { Fade } = {}
 local emitterPool: { BasePart } = {}
 local emitterFolder: Instance? = nil
 local recent: { { name: string, position: Vector3?, time: number } } = {}
+-- shatter cue name -> when and where it last started: shatters that crack together inside one
+-- sound's reach are one sound.
+local lastShatters: { [string]: { at: number, position: Vector3? } } = {}
 -- Plays asked for, played, deduped, placeholders that never play, risers skipped unloaded, and
 -- plays whose asset had not loaded yet (they start when it arrives, untimed and unfaded).
 export type Stats = {
@@ -788,7 +802,8 @@ local function startSound(
 	position: Vector3?,
 	gainDb: number,
 	endIn: number?,
-	speedOverride: number?
+	speedOverride: number?,
+	lateBy: number?
 ): Sound?
 	SfxPool.start()
 	stats.requested += 1
@@ -800,6 +815,16 @@ local function startSound(
 	if isDuplicate(name, heardAt, now) then
 		stats.deduped += 1
 		return nil
+	end
+	-- A late play picks its speed first, so it knows how far into the asset it is by now.
+	local skip = 0
+	if lateBy ~= nil and lateBy > 0 then
+		speedOverride = pitchOf(entry, speedOverride)
+		skip = lateBy * (speedOverride :: number)
+		local last = audibleEnd(entry, 0)
+		if last ~= nil and startOf(entry) + skip >= last then
+			return nil -- already over: nothing of it is left to hear
+		end
 	end
 	table.insert(recent, { name = name, position = heardAt, time = now })
 	if entry.placeholder then
@@ -845,7 +870,7 @@ local function startSound(
 
 	-- Where the play starts in the asset, and how long it waits first (a riser shorter than its lead).
 	local first = startOf(entry)
-	local timePosition = first
+	local timePosition = first + skip
 	local wait = 0
 	if endIn ~= nil then
 		-- endIn > 0 here (playEndingAt skips a hit that is now or past), so from < last.
@@ -972,6 +997,7 @@ end
 function SfxPool.reset()
 	stopStepper()
 	table.clear(recent)
+	table.clear(lastShatters)
 	stats = freshStats()
 	for _, list in voices do
 		for _, voice in list do
@@ -1170,6 +1196,11 @@ function SfxPool.playEndingAt(name: string, seconds: number, position: Vector3?)
 	return startSound(name, position, 0, seconds)
 end
 
+--- Plays "family.Name" as if it had started `lateBy` seconds ago (a clip sound a late start jumped over): it starts that far into its region at its speed; nil when deduped, a placeholder, or already over.
+function SfxPool.playLate(name: string, lateBy: number, position: Vector3?): Sound?
+	return startSound(name, position, 0, nil, nil, lateBy)
+end
+
 --- Every cue name in sfx.luau, sorted.
 function SfxPool.cueNames(): { string }
 	return Sfx.cueNames()
@@ -1257,10 +1288,44 @@ function SfxPool.parry(position: Vector3?)
 	SfxPool.play("guard.Parry", position)
 end
 
---- The shatter: the Shatter cue (slam, sub, glass crack, chime, bass dive); bosses get BossShatter.
-function SfxPool.shatter(position: Vector3?, boss: boolean?)
+--- The sfx.shatterCues cue for a weight ("normal" | "heavy" | "boss", or one of those cues by name; true is boss, false or nil normal); anything else is normal.
+function SfxPool.shatterCue(weight: (ShatterWeight | string | boolean)?): string
+	local cues = Sfx.shatterCues :: { [string]: string }
+	if weight == true then
+		return cues.boss
+	end
+	if typeof(weight) == "string" then
+		if cues[weight] ~= nil then
+			return cues[weight]
+		end
+		-- A moments.luau death row names the cue itself.
+		for _, cue in cues do
+			if cue == weight then
+				return cue
+			end
+		end
+	end
+	return cues.normal
+end
+
+--- The shatter cue (slam, glass crack, chime, bass dive) for the caller's weight or cue name: a mob's Shatter, a player's or an Elite's ShatterHeavy, a boss's BossShatter; once for shatters of one cue that crack together.
+function SfxPool.shatter(position: Vector3?, weight: (ShatterWeight | string | boolean)?)
 	-- The mix stays alone: the reverb bloom is the impact director's, for deaths near the camera.
-	SfxPool.cue(if boss then Sfx.shatterCues.boss else Sfx.shatterCues.normal, position)
+	local cue = SfxPool.shatterCue(weight)
+	-- One sweep's kills shatter in the same frame, often farther apart than the same-spot dedupe
+	-- reaches: inside fx.audio.dedupeSeconds a shatter cue plays once within one sound's reach
+	-- (sfx.mix.rolloffMaxDistance; a pack lies well inside it). One beyond it is another fight's.
+	local now = deps.now()
+	local last = lastShatters[cue]
+	if last ~= nil and now - last.at <= Fx.audio.dedupeSeconds then
+		local from = last.position
+		if position == nil or from == nil or (position - (from :: Vector3)).Magnitude <= Sfx.mix.rolloffMaxDistance then
+			stats.deduped += 1
+			return
+		end
+	end
+	lastShatters[cue] = { at = now, position = position }
+	SfxPool.cue(cue, position)
 end
 
 --- The footstep surface for a character: the event's surface, else the Humanoid's floor material.

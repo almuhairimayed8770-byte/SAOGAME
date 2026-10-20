@@ -23,7 +23,15 @@
 	`select` picks the moment for a confirmed hit: the first rule whose every `when` field equals
 	the hit's wins, else `fallback`. A death always plays the Kill moment (even through a guard),
 	and only an Art's final hit gets FinalHit (a basic chain's last swing also rides the Final
-	hit-stop, but stays a basic hit: section 6, basics are weak).
+	hit-stop, but stays a basic hit: section 6, basics are weak). A player's basic swing
+	(`art = false`) is BasicHit unless a parry, a kill, a guard or a crit claims it first; an
+	enemy's strike is neither an Art nor a basic (`art` nil) and falls back to Hit.
+
+	Hits that land together (one sweep through up to 12 targets arrives as that many HitConfirmed
+	within a few frames) are one sound: inside `sweep.mergeSeconds` the director plays each cue, sound,
+	contour and punch of one attacker once, never a weaker hit-stop's cue after a stronger one,
+	and every cue at the sweep's first hit (Replication nudges the camera and ticks the hit-stop
+	once the same way, and one sweep's deaths of the same voice scream once).
 
 	The 3D accents (glint, crescent, slash line, Highlight, trail flash) of a hit wait while the
 	local player's impact frames hide the world (ImpactFrames.hiddenSeconds), then play: the
@@ -145,13 +153,16 @@ local Moments = {
 		{ when = { tier = "Final", art = true }, moment = "FinalHit" },
 		{ when = { crit = true }, moment = "Crit" },
 		{ when = { isSwitch = true }, moment = "Switch" },
+		{ when = { art = false }, moment = "BasicHit" },
 	} :: { Rule },
 	fallback = "Hit",
 
 	-- The hit fields a rule may test (the director's HitInfo).
 	hitFields = {
 		tier = "string",
-		art = "boolean", -- the hit is an Art's (HitConfirmed carries its artId)
+		-- true: an Art's hit (HitConfirmed carries its artId); false: a player's basic swing; nil:
+		-- neither (an enemy's strike, or an attacker this client does not track).
+		art = "boolean",
 		parried = "boolean",
 		guarded = "boolean",
 		killed = "boolean",
@@ -168,13 +179,30 @@ local Moments = {
 		duckDelayFrames = Combat.hitStopFrames.Kill,
 	},
 
+	-- One sweep's hits (HitConfirmed of one attacker inside this many seconds of its first) share
+	-- their sound and mix: the server confirms a wide sweep's targets over about 3 frames as the
+	-- blade crosses them and they arrive with a frame or two of jitter; an Art's next window is
+	-- 0.23 s on at the closest (the validator holds the merge under it).
+	sweep = {
+		mergeSeconds = 0.1,
+	},
+
 	rows = {
-		-- A basic hit or a non-final Art hit (3-frame hit-stop): the 4-layer hit and a small glint.
+		-- A non-final Art hit or an enemy's strike (3-frame hit-stop): the 4-layer hit and a small
+		-- glint.
 		Hit = {
 			hitStop = "Normal",
 			range = 60, -- small glints far off are noise
 			glint = { size = "Small" },
 			cue = "HitNormal",
+		},
+		-- A player's basic swing, the third swing's Final hit-stop included (section 6, basics are
+		-- weak): the 4-layer hit with the crack and the body down, and the small glint.
+		BasicHit = {
+			hitStop = "Normal",
+			range = 60,
+			glint = { size = "Small" },
+			cue = "HitBasic",
 		},
 		Crit = {
 			hitStop = "Normal",
@@ -250,10 +278,28 @@ local Moments = {
 			cue = "Dodge",
 			audience = { Cue = "Range" } :: { [string]: Audience },
 		},
+		-- A player's guard breaks (StateChanged GuardBroken): the crack with the sub under it. The
+		-- Final hit-stop tick for the people in the hit is Replication's.
+		GuardBreak = {
+			cue = "GuardBreak",
+		},
+		-- A guard goes up: the soft raise, predicted on the guarding fighter's own client and played
+		-- from StateChanged Guard for everyone else.
+		GuardRaise = {
+			range = 60,
+			sound = "guard.GuardRaise",
+			audience = { Sound = "Range" } :: { [string]: Audience },
+		},
 		-- A death: the shatter plays its own cue; the director blooms the mix after the silence for
 		-- everyone near it.
 		Death = {
 			shatterCue = "Shatter",
+			contour = "ShatterBloom",
+			audience = { Contour = "Range" } :: { [string]: Audience },
+		},
+		-- A player's or an Elite's death: the heavier shatter (the bass dive at full level).
+		HeavyDeath = {
+			shatterCue = "ShatterHeavy",
 			contour = "ShatterBloom",
 			audience = { Contour = "Range" } :: { [string]: Audience },
 		},
@@ -320,6 +366,14 @@ end
 --- Seconds the death silence waits after EntityDied (the kill's hit-stop).
 function Moments.deathDuckDelay(): number
 	return Moments.death.duckDelayFrames * Combat.hitStopFrameSeconds
+end
+
+--- The death moment for a shatter: BossDeath for a boss, HeavyDeath for a player or an Elite, else Death.
+function Moments.deathFor(boss: boolean, heavy: boolean?): string
+	if boss then
+		return "BossDeath"
+	end
+	return if heavy then "HeavyDeath" else "Death"
 end
 
 return Moments

@@ -5,9 +5,29 @@
 	an enemy's additive directional flinch, the parry spark burst, camera nudge and shake, the HP
 	flash, the death freeze (Music, SFX and UI ducked) and shatter, the death system line after the
 	shatter, other system lines, the Switch ring. A Stagger, Break, guard break or death hides the
-	wind-up telegraph it interrupted. It also routes every rig's clip events (trail, smear,
+	wind-up telegraph it interrupted.
+
+	The impact director (fx/Impact.luau) owns every hit, parry, block and guard sound and the reel
+	accents: each HitConfirmed becomes one Impact.hit(info); a guard break or raise, a remote dodge
+	(ActionStarted of a "/Dodge" clip), an Art activation (the clip's ActivationHold) and a shatter
+	call it too. Replication keeps the hit-stop tick (2D, for the people in the hit; a hit that
+	breaks a player's guard ticks Final; one per sweep, a stronger tier's taking over), the
+	digits, the reactions, the flinch, one camera nudge per sweep, the shake and the HP flash. The
+	blow that breaks a player's guard reaches the director as a guarded hit: StateChanged
+	GuardBroken already played the break's crack, and the blow is the block under it. A death
+	waits the kill's hit-stop (Moments.deathDuckDelay) before the silence, so the kill is heard;
+	the shatter and the system line move by the same lead, and an enemy's death vocal plays at
+	once (the silence chops it), once for one sweep's deaths of the same voice. The newest death
+	owns the silence: one inside another's silence brings the sound back at once for its kill, and
+	an older death's shatter never ends a newer silence (one sweep's deaths share theirs).
+
+	It also routes every rig's clip events (trail, smear,
 	activation light, footsteps, clip sounds) to the FX and audio packages, so trails, smears and
-	swings look and sound the same on the local fighter and on everyone else. A TrailOn's
+	swings look and sound the same on the local fighter and on everyone else. A remote clip that
+	ActionStarted starts late (the network catch-up jumps into it) still sounds the clip sounds it
+	jumped over, each from where it would be by now (SfxPool.playLate): a swing whose whoosh starts
+	on frame 0 keeps it. An Art's ActivationHold it jumped over still lights, chimes and ends its
+	riser on the first damage frame while that frame is ahead. A TrailOn's
 	`data.kind` ("Art" | "Basic") picks the trail kind for the rest of that clip's trail events.
 
 	Every tracked rig this client does not own (other players, enemies) gets a locomotion driver
@@ -36,6 +56,9 @@ local Combat = require(Shared.data.combat)
 local ChoreoData = require(Shared.data.choreo)
 local Fx = require(Shared.data.fx)
 local UI = require(Shared.data.ui)
+local Moments = require(Shared.data.moments)
+local Sfx = require(Shared.data.sfx)
+local Enemies = require(Shared.data.enemies)
 local Signal = require(Shared.util.Signal)
 local ActionLogic = require(script.Parent.ActionLogic)
 local Siblings = require(script.Parent.Siblings)
@@ -60,24 +83,27 @@ export type Deps = {
 	digits: any,
 	hud: any,
 	systemLine: any,
-	sfx: any, -- SfxPool-like: play(name, position?), footstep(model, surface?), duck(db, seconds)
+	sfx: any, -- SfxPool-like: play(name, position?), playLate(name, lateBy, position?), cue(name, position?), footstep(model, surface?), duck(db, seconds)
+	-- Impact-like: hit(info) -> string, ownsHighlight(info) -> boolean, hiddenSeconds() -> number,
+	-- activation(model, clipId, token, isLocal, speed?, lateBy?), dodge(model, isLocal),
+	-- guardBreak(model, isLocal), guardRaise(model, isLocal), shatterCue(boss, heavy) -> string,
+	-- death(model?, position, boss, heavy)
+	impact: any,
 	camera: any,
 	weaponCategory: (record: any) -> string,
 	trailToken: (record: any) -> string,
 	positionOf: (model: Instance) -> Vector3?,
 	schedule: (seconds: number, fn: () -> ()) -> (),
+	now: (() -> number)?, -- monotonic seconds (one camera nudge per sweep); os.clock when nil
 }
 
 -- Sound names (family.Name in sfx.luau) the reactions play; Replication.spec checks each resolves.
+-- The hit, parry, block and guard sounds are the impact director's cues (moments.luau). An
+-- enemy's death vocal is Sfx.vocalName(archetype, "Death"): in Phase 0 "enemy.ChargerDeath" and
+-- "enemy.BruteDeath".
 local SOUNDS = {
-	impact = { Normal = "impact.Flesh", Final = "impact.FinalHit", Kill = "impact.Kill" },
 	hitStop = { Normal = "hitStopTick.Normal", Final = "hitStopTick.Final", Kill = "hitStopTick.Kill" },
-	parry = "guard.Parry",
-	block = "guard.Block",
-	guardBreak = "guard.GuardBreak",
-	shatterCrack = "shatter.Crack",
 	switchPrompt = "ui.SwitchPrompt",
-	switchLand = "ui.SwitchLand",
 	systemLine = "ui.SystemLine",
 }
 
@@ -109,6 +135,22 @@ local drivers: { [number]: any } = {} -- entity id -> locomotion driver on a rig
 -- entity id -> the trail kind the playing clip's TrailOn named; HitWindowOpen / Close, TrailOff and
 -- PostMotionStart carry no kind, so they reuse it while the same clip is playing.
 local trailKinds: { [number]: { clipId: string, kind: string } } = {}
+-- enemy id -> the open Switch window on it and who opened it (that blade flashes on the Switch).
+local switchOpeners: { [any]: { openerId: any } } = {}
+-- entity id -> the clip ActionStarted played on it and its speed (the activation riser's timing).
+local clipSpeeds: { [any]: { clipId: string, speed: number? } } = {}
+-- Per attacker (its entity id, NO_ATTACKER when the payload names none): when its sweep's camera
+-- nudge was given (a sweep's hits confirm within a few frames and nudge once), and its sweep's
+-- hit-stop tick (when the sweep began and the strongest tier it ticked). A trade is two sweeps.
+local NO_ATTACKER = {}
+local lastNudges: { [any]: number } = {}
+local lastTicks: { [any]: { at: number, rank: number } } = {}
+-- death vocal name -> when it last played: one sweep's deaths of the same voice scream once.
+local deathVocals: { [string]: number } = {}
+-- The newest death owns the silence: how many deaths came so far, and when the silence a death
+-- started ends (nil while none holds).
+local deathCount = 0
+local silenceEnd: number? = nil
 
 local function dependencies(): Deps
 	if deps == nil then
@@ -127,6 +169,107 @@ end
 
 local function animatorOf(record: any): any
 	return dependencies().choreo.get(record.model)
+end
+
+local function clock(): number
+	local fn = dependencies().now
+	return if fn ~= nil then fn() else os.clock()
+end
+
+-- A player's or an Elite's death shatters heavier than a mob's (D-NEW: decision 8). An Elite is a
+-- record the tracker marks elite (a spawn-time Elite variant) or a def marked elite in enemies.luau.
+local function heavyDeath(record: any, isLocal: boolean): boolean
+	if isLocal then
+		return true
+	end
+	if record == nil then
+		return false
+	end
+	if record.kind == "Player" or record.elite == true then
+		return true
+	end
+	local def = Enemies.byId(record.defId or "")
+	return def ~= nil and def.elite == true
+end
+
+-- An enemy's death vocal at the rig (a placeholder entry plays nothing; an unknown def nothing).
+local function deathVocal(record: any, position: Vector3)
+	if record.kind ~= "Enemy" then
+		return
+	end
+	local def = Enemies.byId(record.defId or "")
+	if def == nil then
+		return
+	end
+	local ok, name = pcall(Sfx.vocalName, def.archetype, "Death")
+	if not ok then
+		return
+	end
+	local at = clock()
+	local last = deathVocals[name]
+	if last ~= nil and at - last <= Moments.sweep.mergeSeconds then
+		return -- the same sweep's death: its scream is already playing
+	end
+	deathVocals[name] = at
+	dependencies().sfx.play(name, position)
+end
+
+-- True when an attacker's sweep's hit plays its hit-stop tick: the sweep's first, or a stronger
+-- tier than it ticked (a kill among final hits is heard; a final hit after the kill adds nothing).
+local function ticksInSweep(tier: string, at: number, attacker: any): boolean
+	local rank = (Combat.hitStopFrames :: { [string]: number })[tier] or 0
+	local sweep = lastTicks[attacker]
+	if sweep == nil or at - sweep.at > Moments.sweep.mergeSeconds then
+		lastTicks[attacker] = { at = at, rank = rank }
+		return true
+	end
+	if rank > sweep.rank then
+		sweep.rank = rank
+		return true
+	end
+	return false
+end
+
+-- An Art's ActivationHold a late start jumped over while its first damage frame is still ahead:
+-- the activation light, the chime from where it would be by now, and the riser still ending on
+-- that frame. A hold whose window the start jumped over too is over: nothing replays for it.
+local function replayHold(record: any, clip: any, clipId: string, holdTime: number, clipTime: number, speed: number)
+	for _, event in clip.events do
+		if event.kind == "HitWindowOpen" and event.time >= holdTime and event.time <= clipTime then
+			return
+		end
+	end
+	local d = dependencies()
+	local token = d.trailToken(record)
+	local late = (clipTime - holdTime) / speed
+	d.trails.activationLight(record.model, true, token)
+	d.sfx.playLate("artChime." .. token, late, d.positionOf(record.model))
+	d.impact.activation(record.model, clipId, token, false, speed, late)
+end
+
+-- The clip sounds a late start jumped over (the network catch-up starts the clip `handle.time`
+-- in; the Mixer's first step fires the events from there on), each from where it would be by now,
+-- and an Art's hold it jumped over (replayHold).
+local function replaySkipped(record: any, handle: any, clipId: string)
+	if typeof(handle) ~= "table" or typeof(handle.time) ~= "number" or handle.time <= 0 then
+		return
+	end
+	local clip = handle.clip
+	if typeof(clip) ~= "table" or typeof(clip.events) ~= "table" or clip.loop == true then
+		return
+	end
+	local d = dependencies()
+	local speed = if typeof(handle.speed) == "number" and handle.speed > 0 then handle.speed else 1
+	for _, event in clip.events do
+		if (event.kind == "Sfx" or event.kind == "Voice") and event.time < handle.time then
+			local data = event.data
+			if typeof(data) == "table" and typeof(data.name) == "string" then
+				d.sfx.playLate(data.name, (handle.time - event.time) / speed, d.positionOf(record.model))
+			end
+		elseif event.kind == "ActivationHold" and event.time < handle.time then
+			replayHold(record, clip, clipId, event.time, handle.time, speed)
+		end
+	end
 end
 
 local function reactionClip(record: any, name: string): string?
@@ -186,7 +329,13 @@ function handlers.ActionStarted(payload: any)
 	if record == nil then
 		return
 	end
-	animatorOf(record):play(payload.clipId, { serverTime = payload.serverTime, speed = payload.speed })
+	local handle = animatorOf(record):play(payload.clipId, { serverTime = payload.serverTime, speed = payload.speed })
+	clipSpeeds[record.id] = { clipId = payload.clipId, speed = payload.speed }
+	replaySkipped(record, handle, payload.clipId)
+	if string.find(payload.clipId, "/Dodge", 1, true) then
+		-- A remote dodge: its whoosh in range (the local dodge is the character controller's).
+		d.impact.dodge(record.model, false)
+	end
 end
 
 function handlers.Telegraph(payload: any)
@@ -222,14 +371,53 @@ function handlers.HitConfirmed(payload: any)
 		animatorOf(target):hitStop(frames)
 	end
 
+	local window = if payload.isSwitch then switchOpeners[payload.targetId] else nil
+	local opener = if window ~= nil then d.entities.get(window.openerId) else nil
+	-- The blow that breaks a player's guard (an enemy's Break is its gauge, not a guard).
+	local breaksGuard = payload.broke == true and not payload.killed and target ~= nil and target.kind == "Player"
+	local info = {
+		tier = if Combat.hitStopFrames[tier] ~= nil then tier else "Normal",
+		position = position,
+		attacker = if attacker ~= nil then attacker.model else nil,
+		target = if target ~= nil then target.model else nil,
+		involved = involved,
+		localAttacker = payload.attackerId == localId,
+		trailToken = if attacker ~= nil then d.trailToken(attacker) else "SystemWhite",
+		parried = payload.parried == true,
+		-- The guard break's crack already played (StateChanged GuardBroken): its blow is the block.
+		guarded = payload.guarded == true or breaksGuard,
+		crit = payload.crit == true,
+		isSwitch = payload.isSwitch == true,
+		killed = payload.killed == true,
+		-- An Art's hit carries its artId; a player's hit without one is a basic swing; an enemy's
+		-- strike is neither.
+		art = if payload.artId ~= nil then true elseif attacker ~= nil and attacker.kind == "Player" then false else nil,
+		partner = if opener ~= nil then opener.model else nil,
+	}
+	if payload.isSwitch then
+		switchOpeners[payload.targetId] = nil
+	end
+
 	if payload.parried then
-		-- A perfect parry: spark burst, the metallic ring, a short shake; no number.
+		-- A perfect parry: the director's glint, inverted frame and ring; the spark burst and the
+		-- parrier's blade flash wait while that frame hides the world; a short shake; no number.
+		d.impact.hit(info)
+		local hidden = d.impact.hiddenSeconds()
+		local wait = if typeof(hidden) == "number" and hidden > 0 then hidden else 0
+		local function accents()
+			if target ~= nil then
+				d.trails.flashWhite(target.model, Combat.highlightFlashFrames)
+			end
+			d.sparks.parry(position)
+		end
+		if wait > 0 then
+			d.schedule(wait, accents)
+		else
+			accents()
+		end
 		if target ~= nil then
-			d.trails.flashWhite(target.model, Combat.highlightFlashFrames)
 			playReaction(target, "Parry")
 		end
-		d.sparks.parry(position)
-		d.sfx.play(SOUNDS.parry, position)
 		if involved then
 			d.camera.shake("Normal")
 		end
@@ -249,7 +437,11 @@ function handlers.HitConfirmed(payload: any)
 		d.digits.show(position, payload.damage, kind)
 	end
 	if target ~= nil then
-		d.outline.flash(target.model, "SystemWhite", Combat.highlightFlashFrames)
+		if d.impact.ownsHighlight(info) ~= true and not breaksGuard then
+			-- FinalHit and Kill flash it themselves, white, after the impact frames. The blow that
+			-- breaks a guard leaves the guard break's red fill (StateChanged GuardBroken) showing.
+			d.outline.flash(target.model, "SystemWhite", Combat.highlightFlashFrames)
+		end
 		if payload.guarded then
 			playReaction(target, "GuardHit")
 		end
@@ -263,19 +455,30 @@ function handlers.HitConfirmed(payload: any)
 			end
 		end
 	end
-	if payload.isSwitch and attacker ~= nil then
-		d.trails.flashWhite(attacker.model, Combat.highlightFlashFrames)
-		d.sfx.play(SOUNDS.switchLand, position)
-	end
 	if involved then
-		d.camera.nudge(position, Combat.cameraNudgeStuds)
+		-- One nudge per sweep: twelve targets confirmed in one frame must not push twelve times.
+		local at = clock()
+		local sweepKey = if payload.attackerId ~= nil then payload.attackerId else NO_ATTACKER
+		local nudgedAt = lastNudges[sweepKey]
+		if nudgedAt == nil or at - nudgedAt > Moments.sweep.mergeSeconds then
+			lastNudges[sweepKey] = at
+			d.camera.nudge(position, Combat.cameraNudgeStuds)
+		end
 		d.camera.shake(tier)
-		d.sfx.play(SOUNDS.hitStop[tier] or SOUNDS.hitStop.Normal)
+		-- The hit that breaks a player's guard ticks Final (the server keeps its hit-stop tier).
+		local tick = if breaksGuard and tier == "Normal" then "Final" else tier
+		if SOUNDS.hitStop[tick] == nil then
+			tick = "Normal"
+		end
+		if ticksInSweep(tick, at, sweepKey) then
+			d.sfx.play(SOUNDS.hitStop[tick])
+		end
 	end
 	if payload.targetId == localId and payload.damage > 0 then
 		d.hud.flashHp()
 	end
-	d.sfx.play(if payload.guarded then SOUNDS.block else (SOUNDS.impact[tier] or SOUNDS.impact.Normal), position)
+	-- The hit's cue (block, basic, crit, final, kill, Switch land), glint, crescent, line, frames.
+	d.impact.hit(info)
 	Replication.hit:Fire(payload)
 end
 
@@ -298,7 +501,10 @@ function handlers.StateChanged(payload: any)
 	end
 	if payload.state == "GuardBroken" then
 		d.outline.flash(record.model, "HPRed", Combat.highlightFlashFrames)
-		d.sfx.play(SOUNDS.guardBreak, d.positionOf(record.model))
+		d.impact.guardBreak(record.model, isLocal)
+	elseif payload.state == "Guard" and not isLocal then
+		-- The local guard's raise is predicted on the key press, with its pose.
+		d.impact.guardRaise(record.model, false)
 	end
 	Replication.stateChanged:Fire(record, payload.state, payload.duration, payload.direction)
 end
@@ -307,33 +513,67 @@ function handlers.EntityDied(payload: any)
 	local d = dependencies()
 	local record = d.entities.get(payload.entityId)
 	local position = toVector(payload.position)
+	local isLocal = payload.entityId == d.localId()
+	local boss = payload.shatter == "Boss"
+	local heavy = heavyDeath(record, isLocal)
+	deathCount += 1
+	local death = deathCount
+	local diedAt = clock()
+	if silenceEnd ~= nil and diedAt < (silenceEnd :: number) then
+		-- Another death's silence holds: this kill is the new moment and is heard at full; its own
+		-- silence follows after its hit-stop.
+		silenceEnd = nil
+		d.sfx.duck(0, 0)
+	end
 	if record ~= nil then
 		local animator = animatorOf(record)
 		playReaction(record, "DeathFreeze")
 		animator:setTimeScale(0)
 		d.trails.setActive(record.model, false, "Art")
+		-- The scream starts with the kill; the silence after the hit-stop chops its tail.
+		deathVocal(record, position)
 	end
-	-- Freeze and silence (section 6, section 11): Music, SFX and UI duck, not only the music.
-	d.sfx.duck(Combat.deathDuckDb, Combat.deathFreeze)
-	d.schedule(Combat.deathFreeze, function()
-		-- The silence ends as this shatter cracks. SfxPool keeps only the newest duck, so without
-		-- this a second death inside the freeze would keep the groups down and swallow this crack
-		-- and chime; a duck of 0 dB restores full volume and makes any pending restore stale.
-		d.sfx.duck(0, 0)
-		if record ~= nil then
-			-- Shatter.play plays the crack itself (SfxPool.shatter) at the rig.
-			d.shatter.play(record.model, payload.shatter)
-		else
-			-- No rig left to shatter: the crack still sounds where the server said it died.
-			d.sfx.play(SOUNDS.shatterCrack, position)
+	-- Freeze and silence (section 6, section 11): Music, SFX and UI duck, not only the music. The
+	-- silence waits the kill's hit-stop so the kill's crack and impact frames are heard first; the
+	-- shatter and the line move by the same lead. Only the newest death ducks and restores: a
+	-- death after this one brings its own silence, which this one's shatter never cuts short.
+	local lead = Moments.deathDuckDelay()
+	d.schedule(lead, function()
+		if death ~= deathCount then
+			return
 		end
+		silenceEnd = clock() + Combat.deathFreeze
+		d.sfx.duck(Combat.deathDuckDb, Combat.deathFreeze)
 	end)
-	local isLocal = payload.entityId == d.localId()
+	local named = d.impact.shatterCue(boss, heavy)
+	local cue: string = if typeof(named) == "string"
+		then named
+		elseif boss then Sfx.shatterCues.boss
+		else Sfx.shatterCues.normal
+	d.schedule(lead + Combat.deathFreeze, function()
+		-- The silence ends as the newest death's shatter cracks: a duck of 0 dB restores full volume
+		-- and makes any pending restore stale. An older death's shatter inside a newer silence stays
+		-- in it (the newest shatter is the one the silence leads to), unless that silence ends within
+		-- a sweep's window anyway (one sweep's deaths are one moment and crack together).
+		local ending = silenceEnd == nil or clock() >= (silenceEnd :: number) - Moments.sweep.mergeSeconds
+		if death == deathCount or ending then
+			silenceEnd = nil
+			d.sfx.duck(0, 0)
+		end
+		if record ~= nil then
+			-- Shatter.play plays the shatter cue itself (SfxPool.shatter) at the rig.
+			d.shatter.play(record.model, payload.shatter, cue)
+		else
+			-- No rig left to shatter: the shatter cue still sounds where the server said it died.
+			d.sfx.cue(cue, position)
+		end
+		d.impact.death(if record ~= nil then record.model else nil, position, boss, heavy)
+	end)
 	if isLocal or (record ~= nil and record.kind == "Player") then
 		-- The line follows the shatter: the dying player reads their own line, everyone else the name.
-		local shatterTime = if payload.shatter == "Boss" then Fx.shatter.bossDuration else Fx.shatter.duration
+		local shatterTime = if boss then Fx.shatter.bossDuration else Fx.shatter.duration
 		local text = if isLocal then UI.systemLine.deathSelf else UI.systemLine.deathOther:format(payload.name)
-		d.schedule(Combat.deathFreeze + shatterTime, function()
+		d.schedule(lead + Combat.deathFreeze + shatterTime, function()
 			d.systemLine.show(text, "SystemWhite", SOUNDS.systemLine)
 		end)
 	end
@@ -351,6 +591,15 @@ function handlers.SwitchWindow(payload: any)
 	local d = dependencies()
 	local position = toVector(payload.position)
 	d.switchRing.show(position, payload.duration)
+	-- The opener's blade flashes with the partner's when the Switch lands inside the window.
+	local window = { openerId = payload.openerId }
+	switchOpeners[payload.entityId] = window
+	d.schedule(payload.duration, function()
+		-- Only this window closes: a newer one on the same enemy keeps its opener.
+		if switchOpeners[payload.entityId] == window then
+			switchOpeners[payload.entityId] = nil
+		end
+	end)
 	if payload.openerId ~= d.localId() then
 		if typeof(rawget(d.hud, "showSwitchPrompt")) == "function" then
 			-- SWITCH sits above the enemy (section 14) when its rig is known.
@@ -409,11 +658,16 @@ function Replication.routeClipEvent(record: any, clipId: string, event: any)
 		end
 	elseif kind == "ActivationHold" then
 		local token = d.trailToken(record)
+		local isLocal = record.id == d.localId()
 		d.trails.activationLight(model, true, token)
 		d.sfx.play("artChime." .. token, d.positionOf(model))
-		if record.id == d.localId() then
+		if isLocal then
 			d.camera.fovKick()
 		end
+		-- The riser into the first damage frame (remote), the wind-up contour (local).
+		local entry = clipSpeeds[record.id]
+		local speed = if entry ~= nil and entry.clipId == clipId then entry.speed else nil
+		d.impact.activation(model, clipId, token, isLocal, speed)
 	elseif kind == "PostMotionStart" then
 		d.trails.activationLight(model, false, d.trailToken(record))
 		d.trails.setActive(model, false, resolveTrailKind(record, clipId, event))
@@ -529,6 +783,10 @@ function Replication.unwatch(record: any)
 	destroyDriver(record.id)
 	stateClips[record.id] = nil
 	trailKinds[record.id] = nil
+	clipSpeeds[record.id] = nil
+	switchOpeners[record.id] = nil
+	lastNudges[record.id] = nil
+	lastTicks[record.id] = nil
 	d.outline.unregister(record.model)
 	d.trails.detach(record.model)
 	d.telegraphs.forget(record.model)
@@ -542,6 +800,13 @@ function Replication.bind(newDeps: Deps)
 	table.clear(watched)
 	table.clear(drivers)
 	table.clear(trailKinds)
+	table.clear(switchOpeners)
+	table.clear(clipSpeeds)
+	table.clear(lastNudges)
+	table.clear(lastTicks)
+	table.clear(deathVocals)
+	deathCount = 0
+	silenceEnd = nil
 	local entities = newDeps.entities
 	if typeof(entities.added) == "table" then
 		entities.added:Connect(Replication.watch)
@@ -611,6 +876,7 @@ function Replication.start()
 		hud = Siblings.load(Client, "ui.Hud"),
 		systemLine = Siblings.load(Client, "ui.SystemLine"),
 		sfx = Siblings.load(Client, "audio.SfxPool"),
+		impact = Siblings.load(Client, "fx.Impact"),
 		camera = CameraController,
 		weaponCategory = function(record)
 			return WeaponInfo.categoryOf(record.weaponId)
@@ -625,6 +891,7 @@ function Replication.start()
 		schedule = function(seconds, fn)
 			task.delay(seconds, fn)
 		end,
+		now = os.clock,
 	})
 	Replication.subscribe()
 end

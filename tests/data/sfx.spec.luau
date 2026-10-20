@@ -864,6 +864,7 @@ local RECIPES: { [string]: { [string]: number } } = {
 	Block = { ["guard.Block"] = 0 },
 	GuardBreak = { ["guard.GuardBreak"] = 0, ["impact.Sub"] = -6 },
 	Shatter = { ["shatter.Crack"] = 0, ["shatter.Slam"] = 0, ["shatter.Chime"] = 0, ["impact.SubDrop"] = -3 },
+	ShatterHeavy = { ["shatter.Crack"] = 0, ["shatter.Slam"] = 0, ["shatter.Chime"] = 0, ["impact.SubDrop"] = 0 },
 	BossShatter = {
 		["shatter.BossCrack"] = 0,
 		["shatter.BossBoom"] = 0,
@@ -980,12 +981,29 @@ describe("sfx cue gains", function()
 	end)
 
 	it("starts everything on the shatter's white-flash frame, and the parry's ring with its clash", function()
-		for _, cueName in { "Shatter", "BossShatter", "Parry" } do
+		for _, cueName in { "Shatter", "ShatterHeavy", "BossShatter", "Parry" } do
 			for _, layer in Sfx.cue(cueName) do
 				expect(layer.delay).toBe(0)
 			end
 		end
 		expect(layerOf("Parry", "impact.Crack")).toBeNil()
+	end)
+
+	it("shatters a player or an Elite heavier: the Shatter stack with the bass dive at full level", function()
+		local normal, heavy = Sfx.cue(Sfx.shatterCues.normal), Sfx.cue(Sfx.shatterCues.heavy)
+		expect(#heavy).toBe(#normal)
+		for index, layer in normal do
+			local other = heavy[index]
+			expect(other.name).toBe(layer.name)
+			expect(other.delay).toBe(layer.delay)
+			expect(other.pitch).toBe(layer.pitch)
+			if layer.name == "impact.SubDrop" then
+				expect(other.gainDb).toBe(0)
+				expect(other.gainDb).toBeGreaterThan(layer.gainDb)
+			else
+				expect(other.gainDb).toBe(layer.gainDb)
+			end
+		end
 	end)
 
 	it("lands the dodge's soft step as the 0.25 s step ends", function()
@@ -1024,16 +1042,10 @@ local OUT_OF_SCOPE: { [string]: string } = {
 
 -- Real sounds nothing in the slice plays yet, and why (docs/PLACEHOLDERS.md lists them too).
 local UNPLAYED: { [string]: string } = {
-	["ambience.RimWind"] = "no ambience caller yet",
-	["ambience.Plains"] = "no ambience caller yet",
-	["guard.GuardRaise"] = "nothing plays it when a guard goes up",
 	["impact.Armor"] = "no in-scope enemy has an armored surface",
 	["impact.Construct"] = "no in-scope enemy is a construct",
 	["shatter.BossCrack"] = "Phase 0 has no boss to play BossShatter",
 	["shatter.BossBoom"] = "Phase 0 has no boss to play BossShatter",
-	["enemy.ChargerDeath"] = "the kill's death vocal has no caller yet",
-	["enemy.BruteDeath"] = "the kill's death vocal has no caller yet",
-	["enemy.BruteStrike"] = "no Kobold clip names it",
 	["telegraph.Tick"] = "every in-scope attack telegraphs Unblockable or GuardBreak",
 }
 
@@ -1077,16 +1089,16 @@ end
 local function phase0Sounds(): { [string]: string }
 	local sounds: { [string]: string } = {}
 	-- What the client plays by name: Replication's reactions, the clips' Sfx and Voice events,
-	-- the telegraphs, the heartbeat, the system line's chime, the moments' riser and sound.
-	-- fx.luau's telegraph sounds play by attack kind (added below for the in-scope attacks), and
-	-- nothing reads its shatter sounds (the Shatter cue is the shatter).
+	-- the telegraphs, the heartbeat, the ambience beds, the system line's chime, the moments'
+	-- riser and sound. fx.luau's telegraph sounds play by attack kind (added below for the
+	-- in-scope attacks).
 	local byKindOrUnread: { [string]: boolean } = {}
 	for _, name in Fx.telegraph.sounds do
 		byKindOrUnread[name] = true
 	end
-	for _, name in Fx.shatter.sounds do
-		byKindOrUnread[name] = true
-	end
+	-- A client file that plays an archetype's death vocal by name (Sfx.vocalName(archetype,
+	-- "Death"), called directly or through pcall) plays every in-scope enemy's (added below).
+	local deathVocalCaller: string? = nil
 	for _, directory in { "src/client", "src/shared/clips", "src/shared/data" } do
 		for _, path in Harness.listFiles(directory, "%.luau$") do
 			if NOT_CALLERS[path] then
@@ -1094,6 +1106,11 @@ local function phase0Sounds(): { [string]: string }
 			end
 			local found: { [string]: string } = {}
 			mentionedIn(path, found)
+			if path:sub(1, #"src/client/") == "src/client/" and deathVocalCaller == nil then
+				if Harness.readFile(path):find('vocalName[%(,][^)]*"Death"') ~= nil then
+					deathVocalCaller = path
+				end
+			end
 			for name, from in found do
 				if path == "src/shared/data/fx.luau" and byKindOrUnread[name] then
 					continue
@@ -1139,11 +1156,16 @@ local function phase0Sounds(): { [string]: string }
 		sounds["footsteps." .. surface .. "Light"] = "material " .. material
 	end
 	-- The telegraph of every in-scope enemy attack (Telegraphs.show plays it by kind). The
-	-- vocals come from the enemies' clip events above.
+	-- vocals come from the enemies' clip events above, the death vocal from its caller.
 	for _, enemyId in Scope.enemies do
-		for _, attack in Enemies.byId(enemyId).attacks do
+		local def = Enemies.byId(enemyId)
+		for _, attack in def.attacks do
 			local sound = Fx.telegraph.sounds[attack.telegraph] or Fx.telegraph.sounds.Normal
 			sounds[sound] = "a " .. tostring(attack.telegraph) .. " telegraph of " .. enemyId
+		end
+		if deathVocalCaller ~= nil then
+			local vocal = Sfx.vocalName(def.archetype, "Death")
+			sounds[vocal] = sounds[vocal] or (deathVocalCaller :: string)
 		end
 	end
 	return sounds
@@ -1164,7 +1186,7 @@ describe("sfx Phase 0 coverage", function()
 		-- Spot checks of each source the scan reads.
 		for _, name in
 			{
-				"impact.Flesh", -- Replication's hit reaction
+				"impact.Flesh", -- the HitNormal and HitBasic cues' flesh layer
 				"enemy.ChargerStrike", -- a clip event
 				"telegraph.Unblockable", -- the boar's charge telegraph
 				"telegraph.GuardBreak", -- the kobold's overhead telegraph
@@ -1277,7 +1299,7 @@ describe("sfx reel layers", function()
 	end)
 
 	it("stacks the big hits 4 to 6 deep", function()
-		for _, name in { "HitNormal", "HitCrit", "HitFinal", "HitKill", "Shatter", "BossShatter" } do
+		for _, name in { "HitNormal", "HitCrit", "HitFinal", "HitKill", "Shatter", "ShatterHeavy", "BossShatter" } do
 			expect(#Sfx.cue(name)).toBeGreaterThanOrEqual(4)
 			expect(#Sfx.cue(name)).toBeLessThanOrEqual(6)
 		end
@@ -1316,6 +1338,7 @@ describe("sfx reel layers", function()
 
 	it("names the shatter cues SfxPool.shatter plays", function()
 		expect(Sfx.shatterCues.normal).toBe("Shatter")
+		expect(Sfx.shatterCues.heavy).toBe("ShatterHeavy")
 		expect(Sfx.shatterCues.boss).toBe("BossShatter")
 	end)
 
@@ -1343,7 +1366,7 @@ describe("sfx reel layers", function()
 
 	it("names cues and contours, sorted, and errors on unknown ones", function()
 		local cues = Sfx.cueNames()
-		expect(#cues).toBe(11)
+		expect(#cues).toBe(12)
 		for index = 2, #cues do
 			expect(cues[index - 1] < cues[index]).toBe(true)
 		end
@@ -1362,6 +1385,193 @@ describe("sfx reel layers", function()
 		expect(Sfx.gainOf(0)).toBe(1)
 		expect(Sfx.gainOf(20)).toBeCloseTo(10, 1e-9)
 		expect(Sfx.gainOf(-6)).toBeCloseTo(0.501187, 1e-6)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- Clip sound events: the whooshes peak on the snap, the dodge lands once, the strikes are voiced
+-- ------------------------------------------------------------------------------------------
+
+-- Every clip module under src/shared/clips, by its repo path without the extension.
+local function clipModules(): { { path: string, clip: any } }
+	local list = {}
+	for _, file in Harness.listFiles("src/shared/clips", "%.luau$") do
+		local path = (file:gsub("%.luau$", ""))
+		table.insert(list, { path = path, clip = Harness.load(path) })
+	end
+	return list
+end
+
+-- A clip event's sound name, or nil for an event that plays none.
+local function soundOf(event: any): string?
+	if (event.kind == "Sfx" or event.kind == "Voice") and typeof(event.data) == "table" then
+		return event.data.name
+	end
+	return nil
+end
+
+-- The clip events fire on the frame that crosses them, so half a frame either way is on time.
+local ON_TIME = Combat.hitStopFrameSeconds / 2
+
+describe("sfx clip sound events", function()
+	it("measures each clip whoosh's peak inside its audible part and leads it by the pitch's middle", function()
+		for _, name in { "Small", "Medium", "Large", "Basic" } do
+			local entry = Sfx.get("whoosh", name)
+			expect(typeof(entry.peakAt)).toBe("number")
+			expect(entry.peakAt).toBeGreaterThan(entry.startAt or 0)
+			expect(entry.peakAt).toBeLessThan(entry.stopAt)
+		end
+		-- (peakAt - startAt) / the middle of the pitch range: the real seconds from Play to the peak.
+		expect(Sfx.peakLead(Sfx.get("whoosh", "Medium"))).toBeCloseTo(0.061, 1e-9)
+		expect(Sfx.peakLead(Sfx.get("whoosh", "Large"))).toBeCloseTo(0.144 / 0.925, 1e-9)
+		expect(Sfx.peakLead(Sfx.get("whoosh", "Small"))).toBeCloseTo(0.066 / 1.025, 1e-9)
+		expect(Sfx.peakLead(Sfx.get("impact", "Crack"))).toBeNil()
+	end)
+
+	it("starts every clip whoosh so its swell peaks as its strike's hit window opens", function()
+		local checked = 0
+		for _, module in clipModules() do
+			local opens: { number } = {}
+			for _, event in module.clip.events do
+				if event.kind == "HitWindowOpen" then
+					table.insert(opens, event.time)
+				end
+			end
+			local nextOpen = 1
+			for _, event in module.clip.events do
+				local name = soundOf(event)
+				if name == nil or name:sub(1, #"whoosh.") ~= "whoosh." then
+					continue
+				end
+				-- The whoosh leads the strike after it: the next hit window at or after the event.
+				while opens[nextOpen] ~= nil and opens[nextOpen] < event.time - 1e-9 do
+					nextOpen += 1
+				end
+				local open = opens[nextOpen]
+				if open == nil then
+					error(("%s: %s at %s has no hit window after it"):format(module.path, name, event.time), 0)
+				end
+				local lead = Sfx.peakLead(entryOf(name))
+				if lead == nil then
+					error(("%s: %s has no measured peakAt to time it by"):format(module.path, name), 0)
+				end
+				-- A basic's anticipation is shorter than the swell: the whoosh starts with the clip.
+				local expected = math.max(0, open - (lead :: number))
+				if math.abs(event.time - expected) > ON_TIME then
+					error(
+						("%s: %s at %s peaks off its strike; start it at %.3f (window %s - lead %.3f)"):format(
+							module.path,
+							name,
+							event.time,
+							expected,
+							open,
+							lead :: number
+						),
+						0
+					)
+				end
+				nextOpen += 1
+				checked += 1
+			end
+		end
+		-- Basic1-3, Horizontal, Vertical, Rising Arc's two, Sharp Nail's three, the kobold's Overhead.
+		expect(checked).toBe(11)
+	end)
+
+	it("keeps an Art's strike sounds out of its hold's step down to 20 fps", function()
+		-- The local clip freezes on the step that crosses its ActivationHold, and that step's other
+		-- events still fire: a sound less than one 20 fps frame after the hold could sound as the
+		-- stance starts glowing, a whole hold before its strike.
+		local slowFrame = 1 / 20
+		local holds = 0
+		for _, module in clipModules() do
+			local hold: number?, open: number? = nil, nil
+			for _, event in module.clip.events do
+				if event.kind == "ActivationHold" then
+					hold = event.time
+				elseif event.kind == "HitWindowOpen" and (open == nil or event.time < (open :: number)) then
+					open = event.time
+				end
+			end
+			if hold == nil then
+				continue
+			end
+			holds += 1
+			for _, event in module.clip.events do
+				local name = soundOf(event)
+				local after = event.time - (hold :: number)
+				local beforeStrike = open == nil or event.time < (open :: number)
+				if name ~= nil and beforeStrike and after > 0 and after < slowFrame - 1e-9 then
+					error(
+						("%s: %s at %s is %.3f s after the hold; keep it %.2f s clear"):format(
+							module.path,
+							name,
+							event.time,
+							after,
+							slowFrame
+						),
+						0
+					)
+				end
+			end
+		end
+		-- Horizontal, Vertical, Rising Arc, Sharp Nail.
+		expect(holds).toBe(4)
+	end)
+
+	it("lands a dodge once: the Dodge cue plays the soft step, so no dodge clip names it", function()
+		local landing = layerOf("Dodge", "footsteps.LandSoft")
+		expect(landing).never.toBeNil()
+		local dodges = 0
+		for _, module in clipModules() do
+			if not module.path:find("/Dodge", 1, true) then
+				continue
+			end
+			dodges += 1
+			for _, event in module.clip.events do
+				if soundOf(event) == landing.name then
+					error(("%s plays %s; the Dodge cue already lands the step"):format(module.path, landing.name), 0)
+				end
+			end
+		end
+		expect(dodges).toBe(4)
+	end)
+
+	it("voices every in-scope enemy strike on its strike frame, as a Voice event", function()
+		local voiced = 0
+		for _, enemyId in Scope.enemies do
+			local def = Enemies.byId(enemyId)
+			local strike = Sfx.vocalName(def.archetype, "Strike")
+			if not Sfx.isReal(entryOf(strike)) then
+				continue
+			end
+			for _, attack in def.attacks do
+				local path = ("src/shared/clips/enemy/%s/%s"):format(def.skin, attack.clip)
+				local clip = Harness.load(path)
+				local open: number? = nil
+				for _, event in clip.events do
+					if event.kind == "HitWindowOpen" then
+						open = event.time
+						break
+					end
+				end
+				expect(open).never.toBeNil()
+				local found = 0
+				for _, event in clip.events do
+					if soundOf(event) == strike then
+						found += 1
+						expect(event.kind).toBe("Voice")
+						expect(event.time).toBeCloseTo(open :: number, 1e-9)
+					end
+				end
+				if found ~= 1 then
+					error(("%s voices %s %d times; once on the strike"):format(path, strike, found), 0)
+				end
+				voiced += 1
+			end
+		end
+		-- The boar's Charge and the kobold's Overhead.
+		expect(voiced).toBe(2)
 	end)
 end)
 
@@ -1566,6 +1776,46 @@ describe("sfx validator: real sounds and their trims", function()
 				entry.id, entry.placeholder, entry.length, entry.stopAt = "rbxassetid://0", true, nil, nil
 			end),
 			CRACK .. ": fadeOut needs a stopAt or a length to end at"
+		)
+	end)
+
+	it("keeps a measured peak inside the audible part", function()
+		local MEDIUM = "sfx.families.whoosh.Medium"
+		expectOnly(
+			problemsWith(function(data)
+				data.families.whoosh.entries.Medium.peakAt = 0.3
+			end),
+			MEDIUM .. ": peakAt 0.3 must lie in the audible part (0.34 to 0.55)"
+		)
+		expectOnly(
+			problemsWith(function(data)
+				data.families.whoosh.entries.Medium.peakAt = 0.6
+			end),
+			MEDIUM .. ": peakAt 0.6 must lie in the audible part (0.34 to 0.55)"
+		)
+		expectOnly(
+			problemsWith(function(data)
+				data.families.whoosh.entries.Medium.peakAt = "loud"
+			end),
+			MEDIUM .. ": peakAt must be seconds of the asset"
+		)
+		expectClean(function(data)
+			data.families.whoosh.entries.Medium.peakAt = 0.55
+		end)
+		expectClean(function(data)
+			data.families.whoosh.entries.Medium.peakAt = nil
+		end)
+		-- With no stopAt the asset's length ends the audible part.
+		expectClean(function(data)
+			local entry = data.families.impact.entries.RingTail
+			entry.stopAt, entry.peakAt = nil, 18
+		end)
+		expectOnly(
+			problemsWith(function(data)
+				local entry = data.families.impact.entries.Crack
+				entry.stopAt, entry.fadeOut, entry.peakAt = nil, 0, 1.3
+			end),
+			CRACK .. ": peakAt 1.3 must lie in the audible part (0.39 to 1.18)"
 		)
 	end)
 
@@ -1924,6 +2174,12 @@ describe("sfx validator: cues and contours", function()
 				data.shatterCues.boss = "BossSplat"
 			end),
 			"sfx.shatterCues.boss 'BossSplat' is not in sfx.cues"
+		)
+		expectOnly(
+			problemsWith(function(data)
+				data.shatterCues.heavy = nil
+			end),
+			"sfx.shatterCues.heavy must name the cue SfxPool.shatter plays"
 		)
 		expectOnly(
 			problemsWith(function(data)

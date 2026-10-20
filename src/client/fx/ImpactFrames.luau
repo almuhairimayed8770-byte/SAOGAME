@@ -10,14 +10,16 @@
 	  - Background: a full-screen Frame in the look's background token.
 	  - Figures: a full-screen ViewportFrame with its own Camera, copied from the CurrentCamera
 	    (CFrame and FieldOfView) every frame the overlay shows. Each rig's visible BaseParts
-	    (MeshParts and accessory Handles too; not the root, the sheath, the sword or FX parts, as
-	    impact.silhouette.excludeNames says, nor layered clothing) are cloned once per play, or
+	    (MeshParts and accessory Handles and the sword too; not the root, the sheath or FX parts,
+	    as impact.silhouette.excludeNames says, nor layered clothing) are cloned once per play, or
 	    taken back from the pool, and stripped to their bare mesh: no texture, decal,
 	    SurfaceAppearance, Highlight, script, sound, joint or attachment, SmoothPlastic, flat white.
 	    The viewport's white Ambient and black LightColor render every clone flat, and ImageColor3
 	    tints the whole picture to the look's figure token. Each clone copies its source part's
 	    CFrame every overlay frame; the rigs are frozen by hit-stop, so the silhouettes hold the
-	    pose. Every quality tier draws them; lower tiers draw fewer parts per rig (impact.quality).
+	    pose. Each clone takes its source's rest size: the sword's smear stretch (Smear.restSize)
+	    can still be on in a hit-stop that froze the snap, and the figure draws the blade at rest.
+	    Every quality tier draws them; lower tiers draw fewer parts per rig (impact.quality).
 	  - Strokes: a layer of OutlineInk Frames (UICorner round ends, UIGradient transparency
 	    taper) rotated to the slash angle across the hit; no image assets.
 
@@ -32,14 +34,17 @@
 	Hits that land together (one sweep through several targets confirms them all in one frame):
 	a play while a sequence shows never cuts it for a dim and is never charged again. A sequence
 	of the same or a lower rank joins the one showing (its rigs are drawn too); a higher rank
-	takes over when the budget allows what the whole path really shows, else it joins.
+	takes over when the budget allows what the whole path really shows (every look drawn under
+	the claim, through earlier takeovers too), else it joins.
 
 	Flash safety: `play` asks FlashBudget itself with the sequence's flash cost and holds that
 	claim until the overlay's last change. When the budget says no, or the Reduce flashing setting
 	is on, it shows impact.reduced instead: a soft OutlineInk dim eased in and out, charged
 	impact.reduced.flashCost (on a bright scene its dip is a flash too); nothing shows when that
 	is refused as well. A dim asked for while a dim rises or holds keeps it at the peak, uncharged;
-	one asked for while it fades is a new flash and is charged.
+	one asked for while it fades is a new flash and is charged. With the setting on, at most
+	impact.reduced.maxPerWindow dims start in any flash window, so Reduce flashing really flashes
+	less than the budget allows.
 
 	Engine-only pieces (the render step, PlayerGui, the camera, projection) sit behind `bind`, so
 	specs drive the clock and the render step by hand.
@@ -55,6 +60,7 @@ local Engine = require(script.Parent.Engine)
 local Quality = require(script.Parent.Quality)
 local FlashBudget = require(script.Parent.FlashBudget)
 local ImpactSequence = require(script.Parent.ImpactSequence)
+local Smear = require(script.Parent.Smear)
 
 export type Options = {
 	slashDirection: Vector2?, -- screen space, x right and y down; nil uses impact.strokes.defaultAngle
@@ -90,6 +96,7 @@ type Showing = {
 	look: string?,
 	unbind: (() -> ())?,
 	claim: FlashBudget.Claim?, -- the flash budget's record of what this picture costs
+	shownBefore: { string }, -- looks the sequences this one took over drew under the same claim
 	rigs: { Model }, -- the rigs drawn as silhouettes
 	wantsFigures: boolean, -- a look of the sequence draws figures
 }
@@ -112,6 +119,7 @@ local pooled: { [BasePart]: BasePart } = {}
 local pooledOrder: { BasePart } = {}
 
 local showing: Showing? = nil
+local reducedDims: { FlashBudget.Claim } = {} -- the dims Reduce flashing let start, newest last
 local finish: () -> () -- ends what is showing; defined with the show / hide helpers below
 local figuresOn = true
 local strokesOn = true
@@ -150,6 +158,18 @@ end
 
 local function rng(): Random
 	return overrides.random or random
+end
+
+-- The size a silhouette draws a part at: the smear's stored rest size for a stretched sword
+-- (Smear.restSize), else the part's own.
+local function restSizeOf(part: BasePart): Vector3
+	local size: any = nil
+	local accessor = (Smear :: any).restSize
+	if typeof(accessor) == "function" then
+		local ok, value = pcall(accessor, part)
+		size = if ok then value else nil
+	end
+	return if typeof(size) == "Vector3" then size else part.Size
 end
 
 -- Binds the step after the camera's own (CameraController binds at Camera priority), so the
@@ -540,7 +560,7 @@ local function buildSilhouettes(rigs: { Model }, firstIndex: number)
 			if clone == nil then
 				continue
 			end
-			clone.Size = source.Size
+			clone.Size = restSizeOf(source)
 			clone.CFrame = source.CFrame
 			clone.Parent = folder
 			table.insert(active, { source = source, clone = clone })
@@ -724,9 +744,10 @@ local function remainingOf(current: Showing, at: number): number
 	return math.max(0, began + total - at)
 end
 
--- The looks a sequence has put on screen so far (none before its first drawn frame).
+-- The looks put on screen so far under the claim: those of the sequences this one took over,
+-- then its own (none of its own before its first drawn frame).
 local function drawnLooks(current: Showing): { string }
-	local names: { string } = {}
+	local names: { string } = table.clone(current.shownBefore)
 	if current.startedAt == nil then
 		return names
 	end
@@ -819,8 +840,20 @@ local function join(current: Showing, models: { Model })
 	end
 end
 
+-- True when Reduce flashing still allows a new dim at `at`: fewer than impact.reduced.maxPerWindow
+-- dims it let start are still counted (each until a window after its end, like the budget).
+local function reducedAllows(at: number): boolean
+	for index = #reducedDims, 1, -1 do
+		if at - reducedDims[index].finish >= Impact.flash.windowSeconds then
+			table.remove(reducedDims, index)
+		end
+	end
+	return #reducedDims < Impact.reduced.maxPerWindow
+end
+
 -- The soft dim, or more of the one showing. Returns the seconds it lasts (0 when refused).
-local function playDim(name: string, budgetNow: number): number
+-- `reduced`: asked for by the Reduce flashing setting, which allows fewer dims than the budget.
+local function playDim(name: string, budgetNow: number, reduced: boolean): number
 	local at = now()
 	local current = showing
 	if current ~= nil and current.kind == "Sequence" then
@@ -840,9 +873,15 @@ local function playDim(name: string, budgetNow: number): number
 		end
 	end
 	-- A new dim, or one rising again out of a fade: a new flash.
+	if reduced and not reducedAllows(budgetNow) then
+		return if current ~= nil then remainingOf(current, at) else 0
+	end
 	local claim = FlashBudget.claim(budgetNow, Impact.reduced.flashCost, ImpactSequence.dimSeconds())
 	if claim == nil then
 		return if current ~= nil then remainingOf(current, at) else 0
+	end
+	if reduced then
+		table.insert(reducedDims, claim)
 	end
 	local from = if current ~= nil then dimOpacityOf(current, at) else 0
 	ImpactFrames.cancel()
@@ -863,6 +902,7 @@ local function playDim(name: string, budgetNow: number): number
 		look = nil,
 		unbind = nil,
 		claim = claim,
+		shownBefore = {},
 		rigs = {},
 		wantsFigures = false,
 	}
@@ -872,13 +912,15 @@ local function playDim(name: string, budgetNow: number): number
 	return dim.seconds
 end
 
--- Puts a sequence on screen with its claim (whatever showed before goes).
+-- Puts a sequence on screen with its claim (whatever showed before goes); `shownBefore` holds the
+-- looks a sequence it takes over already drew under that claim.
 local function showSequence(
 	sequence: string,
 	frames: { ImpactSequence.Frame },
 	rigs: { Model },
 	options: Options,
-	claim: FlashBudget.Claim
+	claim: FlashBudget.Claim,
+	shownBefore: { string }?
 ): number
 	local screen = gui :: ScreenGui
 	ImpactFrames.cancel()
@@ -919,6 +961,7 @@ local function showSequence(
 		look = frames[1].look,
 		unbind = nil,
 		claim = claim,
+		shownBefore = shownBefore or {},
 		rigs = table.clone(rigs),
 		wantsFigures = wantsFigures,
 	}
@@ -954,14 +997,16 @@ function ImpactFrames.play(sequence: string, models: { Model }, opts: Options?):
 	local budgetNow = if options.now ~= nil then options.now else now()
 	local rigs = uniqueRigs(models or {})
 	if FlashBudget.reduced() then
-		return playDim(sequence, budgetNow)
+		return playDim(sequence, budgetNow, true)
 	end
 
 	local current = showing
 	if current ~= nil and current.kind == "Sequence" then
 		-- Another hit of the same frame or the same burst: never a second charge for one picture.
 		if ImpactSequence.rank(sequence) > current.rank then
-			local path = drawnLooks(current)
+			-- Every look drawn under the claim, through any takeover earlier in this frame.
+			local shown = drawnLooks(current)
+			local path = table.clone(shown)
 			for _, frame in frames do
 				table.insert(path, frame.look)
 			end
@@ -972,7 +1017,7 @@ function ImpactFrames.play(sequence: string, models: { Model }, opts: Options?):
 				for _, model in uniqueRigs(models or {}, current.rigs) do
 					table.insert(all, model)
 				end
-				return showSequence(sequence, frames, all, options, claim)
+				return showSequence(sequence, frames, all, options, claim, shown)
 			end
 		end
 		join(current, rigs)
@@ -981,7 +1026,7 @@ function ImpactFrames.play(sequence: string, models: { Model }, opts: Options?):
 
 	local claim = FlashBudget.claim(budgetNow, ImpactSequence.flashCost(sequence), ImpactSequence.seconds(sequence))
 	if claim == nil then
-		return playDim(sequence, budgetNow)
+		return playDim(sequence, budgetNow, false)
 	end
 	return showSequence(sequence, frames, rigs, options, claim)
 end
@@ -1047,6 +1092,7 @@ end
 --- restores the engine. Drops the overlay and the pool so the next play builds fresh.
 function ImpactFrames.bind(deps: Deps?)
 	ImpactFrames.cancel()
+	table.clear(reducedDims)
 	for source, clone in pooled do
 		pooled[source] = nil
 		clone:Destroy()

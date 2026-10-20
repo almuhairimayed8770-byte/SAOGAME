@@ -26,7 +26,16 @@
 	(TrailEnd's) world position in a short ring (accents.swing.samples long) and answers with
 	the unit motion from the oldest of those samples to the newest, or nil when the tip moved
 	less than accents.swing.minTravel (or jumped more than maxTravel: a respawn, a teleport).
-	The slash crescent and the slash line read it for their tangent.
+	The snap: when a strike begins (an Art or Basic kind turns on: TrailOn, or a HitWindowOpen,
+	which opens with the snap), the tip's chord over its first accents.swing.snapFrames (the
+	smear's two snap frames, section 10 beat 3) is kept with its time: the chord from the tip's
+	last sample before the strike to its first sample past those frames, so a low frame rate
+	still reads the strike, not the settle. It answers for
+	accents.swing.memorySeconds after it was sampled, while the trail is still on in the
+	overshoot and settle and once the swing is over, so a HitConfirmed that arrives a round trip
+	late still gets the swing that hit, never the settle. The last good direction sampled while a
+	trail kind was on backs it up, then the tip's motion now. The slash crescent and the slash
+	line read it for their tangent.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -63,6 +72,12 @@ type Entry = {
 	tips: { Vector3 }, -- ring of the tip's last world positions
 	tipHead: number, -- index of the newest sample in `tips`
 	tipCount: number, -- samples recorded so far (at most SWING_SAMPLES)
+	lastSwing: Vector3?, -- the last good direction sampled while a trail kind was on
+	lastSwingAt: number, -- Engine.now() of that sample
+	strikeAt: number?, -- Engine.now() when the strike began (an Art or Basic kind turned on)
+	snapFrom: Vector3?, -- the tip's last sample before the strike (its first sample when none)
+	snapSwing: Vector3?, -- the tip's chord since then, over the snap frames at most
+	snapAt: number, -- Engine.now() of the sample that measured it
 }
 
 local KIND_PRIORITY: { Kind } = { "Art", "Smear", "Basic" }
@@ -286,6 +301,12 @@ function Trails.attach(model: Instance): boolean
 		tips = {},
 		tipHead = 0,
 		tipCount = 0,
+		lastSwing = nil,
+		lastSwingAt = 0,
+		strikeAt = nil,
+		snapFrom = nil,
+		snapSwing = nil,
+		snapAt = 0,
 	}
 	entry.light.Color = color
 	entries[model] = entry
@@ -315,6 +336,13 @@ function Trails.setActive(model: Instance, on: boolean, kind: Kind)
 		return
 	end
 	local entry = entries[model] :: Entry
+	if on and kind ~= "Smear" then
+		-- A strike begins (TrailOn, or the next damage window of the same trail): its snap is new,
+		-- a chord from the tip's last sample before it.
+		entry.strikeAt = Engine.now()
+		entry.snapFrom = if entry.tipCount > 0 then entry.tips[entry.tipHead] else nil
+		entry.snapSwing = nil
+	end
 	entry.active[kind] = if on then true else nil
 	applyAppearance(entry)
 	rebalance()
@@ -370,31 +398,93 @@ function Trails.isEnabled(model: Instance): boolean
 	return entry ~= nil and entry.trail.Enabled
 end
 
---- Records each tracked blade tip's world position in its ring (Heartbeat runs it; specs call it).
+-- The unit direction of a tip motion; nil when it barely moved or jumped (a respawn, a teleport).
+local function unitMotion(motion: Vector3): Vector3?
+	local travel = motion.Magnitude
+	if travel <= Accents.swing.minTravel or travel > Accents.swing.maxTravel then
+		return nil
+	end
+	return motion / travel
+end
+
+-- The unit motion of the tip over the ring; nil when unknown, still, or a jump.
+local function ringDirection(entry: Entry): Vector3?
+	if entry.tipCount < 2 then
+		return nil
+	end
+	local back = entry.tipCount - 1
+	local oldest = entry.tips[(entry.tipHead - 1 - back) % SWING_SAMPLES + 1]
+	return unitMotion(entry.tips[entry.tipHead] - oldest)
+end
+
+local SNAP_SECONDS = Accents.swing.snapFrames * Accents.frameSeconds
+
+-- Measures the strike's snap: the tip's chord from its last sample before the strike, until the
+-- samples span the snap frames (half a frame early, so a 60 fps clock that runs a hair fast never
+-- takes a third, and a slow frame that crosses them ends it).
+local function measureSnap(entry: Entry, position: Vector3, at: number)
+	local strikeAt = entry.strikeAt
+	if strikeAt == nil or at < strikeAt then
+		return
+	end
+	local from = entry.snapFrom
+	if from == nil then
+		entry.snapFrom = position
+		return
+	end
+	local direction = unitMotion(position - from)
+	if direction ~= nil then
+		entry.snapSwing = direction
+		entry.snapAt = at
+	end
+	if at - strikeAt >= SNAP_SECONDS - Accents.frameSeconds * 0.5 and entry.snapSwing ~= nil then
+		entry.strikeAt = nil -- measured: the snap is over
+	end
+end
+
+--- Records each tracked blade tip's world position in its ring (Heartbeat runs it; specs call
+--- it), and remembers the direction of a rig that is swinging (a trail kind on).
 function Trails.sample()
+	local at = Engine.now()
 	for _, entry in entries do
 		-- The attachment's world position: its part's frame times its own (Attachment.WorldPosition).
 		local position = (entry.weapon.CFrame * entry.tip.CFrame).Position
 		entry.tipHead = entry.tipHead % SWING_SAMPLES + 1
 		entry.tips[entry.tipHead] = position
 		entry.tipCount = math.min(entry.tipCount + 1, SWING_SAMPLES)
+		if activeKind(entry) ~= nil then
+			local direction = ringDirection(entry)
+			if direction ~= nil then
+				entry.lastSwing = direction
+				entry.lastSwingAt = at
+			end
+			measureSnap(entry, position, at)
+		end
 	end
 end
 
---- The unit direction the blade tip moved over the last few samples; nil when unknown or still.
+--- The unit direction the blade swung: the strike's snap inside accents.swing.memorySeconds,
+--- else the tip's motion while it swings, else the swing's last good direction inside that
+--- window, else the tip's motion now; nil when none is known.
 function Trails.swingDirection(model: Instance): Vector3?
 	local entry = entries[model]
-	if entry == nil or entry.tipCount < 2 then
+	if entry == nil then
 		return nil
 	end
-	local back = entry.tipCount - 1
-	local oldest = entry.tips[(entry.tipHead - 1 - back) % SWING_SAMPLES + 1]
-	local motion = entry.tips[entry.tipHead] - oldest
-	local travel = motion.Magnitude
-	if travel <= Accents.swing.minTravel or travel > Accents.swing.maxTravel then
-		return nil
+	local now = Engine.now()
+	local snap = entry.snapSwing
+	if snap ~= nil and now - entry.snapAt <= Accents.swing.memorySeconds then
+		return snap
 	end
-	return motion / travel
+	local current = ringDirection(entry)
+	if current ~= nil and activeKind(entry) ~= nil then
+		return current
+	end
+	local remembered = entry.lastSwing
+	if remembered ~= nil and now - entry.lastSwingAt <= Accents.swing.memorySeconds then
+		return remembered
+	end
+	return current
 end
 
 --- Starts the periodic budget re-rank (rigs move) and follows quality changes.

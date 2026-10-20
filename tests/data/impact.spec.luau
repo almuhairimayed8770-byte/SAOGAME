@@ -74,6 +74,9 @@ describe("impact data", function()
 		-- On a white scene the dip is itself a flash: it is charged.
 		expect(dim.flashCost).toBe(1)
 		expect(palette.tokens[dim.referenceScene]).never.toBeNil()
+		-- Reduce flashing allows one dim a window, well under the full budget.
+		expect(dim.maxPerWindow).toBe(1)
+		expect(dim.maxPerWindow * dim.flashCost).toBeLessThan(impact.flash.maxPerWindow)
 	end)
 
 	it("reads the Reduce flashing setting from a boolean attribute that starts off", function()
@@ -86,10 +89,12 @@ describe("impact data", function()
 		expect(impact.overlay.displayOrder).toBeGreaterThan(ui.systemLine.displayOrder)
 	end)
 
-	it("leaves the root, the sheath, the sword and FX parts out of the silhouettes", function()
-		for _, name in { "HumanoidRootPart", "Sheath", "Weapon", "FX" } do
+	it("leaves the root, the sheath and FX parts out of the silhouettes, and draws the sword", function()
+		for _, name in { "HumanoidRootPart", "Sheath", "FX" } do
 			expect(impact.silhouette.excludeNames).toContain(name)
 		end
+		-- The blade is in the white figure, at rest size (D-NEW: decision 1).
+		expect(table.find(impact.silhouette.excludeNames, "Weapon")).toBeNil()
 		expect(impact.silhouette.maxRigs).toBeGreaterThan(0)
 		expect(impact.silhouette.poolCap).toBeGreaterThanOrEqual(impact.quality.High.maxPartsPerRig)
 	end)

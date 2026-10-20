@@ -56,14 +56,22 @@ TargetController.targetChanged:Connect(function(record: any)
 end)
 
 -- Sibling packages that may not be in this build yet: load each once, start the ones that exist
--- (every start is idempotent). Quality first: the fx budgets and the HUD read its tier.
+-- (every start is idempotent). Quality first: the fx budgets and the HUD read its tier. The
+-- impact director comes after everything it fires (the pool, the outlines, the trails, the
+-- shatter and the four reel modules), so each is started before Impact.start() binds it.
 local SIBLING_ORDER = {
 	"fx.Quality",
 	"audio.SfxPool",
+	"audio.Ambience",
 	"audio.MusicDirector",
 	"fx.OutlineManager",
 	"fx.Trails",
 	"fx.Shatter",
+	"fx.ImpactFrames",
+	"fx.Glint",
+	"fx.SlashArc",
+	"fx.SpeedLines",
+	"fx.Impact",
 	"fx.Sparks",
 	"fx.Digits",
 	"fx.SwitchRing",

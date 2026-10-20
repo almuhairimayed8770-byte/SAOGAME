@@ -1582,34 +1582,167 @@ describe("SfxPool.cue", function()
 end)
 
 describe("SfxPool.shatter", function()
-	for _, case in { { boss = false, cue = sfx.shatterCues.normal }, { boss = true, cue = sfx.shatterCues.boss } } do
-		it(
-			("plays sfx.shatterCues.%s by delay and leaves the mix alone"):format(
-				if case.boss then "boss" else "normal"
-			),
-			function()
-				scenario(function(w)
-					withReal(layerNames(case.cue), function()
-						SfxPool.shatter(HIT, case.boss)
-						w.frame(0)
-						-- The bloom is the impact director's (deaths near the camera): the shatter starts no contour.
-						local state = SfxPool.mixState("SFX") :: any
-						expect(state.running).toBeNil()
-						expect(state.wet).toBe(sfx.effects.reverb.wet)
-						w.run(sfx.limits.cueDelaySeconds + 1)
-						local expected = {}
-						for _, layer in byDelay(case.cue) do
-							table.insert(expected, layer.name)
-						end
-						expect(w.names()).toEqual(expected)
-						for index, layer in byDelay(case.cue) do
-							expect(w.plays[index].time).toBeCloseTo(dueAt(layer.delay), 1e-9)
-						end
-					end)
+	-- The caller's weight picks the cue; the old boolean still means boss (true) or normal.
+	local cases: { { weight: any, label: string, cue: string } } = {
+		{ weight = false, label = "false", cue = sfx.shatterCues.normal },
+		{ weight = true, label = "true", cue = sfx.shatterCues.boss },
+		{ weight = nil, label = "nil", cue = sfx.shatterCues.normal },
+		{ weight = "normal", label = "normal", cue = sfx.shatterCues.normal },
+		{ weight = "heavy", label = "heavy", cue = sfx.shatterCues.heavy },
+		{ weight = "boss", label = "boss", cue = sfx.shatterCues.boss },
+		-- The moments.luau death rows hand over the cue name itself: each shatter cue plays as named.
+		{ weight = sfx.shatterCues.normal, label = "cue " .. sfx.shatterCues.normal, cue = sfx.shatterCues.normal },
+		{ weight = sfx.shatterCues.heavy, label = "cue " .. sfx.shatterCues.heavy, cue = sfx.shatterCues.heavy },
+		{ weight = sfx.shatterCues.boss, label = "cue " .. sfx.shatterCues.boss, cue = sfx.shatterCues.boss },
+		-- A weight the data does not know never silences a death: the normal shatter plays. Nor does
+		-- a cue that is not a shatter turn a death into something else.
+		{ weight = "enormous", label = "enormous", cue = sfx.shatterCues.normal },
+		{ weight = "HitBasic", label = "cue HitBasic", cue = sfx.shatterCues.normal },
+	}
+	for _, case in cases do
+		it(("plays %s for the weight %s, by delay, and leaves the mix alone"):format(case.cue, case.label), function()
+			scenario(function(w)
+				withReal(layerNames(case.cue), function()
+					SfxPool.shatter(HIT, case.weight)
+					w.frame(0)
+					-- The bloom is the impact director's (deaths near the camera): the shatter starts no contour.
+					local state = SfxPool.mixState("SFX") :: any
+					expect(state.running).toBeNil()
+					expect(state.wet).toBe(sfx.effects.reverb.wet)
+					w.run(sfx.limits.cueDelaySeconds + 1)
+					local expected = {}
+					for _, layer in byDelay(case.cue) do
+						table.insert(expected, layer.name)
+					end
+					expect(w.names()).toEqual(expected)
+					for index, layer in byDelay(case.cue) do
+						expect(w.plays[index].time).toBeCloseTo(dueAt(layer.delay), 1e-9)
+					end
 				end)
-			end
-		)
+			end)
+		end)
 	end
+
+	it("lands a heavy shatter's bass dive 3 dB over a normal one's, the rest alike", function()
+		local volumes: { [string]: number } = {}
+		for _, weight in { "normal", "heavy" } do
+			scenario(function(w)
+				withReal(layerNames(sfx.shatterCues[weight]), function()
+					SfxPool.shatter(HIT, weight)
+					for _, play in w.plays do
+						if play.name == "impact.SubDrop" then
+							volumes[weight] = play.volume
+						end
+					end
+				end)
+			end)
+		end
+		local dive = entryOf("impact.SubDrop").volume
+		expect(volumes.heavy).toBeCloseTo(dive, FLOAT)
+		expect(volumes.normal).toBeCloseTo(dive * 10 ^ (-3 / 20), FLOAT)
+	end)
+
+	it("plays shatters that crack together once inside a sound's reach; another cue or a later one plays", function()
+		scenario(function(w)
+			local normal = sfx.shatterCues.normal
+			local heavy = sfx.shatterCues.heavy
+			local names = layerNames(normal)
+			for _, name in layerNames(heavy) do
+				table.insert(names, name)
+			end
+			withReal(names, function()
+				-- One sweep's two kills, farther apart than the same-spot dedupe reaches, and a
+				-- player's death in the same frame.
+				local elsewhere = HIT - Vector3.new(fx.audio.dedupeDistance * 2, 0, 0)
+				SfxPool.shatter(HIT, "normal")
+				SfxPool.shatter(FAR, "normal")
+				SfxPool.shatter(elsewhere, "heavy")
+				w.run(sfx.limits.cueDelaySeconds + 1)
+				expect(#w.plays).toBe(#sfx.cue(normal) + #sfx.cue(heavy))
+				-- Past the window a shatter is another death's.
+				SfxPool.shatter(FAR, "normal")
+				w.run(2 * (sfx.limits.cueDelaySeconds + 1))
+				expect(#w.plays).toBe(2 * #sfx.cue(normal) + #sfx.cue(heavy))
+				-- reset forgets the last shatter.
+				SfxPool.reset()
+				SfxPool.shatter(FAR, "normal")
+				w.run(3 * (sfx.limits.cueDelaySeconds + 1))
+				expect(#w.plays).toBe(3 * #sfx.cue(normal) + #sfx.cue(heavy))
+			end)
+		end)
+	end)
+
+	it("plays a shatter beyond the last one's reach: a kill across the map does not mute the one here", function()
+		scenario(function(w)
+			local normal = sfx.shatterCues.normal
+			withReal(layerNames(normal), function()
+				local across = HIT + Vector3.new(sfx.mix.rolloffMaxDistance * 2, 0, 0)
+				SfxPool.shatter(across, "normal")
+				SfxPool.shatter(HIT, "normal")
+				-- One with no position folds into the last one, as before.
+				SfxPool.shatter(nil, "normal")
+				w.run(sfx.limits.cueDelaySeconds + 1)
+				expect(#w.plays).toBe(2 * #sfx.cue(normal))
+			end)
+		end)
+	end)
+end)
+
+describe("SfxPool.playLate", function()
+	it("starts a sound a late clip start jumped over where it would be by now, at its speed", function()
+		spec(function(w)
+			-- Swish plays 0.34 .. 0.55 of its asset; 0.05 s late it starts at 0.39.
+			expect(SfxPool.playLate("spec.Swish", 0.05, HIT)).never.toBeNil()
+			expect(#w.plays).toBe(1)
+			expect(w.plays[1].time).toBe(0)
+			expect(w.plays[1].timePosition).toBeCloseTo(0.39, 1e-9)
+			expectRegion(w.plays[1], 0.34, 0.55)
+			-- At 1.25x the asset moved 1.25 times as far.
+			SfxPool.playLate("spec.SwishFast", 0.05, FAR)
+			expect(w.plays[2].speed).toBeCloseTo(1.25, FLOAT)
+			expect(w.plays[2].timePosition).toBeCloseTo(0.34 + 0.05 * 1.25, 1e-9)
+			-- Its fade still ends on stopAt: (0.55 - 0.06 - 0.39) = 0.10 s in it starts, 0.16 s it ends.
+			local sound = w.plays[1].sound
+			w.frame(0.099)
+			expect(sound.Volume).toBeCloseTo(0.32, FLOAT)
+			w.frame(0.13)
+			expect(sound.Volume).toBeCloseTo(0.32 * 0.5, FLOAT)
+			w.frame(0.16)
+			expect(sound.Volume).toBeCloseTo(0, FLOAT)
+			-- Nothing late is a plain play.
+			SfxPool.playLate("spec.Plain", 0, Vector3.new(90, 0, 0))
+			expect(w.plays[3].timePosition).toBe(0)
+		end)
+	end)
+
+	it("skips a sound already over by now, a placeholder, and a duplicate like any play", function()
+		spec(function(w)
+			-- 0.34 + 0.25 is past Swish's stopAt.
+			expect(SfxPool.playLate("spec.Swish", 0.25, HIT)).toBeNil()
+			expect(SfxPool.playLate("spec.Silent", 0.01, HIT)).toBeNil()
+			expect(#w.plays).toBe(0)
+			SfxPool.playLate("spec.Swish", 0.01, HIT)
+			expect(SfxPool.playLate("spec.Swish", 0.02, HIT)).toBeNil()
+			expect(SfxPool.play("spec.Swish", HIT)).toBeNil()
+			expect(#w.plays).toBe(1)
+		end)
+	end)
+end)
+
+describe("the harness NumberRange", function()
+	it("refuses min > max as the engine does, so a reversed region fails in every spec", function()
+		local env = Harness.environment()
+		expect(function()
+			env.NumberRange.new(2, 1)
+		end).toThrow("invalid range")
+		local range = env.NumberRange.new(1, 2)
+		expect(range.Min).toBe(1)
+		expect(range.Max).toBe(2)
+		local single = env.NumberRange.new(0.5)
+		expect(single.Min).toBe(0.5)
+		expect(single.Max).toBe(0.5)
+		expect(env.NumberRange.new(1, 1).Max).toBe(1)
+	end)
 end)
 
 describe("SfxPool.contour", function()

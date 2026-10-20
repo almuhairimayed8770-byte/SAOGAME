@@ -136,13 +136,6 @@ local Fx = {
 			Construct = "ShatterSilver",
 			Plant = "ShatterGreenGold",
 		},
-		sounds = {
-			crack = "shatter.Crack",
-			chime = "shatter.Chime",
-			bossCrack = "shatter.BossCrack",
-			bossBoom = "shatter.BossBoom",
-		},
-		chimeDelay = 0.12, -- seconds after the crack
 		bossCameraPullBack = 10, -- studs the camera eases back for a boss shatter
 		poolFolderName = "ShatterPool",
 		preWarmPerFrame = 40, -- shards created per frame while pre-warming (never a hitch)
@@ -305,6 +298,20 @@ local Fx = {
 		},
 		defaultSurface = "Stone",
 		armoredAttribute = "Armored", -- a character attribute the server writes for heavy sets
+		-- The world beds (section 15: wind at the rim everywhere, an ambience per biome), played by
+		-- Ambience.luau through SfxPool.loop. On the Playground island (playground.luau fieldRadius
+		-- around the field center) the bed plays and the rim wind rises as the local character nears
+		-- the edge; off the island, or with no character, both ramp out and stop.
+		ambience = {
+			bed = "ambience.Plains", -- the Playground's biome bed
+			rimWind = "ambience.RimWind",
+			rampSeconds = 2, -- a bed's gain moves all the way (0 to 1, or back) over this
+			sampleHz = 10, -- reads per second of the character's distance to the island's edge
+			-- Studs inside the edge: the full rim wind at `near` or closer, `rimFloor` at `far` or farther.
+			rimBand = { near = 15, far = 140 },
+			rimFloor = 0.2, -- the rim wind's gain deep inside the island: faint, never gone
+			rimEasing = "QuadIn", -- the wind rises slowly at first and fastest near the edge
+		},
 	},
 }
 

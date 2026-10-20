@@ -1,10 +1,15 @@
 --!strict
 local Replication = Harness.load("src/client/controllers/Replication")
 local ChoreoData = Harness.load("src/shared/data/choreo")
+local Impact = Harness.load("src/client/fx/Impact")
 local combat = Harness.load("src/shared/data/combat")
 local fx = Harness.load("src/shared/data/fx")
 local sfx = Harness.load("src/shared/data/sfx")
 local ui = Harness.load("src/shared/data/ui")
+local moments = Harness.load("src/shared/data/moments")
+
+-- A payload override that removes the field (a basic swing carries no artId).
+local NONE = table.freeze({})
 
 -- A recorder module: every field is a function that logs its call.
 local function recorder(moduleName, calls)
@@ -70,13 +75,49 @@ local function fakeLocomotion(calls)
 	}
 end
 
+-- A fake impact director: every call is logged; hiddenSeconds, ownsHighlight and shatterCue answer
+-- from `state` and the moments table.
+local function fakeImpact(calls, state)
+	local function log(fn, ...)
+		table.insert(calls, { module = "impact", fn = fn, args = { ... } })
+	end
+	local answers = {
+		hiddenSeconds = function()
+			log("hiddenSeconds")
+			return state.hidden
+		end,
+		ownsHighlight = function(info)
+			log("ownsHighlight", info)
+			return state.ownsHighlight
+		end,
+		shatterCue = function(boss, heavy)
+			log("shatterCue", boss, heavy)
+			return moments.rows[moments.deathFor(boss, heavy)].shatterCue
+		end,
+	}
+	return setmetatable(answers, {
+		__index = function(_, key)
+			return function(...)
+				log(key, ...)
+			end
+		end,
+	})
+end
+
 -- options.unknownLocal: the tracker has not resolved the local id yet (localId() -> nil).
 -- options.localCharacter: the models key the client already knows as its own character.
 local function setup(options)
 	options = options or {}
 	local calls = {}
 	local scheduled = {}
-	local models = { me = Instance.new("Model"), boar = Instance.new("Model"), ally = Instance.new("Model") }
+	local state = { hidden = 0, ownsHighlight = false, clock = 100 }
+	local models = {
+		me = Instance.new("Model"),
+		boar = Instance.new("Model"),
+		ally = Instance.new("Model"),
+		axeman = Instance.new("Model"),
+		elite = Instance.new("Model"),
+	}
 	local records = {
 		[1] = {
 			id = 1,
@@ -86,7 +127,25 @@ local function setup(options)
 			weaponId = "TrialistSword",
 			name = "Mira",
 		},
-		[7] = { id = 7, model = models.boar, kind = "Enemy", rig = "Boar", name = "Frenzy Boar" },
+		[7] = { id = 7, model = models.boar, kind = "Enemy", rig = "Boar", defId = "FrenzyBoar", name = "Frenzy Boar" },
+		[8] = {
+			id = 8,
+			model = models.axeman,
+			kind = "Enemy",
+			rig = "Kobold",
+			defId = "KoboldAxeman",
+			name = "Kobold Axeman",
+		},
+		-- A spawn-time Elite variant, once the tracker carries the mark (record.elite).
+		[9] = {
+			id = 9,
+			model = models.elite,
+			kind = "Enemy",
+			rig = "Kobold",
+			defId = "KoboldAxeman",
+			name = "Elite Kobold Axeman",
+			elite = true,
+		},
 		[2] = {
 			id = 2,
 			model = models.ally,
@@ -154,6 +213,7 @@ local function setup(options)
 		hud = recorder("hud", calls),
 		systemLine = recorder("systemLine", calls),
 		sfx = recorder("sfx", calls),
+		impact = fakeImpact(calls, state),
 		camera = recorder("camera", calls),
 		weaponCategory = function()
 			return "OneHandedSword"
@@ -166,6 +226,9 @@ local function setup(options)
 		end,
 		schedule = function(seconds, fn)
 			table.insert(scheduled, { seconds = seconds, fn = fn })
+		end,
+		now = function()
+			return state.clock
 		end,
 	}
 	Replication.bind(deps)
@@ -181,6 +244,7 @@ local function setup(options)
 	return {
 		calls = calls,
 		scheduled = scheduled,
+		state = state,
 		models = models,
 		records = records,
 		find = find,
@@ -192,15 +256,70 @@ local function setup(options)
 	}
 end
 
--- The shatter.Crack plays the reactions made so far.
-local function cracks(t)
+-- The shatter cues played straight through SfxPool so far (a death with no rig left).
+local function shatterCues(t)
 	local found = {}
-	for _, call in t.find("sfx", "play") do
-		if call.args[1] == "shatter.Crack" then
-			table.insert(found, call)
+	for _, call in t.find("sfx", "cue") do
+		for _, cue in sfx.shatterCues do
+			if call.args[1] == cue then
+				table.insert(found, call)
+				break
+			end
 		end
 	end
 	return found
+end
+
+-- The one impact.hit info of the HitConfirmed dispatched last.
+local function lastInfo(t)
+	local hits = t.find("impact", "hit")
+	expect(#hits).toBeGreaterThan(0)
+	return hits[#hits].args[1]
+end
+
+-- Runs everything scheduled so far, earliest first (stable for equal delays), and clears it.
+local function runScheduled(t)
+	local list = table.clone(t.scheduled)
+	table.clear(t.scheduled)
+	local order = {}
+	for index in list do
+		table.insert(order, index)
+	end
+	table.sort(order, function(a, b)
+		if list[a].seconds ~= list[b].seconds then
+			return list[a].seconds < list[b].seconds
+		end
+		return a < b
+	end)
+	for _, index in order do
+		list[index].fn()
+	end
+end
+
+-- Replaces the spec's scheduler with a clock-driven one: each scheduled fn runs at its own time,
+-- the fake clock set to it. Returns runUntil(at), which runs everything due by `at`, in time order.
+local function timedScheduler(t): (at: number) -> ()
+	local queue = {}
+	t.deps.schedule = function(seconds, fn)
+		table.insert(queue, { at = t.state.clock + seconds, fn = fn })
+	end
+	return function(at: number)
+		while true do
+			local first = nil
+			for index, item in queue do
+				if item.at <= at + 1e-9 and (first == nil or item.at < queue[first].at) then
+					first = index
+				end
+			end
+			if first == nil then
+				break
+			end
+			local item = table.remove(queue, first)
+			t.state.clock = item.at
+			item.fn()
+		end
+		t.state.clock = at
+	end
 end
 
 local function hit(overrides)
@@ -221,7 +340,7 @@ local function hit(overrides)
 		hitIndex = 1,
 	}
 	for key, value in overrides or {} do
-		payload[key] = value
+		payload[key] = if value == NONE then nil else value
 	end
 	return payload
 end
@@ -256,13 +375,29 @@ describe("Replication", function()
 		expect(#shakes).toBe(1)
 		expect(shakes[1].args[1]).toBe("Normal")
 		expect(#t.find("hud", "flashHp")).toBe(0)
-		-- The local attacker hears the hit-stop tick (2D) and the impact at the hit.
+		-- The local attacker hears the hit-stop tick (2D); the hit's own sound is the director's cue.
 		local sounds = {}
 		for _, call in t.find("sfx", "play") do
 			table.insert(sounds, call.args[1])
 		end
-		expect(sounds).toContain("hitStopTick.Normal")
-		expect(sounds).toContain("impact.Flesh")
+		expect(sounds).toEqual({ "hitStopTick.Normal" })
+		expect(#t.find("sfx", "cue")).toBe(0)
+		-- One impact.hit per confirmation, with everything the director selects on.
+		local hits = t.find("impact", "hit")
+		expect(#hits).toBe(1)
+		local info = hits[1].args[1]
+		expect(info.tier).toBe("Normal")
+		expect(info.position).toBe(Vector3.new(3, 2, -5))
+		expect(info.attacker).toBe(t.models.me)
+		expect(info.target).toBe(t.models.boar)
+		expect(info.involved).toBe(true)
+		expect(info.localAttacker).toBe(true)
+		expect(info.trailToken).toBe("TrailCyanWhite")
+		expect(info.art).toBe(true)
+		for _, flag in { "parried", "guarded", "crit", "isSwitch", "killed" } do
+			expect(info[flag]).toBe(false)
+		end
+		expect(info.partner).toBeNil()
 		-- The hit Signal fires after the reactions, so the character controller sees every hit.
 		local seen = {}
 		Replication.hit:Connect(function(payload)
@@ -296,6 +431,13 @@ describe("Replication", function()
 		expect(function()
 			sfx.get("artChime", "TrailCyanWhite")
 		end).never.toThrow()
+		-- The hit, parry, block, guard, Switch land and shatter sounds are the director's now.
+		for _, key in { "impact", "parry", "block", "guardBreak", "shatterCrack", "switchLand" } do
+			expect(Replication.SOUNDS[key]).toBeNil()
+		end
+		-- The death vocals it plays through Sfx.vocalName.
+		expect(sfx.vocalName("Charger", "Death")).toBe("enemy.ChargerDeath")
+		expect(sfx.vocalName("Brute", "Death")).toBe("enemy.BruteDeath")
 	end)
 
 	it("footsteps go through SfxPool.footstep so the surface comes from the floor", function()
@@ -325,10 +467,55 @@ describe("Replication", function()
 		Replication.dispatch("HitConfirmed", hit({ hitStop = "Final", isSwitch = true, crit = true }))
 		expect(switch.find("animator:me", "hitStop")[1].args[1]).toBe(combat.hitStopFrames.Final)
 		expect(switch.find("digits", "show")[1].args[3]).toBe("Switch")
-		local whiteFlashes = switch.find("trails", "flashWhite")
-		expect(#whiteFlashes).toBe(1)
-		expect(whiteFlashes[1].args[1]).toBe(switch.models.me)
-		expect(whiteFlashes[1].args[2]).toBe(combat.highlightFlashFrames)
+		-- The blades' white flash and the land sound are the director's Switch row now.
+		expect(#switch.find("trails", "flashWhite")).toBe(0)
+		expect(#switch.find("sfx", "play")).toBe(1)
+		local info = lastInfo(switch)
+		expect(info.isSwitch).toBe(true)
+		expect(info.crit).toBe(true)
+		expect(info.tier).toBe("Final")
+	end)
+
+	it("HitConfirmed: a Switch inside a window names the opener as the partner whose blade flashes too", function()
+		local t = setup()
+		Replication.dispatch(
+			"SwitchWindow",
+			{ entityId = 7, openerId = 2, position = { 1, 1, 1 }, duration = 0.8, serverTime = 1 }
+		)
+		Replication.dispatch("HitConfirmed", hit({ isSwitch = true }))
+		expect(lastInfo(t).partner).toBe(t.models.ally)
+		-- The window is spent by the Switch that landed in it.
+		Replication.dispatch("HitConfirmed", hit({ isSwitch = true }))
+		expect(lastInfo(t).partner).toBeNil()
+		-- A window that closes unused is forgotten when it closes (and never outlives a newer one).
+		Replication.dispatch(
+			"SwitchWindow",
+			{ entityId = 7, openerId = 2, position = { 1, 1, 1 }, duration = 0.8, serverTime = 2 }
+		)
+		local closes = {}
+		for _, item in t.scheduled do
+			if item.seconds == 0.8 then
+				table.insert(closes, item)
+			end
+		end
+		expect(#closes).toBe(2)
+		closes[1].fn()
+		Replication.dispatch("HitConfirmed", hit({ isSwitch = true }))
+		expect(lastInfo(t).partner).toBe(t.models.ally)
+		Replication.dispatch(
+			"SwitchWindow",
+			{ entityId = 7, openerId = 2, position = { 1, 1, 1 }, duration = 0.8, serverTime = 3 }
+		)
+		t.scheduled[#t.scheduled].fn()
+		Replication.dispatch("HitConfirmed", hit({ isSwitch = true }))
+		expect(lastInfo(t).partner).toBeNil()
+		-- A hit that is not a Switch never takes a partner.
+		Replication.dispatch(
+			"SwitchWindow",
+			{ entityId = 7, openerId = 2, position = { 1, 1, 1 }, duration = 0.8, serverTime = 4 }
+		)
+		Replication.dispatch("HitConfirmed", hit())
+		expect(lastInfo(t).partner).toBeNil()
 	end)
 
 	it("HitConfirmed: damage taken by the local player flashes the HP bar and reads as Taken", function()
@@ -364,14 +551,43 @@ describe("Replication", function()
 		local bursts = t.find("sparks", "parry")
 		expect(#bursts).toBe(1)
 		expect(bursts[1].args[1]).toBe(Vector3.new(3, 2, -5))
-		local sounds = t.find("sfx", "play")
-		expect(#sounds).toBe(1)
-		expect(sounds[1].args[1]).toBe("guard.Parry")
+		-- The ring is the director's Parry cue: Replication plays no parry sound of its own.
+		expect(#t.find("sfx", "play")).toBe(0)
+		local hits = t.find("impact", "hit")
+		expect(#hits).toBe(1)
+		expect(hits[1].args[1].parried).toBe(true)
+		expect(hits[1].args[1].involved).toBe(true)
 		expect(t.find("camera", "shake")[1].args[1]).toBe("Normal")
 		expect(#t.find("camera", "nudge")).toBe(0)
 		local plays = t.find("animator:me", "play")
 		expect(#plays).toBe(1)
 		expect(plays[1].args[1]).toBe("player/OneHandedSword/Parry")
+	end)
+
+	it("HitConfirmed: a parry's blade flash and sparks wait while the inverted frame hides the world", function()
+		local t = setup()
+		t.state.hidden = 0.05
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 7, targetId = 1, damage = 0, parried = true }))
+		-- The director plays first (its frame is what hides the world), then Replication asks.
+		local hitAt, askedAt = 0, 0
+		for index, call in t.calls do
+			if call.module == "impact" and call.fn == "hit" then
+				hitAt = index
+			elseif call.module == "impact" and call.fn == "hiddenSeconds" then
+				askedAt = index
+			end
+		end
+		expect(hitAt).toBeLessThan(askedAt)
+		expect(#t.find("trails", "flashWhite")).toBe(0)
+		expect(#t.find("sparks", "parry")).toBe(0)
+		-- The reaction and the shake do not wait.
+		expect(#t.find("animator:me", "play")).toBe(1)
+		expect(#t.find("camera", "shake")).toBe(1)
+		expect(#t.scheduled).toBe(1)
+		expect(t.scheduled[1].seconds).toBe(0.05)
+		t.scheduled[1].fn()
+		expect(t.find("trails", "flashWhite")[1].args[1]).toBe(t.models.me)
+		expect(t.find("sparks", "parry")[1].args[1]).toBe(Vector3.new(3, 2, -5))
 	end)
 
 	it("HitConfirmed: an enemy plays its additive directional flinch without replacing its reaction clip", function()
@@ -478,49 +694,91 @@ describe("Replication", function()
 		expect(#flashes).toBe(1)
 		expect(flashes[1].args[2]).toBe("HPRed")
 		expect(#t.find("telegraphs", "hide")).toBe(4)
-		-- Guard on another player plays their guard pose; the local player's guard is predicted locally.
+		-- The guard break's crack is the director's GuardBreak cue, at the fighter, for everyone.
+		local breaks = t.find("impact", "guardBreak")
+		expect(#breaks).toBe(1)
+		expect(breaks[1].args[1]).toBe(t.models.ally)
+		expect(breaks[1].args[2]).toBe(false)
+		expect(#t.find("sfx", "play")).toBe(0)
+		Replication.dispatch("StateChanged", { entityId = 1, state = "GuardBroken", duration = 1.2 })
+		expect(t.find("impact", "guardBreak")[2].args[1]).toBe(t.models.me)
+		expect(t.find("impact", "guardBreak")[2].args[2]).toBe(true)
+		-- Guard on another player plays their guard pose and the raise; the local player's guard
+		-- (pose and raise) is predicted locally.
 		Replication.dispatch("StateChanged", { entityId = 2, state = "Guard" })
 		expect(t.find("animator:ally", "play")[2].args[1]).toBe("player/OneHandedSword/Guard")
+		local raises = t.find("impact", "guardRaise")
+		expect(#raises).toBe(1)
+		expect(raises[1].args[1]).toBe(t.models.ally)
+		expect(raises[1].args[2]).toBe(false)
+		local mine = #t.find("animator:me", "play")
 		Replication.dispatch("StateChanged", { entityId = 1, state = "Guard" })
-		expect(#t.find("animator:me", "play")).toBe(0)
-		expect(#t.find("telegraphs", "hide")).toBe(4)
+		expect(#t.find("animator:me", "play")).toBe(mine)
+		expect(#t.find("impact", "guardRaise")).toBe(1)
+		expect(#t.find("telegraphs", "hide")).toBe(5)
 		-- A death takes a half-shown telegraph down at once, not when the shatter starts.
 		Replication.dispatch("StateChanged", { entityId = 7, state = "Dead" })
-		expect(#t.find("telegraphs", "hide")).toBe(5)
-		expect(t.find("telegraphs", "hide")[5].args[1]).toBe(t.models.boar)
+		expect(#t.find("telegraphs", "hide")).toBe(6)
+		expect(t.find("telegraphs", "hide")[6].args[1]).toBe(t.models.boar)
 	end)
 
-	it("EntityDied freezes the rig, ducks Music, SFX and UI, then shatters (and reads a player's name)", function()
+	it("EntityDied freezes the rig, ducks Music, SFX and UI after the kill's hit-stop, then shatters", function()
 		local t = setup()
+		local lead = moments.deathDuckDelay()
 		Replication.dispatch(
 			"EntityDied",
 			{ entityId = 7, shatter = "Beast", position = { 0, 0, 0 }, name = "Frenzy Boar" }
 		)
 		expect(t.find("animator:boar", "play")[1].args[1]).toBe("enemy/Boar/DeathFreeze")
 		expect(t.find("animator:boar", "setTimeScale")[1].args[1]).toBe(0)
+		-- The boar's death scream starts with the kill (the silence chops its tail).
+		local vocals = t.find("sfx", "play")
+		expect(#vocals).toBe(1)
+		expect(vocals[1].args[1]).toBe("enemy.ChargerDeath")
+		expect(vocals[1].args[2]).toBe(Vector3.zero)
+		-- The silence waits the kill's hit-stop, so the kill's crack and frames are heard first.
+		expect(#t.find("sfx", "duck")).toBe(0)
+		expect(#t.find("shatter", "play")).toBe(0)
+		-- An enemy's death reads no line: the duck and the shatter are scheduled.
+		expect(#t.scheduled).toBe(2)
+		expect(t.scheduled[1].seconds).toBe(lead)
+		expect(t.scheduled[2].seconds).toBeCloseTo(lead + combat.deathFreeze, 1e-12)
+		t.scheduled[1].fn()
 		-- Freeze and silence: SfxPool.duck lowers Music, SFX and UI together for the freeze.
 		local ducks = t.find("sfx", "duck")
 		expect(#ducks).toBe(1)
 		expect(ducks[1].args[1]).toBe(combat.deathDuckDb)
 		expect(ducks[1].args[2]).toBe(combat.deathFreeze)
 		expect(#t.find("shatter", "play")).toBe(0)
-		-- An enemy's death reads no line: only the shatter is scheduled.
-		expect(#t.scheduled).toBe(1)
-		expect(t.scheduled[1].seconds).toBe(combat.deathFreeze)
-		t.scheduled[1].fn()
+		t.scheduled[2].fn()
 		local shatters = t.find("shatter", "play")
 		expect(#shatters).toBe(1)
 		expect(shatters[1].args[1]).toBe(t.models.boar)
 		expect(shatters[1].args[2]).toBe("Beast")
+		expect(shatters[1].args[3]).toBe(sfx.shatterCues.normal)
+		-- The director blooms the mix as the shatter starts.
+		local deaths = t.find("impact", "death")
+		expect(#deaths).toBe(1)
+		expect(deaths[1].args[1]).toBe(t.models.boar)
+		expect(deaths[1].args[2]).toBe(Vector3.zero)
+		expect(deaths[1].args[3]).toBe(false)
+		expect(deaths[1].args[4]).toBe(false)
 		expect(#t.find("systemLine", "show")).toBe(0)
 
-		-- Another player: the name line comes after the shatter, not with it.
+		-- Another player: the heavy shatter, and the name line after the shatter, not with it.
+		table.clear(t.scheduled)
 		Replication.dispatch("EntityDied", { entityId = 2, shatter = "Humanoid", position = { 0, 0, 0 }, name = "Ren" })
 		expect(#t.scheduled).toBe(3)
-		expect(t.scheduled[2].seconds).toBe(combat.deathFreeze)
-		expect(t.scheduled[3].seconds).toBe(combat.deathFreeze + fx.shatter.duration)
+		expect(t.scheduled[1].seconds).toBe(lead)
+		expect(t.scheduled[2].seconds).toBeCloseTo(lead + combat.deathFreeze, 1e-12)
+		expect(t.scheduled[3].seconds).toBeCloseTo(lead + combat.deathFreeze + fx.shatter.duration, 1e-12)
+		-- A player screams nothing here (their vocal is the clip's).
+		expect(#t.find("sfx", "play")).toBe(1)
+		t.scheduled[1].fn()
 		t.scheduled[2].fn()
 		expect(#t.find("shatter", "play")).toBe(2)
+		expect(t.find("shatter", "play")[2].args[3]).toBe(sfx.shatterCues.heavy)
+		expect(t.find("impact", "death")[2].args[4]).toBe(true)
 		expect(#t.find("systemLine", "show")).toBe(0)
 		t.scheduled[3].fn()
 		local lines = t.find("systemLine", "show")
@@ -530,19 +788,67 @@ describe("Replication", function()
 		expect(lines[1].args[2]).toBe("SystemWhite")
 		expect(lines[1].args[3]).toBe("ui.SystemLine")
 
-		-- The dying player reads their own line (section 6), after their shatter.
+		-- The dying player reads their own line (section 6), after their own heavy shatter.
+		table.clear(t.scheduled)
 		Replication.dispatch(
 			"EntityDied",
 			{ entityId = 1, shatter = "Humanoid", position = { 0, 0, 0 }, name = "Mira" }
 		)
-		expect(#t.scheduled).toBe(5)
-		expect(t.scheduled[5].seconds).toBe(combat.deathFreeze + fx.shatter.duration)
-		t.scheduled[4].fn()
-		t.scheduled[5].fn()
+		expect(#t.scheduled).toBe(3)
+		expect(t.scheduled[3].seconds).toBeCloseTo(lead + combat.deathFreeze + fx.shatter.duration, 1e-12)
+		runScheduled(t)
+		expect(t.find("shatter", "play")[3].args[3]).toBe(sfx.shatterCues.heavy)
 		lines = t.find("systemLine", "show")
 		expect(#lines).toBe(2)
 		expect(lines[2].args[1]).toBe("Your name has been struck from the Roll.")
 		expect(lines[2].args[1]).toBe(ui.systemLine.deathSelf)
+	end)
+
+	it("EntityDied picks the shatter's weight: a boss's, a player's or an Elite's heavy one, else a mob's", function()
+		local t = setup()
+		local function cueFor(payload)
+			table.clear(t.scheduled)
+			t.state.clock += 1 -- separate deaths, never one sweep's
+			Replication.dispatch("EntityDied", payload)
+			runScheduled(t)
+			local shatters = t.find("shatter", "play")
+			return shatters[#shatters].args[3]
+		end
+		expect(cueFor({ entityId = 8, shatter = "Humanoid", position = { 0, 0, 0 }, name = "Kobold Axeman" })).toBe(
+			sfx.shatterCues.normal
+		)
+		expect(cueFor({ entityId = 9, shatter = "Humanoid", position = { 0, 0, 0 }, name = "Elite" })).toBe(
+			sfx.shatterCues.heavy
+		)
+		expect(cueFor({ entityId = 7, shatter = "Boss", position = { 0, 0, 0 }, name = "King" })).toBe(
+			sfx.shatterCues.boss
+		)
+		-- A boss's shatter runs longer: its line (none for an enemy) and its bloom follow it.
+		expect(t.find("impact", "death")[3].args[3]).toBe(true)
+		-- Each Kobold screams its archetype's death on the kill.
+		local vocals = {}
+		for _, call in t.find("sfx", "play") do
+			table.insert(vocals, call.args[1])
+		end
+		expect(vocals).toEqual({ "enemy.BruteDeath", "enemy.BruteDeath", "enemy.ChargerDeath" })
+	end)
+
+	it("EntityDied with a director that is not loaded still shatters with the plain cue", function()
+		local t = setup()
+		t.deps.impact = setmetatable({}, {
+			__index = function()
+				return function()
+					return {} -- a Siblings stub answers with a table, never a cue name
+				end
+			end,
+		})
+		Replication.bind(t.deps)
+		Replication.dispatch("EntityDied", { entityId = 7, shatter = "Beast", position = { 0, 0, 0 }, name = "Boar" })
+		runScheduled(t)
+		expect(t.find("shatter", "play")[1].args[3]).toBe(sfx.shatterCues.normal)
+		Replication.dispatch("EntityDied", { entityId = 7, shatter = "Boss", position = { 0, 0, 0 }, name = "Boar" })
+		runScheduled(t)
+		expect(t.find("shatter", "play")[2].args[3]).toBe(sfx.shatterCues.boss)
 	end)
 
 	it("ActionRejected becomes the rejected Signal and nothing else", function()
@@ -837,80 +1143,583 @@ describe("Replication", function()
 		expect(#t.find("animator:boar", "stop")).toBe(0)
 	end)
 
-	it("EntityDied plays the crack once: through the shatter with a rig, directly when the rig is gone", function()
-		local t = setup()
-		Replication.dispatch(
-			"EntityDied",
-			{ entityId = 7, shatter = "Beast", position = { 1, 2, 3 }, name = "Frenzy Boar" }
-		)
-		t.scheduled[1].fn()
-		expect(#t.find("shatter", "play")).toBe(1)
-		expect(#cracks(t)).toBe(0)
-
-		-- No record for the id: nothing to shatter, the crack still sounds where the server said.
-		Replication.dispatch("EntityDied", { entityId = 99, shatter = "Beast", position = { 1, 2, 3 }, name = "Gone" })
-		t.scheduled[2].fn()
-		expect(#t.find("shatter", "play")).toBe(1)
-		local played = cracks(t)
-		expect(#played).toBe(1)
-		expect(played[1].args[2]).toBe(Vector3.new(1, 2, 3))
-		expect(#t.find("systemLine", "show")).toBe(0)
-	end)
-
 	it(
-		"EntityDied: each shatter releases the duck before it cracks, so a second death never mutes the first",
+		"EntityDied plays the shatter cue once: through the shatter with a rig, directly when the rig is gone",
 		function()
 			local t = setup()
-			-- Two deaths inside one freeze (Sharp Nail hits land closer together than deathFreeze).
 			Replication.dispatch(
 				"EntityDied",
 				{ entityId = 7, shatter = "Beast", position = { 1, 2, 3 }, name = "Frenzy Boar" }
 			)
+			runScheduled(t)
+			expect(#t.find("shatter", "play")).toBe(1)
+			expect(#shatterCues(t)).toBe(0)
+
+			-- No record for the id: nothing to shatter, the shatter cue still sounds where the server
+			-- said, and the director still blooms the mix there.
 			Replication.dispatch(
 				"EntityDied",
-				{ entityId = 99, shatter = "Beast", position = { 4, 5, 6 }, name = "Gone" }
+				{ entityId = 99, shatter = "Beast", position = { 1, 2, 3 }, name = "Gone" }
 			)
-			local ducks = t.find("sfx", "duck")
-			expect(#ducks).toBe(2)
-			for _, duck in ducks do
-				expect(duck.args[1]).toBe(combat.deathDuckDb)
-				expect(duck.args[2]).toBe(combat.deathFreeze)
+			-- No rig, no scream.
+			expect(#t.find("sfx", "play")).toBe(1)
+			runScheduled(t)
+			expect(#t.find("shatter", "play")).toBe(1)
+			local played = shatterCues(t)
+			expect(#played).toBe(1)
+			expect(played[1].args[1]).toBe(sfx.shatterCues.normal)
+			expect(played[1].args[2]).toBe(Vector3.new(1, 2, 3))
+			local deaths = t.find("impact", "death")
+			expect(deaths[2].args[1]).toBeNil()
+			expect(deaths[2].args[2]).toBe(Vector3.new(1, 2, 3))
+			expect(#t.find("systemLine", "show")).toBe(0)
+			-- A boss gone before its shatter still sounds the boss's cue.
+			Replication.dispatch(
+				"EntityDied",
+				{ entityId = 98, shatter = "Boss", position = { 1, 2, 3 }, name = "Gone" }
+			)
+			runScheduled(t)
+			expect(shatterCues(t)[2].args[1]).toBe(sfx.shatterCues.boss)
+			-- The old crack is not played any more.
+			for _, call in t.find("sfx", "play") do
+				expect(call.args[1]).never.toBe("shatter.Crack")
 			end
-			expect(#t.scheduled).toBe(2)
-
-			-- The first shatter: a release (0 dB, at once) is recorded before Shatter.play.
-			t.scheduled[1].fn()
-			local releaseAt, shatterAt = nil, nil
-			for index, call in t.calls do
-				if call.module == "sfx" and call.fn == "duck" and call.args[1] == 0 and call.args[2] == 0 then
-					releaseAt = releaseAt or index
-				elseif call.module == "shatter" and call.fn == "play" then
-					shatterAt = shatterAt or index
-				end
-			end
-			expect(releaseAt).never.toBeNil()
-			expect(shatterAt).never.toBeNil()
-			expect(releaseAt :: number).toBeLessThan(shatterAt :: number)
-			expect(#t.find("sfx", "duck")).toBe(3)
-
-			-- The second death has no rig: its own release comes before the crack it plays directly.
-			t.scheduled[2].fn()
-			ducks = t.find("sfx", "duck")
-			expect(#ducks).toBe(4)
-			expect(ducks[4].args[1]).toBe(0)
-			expect(ducks[4].args[2]).toBe(0)
-			local lastRelease, crackAt = 0, 0
-			for index, call in t.calls do
-				if call.module == "sfx" and call.fn == "duck" then
-					lastRelease = index
-				elseif call.module == "sfx" and call.fn == "play" and call.args[1] == "shatter.Crack" then
-					crackAt = index
-				end
-			end
-			expect(#cracks(t)).toBe(1)
-			expect(lastRelease).toBeLessThan(crackAt)
 		end
 	)
+
+	it("EntityDied: one sweep's deaths share one silence, and each shatter cracks with it released", function()
+		local t = setup()
+		local runUntil = timedScheduler(t)
+		-- Two deaths of one sweep, a frame apart (Sharp Nail hits land closer than deathFreeze).
+		local start = t.state.clock
+		Replication.dispatch(
+			"EntityDied",
+			{ entityId = 7, shatter = "Beast", position = { 1, 2, 3 }, name = "Frenzy Boar" }
+		)
+		t.state.clock += moments.sweep.mergeSeconds * 0.5
+		Replication.dispatch("EntityDied", { entityId = 99, shatter = "Beast", position = { 4, 5, 6 }, name = "Gone" })
+		-- One silence, the newer death's, after the kill's hit-stop.
+		local lead = moments.deathDuckDelay()
+		runUntil(start + lead + moments.sweep.mergeSeconds)
+		local ducks = t.find("sfx", "duck")
+		expect(#ducks).toBe(1)
+		expect(ducks[1].args[1]).toBe(combat.deathDuckDb)
+		expect(ducks[1].args[2]).toBe(combat.deathFreeze)
+
+		-- The first shatter: its silence ends within the sweep's window, so a release (0 dB, at once)
+		-- is recorded before Shatter.play.
+		runUntil(start + lead + combat.deathFreeze)
+		local releaseAt, shatterAt = nil, nil
+		for index, call in t.calls do
+			if call.module == "sfx" and call.fn == "duck" and call.args[1] == 0 and call.args[2] == 0 then
+				releaseAt = releaseAt or index
+			elseif call.module == "shatter" and call.fn == "play" then
+				shatterAt = shatterAt or index
+			end
+		end
+		expect(releaseAt).never.toBeNil()
+		expect(shatterAt).never.toBeNil()
+		expect(releaseAt :: number).toBeLessThan(shatterAt :: number)
+		expect(#t.find("sfx", "duck")).toBe(2)
+
+		-- The second death has no rig: its own release comes before the cue it plays directly.
+		runUntil(start + lead + combat.deathFreeze + moments.sweep.mergeSeconds)
+		ducks = t.find("sfx", "duck")
+		expect(#ducks).toBe(3)
+		expect(ducks[3].args[1]).toBe(0)
+		expect(ducks[3].args[2]).toBe(0)
+		local lastRelease, cueAt = 0, 0
+		for index, call in t.calls do
+			if call.module == "sfx" and call.fn == "duck" then
+				lastRelease = index
+			elseif call.module == "sfx" and call.fn == "cue" then
+				cueAt = index
+			end
+		end
+		expect(#shatterCues(t)).toBe(1)
+		expect(lastRelease).toBeLessThan(cueAt)
+	end)
+
+	it("HitConfirmed: a basic swing is no Art's; its third swing keeps the Final hit-stop and tick", function()
+		local t = setup()
+		Replication.dispatch("HitConfirmed", hit({ artId = NONE, hitStop = "Final", hitIndex = 3 }))
+		local info = lastInfo(t)
+		expect(info.art).toBe(false)
+		expect(info.tier).toBe("Final")
+		expect(t.find("animator:boar", "hitStop")[1].args[1]).toBe(combat.hitStopFrames.Final)
+		expect(t.find("sfx", "play")[1].args[1]).toBe("hitStopTick.Final")
+		-- An enemy's strike is neither an Art nor a player's basic swing.
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 7, targetId = 1, artId = NONE }))
+		expect(lastInfo(t).art).toBeNil()
+		-- An attacker this client does not track: unknown, never a basic swing.
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 50, targetId = 7, artId = NONE }))
+		expect(lastInfo(t).art).toBeNil()
+		expect(lastInfo(t).attacker).toBeNil()
+		expect(lastInfo(t).trailToken).toBe("SystemWhite")
+		-- An Art's hit carries its artId.
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 2 }))
+		expect(lastInfo(t).art).toBe(true)
+		expect(lastInfo(t).involved).toBe(false)
+	end)
+
+	it("HitConfirmed: with the real director a basic swing plays the basic hit's cue", function()
+		local t = setup()
+		local directorCalls = {}
+		local recorders = {}
+		for _, name in { "impactFrames", "glint", "slashArc", "speedLines", "trails", "sfx", "camera", "outline" } do
+			recorders[name] = recorder(name, directorCalls)
+		end
+		recorders.clipLibrary = { get = function() end }
+		recorders.now = function()
+			return t.state.clock
+		end
+		recorders.viewerPosition = function()
+			return Vector3.zero
+		end
+		recorders.positionOf = function()
+			return Vector3.zero
+		end
+		Impact.bind(recorders)
+		t.deps.impact = Impact
+		Replication.bind(t.deps)
+		Replication.dispatch("HitConfirmed", hit({ artId = NONE, hitStop = "Final", hitIndex = 3 }))
+		local cues = {}
+		for _, call in directorCalls do
+			if call.module == "sfx" and call.fn == "cue" then
+				table.insert(cues, call.args[1])
+			end
+		end
+		expect(cues).toEqual({ moments.rows.BasicHit.cue })
+		-- Basics stay weak: no impact frames, no punch.
+		for _, call in directorCalls do
+			expect(call.module .. "." .. call.fn).never.toBe("impactFrames.play")
+			expect(call.module .. "." .. call.fn).never.toBe("camera.punch")
+		end
+		-- Replication still flashes the target white (BasicHit has no Highlight of its own).
+		expect(#t.find("outline", "flash")).toBe(1)
+		Impact.bind({})
+	end)
+
+	it("HitConfirmed: the hit that breaks a player's guard ticks Final for the people in it", function()
+		local t = setup()
+		-- The boar breaks the local player's guard.
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 7, targetId = 1, guarded = true, broke = true }))
+		expect(t.find("sfx", "play")[1].args[1]).toBe("hitStopTick.Final")
+		-- The local player breaks another player's guard (each blow its own swing, never one sweep).
+		t.state.clock += 1
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 1, targetId = 2, guarded = true, broke = true }))
+		expect(t.find("sfx", "play")[2].args[1]).toBe("hitStopTick.Final")
+		-- An enemy's Break is not a guard break; a kill keeps its own tick.
+		t.state.clock += 1
+		Replication.dispatch("HitConfirmed", hit({ broke = true }))
+		expect(t.find("sfx", "play")[3].args[1]).toBe("hitStopTick.Normal")
+		t.state.clock += 1
+		Replication.dispatch(
+			"HitConfirmed",
+			hit({ attackerId = 7, targetId = 1, broke = true, killed = true, hitStop = "Kill" })
+		)
+		expect(t.find("sfx", "play")[4].args[1]).toBe("hitStopTick.Kill")
+		-- A bystander hears no tick at all.
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 7, targetId = 2, broke = true }))
+		expect(#t.find("sfx", "play")).toBe(4)
+	end)
+
+	it("HitConfirmed: the blow that breaks a player's guard lands on the guard for the director", function()
+		local t = setup()
+		-- The server's guard break: the blow goes through the guard (guarded false, broke true).
+		-- StateChanged GuardBroken already played the break's crack; the blow is the guarded thud
+		-- under it, never a second clean hit (4 layers, not 7).
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 8, targetId = 1, broke = true, artId = NONE }))
+		local info = lastInfo(t)
+		expect(info.guarded).toBe(true)
+		expect(moments.selectFor(info)).toBe("Guarded")
+		-- The rig plays the guard break's reaction (StateChanged), not a guard hit.
+		for _, call in t.find("animator:me", "play") do
+			expect(string.find(call.args[1], "GuardHit", 1, true)).toBeNil()
+		end
+		-- An enemy's Break (its gauge, not a guard) and a death through the guard stay what they are.
+		Replication.dispatch("HitConfirmed", hit({ broke = true }))
+		expect(lastInfo(t).guarded).toBe(false)
+		Replication.dispatch(
+			"HitConfirmed",
+			hit({ attackerId = 8, targetId = 1, broke = true, killed = true, hitStop = "Kill", artId = NONE })
+		)
+		expect(moments.selectFor(lastInfo(t))).toBe("Kill")
+	end)
+
+	it("HitConfirmed: the blow that breaks a player's guard leaves the guard break's red fill showing", function()
+		local t = setup()
+		local function fills(): { string }
+			local tokens = {}
+			for _, call in t.find("outline", "flash") do
+				if call.args[1] == t.models.me then
+					table.insert(tokens, call.args[2])
+				end
+			end
+			return tokens
+		end
+		-- The server's order: StateChanged GuardBroken, then the blow's HitConfirmed, one frame.
+		Replication.dispatch("StateChanged", { entityId = 1, state = "GuardBroken", duration = 1.2 })
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 8, targetId = 1, broke = true, artId = NONE }))
+		expect(fills()).toEqual({ "HPRed" })
+		-- A guarded blow that breaks nothing, and a clean hit, still flash white.
+		t.state.clock += 1
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 8, targetId = 1, guarded = true, artId = NONE }))
+		t.state.clock += 1
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 8, targetId = 1, artId = NONE }))
+		expect(fills()).toEqual({ "HPRed", "SystemWhite", "SystemWhite" })
+	end)
+
+	it(
+		"HitConfirmed: one sweep ticks once; a stronger tier's tick takes over, a weaker one after it is not heard",
+		function()
+			local t = setup()
+			local function ticks(): { string }
+				local names = {}
+				for _, call in t.find("sfx", "play") do
+					table.insert(names, call.args[1])
+				end
+				return names
+			end
+			-- A kill confirmed first: the final hits of the same sweep add no Final tick under it.
+			Replication.dispatch("HitConfirmed", hit({ hitStop = "Kill", killed = true }))
+			Replication.dispatch("HitConfirmed", hit({ hitStop = "Final" }))
+			Replication.dispatch("HitConfirmed", hit({ hitStop = "Final" }))
+			expect(ticks()).toEqual({ "hitStopTick.Kill" })
+			-- The next sweep: final hits first, then a kill, which is heard.
+			t.state.clock += moments.sweep.mergeSeconds * 1.01
+			Replication.dispatch("HitConfirmed", hit({ hitStop = "Final" }))
+			Replication.dispatch("HitConfirmed", hit({ hitStop = "Final" }))
+			Replication.dispatch("HitConfirmed", hit({ hitStop = "Kill", killed = true }))
+			expect(ticks()).toEqual({ "hitStopTick.Kill", "hitStopTick.Final", "hitStopTick.Kill" })
+			-- Past the window the same tier ticks again; binding again forgets the sweep.
+			t.state.clock += moments.sweep.mergeSeconds * 1.01
+			Replication.dispatch("HitConfirmed", hit({ hitStop = "Normal" }))
+			Replication.bind(t.deps)
+			Replication.dispatch("HitConfirmed", hit({ hitStop = "Normal" }))
+			expect(ticks()).toEqual({
+				"hitStopTick.Kill",
+				"hitStopTick.Final",
+				"hitStopTick.Kill",
+				"hitStopTick.Normal",
+				"hitStopTick.Normal",
+			})
+		end
+	)
+
+	it("EntityDied: deaths that land together scream once; a later death screams again", function()
+		local t = setup()
+		local function vocals(): number
+			return #t.find("sfx", "play")
+		end
+		-- One sweep kills two boars and a kobold in the same frame: one scream per voice.
+		Replication.dispatch("EntityDied", { entityId = 7, shatter = "Beast", position = { 0, 0, 0 }, name = "Boar" })
+		Replication.dispatch("EntityDied", { entityId = 7, shatter = "Beast", position = { 20, 0, 0 }, name = "Boar" })
+		Replication.dispatch(
+			"EntityDied",
+			{ entityId = 8, shatter = "Beast", position = { 40, 0, 0 }, name = "Kobold" }
+		)
+		local names = {}
+		for _, call in t.find("sfx", "play") do
+			table.insert(names, call.args[1])
+		end
+		expect(names).toEqual({ "enemy.ChargerDeath", "enemy.BruteDeath" })
+		-- Inside the window it is still the same sweep's deaths; past it, a new death.
+		t.state.clock += moments.sweep.mergeSeconds * 0.5
+		Replication.dispatch("EntityDied", { entityId = 7, shatter = "Beast", position = { 0, 0, 0 }, name = "Boar" })
+		expect(vocals()).toBe(2)
+		t.state.clock += moments.sweep.mergeSeconds * 1.01
+		Replication.dispatch("EntityDied", { entityId = 7, shatter = "Beast", position = { 0, 0, 0 }, name = "Boar" })
+		expect(vocals()).toBe(3)
+		-- Every death still freezes, ducks and shatters (the shatter's own sound merges in SfxPool).
+		runScheduled(t)
+		expect(#t.find("shatter", "play")).toBe(5)
+	end)
+
+	it(
+		"HitConfirmed: one sweep through many targets nudges the camera once and hands every hit to the director",
+		function()
+			local t = setup()
+			for _ = 1, 12 do
+				Replication.dispatch("HitConfirmed", hit())
+			end
+			expect(#t.find("camera", "nudge")).toBe(1)
+			expect(#t.find("impact", "hit")).toBe(12)
+			expect(#t.find("digits", "show")).toBe(12)
+			-- The next swing nudges again.
+			t.state.clock += moments.sweep.mergeSeconds * 1.01
+			Replication.dispatch("HitConfirmed", hit())
+			expect(#t.find("camera", "nudge")).toBe(2)
+			-- Inside the window, still the same sweep.
+			t.state.clock += moments.sweep.mergeSeconds * 0.5
+			Replication.dispatch("HitConfirmed", hit())
+			expect(#t.find("camera", "nudge")).toBe(2)
+			-- Binding again forgets the last nudge.
+			Replication.bind(t.deps)
+			Replication.dispatch("HitConfirmed", hit())
+			expect(#t.find("camera", "nudge")).toBe(3)
+		end
+	)
+
+	it("HitConfirmed: the director's own white flash replaces Replication's", function()
+		local t = setup()
+		t.state.ownsHighlight = true
+		Replication.dispatch("HitConfirmed", hit({ hitStop = "Final" }))
+		expect(#t.find("outline", "flash")).toBe(0)
+		expect(t.find("impact", "ownsHighlight")[1].args[1]).toBe(lastInfo(t))
+		-- A Siblings stub (no director loaded) answers with a table: Replication flashes itself.
+		t.state.ownsHighlight = {}
+		Replication.dispatch("HitConfirmed", hit({ hitStop = "Final" }))
+		expect(#t.find("outline", "flash")).toBe(1)
+	end)
+
+	it("ActionStarted: another fighter's dodge is the director's, the local dodge the controller's", function()
+		local t = setup()
+		Replication.dispatch("ActionStarted", {
+			entityId = 2,
+			clipId = "player/OneHandedSword/DodgeBack",
+			serverTime = 5,
+			facing = { 0, 0, -1 },
+		})
+		local dodges = t.find("impact", "dodge")
+		expect(#dodges).toBe(1)
+		expect(dodges[1].args[1]).toBe(t.models.ally)
+		expect(dodges[1].args[2]).toBe(false)
+		Replication.dispatch("ActionStarted", {
+			entityId = 1,
+			clipId = "player/OneHandedSword/DodgeLeft",
+			serverTime = 6,
+			facing = { 0, 0, -1 },
+		})
+		Replication.dispatch("ActionStarted", {
+			entityId = 2,
+			clipId = "player/OneHandedSword/Horizontal",
+			serverTime = 7,
+			facing = { 0, 0, -1 },
+		})
+		expect(#t.find("impact", "dodge")).toBe(1)
+	end)
+
+	it("ActionStarted: the clip sounds a late start jumped over play from where they would be by now", function()
+		local t = setup()
+		-- A clip the network catch-up starts 0.05 s in, at speed 1.25: the whoosh at 0 and the vocal
+		-- at 0.03 were jumped over; the Mixer's first step fires the one at 0.05 itself.
+		local clip = {
+			events = {
+				{ time = 0, kind = "Sfx", data = { name = "whoosh.Basic" } },
+				{ time = 0.03, kind = "Voice", data = { name = "enemy.ChargerWindUp" } },
+				{ time = 0.04, kind = "Footstep" },
+				{ time = 0.05, kind = "Sfx", data = { name = "whoosh.Medium" } },
+				{ time = 0.2, kind = "Sfx", data = { name = "whoosh.Large" } },
+			},
+		}
+		local handle: any = { clipId = "player/OneHandedSword/Basic1", clip = clip, time = 0.05, speed = 1.25 }
+		local animator = t.deps.choreo.get(t.models.ally)
+		function animator.play(_self: any, clipId: string, opts: any): any
+			table.insert(t.calls, { module = "animator:ally", fn = "play", args = { clipId, opts } })
+			return handle
+		end
+		Replication.dispatch(
+			"ActionStarted",
+			{ entityId = 2, clipId = "player/OneHandedSword/Basic1", serverTime = 99.96, speed = 1.25 }
+		)
+		local late = t.find("sfx", "playLate")
+		expect(#late).toBe(2)
+		expect(late[1].args[1]).toBe("whoosh.Basic")
+		expect(late[1].args[2]).toBeCloseTo(0.05 / 1.25, 1e-12)
+		expect(late[1].args[3]).toBe(Vector3.zero)
+		expect(late[2].args[1]).toBe("enemy.ChargerWindUp")
+		expect(late[2].args[2]).toBeCloseTo(0.02 / 1.25, 1e-12)
+		expect(#t.find("sfx", "play")).toBe(0)
+		-- A clip started on time replays nothing, nor does a handle with no clip clock (an engine
+		-- Animation) or a looping clip.
+		handle.time = 0
+		Replication.dispatch(
+			"ActionStarted",
+			{ entityId = 2, clipId = "player/OneHandedSword/Basic1", serverTime = 100 }
+		)
+		handle = { clipId = "rbxassetid://1", rbx = {}, speed = 1 }
+		Replication.dispatch("ActionStarted", { entityId = 2, clipId = "rbxassetid://1", serverTime = 99 })
+		handle = { clipId = "x", clip = { loop = true, events = clip.events }, time = 0.1, speed = 1 }
+		Replication.dispatch("ActionStarted", { entityId = 2, clipId = "x", serverTime = 99.9 })
+		expect(#t.find("sfx", "playLate")).toBe(2)
+	end)
+
+	it("ActionStarted: an Art's hold a late start jumped over still lights, chimes and rises", function()
+		local t = setup()
+		local clipId = "player/OneHandedSword/Horizontal"
+		local horizontal = Harness.load("src/shared/clips/player/OneHandedSword/Horizontal")
+		local holdAt, windowAt = 0, 0
+		for _, event in horizontal.events do
+			if event.kind == "ActivationHold" then
+				holdAt = event.time
+			elseif event.kind == "HitWindowOpen" and windowAt == 0 then
+				windowAt = event.time
+			end
+		end
+		expect(windowAt > holdAt + 0.1).toBe(true)
+		-- The network catch-up starts the clip 0.1 s past its hold, at speed 1.25.
+		local handle: any = { clipId = clipId, clip = horizontal, time = holdAt + 0.1, speed = 1.25 }
+		local animator = t.deps.choreo.get(t.models.ally)
+		function animator.play(_self: any, _clipId: string, _opts: any): any
+			return handle
+		end
+		Replication.dispatch("ActionStarted", { entityId = 2, clipId = clipId, serverTime = 99.9, speed = 1.25 })
+		local holds = t.find("impact", "activation")
+		expect(#holds).toBe(1)
+		expect(holds[1].args[1]).toBe(t.models.ally)
+		expect(holds[1].args[2]).toBe(clipId)
+		expect(holds[1].args[3]).toBe("TrailCyanWhite")
+		expect(holds[1].args[4]).toBe(false)
+		expect(holds[1].args[5]).toBe(1.25)
+		expect(holds[1].args[6]).toBeCloseTo(0.1 / 1.25, 1e-12)
+		local lights = t.find("trails", "activationLight")
+		expect(#lights).toBe(1)
+		expect(lights[1].args[2]).toBe(true)
+		local chimes = {}
+		for _, call in t.find("sfx", "playLate") do
+			if string.find(call.args[1], "artChime.", 1, true) == 1 then
+				table.insert(chimes, call)
+			end
+		end
+		expect(#chimes).toBe(1)
+		expect(chimes[1].args[1]).toBe("artChime.TrailCyanWhite")
+		expect(chimes[1].args[2]).toBeCloseTo(0.1 / 1.25, 1e-12)
+		-- Started past the first damage window: the hold is over, nothing replays for it; started
+		-- before the hold, the Mixer fires it itself.
+		for _, time in { windowAt, windowAt + 0.05, holdAt } do
+			handle = { clipId = clipId, clip = horizontal, time = time, speed = 1 }
+			Replication.dispatch("ActionStarted", { entityId = 2, clipId = clipId, serverTime = 99 })
+		end
+		expect(#t.find("impact", "activation")).toBe(1)
+		expect(#t.find("trails", "activationLight")).toBe(1)
+	end)
+
+	it("ActivationHold: the director times the riser by the clip's speed from ActionStarted", function()
+		local t = setup()
+		Replication.dispatch("ActionStarted", {
+			entityId = 2,
+			clipId = "player/OneHandedSword/Horizontal",
+			serverTime = 5,
+			facing = { 0, 0, -1 },
+			speed = 1.25,
+		})
+		Replication.routeClipEvent(
+			t.records[2],
+			"player/OneHandedSword/Horizontal",
+			{ time = 0.15, kind = "ActivationHold" }
+		)
+		local holds = t.find("impact", "activation")
+		expect(#holds).toBe(1)
+		expect(holds[1].args[1]).toBe(t.models.ally)
+		expect(holds[1].args[2]).toBe("player/OneHandedSword/Horizontal")
+		expect(holds[1].args[3]).toBe("TrailCyanWhite")
+		expect(holds[1].args[4]).toBe(false)
+		expect(holds[1].args[5]).toBe(1.25)
+		-- Another clip's hold has no speed of its own; the local hold is the local fighter's.
+		Replication.routeClipEvent(
+			t.records[2],
+			"player/OneHandedSword/Vertical",
+			{ time = 0.15, kind = "ActivationHold" }
+		)
+		expect(t.find("impact", "activation")[2].args[5]).toBeNil()
+		Replication.routeClipEvent(
+			t.records[1],
+			"player/OneHandedSword/Horizontal",
+			{ time = 0.15, kind = "ActivationHold" }
+		)
+		expect(t.find("impact", "activation")[3].args[4]).toBe(true)
+		-- unwatch forgets the speed.
+		Replication.unwatch(t.records[2])
+		Replication.routeClipEvent(
+			t.records[2],
+			"player/OneHandedSword/Horizontal",
+			{ time = 0.15, kind = "ActivationHold" }
+		)
+		expect(t.find("impact", "activation")[4].args[5]).toBeNil()
+	end)
+
+	it("HitConfirmed: a trade is two sweeps, each with its own nudge and hit-stop tick", function()
+		local t = setup()
+		local function ticks(): { string }
+			local names = {}
+			for _, call in t.find("sfx", "play") do
+				if string.find(call.args[1], "hitStopTick", 1, true) then
+					table.insert(names, call.args[1])
+				end
+			end
+			return names
+		end
+		-- The local player's basic hit on the boar, then 20 ms later the axeman's strike on them.
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 1, targetId = 7, artId = NONE }))
+		t.state.clock += 0.02
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 8, targetId = 1, artId = NONE }))
+		expect(#t.find("camera", "nudge")).toBe(2)
+		expect(ticks()).toEqual({ "hitStopTick.Normal", "hitStopTick.Normal" })
+		-- An Art's final hit, then a weaker strike taken 20 ms later: the blow taken still ticks.
+		t.state.clock += 1
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 1, targetId = 7, hitStop = "Final" }))
+		t.state.clock += 0.02
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 8, targetId = 1, artId = NONE }))
+		expect(ticks()).toEqual({
+			"hitStopTick.Normal",
+			"hitStopTick.Normal",
+			"hitStopTick.Final",
+			"hitStopTick.Normal",
+		})
+		-- The same attacker's sweep still nudges and ticks once; unwatch forgets its sweep.
+		t.state.clock += 1
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 8, targetId = 1, artId = NONE }))
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 8, targetId = 1, artId = NONE }))
+		expect(#t.find("camera", "nudge")).toBe(5)
+		expect(#ticks()).toBe(5)
+		Replication.unwatch(t.records[8])
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 8, targetId = 1, artId = NONE }))
+		expect(#t.find("camera", "nudge")).toBe(6)
+	end)
+
+	it("EntityDied: a death inside another's silence is heard; an older shatter never ends it", function()
+		local t = setup()
+		local runUntil = timedScheduler(t)
+		local function ducks(): { number }
+			local list = {}
+			for _, call in t.find("sfx", "duck") do
+				table.insert(list, call.args[1])
+			end
+			return list
+		end
+		local lead = moments.deathDuckDelay()
+		local start = t.state.clock
+		Replication.dispatch("EntityDied", { entityId = 7, shatter = "Beast", position = { 0, 0, 0 }, name = "Boar" })
+		runUntil(start + lead + 0.01)
+		expect(ducks()).toEqual({ combat.deathDuckDb })
+		-- The Kobold dies inside the Boar's silence: the groups come back at once for its kill.
+		local second = start + lead + combat.deathFreeze * 0.5
+		runUntil(second)
+		Replication.dispatch("EntityDied", { entityId = 8, shatter = "Beast", position = { 4, 0, 0 }, name = "Kobold" })
+		expect(ducks()).toEqual({ combat.deathDuckDb, 0 })
+		-- Its own silence follows its hit-stop; the Boar's shatter inside it restores nothing.
+		runUntil(second + lead + combat.deathFreeze * 0.5)
+		expect(ducks()).toEqual({ combat.deathDuckDb, 0, combat.deathDuckDb })
+		expect(#t.find("shatter", "play")).toBe(1)
+		runUntil(second + lead + combat.deathFreeze)
+		expect(ducks()).toEqual({ combat.deathDuckDb, 0, combat.deathDuckDb, 0 })
+		expect(#t.find("shatter", "play")).toBe(2)
+
+		-- A death inside another's hit-stop lead (past one sweep's window): only the newer one's
+		-- silence comes, and the older shatter inside it restores nothing.
+		local third = t.state.clock + 2
+		local gap = (lead + moments.sweep.mergeSeconds) * 0.5
+		expect(gap).toBeGreaterThan(moments.sweep.mergeSeconds)
+		expect(gap).toBeLessThan(lead)
+		runUntil(third)
+		Replication.dispatch("EntityDied", { entityId = 7, shatter = "Beast", position = { 0, 0, 0 }, name = "Boar" })
+		runUntil(third + gap)
+		Replication.dispatch("EntityDied", { entityId = 8, shatter = "Beast", position = { 4, 0, 0 }, name = "Kobold" })
+		runUntil(third + gap + lead + combat.deathFreeze + 0.01)
+		expect(ducks()).toEqual({ combat.deathDuckDb, 0, combat.deathDuckDb, 0, combat.deathDuckDb, 0 })
+		expect(#t.find("shatter", "play")).toBe(4)
+	end)
 
 	it("dispatch rejects unknown remotes", function()
 		setup()

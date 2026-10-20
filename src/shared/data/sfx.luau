@@ -20,7 +20,9 @@
 	- fadeOut: a linear fade to silence that ends at stopAt (nil or 0 = a hard stop)
 	- loop: true loops startAt..stopAt (only the heartbeat layer and the ambience beds)
 	The credits: length (the asset's full length as the library lists it; stopAt never passes
-	it), title (the library title) and creator.
+	it), title (the library title) and creator. peakAt (seconds of the asset, measured in Studio
+	Play at PlaybackSpeed 1, optional) is where the play is loudest: a clip whoosh's Sfx event sits
+	`peakLead` before its strike's HitWindowOpen so the swell peaks on the snap.
 
 	Levels. "0 dB" is a PlaybackLoudness peak x volume of 200, the level of the hit's crack and
 	body. Each pick's volume puts its own peak where the mix wants it (whoosh.Small at 0.35 is
@@ -68,6 +70,7 @@ export type Entry = {
 	length: number?, -- the asset's full length as the library lists it
 	title: string?, -- the library title, for the credits list
 	creator: string?, -- "ProSoundEffects" | "APMOfficial" | "Roblox"
+	peakAt: number?, -- seconds of the asset where it is loudest (measured); a clip whoosh times by it
 }
 
 export type Family = {
@@ -108,6 +111,7 @@ type Take = {
 	volume: number,
 	pitch: { number },
 	loop: boolean?,
+	peakAt: number?,
 }
 
 local PLACEHOLDER = "rbxassetid://0"
@@ -155,6 +159,7 @@ local function licensed(spatial: boolean, take: Take, note: string?): Entry
 		length = take.length,
 		title = take.title,
 		creator = take.creator,
+		peakAt = take.peakAt,
 	}
 end
 
@@ -301,7 +306,7 @@ vocalizations.BruteDeath = licensed(true, {
 -- The strike is the snort dropped about 3 semitones into a grunt, at full level like its source
 -- (it is the attack, never quieter than the idle snort). The staggers are the death screams up
 -- about 2 semitones and well under them: a pained yelp, not a wind-up growl, which would read as
--- the telegraph. BruteStrike has no clip event yet (nothing plays it until a Brute clip names it).
+-- the telegraph. The strikes are Voice events on the strike frame of the Charge and Overhead clips.
 vocalizations.ChargerStrike = reuse("enemy.ChargerSnort", vocalizations.ChargerSnort, 1, { 0.74, 0.84 })
 vocalizations.ChargerStagger = reuse("enemy.ChargerDeath", vocalizations.ChargerDeath, 0.45, { 1.12, 1.22 })
 vocalizations.BruteStrike = reuse("enemy.BruteDeath", vocalizations.BruteDeath, 0.75, { 0.98, 1.04 })
@@ -405,6 +410,7 @@ local Sfx = {
 					fadeOut = 0.06,
 					volume = 0.35,
 					pitch = { 0.95, 1.1 },
+					peakAt = 0.066,
 				}, "daggers, rapier points"),
 				Medium = licensed(true, {
 					id = "9119749044",
@@ -416,6 +422,7 @@ local Sfx = {
 					fadeOut = 0.06,
 					volume = 0.32,
 					pitch = { 0.95, 1.05 },
+					peakAt = 0.401,
 				}, "one-handed arcs; the louder second swish of the file"),
 				Large = licensed(true, {
 					id = "9126229280",
@@ -427,6 +434,7 @@ local Sfx = {
 					fadeOut = 0.08,
 					volume = 0.36,
 					pitch = { 0.85, 1 },
+					peakAt = 0.234,
 				}, "two-handed, axes, spears; one low swell, the loudest whoosh"),
 				Basic = licensed(true, {
 					id = "9119750698",
@@ -438,6 +446,7 @@ local Sfx = {
 					fadeOut = 0.3,
 					volume = 0.8,
 					pitch = { 0.95, 1.1 },
+					peakAt = 1.199,
 				}, "the thinner basic swing, quieter than Small"),
 				Riser = licensed(
 					true,
@@ -999,6 +1008,14 @@ local Sfx = {
 			{ name = "shatter.Chime", delay = 0, gainDb = 0 },
 			{ name = "impact.SubDrop", delay = 0, gainDb = -3 },
 		},
+		-- A player's or an Elite's shatter: the Shatter stack with the bass dive at full level, so the
+		-- death of someone who matters lands heavier than a mob's (the boss keeps its slow version).
+		ShatterHeavy = {
+			{ name = "shatter.Slam", delay = 0, gainDb = 0 },
+			{ name = "shatter.Crack", delay = 0, gainDb = 0 },
+			{ name = "shatter.Chime", delay = 0, gainDb = 0 },
+			{ name = "impact.SubDrop", delay = 0, gainDb = 0 },
+		},
 		-- The boss shatter on its white flash: the slow crack (its own 0.70 to 0.75x range), the
 		-- low boom in place of the slam, the chime slowed to its slow version, the full bass dive.
 		BossShatter = {
@@ -1171,14 +1188,16 @@ local Sfx = {
 		"enemy.ChargerDeath",
 		"enemy.BruteRoar",
 		"enemy.BruteWindUp",
+		"enemy.BruteStrike",
 		"enemy.BruteStagger",
 		"enemy.BruteDeath",
 	},
 
-	--- The cue SfxPool.shatter plays (Shatter.luau calls it). The reverb bloom is not part of it:
+	--- The cue SfxPool.shatter plays by the caller's weight (Shatter.luau calls it): a mob's
+	--- normal, a player's or an Elite's heavy, a boss's boss. The reverb bloom is not part of it:
 	--- a contour colors the whole SFX group, so the impact director fires ShatterBloom only for a
 	--- death near the camera (moments.luau `Death` / `BossDeath`).
-	shatterCues = { normal = "Shatter", boss = "BossShatter" },
+	shatterCues = { normal = "Shatter", heavy = "ShatterHeavy", boss = "BossShatter" },
 }
 
 --- One entry by family and name; errors on an unknown pair so a missing sound fails at load.
@@ -1269,6 +1288,17 @@ function Sfx.region(entry: Entry): (number, number)
 	local first = entry.startAt or 0
 	local last = entry.stopAt or entry.length or Sfx.playback.openEndSeconds
 	return first, last
+end
+
+--- Real seconds from Play to an entry's peak at the middle of its pitch range: (peakAt - startAt) / PlaybackSpeed; nil without a peakAt.
+function Sfx.peakLead(entry: Entry): number?
+	local peakAt = entry.peakAt
+	if peakAt == nil then
+		return nil
+	end
+	local range = entry.pitchRange
+	local speed = if range ~= nil then (range[1] + range[2]) / 2 else 1
+	return (peakAt - (entry.startAt or 0)) / speed
 end
 
 --- True for a sound from the library (a real asset id); false for a placeholder.

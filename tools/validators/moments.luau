@@ -3,18 +3,20 @@
 	Validates src/shared/data/moments.luau, the impact director's table, against the tables its
 	keys point into:
 
-	- Every moment the director plays exists (Hit, Crit, Guarded, FinalHit, Kill, Parry, Switch,
-	  Activation, Dodge, Death, BossDeath), every select rule tests hit fields with values of
-	  their type and names a moment, and the fallback is a moment.
+	- Every moment the director plays exists (Hit, BasicHit, Crit, Guarded, FinalHit, Kill, Parry,
+	  Switch, Activation, Dodge, GuardBreak, GuardRaise, Death, HeavyDeath, BossDeath), every
+	  select rule tests hit fields with values of their type and names a moment, and the fallback
+	  is a moment.
 	- Selection, over every combination of the hit fields: a hit that kills (or rides the Kill
 	  hit-stop) and was not parried plays a Kill-tier moment, even through a guard; an Art's final
 	  hit that is not parried, guarded or killing plays a Final-tier moment; a hit that is not an
 	  Art's and does not kill never plays a moment above Normal (basics stay weak, section 6).
 	- Every key exists: glint, crescent and line sizes and speed-line kinds in accents.luau; impact
 	  sequences in impact.luau; cues, shatter cues and contours in sfx.luau (`cues`, `contours`);
-	  sounds and the riser in sfx.luau entries; punches in camera.luau. Death and BossDeath name
-  the cues SfxPool.shatter plays (sfx.shatterCues normal and boss). A file (or a table in it)
-	  that is not there yet is a problem: by the end of the round all four builders' files exist.
+	  sounds and the riser in sfx.luau entries; punches in camera.luau. Death, HeavyDeath and
+	  BossDeath name the cues SfxPool.shatter plays (sfx.shatterCues normal, heavy and boss). A
+	  file (or a table in it) that is not there yet is a problem: by the end of the round all four
+	  builders' files exist.
 	- Every token is a palette token; frames are whole and positive; ranges are positive and no
 	  further than a glint can be drawn (accents glint.maxDistance).
 	- A moment's impact sequence and punch ride on the moment's hit-stop tier.
@@ -22,6 +24,8 @@
 	  punch are only ever "Involved" (bystanders never get a full-screen flash or a camera push),
 	  and a hit's contour too (only a death's contour may reach bystanders in range).
 	- The death silence waits at least the kill's hit-stop.
+	- One sweep's merge window is positive and shorter than the gap between any two damage
+	  windows of one clip, so an Art's next hit always gets its own sound.
 	- The bass is back when the sub thumps: for a moment with both a cue and a contour, every
 	  sfx.limits.subLayers layer of the cue starts with its group's low band, as the contour
 	  eases it, at or above sfx.limits.bassBackDb.
@@ -36,6 +40,7 @@ type Context = {
 
 local REQUIRED = {
 	"Hit",
+	"BasicHit",
 	"Crit",
 	"Guarded",
 	"FinalHit",
@@ -44,13 +49,16 @@ local REQUIRED = {
 	"Switch",
 	"Activation",
 	"Dodge",
+	"GuardBreak",
+	"GuardRaise",
 	"Death",
+	"HeavyDeath",
 	"BossDeath",
 }
 local AUDIENCES = { Always = true, Range = true, Involved = true }
-local DEATH_ROWS = { Death = true, BossDeath = true }
+local DEATH_ROWS = { Death = true, HeavyDeath = true, BossDeath = true }
 -- The sfx.shatterCues key each death row's shatterCue must match.
-local SHATTER_KINDS = { Death = "normal", BossDeath = "boss" }
+local SHATTER_KINDS = { Death = "normal", HeavyDeath = "heavy", BossDeath = "boss" }
 local INVOLVED_ONLY = { "ImpactFrames", "Punch" }
 local TIERS = { "Normal", "Final", "Kill" }
 
@@ -650,6 +658,41 @@ return function(ctx: Context): { string }
 				combat.hitStopFrames.Kill
 			)
 		end
+	end
+
+	-- ------------------------------------------------------------------ sweep
+	local sweep = moments.sweep
+	if typeof(sweep) ~= "table" or not isNumber(sweep.mergeSeconds) or sweep.mergeSeconds <= 0 then
+		check(false, "sweep.mergeSeconds must be a positive number of seconds")
+	else
+		-- The closest two HitWindowOpen events of any clip: the merge must never reach the next hit.
+		local closest, closestClip = math.huge, ""
+		for _, path in ctx.listFiles("src/shared/clips", "%.luau$") do
+			local ok, clip = pcall(ctx.load, (path:gsub("%.luau$", "")))
+			if not ok or typeof(clip) ~= "table" or typeof(clip.events) ~= "table" then
+				continue
+			end
+			local opens: { number } = {}
+			for _, event in clip.events do
+				if typeof(event) == "table" and event.kind == "HitWindowOpen" and isNumber(event.time) then
+					table.insert(opens, event.time)
+				end
+			end
+			table.sort(opens)
+			for index = 2, #opens do
+				local gap = opens[index] - opens[index - 1]
+				if gap < closest then
+					closest, closestClip = gap, tostring(clip.id or path)
+				end
+			end
+		end
+		check(
+			sweep.mergeSeconds < closest,
+			"sweep.mergeSeconds %.3f s must be shorter than %s's %.3f s between two damage windows",
+			sweep.mergeSeconds,
+			closestClip,
+			closest
+		)
 	end
 
 	return problems

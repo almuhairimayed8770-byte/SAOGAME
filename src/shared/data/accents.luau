@@ -17,6 +17,7 @@
 ]]
 
 local Combat = require(script.Parent.combat)
+local Choreo = require(script.Parent.choreo)
 
 export type Thickness = {
 	scale: number, -- fraction of the star's size
@@ -206,6 +207,13 @@ local Accents = {
 		-- The attachment axis that carries the swing plane's normal ("Y" or "Z"). STUDIO_TASKS
 		-- checks it: with the right axis the crescent lies flat in the swing plane.
 		faceAxis = "Y",
+		-- The director lays the crescent in the true swing plane (the hit's radius from the attacker
+		-- and the swing direction). Seen near edge-on (a horizontal swing from a camera just above
+		-- it) it would read as a line, so it turns about the swing direction toward the camera: just
+		-- far enough that its face is at most `faceDegrees` off the camera, and never more than
+		-- `maxDegrees`. A swing that runs within asin(minPlaneSine) of its radius (a thrust) has no
+		-- plane of its own and stands upright along the swing instead.
+		tilt = { faceDegrees = 50, maxDegrees = 30, minPlaneSine = 0.25 },
 		wipeEasing = "QuadOut",
 		wipeSoftness = 0.18, -- fraction of the crescent the wipe's soft edge spans
 		wipeKeys = 9, -- Transparency keypoints along each half while it wipes
@@ -312,11 +320,19 @@ local Accents = {
 
 	-- Trails.swingDirection: Trails samples each tracked blade tip (TrailEnd) once per Heartbeat
 	-- into a short ring and reports the unit motion between the newest sample and the one
-	-- `samples - 1` steps before it.
+	-- `samples - 1` steps before it. While a trail kind is on (the swing itself) each good
+	-- direction is also remembered with its time, and for `memorySeconds` after the swing that
+	-- direction is the answer: a HitConfirmed that arrives after the window closed (the round trip,
+	-- the server's lag allowance) still gets the swing, never the follow-through.
 	swing = {
 		samples = 5,
 		minTravel = 0.25, -- studs; under this the tip has not really moved and the answer is nil
 		maxTravel = 30, -- studs; over this the rig jumped (a respawn, a teleport) and the answer is nil
+		memorySeconds = 0.4,
+		-- A strike's snap (section 10 beat 2, the smear's frames): the tip's chord over this many
+		-- frames from the strike's first sample (TrailOn or a HitWindowOpen) is the swing's
+		-- direction, held for memorySeconds, so the overshoot and settle never turn it around.
+		snapFrames = Choreo.smearFrames,
 	},
 
 	-- Quality tiers (fx.luau names the tiers; Quality.luau picks one).

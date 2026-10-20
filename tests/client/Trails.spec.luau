@@ -141,6 +141,7 @@ describe("Trails", function()
 				systemLine = noop,
 				sfx = noop,
 				camera = noop,
+				impact = noop,
 				weaponCategory = function()
 					return "OneHandedSword"
 				end,
@@ -337,6 +338,181 @@ describe("Trails.swingDirection", function()
 			expectColor(colorOf(weapon), color)
 			expect(headWidth(weapon)).toBeCloseTo(width, 1e-6)
 			Trails.setActive(model, false, "Basic")
+			Trails.detach(model)
+		end)
+	end)
+end)
+
+-- The swing remembered after the trail goes off: a HitConfirmed lands a round trip after the
+-- damage window, when the blade is already in its follow-through (or held still by the hit-stop).
+describe("Trails.swingDirection memory", function()
+	local MEMORY = accents.swing.memorySeconds
+
+	-- Runs `body` with a hand clock and puts the engine's clock back afterwards.
+	local function withClock(body: (clock: { now: number }) -> ())
+		local clock = { now = 50 }
+		Engine.setClock(function()
+			return clock.now
+		end)
+		local ok, err = pcall(body, clock)
+		Engine.setClock(nil)
+		if not ok then
+			error(err, 0)
+		end
+	end
+
+	-- Swings the tip along +X for a whole ring with a trail kind on, one sample a frame.
+	local function swing(model: Model, weapon: BasePart, clock: { now: number })
+		Trails.setActive(model, true, "Basic")
+		for step = 1, SAMPLES do
+			clock.now += 1 / 60
+			sampleAt(weapon, CFrame.new(step, 0, 0))
+		end
+	end
+
+	it("answers the swing, not the follow-through, for memorySeconds after the trail goes off", function()
+		withClock(function(clock)
+			local model, weapon = rig()
+			swing(model, weapon, clock)
+			expectUnit(Trails.swingDirection(model), Vector3.xAxis)
+			Trails.setActive(model, false, "Basic")
+			-- The follow-through turns back along -Z.
+			for step = 1, SAMPLES do
+				clock.now += 1 / 60
+				sampleAt(weapon, CFrame.new(SAMPLES, 0, -step))
+			end
+			expectUnit(Trails.swingDirection(model), Vector3.xAxis)
+			-- Past the memory: the tip's motion now.
+			clock.now += MEMORY
+			expectUnit(Trails.swingDirection(model), Vector3.new(0, 0, -1))
+			Trails.detach(model)
+		end)
+	end)
+
+	it("holds the swing through a hit-stop's stillness while the trail is still on", function()
+		withClock(function(clock)
+			local model, weapon = rig()
+			swing(model, weapon, clock)
+			-- The hit-stop freezes the blade: the ring goes still.
+			for _ = 1, SAMPLES do
+				clock.now += 1 / 60
+				sampleAt(weapon, CFrame.new(SAMPLES, 0, 0))
+			end
+			expectUnit(Trails.swingDirection(model), Vector3.xAxis)
+			clock.now += MEMORY * 2
+			expect(Trails.swingDirection(model)).toBeNil()
+			Trails.setActive(model, false, "Basic")
+			Trails.detach(model)
+		end)
+	end)
+
+	it("answers the snap, not the settle, while the trail is still on", function()
+		withClock(function(clock)
+			local model, weapon = rig()
+			-- The snap: fast along +X (a stud a frame).
+			swing(model, weapon, clock)
+			-- The overshoot and settle spring back along -X, slower, with the trail still on, until
+			-- a HitConfirmed a round trip after the window asks.
+			for step = 1, 2 * SAMPLES do
+				clock.now += 1 / 60
+				sampleAt(weapon, CFrame.new(SAMPLES - step * 0.2, 0, step * 0.05))
+			end
+			expectUnit(Trails.swingDirection(model), Vector3.xAxis)
+			-- Past the memory the snap is forgotten: the settle's motion then.
+			clock.now += MEMORY
+			expect((Trails.swingDirection(model) :: Vector3).X).toBeLessThan(0)
+			Trails.setActive(model, false, "Basic")
+			Trails.detach(model)
+		end)
+	end)
+
+	it("at a low frame rate reads the snap from the pose before the strike began", function()
+		withClock(function(clock)
+			local model, weapon = rig()
+			Trails.attach(model)
+			-- 20 fps: the last pose before the window, then the window opens with the snap.
+			sampleAt(weapon, CFrame.new(0, 0, 0))
+			clock.now += 0.01
+			Trails.setActive(model, true, "Art")
+			-- The first frame drawn after it is past the key already (the snap, then the overshoot
+			-- springing back), and the next frames settle back along -X.
+			clock.now += 0.04
+			sampleAt(weapon, CFrame.new(3.5, 0, 0))
+			for step = 1, SAMPLES - 1 do
+				clock.now += 0.05
+				sampleAt(weapon, CFrame.new(3.5 - step, 0, 0))
+			end
+			expectUnit(Trails.swingDirection(model), Vector3.xAxis)
+			Trails.setActive(model, false, "Art")
+			Trails.detach(model)
+		end)
+	end)
+
+	it("a strike's next damage window starts a new snap", function()
+		withClock(function(clock)
+			local model, weapon = rig()
+			-- Window 1 snaps fast along +X.
+			Trails.setActive(model, true, "Art")
+			for step = 1, SAMPLES do
+				clock.now += 1 / 60
+				sampleAt(weapon, CFrame.new(step * 2, 0, 0))
+			end
+			-- Window 2 of the same trail (HitWindowOpen turns Art on again) snaps slower along +Y.
+			Trails.setActive(model, true, "Art")
+			-- A smear frame inside it is the same snap, never a new one.
+			Trails.setActive(model, true, "Smear")
+			for step = 1, SAMPLES do
+				clock.now += 1 / 60
+				sampleAt(weapon, CFrame.new(SAMPLES * 2, step * 0.5, 0))
+			end
+			Trails.setActive(model, false, "Smear")
+			expectUnit(Trails.swingDirection(model), Vector3.yAxis)
+			Trails.setActive(model, false, "Art")
+			Trails.detach(model)
+		end)
+	end)
+
+	it("a new swing replaces the remembered one, and a blade that never swung has none", function()
+		withClock(function(clock)
+			local model, weapon = rig()
+			swing(model, weapon, clock)
+			-- The next swing (its TrailOn) goes along +Z while its trail is on.
+			Trails.setActive(model, true, "Basic")
+			for step = 1, SAMPLES do
+				clock.now += 1 / 60
+				sampleAt(weapon, CFrame.new(SAMPLES, 0, step))
+			end
+			expectUnit(Trails.swingDirection(model), Vector3.zAxis)
+			Trails.setActive(model, false, "Basic")
+			for _ = 1, SAMPLES do
+				sampleAt(weapon, CFrame.new(SAMPLES, 0, SAMPLES))
+			end
+			expectUnit(Trails.swingDirection(model), Vector3.zAxis)
+			Trails.detach(model)
+
+			-- Moved with no trail on (a walk, a sheathe): nothing remembered, the motion now only.
+			local idle, blade = rig()
+			Trails.attach(idle)
+			for step = 1, SAMPLES do
+				clock.now += 1 / 60
+				sampleAt(blade, CFrame.new(0, step, 0))
+			end
+			for _ = 1, SAMPLES do
+				sampleAt(blade, CFrame.new(0, SAMPLES, 0))
+			end
+			expect(Trails.swingDirection(idle)).toBeNil()
+			Trails.detach(idle)
+		end)
+	end)
+
+	it("forgets the remembered swing on detach", function()
+		withClock(function(clock)
+			local model, weapon = rig()
+			swing(model, weapon, clock)
+			Trails.setActive(model, false, "Basic")
+			Trails.detach(model)
+			Trails.attach(model)
+			expect(Trails.swingDirection(model)).toBeNil()
 			Trails.detach(model)
 		end)
 	end)

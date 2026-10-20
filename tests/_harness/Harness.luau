@@ -83,7 +83,19 @@ local function buildBaseEnv()
 		BrickColor = roblox.BrickColor,
 		UDim = roblox.UDim,
 		UDim2 = roblox.UDim2,
-		NumberRange = roblox.NumberRange,
+		-- The engine refuses NumberRange.new(min, max) with min > max ("invalid range"); Lune swaps
+		-- the ends without a word, so every spec gets the engine's rule.
+		NumberRange = {
+			new = function(first: number, last: number?): any
+				if last == nil then
+					return roblox.NumberRange.new(first)
+				end
+				if first > last then
+					error(("NumberRange.new(%s, %s): invalid range"):format(tostring(first), tostring(last)), 2)
+				end
+				return roblox.NumberRange.new(first, last)
+			end,
+		},
 		NumberSequence = roblox.NumberSequence,
 		NumberSequenceKeypoint = roblox.NumberSequenceKeypoint,
 		ColorSequence = roblox.ColorSequence,

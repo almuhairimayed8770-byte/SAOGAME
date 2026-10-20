@@ -9,7 +9,8 @@
 	never skipped as a placeholder. A real entry names its library title, its creator (one of the
 	licensed library's: ProSoundEffects, APMOfficial, Roblox) and the asset's length. The trim, in
 	seconds of the asset: startAt is 0 or more, stopAt is after startAt and inside the length,
-	fadeOut fits inside startAt..stopAt, and a loop has a stopAt, a loop region longer than
+	fadeOut fits inside startAt..stopAt, a measured peakAt (when set) lies inside the audible part
+	(startAt to stopAt, else the length), and a loop has a stopAt, a loop region longer than
 	limits.loopMinSeconds and no per-cycle fade. Slots that share one real asset (the reuses) keep
 	their pitch ranges at least limits.sharedAssetSemitones apart (no range means the asset's own
 	speed, 1), so each reads as its own sound.
@@ -294,6 +295,19 @@ return function(ctx: Context): { string }
 					tostring(entry.fadeOut),
 					tostring(start),
 					tostring(finish)
+				)
+			end
+		end
+		if entry.peakAt ~= nil then
+			if typeof(entry.peakAt) ~= "number" then
+				problem("%s: peakAt must be seconds of the asset", label)
+			elseif entry.peakAt < start or (finish ~= nil and entry.peakAt > finish) then
+				problem(
+					"%s: peakAt %s must lie in the audible part (%s to %s)",
+					label,
+					tostring(entry.peakAt),
+					tostring(start),
+					tostring(finish or "the end")
 				)
 			end
 		end
@@ -748,9 +762,9 @@ return function(ctx: Context): { string }
 		end
 	end
 
-	-- What SfxPool.shatter plays.
+	-- What SfxPool.shatter plays, by the caller's weight.
 	local shatterCues = if typeof(Sfx.shatterCues) == "table" then Sfx.shatterCues else {}
-	for _, kind in { "normal", "boss" } do
+	for _, kind in { "normal", "heavy", "boss" } do
 		local cueName = shatterCues[kind]
 		if typeof(cueName) ~= "string" then
 			problem("sfx.shatterCues.%s must name the cue SfxPool.shatter plays", kind)

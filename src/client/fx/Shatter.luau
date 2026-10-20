@@ -7,8 +7,10 @@
 	burst, takes 40 to 80 pooled wedge shards (300 for bosses) from ReplicatedStorage, lays them
 	over the limbs with ShatterMath and animates them on the client with CFrames (no physics):
 	outward and upward drift, slow rotation, a 6-stud rise over 0.8 s (3 s for bosses), shrinking
-	and fading to transparent, then every shard goes back to the pool. The glass crack plays, then
-	the rising chime; bosses get the slow crack and the low boom and a camera pull-back hook.
+	and fading to transparent, then every shard goes back to the pool. The shatter cue plays by the
+	caller's weight (SfxPool.shatter): a mob's Shatter, a player's or an Elite's ShatterHeavy (the
+	bass dive at full level), a boss's BossShatter (the slow crack and the low boom) with a camera
+	pull-back hook. A Boss kind is always the boss shatter.
 
 	The pool is pre-warmed on start (spread over frames so it never hitches) at the quality
 	tier's size and only grows when a wave of deaths needs more, up to the tier's live cap.
@@ -247,8 +249,8 @@ function Shatter.start()
 	end)
 end
 
---- Hides the frozen rig and plays the shatter for its kind ("Beast" | "Construct" | "Plant" | "Humanoid" | "Boss").
-function Shatter.play(model: Instance, kind: string)
+--- Hides the frozen rig and plays the shatter for its kind ("Beast" | "Construct" | "Plant" | "Humanoid" | "Boss") at the caller's weight or sfx.shatterCues cue name ("normal" by default; a Boss kind is always "boss").
+function Shatter.play(model: Instance, kind: string, weight: (SfxPool.ShatterWeight | string)?)
 	Shatter.start()
 	local boss = kind == "Boss"
 	local token = Fx.shatter.colors[kind] or Fx.shatter.colors.Beast
@@ -291,8 +293,9 @@ function Shatter.play(model: Instance, kind: string)
 	table.insert(live, { shards = instances, start = Engine.now(), duration = duration, rise = rise, boss = boss })
 	ensureLoop()
 
-	-- The crack then the rising chime (the slow crack and the boom for a boss) live in SfxPool.
-	SfxPool.shatter(soundPosition, boss)
+	-- The cue (slam, crack, chime and bass dive; the slow crack and the boom for a boss) lives in SfxPool.
+	local cueWeight: SfxPool.ShatterWeight | string = if boss then "boss" else weight or "normal"
+	SfxPool.shatter(soundPosition, cueWeight)
 	if boss then
 		Shatter.bossShatter:Fire(center, duration)
 	end

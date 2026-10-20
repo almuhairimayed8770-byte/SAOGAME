@@ -7,12 +7,16 @@
 local ImpactFrames = Harness.load("src/client/fx/ImpactFrames")
 local FlashBudget = Harness.load("src/client/fx/FlashBudget")
 local ImpactSequence = Harness.load("src/client/fx/ImpactSequence")
+local Smear = Harness.load("src/client/fx/Smear")
+local fx = Harness.load("src/shared/data/fx")
 local impact = Harness.load("src/shared/data/impact")
 local palette = Harness.load("src/shared/data/palette")
 local combat = Harness.load("src/shared/data/combat")
 local ui = Harness.load("src/shared/data/ui")
 
 local F = combat.hitStopFrameSeconds
+-- The parts of rig() a silhouette draws: the torso, the head, the hat's handle and the sword.
+local FIGURE = 4
 local HIT_POINT = Vector2.new(0.4, 0.6) -- where the fake camera projects every world point
 local ASPECT = 16 / 9
 
@@ -101,9 +105,9 @@ local function part(className: string, name: string, parent: Instance, position:
 	return made
 end
 
--- A rig with three parts the silhouette draws (a torso full of clutter, a textured MeshPart head,
--- an accessory Handle with a SpecialMesh) and everything it must leave out (layered clothing, a
--- hidden part, the root, the sword, the sheath and FX).
+-- A rig with four parts the silhouette draws (a torso full of clutter, a textured MeshPart head,
+-- an accessory Handle with a SpecialMesh, the sword with its Trail) and everything it must leave
+-- out (layered clothing, a hidden part, the root, the sheath and FX).
 local function rig(name: string, origin: Vector3): Model
 	local model = Instance.new("Model")
 	model.Name = name
@@ -157,6 +161,17 @@ local function rig(name: string, origin: Vector3): Model
 
 	model.Parent = Instance.new("Folder")
 	return model
+end
+
+-- The drawn part a clone copies: the first BasePart of that name (the sword's part sits in a
+-- Model of the same name).
+local function sourceOf(model: Model, name: string): BasePart
+	for _, descendant in model:GetDescendants() do
+		if descendant.Name == name and descendant:IsA("BasePart") then
+			return descendant
+		end
+	end
+	error("no part " .. name, 2)
 end
 
 local function expectColor(actual: Color3, token: string)
@@ -337,7 +352,7 @@ describe("ImpactFrames overlay rebuild", function()
 			expect(gui.Parent).toBe(world.gui)
 			expect(ImpactFrames.look()).toBe("Dark")
 			-- The clones that went down with the old overlay were dropped, not pooled.
-			expect(#ImpactFrames.clones()).toBe(3)
+			expect(#ImpactFrames.clones()).toBe(FIGURE)
 			for _, clone in ImpactFrames.clones() do
 				expect(clone:IsDescendantOf(gui)).toBe(true)
 			end
@@ -347,39 +362,43 @@ describe("ImpactFrames overlay rebuild", function()
 end)
 
 describe("ImpactFrames silhouettes", function()
-	it("clones each visible part flat and bare, and leaves out the root, sheath, sword, FX and hidden parts", function()
-		withWorld(function()
-			local model = rig("Fighter", Vector3.new(0, 3, 0))
-			ImpactFrames.play("Final", { model })
-			local clones = ImpactFrames.clones()
-			expect(#clones).toBe(3)
-			expect(cloneNames()).toEqual({ UpperTorso = true, Head = true, Handle = true })
-			local _, _, figures = tree()
-			for _, clone in clones do
-				expect(clone:IsDescendantOf(figures)).toBe(true)
-				expect(clone.Material).toBe(Enum.Material.SmoothPlastic)
-				expectColor(clone.Color, impact.silhouette.flatToken)
-				expect(clone.Transparency).toBeCloseTo(0, 1e-6)
-				expect(clone.Anchored).toBe(true)
-				expect(clone.CanCollide).toBe(false)
-				for _, child in clone:GetChildren() do
-					-- Only a shape-giving mesh survives, with its texture taken off.
-					expect(child:IsA("DataModelMesh")).toBe(true)
-					expect((child :: SpecialMesh).TextureId).toBe("")
+	it(
+		"clones each visible part flat and bare, the sword too, and leaves out the root, sheath, FX and hidden parts",
+		function()
+			withWorld(function()
+				local model = rig("Fighter", Vector3.new(0, 3, 0))
+				ImpactFrames.play("Final", { model })
+				local clones = ImpactFrames.clones()
+				expect(#clones).toBe(FIGURE)
+				-- The anime's impact frames draw the blade in the figure (D-NEW: decision 1).
+				expect(cloneNames()).toEqual({ UpperTorso = true, Head = true, Handle = true, Weapon = true })
+				local _, _, figures = tree()
+				for _, clone in clones do
+					expect(clone:IsDescendantOf(figures)).toBe(true)
+					expect(clone.Material).toBe(Enum.Material.SmoothPlastic)
+					expectColor(clone.Color, impact.silhouette.flatToken)
+					expect(clone.Transparency).toBeCloseTo(0, 1e-6)
+					expect(clone.Anchored).toBe(true)
+					expect(clone.CanCollide).toBe(false)
+					for _, child in clone:GetChildren() do
+						-- Only a shape-giving mesh survives, with its texture taken off.
+						expect(child:IsA("DataModelMesh")).toBe(true)
+						expect((child :: SpecialMesh).TextureId).toBe("")
+					end
+					if clone:IsA("MeshPart") then
+						expect((clone :: MeshPart).TextureID).toBe("")
+					end
+					local source = sourceOf(model, clone.Name)
+					expectFrame(clone.CFrame, source.CFrame)
 				end
-				if clone:IsA("MeshPart") then
-					expect((clone :: MeshPart).TextureID).toBe("")
-				end
-				local source = model:FindFirstChild(clone.Name, true) :: BasePart
-				expectFrame(clone.CFrame, source.CFrame)
-			end
-			-- The rig itself is untouched.
-			local torso = model:FindFirstChild("UpperTorso") :: BasePart
-			expect(torso:FindFirstChildOfClass("Decal")).never.toBeNil()
-			expect(torso:FindFirstChildOfClass("Motor6D")).never.toBeNil()
-			expect((model:FindFirstChild("Head") :: MeshPart).TextureID).toBe("rbxassetid://123")
-		end)
-	end)
+				-- The rig itself is untouched.
+				local torso = model:FindFirstChild("UpperTorso") :: BasePart
+				expect(torso:FindFirstChildOfClass("Decal")).never.toBeNil()
+				expect(torso:FindFirstChildOfClass("Motor6D")).never.toBeNil()
+				expect((model:FindFirstChild("Head") :: MeshPart).TextureID).toBe("rbxassetid://123")
+			end)
+		end
+	)
 
 	it("copies the camera and every source part's CFrame each overlay frame", function()
 		withWorld(function()
@@ -409,11 +428,86 @@ describe("ImpactFrames silhouettes", function()
 			local a = rig("A", Vector3.new(0, 3, 0))
 			local b = rig("B", Vector3.new(6, 3, 0))
 			ImpactFrames.play("Kill", { a, b, a })
-			expect(#ImpactFrames.clones()).toBe(6)
+			expect(#ImpactFrames.clones()).toBe(2 * FIGURE)
 			local _, _, figures = tree()
 			-- Kill opens on the black beat: no figures shown yet.
 			expect(figures.Visible).toBe(false)
 			expect(ImpactFrames.look()).toBe("Black")
+		end)
+	end)
+
+	it("draws the sword at its rest size while the smear stretches it in a hit-stop", function()
+		withWorld(function()
+			local model = rig("Fighter", Vector3.new(0, 3, 0))
+			local sword = sourceOf(model, "Weapon")
+			local rest = sword.Size
+			-- The snap's smear frames are on when the hit-stop freezes the clip.
+			Smear.apply(model, true, "Y")
+			expect(sword.Size.Y).toBeCloseTo(rest.Y * fx.smear.scale, 1e-4)
+			-- Smear keeps the size it stored; the figure asks it through Smear.restSize.
+			local stored = (Smear :: any).restSize;
+			(Smear :: any).restSize = function(part: BasePart): Vector3?
+				return if part == sword then rest else nil
+			end
+			local ok, err = pcall(function()
+				ImpactFrames.play("Final", { model })
+				for _, clone in ImpactFrames.clones() do
+					local source = sourceOf(model, clone.Name)
+					if clone.Name == "Weapon" then
+						expect((clone.Size - rest).Magnitude).toBeCloseTo(0, 1e-5)
+					else
+						expect((clone.Size - source.Size).Magnitude).toBeCloseTo(0, 1e-5)
+					end
+				end
+				-- The rig keeps its stretch: only the figure is drawn at rest.
+				expect(sword.Size.Y).toBeCloseTo(rest.Y * fx.smear.scale, 1e-4)
+				-- A pooled clone taken back next time is sized again, at rest too.
+				ImpactFrames.cancel()
+				world.clock += 2
+				ImpactFrames.play("Final", { model })
+				for _, clone in ImpactFrames.clones() do
+					if clone.Name == "Weapon" then
+						expect((clone.Size - rest).Magnitude).toBeCloseTo(0, 1e-5)
+					end
+				end
+			end);
+			(Smear :: any).restSize = stored
+			Smear.reset(model)
+			if not ok then
+				error(err, 0)
+			end
+		end)
+	end)
+end)
+
+describe("ImpactFrames sweep", function()
+	it("twelve hits of one frame (a 12-target sweep, kills among them) are one picture, charged once", function()
+		withWorld(function()
+			local rigs = {}
+			for index = 1, 12 do
+				table.insert(rigs, rig("T" .. index, Vector3.new(index * 3, 3, 0)))
+			end
+			local attacker = rig("Attacker", Vector3.new(0, 3, 4))
+			-- Eleven final hits and one kill, all in the frame the sweep confirms.
+			for index, target in rigs do
+				ImpactFrames.play(if index == 7 then "Kill" else "Final", { attacker, target })
+			end
+			expect(FlashBudget.used(world.clock)).toBe(ImpactSequence.flashCost("Kill"))
+			expect(ImpactFrames.look()).toBe("Black")
+			-- One render step runs (the kill's takeover swapped it, never added one).
+			expect(world.binds - world.unbinds).toBe(1)
+			-- Never more rigs than the cap, the attacker first.
+			expect(#ImpactFrames.clones()).toBe(FIGURE * impact.silhouette.maxRigs)
+			-- With Reduce flashing on, twelve dims of one frame are one dim, charged once.
+			ImpactFrames.cancel()
+			world.clock += 2
+			FlashBudget.set(true)
+			for _, target in rigs do
+				ImpactFrames.play("Final", { attacker, target })
+			end
+			expect(ImpactFrames.look()).toBe("Reduced")
+			expect(FlashBudget.used(world.clock)).toBe(impact.reduced.flashCost)
+			FlashBudget.set(false)
 		end)
 	end)
 end)
@@ -464,7 +558,7 @@ describe("ImpactFrames timing", function()
 			expect(figures.Visible).toBe(false)
 			expect(#visibleStrokes(strokes)).toBe(0)
 			expect(#ImpactFrames.clones()).toBe(0)
-			expect(ImpactFrames.pooledCount()).toBe(3)
+			expect(ImpactFrames.pooledCount()).toBe(FIGURE)
 			expect(world.binds).toBe(1)
 			expect(world.unbinds).toBe(1)
 			-- The clones left the viewport.
@@ -745,20 +839,75 @@ describe("ImpactFrames flash safety", function()
 
 	it("charges a dim asked for while one fades out: it is a new dip", function()
 		withWorld(function()
-			FlashBudget.set(true)
-			ImpactFrames.play("Final", {})
+			-- Reduce flashing off, the budget too full for a Kill: the hits fall back to the dim.
+			-- One cost stays the whole case; another ends just after the first dim starts.
+			local window = impact.flash.windowSeconds
+			expect(FlashBudget.request(world.clock, 1, 10)).toBe(true)
+			expect(FlashBudget.request(world.clock - window + 2 * F, 1, 0)).toBe(true)
+			ImpactFrames.play("Kill", {})
+			expect(ImpactFrames.look()).toBe("Reduced")
 			local fadeIn = impact.reduced.fadeInFrames * F
 			advance(fadeIn + ImpactSequence.dimHoldSeconds() + 4 * F)
 			local _, background = tree()
 			local fading = 1 - background.BackgroundTransparency
 			expect(fading).toBeLessThan(impact.reduced.opacity)
 			expect(fading).toBeGreaterThan(0)
-			ImpactFrames.play("Final", {})
-			expect(FlashBudget.used(world.clock)).toBe(2 * impact.reduced.flashCost)
+			ImpactFrames.play("Kill", {})
+			expect(FlashBudget.used(world.clock)).toBe(1 + 2 * impact.reduced.flashCost)
 			-- It rises from what shows, never jumping.
 			expect(1 - background.BackgroundTransparency).toBeCloseTo(fading, 1e-6)
 			advance(F)
 			expect(1 - background.BackgroundTransparency).toBeGreaterThan(fading)
+		end)
+	end)
+
+	it("starts one dim a window with Reduce flashing on, however many hits land", function()
+		withWorld(function()
+			FlashBudget.set(true)
+			local window = impact.flash.windowSeconds
+			local start = world.clock
+			expect(ImpactFrames.play("Final", {})).toBeCloseTo(ImpactSequence.dimSeconds(), 1e-9)
+			local firstEnd = start + ImpactSequence.dimSeconds()
+			-- Hits 0.31 s apart, each landing after the last dim faded, and one just inside the
+			-- window after the first dim's end.
+			local hits = { 0.31, 0.62, 0.93, firstEnd - start + window - 2 * F }
+			local nextHit = 1
+			local started = 1
+			local wasShowing = true
+			while world.clock < firstEnd + window - F do
+				advance(F)
+				local showingNow = ImpactFrames.isShowing()
+				if showingNow and not wasShowing then
+					started += 1
+				end
+				wasShowing = showingNow
+				while hits[nextHit] ~= nil and world.clock - start >= hits[nextHit] do
+					expect(ImpactFrames.play("Kill", {})).toBe(0)
+					nextHit += 1
+				end
+			end
+			expect(nextHit).toBe(#hits + 1)
+			expect(started).toBe(impact.reduced.maxPerWindow)
+			expect(FlashBudget.used(world.clock)).toBe(impact.reduced.flashCost)
+			-- A window after the dim's end, the next hit dims again.
+			world.clock = firstEnd + window + F
+			expect(ImpactFrames.play("Kill", {})).toBeCloseTo(ImpactSequence.dimSeconds(), 1e-9)
+			expect(ImpactFrames.look()).toBe("Reduced")
+		end)
+	end)
+
+	it("keeps a fading dim fading, uncharged, when Reduce flashing already spent its window", function()
+		withWorld(function()
+			FlashBudget.set(true)
+			ImpactFrames.play("Final", {})
+			advance(impact.reduced.fadeInFrames * F + ImpactSequence.dimHoldSeconds() + 4 * F)
+			local _, background = tree()
+			local before = 1 - background.BackgroundTransparency
+			local left = ImpactFrames.remaining()
+			expect(ImpactFrames.play("Final", {})).toBeCloseTo(left, 1e-9)
+			expect(FlashBudget.used(world.clock)).toBe(impact.reduced.flashCost)
+			advance(F)
+			expect(1 - background.BackgroundTransparency).toBeLessThan(before)
 		end)
 	end)
 
@@ -836,7 +985,7 @@ describe("ImpactFrames cancel and the pool", function()
 			expect(gui.Enabled).toBe(false)
 			expect(ImpactFrames.isShowing()).toBe(false)
 			expect(world.unbinds).toBe(1)
-			expect(ImpactFrames.pooledCount()).toBe(3)
+			expect(ImpactFrames.pooledCount()).toBe(FIGURE)
 			for clone in first do
 				expect(clone.Parent).toBeNil()
 			end
@@ -859,14 +1008,14 @@ describe("ImpactFrames cancel and the pool", function()
 			expect(ImpactFrames.play("Kill", { b })).toBeCloseTo(ImpactSequence.seconds("Kill"), 1e-9)
 			expect(FlashBudget.used(world.clock)).toBe(ImpactSequence.flashCost("Kill"))
 			expect(ImpactFrames.look()).toBe("Black")
-			expect(#ImpactFrames.clones()).toBe(6)
+			expect(#ImpactFrames.clones()).toBe(2 * FIGURE)
 			expect(world.binds).toBe(1)
 			-- A lower rank (the parry's frame) joins too, and never cuts the kill short.
 			advance(F)
 			local c = rig("C", Vector3.new(-6, 3, 0))
 			expect(ImpactFrames.play("Parry", { c })).toBeCloseTo(ImpactSequence.seconds("Kill"), 1e-9)
 			expect(ImpactFrames.look()).toBe("Black")
-			expect(#ImpactFrames.clones()).toBe(9)
+			expect(#ImpactFrames.clones()).toBe(3 * FIGURE)
 			expect(FlashBudget.used(world.clock)).toBe(ImpactSequence.flashCost("Kill"))
 			advance(2 * F)
 			expect(ImpactFrames.look()).toBe("Dark")
@@ -883,7 +1032,7 @@ describe("ImpactFrames cancel and the pool", function()
 			expect(ImpactFrames.play("Kill", { b })).toBeCloseTo(ImpactSequence.seconds("Kill"), 1e-9)
 			expect(ImpactFrames.look()).toBe("Black")
 			expect(FlashBudget.used(world.clock)).toBe(ImpactSequence.flashCost("Kill"))
-			expect(#ImpactFrames.clones()).toBe(6)
+			expect(#ImpactFrames.clones()).toBe(2 * FIGURE)
 		end)
 	end)
 
@@ -903,6 +1052,30 @@ describe("ImpactFrames cancel and the pool", function()
 		end)
 	end)
 
+	it("charges a second takeover in one frame for the looks the first one took over", function()
+		withWorld(function()
+			-- The parry's frame is drawn; the next frame a sweep confirms a final hit, then a kill.
+			ImpactFrames.play("Parry", { rig("A", Vector3.new(0, 3, 0)) })
+			advance(F)
+			ImpactFrames.play("Final", { rig("B", Vector3.new(6, 3, 0)) })
+			ImpactFrames.play("Kill", { rig("C", Vector3.new(-6, 3, 0)) })
+			local path = { "Inverted" }
+			for _, frame in ImpactSequence.frames("Kill") do
+				table.insert(path, frame.look)
+			end
+			local cost = ImpactSequence.costOfLooks(path, impact.looks)
+			expect(cost).toBe(impact.flash.maxPerWindow)
+			expect(FlashBudget.used(world.clock)).toBe(cost)
+			for _ = 1, ImpactSequence.frameCount("Kill") + 1 do
+				advance(F)
+			end
+			expect(ImpactFrames.isShowing()).toBe(false)
+			-- The whole second is spent: a final hit right after shows nothing, not a second picture.
+			expect(ImpactFrames.play("Final", { rig("D", Vector3.new(0, 3, 6)) })).toBe(0)
+			expect(ImpactFrames.isShowing()).toBe(false)
+		end)
+	end)
+
 	it("keeps the sequence showing, joined, when the budget cannot pay for a takeover", function()
 		withWorld(function()
 			expect(FlashBudget.request(world.clock, impact.flash.maxPerWindow - ImpactSequence.flashCost("Final"))).toBe(
@@ -913,7 +1086,7 @@ describe("ImpactFrames cancel and the pool", function()
 			ImpactFrames.play("Kill", { rig("B", Vector3.new(6, 3, 0)) })
 			-- Never cut to a dim mid-picture, never charged past the limit.
 			expect(ImpactFrames.look()).toBe("Dark")
-			expect(#ImpactFrames.clones()).toBe(6)
+			expect(#ImpactFrames.clones()).toBe(2 * FIGURE)
 			expect(FlashBudget.used(world.clock)).toBe(impact.flash.maxPerWindow)
 		end)
 	end)
@@ -925,7 +1098,7 @@ describe("ImpactFrames cancel and the pool", function()
 			for index = 1, cap + 2 do
 				ImpactFrames.play("Kill", { rig("R" .. index, Vector3.new(index * 4, 3, 0)) })
 			end
-			expect(#ImpactFrames.clones()).toBe(3 * cap)
+			expect(#ImpactFrames.clones()).toBe(FIGURE * cap)
 		end)
 	end)
 
@@ -944,7 +1117,7 @@ describe("ImpactFrames cancel and the pool", function()
 						destroyed += 1
 					end
 				end
-				expect(destroyed).toBe(1)
+				expect(destroyed).toBe(#clones - 2)
 				-- The first clone pooled is the one that went.
 				expect(destroyedInstance(clones[1])).toBe(true)
 			end)
@@ -960,7 +1133,7 @@ describe("ImpactFrames cancel and the pool", function()
 			local gone = rig("Gone", Vector3.new(0, 3, 0))
 			ImpactFrames.play("Final", { gone })
 			local clones = ImpactFrames.clones()
-			expect(#clones).toBe(3)
+			expect(#clones).toBe(FIGURE)
 			gone:Destroy()
 			ImpactFrames.cancel()
 			expect(ImpactFrames.pooledCount()).toBe(0)
@@ -1012,7 +1185,7 @@ describe("ImpactFrames quality", function()
 		withWorld(function()
 			world.quality = "Low"
 			ImpactFrames.play("Kill", { rig("Fighter", Vector3.new(0, 3, 0)) }, { slashDirection = Vector2.new(1, 0) })
-			expect(#ImpactFrames.clones()).toBe(3)
+			expect(#ImpactFrames.clones()).toBe(FIGURE)
 			expect(FlashBudget.used(world.clock)).toBe(ImpactSequence.flashCost("Kill"))
 			local _, background, figures, strokes = tree()
 			advance(F)

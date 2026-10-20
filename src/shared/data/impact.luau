@@ -118,6 +118,11 @@ local Impact = {
 		fadeOutEasing = "SineInOut",
 		flashCost = 1, -- one down-and-up pair
 		referenceScene = "TrailWhite", -- the brightest scene the dim can fall on (pure white)
+		-- With Reduce flashing on, at most this many dims in any flash window (counted, like the
+		-- budget, until a window after each one's end): the setting means fewer flashes, never
+		-- the full budget of soft ones. A hit asked for past it shows nothing; one landing while a
+		-- dim rises or holds still keeps that dim at its peak.
+		maxPerWindow = 1,
 	},
 
 	-- The local player's boolean attribute the settings menu writes (FlashBudget reads it).
@@ -148,9 +153,10 @@ local Impact = {
 		material = "SmoothPlastic",
 		hiddenTransparency = 1, -- parts at or above this transparency are left out
 		-- A part named one of these, or any part under a model or folder named one of these, is
-		-- left out: the root, the sheath, the sword (the strokes and the slash line carry the
-		-- blade) and FX parts.
-		excludeNames = { "HumanoidRootPart", "Sheath", "Weapon", "FX" },
+		-- left out: the root, the sheath and FX parts. The sword is part of the figure, as in the
+		-- anime's impact frames, drawn at its rest size: the smear's stretch (section 10 beat 3)
+		-- may still be on while hit-stop freezes the snap, and the figure never shows it.
+		excludeNames = { "HumanoidRootPart", "Sheath", "FX" },
 		-- Layered clothing (a part with a WrapLayer) only fits the body through the engine's
 		-- deformation, which a lone clone does not get: its raw cage would break the outline.
 		skipWrapLayers = true,

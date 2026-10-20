@@ -55,6 +55,7 @@ local Locomotion = Siblings.load(Client, "choreo.Locomotion")
 local ClipLibrary, hasClipLibrary = Siblings.load(Client, "choreo.ClipLibrary")
 local Trails = Siblings.load(Client, "fx.Trails")
 local Hud = Siblings.load(Client, "ui.Hud")
+local Impact = Siblings.load(Client, "fx.Impact")
 
 local RENDER_STEP_NAME = "SkyspireCharacter"
 local ART_SLOTS_ATTRIBUTE = "ArtSlots"
@@ -233,6 +234,8 @@ local function clearHold()
 	hold = nil
 	setTimeScale(timeScale)
 	stopClip(current.handle)
+	-- The wind-up contour ends with the hold, however it ended.
+	Impact.cancelActivation(character)
 	if character ~= nil then
 		Trails.activationLight(character, false, trailToken())
 	end
@@ -297,6 +300,11 @@ function CharacterController.releaseArt(slot: number, heldSeconds: number)
 	end
 	local releasedAt = now()
 	local plan = ActionLogic.syncPlan(current.pressedAt, current.frozenClipTime, releasedAt)
+	if character ~= nil then
+		-- The clip waits at freezeClipTime for freezeClipTime more: the riser and the highs land on
+		-- its first damage frame after that.
+		Impact.release(character :: Model, current.art.clip, plan.freezeClipTime, plan.freezeClipTime)
+	end
 	if current.frozenClipTime == nil then
 		setTimeScale(0)
 	end
@@ -374,6 +382,8 @@ function CharacterController.setGuard(held: boolean)
 		}
 		setState("Guard")
 		predictDraw()
+		-- The raise sounds with the predicted pose (Replication plays it for everyone else).
+		Impact.guardRaise(character, true)
 		sendGuard(true)
 	elseif state == "Guard" then
 		if predicted ~= nil then
@@ -426,6 +436,10 @@ function CharacterController.dodge()
 	actionEndsAt = t + Combat.dodgeDuration
 	dodgeReadyAt = t + Combat.dodgeCooldown
 	CameraController.fovKick("Dash")
+	if character ~= nil then
+		-- The speed lines on this screen and the dodge whoosh for anyone near.
+		Impact.dodge(character :: Model, true)
+	end
 	fire("DodgeRequest", { direction = { world.X, world.Y, world.Z }, clientTime = serverNow() })
 end
 

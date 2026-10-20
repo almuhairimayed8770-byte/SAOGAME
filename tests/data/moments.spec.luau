@@ -116,31 +116,51 @@ describe("moments data", function()
 		expect(rows.Death.shatterCue).toBe("Shatter")
 		expect(rows.BossDeath.shatterCue).toBe("BossShatter")
 		expect(rows.Death.contour).toBe("ShatterBloom")
+		-- A player's basic swing: its own 4-layer hit, a Normal moment even on the third swing.
+		expect(rows.BasicHit.cue).toBe("HitBasic")
+		expect(rows.BasicHit.hitStop).toBe("Normal")
+		expect(rows.BasicHit.glint.size).toBe("Small")
+		expect(rows.GuardBreak.cue).toBe("GuardBreak")
+		expect(rows.GuardRaise.sound).toBe("guard.GuardRaise")
+		expect(rows.HeavyDeath.shatterCue).toBe("ShatterHeavy")
+		expect(rows.HeavyDeath.contour).toBe("ShatterBloom")
 	end)
 
-	it("picks a hit's moment parried, killed, Kill tier, guarded, an Art's Final, crit, Switch, else Hit", function()
-		local order = {}
-		for _, rule in moments.select do
-			table.insert(order, rule.moment)
+	it(
+		"picks a hit's moment parried, killed, Kill tier, guarded, an Art's Final, crit, Switch, basic, else Hit",
+		function()
+			local order = {}
+			for _, rule in moments.select do
+				table.insert(order, rule.moment)
+			end
+			expect(order).toEqual({ "Parry", "Kill", "Kill", "Guarded", "FinalHit", "Crit", "Switch", "BasicHit" })
+			expect(moments.fallback).toBe("Hit")
+			expect(moments.selectFor({ parried = true, guarded = true })).toBe("Parry")
+			-- A death through a guard is still a death.
+			expect(moments.selectFor({ guarded = true, killed = true, tier = "Kill" })).toBe("Kill")
+			expect(moments.selectFor({ killed = true, tier = "Final" })).toBe("Kill")
+			expect(moments.selectFor({ guarded = true, tier = "Final", art = true })).toBe("Guarded")
+			expect(moments.selectFor({ tier = "Final", art = true, crit = true })).toBe("FinalHit")
+			-- A basic chain's last swing rides the Final hit-stop and stays a basic hit.
+			expect(moments.selectFor({ tier = "Final", crit = true })).toBe("Crit")
+			expect(moments.selectFor({ tier = "Final" })).toBe("Hit")
+			expect(moments.selectFor({ crit = true, isSwitch = true })).toBe("Crit")
+			expect(moments.selectFor({ isSwitch = true })).toBe("Switch")
+			expect(moments.selectFor({ tier = "Normal" })).toBe("Hit")
+			-- A player's basic swing (art false) plays BasicHit, its third swing's Final hit-stop too;
+			-- a parry, a kill, a guard and a crit still win. An enemy's strike (art nil) stays Hit.
+			expect(moments.selectFor({ tier = "Normal", art = false })).toBe("BasicHit")
+			expect(moments.selectFor({ tier = "Final", art = false })).toBe("BasicHit")
+			expect(moments.selectFor({ art = false, parried = true })).toBe("Parry")
+			expect(moments.selectFor({ art = false, killed = true, tier = "Kill" })).toBe("Kill")
+			expect(moments.selectFor({ art = false, guarded = true })).toBe("Guarded")
+			expect(moments.selectFor({ art = false, crit = true, tier = "Final" })).toBe("Crit")
+			expect(moments.selectFor({ tier = "Normal", art = true })).toBe("Hit")
+			expect(moments.matches({ when = { tier = "Final", art = true }, moment = "FinalHit" }, { tier = "Final" })).toBe(
+				false
+			)
 		end
-		expect(order).toEqual({ "Parry", "Kill", "Kill", "Guarded", "FinalHit", "Crit", "Switch" })
-		expect(moments.fallback).toBe("Hit")
-		expect(moments.selectFor({ parried = true, guarded = true })).toBe("Parry")
-		-- A death through a guard is still a death.
-		expect(moments.selectFor({ guarded = true, killed = true, tier = "Kill" })).toBe("Kill")
-		expect(moments.selectFor({ killed = true, tier = "Final" })).toBe("Kill")
-		expect(moments.selectFor({ guarded = true, tier = "Final", art = true })).toBe("Guarded")
-		expect(moments.selectFor({ tier = "Final", art = true, crit = true })).toBe("FinalHit")
-		-- A basic chain's last swing rides the Final hit-stop and stays a basic hit.
-		expect(moments.selectFor({ tier = "Final", crit = true })).toBe("Crit")
-		expect(moments.selectFor({ tier = "Final" })).toBe("Hit")
-		expect(moments.selectFor({ crit = true, isSwitch = true })).toBe("Crit")
-		expect(moments.selectFor({ isSwitch = true })).toBe("Switch")
-		expect(moments.selectFor({ tier = "Normal" })).toBe("Hit")
-		expect(moments.matches({ when = { tier = "Final", art = true }, moment = "FinalHit" }, { tier = "Final" })).toBe(
-			false
-		)
-	end)
+	)
 
 	it("keeps impact frames, the punch and a hit's contour for the people in the fight", function()
 		for _, name in moments.list() do
@@ -166,6 +186,23 @@ describe("moments data", function()
 		expect(moments.deathDuckDelay()).toBeCloseTo(combat.hitStopFrames.Kill * combat.hitStopFrameSeconds, 1e-12)
 	end)
 
+	it("picks the death row: a boss's, a player's or an Elite's heavy one, else the plain one", function()
+		expect(moments.deathFor(true)).toBe("BossDeath")
+		expect(moments.deathFor(true, true)).toBe("BossDeath")
+		expect(moments.deathFor(false, true)).toBe("HeavyDeath")
+		expect(moments.deathFor(false, false)).toBe("Death")
+		expect(moments.deathFor(false)).toBe("Death")
+	end)
+
+	it("merges one sweep's hits inside a short window", function()
+		-- Up to 12 confirmations of one swing land over about 3 server frames and arrive with a
+		-- frame or two of jitter: the window spans at least 5 frames. An Art's next hit is a damage
+		-- window later (the validator holds the window under the closest pair).
+		local frames = moments.sweep.mergeSeconds / combat.hitStopFrameSeconds
+		expect(frames).toBeGreaterThanOrEqual(5)
+		expect(moments.sweep.mergeSeconds).toBeLessThan(combat.hitStopFrames.Kill * combat.hitStopFrameSeconds * 2)
+	end)
+
 	it("names only palette tokens", function()
 		expect(palette.tokens[moments.rows.Guarded.glint.token]).never.toBeNil()
 	end)
@@ -178,7 +215,7 @@ describe("moments data", function()
 		local sorted = table.clone(names)
 		table.sort(sorted)
 		expect(names).toEqual(sorted)
-		expect(#names).toBe(11)
+		expect(#names).toBe(15)
 	end)
 end)
 
@@ -303,7 +340,7 @@ describe("moments validator", function()
 		expect(mentions(problems, "compares crit to a string, not a boolean")).toBe(true)
 		expect(mentions(problems, "tier 'Huge' is not a hit-stop tier")).toBe(true)
 		expect(mentions(problems, "names moment 'Ghost', which has no row")).toBe(true)
-		expect(mentions(problems, "select[12] must be { when = { field = value, ... }, moment }")).toBe(true)
+		expect(mentions(problems, "select[13] must be { when = { field = value, ... }, moment }")).toBe(true)
 		expect(mentions(problems, "fallback must name a moment with a row")).toBe(true)
 		expect(mentions(problems, "the director plays 'Switch', which has no row")).toBe(true)
 		expect(mentions(problems, "rows.Kill range 10000 is past the glint's draw distance")).toBe(true)
@@ -356,6 +393,38 @@ describe("moments validator", function()
 		end)
 		expect(mentions(problems, "rows.Activation.releaseContour names contour 'Unwind'")).toBe(true)
 		expect(mentions(problems, "rows.Dodge has a releaseContour but no contour for it to end")).toBe(true)
+	end)
+
+	it("keeps the heavy death on the heavy shatter cue", function()
+		local problems = broken(function(copy)
+			copy.rows.HeavyDeath.shatterCue = "Shatter"
+		end)
+		expect(
+			mentions(problems, "rows.HeavyDeath.shatterCue 'Shatter' must be sfx.shatterCues.heavy ('ShatterHeavy')")
+		).toBe(true)
+		local noRow = broken(function(copy)
+			copy.rows.HeavyDeath = nil
+			copy.rows.GuardRaise = nil
+		end)
+		expect(mentions(noRow, "the director plays 'HeavyDeath', which has no row")).toBe(true)
+		expect(mentions(noRow, "the director plays 'GuardRaise', which has no row")).toBe(true)
+	end)
+
+	it("keeps the sweep merge positive and short of an Art's next damage window", function()
+		local zero = broken(function(copy)
+			copy.sweep.mergeSeconds = 0
+		end)
+		expect(mentions(zero, "sweep.mergeSeconds must be a positive number of seconds")).toBe(true)
+		local missing = broken(function(copy)
+			copy.sweep = nil
+		end)
+		expect(mentions(missing, "sweep.mergeSeconds must be a positive number of seconds")).toBe(true)
+		-- A merge as long as a whole swing would swallow a multi-hit Art's second hit.
+		local long = broken(function(copy)
+			copy.sweep.mergeSeconds = 10
+		end)
+		expect(mentions(long, "sweep.mergeSeconds 10.000 s must be shorter than player/")).toBe(true)
+		expect(mentions(long, "between two damage windows")).toBe(true)
 	end)
 
 	it("keeps the death silence after the kill's hit-stop", function()

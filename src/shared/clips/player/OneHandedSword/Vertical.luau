@@ -191,9 +191,9 @@ local clip: Types.ClipDef = {
 	},
 	events = {
 		{ time = 0.15, kind = "ActivationHold", data = { hold = 0.1 } },
+		{ time = 0.2, kind = "Sfx", data = { name = "whoosh.Large" } },
 		{ time = 0.35, kind = "TrailOn", data = { kind = "Art" } },
 		{ time = 0.35, kind = "SmearOn", data = { axis = "Y" } },
-		{ time = 0.35, kind = "Sfx", data = { name = "whoosh.Large" } },
 		{ time = 0.35, kind = "HitWindowOpen", data = { hit = 1 } },
 		{ time = 0.3833, kind = "SmearOff" },
 		{ time = 0.48, kind = "HitWindowClose", data = { hit = 1 } },
