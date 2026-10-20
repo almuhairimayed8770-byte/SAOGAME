@@ -275,6 +275,199 @@ describe("ActionLogic", function()
 		expect(early.resumeAt).toBeCloseTo(10.2)
 	end)
 
+	describe("the two-step stop's carry", function()
+		local Locomotion = choreo.locomotion
+		local config = {
+			seconds = Locomotion.stopStepsSeconds,
+			minCycles = Locomotion.stopMinCycles,
+			endSpeed = Locomotion.stopEndSpeed,
+			minSpeed = Locomotion.idleSpeedThreshold,
+			maxSpeed = Locomotion.skidSpeedThreshold,
+		}
+		local FRAME = 1 / 60
+
+		-- Moves along +X at `speed`, lets go at `phase`, and walks the gait on at `pace` cycles a
+		-- second; `after` is each foot's settle point, in cycles after its Footstep (left at phase 0,
+		-- right at 0.5). Returns the carry speeds and the phase each frame was at.
+		local function stopWithGait(speed: number, walkSpeed: number, phase: number, pace: number, after: { number })
+			local carry = ActionLogic.newStopCarry()
+			local gait = { phase = phase, leftStep = 0, leftAfter = after[1], rightStep = 0.5, rightAfter = after[2] }
+			for _ = 1, 3 do
+				ActionLogic.stopCarryStep(carry, 1, 0, speed, walkSpeed, true, "Idle", FRAME, config, gait)
+			end
+			local speeds, phases = {}, {}
+			local current = speed
+			for _ = 1, math.ceil(config.seconds / FRAME) + 5 do
+				current = ActionLogic.stopCarryStep(carry, 0, 0, current, walkSpeed, true, "Idle", FRAME, config, gait)
+				table.insert(speeds, current)
+				table.insert(phases, gait.phase)
+				gait.phase = (gait.phase + pace * FRAME) % 1
+			end
+			return speeds, phases
+		end
+
+		it(
+			"walks through the next Footstep stopMinCycles away and stops where that foot settles, slowing down",
+			function()
+				local after = { 0.12, 0.4 }
+				for _, phase in { 0, 0.05, 0.25, 0.31, 0.45, 0.6, 0.79, 0.95 } do
+					local pace = 2
+					local speeds, phases = stopWithGait(Locomotion.runSpeed, Locomotion.runSpeed, phase, pace, after)
+					local frames = 0
+					local last = math.huge
+					for index, value in speeds do
+						if value == 0 then
+							break
+						end
+						frames = index
+						expect(value).toBeLessThan(last + 1e-12)
+						expect(value).toBeGreaterThan(Locomotion.stopEndSpeed - 1e-9)
+						last = value
+					end
+					-- The first Footstep at least stopMinCycles on, then that foot's settle point.
+					local best = math.huge
+					for index, step in { 0, 0.5 } do
+						local toStep = (step - phase) % 1
+						if toStep < Locomotion.stopMinCycles then
+							toStep += 1
+						end
+						best = math.min(best, toStep + after[index])
+					end
+					local walked = frames * FRAME * pace
+					expect(math.abs(walked - best)).toBeLessThan(pace * FRAME * 1.01)
+					expect(phases[frames + 1]).toBeCloseTo((phase + walked) % 1, 1e-9)
+				end
+			end
+		)
+
+		it("ends at stopStepsSeconds when the gait does not walk on", function()
+			local speeds = stopWithGait(Locomotion.walkSpeed, Locomotion.walkSpeed, 0, 0, { 0.12, 0.4 })
+			local moving = 0
+			for _, value in speeds do
+				if value > 0 then
+					moving += 1
+				end
+			end
+			expect(moving * FRAME).toBeCloseTo(config.seconds, FRAME * 1.01)
+		end)
+
+		it("a Guard raised mid-carry slows the carry to the Guard speed at once", function()
+			local carry = ActionLogic.newStopCarry()
+			local gait = { phase = 0, leftStep = 0, leftAfter = 0.12, rightStep = 0.5, rightAfter = 0.4 }
+			ActionLogic.stopCarryStep(
+				carry,
+				1,
+				0,
+				Locomotion.runSpeed,
+				Locomotion.runSpeed,
+				true,
+				"Idle",
+				FRAME,
+				config,
+				gait
+			)
+			local first = ActionLogic.stopCarryStep(
+				carry,
+				0,
+				0,
+				Locomotion.runSpeed,
+				Locomotion.runSpeed,
+				true,
+				"Idle",
+				FRAME,
+				config,
+				gait
+			)
+			expect(first).toBeGreaterThan(Locomotion.walkSpeed)
+			gait.phase = 0.01
+			local guarded =
+				ActionLogic.stopCarryStep(carry, 0, 0, first, Locomotion.walkSpeed, true, "Guard", FRAME, config, gait)
+			expect(guarded).toBeGreaterThan(0)
+			expect(guarded).toBeLessThan(Locomotion.walkSpeed + 1e-9)
+		end)
+
+		-- Moves for a few frames at `speed` along +X, then lets go; returns the carry speeds.
+		local function release(speed: number, walkSpeed: number, state: any, grounded: boolean?)
+			local carry = ActionLogic.newStopCarry()
+			for _ = 1, 5 do
+				expect(ActionLogic.stopCarryStep(carry, 1, 0, speed, walkSpeed, true, state, FRAME, config)).toBe(0)
+			end
+			local speeds = {}
+			local current = speed
+			for _ = 1, math.ceil(config.seconds / FRAME) + 5 do
+				current = ActionLogic.stopCarryStep(
+					carry,
+					0,
+					0,
+					current,
+					walkSpeed,
+					if grounded == nil then true else grounded,
+					state,
+					FRAME,
+					config
+				)
+				table.insert(speeds, current)
+			end
+			return speeds, carry
+		end
+
+		it("with no gait, carries the root along the last move and slows it to a stop over stopStepsSeconds", function()
+			local cases = {
+				{ speed = Locomotion.walkSpeed, state = "Guard" },
+				{ speed = Locomotion.runSpeed, state = "Idle" },
+			}
+			for _, case in cases do
+				local speeds, carry = release(case.speed, case.speed, case.state)
+				expect(carry.x).toBe(1)
+				expect(carry.z).toBe(0)
+				expect(speeds[1]).toBeCloseTo(case.speed * (1 - FRAME / config.seconds), 1e-9)
+				local last = math.huge
+				local moving = 0
+				for _, value in speeds do
+					expect(value).toBeLessThan(last + 1e-12)
+					expect(value).toBeLessThan(case.speed + 1e-12)
+					last = value
+					if value > 0 then
+						moving += 1
+					end
+				end
+				expect(moving * FRAME).toBeCloseTo(config.seconds, FRAME * 1.01)
+				expect(speeds[#speeds]).toBe(0)
+			end
+		end)
+
+		it("never starts faster than the Humanoid's speed, and not at all above the skid threshold", function()
+			local speeds = release(Locomotion.runSpeed, Locomotion.walkSpeed, "Guard")
+			expect(speeds[1]).toBeLessThan(Locomotion.walkSpeed + 1e-9)
+			local skid = release(Locomotion.skidSpeedThreshold + 1, Locomotion.sprintSpeed, "Idle")
+			expect(skid[1]).toBe(0)
+			local still = release(Locomotion.idleSpeedThreshold, Locomotion.runSpeed, "Idle")
+			expect(still[1]).toBe(0)
+		end)
+
+		it("ends on new input, a locked state or leaving the ground", function()
+			local carry = ActionLogic.newStopCarry()
+			ActionLogic.stopCarryStep(carry, 0, -1, 16, 16, true, "Idle", FRAME, config)
+			expect(ActionLogic.stopCarryStep(carry, 0, 0, 16, 16, true, "Idle", FRAME, config)).toBeGreaterThan(0)
+			expect(carry.active).toBe(true)
+			expect(ActionLogic.stopCarryStep(carry, 1, 0, 15, 16, true, "Idle", FRAME, config)).toBe(0)
+			expect(carry.active).toBe(false)
+			for _, ending in { { state = "Dodge", grounded = true }, { state = "Idle", grounded = false } } do
+				local other = ActionLogic.newStopCarry()
+				ActionLogic.stopCarryStep(other, 0, -1, 16, 16, true, "Idle", FRAME, config)
+				expect(ActionLogic.stopCarryStep(other, 0, 0, 16, 16, true, "Idle", FRAME, config)).toBeGreaterThan(0)
+				expect(ActionLogic.stopCarryStep(other, 0, 0, 15, 16, ending.grounded, ending.state, FRAME, config)).toBe(
+					0
+				)
+				-- and it does not come back on its own
+				expect(ActionLogic.stopCarryStep(other, 0, 0, 0, 16, true, "Idle", FRAME, config)).toBe(0)
+			end
+			-- Standing still is not a stop.
+			local idle = ActionLogic.newStopCarry()
+			expect(ActionLogic.stopCarryStep(idle, 0, 0, 5, 16, true, "Idle", FRAME, config)).toBe(0)
+		end)
+	end)
+
 	it("maps actions to local states", function()
 		expect(ActionLogic.stateForAction("Art")).toBe("Art")
 		expect(ActionLogic.stateForAction("Basic")).toBe("Basic")

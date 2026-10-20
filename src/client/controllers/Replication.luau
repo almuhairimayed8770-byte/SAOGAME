@@ -17,6 +17,11 @@
 	slipped onto the local rig in between is dropped when the tracker's `localChanged` fires.
 	Unwatch releases the driver, the trail, the telegraph highlight, the smear and the reaction clip.
 
+	A remote player's driver sees the Drawn attribute through SheathState.riseFilter: a rise counts
+	choreo.luau sheath.remoteDrawDelay late. The attribute can land a frame or two before the
+	unreliable ActionStarted of the attack that set it; with the delay that attack draw-cuts, and
+	no Draw or drawn walk set flashes in first. A lock-on's Draw starts that much later.
+
 	Nothing here decides damage; a rejected hit is simply a `rejected` Signal that the character
 	controller turns into a cancelled prediction (section 17).
 
@@ -28,18 +33,21 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage.Shared
 
 local Combat = require(Shared.data.combat)
+local ChoreoData = require(Shared.data.choreo)
 local Fx = require(Shared.data.fx)
 local UI = require(Shared.data.ui)
 local Signal = require(Shared.util.Signal)
 local ActionLogic = require(script.Parent.ActionLogic)
 local Siblings = require(script.Parent.Siblings)
 
+local SheathState, hasSheathState = Siblings.load(script.Parent.Parent, "choreo.SheathState")
+
 export type Deps = {
 	net: { on: (name: string, handler: (payload: any) -> ()) -> () },
 	entities: any, -- EntityTracker-like: get(id), all(), added, removed
 	localId: () -> number?, -- never yields
 	localCharacter: (() -> Instance?)?, -- the local player's character model when it exists; never yields
-	locomotion: any, -- Locomotion-like: attach(animator, model) -> driver, destroy(driver)
+	locomotion: any, -- Locomotion-like: attach(animator, model, deps?) -> driver, destroy(driver), humanoidTracker?
 	choreo: any, -- Choreo.get(model) -> animator
 	clipLibrary: any, -- ClipLibrary.has(clipId)
 	trails: any,
@@ -443,6 +451,28 @@ local function destroyDriver(id: number)
 	dependencies().locomotion.destroy(driver)
 end
 
+-- The driver options for a remote player's rig: the default Humanoid tracker, fed the driver's
+-- Drawn attribute through a rise filter (sheath.remoteDrawDelay). `driverOf` gives the driver
+-- once attach has returned it. Nil (the default tracker) when the locomotion package has none.
+local function remotePlayerOptions(locomotion: any, model: Instance, driverOf: () -> any): any
+	if not hasSheathState or typeof(locomotion.humanoidTracker) ~= "function" then
+		return nil
+	end
+	local filter = SheathState.riseFilter(ChoreoData.sheath.remoteDrawDelay, model:GetAttribute("Drawn") == true)
+	local source = locomotion.humanoidTracker(model, function(): boolean
+		return filter.value
+	end)
+	return {
+		tracker = function(dt: number): any
+			local driver = driverOf()
+			if driver ~= nil then
+				filter:step(dt, driver:serverDrawn() == true)
+			end
+			return source(dt)
+		end,
+	}
+end
+
 -- Attaches the remote-rig locomotion driver (a player rig runs the blend space, an enemy rig its
 -- idle / walk pair) unless the rig is the local player's own.
 local function attachDriver(record: any, animator: any)
@@ -450,12 +480,19 @@ local function attachDriver(record: any, animator: any)
 		return
 	end
 	local d = dependencies()
-	local ok, driver = pcall(d.locomotion.attach, animator, record.model)
+	local attached: any = nil
+	local options = if record.kind == "Player"
+		then remotePlayerOptions(d.locomotion, record.model, function(): any
+			return attached
+		end)
+		else nil
+	local ok, driver = pcall(d.locomotion.attach, animator, record.model, options)
 	if not ok then
 		warn(("[Replication] locomotion for %s failed: %s"):format(tostring(record.name), tostring(driver)))
 		return
 	end
 	if driver ~= nil and not Siblings.isStub(driver) then
+		attached = driver
 		drivers[record.id] = driver
 	end
 end

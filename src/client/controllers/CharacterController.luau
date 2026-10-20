@@ -16,6 +16,12 @@
 	also predict it for choreo.luau sheath.predictSeconds, so the draw shows at once; a dodge does
 	not. Locomotion moves the sword and plays Draw and Sheathe from that target.
 
+	The two-step stop: when the stick lets go below the skid threshold, the root keeps going along
+	its last move direction and slows down as the gait walks on, and stops where the walk's planted
+	foot is over its Idle spot (ActionLogic.stopCarryStep, Locomotion.stopGait), never faster than
+	it was moving, so the walk paced to it plants its feet instead of sliding over a body that
+	stopped dead. Any input ends it.
+
 	Every decision is in ActionLogic (tested); this file is the engine glue around it.
 ]]
 
@@ -34,6 +40,7 @@ local World = require(Shared.data.world)
 local Arts = require(Shared.data.arts)
 local Types = require(Shared.types)
 local Net = require(Shared.net.Net)
+local TrailingSend = require(Shared.net.TrailingSend)
 local Signal = require(Shared.util.Signal)
 
 local ActionLogic = require(script.Parent.ActionLogic)
@@ -100,6 +107,17 @@ local hold: Hold? = nil
 local predicted: Predicted? = nil
 local token = 0
 local fallTracker: ActionLogic.FallTracker = { airborneSince = nil, peakY = 0 }
+local stopCarry: ActionLogic.StopCarry = ActionLogic.newStopCarry()
+local carrying = false -- the two-step stop moved the Humanoid last frame
+local STOP_CARRY: ActionLogic.StopCarryConfig = {
+	seconds = ChoreoData.locomotion.stopStepsSeconds,
+	minCycles = ChoreoData.locomotion.stopMinCycles,
+	endSpeed = ChoreoData.locomotion.stopEndSpeed,
+	minSpeed = ChoreoData.locomotion.idleSpeedThreshold,
+	maxSpeed = ChoreoData.locomotion.skidSpeedThreshold,
+}
+-- Locomotion.stopGait writes it.
+local stopGait: ActionLogic.StopGait = { phase = 0, leftStep = 0, leftAfter = 0, rightStep = 0.5, rightAfter = 0 }
 local started = false
 
 local function now(): number
@@ -132,6 +150,27 @@ local function fire(remote: string, payload: any)
 	if net ~= nil then
 		net.fire(remote, payload)
 	end
+end
+
+-- GuardRequest goes through TrailingSend: never faster than its rate limit, and the last raise or
+-- release always arrives, so tapping guard cannot leave the server holding a guard (and the sword
+-- drawn) the client let go of. The facing and clock are read when the request goes out.
+local guardSender: TrailingSend.TrailingSend? = nil
+local function sendGuard(held: boolean)
+	if guardSender == nil then
+		guardSender = TrailingSend.new({
+			gap = TrailingSend.gapOf("GuardRequest"),
+			burst = World.anticheat.remoteRates.GuardRequest.clientBurst,
+			now = now,
+			schedule = function(seconds: number, fn: () -> ())
+				task.delay(seconds, fn)
+			end,
+			send = function(isHeld: boolean)
+				fire("GuardRequest", { held = isHeld, facing = facingTable(), clientTime = serverNow() })
+			end,
+		})
+	end
+	(guardSender :: TrailingSend.TrailingSend):set(held)
 end
 
 local function weaponCategory(): string
@@ -335,14 +374,14 @@ function CharacterController.setGuard(held: boolean)
 		}
 		setState("Guard")
 		predictDraw()
-		fire("GuardRequest", { held = true, facing = facingTable(), clientTime = serverNow() })
+		sendGuard(true)
 	elseif state == "Guard" then
 		if predicted ~= nil then
 			stopClip((predicted :: Predicted).handle)
 			predicted = nil
 		end
 		setState("Idle")
-		fire("GuardRequest", { held = false, facing = facingTable(), clientTime = serverNow() })
+		sendGuard(false)
 	end
 end
 
@@ -360,10 +399,13 @@ function CharacterController.dodge()
 		clearHold()
 	elseif state == "Guard" and predicted ~= nil then
 		stopClip((predicted :: Predicted).handle)
-		fire("GuardRequest", { held = false, facing = facingTable(), clientTime = serverNow() })
+		sendGuard(false)
 	end
 	local rootPart = root :: BasePart
-	local moveLocal = rootPart.CFrame:VectorToObjectSpace((humanoid :: Humanoid).MoveDirection)
+	-- The stick, not the Humanoid: the two-step stop keeps moving the Humanoid along the last move
+	-- after the stick lets go, and a dodge with no input steps back.
+	local stick = if stopCarry.active then Vector3.zero else (humanoid :: Humanoid).MoveDirection
+	local moveLocal = rootPart.CFrame:VectorToObjectSpace(stick)
 	local direction = ActionLogic.dodgeDirection(moveLocal.X, moveLocal.Z, InputData.dodge.inputDeadzone)
 	local look = rootPart.CFrame.LookVector
 	local right = rootPart.CFrame.RightVector
@@ -546,6 +588,37 @@ local function step(dt: number)
 	local fallHeight = ActionLogic.fallStep(fallTracker, grounded, rootPart.Position.Y, t)
 	local look = rootPart.CFrame.LookVector
 	local moveDir = hum.MoveDirection
+	-- The two-step stop: after the stick lets go the root slows to a stop along its last move
+	-- direction (the control script's Move ran earlier this frame; this one overrides it).
+	local gait: ActionLogic.StopGait? = nil
+	if locomotion ~= nil and moveDir.Magnitude == 0 and typeof(locomotion.stopGait) == "function" then
+		locomotion:stopGait(stopGait)
+		gait = stopGait
+	end
+	local carrySpeed = ActionLogic.stopCarryStep(
+		stopCarry,
+		moveDir.X,
+		moveDir.Z,
+		speed,
+		walkSpeed,
+		grounded,
+		state,
+		dt,
+		STOP_CARRY,
+		gait
+	)
+	if carrySpeed > 0 then
+		moveDir = Vector3.new(stopCarry.x, 0, stopCarry.z)
+		hum.WalkSpeed = carrySpeed
+		lastWalkSpeed = carrySpeed
+		hum:Move(moveDir)
+		carrying = true
+	elseif carrying then
+		carrying = false
+		if moveDir.Magnitude == 0 then
+			hum:Move(Vector3.zero)
+		end
+	end
 	-- Degrees from the facing to the direction the stick asks for (+ = left): Locomotion turns in
 	-- place past choreo.locomotion.turnInPlaceDegrees.
 	local turning = if locked then 0 else ActionLogic.turnAngle(look.X, look.Z, moveDir.X, moveDir.Z)
@@ -587,6 +660,8 @@ local function clearCharacter()
 	lastWalkSpeed = nil
 	lastPredictAt = nil
 	fallTracker = { airborneSince = nil, peakY = 0 }
+	stopCarry = ActionLogic.newStopCarry()
+	carrying = false
 	setState("Idle")
 end
 

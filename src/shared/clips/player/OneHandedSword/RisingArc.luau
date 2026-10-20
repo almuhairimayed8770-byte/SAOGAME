@@ -183,18 +183,22 @@ local clip: Types.ClipDef = {
 			root = { pos = { 0, 0, -0.6 } },
 		},
 		{
-			-- re-cock: the blade carries over the head, the elbow and wrist cock back
+			-- re-cock: the blade carries over the head, the elbow and wrist cock back. The waist
+			-- twists less than the upper body turns, keeping the hips off the scabbard; Root and the
+			-- hips take up the rest, so the torso, arm and blade stand where they did
 			time = 0.56,
 			easing = "QuadIn",
 			joints = {
-				Root = posRot(0.04, -0.02, -0.1, 0, -8, -2),
-				Waist = rot(14, -20, -6),
+				Root = posRot(0.06, -0.02, -0.12, 3, -11.6, 0.7),
+				Waist = rot(10, -17, -9),
 				Neck = rot(-6, 18, 1),
 				RightShoulder = rot(148, 0, 24),
 				RightElbow = rot(42, 0, 0),
 				RightWrist = rot(-26, 0, -6),
 				Weapon = rot(-34, 0, 4),
 				LeftShoulder = rot(-18, 0, -30),
+				LeftHip = rot(5, 3.3, -8.5),
+				RightHip = rot(-19, 4, 7),
 			},
 			root = { pos = { 0, 0, -0.6 } },
 		},
@@ -213,6 +217,8 @@ local clip: Types.ClipDef = {
 				Weapon = rot(-84, 0, 18),
 				LeftShoulder = rot(-28, 0, -38),
 				LeftElbow = rot(34, 0, 0),
+				LeftHip = rot(8, 0, -6),
+				RightHip = rot(-16, 0, 8),
 				LeftKnee = rot(-12, 0, 0),
 				LeftAnkle = rot(-12, 0, 0),
 				RightKnee = rot(-14, 0, 0),

@@ -23,6 +23,12 @@
 
 	Each step first settles the clips that just ended, then applies the cut, then the target, so a
 	clip that ends without its event never plays again in the same step.
+
+	SheathState.riseFilter is the late view of a remote rig's Drawn attribute (Replication feeds
+	it): the attribute can land a frame or two before the unreliable ActionStarted of the attack
+	that set it, so a rise only counts once it has held sheath.remoteDrawDelay. An attack that
+	arrives inside that time draw-cuts with no Draw (or drawn walk set) shown first; a fall counts
+	at once.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -50,6 +56,11 @@ export type SheathState = {
 	place: Place,
 	step: (self: SheathState, dt: number, input: Input) -> Output,
 	onEvent: (self: SheathState, kind: string, input: Input) -> Place?,
+}
+
+export type RiseFilter = {
+	value: boolean,
+	step: (self: RiseFilter, dt: number, raw: boolean) -> boolean,
 }
 
 local DRAW_EVENT = "WeaponDraw"
@@ -175,6 +186,30 @@ function SheathState.onEvent(self: any, kind: string, input: Input): Place?
 	end
 	self.place = place
 	return place
+end
+
+local RiseFilter = {}
+RiseFilter.__index = RiseFilter
+
+--- A boolean that turns true only once its raw value has been true for `delay` seconds (the
+--- step that first sees it counts its dt) and false at once. Starting true counts as already held.
+function SheathState.riseFilter(delay: number, initial: boolean): RiseFilter
+	local self = setmetatable({
+		value = initial,
+		delay = delay,
+		heldFor = if initial then delay else 0, -- seconds the raw value has been true
+	}, RiseFilter)
+	return (self :: any) :: RiseFilter
+end
+
+function RiseFilter.step(self: any, dt: number, raw: boolean): boolean
+	if raw then
+		self.heldFor = math.min(self.heldFor + dt, self.delay)
+	else
+		self.heldFor = 0
+	end
+	self.value = raw and self.heldFor >= self.delay
+	return self.value
 end
 
 return SheathState

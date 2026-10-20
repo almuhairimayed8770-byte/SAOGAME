@@ -10,9 +10,16 @@
 
 	It keeps one Base-layer handle per locomotion clip (Idle, IdleDrawn, and the walks, Run and
 	Sprint twice: the sheathed set under the plain names, the drawn set under the ...Drawn names)
-	and drives their weights from LocomotionState every frame; both sets start together, so a walk
-	and its drawn twin stay in step. One-shots (Jump, Fall, Land, TurnLeft, TurnRight, Skid) play
-	on the FullBody layer; the lean into turns, the drawn sprint "weapon low and back" pose and the
+	and drives their weights from LocomotionState every frame. Before every animator step the gait
+	clips (the walks, Run and Sprint of both sets) are paced to the root on one shared phase: the
+	live weights give the blend's stride (the ground one cycle covers along the move, from
+	locomotion.stride.groundSpeed) and natural cycle, the cycle time is that stride over the
+	root's speed, and each clip runs its own duration in that time with its clock set from the
+	phase (each clip's left Footstep at phase 0). So the planted foot moves back as fast as the root
+	moves on, no clip drifts from another, a walk and its drawn twin stay in step, and each clip
+	crosses its Footsteps once per plant. One-shots (Jump, Fall, Land, TurnLeft, TurnRight, Skid) play
+	on the FullBody layer (a turn in place or a standing Land stops when the root starts to move;
+	a landing on the move plays Land with no weight, for its sounds); the lean into turns, the drawn sprint "weapon low and back" pose and the
 	raycast foot IK ride as procedural additive channels. The raycast is injected so the IK math
 	stays pure and tested; the default uses workspace.
 
@@ -59,6 +66,9 @@ local WeaponMount = require(script.Parent.WeaponMount)
 
 local Config = ChoreoData.locomotion
 local Sheath = ChoreoData.sheath
+local Stride = Config.stride
+local GAIT_NAMES = LocomotionState.GAIT_NAMES
+local WEIGHT_NAMES = LocomotionState.WEIGHT_NAMES
 
 local DRAWN_ATTRIBUTE = "Drawn"
 local STATE_ATTRIBUTE = "State"
@@ -106,6 +116,7 @@ export type Locomotion = {
 	update: (self: Locomotion, dt: number, state: State) -> LocomotionState.Output,
 	setDrawn: (self: Locomotion, drawn: boolean) -> (),
 	serverDrawn: (self: Locomotion) -> boolean,
+	stopGait: (self: Locomotion, into: LocomotionState.StopGait) -> (),
 	destroy: (self: Locomotion) -> (),
 }
 
@@ -147,7 +158,8 @@ end
 local keysArmById: { [string]: boolean } = {}
 
 -- True when a handle hides the hand from the hilt: a clip that outranks Draw and Sheathe on the
--- arm (any FullBody clip, or a higher UpperBody one) and keys an arm joint they move.
+-- arm (any FullBody clip, or a higher UpperBody one) and keys an arm joint they move. The caller
+-- skips a weightless one (a Land on the move): it hides nothing.
 local function coversArm(handle: any): boolean
 	local above = handle.layer == "FullBody"
 		or (handle.layer == "UpperBody" and handle.priority > ChoreoData.priority.Sheath)
@@ -270,7 +282,7 @@ local function scanClips(self: any): (SheathState.Input, number)
 			if isDrawCut(handle.clip) then
 				cut = true
 			end
-			if coversArm(handle) then
+			if handle.weight > 0 and coversArm(handle) then
 				covered = true
 			end
 		end
@@ -364,6 +376,108 @@ local function onClipEvent(self: any, clipId: string, event: Types.ClipEvent)
 	end
 end
 
+-- The shared phase's pace limits (cycles per second): every gait clip's own speed stays inside
+-- the mixer's [minSpeed, maxSpeed], so no clock is clamped out of step.
+local paceLimits: { number }? = nil
+local function paceRange(): (number, number)
+	local limits = paceLimits
+	if limits == nil then
+		local shortest, longest = math.huge, 0
+		for _, gait in LocomotionState.gaits() do
+			shortest = math.min(shortest, gait.duration)
+			longest = math.max(longest, gait.duration)
+		end
+		limits = { ChoreoData.minSpeed / shortest, ChoreoData.maxSpeed / longest }
+		paceLimits = limits
+	end
+	local range = limits :: { number }
+	return range[1], range[2]
+end
+
+-- Paces the gait clips to the root (runs before the mixer step; no allocation). The blend's stride
+-- is the ground its shown gait clips cover per cycle along the move, over everything the Base set
+-- shows (an Idle share shortens the step); its natural cycle is the shown clips' mean duration.
+-- The rate that makes the planted foot keep pace with the root is speed x natural / stride, held
+-- inside stride.rateFloor .. rateCeiling. A change of weights moves the planted foot too (each
+-- clip has it somewhere else: stride.touchdown), so the phase also takes up last step's change.
+-- Each clip then runs its duration per cycle from the shared phase, which advances with the
+-- mixer's clock (held through hit-stop, scaled with it).
+local function stepGait(self: any, dt: number)
+	local gaits = LocomotionState.gaits()
+	local handles = self.handles
+	local shownNow, shownLast = self.shownNow, self.shownLast
+	local forward, right = self.travelForward, self.travelRight
+	local phase = self.gaitPhase
+	local stride, natural, gaitShown, baseShown, planted = 0, 0, 0, 0, 0
+	for _, name in WEIGHT_NAMES do
+		local handle = handles[name]
+		local weight = handle.weight
+		local shown = 0
+		if weight > 0 then
+			shown = Easing.evaluate(ChoreoData.blendEasing, handle.fade) * weight
+			baseShown += shown
+			local gait = gaits[name]
+			if gait ~= nil and shown > 0 then
+				local along = if gait.walk then gait.forward * forward + gait.right * right else 1
+				stride += shown * gait.stride * along
+				natural += shown * gait.duration
+				gaitShown += shown
+			end
+			planted += shown * LocomotionState.plantedAlong(name, phase, forward, right)
+		end
+		shownNow[name] = shown
+	end
+	local minPace, maxPace = paceRange()
+	local pace = self.gaitPace or Stride.rateFloor / gaits.WalkForward.duration
+	local mixer = self.animator.mixer
+	local scale = mixer:timeScale()
+	local running = mixer:pauseRemaining() <= ChoreoData.pauseEpsilon
+	if gaitShown > 0 then
+		natural /= gaitShown
+		stride = math.max(stride / baseShown, Stride.minGroundSpeed * natural)
+		-- The clips run on the mixer's scaled clock (dev slow motion), the root on real time.
+		local speed = if scale > 0 then self.speed / scale else self.speed
+		local rate = math.clamp(speed * natural / stride, Stride.rateFloor, Stride.rateCeiling)
+		pace = math.clamp(rate / natural, minPace, maxPace)
+		if running and dt > 0 and scale > 0 then
+			-- Last step's weight change pulled the planted foot along the move by `moved` studs;
+			-- the phase takes it up (never backwards) on top of this step's advance.
+			planted /= baseShown
+			local moved = 0
+			for _, name in WEIGHT_NAMES do
+				local change = shownNow[name] - shownLast[name]
+				if change ~= 0 then
+					moved += change * (LocomotionState.plantedAlong(name, phase, forward, right) - planted)
+				end
+			end
+			local advance = dt * scale * pace + moved / baseShown / stride
+			pace = math.clamp(advance / (dt * scale), minPace, maxPace)
+		end
+		self.gaitPace = pace
+	else
+		-- Standing: every start steps off from the same point of the cycle.
+		phase = Stride.startPhase
+		self.gaitPhase = phase
+	end
+	for _, name in WEIGHT_NAMES do
+		shownLast[name] = shownNow[name]
+	end
+	local animator = self.animator
+	for _, name in GAIT_NAMES do
+		local handle = handles[name]
+		-- A clip with no weight now and none ahead keeps its own clock: it is put back on the
+		-- phase on the step its target weight rises, before the mixer shows it.
+		if handle.weight > 0 or (handle.targetWeight or 0) > 0 then
+			local gait = gaits[name]
+			handle.time = ((phase + gait.offset) % 1) * gait.duration
+			animator:setSpeed(handle, gait.duration * pace)
+		end
+	end
+	if gaitShown > 0 and running then
+		self.gaitPhase = (phase + dt * scale * pace) % 1
+	end
+end
+
 --- Creates the locomotion driver for a player rig's animator and its character model.
 function Locomotion.new(animator: any, character: Model, deps: Dependencies?): Locomotion
 	local dependencies: Dependencies = deps or {}
@@ -374,6 +488,8 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		handles = {} :: { [string]: any },
 		fallHandle = nil :: any,
 		jumpHandle = nil :: any,
+		turnHandle = nil :: any,
+		landHandle = nil :: any,
 		drawn = character:GetAttribute(DRAWN_ATTRIBUTE) == true,
 		lastYaw = nil :: number?,
 		raycast = dependencies.raycast,
@@ -389,6 +505,13 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		dead = false, -- the State attribute is Dead, kept by its change signal
 		attributeConnections = {} :: { any },
 		pollAttributes = false, -- the character has no attribute signals: the step reads them
+		speed = 0, -- the root's horizontal speed from the last update
+		travelForward = 1, -- the last move direction in the character's frame
+		travelRight = 0,
+		gaitPhase = Stride.startPhase, -- the shared gait phase: 0..1 of a cycle, 0 at every left Footstep
+		gaitPace = nil :: number?, -- cycles per second the phase last advanced at
+		shownNow = {} :: { [string]: number }, -- each Base clip's shown weight at this step's start
+		shownLast = {} :: { [string]: number }, -- and at the last step's
 		destroyed = false,
 	}, Locomotion)
 	if self.raycast == nil and self.footIK then
@@ -397,6 +520,8 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 	followAttributes(self, dependencies.attributeSignal or defaultAttributeSignal)
 	for _, name in LocomotionState.WEIGHT_NAMES do
 		self.handles[name] = animator:play(clipId(name), { coexist = true, weight = 0, blendIn = 0 })
+		self.shownNow[name] = 0
+		self.shownLast[name] = 0
 	end
 	animator:setWeight(self.handles[LocomotionState.clipFor("Idle", self.drawn)], 1, true)
 
@@ -410,6 +535,7 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 	self.unhookSheath = animator:onStep(function(dt: number)
 		if not self.destroyed then
 			stepSheath(self, dt)
+			stepGait(self, dt)
 		end
 	end)
 	self.clipEvents = animator.events:Connect(function(eventClipId: string, event: Types.ClipEvent)
@@ -420,6 +546,15 @@ end
 
 function Locomotion.setDrawn(self: any, drawn: boolean)
 	self.drawn = drawn
+end
+
+--- The gait as the two-step stop needs it (ActionLogic.stopCarryStep), written into `into`: the
+--- shared phase, and where the walk of the last move direction has each planted foot over its
+--- Idle spot (LocomotionState.settlePoints). No allocation.
+function Locomotion.stopGait(self: any, into: LocomotionState.StopGait)
+	into.phase = self.gaitPhase
+	into.leftStep, into.leftAfter, into.rightStep, into.rightAfter =
+		LocomotionState.settlePoints(self.travelForward, self.travelRight, self.drawn)
 end
 
 --- The character's Drawn attribute (the server's word, nil read as false), kept by its change
@@ -465,6 +600,19 @@ local function drawnSprintWeight(self: any): number
 	return weight * (1 - math.clamp(self.sheathClipWeight, 0, 1))
 end
 
+-- The lean as posed: each clip in locomotion.lean.upright holds back a lean toward its side by
+-- its shown weight (the drawn left walk would roll the scabbard into its own left leg).
+local function uprightLean(self: any, lean: number): number
+	for name, side in Config.lean.upright do
+		local handle = self.handles[name]
+		if handle ~= nil and lean * side > 0 then
+			local shown = Easing.evaluate(ChoreoData.blendEasing, handle.fade) * handle.weight
+			lean *= 1 - math.clamp(shown, 0, 1)
+		end
+	end
+	return lean
+end
+
 function Locomotion.update(self: any, dt: number, state: State): LocomotionState.Output
 	local animator = self.animator
 	local root: BasePart? = self.character.PrimaryPart or self.character:FindFirstChild("HumanoidRootPart") :: any
@@ -486,6 +634,13 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 	end
 	if state.drawn ~= nil then
 		self.drawn = state.drawn
+	end
+	self.speed = math.max(0, state.speed)
+	if forward ~= 0 or right ~= 0 then
+		self.travelForward, self.travelRight = forward, right
+	elseif state.speed > Config.idleSpeedThreshold then
+		-- Moving with no stick (a coast, a shove): the blend keeps the last move direction.
+		forward, right = self.travelForward, self.travelRight
 	end
 
 	local output = self.state:update(dt, {
@@ -526,12 +681,32 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 			animator:stop(self.jumpHandle, ChoreoData.oneShotBlendIn)
 			self.jumpHandle = nil
 		end
-		playOneShot(self, "Land", output.oneShotWeight)
+		-- On the move Land has no weight: it plays for its sounds only.
+		local land = playOneShot(self, "Land", output.oneShotWeight)
+		self.landHandle = if output.oneShotWeight > 0 then land else nil
+	elseif oneShot == "TurnLeft" or oneShot == "TurnRight" then
+		self.turnHandle = playOneShot(self, oneShot)
 	elseif oneShot ~= nil then
 		playOneShot(self, oneShot)
 	end
+	-- A turn in place or a standing Land gives way to the first steps (their feet would slide
+	-- under the moving root).
+	if output.phase == "Move" then
+		if self.turnHandle ~= nil then
+			animator:stop(self.turnHandle, ChoreoData.oneShotBlendIn)
+			self.turnHandle = nil
+		end
+		if self.landHandle ~= nil then
+			animator:stop(self.landHandle, ChoreoData.oneShotBlendIn)
+			self.landHandle = nil
+		end
+	end
 
-	animator:setProcedural("lean", LocomotionState.leanOffsets(output.lean), ChoreoData.additiveWeights.lean)
+	animator:setProcedural(
+		"lean",
+		LocomotionState.leanOffsets(uprightLean(self, output.lean)),
+		ChoreoData.additiveWeights.lean
+	)
 	animator:setProcedural(
 		"drawnSprint",
 		DRAWN_SPRINT,
@@ -631,6 +806,11 @@ end
 
 function RigDriver.setDrawn(_self: any, _drawn: boolean) end
 
+-- An enemy rig keeps no shared phase: its stop needs no settle point.
+function RigDriver.stopGait(_self: any, into: LocomotionState.StopGait)
+	into.phase, into.leftStep, into.leftAfter, into.rightStep, into.rightAfter = 0, 0, 0, 0.5, 0
+end
+
 function RigDriver.serverDrawn(_self: any): boolean
 	return false
 end
@@ -716,7 +896,8 @@ function Locomotion.humanoidTracker(character: Model, drawnOf: (() -> boolean)?)
 		return {
 			moveDir = humanoid.MoveDirection,
 			speed = horizontal.Magnitude,
-			sprinting = horizontal.Magnitude > Config.runSpeed,
+			-- Sprinting: past halfway from run speed to sprint speed, so a run's noise never flips it.
+			sprinting = horizontal.Magnitude > (Config.runSpeed + Config.sprintSpeed) / 2,
 			grounded = grounded,
 			-- A missing attribute means sheathed (the server writes it on player characters only).
 			drawn = if drawnOf ~= nil then drawnOf() else character:GetAttribute(DRAWN_ATTRIBUTE) == true,

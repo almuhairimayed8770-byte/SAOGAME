@@ -2,16 +2,18 @@
 --[[
 	player/OneHandedSword/Sheathe: the sword goes back on the back (UpperBody, the right arm and the
 	head only, so it plays over any base). It plays once the server's Drawn attribute has stayed
-	false for choreo.luau sheath.sheatheDelay, when the base is already the sheathed set, so it
-	starts from what that base shows: the arm relaxed, the sword still in the hand with its point
-	forward. The hand sinks (anticipation), swings the blade up in front and over the right
-	shoulder, the point drops behind the head into the scabbard's mouth with the arm at full reach,
-	and the blade slides home along the sheath line, speeding up and then slowing into the seat at
-	0.42 s (WeaponSheathe: the Weapon key there lines the blade up with the back mount exactly). The
-	middle key is Draw's, solved so that both moves keep the blade inside the scabbard's walls and
-	the guard off the head; the wrist turns about the grip on the way, the blade does not. The head
-	tucks and leans away from the arm while the hilt passes behind it. The hand lets go and falls
-	back to the side with a small spring settle. After WeaponSheathe no key moves Weapon.
+	false for choreo.luau sheath.sheatheDelay, when the base is already the sheathed set, and starts
+	with the arm relaxed, the sword still in the hand with its point forward, the hand a little out
+	from the side so the guard clears a run's rising thigh. The hand sinks (anticipation), swings
+	the blade up in front and over the right shoulder, the point drops behind the head into the
+	scabbard's mouth with the arm high (an edge out through the wall for 5 ms, 0.361 to 0.365 s,
+	under two frames at 240 Hz), and the blade slides home along the sheath line, speeding up and
+	then slowing into the seat at 0.42 s (WeaponSheathe: the Weapon key there lines the blade up
+	with the back mount exactly). The middle key is Draw's, solved so that both moves keep the blade
+	inside the scabbard's walls and the guard off the head; the wrist turns about the grip on the
+	way, the blade does not. The head tucks and leans away from the arm while the hilt passes behind
+	it. The hand lets go and falls back to the side with a small spring settle. After WeaponSheathe
+	no key moves Weapon.
 	Rotations: X+ swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -36,23 +38,25 @@ local clip: Types.ClipDef = {
 	blendOut = 0.2,
 	keys = {
 		{
-			-- what the sheathed base shows: the arm relaxed, the sword still in the hand, point forward
+			-- the arm relaxed, the sword still in the hand with its point forward, the hand a
+			-- little out from the side so the guard clears a run's rising thigh
 			time = 0,
 			easing = "SineInOut",
 			joints = {
 				Neck = rot(3, 2, 0),
-				RightShoulder = rot(3, 0, 4),
+				RightShoulder = rot(3, 0, 10),
 				RightElbow = rot(8, 0, 0),
 				RightWrist = rot(0, 0, 0),
 				Weapon = rot(0, 0, 0),
 			},
 		},
 		{
-			-- anticipation: the hand sinks a little and the wrist tips the point up
+			-- anticipation: the hand sinks a little, still out from the thigh, and the wrist tips
+			-- the point up
 			time = 0.1,
 			easing = "SineInOut",
 			joints = {
-				RightShoulder = rot(10, 0, 6),
+				RightShoulder = rot(10, 0, 12),
 				RightElbow = rot(20, 0, 0),
 				RightWrist = rot(-10, 0, 0),
 				Weapon = rot(12, 0, 0),
@@ -83,15 +87,15 @@ local clip: Types.ClipDef = {
 			},
 		},
 		{
-			-- the point finds the sheath: the arm at full reach, the blade on the sheath line with
+			-- the point finds the sheath: the arm high, the blade on the sheath line with
 			-- its lower part already in the mouth
 			time = 0.37,
 			easing = "SineInOut",
 			joints = {
-				RightShoulder = rot(181.9, 0.6, 21.7),
-				RightElbow = rot(42.7, 0, 0),
-				RightWrist = rot(46.7, 15.9, -77.8),
-				Weapon = posRot(0.0012, -0.004, 0.0001, -5.7525, -77.1789, -3.217),
+				RightShoulder = rot(160.8, 22.5, 27.6),
+				RightElbow = rot(82.9, 0, 0),
+				RightWrist = rot(4.5, 15.3, -59.1),
+				Weapon = posRot(0.0003, -0.0022, 0.0002, 10.2084, -76.1491, 7.5842),
 			},
 		},
 		{
@@ -100,10 +104,10 @@ local clip: Types.ClipDef = {
 			time = 0.395,
 			easing = "QuadIn",
 			joints = {
-				RightShoulder = rot(177.7, -6.7, 5.5),
-				RightElbow = rot(102.5, 0, 0),
-				RightWrist = rot(-5.7, 31.9, -101.3),
-				Weapon = posRot(0.0001, -0.0021, 0.0017, 23.2883, -91.0383, 25.9712),
+				RightShoulder = rot(160.3, 41.4, 46.5),
+				RightElbow = rot(101.3, 0, 0),
+				RightWrist = rot(-21.9, -4.9, -67.8),
+				Weapon = posRot(0, -0.001, -0.0004, 5.5355, -94.0645, 5.5192),
 			},
 		},
 		{
@@ -111,10 +115,10 @@ local clip: Types.ClipDef = {
 			time = 0.42,
 			easing = "QuadOut",
 			joints = {
-				RightShoulder = rot(171.8, 30.6, 0.7),
-				RightElbow = rot(146.3, 0, 0),
-				RightWrist = rot(-70, 35.7, -40),
-				Weapon = posRot(-0.001, -0.0003, 0.0034, -6.0927, -77.2179, -3.4319),
+				RightShoulder = rot(190.1, 56.8, 22),
+				RightElbow = rot(125.6, 0, 0),
+				RightWrist = rot(-69, -5, -45.4),
+				Weapon = posRot(-0.0003, 0.0002, -0.0011, -10.9507, -77.1142, -9.553),
 			},
 		},
 		{

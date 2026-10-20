@@ -32,6 +32,29 @@ export type Reconcile = "None" | "EndAction" | "Stagger" | "GuardBroken" | "Brea
 export type Speeds = { walk: number, run: number, sprint: number }
 export type FallTracker = { airborneSince: number?, peakY: number }
 export type SyncPlan = { freezeClipTime: number, resumeAt: number }
+-- The two-step stop's carry (ActionLogic.stopCarryStep).
+export type StopCarry = {
+	active: boolean,
+	moving: boolean, -- the stick asked for a move last frame
+	x: number, -- the last move direction (horizontal, unit)
+	z: number,
+	from: number, -- studs per second the carry started at
+	elapsed: number, -- seconds since it started
+	phase: number, -- the gait phase last frame
+	total: number, -- cycles of the gait phase from the release to the settle point
+	left: number, -- cycles of it still to go
+}
+export type StopCarryConfig = {
+	seconds: number, -- choreo locomotion.stopStepsSeconds: the longest a carry runs
+	minCycles: number, -- locomotion.stopMinCycles: the least gait phase before the Footstep that settles
+	endSpeed: number, -- locomotion.stopEndSpeed: the slowest it gets before it ends
+	minSpeed: number, -- locomotion.idleSpeedThreshold: slower than this is standing
+	maxSpeed: number, -- locomotion.skidSpeedThreshold: faster stops are the Skid clip's
+}
+-- The gait as the carry reads it (Locomotion.stopGait): the shared phase and, for each foot, the
+-- shared phase of the walk's Footstep and the cycles after it at which the foot is over its Idle
+-- spot.
+export type StopGait = { phase: number, leftStep: number, leftAfter: number, rightStep: number, rightAfter: number }
 
 local ActionLogic = {}
 
@@ -320,6 +343,102 @@ function ActionLogic.fallStep(tracker: FallTracker, grounded: boolean, y: number
 		return height
 	end
 	return nil
+end
+
+--- A carry that is not running.
+function ActionLogic.newStopCarry(): StopCarry
+	return {
+		active = false,
+		moving = false,
+		x = 0,
+		z = -1,
+		from = 0,
+		elapsed = 0,
+		phase = 0,
+		total = 0,
+		left = 0,
+	}
+end
+
+-- Cycles of the gait phase from `phase` to `target`, at least `least`.
+local function cyclesTo(phase: number, target: number, least: number): number
+	local cycles = (target - phase) % 1
+	if cycles < least then
+		cycles += math.ceil(least - cycles)
+	end
+	return cycles
+end
+
+--- The two-step stop below the skid threshold. On the frame the stick lets go, a grounded fighter
+--- that is free to move (Idle or Guard) and was moving keeps going along its last move direction
+--- and slows down as the gait walks on: through the next Footstep at least `config.minCycles` of
+--- the phase away, to where that foot is over its Idle spot (`gait`, Locomotion.stopGait), its
+--- speed falling with the phase still to go (never below `config.endSpeed`). There it stops, so
+--- the feet step the body to a stop and hand over to Idle where Idle has them, instead of the body
+--- stopping dead under walking legs. It starts at the speed the fighter had and never goes above
+--- `walkSpeed` (the Humanoid's speed for the state, which a Guard mid-carry lowers). Above
+--- config.maxSpeed no carry starts: the Skid clip owns that stop. Any input, another state, leaving
+--- the ground or `config.seconds` ends it; with no gait (no animator) the speed just falls to zero
+--- over `config.seconds`. `moveX`, `moveZ` are the stick's world move direction, `speed` the
+--- root's horizontal speed. Returns this frame's carry speed (0 when there is none); the direction
+--- is (carry.x, carry.z).
+function ActionLogic.stopCarryStep(
+	carry: StopCarry,
+	moveX: number,
+	moveZ: number,
+	speed: number,
+	walkSpeed: number,
+	grounded: boolean,
+	state: LocalState,
+	dt: number,
+	config: StopCarryConfig,
+	gait: StopGait?
+): number
+	local length = math.sqrt(moveX * moveX + moveZ * moveZ)
+	if length > 1e-6 then
+		carry.x, carry.z = moveX / length, moveZ / length
+		carry.active = false
+		carry.moving = true
+		return 0
+	end
+	local wasMoving = carry.moving
+	carry.moving = false
+	if not grounded or (state ~= "Idle" and state ~= "Guard") then
+		carry.active = false
+		return 0
+	end
+	if not carry.active then
+		if not wasMoving or speed <= config.minSpeed or speed > config.maxSpeed then
+			return 0
+		end
+		carry.active = true
+		carry.from = math.min(speed, walkSpeed)
+		carry.elapsed = 0
+		carry.total = if gait ~= nil
+			then math.min(
+				cyclesTo(gait.phase, gait.leftStep, config.minCycles) + gait.leftAfter,
+				cyclesTo(gait.phase, gait.rightStep, config.minCycles) + gait.rightAfter
+			)
+			else 1
+		carry.left = carry.total
+	elseif gait ~= nil then
+		carry.left -= (gait.phase - carry.phase) % 1
+	end
+	carry.elapsed += dt
+	if gait ~= nil then
+		carry.phase = gait.phase
+	else
+		carry.left = 1 - carry.elapsed / config.seconds
+	end
+	if carry.left <= 0 or carry.elapsed >= config.seconds then
+		carry.active = false
+		return 0
+	end
+	local slowing = carry.from * carry.left / carry.total
+	if gait ~= nil then
+		slowing = math.max(config.endSpeed, slowing)
+	end
+	return math.min(carry.from, slowing, walkSpeed)
 end
 
 --- When the local clip resumes after a release so its clock matches the server's, which starts

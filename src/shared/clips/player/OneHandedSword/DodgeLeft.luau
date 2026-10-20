@@ -51,12 +51,13 @@ local clip: Types.ClipDef = {
 			root = { pos = { 0, 0, 0 } },
 		},
 		{
-			-- full extension
+			-- full extension: the torso leans 30 degrees into the dodge (DodgeRight leans 24) so the
+			-- scabbard's tip rides over the splayed left leg, not into it
 			time = 0.07,
 			easing = "ExpoOut",
 			joints = {
 				Root = posRot(0, -0.34, 0, 0, 0, 0),
-				Waist = rot(-14, -6, 24),
+				Waist = rot(-14, -6, 30),
 				Neck = rot(8, 6, -16),
 				LeftHip = rot(6, 0, -40),
 				LeftKnee = rot(-36, 0, 0),
@@ -81,13 +82,14 @@ local clip: Types.ClipDef = {
 			root = { pos = { -8, 0, 0 } },
 		},
 		{
-			-- recovery into the ready stance
+			-- recovery into the ready stance (the head 3 degrees lower than IdleDrawn's, clear of the
+			-- sheathed hilt)
 			time = 0.38,
 			easing = "BackOut",
 			joints = {
 				Root = posRot(0, -0.12, 0, 0, 0, 0),
 				Waist = rot(-8, -12, 0),
-				Neck = rot(6, 12, 0),
+				Neck = rot(3, 12, 0),
 				RightShoulder = rot(30, 0, 10),
 				RightElbow = rot(35, 0, 0),
 				RightWrist = rot(-25, 0, 0),

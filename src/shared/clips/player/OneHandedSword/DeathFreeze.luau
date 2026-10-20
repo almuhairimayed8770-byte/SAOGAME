@@ -17,7 +17,8 @@ local function tremor(time: number, sign: number, scale: number): Types.ClipKey
 		time = time,
 		easing = "SineInOut",
 		joints = {
-			Waist = rot(0, 0, 0.9 * sign * scale),
+			-- small enough that the scabbard's tip stays off a striding leg
+			Waist = rot(0, 0, 0.8 * sign * scale),
 			Neck = rot(0.7 * sign * scale, 0, -0.5 * sign * scale),
 			RightWrist = rot(1.2 * sign * scale, 0, 0),
 			Weapon = rot(1.6 * sign * scale, 0, 0.8 * sign * scale),

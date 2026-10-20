@@ -148,9 +148,12 @@ local WeaponModels = {
 	sheaths = {
 		OneHandedSword = {
 			part = "UpperTorso",
-			-- Hilt above the right shoulder, blade diagonal across the back, flat against it, the tip
-			-- by the left hip. Rotating 140 degrees about Z points +Y down and to the left.
-			mount = { pos = { 0.75, 1.05, 0.7 }, rot = { 0, 0, 140 } },
+			-- The grip behind the right shoulder blade, the pommel just over the shoulder line, the
+			-- blade diagonal across the back to the left hip, its tip past the hip. Rolling 141.8
+			-- degrees about Z points +Y down and to the left; the small turn and tip lay the
+			-- scabbard flat on the back (dev.luau offBody.backGap). Low and close to the spine so
+			-- the head can turn and tip back and the arms swing clear (GroundClearance checks it).
+			mount = { pos = { 0.306, 0.832, 0.826 }, rot = { -7.9, -10, 141.8 } },
 			scabbard = {
 				wall = 0.06, -- added on each side of the blade's width and thickness
 				clearance = 0.15, -- how far the scabbard runs past the tip

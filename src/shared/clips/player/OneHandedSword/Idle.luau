@@ -106,16 +106,16 @@ local clip: Types.ClipDef = {
 			time = 10,
 			easing = "SineInOut",
 			joints = {
-				Neck = rot(2, 10, 0),
-				Waist = rot(-3, 6, 0),
+				Neck = rot(-1, 5, 0),
+				Waist = rot(-3, 11, 0),
 			},
 		},
 		{
 			time = 10.6,
 			easing = "SineInOut",
 			joints = {
-				Neck = rot(2, 10, 0),
-				Waist = rot(-3, 6, 0),
+				Neck = rot(-1, 5, 0),
+				Waist = rot(-3, 11, 0),
 			},
 		},
 		{

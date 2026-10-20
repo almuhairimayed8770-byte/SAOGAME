@@ -109,7 +109,11 @@ local function validate(ctx: Context): { string }
 				teleport = Check.string(32),
 				abuse = Check.string(32),
 			}),
-			remoteRates = Check.map(Check.string(64), Check.strictInterface({ perSecond = positive, burst = count })),
+			remoteStallSeconds = Check.number(0, 2),
+			remoteRates = Check.map(
+				Check.string(64),
+				Check.strictInterface({ perSecond = positive, burst = count, clientBurst = Check.optional(count) })
+			),
 		}),
 		performance = Check.strictInterface({
 			maxServerHeartbeatMs = positive,
@@ -160,6 +164,17 @@ local function validate(ctx: Context): { string }
 		local definition = Remotes[name]
 		if definition == nil or definition.direction ~= "ClientToServer" then
 			problem(("anticheat.remoteRates.%s is not a client-to-server remote"):format(tostring(name)))
+		end
+	end
+	-- A client burst plus what a stall bunches behind it must fit the server's bucket.
+	for name, rate in rates do
+		local clientBurst = (rate :: any).clientBurst
+		if clientBurst ~= nil and clientBurst + rate.perSecond * World.anticheat.remoteStallSeconds > rate.burst then
+			problem(
+				("anticheat.remoteRates.%s.clientBurst plus perSecond x remoteStallSeconds must fit inside burst"):format(
+					tostring(name)
+				)
+			)
 		end
 	end
 

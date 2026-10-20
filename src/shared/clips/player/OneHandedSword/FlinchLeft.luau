@@ -3,6 +3,8 @@
 	player/OneHandedSword/FlinchLeft: additive hit reaction, a hit from the left: the torso is shoved right, the head follows. Two frames of
 	ExpoOut snap away from the hit, a spring back through a small counter-swing, back to zero at
 	the end. Rides on the Additive layer so it works over walking, guarding or an Art.
+	The sword arm rides the torso (no right shoulder key): a hit taken during Draw or Sheathe then
+	keeps the blade in line with its sheath.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -34,7 +36,6 @@ local clip: Types.ClipDef = {
 				Waist = rot(0, 0, 0),
 				Neck = rot(0, 0, 0),
 				LeftShoulder = rot(0, 0, 0),
-				RightShoulder = rot(0, 0, 0),
 				LeftHip = rot(0, 0, 0),
 				RightHip = rot(0, 0, 0),
 			},
@@ -43,13 +44,12 @@ local clip: Types.ClipDef = {
 			time = 0.04,
 			easing = "ExpoOut",
 			joints = {
-				Root = posRot(0.12, 0, 0, 0, 0, 0),
-				Waist = rot(0, 0, -12),
+				Root = posRot(0.15, 0, 0, 0, 0, 0),
+				Waist = rot(0, 0, -6),
 				Neck = rot(0, -6, -10),
-				LeftShoulder = rot(0, 0, 10),
-				RightShoulder = rot(0, 0, 10),
+				LeftShoulder = rot(0, 0, 1),
 				LeftHip = rot(0, 0, 4),
-				RightHip = rot(0, 0, 4),
+				RightHip = rot(0, 0, -5),
 			},
 		},
 		{
@@ -57,10 +57,9 @@ local clip: Types.ClipDef = {
 			easing = "BackOut",
 			joints = {
 				Root = posRot(-0.03, 0, 0, 0, 0, 0),
-				Waist = rot(0, 0, 3),
+				Waist = rot(0, 0, 0),
 				Neck = rot(0, 1.8, 3),
-				LeftShoulder = rot(0, 0, -2),
-				RightShoulder = rot(0, 0, -2),
+				LeftShoulder = rot(0, 0, -0.2),
 				LeftHip = rot(0, 0, 0),
 				RightHip = rot(0, 0, 0),
 			},
@@ -73,7 +72,6 @@ local clip: Types.ClipDef = {
 				Waist = rot(0, 0, 0),
 				Neck = rot(0, 0, 0),
 				LeftShoulder = rot(0, 0, 0),
-				RightShoulder = rot(0, 0, 0),
 			},
 		},
 	},

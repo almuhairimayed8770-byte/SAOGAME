@@ -41,6 +41,7 @@ local Combat = Harness.load("src/shared/data/combat")
 local Rigs = Harness.load("src/shared/data/rigs")
 local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
 local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
+local Easing = Harness.load("src/shared/util/Easing")
 
 local FRAME = 1 / 60
 local HORIZONTAL = "player/OneHandedSword/Horizontal"
@@ -722,6 +723,211 @@ describe("Choreo", function()
 		animator:play(landId, { blendIn = 0 })
 		expect(landSteps > 0).toBe(true)
 		expect(count(run(ClipLibrary.get(landId).duration), landId)).toBe(landSteps)
+		Choreo.release(model)
+	end)
+
+	it(
+		"a FullBody clip with its own steps silences the walk's while it covers most of the limbs, then the walk steps again",
+		function()
+			local runId = "player/OneHandedSword/Run"
+			local model = buildRig("PlayerR15")
+			local animator = Choreo.get(model)
+			local fired: { string } = {}
+			animator.events:Connect(function(clipId, event)
+				if event.kind == "Footstep" then
+					table.insert(fired, clipId)
+				end
+			end)
+			-- The Run steps the mixer crossed, whatever was heard.
+			local crossed = 0
+			local mixerStep = animator.mixer.step
+			animator.mixer.step = function(self, dt)
+				local result = mixerStep(self, dt)
+				for _, step in result.events do
+					if step.event.kind == "Footstep" and step.clipId == runId then
+						crossed += 1
+					end
+				end
+				return result
+			end
+			local function stepsOf(clipId: string): number
+				local total = 0
+				for _, event in ClipLibrary.get(clipId).events do
+					if event.kind == "Footstep" then
+						total += 1
+					end
+				end
+				return total
+			end
+			local function shows(handle): boolean
+				for _, live in animator.mixer:handles() do
+					if live == handle then
+						return true
+					end
+				end
+				return false
+			end
+			animator:play(runId, { coexist = true, weight = 1, blendIn = 0 })
+			local cycle = ClipLibrary.get(runId).duration
+			for _ = 1, math.ceil(2 * cycle / FRAME) do
+				animator:step(FRAME)
+			end
+			expect(count(fired, runId) > 0).toBe(true)
+
+			-- A dodge out of the run, then a landing: each sounds its own steps, the run none of its,
+			-- from the clip's first frame until its fade-out ends.
+			for _, oneShot in { "player/OneHandedSword/DodgeForward", "player/OneHandedSword/Land" } do
+				table.clear(fired)
+				crossed = 0
+				local handle = animator:play(oneShot)
+				local frames = 0
+				repeat
+					animator:step(FRAME)
+					frames += 1
+				until not shows(handle) or frames > 120
+				expect(shows(handle)).toBe(false)
+				expect(crossed > 0).toBe(true)
+				expect(count(fired, runId)).toBe(0)
+				expect(count(fired, oneShot)).toBe(stepsOf(oneShot))
+
+				-- Faded out: the run's steps sound again, one per step crossed.
+				table.clear(fired)
+				crossed = 0
+				for _ = 1, math.ceil(2 * cycle / FRAME) do
+					animator:step(FRAME)
+				end
+				expect(crossed > 0).toBe(true)
+				expect(count(fired, runId)).toBe(crossed)
+			end
+
+			-- A FullBody clip with no steps of its own (an Art) silences the run's too: the legs are
+			-- the Art's, so a walk step would sound with no foot planting.
+			table.clear(fired)
+			crossed = 0
+			animator:play(HORIZONTAL, { blendIn = 0 })
+			for _ = 1, math.ceil(ClipLibrary.get(HORIZONTAL).duration / FRAME) do
+				animator:step(FRAME)
+			end
+			expect(stepsOf(HORIZONTAL)).toBe(0)
+			expect(crossed > 0).toBe(true)
+			expect(count(fired, runId)).toBe(0)
+			Choreo.release(model)
+		end
+	)
+
+	it(
+		"the walk under a FullBody clip that covers less than half of the limbs still steps (a light landing)",
+		function()
+			local runId = "player/OneHandedSword/Run"
+			local landId = "player/OneHandedSword/Land"
+			local model = buildRig("PlayerR15")
+			local animator = Choreo.get(model)
+			local heard: { string } = {}
+			animator.events:Connect(function(clipId, event)
+				if event.kind == "Footstep" then
+					table.insert(heard, clipId)
+				end
+			end)
+			-- The Run steps the mixer crossed while the landing showed.
+			local crossedUnder = 0
+			local landHandle = nil
+			local mixerStep = animator.mixer.step
+			animator.mixer.step = function(self, dt)
+				local result = mixerStep(self, dt)
+				for _, step in result.events do
+					if step.event.kind == "Footstep" and step.clipId == runId and landHandle ~= nil then
+						crossedUnder += 1
+					end
+				end
+				return result
+			end
+			local function shows(handle): boolean
+				return table.find(animator.mixer:handles(), handle) ~= nil
+			end
+			animator:play(runId, { coexist = true, weight = 1, blendIn = 0 })
+			for _ = 1, 60 do
+				animator:step(FRAME)
+			end
+			table.clear(heard)
+			-- A short hop's landing: Locomotion plays Land at landingWeight, 0.3 to 0.4 below 4 studs.
+			landHandle = animator:play(landId, { weight = 0.4 })
+			local frames = 0
+			repeat
+				animator:step(FRAME)
+				frames += 1
+			until not shows(landHandle) or frames > 120
+			expect(crossedUnder > 0).toBe(true)
+			expect(count(heard, runId)).toBe(crossedUnder)
+			expect(count(heard, landId)).toBe(1)
+			Choreo.release(model)
+		end
+	)
+
+	it("nothing steps in the air: a jump and the fall after it silence the run under them", function()
+		local runId = "player/OneHandedSword/Run"
+		local jumpId = "player/OneHandedSword/Jump"
+		local fallId = "player/OneHandedSword/Fall"
+		local model = buildRig("PlayerR15")
+		local animator = Choreo.get(model)
+		local heard: { string } = {}
+		animator.events:Connect(function(clipId, event)
+			if event.kind == "Footstep" then
+				table.insert(heard, clipId)
+			end
+		end)
+		local crossed = 0
+		local mixerStep = animator.mixer.step
+		animator.mixer.step = function(self, dt)
+			local result = mixerStep(self, dt)
+			for _, step in result.events do
+				if step.event.kind == "Footstep" and step.clipId == runId then
+					crossed += 1
+				end
+			end
+			return result
+		end
+		animator:play(runId, { coexist = true, weight = 1, blendIn = 0 })
+		for _ = 1, 60 do
+			animator:step(FRAME)
+		end
+		-- As Locomotion does it: the jump, then the fall loop as the jump clip ends. (The Fall clip
+		-- is loaded first: a handler that loads a module yields in Lune.)
+		ClipLibrary.get(fallId)
+		local jump = animator:play(jumpId)
+		local fall = nil
+		animator.finished:Connect(function(finished)
+			if finished == jump then
+				fall = animator:play(fallId)
+			end
+		end)
+		-- The takeoff: until the jump covers half of the limbs the feet are still on the ground.
+		local takeoff = 0
+		repeat
+			animator:step(FRAME)
+			takeoff += 1
+		until Easing.evaluate(ChoreoData.blendEasing, jump.fade) * jump.weight > 0.5 or takeoff > 30
+		expect(takeoff < 30).toBe(true)
+		table.clear(heard)
+		crossed = 0
+		-- A second in the air (a 1 s fall): the run crosses its steps and none sounds.
+		for _ = 1, 60 do
+			animator:step(FRAME)
+		end
+		expect(fall).never.toBeNil()
+		expect(crossed >= 3).toBe(true)
+		expect(count(heard, runId)).toBe(0)
+		-- Landed: the fall goes, the run steps again.
+		animator:stop(fall, ChoreoData.oneShotBlendIn)
+		for _ = 1, 30 do
+			animator:step(FRAME)
+		end
+		table.clear(heard)
+		crossed = 0
+		for _ = 1, 60 do
+			animator:step(FRAME)
+		end
+		expect(crossed > 0).toBe(true)
+		expect(count(heard, runId)).toBe(crossed)
 		Choreo.release(model)
 	end)
 

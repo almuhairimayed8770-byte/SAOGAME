@@ -207,17 +207,71 @@ local Dev = {
 		-- hand (the clip's Weapon key) and once on the back mount, the grip moves at most
 		-- maxDistance studs and the blade turns at most maxDegrees, so the swap does not pop.
 		handoff = { maxDistance = 0.4, maxDegrees = 30 },
-		-- How deep the sword on the back (blade, guard, grip) or its scabbard may go into a body
-		-- part in the sheathed set (the idle, the walks, Run and Sprint), the sheath's own part
-		-- aside: zero, so they may touch but never pass inside. A hilt in the head or a hand through
-		-- the scabbard on every step reads as a broken model, not a stance.
-		backOverlap = 0,
-		-- For `seconds` after a WeaponDraw (the pull) and before a WeaponSheathe (the slide home)
-		-- the blade runs along its sheath: every edge and face of it that is still within the
-		-- scabbard's length must stay inside the scabbard's walls, coming out by at most `poke`
-		-- studs. A blade that cuts out through the side of its sheath reads as a broken model.
-		-- After that the arm's reach is spent and the rest of the blade swings out over the top.
-		sheathSlide = { seconds = 0.05, poke = 0 },
+		-- Off the body (D-050): the sword on the back (blade, guard, grip) and the scabbard keep `margin`
+		-- from every body part but the sheath's own, by the part's group, in the poses GroundClearance
+		-- lists (the sheathed and drawn sets, every one-shot, the flinches over the sets, the attacks,
+		-- Guard, Parry, Draw and Sheathe), and stay above the field. It poses without Breathe, which adds
+		-- to every pose on its own clock: held at either end of the breath, over those poses at 240 Hz, it
+		-- brings the head at most 0.0097 studs nearer the sword or scabbard, the arms 0.027, the legs
+		-- 0.039 and the hips 0.0100 (`torso` is the LowerTorso: the sheath hangs on the UpperTorso), so
+		-- each margin is that rounded up and no breath closes the gap.
+		offBody = {
+			margin = { head = 0.01, arms = 0.03, legs = 0.04, torso = 0.01 },
+			-- The sword in the hand (blade and guard) never goes into a body part but the hand on
+			-- the hilt and its forearm. Contact only: posed without Breathe, whose breath and
+			-- tremor bring the held guard up to 0.075 studs nearer the legs, more than a moving
+			-- sword can keep from a stepping thigh.
+			heldMargin = 0,
+			-- For this long before a WeaponDraw and after a WeaponSheathe the right hand is on the
+			-- hilt: the grip and guard may meet that hand and its forearm.
+			onHilt = 0.1,
+			-- A clip laid over a looping Base clip starts at this many points spread over the base's
+			-- cycle, and at more when the base is longer than that many of the clip, so that every
+			-- base frame plays under some frame of it (a looping clip needs only the second rule).
+			starts = 4,
+			-- A one-shot also starts at most startSpacing seconds apart in the base's cycle, up to
+			-- maxStarts: a flinch peaks once, and over a 0.9 s walk the scabbard met the left foot
+			-- only from starts in a 0.13 s band that 4 starts stepped over. 0.075 s is 12 starts on
+			-- a walk; the cap holds only on the 12 s idles, which move too slowly to need more.
+			startSpacing = 0.075,
+			maxStarts = 24,
+			-- The scabbard lies on the back: along the length of it that crosses the back, its face
+			-- nearest the back stays within this of the back's face and never goes into it. A fifth
+			-- of a stud is about 6 cm on the 5.33-stud figure, a coat and a strap: the most that
+			-- still reads as worn on the back, and the room the hilt needs to clear the head.
+			backGap = 0.2,
+			-- Turns (TurnClearance.spec.luau): the real Locomotion carries the body through a drawn
+			-- reversal, the stick swung straight back after `settle` seconds straight ahead, the root
+			-- yawing toward it at each of `yawRates` (degrees a second; the lean reaches its cap at
+			-- 250) while it moves at each of `speeds` (studs a second), to either side, and on for
+			-- `after` seconds. The scabbard keeps `margin` all through, posed at sampleHz.
+			turns = {
+				speeds = { 6, 8, 12, 16, 24 },
+				yawRates = { 180, 240, 360, 480 },
+				settle = 1,
+				after = 0.3,
+			},
+		},
+		-- From a WeaponDraw until the blade is clear of the scabbard, and back from a WeaponSheathe
+		-- to where it first meets it, every long edge of the blade that is partly inside the
+		-- scabbard's walls stays within them, posed at `sampleHz`. For `seconds` from the event
+		-- the blade runs along its sheath and comes out by at most `poke`: a blade that cuts out
+		-- through the side of its sheath reads as a broken model. The pull ends with the grip 1.53
+		-- studs from the shoulder (a straight arm reaches 2.29) and 2 studs of blade still in, so
+		-- the rest swings out over the mouth: an edge passes up to 0.163 out (0.174 with Breathe)
+		-- for 7 ms of Draw and 5 ms of Sheathe, under two frames at 240 Hz, held by `swingOut`.
+		-- Breathe, always on, adds its wrist and sword tremor to every pose: from `breathPhases`
+		-- points of its cycle it brings an edge up to 0.106 out in the slide, held by `breathe`.
+		-- Each Additive one-shot (the flinches) is posed landing every `leadStep` seconds.
+		sheathSlide = {
+			seconds = 0.05,
+			sampleHz = 960,
+			poke = 0,
+			swingOut = 0.18,
+			breathe = 0.11,
+			breathPhases = 16,
+			leadStep = 0.02,
+		},
 	},
 
 	-- Gate recordings (section 20 Phase 0 gate; section 1: the capture script's on-screen prompts).

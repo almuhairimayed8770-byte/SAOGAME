@@ -274,3 +274,50 @@ describe("SheathState.onEvent", function()
 		expect(state.place).toBe("Back")
 	end)
 end)
+
+describe("SheathState.riseFilter", function()
+	local REMOTE = ChoreoData.sheath.remoteDrawDelay
+
+	it("a rise counts once it has held the delay; the step that first sees it counts", function()
+		local filter = SheathState.riseFilter(REMOTE, false)
+		expect(filter.value).toBe(false)
+		local steps = 0
+		repeat
+			steps += 1
+		until filter:step(FRAME, true) or steps > 60
+		expect(steps).toBe(math.ceil(REMOTE / FRAME - 1e-6))
+		expect(filter.value).toBe(true)
+		-- It stays true while the raw value does.
+		expect(filter:step(FRAME, true)).toBe(true)
+	end)
+
+	it("covers an attack three 60 Hz frames behind its Drawn, not four", function()
+		local filter = SheathState.riseFilter(REMOTE, false)
+		for _ = 1, 3 do
+			expect(filter:step(FRAME, true)).toBe(false)
+		end
+		expect(filter:step(FRAME, true)).toBe(true)
+	end)
+
+	it("a fall counts at once, and a new rise waits the whole delay again", function()
+		local filter = SheathState.riseFilter(REMOTE, false)
+		run(filter :: any, 0.5, true)
+		expect(filter.value).toBe(true)
+		expect(filter:step(FRAME, false)).toBe(false)
+		expect(filter:step(FRAME, true)).toBe(false)
+		expect(filter:step(REMOTE, true)).toBe(true)
+		-- A flicker shorter than the delay never shows.
+		filter:step(FRAME, false)
+		expect(filter:step(REMOTE / 2, true)).toBe(false)
+		expect(filter:step(FRAME, false)).toBe(false)
+		expect(filter:step(REMOTE / 2, true)).toBe(false)
+	end)
+
+	it("starting true counts as already held; a slow step passes the delay in one go", function()
+		local filter = SheathState.riseFilter(REMOTE, true)
+		expect(filter.value).toBe(true)
+		expect(filter:step(FRAME, true)).toBe(true)
+		local slow = SheathState.riseFilter(REMOTE, false)
+		expect(slow:step(1 / 10, true)).toBe(true)
+	end)
+end)

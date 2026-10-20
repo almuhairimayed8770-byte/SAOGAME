@@ -58,8 +58,8 @@ local clip: Types.ClipDef = {
 			easing = "ExpoOut",
 			joints = {
 				Root = posRot(0, -0.34, 0, 0, 0, 0),
-				Waist = rot(-14, -6, -24),
-				Neck = rot(8, 6, 16),
+				Waist = rot(-14, -4, -24),
+				Neck = rot(8, 4, 16),
 				LeftHip = rot(-4, 0, -34),
 				LeftKnee = rot(-8, 0, 0),
 				LeftAnkle = rot(10, 0, 0),
@@ -75,21 +75,25 @@ local clip: Types.ClipDef = {
 			root = { pos = { 4.8, 0, 0 } },
 		},
 		{
+			-- the head rights itself before the recovery turns it: rolled and turned at once it
+			-- would meet the sheathed hilt
 			time = 0.25,
 			easing = "QuadOut",
 			joints = {
 				Root = posRot(0, -0.34, 0, 0, 0, 0),
+				Neck = rot(5, 4, 0),
 			},
 			root = { pos = { 8, 0, 0 } },
 		},
 		{
-			-- recovery into the ready stance
+			-- recovery into the ready stance (the head 3 degrees lower than IdleDrawn's, clear of the
+			-- sheathed hilt)
 			time = 0.38,
 			easing = "BackOut",
 			joints = {
 				Root = posRot(0, -0.12, 0, 0, 0, 0),
 				Waist = rot(-8, -12, 0),
-				Neck = rot(6, 12, 0),
+				Neck = rot(3, 12, 0),
 				RightShoulder = rot(30, 0, 10),
 				RightElbow = rot(35, 0, 0),
 				RightWrist = rot(-25, 0, 0),

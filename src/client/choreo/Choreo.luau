@@ -21,7 +21,9 @@
 
 	Footsteps: the Base layer blends many walk clips (and a drawn twin of each), all running at
 	once, and each has its own steps. Only the one the limbs show most sounds its Footstep events,
-	so a still rig is silent and a blend of walks steps once.
+	so a still rig is silent and a blend of walks steps once. FullBody clips that cover more of the
+	limbs than they leave to the walk (a dodge, a landing, a jump, a fall, an Art) silence it: the
+	feet are theirs, and only their own steps sound, so nothing steps in the air.
 
 	Update rates: the local character and the nearest rigs step on RenderStepped; the rest step
 	on Heartbeat at the quality tier's distant / far rate (data/choreo.luau quality). A clip id
@@ -508,19 +510,38 @@ local function hasFootsteps(clip: Types.ClipDef): boolean
 	return cached :: boolean
 end
 
+-- Reused by footstepSource: the shown weight of each FullBody priority group.
+local fullBodyGroups: { [number]: number } = {}
+
 -- The Base handle whose footsteps sound: of the Base clips with steps, the one the limbs show
--- most (the first one on a tie). Nil when none shows at all, so a still rig makes no sound.
+-- most (the first one on a tie). Nil when none shows at all, so a still rig makes no sound, and
+-- nil while FullBody clips cover more of the limbs than they leave to the walk: a dodge, a
+-- landing, a jump, a fall, an Art or a stagger moves the feet then, and only its own steps (if
+-- it has any) sound. Its blend-in and fade-out tails, and a light landing, leave the walk's.
 local function footstepSource(self: any): Handle?
 	local best: Handle? = nil
 	local bestWeight = 0
+	table.clear(fullBodyGroups)
 	for _, handle in self.mixer:handles() do
-		if handle.layer == "Base" and hasFootsteps(handle.clip) then
+		local layer = handle.layer
+		if layer == "FullBody" or (layer == "Base" and hasFootsteps(handle.clip)) then
 			local shown = Easing.evaluate(ChoreoData.blendEasing, handle.fade) * handle.weight
-			if shown > bestWeight then
+			if layer == "FullBody" then
+				fullBodyGroups[handle.priority] = (fullBodyGroups[handle.priority] or 0) + shown
+			elseif shown > bestWeight then
 				best = handle
 				bestWeight = shown
 			end
 		end
+	end
+	-- What the walk keeps of the limbs: the Mixer lays each FullBody priority group over the
+	-- layers below at its summed shown weight (at most all of it).
+	local walkShare = 1
+	for _, shown in fullBodyGroups do
+		walkShare *= 1 - math.min(1, shown)
+	end
+	if walkShare < 1 - walkShare then
+		return nil
 	end
 	return best
 end

@@ -102,11 +102,14 @@ local World = {
 		-- weighted by abuseWeight. The client never sends BasicAttackRequest faster than its
 		-- perSecond (ActionLogic.basicReady), so honest mashing stays inside the bucket and the
 		-- burst only absorbs network jitter.
+		-- A stall an honest client's paced sends must ride out without tripping its bucket: a
+		-- clientBurst plus perSecond times this must fit inside burst.
+		remoteStallSeconds = 0.3,
 		remoteRates = {
 			ClientReady = { perSecond = 1, burst = 2 },
 			ArtRequest = { perSecond = 6, burst = 3 },
 			BasicAttackRequest = { perSecond = 6, burst = 3 },
-			GuardRequest = { perSecond = 12, burst = 6 },
+			GuardRequest = { perSecond = 12, burst = 6, clientBurst = 2 },
 			DodgeRequest = { perSecond = 4, burst = 2 },
 			TargetRequest = { perSecond = 8, burst = 4 },
 			SwitchCallRequest = { perSecond = 2, burst = 2 },

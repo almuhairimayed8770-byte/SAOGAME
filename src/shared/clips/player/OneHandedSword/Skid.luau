@@ -81,13 +81,13 @@ local clip: Types.ClipDef = {
 			},
 		},
 		{
-			-- settle into the ready stance
+			-- settle into the ready stance, the head low enough to clear the sheathed hilt
 			time = 0.5,
 			easing = "Spring",
 			joints = {
 				Root = posRot(0, -0.12, 0, 0, 0, 0),
 				Waist = rot(-6, -6, 0),
-				Neck = rot(5, 6, 0),
+				Neck = rot(3, 6, 0),
 				RightHip = rot(-8, 0, 6),
 				RightKnee = rot(-22, 0, 0),
 				RightAnkle = rot(30, 0, 0),

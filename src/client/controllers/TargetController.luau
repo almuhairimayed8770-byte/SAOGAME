@@ -3,8 +3,13 @@
 	TargetController: lock-on (section 6: F / R3). A press locks the best enemy inside the camera
 	data's range and cone (nearest, with off-center angle priced in studs); repeated presses cycle
 	down the ranked list and past the last one unlock. The lock clears when the target dies, leaves
-	or walks beyond the break distance. The camera frames both fighters and the outline manager
-	marks the target. Ranking lives in TargetRanking (tested).
+	or walks beyond the break distance, and when the player's own character goes. The camera
+	frames both fighters and the outline manager marks the target. Ranking lives in TargetRanking
+	(tested).
+
+	Every lock change goes to the server as a TargetRequest through TrailingSend: never faster than
+	the remote's rate limit, and the last change always arrives, so mashing the key cannot leave the
+	server holding a lock (and the sword drawn, D-050) that the client already let go of.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -16,6 +21,7 @@ local Client = script.Parent.Parent
 
 local CameraData = require(Shared.data.camera)
 local Net = require(Shared.net.Net)
+local TrailingSend = require(Shared.net.TrailingSend)
 local Signal = require(Shared.util.Signal)
 
 local EntityTracker = require(script.Parent.EntityTracker)
@@ -32,7 +38,7 @@ local TargetController = {}
 TargetController.targetChanged = Signal.new() :: Signal.Signal<any>
 
 local target: any = nil
-local net: Net.ClientNet? = nil
+local sender: TrailingSend.TrailingSend? = nil -- TargetRequest, paced to its rate limit
 local started = false
 
 local function toTable(v: Vector3): { number }
@@ -95,8 +101,8 @@ local function setTarget(record: any)
 		OutlineManager.setImportance(record.model, "Lock")
 	end
 	CameraController.setLockTarget(if record ~= nil then record.model else nil)
-	if net ~= nil then
-		net.fire("TargetRequest", { entityId = if record ~= nil then record.id else nil })
+	if sender ~= nil then
+		sender:set(if record ~= nil then record.id else nil)
 	end
 	TargetController.targetChanged:Fire(record)
 end
@@ -142,7 +148,17 @@ function TargetController.start()
 		return
 	end
 	started = true
-	net = Net.client()
+	local net = Net.client()
+	sender = TrailingSend.new({
+		gap = TrailingSend.gapOf("TargetRequest"),
+		now = os.clock,
+		schedule = function(seconds: number, fn: () -> ())
+			task.delay(seconds, fn)
+		end,
+		send = function(entityId: number?)
+			net.fire("TargetRequest", { entityId = entityId })
+		end,
+	})
 	InputController.lockToggle:Connect(TargetController.toggle)
 	EntityTracker.removed:Connect(function(record: any)
 		if record == target then
@@ -152,6 +168,16 @@ function TargetController.start()
 	EntityTracker.changed:Connect(function(record: any, attribute: string, value: any)
 		if record == target and attribute == "State" and value == "Dead" then
 			setTarget(nil)
+		end
+	end)
+	-- A respawn gives the player a new server record, and it starts with no lock. The old
+	-- character's lock ends with it; a lock the client holds when the new record arrives (taken
+	-- before the server registered it) is sent again, so the server never misses it.
+	EntityTracker.localChanged:Connect(function(id: number?)
+		if id == nil then
+			setTarget(nil)
+		elseif target ~= nil and sender ~= nil then
+			sender:set(target.id)
 		end
 	end)
 	RunService.Heartbeat:Connect(check)

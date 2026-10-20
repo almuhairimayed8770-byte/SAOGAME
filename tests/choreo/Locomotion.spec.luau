@@ -8,7 +8,10 @@ local function fakeSignal()
 	end
 	return signal
 end
-Harness.stubService("RunService", { RenderStepped = fakeSignal(), Heartbeat = fakeSignal() })
+Harness.stubService(
+	"RunService",
+	{ RenderStepped = fakeSignal(), Heartbeat = fakeSignal(), PreSimulation = fakeSignal() }
+)
 
 local Choreo = Harness.load("src/client/choreo/Choreo")
 Choreo.configure({
@@ -20,6 +23,7 @@ Choreo.configure({
 	end,
 })
 local Locomotion = Harness.load("src/client/choreo/Locomotion")
+local LocomotionState = Harness.load("src/client/choreo/LocomotionState")
 local ChoreoData = Harness.load("src/shared/data/choreo")
 local Rigs = Harness.load("src/shared/data/rigs")
 local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
@@ -256,7 +260,7 @@ describe("Locomotion.attach", function()
 		animator:step(FRAME)
 		local run = handleOf(animator, Config.clipPrefix .. Config.clips.Run)
 		expect(run).toBeTruthy()
-		state.speed = Config.runSpeed
+		state.speed = Config.stride.groundSpeed.Run
 		state.moveDir = Vector3.new(0, 0, -1)
 		for _ = 1, 30 do
 			animator:step(FRAME)
@@ -338,7 +342,7 @@ describe("Locomotion: the sheathed sword", function()
 		expect(motor.Part0).toBe(model:FindFirstChild("RightHand"))
 		steps(animator, 1)
 		expect(handleOf(animator, Config.clipPrefix .. Config.clips.IdleDrawn).weight).toBeCloseTo(1, 1e-6)
-		state.speed = Config.runSpeed
+		state.speed = Config.stride.groundSpeed.RunDrawn
 		state.moveDir = Vector3.new(0, 0, -1)
 		steps(animator, 0.5)
 		expect(handleOf(animator, Config.clipPrefix .. Config.clips.RunDrawn).weight).toBeCloseTo(1, 1e-6)
@@ -511,6 +515,25 @@ describe("Locomotion: the sheathed sword", function()
 		end
 	)
 
+	it("a weightless clip (a Land on the move) does not hold the Draw back", function()
+		local model, animator, state, driver, motor = setup(false)
+		local land = animator:play(Config.clipPrefix .. Config.clips.Land, { weight = 0 })
+		state.drawn = true
+		local swapped = false
+		for _ = 1, 600 do
+			animator:step(FRAME)
+			if motor.Part0 == model:FindFirstChild("RightHand") then
+				swapped = true
+				break
+			end
+		end
+		expect(swapped).toBe(true)
+		-- The sword changed hands before the weightless Land ended.
+		expect(land.done).toBe(false)
+		driver:destroy()
+		Choreo.release(model)
+	end)
+
 	it("the drawn sprint pose waits for the sword in the hand and fades in and out with SprintDrawn", function()
 		local model, animator, state, driver, motor = setup(false)
 		local weights = {}
@@ -590,18 +613,27 @@ describe("Locomotion: the sheathed sword", function()
 		Choreo.release(model)
 	end)
 
-	it("each walk, Run and Sprint keeps time with its drawn twin", function()
+	it("each walk, Run and Sprint keeps time with its drawn twin while both show", function()
 		local model, animator, state, driver = setup(false)
 		state.speed = Config.walkSpeed
 		state.moveDir = Vector3.new(0, 0, -1)
 		steps(animator, 0.7)
 		state.drawn = true
-		steps(animator, 1.3)
-		for _, name in { "WalkForward", "WalkBack", "WalkLeft", "WalkRight", "Run", "Sprint" } do
-			local plain = handleOf(animator, Config.clipPrefix .. Config.clips[name])
-			local drawn = handleOf(animator, Config.clipPrefix .. Config.clips[name .. "Drawn"])
-			expect(plain.time).toBeCloseTo(drawn.time, 1e-9)
+		-- Frame by frame through the set crossfade: a clip with no weight keeps its own clock
+		-- until it is about to show, so only pairs that both show are compared.
+		local compared = 0
+		for _ = 1, math.ceil(1.3 / FRAME) do
+			animator:step(FRAME)
+			for _, name in { "WalkForward", "WalkBack", "WalkLeft", "WalkRight", "Run", "Sprint" } do
+				local plain = handleOf(animator, Config.clipPrefix .. Config.clips[name])
+				local drawn = handleOf(animator, Config.clipPrefix .. Config.clips[name .. "Drawn"])
+				if plain.weight > 0 and drawn.weight > 0 then
+					expect(plain.time).toBeCloseTo(drawn.time, 1e-9)
+					compared += 1
+				end
+			end
 		end
+		expect(compared).toBeGreaterThan(0)
 		driver:destroy()
 		Choreo.release(model)
 	end)
@@ -751,5 +783,202 @@ describe("Locomotion: the Drawn and State attributes", function()
 		-- With no source it reads the attribute; a missing one means sheathed.
 		expect(Locomotion.humanoidTracker(character :: any)(FRAME).drawn).toBe(false)
 		expect(reads).toBe(1)
+	end)
+end)
+
+describe("Locomotion: the gait clock", function()
+	-- A player rig walking straight along `moveDir` at `speed` for `seconds`.
+	local function walker()
+		local model = buildRig("PlayerR15")
+		local animator = Choreo.get(model)
+		local locomotion = Locomotion.new(animator, model, { footIK = false }) :: any
+		local function walk(moveDir: Vector3, speed: number, seconds: number, extra: { [string]: any }?)
+			for _ = 1, math.ceil(seconds / FRAME - 1e-9) do
+				local state: any = { moveDir = moveDir, speed = speed, sprinting = false, grounded = true, turning = 0 }
+				for key, value in extra or {} do
+					state[key] = value
+				end
+				locomotion:update(FRAME, state)
+				animator:step(FRAME)
+			end
+		end
+		return locomotion, animator, walk, model
+	end
+	local FORWARD = Vector3.new(0, 0, -1)
+
+	-- Cycles the shared phase moves over one frame.
+	local function advance(locomotion: any, walk: any, moveDir: Vector3, speed: number): number
+		local before = locomotion.gaitPhase
+		walk(moveDir, speed, FRAME)
+		return (locomotion.gaitPhase - before) % 1
+	end
+
+	it("holds the shared phase and every gait clock through hit-stop", function()
+		local locomotion, animator, walk, model = walker()
+		walk(FORWARD, Config.walkSpeed, 1)
+		local phase = locomotion.gaitPhase
+		local handle = locomotion.handles.WalkForward
+		local clock = handle.time
+		animator:hitStop(4)
+		walk(FORWARD, Config.walkSpeed, 2 * FRAME)
+		expect(locomotion.gaitPhase).toBe(phase)
+		expect(handle.time).toBeCloseTo(clock, 1e-9)
+		walk(FORWARD, Config.walkSpeed, 4 * FRAME)
+		expect(locomotion.gaitPhase).never.toBe(phase)
+		locomotion:destroy()
+		Choreo.release(model)
+	end)
+
+	it("under the mixer's time scale the phase still covers the root's real travel", function()
+		local locomotion, animator, walk, model = walker()
+		local speed = Config.stride.groundSpeed.WalkForward * 0.9
+		walk(FORWARD, speed, 1)
+		local full = advance(locomotion, walk, FORWARD, speed)
+		local rate = locomotion.handles.WalkForward.speed
+		-- Dev slow motion: the clips run twice as fast on the half-speed clock.
+		animator.mixer:setTimeScale(0.5)
+		local half = advance(locomotion, walk, FORWARD, speed)
+		expect(full).toBeGreaterThan(0)
+		expect(half).toBeCloseTo(full, 1e-9)
+		expect(locomotion.handles.WalkForward.speed).toBeCloseTo(rate * 2, 1e-9)
+		-- A frozen clock (an Art hold) holds the phase.
+		animator.mixer:setTimeScale(0)
+		expect(advance(locomotion, walk, FORWARD, speed)).toBe(0)
+		locomotion:destroy()
+		Choreo.release(model)
+	end)
+
+	it("plays a walk no faster than stride.rateCeiling past its ground speed", function()
+		local locomotion, _, walk, model = walker()
+		-- Straight back the walk carries every speed (no Run behind the facing).
+		walk(-FORWARD, 26, 1)
+		local handle = locomotion.handles.WalkBack
+		expect(handle.weight).toBeCloseTo(1, 1e-6)
+		expect(handle.speed).toBeCloseTo(Config.stride.rateCeiling, 1e-6)
+		locomotion:destroy()
+		Choreo.release(model)
+	end)
+
+	it("standing puts the shared phase back at stride.startPhase, so every start steps off alike", function()
+		local locomotion, _, walk, model = walker()
+		walk(FORWARD, Config.walkSpeed, 1.3)
+		expect(locomotion.gaitPhase).never.toBeCloseTo(Config.stride.startPhase, 1e-3)
+		-- Long enough for the walk's weight to reach zero.
+		walk(Vector3.zero, 0, 1)
+		expect(locomotion.gaitPhase).toBe(Config.stride.startPhase)
+		locomotion:destroy()
+		Choreo.release(model)
+	end)
+
+	it("holds a walk that still shows at stride.rateFloor below its floor speed", function()
+		local locomotion, animator, walk, model = walker()
+		walk(FORWARD, Config.stride.groundSpeed.WalkForward, 1)
+		-- Frozen weights (hit-stop): the walk still shows whole at a speed far under its floor.
+		animator:hitStop(4)
+		walk(FORWARD, Config.stride.groundSpeed.WalkForward * Config.stride.rateFloor * 0.5, FRAME)
+		expect(locomotion.handles.WalkForward.weight).toBeCloseTo(1, 1e-6)
+		expect(locomotion.handles.WalkForward.speed).toBeCloseTo(Config.stride.rateFloor, 1e-6)
+		locomotion:destroy()
+		Choreo.release(model)
+	end)
+
+	it("moving with no stick (a coast, a shove) keeps the last move direction", function()
+		local locomotion, _, walk, model = walker()
+		walk(-FORWARD, 3, 1)
+		expect(locomotion.handles.WalkBack.targetWeight).toBeCloseTo(1, 1e-6)
+		walk(Vector3.zero, 3, 0.5)
+		expect(locomotion.handles.WalkBack.targetWeight).toBeCloseTo(1, 1e-6)
+		expect(locomotion.handles.WalkForward.targetWeight).toBe(0)
+		locomotion:destroy()
+		Choreo.release(model)
+	end)
+
+	it("gives the two-step stop the phase and the settle points of the last move", function()
+		local locomotion, _, walk, model = walker()
+		walk(-FORWARD, 3, 0.5)
+		local into = { phase = -1, leftStep = -1, leftAfter = -1, rightStep = -1, rightAfter = -1 }
+		locomotion:stopGait(into)
+		expect(into.phase).toBe(locomotion.gaitPhase)
+		local leftStep, leftAfter, rightStep, rightAfter = LocomotionState.settlePoints(-1, 0, false)
+		expect(into.leftStep).toBe(leftStep)
+		expect(into.leftAfter).toBeCloseTo(leftAfter, 1e-9)
+		expect(into.rightStep).toBeCloseTo(rightStep, 1e-9)
+		expect(into.rightAfter).toBeCloseTo(rightAfter, 1e-9)
+		locomotion:destroy()
+		Choreo.release(model)
+	end)
+
+	it("a turn in place gives way to the first steps", function()
+		local locomotion, animator, walk, model = walker()
+		local turnId = Config.clipPrefix .. Config.clips.TurnLeft
+		walk(Vector3.zero, 0, 0.5)
+		-- Lock-on swings the facing with no stick: the turn clip plays.
+		walk(Vector3.zero, 0, FRAME, { turning = Config.turnInPlaceDegrees + 10 })
+		expect(handleOf(animator, turnId)).never.toBeNil()
+		-- The stick goes forward and the root moves well inside the turn clip.
+		walk(FORWARD, Config.walkSpeed, FRAME)
+		expect(handleOf(animator, turnId)).toBeNil()
+		walk(FORWARD, Config.walkSpeed, ChoreoData.oneShotBlendIn + FRAME)
+		for _, handle in animator.mixer:handles() do
+			expect(handle.clipId == turnId and handle.fade > 0).toBe(false)
+		end
+		locomotion:destroy()
+		Choreo.release(model)
+	end)
+
+	it("a landing on the move plays no Land, and a standing Land gives way to the first steps", function()
+		local locomotion, animator, walk, model = walker()
+		local landId = Config.clipPrefix .. Config.clips.Land
+		local fallId = Config.clipPrefix .. Config.clips.Fall
+		local fall = { grounded = false, verticalVelocity = -10 }
+		local landed = { fallHeight = Config.landing.fullSquashHeight }
+		walk(FORWARD, Config.walkSpeed, 1)
+		walk(FORWARD, Config.walkSpeed, 0.3, fall)
+		expect(handleOf(animator, fallId)).never.toBeNil()
+		walk(FORWARD, Config.walkSpeed, FRAME, landed)
+		-- Land plays for its sounds, with no weight on the limbs.
+		local moving = handleOf(animator, landId)
+		expect(moving).never.toBeNil()
+		expect(moving.weight).toBe(0)
+		expect(handleOf(animator, fallId)).toBeNil()
+		-- Standing, the squash plays until the stick moves the root.
+		walk(Vector3.zero, 0, 1)
+		walk(Vector3.zero, 0, 0.3, fall)
+		walk(Vector3.zero, 0, FRAME, landed)
+		expect(handleOf(animator, landId)).never.toBeNil()
+		walk(FORWARD, Config.walkSpeed, FRAME)
+		expect(handleOf(animator, landId)).toBeNil()
+		locomotion:destroy()
+		Choreo.release(model)
+	end)
+
+	it("a remote player's tracker calls a run a run and a sprint a sprint", function()
+		local humanoid = { MoveDirection = Vector3.new(0, 0, -1), FloorMaterial = Enum.Material.Plastic }
+		local root = { AssemblyLinearVelocity = Vector3.zero, Position = Vector3.zero }
+		local character = {
+			PrimaryPart = root,
+			FindFirstChildOfClass = function()
+				return humanoid
+			end,
+			FindFirstChild = function()
+				return root
+			end,
+			GetAttribute = function()
+				return nil
+			end,
+		}
+		local tracker = Locomotion.humanoidTracker(character :: any)
+		local middle = (Config.runSpeed + Config.sprintSpeed) / 2
+		for _, case in
+			{
+				{ Config.runSpeed * 1.02, false },
+				{ middle - 0.1, false },
+				{ middle + 0.1, true },
+				{ Config.sprintSpeed, true },
+			}
+		do
+			root.AssemblyLinearVelocity = Vector3.new(0, 0, -case[1])
+			expect((tracker(FRAME) :: any).sprinting).toBe(case[2])
+		end
 	end)
 end)

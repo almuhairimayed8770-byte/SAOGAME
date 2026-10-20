@@ -1,8 +1,9 @@
 --!strict
 --[[
-	player/OneHandedSword/TurnRight: turn in place to the right; the mirror of TurnLeft. The head
-	and torso lead, the right foot lifts and plants outward, the left foot drags round. The sword
-	rides low, the point forward.
+	player/OneHandedSword/TurnRight: turn in place to the right; the mirror of TurnLeft, except that
+	the torso turns further (24 degrees) and the head less past it (12, not 22): the sheathed hilt
+	sits behind the right shoulder (D-050). The head and torso lead, the right foot lifts and plants
+	outward, the left foot drags round. The sword rides low, the point forward.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -53,8 +54,8 @@ local clip: Types.ClipDef = {
 			easing = "ExpoOut",
 			joints = {
 				Root = posRot(0, -0.04, 0, 0, 8, -2),
-				Waist = rot(-4, -18, -2),
-				Neck = rot(4, -22, 0),
+				Waist = rot(-4, -24, -2),
+				Neck = rot(4, -12, 0),
 				RightHip = rot(6, -24, 16),
 				RightKnee = rot(-36, 0, 0),
 				RightAnkle = rot(30, 0, 0),

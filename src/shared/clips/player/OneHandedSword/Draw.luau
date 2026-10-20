@@ -3,14 +3,17 @@
 	player/OneHandedSword/Draw: the sword comes off the back (UpperBody, the right arm and the head
 	only, so it plays over any base: the drawn idle, a walk or a run). A lock-on or a hit taken
 	while sheathed plays it; attacks, guard and parry draw-cut instead. The right hand dips
-	(anticipation), reaches over the right shoulder and takes the hilt at 0.22 s (WeaponDraw: the
-	sword moves from its sheath to the hand, the Weapon key there lining the blade up with the back
-	mount exactly). A quick pull up the sheath line to the arm's full reach: 1.2 studs in 0.06 s,
-	speeding up to the middle key and slowing into the reach. The middle key is solved so that both
-	moves keep the blade inside the scabbard's walls and the guard off the head; the wrist turns
-	about the grip on the way, the blade does not. The reach leaves 2 studs of blade in the sheath:
-	they come out as the blade swings out behind the head and over the top. It then drops a little
-	past the drawn carry (low, the point forward, D-047) and springs back.
+	(anticipation), reaches back over the right shoulder and takes the hilt behind it at 0.22 s
+	(WeaponDraw: the sword moves from its sheath to the hand, the Weapon key there lining the blade
+	up with the back mount exactly). A quick pull up the sheath line, the arm rising: 1.2 studs in
+	0.06 s, speeding up to the middle key and slowing into the reach. The middle key is solved so
+	that both moves keep the blade inside the scabbard's walls and the guard off the head; the
+	wrist turns about the grip on the way, the blade does not. The reach leaves the grip 1.53
+	studs from the shoulder, the elbow still bent, and 2 studs of blade in the sheath: they come
+	out as the blade swings out over the mouth, behind the head, an edge out through the wall for
+	7 ms (0.287 to 0.294 s, under two frames at 240 Hz). It then drops a little past the carry
+	(low, the point forward, D-047) and springs back, the point higher than the drawn idle's so
+	that a sprint's lean under it keeps it off the field.
 	The head tucks and leans away from the reaching arm until the blade is out: the hilt sits just
 	behind it, and a run's raised head would meet it.
 	Before WeaponDraw the sword is on the back, so no key moves Weapon there.
@@ -61,14 +64,14 @@ local clip: Types.ClipDef = {
 			},
 		},
 		{
-			-- the grab: the elbow up, the hand on the hilt over the right shoulder (WeaponDraw)
+			-- the grab: the elbow up, the hand back over the right shoulder on the hilt (WeaponDraw)
 			time = 0.22,
 			easing = "QuadOut",
 			joints = {
-				RightShoulder = rot(171.8, 30.6, 0.7),
-				RightElbow = rot(146.3, 0, 0),
-				RightWrist = rot(-70, 35.7, -40),
-				Weapon = posRot(-0.001, -0.0003, 0.0034, -6.0927, -77.2179, -3.4319),
+				RightShoulder = rot(190.1, 56.8, 22),
+				RightElbow = rot(125.6, 0, 0),
+				RightWrist = rot(-69, -5, -45.4),
+				Weapon = posRot(-0.0003, 0.0002, -0.0011, -10.9507, -77.1142, -9.553),
 			},
 		},
 		{
@@ -77,22 +80,22 @@ local clip: Types.ClipDef = {
 			time = 0.25,
 			easing = "QuadIn",
 			joints = {
-				RightShoulder = rot(177.7, -6.7, 5.5),
-				RightElbow = rot(102.5, 0, 0),
-				RightWrist = rot(-5.7, 31.9, -101.3),
-				Weapon = posRot(0.0001, -0.0021, 0.0017, 23.2883, -91.0383, 25.9712),
+				RightShoulder = rot(160.3, 41.4, 46.5),
+				RightElbow = rot(101.3, 0, 0),
+				RightWrist = rot(-21.9, -4.9, -67.8),
+				Weapon = posRot(0, -0.001, -0.0004, 5.5355, -94.0645, 5.5192),
 			},
 		},
 		{
-			-- the arm at full reach up the sheath line, the blade 1.2 studs out
+			-- the arm high up the sheath line, the blade 1.2 studs out
 			time = 0.28,
 			easing = "QuadOut",
 			joints = {
 				Neck = rot(-3, 9, 4),
-				RightShoulder = rot(181.9, 0.6, 21.7),
-				RightElbow = rot(42.7, 0, 0),
-				RightWrist = rot(46.7, 15.9, -77.8),
-				Weapon = posRot(0.0012, -0.004, 0.0001, -5.7525, -77.1789, -3.217),
+				RightShoulder = rot(160.8, 22.5, 27.6),
+				RightElbow = rot(82.9, 0, 0),
+				RightWrist = rot(4.5, 15.3, -59.1),
+				Weapon = posRot(0.0003, -0.0022, 0.0002, 10.2084, -76.1491, 7.5842),
 			},
 		},
 		{
@@ -127,11 +130,13 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(26, 0, 8),
 				RightElbow = rot(30, 0, 0),
 				RightWrist = rot(-30, 0, 0),
-				Weapon = rot(-54, 0, 0),
+				Weapon = rot(-30, 0, 0),
 			},
 		},
 		{
-			-- settle: the drawn carry (IdleDrawn), low with the point forward
+			-- settle: the drawn idle's arm, the point 24 degrees higher than its carry so a run's
+			-- or a sprint's lean under it keeps the point off the field; the blend out hands the
+			-- sword to the base's own carry
 			time = 0.62,
 			easing = "Spring",
 			joints = {
@@ -139,7 +144,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(30, 0, 10),
 				RightElbow = rot(35, 0, 0),
 				RightWrist = rot(-25, 0, 0),
-				Weapon = rot(-50, 0, 0),
+				Weapon = rot(-26, 0, 0),
 			},
 		},
 	},

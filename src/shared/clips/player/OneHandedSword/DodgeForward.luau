@@ -33,8 +33,8 @@ local clip: Types.ClipDef = {
 			easing = "QuadOut",
 			joints = {
 				Root = posRot(0, -0.3, 0, 0, 0, 0),
-				Waist = rot(-34, -6, 0),
-				Neck = rot(14, 6, 0),
+				Waist = rot(-34, -2, 0),
+				Neck = rot(14, 2, 0),
 				RightShoulder = rot(30, 0, 10),
 				RightElbow = rot(35, 0, 0),
 				RightWrist = rot(-25, 0, 0),
@@ -57,8 +57,8 @@ local clip: Types.ClipDef = {
 			easing = "ExpoOut",
 			joints = {
 				Root = posRot(0, -0.36, 0, 0, 0, 0),
-				Waist = rot(-44, -8, 2),
-				Neck = rot(20, 8, 0),
+				Waist = rot(-44, -2, 2),
+				Neck = rot(6, 2, 0),
 				LeftHip = rot(50, 0, -8),
 				LeftKnee = rot(-24, 0, 0),
 				LeftAnkle = rot(-20, 0, 0),
@@ -83,13 +83,14 @@ local clip: Types.ClipDef = {
 			root = { pos = { 0, 0, -8 } },
 		},
 		{
-			-- recovery into the ready stance
+			-- recovery into the ready stance (the head 3 degrees lower than IdleDrawn's, clear of the
+			-- sheathed hilt)
 			time = 0.38,
 			easing = "BackOut",
 			joints = {
 				Root = posRot(0, -0.12, 0, 0, 0, 0),
 				Waist = rot(-8, -12, 0),
-				Neck = rot(6, 12, 0),
+				Neck = rot(3, 12, 0),
 				RightShoulder = rot(30, 0, 10),
 				RightElbow = rot(35, 0, 0),
 				RightWrist = rot(-25, 0, 0),

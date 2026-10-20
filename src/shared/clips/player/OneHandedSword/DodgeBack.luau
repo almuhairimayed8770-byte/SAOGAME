@@ -51,12 +51,13 @@ local clip: Types.ClipDef = {
 			root = { pos = { 0, 0, 0 } },
 		},
 		{
-			-- full extension
+			-- full extension: the torso leans back 18 degrees, no further, so the scabbard's tip stays
+			-- off the left thigh as that leg reaches back
 			time = 0.07,
 			easing = "ExpoOut",
 			joints = {
 				Root = posRot(0, -0.3, 0, 0, 0, 0),
-				Waist = rot(22, -10, -2),
+				Waist = rot(18, -10, -2),
 				Neck = rot(-10, 10, 0),
 				LeftHip = rot(-24, 0, -8),
 				LeftKnee = rot(-40, 0, 0),
@@ -81,13 +82,14 @@ local clip: Types.ClipDef = {
 			root = { pos = { 0, 0, 8 } },
 		},
 		{
-			-- recovery into the ready stance
+			-- recovery into the ready stance (the head 3 degrees lower than IdleDrawn's, clear of the
+			-- sheathed hilt)
 			time = 0.38,
 			easing = "BackOut",
 			joints = {
 				Root = posRot(0, -0.12, 0, 0, 0, 0),
 				Waist = rot(-8, -12, 0),
-				Neck = rot(6, 12, 0),
+				Neck = rot(3, 12, 0),
 				RightShoulder = rot(30, 0, 10),
 				RightElbow = rot(35, 0, 0),
 				RightWrist = rot(-25, 0, 0),

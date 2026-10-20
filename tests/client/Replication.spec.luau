@@ -1,5 +1,6 @@
 --!strict
 local Replication = Harness.load("src/client/controllers/Replication")
+local ChoreoData = Harness.load("src/shared/data/choreo")
 local combat = Harness.load("src/shared/data/combat")
 local fx = Harness.load("src/shared/data/fx")
 local sfx = Harness.load("src/shared/data/sfx")
@@ -916,5 +917,216 @@ describe("Replication", function()
 		expect(function()
 			Replication.dispatch("Nope", {})
 		end).toThrow("no handler")
+	end)
+end)
+
+-- A remote player on the real Choreo and Locomotion: a Lune rig with the server's sword, a
+-- Humanoid standing still on the ground for the default tracker, and foot IK off (no raycast in
+-- Lune). Everything else is a recorder.
+local function liveRemote()
+	local function frameSignal()
+		return {
+			Connect = function()
+				return { Disconnect = function() end }
+			end,
+		}
+	end
+	Harness.stubService(
+		"RunService",
+		{ RenderStepped = frameSignal(), Heartbeat = frameSignal(), PreSimulation = frameSignal() }
+	)
+	local Choreo = Harness.load("src/client/choreo/Choreo")
+	local Locomotion = Harness.load("src/client/choreo/Locomotion")
+	local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
+	local Rigs = Harness.load("src/shared/data/rigs")
+	local RigBuilder = Harness.load("src/server/world/RigBuilder")
+	local WeaponBuilder = Harness.load("src/server/world/WeaponBuilder")
+	local WeaponModels = Harness.load("src/shared/data/weaponModels")
+	local Weapons = Harness.load("src/shared/data/weapons")
+	local clock = 100
+	Choreo.configure({
+		now = function()
+			return clock
+		end,
+		cameraPosition = function()
+			return Vector3.zero
+		end,
+	})
+
+	local model = Instance.new("Model")
+	model.Name = "Ren"
+	model:SetAttribute("Rig", "PlayerR15")
+	model:SetAttribute("Drawn", false)
+	model:SetAttribute("State", "Idle")
+	local parts = {}
+	local function part(name)
+		if parts[name] == nil then
+			local created = Instance.new("Part")
+			created.Name = name
+			created.Size = Vector3.new(1, 1, 1)
+			created.CFrame = CFrame.new(0, 3, 0)
+			created.Position = Vector3.new(0, 3, 0)
+			created.AssemblyLinearVelocity = Vector3.zero
+			created.Parent = model
+			parts[name] = created
+		end
+		return parts[name]
+	end
+	for _, joint in Rigs.PlayerR15.joints do
+		if joint.name ~= WeaponModels.motorName then
+			local motor = Instance.new("Motor6D")
+			motor.Name = joint.name
+			motor.Part0 = part(joint.part0)
+			motor.Part1 = part(joint.part1)
+			motor.C0 = RigBuilder.frameOf(joint.c0)
+			motor.Parent = motor.Part1
+		end
+	end
+	model.PrimaryPart = parts.HumanoidRootPart
+	local humanoid = Instance.new("Humanoid")
+	humanoid.MoveDirection = Vector3.zero
+	humanoid.FloorMaterial = Enum.Material.Plastic
+	humanoid.Parent = model
+	WeaponBuilder.equip(model, Weapons.byId("TrialistSword"))
+	local world = Instance.new("Folder")
+	model.Parent = world
+	local weapon = nil
+	for _, item in model:GetDescendants() do
+		if item:IsA("Motor6D") and item.Name == WeaponModels.motorName then
+			weapon = item
+		end
+	end
+
+	local record =
+		{ id = 2, model = model, kind = "Player", rig = "PlayerR15", weaponId = "TrialistSword", name = "Ren" }
+	local calls = {}
+	Replication.bind({
+		net = { on = function() end },
+		entities = {
+			get = function(id)
+				return if id == 2 then record else nil
+			end,
+		},
+		localId = function()
+			return 1
+		end,
+		locomotion = {
+			attach = function(animator, rig, options)
+				local withoutIK = table.clone(options or {})
+				withoutIK.footIK = false
+				return Locomotion.attach(animator, rig, withoutIK)
+			end,
+			destroy = Locomotion.destroy,
+			humanoidTracker = Locomotion.humanoidTracker,
+		},
+		choreo = Choreo,
+		clipLibrary = ClipLibrary,
+		trails = recorder("trails", calls),
+		smear = recorder("smear", calls),
+		shatter = recorder("shatter", calls),
+		sparks = recorder("sparks", calls),
+		telegraphs = recorder("telegraphs", calls),
+		outline = recorder("outline", calls),
+		switchRing = recorder("switchRing", calls),
+		digits = recorder("digits", calls),
+		hud = recorder("hud", calls),
+		systemLine = recorder("systemLine", calls),
+		sfx = recorder("sfx", calls),
+		camera = recorder("camera", calls),
+		weaponCategory = function()
+			return "OneHandedSword"
+		end,
+		trailToken = function()
+			return "TrailCyanWhite"
+		end,
+		positionOf = function()
+			return Vector3.zero
+		end,
+		schedule = function() end,
+	})
+	Replication.watch(record)
+	local animator = Choreo.get(model)
+	local drawId = ChoreoData.locomotion.clipPrefix .. ChoreoData.sheath.clips.draw
+	local live = {
+		record = record,
+		model = model,
+		animator = animator,
+		drawSteps = 0, -- steps that showed a Draw clip
+		firstDraw = nil :: number?, -- the step that first showed one
+		steps = 0,
+	}
+	-- One 60 Hz frame; records whether a Draw clip is on the rig.
+	function live.step()
+		clock += 1 / 60
+		live.steps += 1
+		animator:step(1 / 60)
+		for _, handle in animator.mixer:handles() do
+			if handle.clipId == drawId then
+				live.drawSteps += 1
+				live.firstDraw = live.firstDraw or live.steps
+				break
+			end
+		end
+	end
+	function live.inHand(): boolean
+		return weapon ~= nil and weapon.Part0 == parts.RightHand
+	end
+	function live.now(): number
+		return clock
+	end
+	function live.release()
+		Replication.unwatch(record)
+		Choreo.release(model)
+		Choreo.configure({
+			now = function()
+				return 0
+			end,
+		})
+	end
+	return live
+end
+
+describe("Replication on a remote player's rig", function()
+	it("an attack whose ActionStarted lands up to three frames behind its Drawn draw-cuts with no Draw", function()
+		local horizontal = ChoreoData.locomotion.clipPrefix .. "Horizontal"
+		for late = 0, 3 do
+			local live = liveRemote()
+			for _ = 1, 60 do
+				live.step()
+			end
+			expect(live.inHand()).toBe(false)
+			live.model:SetAttribute("Drawn", true)
+			for _ = 1, late do
+				live.step()
+			end
+			Replication.dispatch(
+				"ActionStarted",
+				{ entityId = 2, clipId = horizontal, serverTime = live.now() - 0.1, facing = { 0, 0, -1 } }
+			)
+			live.step()
+			-- The sword is in the hand on the Art's first posed frame, and no Draw ever played.
+			expect(live.inHand()).toBe(true)
+			for _ = 1, 90 do
+				live.step()
+			end
+			expect(live.drawSteps).toBe(0)
+			expect(live.inHand()).toBe(true)
+			live.release()
+		end
+	end)
+
+	it("with no attack, the Draw starts once the rise has held remoteDrawDelay", function()
+		local live = liveRemote()
+		for _ = 1, 60 do
+			live.step()
+		end
+		live.model:SetAttribute("Drawn", true)
+		for _ = 1, 60 do
+			live.step()
+		end
+		local delaySteps = math.ceil(ChoreoData.sheath.remoteDrawDelay * 60 - 1e-6)
+		expect(live.firstDraw).toBe(60 + delaySteps)
+		expect(live.inHand()).toBe(true)
+		live.release()
 	end)
 end)
