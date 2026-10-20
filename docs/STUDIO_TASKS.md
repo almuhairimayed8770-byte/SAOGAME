@@ -189,7 +189,7 @@ and the smoke scripts (D-039, D-038).
 34. [ ] **The legs move in Play.** Pull the latest `phase-0`, build, open the Playground and press **Play**. Walk,
     run (W) and sprint (Shift + W) on flat ground: the knees bend, each foot lifts and plants, and a planted foot
     does not slide. Stand still: the body breathes and the sword sits on the back.
-35. [ ] **A long sprint is not kicked.** Sprint in a large circle for 30 s. No "anomalous movement" line appears and
-    the session stays open.
+35. [x] **A long sprint is not kicked.** Sprint in a large circle for 30 s. No "anomalous movement" line appears and
+    the session stays open. (Done 2026-10-20 on 6d6eb74: 32 s, 766 studs, no anti-cheat line.)
 36. [ ] **The draw on lock-on.** Walk up to the kobold and lock on: Draw plays, the hand meets the hilt and the sword
     comes out; lock off and about 6 s later Sheathe puts it back.
