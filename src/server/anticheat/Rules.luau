@@ -4,8 +4,9 @@
 	and is tested under Lune without an engine.
 
 	- allowedDistance: how far a fighter may legitimately travel in one sample interval. The sprint
-	  cap (combat.maxSpeedStudsPerSecond) always applies over the interval, plus whatever lag credit
-	  the caller passes. Mid-Art the Art's rootMotion plus combat.rootMotionSlack is added; mid-Dodge
+	  cap (combat.maxSpeedStudsPerSecond) times combat.speedMargin always applies over the interval,
+	  plus whatever lag credit the caller passes (D-052: physics and replication carry an honest root
+	  a little past the cap in some samples, and with no margin a long sprint drained the credit). Mid-Art the Art's rootMotion plus combat.rootMotionSlack is added; mid-Dodge
 	  combat.dodgeDistance is added. Only the horizontal plane is judged (the engine owns falling,
 	  and the kill volume owns the rim).
 	- maxCredit / nextCredit: the section 17 lag budget (combat.lagAllowance) as a per-player credit
@@ -14,7 +15,8 @@
 	  ahead of the last; it does not accumulate, so over many samples an honest root travels at most
 	  the cap over the elapsed time plus one lag. The credit is spent by a sample that travels past
 	  its allowance without credit and refills only when a sample travels less, never above
-	  maxCredit, so a sustained walk over the cap drains it within a few samples and is flagged.
+	  maxCredit, so a sustained walk over the cap times the margin drains it within a few samples
+	  and is flagged, while an honest sprint refills it on every sample by the margin's share.
 	- evaluate: compares a sampled delta with its allowance. Inside the allowance nothing happens; a
 	  delta beyond combat.teleportFlagDistance is a teleport anomaly weighted by how many
 	  teleport distances the unexplained part (delta minus allowance) spans, at least one and
@@ -55,6 +57,7 @@ export type RecordLike = {
 --- The combat numbers the rules read (tests pass their own table).
 export type CombatLike = {
 	maxSpeedStudsPerSecond: number,
+	speedMargin: number, -- tolerance on the sprint cap per sample (D-052)
 	lagAllowance: number, -- seconds of replication lag; the sprint cap over it is the lag credit (section 17)
 	rootMotionSlack: number,
 	dodgeDistance: number,
@@ -119,7 +122,8 @@ function Rules.allowedDistance(
 	artRootMotion: number?,
 	credit: number?
 ): number
-	local allowed = combat.maxSpeedStudsPerSecond * math.max(interval, 0) + math.max(credit or 0, 0)
+	local allowed = combat.maxSpeedStudsPerSecond * combat.speedMargin * math.max(interval, 0)
+		+ math.max(credit or 0, 0)
 	local state = record.state :: string
 	if STATE_ART[state] then
 		local motion = artRootMotion

@@ -28,6 +28,14 @@
 	that looks like "rbxassetid://..." plays as a Roblox AnimationTrack on the same layer with the
 	matching AnimationPriority, so hand-authored clips can replace data clips later.
 
+	The engine's Animator (the default player character carries one under its Humanoid) puts
+	every joint's Transform back to rest in its animation step, which runs after RenderStepped
+	and before PreSimulation, even with no AnimationTrack playing. So on a rig that has one, the
+	pose written by the step is written again on PreSimulation every frame, and that write is the
+	one physics and the next rendered frame see (D-053, measured in Play on the user's PC: a
+	RenderStepped or PreAnimation write read back as rest in Heartbeat, a PreSimulation write
+	held). A rig without an Animator (the RigBuilder rigs) keeps its writes.
+
 	The engine surface (clocks, camera, frame signals) is one small table that tests replace with
 	Choreo.configure; the logic underneath is the Lune-tested Mixer.
 ]]
@@ -88,6 +96,8 @@ export type Engine = {
 	cameraPosition: () -> Vector3?,
 	renderStepped: { Connect: (self: any, fn: (dt: number) -> ()) -> any },
 	heartbeat: { Connect: (self: any, fn: (dt: number) -> ()) -> any },
+	-- Fires after the engine's animation step; nil where the engine has none (Lune).
+	preSimulation: { Connect: (self: any, fn: (dt: number) -> ()) -> any }?,
 	connect: (instance: Instance, eventName: string, fn: (...any) -> ()) -> any,
 }
 
@@ -119,6 +129,7 @@ local engine: Engine = {
 	end,
 	renderStepped = RunService.RenderStepped :: any,
 	heartbeat = RunService.Heartbeat :: any,
+	preSimulation = (RunService :: any).PreSimulation,
 	connect = function(instance: Instance, eventName: string, fn: (...any) -> ()): any
 		local ok, result = pcall(function()
 			return ((instance :: any)[eventName] :: RBXScriptSignal):Connect(fn)
@@ -146,12 +157,25 @@ end
 -- Animator
 -- ---------------------------------------------------------------------------------------------
 
+-- True when the engine animates the rig: an Animator under its Humanoid or AnimationController.
+-- That Animator puts every joint back to rest each frame after RenderStepped (D-053).
+local function engineAnimates(model: Model): boolean
+	for _, className in { "Humanoid", "AnimationController" } do
+		local host = model:FindFirstChildOfClass(className)
+		if host ~= nil and host:FindFirstChildOfClass("Animator") ~= nil then
+			return true
+		end
+	end
+	return false
+end
+
 -- Name -> joint (Motor6D or AnimationConstraint). Rebuilt on the next step whenever a joint
 -- arrives or leaves, so a rig whose joints replicate after the animator attached still animates.
 -- A pinned name's new joint is put at rest at once.
 local function rebuildMotors(self: any)
 	self.motors = Joints.map(self.model)
 	self.motorsDirty = false
+	self.engineAnimated = engineAnimates(self.model)
 	for name in self.pinned do
 		local joint = self.motors[name]
 		if joint ~= nil then
@@ -161,18 +185,22 @@ local function rebuildMotors(self: any)
 end
 
 -- Writes the blended offsets to the joints' Transform; joints that stopped being keyed return to
--- rest. A pinned joint is skipped, so it returns to rest too and stays there. The two touched sets
+-- rest. A pinned joint is skipped, so it returns to rest too and stays there. Every written
+-- Transform is kept in `pose` for the PreSimulation rewrite (reapplyPose). The two touched sets
 -- are reused frame to frame (no per-frame table on RenderStepped).
 local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 	local motors = self.motors
 	local pinned: { [string]: boolean } = self.pinned
 	local touched: { [string]: boolean } = self.touchedScratch
+	local pose: { [string]: CFrame } = self.pose
 	table.clear(touched)
 	if not self.rbxActive then
 		for name, offset in offsets do
 			local motor = motors[name]
 			if motor ~= nil and not pinned[name] then
-				motor.Transform = ClipSampler.toCFrame(offset)
+				local transform = ClipSampler.toCFrame(offset)
+				motor.Transform = transform
+				pose[name] = transform
 				touched[name] = true
 			end
 		end
@@ -183,6 +211,7 @@ local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 			if motor ~= nil then
 				motor.Transform = CFrame.identity
 			end
+			pose[name] = nil
 		end
 	end
 	self.touchedScratch = self.touched
@@ -448,12 +477,15 @@ function AnimatorClass.pin(self: any, name: string, pinned: boolean)
 	if pinned then
 		Joints.setTransform(joint :: any, CFrame.identity)
 		self.touched[name] = nil
+		self.pose[name] = nil
 		return
 	end
 	local offset = if self.rbxActive then nil else self.mixer:lastOffsets()[name]
 	if offset ~= nil then
-		Joints.setTransform(joint :: any, ClipSampler.toCFrame(offset))
+		local transform = ClipSampler.toCFrame(offset)
+		Joints.setTransform(joint :: any, transform)
 		self.touched[name] = true
+		self.pose[name] = transform
 	end
 end
 
@@ -569,6 +601,8 @@ local function newAnimator(model: Model): any
 		pinned = {} :: { [string]: boolean },
 		touched = {} :: { [string]: boolean },
 		touchedScratch = {} :: { [string]: boolean },
+		pose = {} :: { [string]: CFrame }, -- the Transform last written per joint name
+		engineAnimated = false, -- an engine Animator resets the rig each frame (D-053)
 		stepHooks = {} :: { (dt: number) -> () },
 		rootDelta = Vector3.zero,
 		rbxTracks = {} :: { [any]: AnimationTrack },
@@ -589,14 +623,14 @@ local function newAnimator(model: Model): any
 	-- replicated rig streams in part by part, and the engine can rebuild its joints (a respawn, a
 	-- scale change). Any joint of either kind arriving or leaving rescans the map on the next step.
 	local function onDescendantAdded(descendant: Instance)
-		if Joints.isJoint(descendant) then
+		if Joints.isJoint(descendant) or descendant:IsA("Animator") then
 			self.motorsDirty = true
 		elseif descendant.Name == DEFAULT_ANIMATE_SCRIPT and descendant:IsA("LuaSourceContainer") then
 			descendant:Destroy()
 		end
 	end
 	local function onDescendantRemoving(descendant: Instance)
-		if Joints.isJoint(descendant) then
+		if Joints.isJoint(descendant) or descendant:IsA("Animator") then
 			self.motorsDirty = true
 		end
 	end
@@ -621,6 +655,23 @@ local function newAnimator(model: Model): any
 	end
 	self:step(0)
 	return self
+end
+
+-- Writes the rig's last pose again, after the engine's Animator put it back to rest (D-053). Only
+-- a rig the engine animates needs it; a pinned joint stays at rest. Runs on PreSimulation for
+-- every rig, whatever its update rate, since the Animator resets every frame.
+local function reapplyPose(self: any)
+	if self.destroyed or not self.engineAnimated or self.rbxActive then
+		return
+	end
+	local motors = self.motors
+	local pinned: { [string]: boolean } = self.pinned
+	for name, transform in self.pose :: { [string]: CFrame } do
+		local motor = motors[name]
+		if motor ~= nil and not pinned[name] then
+			motor.Transform = transform
+		end
+	end
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -682,6 +733,17 @@ local function start()
 			end
 		end
 	end)
+	local preSimulation = engine.preSimulation
+	if preSimulation ~= nil then
+		preSimulation:Connect(function()
+			for index = 1, #ordered do
+				local animator = ordered[index]
+				if animator ~= nil then
+					reapplyPose(animator)
+				end
+			end
+		end)
+	end
 	engine.heartbeat:Connect(function(dt: number)
 		local limits = tier()
 		for index = 1, #ordered do

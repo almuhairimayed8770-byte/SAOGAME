@@ -21,7 +21,7 @@ an automated solo Play session); every line that still needs a person in Studio 
 | Server | EntityService, CombatService (DamageMath, HitSweep with the per-sample blade overlap and the arc-following sweep D-010 / D-042 / D-044, the section 17 request checks including the quick-slot check), EnemyService with Brain / Charger / Brute AI, PlaygroundService, AntiCheatService (+ anticheat Rules), world builders (RigBuilder, WeaponBuilder, PlaygroundBuilder, PlaygroundLayout) and CharacterReady (D-046), `Main.server.luau` | `tests/server/*` (with the hit matrix, D-045), `tests/smoke/*.smoke.luau` (six, all pass on the owner's PC) |
 | Tools and docs | `Capture.client.luau` (gate shot prompts), the ClipLab (`places/ClipLab.project.json`, `ClipLab.server.luau`, `ClipLab.client.luau`, `ReviewMarkers`), the PoseEditor Studio plugin (`tools/PoseEditor`) with `Serialize` / `Session`, `tools/pose-server.luau`, `tools/assets.luau`, `tools/smoke.sh`, `tools/animation-review.luau`, `tools/hit-matrix.luau`, `tools/build-plugin.sh`, `data/dev.luau`, this docs set | `tests/tools/*` |
 
-Suite at the time of writing: `lune run tests/run.luau` 1044 passed, 0 failed, 77 spec files. `lune run tools/validate.luau`:
+Suite at the time of writing: `lune run tests/run.luau` 1051 passed, 0 failed, 77 spec files. `lune run tools/validate.luau`:
 25 validators, 0 problems; the clips validator prints one warning for the 160 later-phase clips (66 Arts, 65 enemy
 attacks, 29 boss attacks) that are not authored yet and are outside the Phase 0 scope (D-015).
 `tools/animation-review.luau` flags no review-rule finding on the 64 clips (9 attacks); the hand-filled columns are
@@ -105,6 +105,25 @@ Run over Remote Control: `tools/smoke.sh` (all six smokes) and a solo Play sessi
   checks the handoff, the sheathed set against the body and the pull along the sheath. The rigs and combat smokes check
   the scabbard and `Drawn`.
 
+## Play-test on the owner's PC (2026-10-20)
+
+A real Play session on build 927dbed, driven through Studio's own assistant connection over Remote Control, with the
+game window rendering. What it found and what changed:
+
+- **The character never moved its limbs in Play.** Every joint read at rest on RenderStepped and Heartbeat, so the feet
+  stayed flat and slid at the body's speed (walk 7.5, run 16, sprint 24 studs a second, no lift). The character's
+  engine `Animator` puts every joint back to rest after RenderStepped, even with no track playing; a Transform written
+  on PreSimulation holds, and with the Animator removed Choreo's own pose showed. Choreo now writes the pose again on
+  PreSimulation for any rig with an Animator (D-053). The Lune runs and the ClipLab never saw it: neither has one.
+- **An honest sprint was kicked.** After 15 s at exactly the cap the anti-cheat had 12 flags such as 6.5 studs against
+  6.4 allowed and kicked. The speed check now allows the cap times 1.1 (D-052).
+- **Frame rate:** 59.9 fps standing and running (the frame cap is 60; p95 17.6 ms, max 18.7 ms), render CPU 1.7 to
+  1.8 ms, GPU 0.5 to 0.6 ms, with the enemies 66+ studs away. Memory read 2.7 GB, the whole Studio process.
+- **The sheath** sits where it should and turns rigidly with the body, but on this avatar the grip and guard reach up
+  to 0.16 stud into the head box and into the hat brim; the mount move under way fixes that.
+- Still to check in Play once both fixes are in: the legs pose and the feet lift, a long sprint is not flagged, and the
+  draw on lock-on (STUDIO_TASKS items 34 to 36).
+
 ## Known review items for the Studio pass
 
 - The sheathed sword at 0.25x in the ClipLab: Draw and Sheathe (the hand meets the hilt at 0.22 s and 0.42 s; the last
@@ -137,15 +156,15 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 | --- | --- |
 | The 20-second fight: six beats on every attack, the parry sparks, the kill shatters | Needs the owner's recording (`fight-boar-kobold.mp4`) |
 | The server registered every hit | **Met** in the hit matrix (every window, both enemies, real fight distances, four frame phases; D-045) and in `combat.smoke` in Studio; the recording shows it again as a digit per hit |
-| 60 fps in Studio | Needs Play mode with the window rendering: read **View > Stats** while recording (a scripted Play session does not render, so it cannot measure this) |
-| All tests green | **Met** (1044 tests, 25 validators, six smokes in Studio, CI) |
+| 60 fps in Studio | **Partly met**: 59.9 fps in Play with the window rendering on the owner's PC (2026-10-20, frame cap 60, p95 17.6 ms), standing and running with the enemies 66+ studs away; still to read during the recorded fight (**View > Stats**) |
+| All tests green | **Met** (1051 tests, 25 validators, six smokes in Studio, CI) |
 
 | Line | State | Evidence / what is missing |
 | --- | --- | --- |
-| CI is green: StyLua, Selene, Lune tests, data validators, naming blocklist, `rojo build` | **Met** | GitHub Actions run 39095436348 on `phase-0` (open it from the repository's Actions tab) (format, Selene with the real Roblox std, 1044 tests, 25 validators, the review-report check, the game, both places and the plugin build). `tools/lint.sh --offline` reproduces every step except Selene's Roblox-only lints, which need the API dump; those run only in CI. `aftman.toml` pins the tool versions. |
+| CI is green: StyLua, Selene, Lune tests, data validators, naming blocklist, `rojo build` | **Met** | GitHub Actions run 39115883162 on `phase-0` (open it from the repository's Actions tab) (format, Selene with the real Roblox std, 1044 tests, 25 validators, the review-report check, the game, both places and the plugin build). `tools/lint.sh --offline` reproduces every step except Selene's Roblox-only lints, which need the API dump; those run only in CI. `aftman.toml` pins the tool versions. |
 | Every new clip is in `docs/ANIMATION_REVIEW.md` with the six beats marked present and the hit-stop tier noted | **Met** (generated), hand columns empty | All 64 clips are in the table; 9 attacks show the six beats and a tier. The three hand-filled columns need the ClipLab pass in Studio. |
 | A recorded clip for every new Art, enemy and boss phase exists in `docs/clips/` and was watched at 0.25x | **Needs the owner's recordings** | `docs/clips/phase-0/README.md` lists the ten files the Capture panel prompts for. None recorded yet; each is reviewed frame by frame once it is in the repository. |
-| No T-pose, A-pose, frozen rig, popping limb or sliding foot appears in any clip | **Needs the owner's recordings** | Judged from the recordings. Remote rigs now walk (Replication drives their locomotion) and the root motor name matches the live R15 rig (D-016), the two defects a reviewer would have seen first. |
+| No T-pose, A-pose, frozen rig, popping limb or sliding foot appears in any clip | **Needs the owner's recordings** | Judged from the recordings. Before D-053 the local character stood frozen in Play with its feet sliding (the engine's Animator reset every pose); the Play re-check is STUDIO_TASKS item 34. Remote rigs now walk (Replication drives their locomotion) and the root motor name matches the live R15 rig (D-016), the two defects a reviewer would have seen first. |
 | Every enemy attack has a wind-up of at least 0.3 s with a colored telegraph that reads from behind | **Met in data**, seen in the recordings | `enemies.luau` wind-ups (boar 0.6 s, kobold 1.0 s) and the clips validator's Anticipation-covers-windUp check pass; Telegraphs FX exist. |
 | The server rejects a scripted client that spams Arts, teleports, or reports its own hits | **Met** | `CombatService` validates every request (section 17 list, including the quick slot), `AntiCheatService` + `anticheat/Rules` and the Net rate limits have Lune specs; clients never send hits (the server sweeps). In Studio on the owner's PC: `combat.smoke` refuses 20 Art repeats while locked (one hit lands) and a forged request with a target field, and no client remote is named for hits or damage; `playground.smoke` shadow-flags and then kicks a teleporting stand-in. The smokes drive the same request checks the remotes call, from the server. |
 | Part count, draw calls, server heartbeat and memory are measured in the Playground and within section 16 | **Partly met** | Part count and server frame time measured and well inside the targets (table below). Client fps, draw calls and client memory need Play mode with the game window rendering, read by hand while recording. |
@@ -159,12 +178,12 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 
 | Measure | Target | Measured | Where / how |
 | --- | --- | --- | --- |
-| Frame rate, mid-range PC, 8 players + 30 enemies on screen | 60 fps | | Studio play test, View > Stats > Summary (verify) |
+| Frame rate, mid-range PC, 8 players + 30 enemies on screen | 60 fps | 59.9 fps with one player and the five Playground enemies 66+ studs away (p95 17.6 ms, max 18.7 ms; the frame cap is 60), 2026-10-20; the 8 + 30 case is still to measure | Play on the owner's PC with the window rendering, client frame times read every RenderStepped; then View > Stats > Summary (verify) in a full test |
 | Frame rate, 2020 phone | 30 fps | | device test |
 | Parts loaded | under 60,000 | 1,158 BaseParts in workspace (Stats.PrimitivesCount max 1,173) | `tools/smoke.sh perf` on the owner's PC, 2026-10-18: 8 stand-ins with swords, 60 enemies, server only |
-| Draw calls | under 1,500 | | MicroProfiler (Ctrl+F6) render thread (verify) |
+| Draw calls | under 1,500 | not exposed to scripts; render CPU 1.67 to 1.80 ms, GPU 0.51 to 0.57 ms per frame in the same Play test | MicroProfiler (Ctrl+F6) render thread (verify) |
 | Server heartbeat with 8 players and 60 enemies | under 12 ms | p95 2.72 ms, mean 1.68 ms, max 8.27 ms (timed server work per frame over 1,198 frames, 59.9 steps/s); Stats.HeartbeatTime p95 0.62 ms. With the stand-ins idle: p95 1.77 ms. Rerun after the sub-sample cap rose to 12 (D-044): p95 2.01 ms | `tools/smoke.sh perf` on the owner's PC, 2026-10-18: 8 registered stand-ins swinging Arts back to back (142 Arts, 565 hits on enemies; the arc sweep of D-044 included), 60 enemies winding up and striking (94 hits on the stand-ins), server only. Recheck with real players in a test server (F9 > Server > ServerJobs) |
-| Memory, PC | under 1.2 GB | not yet: 1,909 MB is the whole Studio process in a Run session, not a server or client | read a client in Play mode (View > Stats > Memory) or a live server |
+| Memory, PC | under 1.2 GB | not yet: 1,909 MB (Run) and 2,709 to 2,751 MB (Play, 2026-10-20) are the whole Studio process, server and client together | read a client in Play mode (View > Stats > Memory) or a live server |
 | Memory, mobile | under 600 MB | | device test |
 
 ## Next three tasks

@@ -5,12 +5,12 @@
 
 	Every combat.anticheatSampleInterval seconds (stepped from Heartbeat, never task.wait) the service
 	reads a watched player's root position through EntityService and judges the horizontal distance
-	since the last sample against Rules.allowedDistance: the sprint cap over the interval, plus the
-	running Art's rootMotion and combat.rootMotionSlack mid-Art (CombatService.currentArt says which
-	Art; without CombatService the weapon category's largest Art is assumed), plus
-	combat.dodgeDistance mid-Dodge, plus the player's lag credit. The interval before a sample is
-	covered by whichever of the previous and current states is more permissive, so an Art that ends
-	between samples is not punished. The lag credit is the combat.lagAllowance budget spent once,
+	since the last sample against Rules.allowedDistance: the sprint cap times combat.speedMargin over
+	the interval (D-052), plus the running Art's rootMotion and combat.rootMotionSlack mid-Art
+	(CombatService.currentArt says which Art; without CombatService the weapon category's largest
+	Art is assumed), plus combat.dodgeDistance mid-Dodge, plus the player's lag credit. The interval
+	before a sample is covered by whichever of the previous and current states is more permissive,
+	so an Art that ends between samples is not punished. The lag credit is the combat.lagAllowance budget spent once,
 	not per sample (Rules.maxCredit / Rules.nextCredit): it starts full, a sample that travels past
 	its allowance without credit spends it, a sample that travels less refills it, so replication
 	jitter never flags an honest sprinter while a sustained walk over the cap is flagged within a

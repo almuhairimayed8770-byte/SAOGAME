@@ -24,7 +24,7 @@ src/server/
   services/CombatService       Art/basic/guard/dodge requests, timelines, hit sweep, damage, parry
   services/EnemyService        spawning, 20 Hz AI tick, threat, telegraphs, enemy strikes
   services/PlaygroundService   Playground spawn tables, player loadout, respawns
-  services/AntiCheatService    speed/teleport/timing checks, Net abuse policy, shadow flag
+  services/AntiCheatService    speed/teleport/timing checks (sprint cap x speedMargin, D-052), Net abuse policy, shadow flag
   combat/DamageMath.luau       pure damage, crit, gauge and guard math (Lune-tested)
   combat/HitSweep.luau         overlap-tests the blade and casts along its arc per damage window (D-042, D-044);
                                never across a jumped root (D-048); only damageable targets count (D-049)
@@ -115,7 +115,9 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
   plus `Weapon` (RightHand -> Weapon). On current Studio builds a player character carries the 15
   body joints as `AnimationConstraint`s (Avatar Joint Upgrade) and only `Weapon` as a Motor6D; the
   part-built enemy rigs are all Motor6Ds. Every reader goes through `choreo/Joints.luau`, which takes
-  both classes, reads part and offset frames from either, and writes only `Transform` (D-041). Boar and Kobold: see the file. `RigBuilder.build(rigId, name)` returns a Model with Motor6Ds whose `C0`/`C1` come from
+  both classes, reads part and offset frames from either, and writes only `Transform` (D-041).
+  The character's engine `Animator` puts every joint back to rest after RenderStepped, so Choreo
+  writes the pose again on PreSimulation for any rig that has one (D-053). Boar and Kobold: see the file. `RigBuilder.build(rigId, name)` returns a Model with Motor6Ds whose `C0`/`C1` come from
   the rest pose, with a `WeaponGrip` attachment on the grip part and `TrailStart`/`TrailEnd`
   attachments on the weapon part.
 - Weapons: `WeaponBuilder.build(weaponDef)` returns a Model named `Weapon` with a `Handle`/blade

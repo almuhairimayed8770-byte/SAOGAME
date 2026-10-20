@@ -21,9 +21,12 @@
 	- root motion: walking plus the longest path any player clip's root motion carries the body in
 	  the span (read at dev.luau groundClearance.sampleHz, every frame of the 0.25x review);
 	- the dodge: walking plus dodgeDistance over dodgeDuration;
-	- the anti-cheat: what it lets a body travel in one of its samples (anticheatSampleInterval)
-	  with its full lag credit, plus a dodge or the largest in-scope Art's rootMotion with
-	  rootMotionSlack, over that sample and the lag.
+	- the anti-cheat: what it lets a body travel in one of its samples (anticheatSampleInterval) at
+	  the sprint cap times speedMargin, with its full lag credit, plus a dodge or the largest
+	  in-scope Art's rootMotion with rootMotionSlack, over that sample and the lag.
+	speedMargin is the speed check's tolerance on the sprint cap (D-052): at least 1, so an honest
+	sprint at the cap is never judged past it, and at most MAX_SPEED_MARGIN, so the check still
+	catches a body much faster than the cap.
 	A move the anti-cheat calls a teleport must never be swept across, so the farthest the sweep
 	follows the root over one anti-cheat sample (the speed over the sample, or one frame if that is
 	longer, plus the full credit) stays under teleportFlagDistance.
@@ -38,6 +41,8 @@ type Context = {
 
 -- The widest step that still guarantees a pass-through touches a sample, in hit radii.
 local MAX_STEP_IN_RADII = 2
+-- The largest tolerance the speed check may put on the sprint cap (D-052).
+local MAX_SPEED_MARGIN = 1.25
 
 local PLAYER_CLIPS = "src/shared/clips/player"
 
@@ -141,7 +146,18 @@ return function(ctx: Context): { string }
 	if not marginOk then
 		problem(("sweepRootSpeedMargin must be a number, 1 or more (got %s)"):format(tostring(margin)))
 	end
-	local sourcesOk = positive("maxSpeedStudsPerSecond")
+	local speedMargin = combat.speedMargin
+	local speedMarginOk = isNumber(speedMargin) and speedMargin >= 1 and speedMargin <= MAX_SPEED_MARGIN
+	if not speedMarginOk then
+		problem(
+			("speedMargin must be a number from 1 to %s: the speed check's tolerance on the sprint cap (got %s)"):format(
+				tostring(MAX_SPEED_MARGIN),
+				tostring(speedMargin)
+			)
+		)
+	end
+	local sourcesOk = speedMarginOk
+		and positive("maxSpeedStudsPerSecond")
 		and positive("dodgeDistance")
 		and positive("dodgeDuration")
 		and positive("anticheatSampleInterval")
@@ -195,7 +211,7 @@ return function(ctx: Context): { string }
 	end
 	local interval = combat.anticheatSampleInterval
 	local burst = math.max(combat.dodgeDistance, largestArt + combat.rootMotionSlack)
-	local allowed = combat.maxSpeedStudsPerSecond * (interval + lag) + burst
+	local allowed = combat.maxSpeedStudsPerSecond * combat.speedMargin * (interval + lag) + burst
 	table.insert(sources, { name = "the anti-cheat allowance", speed = allowed / (interval + lag) })
 
 	local honest, honestName = 0, ""

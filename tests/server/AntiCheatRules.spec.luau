@@ -8,15 +8,19 @@ local Playground = Harness.load("src/shared/data/playground")
 
 local interval = Combat.anticheatSampleInterval
 local cap = Combat.maxSpeedStudsPerSecond
+-- The speed check's tolerance on the cap (D-052): a sample may travel the cap times this.
+local margin = Combat.speedMargin
 -- The full lag credit: the sprint cap over the section 17 lag budget, spent once rather than per sample.
 local credit = cap * Combat.lagAllowance
--- The sprint allowance over `seconds` with a full credit: the cap over the time plus the credit.
+-- The sprint allowance over `seconds` with a full credit: the cap and its margin over the time plus the credit.
 local function allowance(seconds: number): number
-	return cap * seconds + credit
+	return cap * margin * seconds + credit
 end
 -- One sample's allowance without credit, and with a full one.
-local base = cap * interval
+local base = cap * margin * interval
 local sprint = allowance(interval)
+-- What an honest sprint at exactly the cap travels in one sample.
+local honest = cap * interval
 
 local function flag(at: number, weight: number?)
 	return { at = at, weight = weight or 1, reason = "test" }
@@ -31,21 +35,27 @@ local function flags(count: number, at: number, weight: number?)
 end
 
 describe("Rules.allowedDistance", function()
-	it("outside any action the allowance is the sprint cap over the interval, plus the credit passed", function()
-		expect(Rules.allowedDistance(interval, { state = "Idle" }, Combat)).toBeCloseTo(base, 1e-9)
-		expect(Rules.allowedDistance(interval, { state = "Moving" }, Combat)).toBeCloseTo(base, 1e-9)
-		expect(Rules.allowedDistance(interval, { state = "Guard" }, Combat)).toBeCloseTo(base, 1e-9)
-		expect(Rules.allowedDistance(interval, { state = "Stagger" }, Combat)).toBeCloseTo(base, 1e-9)
-		expect(Rules.allowedDistance(1, { state = "Idle" }, Combat)).toBeCloseTo(cap, 1e-9)
-		-- The lag credit is added once, whatever the interval: it is not a per-second bonus.
-		expect(Rules.allowedDistance(interval, { state = "Idle" }, Combat, nil, credit)).toBeCloseTo(sprint, 1e-9)
-		expect(Rules.allowedDistance(1, { state = "Idle" }, Combat, nil, credit)).toBeCloseTo(allowance(1), 1e-9)
-		expect(Rules.allowedDistance(interval, { state = "Idle" }, Combat, nil, 1)).toBeCloseTo(base + 1, 1e-9)
-		-- The lag budget is real: the client sprints at exactly the cap and replication jitters.
-		expect(Combat.lagAllowance).toBeGreaterThan(0)
-		expect(Rules.maxCredit(Combat)).toBeCloseTo(credit, 1e-9)
-		expect(Rules.maxCredit(Combat)).toBeGreaterThan(0)
-	end)
+	it(
+		"outside any action the allowance is the sprint cap and its margin over the interval, plus the credit passed",
+		function()
+			expect(Rules.allowedDistance(interval, { state = "Idle" }, Combat)).toBeCloseTo(base, 1e-9)
+			expect(Rules.allowedDistance(interval, { state = "Moving" }, Combat)).toBeCloseTo(base, 1e-9)
+			expect(Rules.allowedDistance(interval, { state = "Guard" }, Combat)).toBeCloseTo(base, 1e-9)
+			expect(Rules.allowedDistance(interval, { state = "Stagger" }, Combat)).toBeCloseTo(base, 1e-9)
+			expect(Rules.allowedDistance(1, { state = "Idle" }, Combat)).toBeCloseTo(cap * margin, 1e-9)
+			-- The margin is a tolerance for jitter, not a second sprint: a tenth over the cap at most.
+			expect(margin).toBeGreaterThan(1)
+			expect(margin).toBeLessThanOrEqual(1.1)
+			-- The lag credit is added once, whatever the interval: it is not a per-second bonus.
+			expect(Rules.allowedDistance(interval, { state = "Idle" }, Combat, nil, credit)).toBeCloseTo(sprint, 1e-9)
+			expect(Rules.allowedDistance(1, { state = "Idle" }, Combat, nil, credit)).toBeCloseTo(allowance(1), 1e-9)
+			expect(Rules.allowedDistance(interval, { state = "Idle" }, Combat, nil, 1)).toBeCloseTo(base + 1, 1e-9)
+			-- The lag budget is real: the client sprints at exactly the cap and replication jitters.
+			expect(Combat.lagAllowance).toBeGreaterThan(0)
+			expect(Rules.maxCredit(Combat)).toBeCloseTo(credit, 1e-9)
+			expect(Rules.maxCredit(Combat)).toBeGreaterThan(0)
+		end
+	)
 
 	it("mid-Art adds the known Art's rootMotion plus the slack", function()
 		local leap = Arts.byId("OneHandedSword.SonicLeap")
@@ -145,6 +155,12 @@ describe("Rules lag credit", function()
 			table.insert(deltas, if index % 2 == 1 then base - jitter else base + jitter)
 		end
 		expect((play(deltas))).toBe(0)
+		-- The same at exactly the cap, where the margin refills the credit on every sample.
+		deltas = {}
+		for index = 1, 400 do
+			table.insert(deltas, if index % 2 == 1 then honest - jitter else honest + jitter)
+		end
+		expect((play(deltas))).toBe(0)
 		-- The credit starts full, so a first reading that catches up on a lag from before is fine too.
 		expect((play({ base + jitter, base, base, base - jitter, base + jitter }))).toBe(0)
 	end)
@@ -170,6 +186,108 @@ describe("Rules lag credit", function()
 		expect(flagged).toBe(0)
 		-- Refilling against the bare sprint term would have emptied the credit after the Art.
 		expect(Rules.nextCredit(credit, base + grant, base + 20, Combat)).toBeCloseTo(credit, 1e-9)
+	end)
+
+	it("an honest sprint read a little past the cap on every sample is never flagged (D-052)", function()
+		-- The Studio play-test kick: a 15 s sprint at the cap, read 6.5 studs over 16 frames (allowed
+		-- 6.4 with no margin), 1.6 % past the cap on every sample.
+		local frames = 16 / 60
+		local over = 6.5 / (cap * frames)
+		expect(over).toBeLessThan(margin)
+		local deltas = {}
+		for _ = 1, 240 do
+			table.insert(deltas, honest * over)
+		end
+		expect((play(deltas))).toBe(0)
+		-- With no margin the credit drains and every reading after it is flagged: the old kick.
+		local noMargin = table.clone(Combat)
+		noMargin.speedMargin = 1
+		local left = Rules.maxCredit(noMargin)
+		local flagged = 0
+		local bare = cap * interval
+		for _, delta in deltas do
+			if Rules.evaluate(delta, bare + left, noMargin).kind ~= "ok" then
+				flagged += 1
+			end
+			left = Rules.nextCredit(left, bare, delta, noMargin)
+		end
+		expect(flagged).toBeGreaterThanOrEqual(Combat.anomalyKickThreshold)
+	end)
+
+	-- Ten minutes of an honest sprint at exactly the cap, sampled on 15 to 17 frame boundaries. The
+	-- server's reading of the root lags it by `lagAt(index)` seconds; every `stallEvery` samples the
+	-- reading freezes for one sample, then catches up. Returns the heaviest window weight, how many
+	-- samples were flagged, and whether the player was ever kicked.
+	local function sprintRun(lagAt: (index: number) -> number, stallEvery: number): (number, number, boolean)
+		local list = {}
+		local left = Rules.maxCredit(Combat)
+		local truth, lastReading, now = 0, 0, 0
+		local kicked, worst, flagged = false, 0, 0
+		local frames = { 16, 15, 17, 16, 17, 15 } -- a fixed shuffle of the sampler's step
+		for index = 1, 2400 do
+			local dt = frames[index % #frames + 1] / 60
+			now += dt
+			truth += cap * dt
+			local reading = if index % stallEvery == 0 then lastReading else truth - cap * lagAt(index)
+			local delta = reading - lastReading
+			lastReading = reading
+			local allowed = cap * margin * dt
+			local verdict = Rules.evaluate(delta, allowed + left, Combat)
+			left = Rules.nextCredit(left, allowed, delta, Combat)
+			if verdict.kind ~= "ok" then
+				flagged += 1
+				table.insert(list, { at = now, weight = verdict.weight, reason = verdict.reason })
+			end
+			Rules.prune(list, now, Combat)
+			worst = math.max(worst, Rules.weight(list, now, Combat))
+			kicked = kicked or Rules.shouldKick(list, now, Combat)
+		end
+		return worst, flagged, kicked
+	end
+
+	-- A fixed-seed generator, so every run is the same.
+	local function generator(seed: number): () -> number
+		local state = seed
+		return function(): number
+			state = (state * 1103515245 + 12345) % 2147483648
+			return state / 2147483648
+		end
+	end
+
+	it("an honest sprint with a typical connection is never flagged, a stall at most once", function()
+		-- The lag drifts between 30 and 120 ms; a 0.25 s stall every 30 s.
+		local random = generator(12345)
+		local lag = 0.075
+		local worst, flagged, kicked = sprintRun(function()
+			lag = math.clamp(lag + (random() - 0.5) * 0.02, 0.03, 0.12)
+			return lag
+		end, 120)
+		expect(kicked).toBe(false)
+		expect(flagged).toBeLessThanOrEqual(2400 // 120)
+		expect(worst).toBeLessThanOrEqual(1)
+	end)
+
+	it("an honest sprint with the worst connection the lag budget allows is never kicked", function()
+		-- Every reading lags by anything from 0 to the whole lag budget, independently, and a 0.25 s
+		-- stall comes every 10 s: harsher than any connection that can play.
+		local random = generator(777)
+		local worst, _, kicked = sprintRun(function()
+			return random() * Combat.lagAllowance
+		end, 40)
+		expect(kicked).toBe(false)
+		expect(worst).toBeLessThan(Combat.anomalyKickThreshold)
+	end)
+
+	it("a body over the cap times the margin is flagged on every sample once the credit drains", function()
+		local deltas = {}
+		for _ = 1, 120 do
+			table.insert(deltas, honest * (margin + 0.1))
+		end
+		local flagged, first = play(deltas)
+		expect(first).toBeTruthy()
+		expect(flagged).toBe(#deltas - (first :: number) + 1)
+		-- At 1.2x the cap it takes a few seconds at most to start flagging every sample.
+		expect((first :: number) * interval).toBeLessThan(5)
 	end)
 end)
 

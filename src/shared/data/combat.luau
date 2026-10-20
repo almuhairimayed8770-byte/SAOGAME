@@ -153,6 +153,12 @@ local Combat = {
 	-- Anti-cheat basics (section 17)
 	artRequestTolerance = 0.05, -- seconds early an Art may be requested before its lock ends
 	maxSpeedStudsPerSecond = 24, -- sprint cap outside root motion
+	-- The speed check's tolerance on the sprint cap (D-052): a sample may travel the cap times this
+	-- over its interval. Physics and replication carry an honest root a little past the cap in some
+	-- samples, and at no margin the lag credit drains on a long sprint and every reading past the cap
+	-- is flagged (an honest 15 s sprint in Studio was kicked, 6.5 studs against 6.4). A body over the
+	-- cap times the margin still drains the credit and is flagged on every sample after.
+	speedMargin = 1.1,
 	rootMotionSlack = 4, -- extra studs allowed while an Art carries the body
 	teleportFlagDistance = 40, -- horizontal studs between two anti-cheat samples; beyond this is a teleport, not over-speed
 	anomalyKickThreshold = 12, -- flags inside the window before a kick

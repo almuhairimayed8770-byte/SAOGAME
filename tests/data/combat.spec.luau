@@ -159,6 +159,11 @@ describe("combat data: the server hit sweep", function()
 		expect(mentions(runValidator({ maxSpeedStudsPerSecond = 40 }), "root motion")).toBe(true)
 		expect(mentions(runValidator({ dodgeDistance = 20 }), "(104.00 studs a second, the dodge)")).toBe(true)
 		expect(mentions(runValidator({ rootMotionSlack = 20 }), "the anti-cheat allowance")).toBe(true)
+		-- The speed check's margin on the cap (D-052) stays between 1 and 1.25.
+		expect(mentions(runValidator({ speedMargin = 0.95 }), "speedMargin must be a number from 1 to 1.25")).toBe(true)
+		expect(mentions(runValidator({ speedMargin = 1.5 }), "speedMargin must be a number from 1 to 1.25")).toBe(true)
+		expect(mentions(runValidator({ speedMargin = "1.1" }), "speedMargin must be a number")).toBe(true)
+		expect(runValidator({ speedMargin = 1.25 })).toEqual({})
 		-- Every player clip counts: a back dodge played twice as fast is faster travel.
 		local DodgeBack = Harness.load("src/shared/clips/player/OneHandedSword/DodgeBack")
 		local quick = table.clone(DodgeBack)

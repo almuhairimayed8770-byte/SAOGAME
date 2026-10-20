@@ -183,3 +183,13 @@ and the smoke scripts (D-039, D-038).
     sword sheathes about 6 s later.
 33. [ ] **Footsteps, once real step sounds exist:** standing still is silent; walking, running and sprinting make one
     step per foot plant, drawn or sheathed; an idle enemy makes none.
+
+## I. Play check after the pose rewrite and the sprint margin (D-052, D-053)
+
+34. [ ] **The legs move in Play.** Pull the latest `phase-0`, build, open the Playground and press **Play**. Walk,
+    run (W) and sprint (Shift + W) on flat ground: the knees bend, each foot lifts and plants, and a planted foot
+    does not slide. Stand still: the body breathes and the sword sits on the back.
+35. [ ] **A long sprint is not kicked.** Sprint in a large circle for 30 s. No "anomalous movement" line appears and
+    the session stays open.
+36. [ ] **The draw on lock-on.** Walk up to the kobold and lock on: Draw plays, the hand meets the hilt and the sword
+    comes out; lock off and about 6 s later Sheathe puts it back.

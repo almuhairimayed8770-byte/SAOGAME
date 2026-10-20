@@ -40,9 +40,10 @@ local CollectionService = Harness.game():GetService("CollectionService")
 local INTERVAL = Combat.anticheatSampleInterval
 -- The full lag credit: the sprint cap over the section 17 lag budget, spent once rather than per sample.
 local CREDIT = Combat.maxSpeedStudsPerSecond * Combat.lagAllowance
--- The sprint allowance over `seconds` with a full credit: the cap over the time plus the credit.
+-- The sprint allowance over `seconds` with a full credit: the cap and its margin (D-052) over the
+-- time plus the credit.
 local function allowance(seconds: number): number
-	return Combat.maxSpeedStudsPerSecond * seconds + CREDIT
+	return Combat.maxSpeedStudsPerSecond * Combat.speedMargin * seconds + CREDIT
 end
 -- One sample at exactly the sprint cap, and the allowance of a sample with a full credit.
 local CAP = Combat.maxSpeedStudsPerSecond * INTERVAL

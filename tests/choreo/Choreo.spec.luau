@@ -29,7 +29,11 @@ end
 
 local renderStepped = fakeSignal()
 local heartbeat = fakeSignal()
-Harness.stubService("RunService", { RenderStepped = renderStepped, Heartbeat = heartbeat })
+local preSimulation = fakeSignal()
+Harness.stubService(
+	"RunService",
+	{ RenderStepped = renderStepped, Heartbeat = heartbeat, PreSimulation = preSimulation }
+)
 
 local Choreo = Harness.load("src/client/choreo/Choreo")
 local ChoreoData = Harness.load("src/shared/data/choreo")
@@ -460,6 +464,122 @@ describe("Choreo", function()
 		Choreo.setLocalModel(nil)
 		Choreo.release(near)
 		Choreo.release(far)
+	end)
+
+	-- The engine's Animator puts every joint back to rest after RenderStepped (D-053): stand in
+	-- for it by resetting every joint of the model.
+	local function engineReset(model)
+		for _, descendant in model:GetDescendants() do
+			if descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint") then
+				descendant.Transform = CFrame.identity
+			end
+		end
+	end
+
+	it("on a rig with an engine Animator, PreSimulation writes the pose again after the reset", function()
+		camera = Vector3.zero
+		local model = buildUpgradedCharacter(true)
+		local animatorInstance = Instance.new("Animator")
+		animatorInstance.Parent = model:FindFirstChildOfClass("Humanoid")
+		local animator = Choreo.get(model)
+		Choreo.setLocalModel(model)
+		animator:play(GUARD, { blendIn = 0 })
+		renderStepped:Fire(FRAME)
+		local shoulder = jointOf(model, "RightShoulder")
+		local hip = jointOf(model, "LeftHip")
+		local posedShoulder, posedHip = shoulder.Transform, hip.Transform
+		expect(posedShoulder == CFrame.identity).toBe(false)
+
+		engineReset(model)
+		expect(shoulder.Transform == CFrame.identity).toBe(true)
+		preSimulation:Fire(FRAME)
+		expect(shoulder.Transform == posedShoulder).toBe(true)
+		expect(hip.Transform == posedHip).toBe(true)
+
+		-- Frame after frame, whatever the step wrote last is what PreSimulation puts back.
+		for _ = 1, 5 do
+			renderStepped:Fire(FRAME)
+			local posed = shoulder.Transform
+			engineReset(model)
+			preSimulation:Fire(FRAME)
+			expect(shoulder.Transform == posed).toBe(true)
+		end
+
+		-- A pinned joint stays at rest through the rewrite; unpinned, it is written again.
+		local weapon = motorOf(model, "Weapon")
+		animator:setProcedural("test", { Weapon = { pos = { 0, 0, 0 }, rot = { 5, 0, 0 } } }, 1)
+		renderStepped:Fire(FRAME)
+		expect(weapon.Transform == CFrame.identity).toBe(false)
+		animator:pin("Weapon", true)
+		engineReset(model)
+		preSimulation:Fire(FRAME)
+		expect(weapon.Transform == CFrame.identity).toBe(true)
+		animator:pin("Weapon", false)
+		local unpinned = weapon.Transform
+		expect(unpinned == CFrame.identity).toBe(false)
+		engineReset(model)
+		preSimulation:Fire(FRAME)
+		expect(weapon.Transform == unpinned).toBe(true)
+
+		Choreo.setLocalModel(nil)
+		Choreo.release(model)
+		-- A released rig is left alone.
+		engineReset(model)
+		preSimulation:Fire(FRAME)
+		expect(shoulder.Transform == CFrame.identity).toBe(true)
+	end)
+
+	it("a rig without an engine Animator is not written on PreSimulation", function()
+		camera = Vector3.zero
+		local model = buildRig("Kobold", Vector3.zero)
+		local animator = Choreo.get(model)
+		animator:step(FRAME)
+		local any = nil
+		for _, descendant in model:GetDescendants() do
+			if descendant:IsA("Motor6D") and descendant.Transform ~= CFrame.identity then
+				any = descendant
+				break
+			end
+		end
+		expect(any).toBeTruthy()
+		local marker = CFrame.new(0, 2, 0)
+		any.Transform = marker
+		preSimulation:Fire(FRAME)
+		expect(any.Transform == marker).toBe(true)
+		Choreo.release(model)
+	end)
+
+	it("an Animator that arrives after the animator attached turns the rewrite on", function()
+		local fire, restore = recordConnections()
+		camera = Vector3.zero
+		local model = buildUpgradedCharacter(true)
+		Choreo.get(model)
+		Choreo.setLocalModel(model)
+		renderStepped:Fire(FRAME)
+		local shoulder = jointOf(model, "RightShoulder")
+		engineReset(model)
+		preSimulation:Fire(FRAME)
+		expect(shoulder.Transform == CFrame.identity).toBe(true) -- no Animator yet: nothing resets it in the engine
+
+		local animatorInstance = Instance.new("Animator")
+		animatorInstance.Parent = model:FindFirstChildOfClass("Humanoid")
+		fire(model, "DescendantAdded", animatorInstance)
+		renderStepped:Fire(FRAME)
+		local posed = shoulder.Transform
+		engineReset(model)
+		preSimulation:Fire(FRAME)
+		expect(shoulder.Transform == posed).toBe(true)
+
+		-- And it turns off again when the Animator leaves.
+		fire(model, "DescendantRemoving", animatorInstance)
+		animatorInstance.Parent = nil
+		renderStepped:Fire(FRAME)
+		engineReset(model)
+		preSimulation:Fire(FRAME)
+		expect(shoulder.Transform == CFrame.identity).toBe(true)
+		Choreo.setLocalModel(nil)
+		Choreo.release(model)
+		restore()
 	end)
 
 	it("setQuality switches the tier and rejects unknown ones", function()
