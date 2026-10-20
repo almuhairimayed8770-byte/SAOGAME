@@ -387,7 +387,7 @@ function Glint.play(position: Vector3, size: string, token: string?)
 	slot.lastTransparency = -1
 	slot.anchor.CFrame = CFrame.new(position)
 	local span = found.studs * config().canvasScale
-	slot.gui.Size = UDim2.new(span, 0, span, 0)
+	slot.gui.Size = UDim2.fromScale(span, span)
 	layEdges(slot, tier.glintEdgeScale)
 	layArms(slot, Glint.coreColor(token))
 	applyPose(slot, poseOf(found, 0))
