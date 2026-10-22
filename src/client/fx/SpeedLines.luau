@@ -10,7 +10,8 @@
 	edges (inEasing), hold, then pull back out to the edges as the lines fade (outEasing), all
 	inside the kind's seconds (a Dodge is the dodge's 0.25 s). The count is the kind's count times
 	the quality tier's speedLineScale. The lines are thin and change no screen-wide brightness, so
-	they are never a flash and never ask the flash budget.
+	they are never a flash and never ask the flash budget. A line whose whole pixels did not move
+	since the last frame is not written again, so the hold builds nothing.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -48,6 +49,10 @@ type Line = {
 	frame: Frame,
 	angle: number,
 	reach: number,
+	-- The whole pixels last laid (x, y off the center, length); math.huge before the first.
+	laidX: number,
+	laidY: number,
+	laidLength: number,
 }
 
 local SpeedLines = {}
@@ -62,6 +67,9 @@ local kindName = Accents.speedLines.defaultKind
 local started = 0
 local active = false
 local viewport = Vector2.new(Accents.speedLines.referenceScreen.width, Accents.speedLines.referenceScreen.height)
+local laidTransparency = -1 -- the transparency last written to the shown lines
+-- The pose the step loop works in, reused frame to frame.
+local poseScratch: Pose = { reachIn = 0, reachOut = 0, fade = 1, done = false }
 
 local function kindOf(name: string): (string, Accents.SpeedLineKind)
 	local config = Accents.speedLines
@@ -121,7 +129,10 @@ local function ensureGui(): ScreenGui
 			ramp.Transparency = fade
 			ramp.Parent = frame
 			frame.Parent = container
-			table.insert(pool, { frame = frame, angle = 0, reach = 0 })
+			table.insert(
+				pool,
+				{ frame = frame, angle = 0, reach = 0, laidX = math.huge, laidY = math.huge, laidLength = math.huge }
+			)
 		end
 		gui = screen
 	end
@@ -155,27 +166,36 @@ function SpeedLines.span(angle: number, reach: number, screen: Vector2, overshoo
 	return inside + (edge - inside) * reach, edge * overshoot
 end
 
---- The look `elapsed` seconds into a play of `kind` (pure).
-function SpeedLines.pose(kind: string, elapsed: number): Pose
+-- SpeedLines.pose written into `into` (the step loop reuses one table).
+local function poseInto(kind: string, elapsed: number, into: Pose): Pose
 	local config = Accents.speedLines
 	local _, found = kindOf(kind)
 	local total = found.seconds
 	-- 1e-6: a clock summed frame by frame lands a hair short of the frame count it reached.
 	if elapsed + 1e-6 >= total then
-		return { reachIn = 1, reachOut = 1, fade = 1, done = true }
+		into.reachIn, into.reachOut, into.fade, into.done = 1, 1, 1, true
+		return into
 	end
 	local rushIn = Accents.seconds(found.inFrames)
 	local pullOut = Accents.seconds(found.outFrames)
 	local outStart = total - pullOut
 	if rushIn > 0 and elapsed < rushIn then
 		local eased = Easing.evaluate(config.inEasing, math.max(elapsed, 0) / rushIn)
-		return { reachIn = eased, reachOut = 0, fade = 1 - eased, done = false }
+		into.reachIn, into.reachOut, into.fade, into.done = eased, 0, 1 - eased, false
+		return into
 	end
 	if elapsed >= outStart and pullOut > 0 then
 		local eased = Easing.evaluate(config.outEasing, (elapsed - outStart) / pullOut)
-		return { reachIn = 1, reachOut = eased, fade = eased, done = false }
+		into.reachIn, into.reachOut, into.fade, into.done = 1, eased, eased, false
+		return into
 	end
-	return { reachIn = 1, reachOut = 0, fade = 0, done = false }
+	into.reachIn, into.reachOut, into.fade, into.done = 1, 0, 0, false
+	return into
+end
+
+--- The look `elapsed` seconds into a play of `kind` (pure).
+function SpeedLines.pose(kind: string, elapsed: number): Pose
+	return poseInto(kind, elapsed, { reachIn = 0, reachOut = 0, fade = 1, done = false })
 end
 
 --- Seconds a play of `kind` lasts.
@@ -190,9 +210,13 @@ function SpeedLines.count(kind: string, tier: string): number
 	return math.max(0, math.floor(found.count * Accents.tier(tier).speedLineScale + 0.5))
 end
 
+-- Lays the shown lines for a pose. UDim offsets are whole pixels, so a line whose rounded place
+-- and length did not move is not written (no UDim2 built), nor is an unchanged transparency.
 local function lay(pose: Pose)
 	local _, config = kindOf(kindName)
 	local transparency = config.transparency + (1 - config.transparency) * pose.fade
+	local fadeChanged = transparency ~= laidTransparency
+	laidTransparency = transparency
 	for index = 1, shown do
 		local line = pool[index]
 		local reach = config.startReach + (line.reach - config.startReach) * pose.reachIn
@@ -201,13 +225,20 @@ local function lay(pose: Pose)
 		local radians = math.rad(line.angle)
 		local middle = (inner + outer) * 0.5
 		local frame = line.frame
-		-- UDim offsets are whole pixels.
 		local x = math.floor(math.cos(radians) * middle + 0.5)
 		local y = math.floor(math.sin(radians) * middle + 0.5)
-		frame.Position = UDim2.new(0.5, x, 0.5, y)
-		frame.Size = UDim2.fromOffset(math.floor(math.max(outer - inner, 0) + 0.5), config.thicknessPixels)
-		frame.Rotation = line.angle
-		frame.BackgroundTransparency = transparency
+		if x ~= line.laidX or y ~= line.laidY then
+			line.laidX, line.laidY = x, y
+			frame.Position = UDim2.new(0.5, x, 0.5, y)
+		end
+		local length = math.floor(math.max(outer - inner, 0) + 0.5)
+		if length ~= line.laidLength then
+			line.laidLength = length
+			frame.Size = UDim2.fromOffset(length, config.thicknessPixels)
+		end
+		if fadeChanged then
+			frame.BackgroundTransparency = transparency
+		end
 	end
 end
 
@@ -232,7 +263,7 @@ local function step()
 		stop()
 		return
 	end
-	local pose = SpeedLines.pose(kindName, deps.now() - started)
+	local pose = poseInto(kindName, deps.now() - started, poseScratch)
 	if pose.done then
 		stop()
 		return
@@ -262,9 +293,12 @@ function SpeedLines.play(kind: string)
 		end
 		line.angle = spacing * (index - 1) + random:NextNumber(-1, 1) * config.angleJitter * spacing
 		line.reach = random:NextNumber(config.innerReach.min, config.innerReach.max)
+		line.laidX, line.laidY, line.laidLength = math.huge, math.huge, math.huge
+		line.frame.Rotation = line.angle
 		line.frame.Visible = true
 	end
-	lay(SpeedLines.pose(name, 0))
+	laidTransparency = -1
+	lay(poseInto(name, 0, poseScratch))
 	screen.Enabled = true
 	if stopLoop == nil then
 		stopLoop = deps.onStep(function()

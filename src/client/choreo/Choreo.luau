@@ -101,6 +101,9 @@ export type Engine = {
 	-- Fires after the engine's animation step; nil where the engine has none (Lune).
 	preSimulation: { Connect: (self: any, fn: (dt: number) -> ()) -> any }?,
 	connect: (instance: Instance, eventName: string, fn: (...any) -> ()) -> any,
+	-- Runs `fn` at the next resumption point (task.defer): after the engine finishes the change
+	-- that fired the current handler, such as parenting the default Animate script.
+	defer: (fn: () -> ()) -> (),
 }
 
 type Rate = "Full" | "Distant" | "Far"
@@ -137,6 +140,9 @@ local engine: Engine = {
 			return ((instance :: any)[eventName] :: RBXScriptSignal):Connect(fn)
 		end)
 		return if ok then result else nil
+	end,
+	defer = function(fn: () -> ())
+		task.defer(fn)
 	end,
 }
 
@@ -245,20 +251,53 @@ local function rbxAnimator(model: Model): Instance
 	return created
 end
 
--- Stops whatever the engine's default scripts were playing so Transform writes are not overwritten.
-local function silenceDefaultAnimations(model: Model)
-	local animate = model:FindFirstChild(DEFAULT_ANIMATE_SCRIPT)
-	if animate ~= nil and animate:IsA("LuaSourceContainer") then
-		animate:Destroy()
-	end
-	local humanoid = model:FindFirstChildOfClass("Humanoid")
+-- Stops every track the engine's Animator is playing that Choreo did not start (the default
+-- Animate script's), so Transform writes are not overwritten.
+local function stopForeignTracks(self: any)
+	local humanoid = self.model:FindFirstChildOfClass("Humanoid")
 	local animator = if humanoid then humanoid:FindFirstChildOfClass("Animator") else nil
-	if animator ~= nil then
-		pcall(function()
-			for _, track in (animator :: any):GetPlayingAnimationTracks() do
+	if animator == nil then
+		return
+	end
+	local ours: { [any]: AnimationTrack } = self.rbxTracks
+	pcall(function()
+		for _, track in (animator :: any):GetPlayingAnimationTracks() do
+			local own = false
+			for _, playing in ours do
+				if playing == track then
+					own = true
+					break
+				end
+			end
+			if not own then
 				track:Stop(0)
 			end
-		end)
+		end
+	end)
+end
+
+-- Silences the default Animate script: disabled and its tracks stopped at once, so not one frame
+-- of the default animations plays, then destroyed at the next resumption point. Destroying it
+-- right away, while the engine is still parenting it (it fires DescendantAdded, and the character
+-- can be handed to Choreo mid-parent), makes Studio print "Something unexpectedly tried to set
+-- the parent of Animate to NULL".
+local function silenceAnimate(self: any, animate: Instance)
+	pcall(function()
+		(animate :: any).Enabled = false
+	end)
+	stopForeignTracks(self)
+	engine.defer(function()
+		animate:Destroy()
+	end)
+end
+
+-- Stops whatever the engine's default scripts were playing so Transform writes are not overwritten.
+local function silenceDefaultAnimations(self: any)
+	local animate = self.model:FindFirstChild(DEFAULT_ANIMATE_SCRIPT)
+	if animate ~= nil and animate:IsA("LuaSourceContainer") then
+		silenceAnimate(self, animate)
+	else
+		stopForeignTracks(self)
 	end
 end
 
@@ -637,7 +676,7 @@ local function newAnimator(model: Model): any
 		destroyed = false,
 	}, AnimatorClass)
 
-	silenceDefaultAnimations(model)
+	silenceDefaultAnimations(self)
 	rebuildMotors(self)
 
 	-- The character's joints (and the engine's Animate script) can arrive after the model does: a
@@ -647,7 +686,7 @@ local function newAnimator(model: Model): any
 		if Joints.isJoint(descendant) or descendant:IsA("Animator") then
 			self.motorsDirty = true
 		elseif descendant.Name == DEFAULT_ANIMATE_SCRIPT and descendant:IsA("LuaSourceContainer") then
-			descendant:Destroy()
+			silenceAnimate(self, descendant)
 		end
 	end
 	local function onDescendantRemoving(descendant: Instance)

@@ -192,15 +192,32 @@ end)
 
 -- Trails.swingDirection: the module samples each tracked blade tip (TrailEnd) into a short ring
 -- on its own Heartbeat; under Lune there is no Heartbeat, so the spec calls Trails.sample() once
--- per fake frame after moving the weapon part by hand.
+-- per fake frame after moving the weapon part by hand. The module reads the part's Position and
+-- the tip's WorldPosition, which the engine derives from the frames and Lune does not, so sampleAt
+-- puts them where the engine would. Rigs other spec files attached are forgotten first
+-- (Trails.reset).
 local accents = Harness.load("src/shared/data/accents")
 
 local SAMPLES = accents.swing.samples
+Trails.reset()
 
--- Places the weapon part and records one sample.
-local function sampleAt(weapon: BasePart, frame: CFrame)
+-- Places the weapon part (its tip where the engine puts it) and records one sample, seen from
+-- `viewer` (the origin, so the rig is near, unless given).
+local function sampleAt(weapon: BasePart, frame: CFrame, viewer: Vector3?)
 	weapon.CFrame = frame
-	Trails.sample()
+	weapon.Position = frame.Position
+	local tip = weapon:FindFirstChild("TrailEnd")
+	if tip ~= nil and tip:IsA("Attachment") then
+		tip.WorldPosition = (frame * tip.CFrame).Position
+	end
+	Engine.setViewer(function()
+		return viewer or Vector3.zero
+	end)
+	local ok, err = pcall(Trails.sample)
+	Engine.setViewer(nil)
+	if not ok then
+		error(err, 0)
+	end
 end
 
 local function expectUnit(actual: Vector3?, expected: Vector3)
@@ -515,5 +532,105 @@ describe("Trails.swingDirection memory", function()
 			expect(Trails.swingDirection(model)).toBeNil()
 			Trails.detach(model)
 		end)
+	end)
+end)
+
+-- What a Heartbeat's sample costs: the tip's WorldPosition (no CFrame built), and only for rigs
+-- whose answer can matter: a swinging one, or an idle one within accents.swing.sampleDistance.
+describe("Trails.sample", function()
+	local function range(): number
+		return accents.swing.sampleDistance
+	end
+
+	it("reads the tip where the engine puts it (its WorldPosition), not a frame it builds", function()
+		local model, weapon = rig()
+		Trails.attach(model)
+		local tip = weapon:FindFirstChild("TrailEnd") :: Attachment
+		-- The part stays put; only the tip's world position moves (as a frame of a turning blade).
+		weapon.Position = Vector3.zero
+		Engine.setViewer(function()
+			return Vector3.zero
+		end)
+		local ok, err = pcall(function()
+			for step = 1, SAMPLES do
+				tip.WorldPosition = Vector3.new(0, 1, -step * 0.6)
+				Trails.sample()
+			end
+		end)
+		Engine.setViewer(nil)
+		if not ok then
+			error(err, 0)
+		end
+		expectUnit(Trails.swingDirection(model), Vector3.new(0, 0, -1))
+		Trails.detach(model)
+	end)
+
+	it("leaves an idle rig beyond the trail distance alone, and samples one that swings there", function()
+		local model, weapon = rig()
+		Trails.attach(model)
+		local far = range() + 20
+		for step = 1, SAMPLES do
+			sampleAt(weapon, CFrame.new(far + step, 0, 0))
+		end
+		expect(Trails.swingDirection(model)).toBeNil()
+		-- Within the distance it is sampled while idle.
+		for step = 1, SAMPLES do
+			sampleAt(weapon, CFrame.new(range() - 20 - step, 0, 0))
+		end
+		expectUnit(Trails.swingDirection(model), Vector3.new(-1, 0, 0))
+		-- Far again and swinging: sampled, whatever the distance.
+		Trails.setActive(model, true, "Art")
+		for step = 1, SAMPLES do
+			sampleAt(weapon, CFrame.new(far, step, 0))
+		end
+		expectUnit(Trails.swingDirection(model), Vector3.yAxis)
+		Trails.setActive(model, false, "Art")
+		Trails.detach(model)
+	end)
+
+	it("starts the ring over when a rig comes back in range: no chord across the gap", function()
+		local model, weapon = rig()
+		Trails.attach(model)
+		sampleAt(weapon, CFrame.new(0, 0, 0))
+		sampleAt(weapon, CFrame.new(0, 0, 1))
+		-- Away past the distance (not sampled), then back a few studs from where it left.
+		for _ = 1, SAMPLES do
+			sampleAt(weapon, CFrame.new(range() + 50, 0, 0))
+		end
+		sampleAt(weapon, CFrame.new(6, 0, 1))
+		expect(Trails.swingDirection(model)).toBeNil()
+		sampleAt(weapon, CFrame.new(6, 0, 3))
+		expectUnit(Trails.swingDirection(model), Vector3.zAxis)
+		Trails.detach(model)
+	end)
+
+	it("skips a weapon that left the world, and starts over when it is back", function()
+		local model, weapon = rig()
+		Trails.attach(model)
+		Trails.setActive(model, true, "Basic")
+		weapon.Parent = nil
+		for step = 1, SAMPLES do
+			sampleAt(weapon, CFrame.new(step, 0, 0))
+		end
+		expect(Trails.swingDirection(model)).toBeNil()
+		weapon.Parent = model
+		sampleAt(weapon, CFrame.new(0, 0, 0))
+		sampleAt(weapon, CFrame.new(0, 2, 0))
+		expectUnit(Trails.swingDirection(model), Vector3.yAxis)
+		Trails.setActive(model, false, "Basic")
+		Trails.detach(model)
+	end)
+
+	it("reset forgets every rig", function()
+		local model, weapon = rig()
+		Trails.setActive(model, true, "Art")
+		for step = 1, SAMPLES do
+			sampleAt(weapon, CFrame.new(step, 0, 0))
+		end
+		expect(Trails.swingDirection(model)).never.toBeNil()
+		Trails.reset()
+		expect(Trails.swingDirection(model)).toBeNil()
+		expect(Trails.tokenOf(model)).toBeNil()
+		expect(trailOf(weapon).Enabled).toBe(false)
 	end)
 end)

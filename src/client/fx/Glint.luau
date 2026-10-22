@@ -15,7 +15,8 @@
 	(UISizeConstraint, maxPixels times the current scale), so one by the camera never fills the
 	view: never a full-screen flash. Quality: the tier's glintEdgeScale scales the split-edge offset
 	and 0 skips the copies; at most the tier's `glints` play at once and past that the oldest is
-	reused. Every instance is pooled; nothing is created after the pool is full.
+	reused. Every instance is pooled; nothing is created after the pool is full. A frame that
+	leaves the star's size where it was (the hold) writes no size, so it builds nothing.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -66,6 +67,7 @@ type Slot = {
 	rotation: number,
 	active: boolean,
 	lastTransparency: number,
+	lastScale: number, -- the scale last sized; -1 before the first
 }
 
 local Glint = {}
@@ -77,6 +79,8 @@ local serial = 0
 local random = Random.new()
 local folder: Instance? = nil
 local taperSequence: NumberSequence? = nil
+-- The pose the step loop works in, reused frame to frame.
+local poseScratch: Pose = { scale = 1, rotation = 0, transparency = 0, done = false }
 
 local function config(): typeof(Accents.glint)
 	return Accents.glint
@@ -202,6 +206,7 @@ local function newSlot(): Slot
 		rotation = 0,
 		active = false,
 		lastTransparency = -1,
+		lastScale = -1,
 	}
 end
 
@@ -231,7 +236,8 @@ local function acquire(cap: number): Slot
 	return slot
 end
 
-local function poseOf(size: Accents.GlintSize, elapsed: number): Pose
+-- The pose `elapsed` seconds into a glint of `size`, written into `into`.
+local function poseOf(size: Accents.GlintSize, elapsed: number, into: Pose): Pose
 	local glint = config()
 	local punch = Accents.seconds(size.punchFrames)
 	local hold = Accents.seconds(size.holdFrames)
@@ -239,7 +245,8 @@ local function poseOf(size: Accents.GlintSize, elapsed: number): Pose
 	local total = Accents.seconds(size.punchFrames + size.holdFrames + size.fadeFrames)
 	-- 1e-6: a clock summed frame by frame lands a hair short of the frame count it reached.
 	if elapsed + 1e-6 >= total then
-		return { scale = size.endScale, rotation = size.turnDegrees, transparency = 1, done = true }
+		into.scale, into.rotation, into.transparency, into.done = size.endScale, size.turnDegrees, 1, true
+		return into
 	end
 	local scale = 1
 	local transparency = 0
@@ -252,7 +259,8 @@ local function poseOf(size: Accents.GlintSize, elapsed: number): Pose
 		transparency = eased
 	end
 	local turn = size.turnDegrees * Easing.evaluate(glint.turnEasing, math.clamp(elapsed / total, 0, 1))
-	return { scale = scale, rotation = turn, transparency = transparency, done = false }
+	into.scale, into.rotation, into.transparency, into.done = scale, turn, transparency, false
+	return into
 end
 
 local function setLayerTransparency(layer: Layer, transparency: number)
@@ -263,11 +271,13 @@ local function setLayerTransparency(layer: Layer, transparency: number)
 end
 
 local function applyPose(slot: Slot, pose: Pose)
-	local canvas = config().canvasScale
-	local fraction = pose.scale / canvas
-	slot.star.Size = UDim2.fromScale(fraction, fraction)
-	local pixels = slot.config.maxPixels * pose.scale
-	slot.cap.MaxSize = Vector2.new(pixels, pixels)
+	if pose.scale ~= slot.lastScale then
+		slot.lastScale = pose.scale
+		local fraction = pose.scale / config().canvasScale
+		slot.star.Size = UDim2.fromScale(fraction, fraction)
+		local pixels = slot.config.maxPixels * pose.scale
+		slot.cap.MaxSize = Vector2.new(pixels, pixels)
+	end
 	slot.star.Rotation = slot.rotation + pose.rotation
 	if pose.transparency ~= slot.lastTransparency then
 		slot.lastTransparency = pose.transparency
@@ -295,7 +305,7 @@ local function step()
 		if not slot.active then
 			continue
 		end
-		local pose = poseOf(slot.config, now - slot.started)
+		local pose = poseOf(slot.config, now - slot.started, poseScratch)
 		if pose.done then
 			hide(slot)
 			continue
@@ -353,7 +363,7 @@ end
 --- The glint's look `elapsed` seconds after it starts at a size (pure; the specs and the director read it).
 function Glint.pose(size: string, elapsed: number): Pose
 	local _, found = sizeOf(size)
-	return poseOf(found, elapsed)
+	return poseOf(found, elapsed, { scale = 1, rotation = 0, transparency = 0, done = false })
 end
 
 --- Seconds a glint of `size` lasts, punch to gone.
@@ -385,12 +395,13 @@ function Glint.play(position: Vector3, size: string, token: string?)
 	slot.rotation = random:NextNumber(-1, 1) * config().jitterDegrees
 	slot.active = true
 	slot.lastTransparency = -1
+	slot.lastScale = -1
 	slot.anchor.CFrame = CFrame.new(position)
 	local span = found.studs * config().canvasScale
 	slot.gui.Size = UDim2.fromScale(span, span)
 	layEdges(slot, tier.glintEdgeScale)
 	layArms(slot, Glint.coreColor(token))
-	applyPose(slot, poseOf(found, 0))
+	applyPose(slot, poseOf(found, 0, poseScratch))
 	slot.gui.Enabled = true
 	ensureLoop()
 end

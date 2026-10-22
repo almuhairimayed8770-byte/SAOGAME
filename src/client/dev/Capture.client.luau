@@ -9,7 +9,9 @@
 
 	A time-scale toggle (1x / 0.5x / 0.25x) slows every Choreo animator on this client and asks the
 	server (dev remote, dev places only) to publish the scale as a workspace attribute for anything
-	else that wants to honour it. No gameplay logic lives here.
+	else that wants to honour it. Hit FX and sounds keep running at 1x, so a slowed shot reviews
+	animation only; the panel says so next to the scale (Dev.timeScaleLabel). No gameplay logic
+	lives here.
 ]]
 
 local CollectionService = game:GetService("CollectionService")
@@ -211,7 +213,7 @@ local function refreshPanel()
 	local shot = currentShot()
 	notesLabel.Text = "See: " .. shot.notes
 	fileLabel.Text = "Save as " .. Dev.clipPath(shot.id)
-	scaleLabel.Text = ("Time scale %gx"):format(Steps[timeScaleIndex])
+	scaleLabel.Text = Dev.timeScaleLabel(Steps[timeScaleIndex])
 	if phase == "Done" then
 		statusLabel.Text = ("Shot done: %s"):format(Dev.clipPath(shot.id))
 	elseif phase == "Idle" then

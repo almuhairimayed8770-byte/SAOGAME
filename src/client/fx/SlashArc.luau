@@ -11,12 +11,15 @@
 	color and a narrower SystemWhite core. Widths taper from the apex to nothing at both points,
 	Texture is empty, FaceCamera is off and LightInfluence 0, so it reads as one flat shape. It
 	snaps on in one frame, holds, and wipes out from the trailing point to the leading one
-	(Transparency keyed along each beam over time); the core finishes its wipe first.
+	(Transparency keyed along each beam over time); the core finishes its wipe first. The wipe
+	front snaps to accents.slashArc.wipeSteps steps whose sequences are built once, so a frame
+	of the wipe assigns a prebuilt sequence (and only when the step moved) and builds nothing.
 
 	`line(position, tangent, size)` is the thin line along the blade's path across the hit for
 	Art final hits and kills: three straight camera-facing Beams through the hit point along the
 	tangent, a SystemWhite core and TrailRose and SystemCyan copies offset across the screen. It
-	grows out in a frame or two, holds, then thins to nothing.
+	grows out in a frame or two, holds, then thins to nothing. Its attachments are laid by
+	Position on a host with no turn, so a frame of it builds no CFrame either.
 
 	Neither is a full-screen flash. At most the tier's `arcs` crescents and `lines` lines play at
 	once; past that the oldest is reused. Every instance is pooled.
@@ -81,6 +84,8 @@ type Arc = {
 	started: number,
 	serial: number,
 	active: boolean,
+	outerStep: number, -- the wipe step the outer beams show; -1 before the first
+	innerStep: number,
 }
 
 type Line = {
@@ -89,13 +94,14 @@ type Line = {
 	starts: { Attachment },
 	ends: { Attachment },
 	offsets: { Vector3 }, -- each beam's offset off the hit point, across the screen
-	center: Vector3,
 	tangent: Vector3,
 	size: string,
 	config: Accents.LineSize,
 	started: number,
 	serial: number,
 	active: boolean,
+	laidLength: number, -- the pose last laid; -1 before the first
+	laidWidth: number,
 }
 
 local SlashArc = {}
@@ -107,6 +113,13 @@ local stopLoop: (() -> ())? = nil
 local serial = 0
 local arcFolder: Instance? = nil
 local lineFolder: Instance? = nil
+-- Transparency sequences per wipe step, built once: [layer][half][step + 1], layer 1 the outer
+-- (color) beams and 2 the inner (white) ones, half 1 the trailing half and 2 the leading one.
+local wipeCache: { { { NumberSequence } } }? = nil
+-- The slash line's Transparency: [1] the core, [2] the split-edge copies; built once.
+local lineFades: { NumberSequence }? = nil
+-- The pose each line is laid from, reused frame to frame.
+local linePoseScratch: LinePose = { length = 1, width = 1, done = false }
 
 local function unit(v: Vector3): Vector3?
 	local length = v.Magnitude
@@ -224,6 +237,8 @@ local function newArc(): Arc
 		started = 0,
 		serial = 0,
 		active = false,
+		outerStep = -1,
+		innerStep = -1,
 	}
 end
 
@@ -261,13 +276,14 @@ local function newLine(): Line
 		starts = starts,
 		ends = ends,
 		offsets = {},
-		center = Vector3.zero,
 		tangent = Vector3.xAxis,
 		size = name,
 		config = size,
 		started = 0,
 		serial = 0,
 		active = false,
+		laidLength = -1,
+		laidWidth = -1,
 	}
 end
 
@@ -326,12 +342,65 @@ local function halfSequence(from: number, to: number, front: number, base: numbe
 	return sequence(keys)
 end
 
-local function setArcTransparency(arc: Arc, outerFront: number, innerFront: number)
+-- The wipe front at `step` of accents.slashArc.wipeSteps (0 whole .. wipeSteps gone).
+local function stepFront(step: number): number
 	local config = Accents.slashArc
-	arc.outer[1].Transparency = halfSequence(0, 0.5, outerFront, config.outerTransparency)
-	arc.outer[2].Transparency = halfSequence(0.5, 1, outerFront, config.outerTransparency)
-	arc.inner[1].Transparency = halfSequence(0, 0.5, innerFront, config.innerTransparency)
-	arc.inner[2].Transparency = halfSequence(0.5, 1, innerFront, config.innerTransparency)
+	return -config.wipeSoftness + (1 + config.wipeSoftness) * step / math.max(1, config.wipeSteps)
+end
+
+local function ensureWipeCache(): { { { NumberSequence } } }
+	local cache = wipeCache
+	if cache == nil then
+		local config = Accents.slashArc
+		local built: { { { NumberSequence } } } = {}
+		for layer, base in { config.outerTransparency, config.innerTransparency } do
+			local halves: { { NumberSequence } } = {}
+			for half, range in { { 0, 0.5 }, { 0.5, 1 } } do
+				local list: { NumberSequence } = {}
+				for step = 0, math.max(1, config.wipeSteps) do
+					list[step + 1] = halfSequence(range[1], range[2], stepFront(step), base)
+				end
+				halves[half] = list
+			end
+			built[layer] = halves
+		end
+		wipeCache = built
+		cache = built
+	end
+	return cache :: { { { NumberSequence } } }
+end
+
+local function ensureLineFades(): { NumberSequence }
+	local fades = lineFades
+	if fades == nil then
+		local config = Accents.slashLine
+		local fade = config.endFade
+		local built: { NumberSequence } = {}
+		for index, base in { config.coreTransparency, config.edgeTransparency } do
+			built[index] = sequence({ { 0, 1 }, { fade, base }, { 1 - fade, base }, { 1, 1 } })
+		end
+		lineFades = built
+		fades = built
+	end
+	return fades :: { NumberSequence }
+end
+
+-- Shows each layer's prebuilt sequences for the steps its front snaps to; a layer whose step has
+-- not moved is left as it is (no write).
+local function setArcTransparency(arc: Arc, outerFront: number, innerFront: number)
+	local cache = ensureWipeCache()
+	local outerStep = SlashArc.wipeStep(outerFront)
+	local innerStep = SlashArc.wipeStep(innerFront)
+	if outerStep ~= arc.outerStep then
+		arc.outerStep = outerStep
+		arc.outer[1].Transparency = cache[1][1][outerStep + 1]
+		arc.outer[2].Transparency = cache[1][2][outerStep + 1]
+	end
+	if innerStep ~= arc.innerStep then
+		arc.innerStep = innerStep
+		arc.inner[1].Transparency = cache[2][1][innerStep + 1]
+		arc.inner[2].Transparency = cache[2][2][innerStep + 1]
+	end
 end
 
 local function hideArc(arc: Arc)
@@ -351,18 +420,48 @@ local function hideLine(line: Line)
 	end
 end
 
+-- Lays the line's beams for a pose. The host sits on the hit with no turn, so each end's place on
+-- it is its beam's offset off the hit plus or minus half the length along the tangent (Position:
+-- no CFrame built). A pose already laid is not written again.
 local function layLine(line: Line, pose: LinePose)
-	local half = line.config.length * pose.length * 0.5
+	if pose.length == line.laidLength and pose.width == line.laidWidth then
+		return
+	end
+	line.laidLength = pose.length
+	line.laidWidth = pose.width
+	local along = line.tangent * (line.config.length * pose.length * 0.5)
 	local width = line.config.width * pose.width
-	local origin = line.host.CFrame
 	for index, beam in line.beams do
 		local offset = line.offsets[index] or Vector3.zero
-		local center = line.center + offset
-		line.starts[index].CFrame = origin:ToObjectSpace(CFrame.new(center - line.tangent * half))
-		line.ends[index].CFrame = origin:ToObjectSpace(CFrame.new(center + line.tangent * half))
+		line.starts[index].Position = offset - along
+		line.ends[index].Position = offset + along
 		beam.Width0 = width
 		beam.Width1 = width
 	end
+end
+
+-- SlashArc.linePose written into `into` (the step loop reuses one table).
+local function linePoseInto(size: string, elapsed: number, into: LinePose): LinePose
+	local config = Accents.slashLine
+	local _, found = lineSize(size)
+	local grow = Accents.seconds(found.growFrames)
+	local hold = Accents.seconds(found.holdFrames)
+	local thin = Accents.seconds(found.thinFrames)
+	if elapsed + 1e-6 >= Accents.seconds(found.growFrames + found.holdFrames + found.thinFrames) then
+		into.length, into.width, into.done = 1, 0, true
+		return into
+	end
+	local length = 1
+	if grow > 0 and elapsed < grow then
+		local eased = Easing.evaluate(config.growEasing, math.max(elapsed, 0) / grow)
+		length = found.startLength + (1 - found.startLength) * eased
+	end
+	local width = 1
+	if elapsed >= grow + hold then
+		width = 1 - Easing.evaluate(config.thinEasing, (elapsed - grow - hold) / thin)
+	end
+	into.length, into.width, into.done = length, width, false
+	return into
 end
 
 local function step()
@@ -384,7 +483,7 @@ local function step()
 		if not line.active then
 			continue
 		end
-		local pose = SlashArc.linePose(line.size, now - line.started)
+		local pose = linePoseInto(line.size, now - line.started, linePoseScratch)
 		if pose.done then
 			hideLine(line)
 			continue
@@ -462,6 +561,16 @@ function SlashArc.transparencyAt(s: number, front: number, base: number): number
 	return base
 end
 
+--- The wipe step a front snaps to (0 whole .. accents.slashArc.wipeSteps gone) and that step's
+--- front (pure): the crescent shows the snapped front, never more than half a step off.
+function SlashArc.wipeStep(front: number): (number, number)
+	local config = Accents.slashArc
+	local steps = math.max(1, config.wipeSteps)
+	local raw = (front + config.wipeSoftness) / (1 + config.wipeSoftness) * steps
+	local step = math.clamp(math.floor(raw + 0.5), 0, steps)
+	return step, stepFront(step)
+end
+
 --- The wipe fronts (outer, inner) `elapsed` seconds into a crescent of `size`; nil once it is gone.
 function SlashArc.wipeFront(size: string, elapsed: number): (number?, number?)
 	local config = Accents.slashArc
@@ -491,24 +600,7 @@ end
 
 --- The slash line's length and width fractions `elapsed` seconds into a line of `size` (pure).
 function SlashArc.linePose(size: string, elapsed: number): LinePose
-	local config = Accents.slashLine
-	local _, found = lineSize(size)
-	local grow = Accents.seconds(found.growFrames)
-	local hold = Accents.seconds(found.holdFrames)
-	local thin = Accents.seconds(found.thinFrames)
-	if elapsed + 1e-6 >= Accents.seconds(found.growFrames + found.holdFrames + found.thinFrames) then
-		return { length = 1, width = 0, done = true }
-	end
-	local length = 1
-	if grow > 0 and elapsed < grow then
-		local eased = Easing.evaluate(config.growEasing, math.max(elapsed, 0) / grow)
-		length = found.startLength + (1 - found.startLength) * eased
-	end
-	local width = 1
-	if elapsed >= grow + hold then
-		width = 1 - Easing.evaluate(config.thinEasing, (elapsed - grow - hold) / thin)
-	end
-	return { length = length, width = width, done = false }
+	return linePoseInto(size, elapsed, { length = 1, width = 1, done = false })
 end
 
 --- Seconds a slash line of `size` lasts.
@@ -573,6 +665,8 @@ function SlashArc.play(position: Vector3, tangent: Vector3, normal: Vector3, tok
 		beam.Color = color
 	end
 	local front = -config.wipeSoftness
+	arc.outerStep = -1
+	arc.innerStep = -1
 	setArcTransparency(arc, front, front)
 	ensureLoop()
 end
@@ -594,8 +688,9 @@ function SlashArc.line(position: Vector3, tangent: Vector3, size: string)
 	line.config = found
 	line.started = deps.now()
 	line.active = true
-	line.center = position
 	line.tangent = tUnit
+	line.laidLength = -1
+	line.laidWidth = -1
 	line.host.CFrame = CFrame.new(position)
 
 	-- Across the screen: perpendicular to the line and to the view, so the copies split sideways.
@@ -613,13 +708,12 @@ function SlashArc.line(position: Vector3, tangent: Vector3, size: string)
 		table.insert(line.offsets, sideUnit * (found.edgeOffset * sign))
 	end
 
-	local fade = config.endFade
+	local fades = ensureLineFades()
 	for index, beam in line.beams do
-		local base = if index == 1 then config.coreTransparency else config.edgeTransparency
-		beam.Transparency = sequence({ { 0, 1 }, { fade, base }, { 1 - fade, base }, { 1, 1 } })
+		beam.Transparency = if index == 1 then fades[1] else fades[2]
 		beam.Enabled = index == 1 or tier.lineEdges
 	end
-	layLine(line, SlashArc.linePose(name, 0))
+	layLine(line, linePoseInto(name, 0, linePoseScratch))
 	ensureLoop()
 end
 
@@ -720,6 +814,8 @@ function SlashArc.start()
 	while #lines < mostLines do
 		table.insert(lines, newLine())
 	end
+	ensureWipeCache()
+	ensureLineFades()
 end
 
 return SlashArc

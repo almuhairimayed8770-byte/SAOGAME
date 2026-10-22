@@ -116,6 +116,7 @@ publishes its state as attributes on its Model (D-006):
 | `Level` | number | |
 | `ArtSlots` | string | players only: the quick-slot Art ids joined with commas, in slot order |
 | `Drawn` | boolean | players only (nil means false): true while the combat tag holds; clients move the sword between hand and back from it (D-050) |
+| `Elite` | boolean | enemies only: true on a spawn-time Elite variant (`EntityService.publish`, when `record.enemyDef.elite`), never set otherwise; `EntityTracker` reads it into `record.elite` (default false) and Replication picks the heavy shatter from it (D-079) |
 
 A hit dealt or taken marks `lastCombatAt` and `combatUntil`; an Art, a basic swing, a guard or a
 lock-on refreshes `combatUntil` only, and Art, PostMotion, Guard and a lock-on on a live target keep
@@ -395,6 +396,32 @@ the sweep.
   frame (D-095).
 - **`fx/Shatter.play(model, kind, weight?)`** plays `SfxPool.shatter` with the weight; a `Boss` kind always plays
   the boss shatter, and the two-argument call keeps the old behaviour.
+
+### After the merge (D-103 to D-111)
+
+- Choreo's Engine seam gains defer(fn) (default task.defer). It is used to destroy the default Animate after
+  disabling it and stopping the animator tracks Choreo did not start (silenceAnimate, at attach and from
+  DescendantAdded).
+- Locomotion keeps one jumpHandoff connection on animator.finished. Only the jump clip's own end hands over to Fall
+  (if still in Air); Land, a new Jump and destroy drop it.
+- Smear.restSize(part) returns the weapon size stored before a stretch (nil when untouched or reset), and
+  ImpactFrames draws a stretched sword at that size (Smear.restSize(part) or part.Size).
+- Trails.sample is gated by swinging or by distance (accents.swing.sampleDistance from Engine.viewerPosition()) and
+  reads tip.WorldPosition; Trails.reset() detaches every rig (only specs call it today).
+- SlashArc prebuilds its wipe Transparency sequences (wipeSteps + 1 per layer and half) and its two line fades on
+  start(); SlashArc.wipeStep(front) returns the snapped step and that step's front.
+- **Audio.** SfxPool.cue(name, position?, lateBy?) and Impact.dodge(model, isLocal, lateBy?). Replication's
+  ActionStarted passes lateOf(handle) = handle.time / handle.speed (nil when the clip started on time or is an
+  engine Animation) for remote dodges. Timed plays (playEndingAt) correct for task.delay frame slip; cue layers keep
+  their onset.
+- **Client input.** Main.client gates Tab (SwitchCallRequest) with ActionLogic.basicReady at
+  TrailingSend.gapOf("SwitchCallRequest") = 1/perSecond, so one-off presses are limited on the client to the server
+  bucket's refill rate, like BasicAttackRequest.
+- **Validators.** tools/validators/accents.luau also checks swing.memorySeconds (above the sample ring, below 1 s),
+  swing.snapFrames (a whole number ≥ 1, inside memorySeconds), slashArc.tilt (0 < maxDegrees, 0 < faceDegrees < 90,
+  90 - maxDegrees ≥ faceDegrees, 0 < minPlaneSine < 1), slashArc.wipeSteps (whole, ≥ 4 × the longest wipeFrames) and
+  swing.sampleDistance (> 0, reaching moments.accentRange and every row's range). tools/validators/impact.luau also
+  checks reduced.maxPerWindow (a whole number ≥ 1, costing fewer flashes than flash.maxPerWindow).
 
 ## Data tables (src/shared/data)
 

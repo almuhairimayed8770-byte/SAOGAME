@@ -217,6 +217,10 @@ local Accents = {
 		wipeEasing = "QuadOut",
 		wipeSoftness = 0.18, -- fraction of the crescent the wipe's soft edge spans
 		wipeKeys = 9, -- Transparency keypoints along each half while it wipes
+		-- The wipe front snaps to this many steps from whole to gone. Each step's Transparency
+		-- sequences are built once, so a wiping crescent builds nothing per frame; at least 4
+		-- steps per frame of the longest wipe, so every frame of the wipe still moves it.
+		wipeSteps = 32,
 		innerLead = 0.35, -- the white core finishes its wipe this fraction of the wipe early
 		hostSize = 0.2, -- studs; the invisible anchored part the attachments sit on
 		folderName = "FxSlashArcs",
@@ -329,6 +333,11 @@ local Accents = {
 		minTravel = 0.25, -- studs; under this the tip has not really moved and the answer is nil
 		maxTravel = 30, -- studs; over this the rig jumped (a respawn, a teleport) and the answer is nil
 		memorySeconds = 0.4,
+		-- Studs from the camera within which an idle blade's tip is sampled (a swinging one always
+		-- is): as far as any moment's accents show (moments.luau accentRange and every row's
+		-- range), so a far swing's snap still starts from the pose before it. Past it nothing reads
+		-- the ring, so it is not kept.
+		sampleDistance = 160,
 		-- A strike's snap (section 10 beat 2, the smear's frames): the tip's chord over this many
 		-- frames from the strike's first sample (TrailOn or a HitWindowOpen) is the swing's
 		-- direction, held for memorySeconds, so the overshoot and settle never turn it around.

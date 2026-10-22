@@ -83,9 +83,9 @@ export type Deps = {
 	digits: any,
 	hud: any,
 	systemLine: any,
-	sfx: any, -- SfxPool-like: play(name, position?), playLate(name, lateBy, position?), cue(name, position?), footstep(model, surface?), duck(db, seconds)
+	sfx: any, -- SfxPool-like: play(name, position?), playLate(name, lateBy, position?), cue(name, position?, lateBy?), footstep(model, surface?), duck(db, seconds)
 	-- Impact-like: hit(info) -> string, ownsHighlight(info) -> boolean, hiddenSeconds() -> number,
-	-- activation(model, clipId, token, isLocal, speed?, lateBy?), dodge(model, isLocal),
+	-- activation(model, clipId, token, isLocal, speed?, lateBy?), dodge(model, isLocal, lateBy?),
 	-- guardBreak(model, isLocal), guardRaise(model, isLocal), shatterCue(boss, heavy) -> string,
 	-- death(model?, position, boss, heavy)
 	impact: any,
@@ -176,7 +176,7 @@ local function clock(): number
 	return if fn ~= nil then fn() else os.clock()
 end
 
--- A player's or an Elite's death shatters heavier than a mob's (D-NEW: decision 8). An Elite is a
+-- A player's or an Elite's death shatters heavier than a mob's (D-079). An Elite is a
 -- record the tracker marks elite (a spawn-time Elite variant) or a def marked elite in enemies.luau.
 local function heavyDeath(record: any, isLocal: boolean): boolean
 	if isLocal then
@@ -245,6 +245,16 @@ local function replayHold(record: any, clip: any, clipId: string, holdTime: numb
 	d.trails.activationLight(record.model, true, token)
 	d.sfx.playLate("artChime." .. token, late, d.positionOf(record.model))
 	d.impact.activation(record.model, clipId, token, false, speed, late)
+end
+
+-- Real seconds a Mixer handle started into its clip (the network catch-up), or nil when it started
+-- on time or has no clip clock (an engine Animation).
+local function lateOf(handle: any): number?
+	if typeof(handle) ~= "table" or typeof(handle.time) ~= "number" or handle.time <= 0 then
+		return nil
+	end
+	local speed = if typeof(handle.speed) == "number" and handle.speed > 0 then handle.speed else 1
+	return handle.time / speed
 end
 
 -- The clip sounds a late start jumped over (the network catch-up starts the clip `handle.time`
@@ -333,8 +343,10 @@ function handlers.ActionStarted(payload: any)
 	clipSpeeds[record.id] = { clipId = payload.clipId, speed = payload.speed }
 	replaySkipped(record, handle, payload.clipId)
 	if string.find(payload.clipId, "/Dodge", 1, true) then
-		-- A remote dodge: its whoosh in range (the local dodge is the character controller's).
-		d.impact.dodge(record.model, false)
+		-- A remote dodge: its whoosh in range (the local dodge is the character controller's). A
+		-- dodge the catch-up started late runs its cue that much late too, so the landing keeps the
+		-- clip's clock and never sounds after the clip's own footstep.
+		d.impact.dodge(record.model, false, lateOf(handle))
 	end
 end
 

@@ -358,6 +358,11 @@ local SPEC_CUES = {
 		{ name = "spec.Silent", delay = 0.05, gainDb = -2 },
 	},
 	-- Under a frame, half a frame, and exactly one frame.
+	-- The Dodge cue's shape: a whoosh with the call and a landing at the end of the step.
+	SpecLanding = {
+		{ name = "spec.Swish", delay = 0, gainDb = 0 },
+		{ name = "spec.Plain", delay = 0.25, gainDb = 0 },
+	},
 	SpecFrames = {
 		{ name = "spec.Swish", delay = 0, gainDb = 0 },
 		{ name = "spec.Plain", delay = sfx.playback.sameFrameSeconds / 2, gainDb = 0 },
@@ -1100,6 +1105,66 @@ describe("SfxPool.playEndingAt", function()
 		end)
 	end
 
+	it("still lands on the hit when the engine resumes the wait on a later frame (30 fps)", function()
+		-- task.delay resumes on the first frame boundary after the wait: on a 30 fps phone that is
+		-- up to 33 ms late. The riser starts that much further into its region, so its stopAt and
+		-- its fade still land where they were aimed.
+		for _, case in
+			{
+				{ entry = "spec.Riser", speed = 1 },
+				{ entry = "spec.RiserFade", speed = 1 },
+				{ entry = "spec.RiserFast", speed = 1.1 },
+			}
+		do
+			spec(function(w)
+				local frame = 1 / 30
+				local order = 1000
+				w.rebind({
+					delay = function(seconds: number, fn: () -> ())
+						order += 1
+						local at = math.ceil((w.now + seconds) / frame - 1e-9) * frame
+						table.insert(w.pending, { at = at, order = order, fn = fn })
+					end,
+				})
+				w.lengths[case.entry] = 1.5
+				-- 0.31 s of region against a 0.5 s lead: it waits 0.19 s (at 1x), resumed at 0.2.
+				local lead = 0.5
+				expect(SfxPool.playEndingAt(case.entry, lead, HIT)).never.toBeNil()
+				w.run(1)
+				expect(#w.plays).toBe(1)
+				local play = w.plays[1]
+				local ideal = lead - (0.46 - 0.15) / case.speed
+				expect(play.time).toBeCloseTo(math.ceil(ideal / frame - 1e-9) * frame, 1e-9)
+				expect(play.time > ideal + 1e-6).toBe(true)
+				expect(play.timePosition).toBeCloseTo(0.15 + (play.time - ideal) * case.speed, 1e-9)
+				expect(play.time + (0.46 - play.timePosition) / case.speed).toBeCloseTo(lead, 1e-9)
+			end)
+		end
+	end)
+
+	it("aims the fade from where the slipped start really is", function()
+		spec(function(w)
+			local frame = 1 / 30
+			local order = 1000
+			w.rebind({
+				delay = function(seconds: number, fn: () -> ())
+					order += 1
+					local at = math.ceil((w.now + seconds) / frame - 1e-9) * frame
+					table.insert(w.pending, { at = at, order = order, fn = fn })
+				end,
+			})
+			w.lengths["spec.RiserFade"] = 1.5
+			SfxPool.playEndingAt("spec.RiserFade", 0.5, HIT)
+			w.run(0.2)
+			local sound = w.plays[1].sound
+			-- The 0.1 s fade ends on stopAt, which lands at 0.5: half way at 0.45, silent at 0.5.
+			w.frame(0.45)
+			expect(sound.Volume).toBeCloseTo(0.7 * 0.5, 1e-4)
+			w.frame(0.5)
+			expect(sound.Volume).toBeCloseTo(0, FLOAT)
+		end)
+	end)
+
 	it("lands the loaded TimeLength for an entry without a stopAt, as before", function()
 		spec(function(w)
 			w.lengths["spec.Flat"] = 2
@@ -1442,6 +1507,53 @@ describe("SfxPool.cue", function()
 			expect(#w.plays).toBe(2)
 			w.run(sfx.playback.sameFrameSeconds)
 			expect(w.names()).toEqual({ "spec.Swish", "spec.Plain", "spec.Tick" })
+		end)
+	end)
+
+	it("a late cue keeps every layer on the cue's own clock, as if it had started lateBy ago", function()
+		spec(function(w)
+			-- A remote dodge the catch-up started 0.1 s late: the whoosh is 0.1 s into its region
+			-- already (0.34 + 0.1), and the landing comes 0.25 - 0.1 from now, not 0.25.
+			SfxPool.cue("SpecLanding", HIT, 0.1)
+			expect(w.names()).toEqual({ "spec.Swish" })
+			expect(w.plays[1].time).toBe(0)
+			expect(w.plays[1].timePosition).toBeCloseTo(0.44, 1e-9)
+			w.run(0.15 - EPSILON)
+			expect(#w.plays).toBe(1)
+			w.run(0.15)
+			expect(w.names()).toEqual({ "spec.Swish", "spec.Plain" })
+			expect(w.plays[2].time).toBeCloseTo(0.15, 1e-9)
+			expect(w.plays[2].timePosition).toBe(0)
+		end)
+	end)
+
+	it("a late cue drops a layer already over, and plays one now that is due under a frame or past", function()
+		spec(function(w)
+			-- 0.3 s late: the whoosh (0.34 + 0.3 is past its 0.55 stop) has nothing left; the landing
+			-- was due 0.05 s ago and starts 0.05 s in.
+			SfxPool.cue("SpecLanding", HIT, 0.3)
+			expect(w.names()).toEqual({ "spec.Plain" })
+			expect(w.plays[1].time).toBe(0)
+			expect(w.plays[1].timePosition).toBeCloseTo(0.05, 1e-9)
+			w.run(1)
+			expect(#w.plays).toBe(1)
+		end)
+		spec(function(w)
+			-- Half a frame short of the landing: it is due in under a frame, so it plays with the
+			-- call from its start (the whoosh is long over).
+			SfxPool.cue("SpecLanding", HIT, 0.25 - sfx.playback.sameFrameSeconds / 2)
+			expect(w.names()).toEqual({ "spec.Plain" })
+			expect(w.plays[1].time).toBe(0)
+			expect(w.plays[1].timePosition).toBe(0)
+		end)
+		spec(function(w)
+			-- No lateness (nil or 0) is the plain cue.
+			SfxPool.cue("SpecLanding", HIT, 0)
+			SfxPool.cue("SpecLanding", FAR)
+			expect(w.names()).toEqual({ "spec.Swish", "spec.Swish" })
+			expect(w.plays[1].timePosition).toBeCloseTo(0.34, 1e-9)
+			w.run(0.25)
+			expect(w.names()).toEqual({ "spec.Swish", "spec.Swish", "spec.Plain", "spec.Plain" })
 		end)
 	end)
 

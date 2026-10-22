@@ -135,6 +135,23 @@ describe("EntityTracker", function()
 		expect(addedRecords[1]).toBe(record)
 	end)
 
+	it("reads the server's Elite label into record.elite, false when the model has none", function()
+		local boar = entityModel(boarAttributes)
+		local eliteAttributes = table.clone(boarAttributes)
+		eliteAttributes.EntityId = 8
+		eliteAttributes.Elite = true
+		local elite = entityModel(eliteAttributes)
+		local env = fresh({ boar, elite })
+		EntityTracker.wire()
+		expect(EntityTracker.get(7).elite).toBe(false)
+		expect(EntityTracker.get(8).elite).toBe(true)
+		-- A label the server takes off (or never set) reads as false again.
+		env.setAttribute(elite, "Elite", nil)
+		expect(EntityTracker.get(8).elite).toBe(false)
+		env.setAttribute(boar, "Elite", true)
+		expect(EntityTracker.get(7).elite).toBe(true)
+	end)
+
 	it("tracks models tagged later and waits for the EntityId attribute", function()
 		local env = fresh({})
 		EntityTracker.wire()

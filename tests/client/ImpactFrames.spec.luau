@@ -370,7 +370,7 @@ describe("ImpactFrames silhouettes", function()
 				ImpactFrames.play("Final", { model })
 				local clones = ImpactFrames.clones()
 				expect(#clones).toBe(FIGURE)
-				-- The anime's impact frames draw the blade in the figure (D-NEW: decision 1).
+				-- The anime's impact frames draw the blade in the figure (D-066).
 				expect(cloneNames()).toEqual({ UpperTorso = true, Head = true, Handle = true, Weapon = true })
 				local _, _, figures = tree()
 				for _, clone in clones do
@@ -444,11 +444,8 @@ describe("ImpactFrames silhouettes", function()
 			-- The snap's smear frames are on when the hit-stop freezes the clip.
 			Smear.apply(model, true, "Y")
 			expect(sword.Size.Y).toBeCloseTo(rest.Y * fx.smear.scale, 1e-4)
-			-- Smear keeps the size it stored; the figure asks it through Smear.restSize.
-			local stored = (Smear :: any).restSize;
-			(Smear :: any).restSize = function(part: BasePart): Vector3?
-				return if part == sword then rest else nil
-			end
+			-- Smear keeps the size it stored; the figure asks it through Smear.restSize (the real
+			-- one: no stand-in).
 			local ok, err = pcall(function()
 				ImpactFrames.play("Final", { model })
 				for _, clone in ImpactFrames.clones() do
@@ -470,8 +467,19 @@ describe("ImpactFrames silhouettes", function()
 						expect((clone.Size - rest).Magnitude).toBeCloseTo(0, 1e-5)
 					end
 				end
-			end);
-			(Smear :: any).restSize = stored
+				-- A sword the smear let go of and forgot is drawn at the size it has.
+				ImpactFrames.cancel()
+				world.clock += 2
+				Smear.reset(model)
+				sword.Size = rest * 1.25
+				ImpactFrames.play("Final", { model })
+				for _, clone in ImpactFrames.clones() do
+					if clone.Name == "Weapon" then
+						expect((clone.Size - sword.Size).Magnitude).toBeCloseTo(0, 1e-5)
+					end
+				end
+				sword.Size = rest
+			end)
 			Smear.reset(model)
 			if not ok then
 				error(err, 0)

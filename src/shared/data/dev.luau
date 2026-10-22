@@ -37,6 +37,9 @@ local Dev = {
 		default = 1,
 		remoteName = "DevTimeScale", -- RemoteEvent under ReplicatedStorage, created by the dev server script
 		remotePerSecond = 4, -- the server ignores faster requests
+		-- Only the Choreo animators slow down: the reel's impact frames, accents, risers and every
+		-- sound keep real time, so a slowed recording judges poses, not hit sync.
+		slowNote = "animation only: hit FX and sounds run at 1x",
 	},
 
 	-- tools/pose-server.luau (Lune) and the PoseEditor plugin's HttpService calls.
@@ -554,6 +557,14 @@ local Dev = {
 --- The repo-relative file a gate shot is recorded to: docs/clips/<phase>/<shot>.<ext>.
 function Dev.clipPath(shotId: string): string
 	return ("%s/%s.%s"):format(Dev.capture.clipDirectory, shotId, Dev.capture.fileExtension)
+end
+
+--- The capture panel's time-scale line: the scale, and below 1x the note that only animation slows.
+function Dev.timeScaleLabel(scale: number): string
+	if scale == 1 then
+		return ("Time scale %gx"):format(scale)
+	end
+	return ("Time scale %gx (%s)"):format(scale, Dev.timeScale.slowNote)
 end
 
 --- The URL the PoseEditor posts a clip to.

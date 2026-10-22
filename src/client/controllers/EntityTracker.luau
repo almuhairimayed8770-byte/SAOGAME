@@ -32,6 +32,7 @@ export type Record = {
 	cursor: string?,
 	level: number,
 	weaponId: string?,
+	elite: boolean?, -- the server's Elite label (a spawn-time Elite variant); false when absent
 }
 
 export type Connection = { Disconnect: (self: any) -> () }
@@ -62,6 +63,7 @@ local ATTRIBUTE_FIELDS: { [string]: string } = {
 	Cursor = "cursor",
 	Level = "level",
 	WeaponId = "weaponId",
+	Elite = "elite",
 }
 
 local DEFAULTS: { [string]: any } = {
@@ -75,6 +77,7 @@ local DEFAULTS: { [string]: any } = {
 	maxGauge = 0,
 	state = "Idle",
 	level = 1,
+	elite = false,
 }
 
 local EntityTracker = {}

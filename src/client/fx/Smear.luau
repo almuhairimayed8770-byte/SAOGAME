@@ -71,6 +71,12 @@ function Smear.isActive(model: Instance): boolean
 	return weapon ~= nil and activeAxis[weapon] ~= nil
 end
 
+--- The size a weapon part had before the smear stretched it; nil when the smear never touched it
+--- (or reset it since). The impact-frame figure draws a stretched sword at this size.
+function Smear.restSize(part: BasePart): Vector3?
+	return originals[part]
+end
+
 --- Restores and forgets a rig's weapon (the rig is leaving or its weapon was swapped).
 function Smear.reset(model: Instance)
 	local weapon = findWeaponPart(model)

@@ -121,6 +121,31 @@ describe("accents data", function()
 		expect(tilt.minPlaneSine).toBeLessThan(1)
 	end)
 
+	it("snaps the crescent's wipe to enough steps that every wipe frame still moves it", function()
+		local arc = accents.slashArc
+		expect(arc.wipeSteps).toBe(math.floor(arc.wipeSteps))
+		local longest = 0
+		for _, size in arc.sizes do
+			longest = math.max(longest, size.wipeFrames)
+		end
+		-- Four steps per frame of the longest wipe (SlashArc.spec checks each frame moves).
+		expect(arc.wipeSteps).toBeGreaterThanOrEqual(4 * longest)
+	end)
+
+	it("samples an idle blade as far as any moment's accents show", function()
+		local moments = Harness.load("src/shared/data/moments")
+		local reach = accents.swing.sampleDistance
+		expect(reach).toBeGreaterThanOrEqual(moments.accentRange)
+		for name, row in moments.rows do
+			if row.range ~= nil and reach < row.range then
+				error(
+					("moments.rows.%s.range %s is past accents.swing.sampleDistance %s"):format(name, row.range, reach),
+					0
+				)
+			end
+		end
+	end)
+
 	it("remembers a swing long enough for a late confirmation and never into the next swing", function()
 		local memory = accents.swing.memorySeconds
 		expect(memory).toBeGreaterThan(accents.swing.samples * combat.hitStopFrameSeconds)

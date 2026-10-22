@@ -341,6 +341,47 @@ describe("SlashArc crescent", function()
 		end)
 	end)
 
+	it("shows the wipe at its snapped step: at most half a step off, and every wipe frame moves it", function()
+		atTier("High", function()
+			local halfStep = (1 + arc.wipeSoftness) / arc.wipeSteps / 2
+			for _, name in { "Medium", "Large" } do
+				fresh()
+				local size = arc.sizes[name]
+				SlashArc.play(HIT, TANGENT, NORMAL, "TrailJade", name)
+				local view = activeArcs()[1]
+				local previous: number? = nil
+				for frame = 1, size.holdFrames + size.wipeFrames - 1 do
+					frames(1)
+					local outerFront, innerFront = SlashArc.wipeFront(name, clock)
+					local layers = {
+						{ view.outer, outerFront :: number, arc.outerTransparency },
+						{ view.inner, innerFront :: number, arc.innerTransparency },
+					}
+					for _, layer in layers do
+						local _, snapped = SlashArc.wipeStep(layer[2])
+						expect(math.abs(snapped - layer[2])).toBeLessThanOrEqual(halfStep + 1e-9)
+						for half, beam in layer[1] do
+							local keys = beam.Transparency.Keypoints
+							expect(#keys).toBe(math.max(2, arc.wipeKeys))
+							for index, key in keys do
+								local s = (half - 1) * 0.5 + 0.5 * (index - 1) / (#keys - 1)
+								expect(key.Value).toBeCloseTo(SlashArc.transparencyAt(s, snapped, layer[3]), 1e-5)
+							end
+						end
+					end
+					if frame > size.holdFrames then
+						local step = SlashArc.wipeStep(outerFront :: number)
+						expect(step).never.toBe(previous)
+						previous = step
+					end
+				end
+			end
+			-- Whole before the wipe, gone at the end of it.
+			expect(SlashArc.wipeStep(-arc.wipeSoftness)).toBe(0)
+			expect(SlashArc.wipeStep(1)).toBe(arc.wipeSteps)
+		end)
+	end)
+
 	it("eases the wipe front (never linear) and the core leads it", function()
 		local size = arc.sizes.Medium
 		local hold = size.holdFrames * F
@@ -407,6 +448,12 @@ describe("SlashArc crescent", function()
 end)
 
 describe("SlashArc line", function()
+	-- Where a line end sits in the world. The line lays its attachments by Position on a host with
+	-- no turn; Lune keeps Position apart from CFrame (the engine moves both together).
+	local function point(attachment: Attachment): Vector3
+		return (attachment.Parent :: BasePart).CFrame * attachment.Position
+	end
+
 	-- Runs `body` with the viewer at `viewer` and puts the engine's viewer back afterwards.
 	local function seenFrom(viewer: Vector3?, body: () -> ())
 		Engine.setViewer(function()
@@ -439,8 +486,8 @@ describe("SlashArc line", function()
 					expect(beam.CurveSize0).toBeCloseTo(0, 1e-6)
 					expect(beam.CurveSize1).toBeCloseTo(0, 1e-6)
 					expect(beam.Width0).toBeCloseTo(size.width, 1e-6)
-					local first = world(view.starts[index]).Position
-					local last = world(view.ends[index]).Position
+					local first = point(view.starts[index])
+					local last = point(view.ends[index])
 					expect((last - first).Unit:Dot(TANGENT)).toBeCloseTo(1, 1e-6)
 					-- The first frame: the line already spans most of its length around the hit.
 					expect((last - first).Magnitude).toBeCloseTo(size.length * size.startLength, 1e-4)
@@ -451,18 +498,18 @@ describe("SlashArc line", function()
 				end
 				expect(view.beams[1].ZOffset).toBeGreaterThan(view.beams[2].ZOffset)
 				-- The core runs through the hit; the copies sit across the screen, one each way.
-				local core = (world(view.starts[1]).Position + world(view.ends[1]).Position) * 0.5
+				local core = (point(view.starts[1]) + point(view.ends[1])) * 0.5
 				expectVector(core, HIT)
 				local across = TANGENT:Cross(Vector3.zAxis) -- perpendicular to the line and the view
 				for index = 2, #view.beams do
-					local middle = (world(view.starts[index]).Position + world(view.ends[index]).Position) * 0.5
+					local middle = (point(view.starts[index]) + point(view.ends[index])) * 0.5
 					local offset = middle - HIT
 					expect(offset:Dot(TANGENT)).toBeCloseTo(0, 1e-4)
 					expect(math.abs(offset:Dot(across))).toBeCloseTo(size.edgeOffset, 1e-4)
 					expect(offset:Dot(Vector3.zAxis)).toBeCloseTo(0, 1e-4)
 				end
-				local rose = (world(view.starts[2]).Position - HIT):Dot(across)
-				local cyan = (world(view.starts[3]).Position - HIT):Dot(across)
+				local rose = (point(view.starts[2]) - HIT):Dot(across)
+				local cyan = (point(view.starts[3]) - HIT):Dot(across)
 				expect(rose * cyan).toBeLessThan(0)
 			end)
 		end)
@@ -476,7 +523,7 @@ describe("SlashArc line", function()
 				SlashArc.line(HIT, TANGENT, "Large")
 				local view = activeLines()[1]
 				local function length(): number
-					return (world(view.ends[1]).Position - world(view.starts[1]).Position).Magnitude
+					return (point(view.ends[1]) - point(view.starts[1])).Magnitude
 				end
 				local shortest = length()
 				frames(size.growFrames)
@@ -515,7 +562,7 @@ describe("SlashArc line", function()
 				fresh()
 				SlashArc.line(HIT, TANGENT, "Medium")
 				local view = activeLines()[1]
-				local middle = (world(view.starts[2]).Position + world(view.ends[2]).Position) * 0.5
+				local middle = (point(view.starts[2]) + point(view.ends[2])) * 0.5
 				expect((middle - HIT).Magnitude).toBeCloseTo(slashLine.sizes.Medium.edgeOffset, 1e-4)
 				expect((middle - HIT):Dot(TANGENT)).toBeCloseTo(0, 1e-4)
 			end)

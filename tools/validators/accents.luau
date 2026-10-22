@@ -12,6 +12,11 @@
 	  (limits.fullFrames) and none fades longer than limits.maxFadeFrames; the Dodge lines last the
 	  dodge (combat.dodgeDuration).
 	- Every easing is a util/Easing curve and never Linear or Hold.
+	- The crescent's turn toward the camera is bounded (0 < maxDegrees, 0 < faceDegrees < 90, a
+	  full turn from edge-on stops no nearer than faceDegrees, 0 < minPlaneSine < 1), and the
+	  swing memory outlasts the sample ring, stays under a second and holds the snap's frames.
+	- The crescent's wipe snaps to at least 4 steps per frame of the longest wipe, and an idle
+	  blade is sampled as far as any moment's accents show (moments.accentRange, every row's range).
 	- Sizes grow in order and the Parry glint is the biggest and the longest.
 	- The speed lines stay out of the middle third and cover at most maxCoverage of the screen.
 	- Every fx.luau quality tier has a row; counts never grow from High to Low; the worst case at
@@ -242,7 +247,44 @@ return function(ctx: Context): { string }
 		"slashArc.wipeKeys must be 2..%d (a Beam's keypoint cap)",
 		BEAM_KEYPOINT_LIMIT
 	)
+	-- The wipe front snaps to wipeSteps steps: at least 4 per frame of the longest wipe, so every
+	-- frame of the wipe still moves it.
+	local longestWipe = 0
+	if typeof(arc.sizes) == "table" then
+		for _, size in arc.sizes do
+			if typeof(size) == "table" and isInteger(size.wipeFrames) then
+				longestWipe = math.max(longestWipe, size.wipeFrames)
+			end
+		end
+	end
+	check(
+		isInteger(arc.wipeSteps) and arc.wipeSteps >= math.max(1, 4 * longestWipe),
+		"slashArc.wipeSteps %s must be a whole number, at least 4 per frame of the longest wipe (%d)",
+		tostring(arc.wipeSteps),
+		4 * longestWipe
+	)
 	check(inRange(arc.innerLead, 0, 1 - 1e-6), "slashArc.innerLead must be in [0, 1)")
+	-- The turn toward the camera: a face more than faceDegrees off turns by at most maxDegrees, so
+	-- a full turn from edge-on (90) leaves it no nearer than faceDegrees and the swing plane reads.
+	local tilt = arc.tilt
+	check(typeof(tilt) == "table", "slashArc.tilt must be {faceDegrees, maxDegrees, minPlaneSine}")
+	if typeof(tilt) == "table" then
+		check(isNumber(tilt.maxDegrees) and tilt.maxDegrees > 0, "slashArc.tilt.maxDegrees must be above 0")
+		check(
+			isNumber(tilt.faceDegrees) and tilt.faceDegrees > 0 and tilt.faceDegrees < 90,
+			"slashArc.tilt.faceDegrees must be above 0 and below 90"
+		)
+		check(
+			not isNumber(tilt.maxDegrees) or not isNumber(tilt.faceDegrees) or 90 - tilt.maxDegrees >= tilt.faceDegrees,
+			"slashArc.tilt.maxDegrees %s turns an edge-on crescent nearer the camera than faceDegrees %s",
+			tostring(tilt.maxDegrees),
+			tostring(tilt.faceDegrees)
+		)
+		check(
+			isNumber(tilt.minPlaneSine) and tilt.minPlaneSine > 0 and tilt.minPlaneSine < 1,
+			"slashArc.tilt.minPlaneSine must be above 0 and below 1 (the sine of a swing's least angle to its radius)"
+		)
+	end
 	check(isNumber(arc.hostSize) and arc.hostSize > 0, "slashArc.hostSize must be positive")
 	for name, size in arc.sizes do
 		local where = "slashArc.sizes." .. name
@@ -422,6 +464,25 @@ return function(ctx: Context): { string }
 			and swing.minTravel < swing.maxTravel,
 		"swing needs 0 < minTravel < maxTravel"
 	)
+	-- A late HitConfirmed (the round trip, the lag allowance) still finds the swing; the next
+	-- swing of a basic chain (within a second) never finds this one.
+	check(
+		isNumber(swing.memorySeconds)
+			and swing.memorySeconds < 1
+			and swing.memorySeconds > (if isInteger(swing.samples) then swing.samples else 0) * frame,
+		"swing.memorySeconds %s must be longer than the %s-sample ring and below 1 second",
+		tostring(swing.memorySeconds),
+		tostring(swing.samples)
+	)
+	check(
+		isInteger(swing.snapFrames)
+			and swing.snapFrames >= 1
+			and isNumber(swing.memorySeconds)
+			and swing.snapFrames * frame < swing.memorySeconds,
+		"swing.snapFrames %s must be a whole number of frames, at least 1, read well inside swing.memorySeconds",
+		tostring(swing.snapFrames)
+	)
+	check(isNumber(swing.sampleDistance) and swing.sampleDistance > 0, "swing.sampleDistance must be above 0")
 
 	-- ------------------------------------------------------------------ quality and budget
 	for tierName in fx.quality do
@@ -484,6 +545,30 @@ return function(ctx: Context): { string }
 	-- ------------------------------------------------------------------ moments.luau names
 	local okMoments, moments = pcall(ctx.load, "src/shared/data/moments")
 	if okMoments and typeof(moments) == "table" then
+		-- An idle blade is sampled as far as any moment's accents show, so a far swing's snap
+		-- still starts from the pose before it. (A missing or non-positive distance is reported
+		-- once, above.)
+		local distance = swing.sampleDistance
+		if isNumber(distance) and distance > 0 then
+			check(
+				not isNumber(moments.accentRange) or distance >= moments.accentRange,
+				"swing.sampleDistance %s must reach moments.accentRange %s",
+				tostring(distance),
+				tostring(moments.accentRange)
+			)
+			if typeof(moments.rows) == "table" then
+				for name, row in moments.rows do
+					local range = if typeof(row) == "table" then row.range else nil
+					check(
+						not isNumber(range) or distance >= range,
+						"swing.sampleDistance %s must reach moments.rows.%s.range %s",
+						tostring(distance),
+						tostring(name),
+						tostring(range)
+					)
+				end
+			end
+		end
 		local fields = {
 			glint = { table = glint.sizes, label = "glint size" },
 			glintSize = { table = glint.sizes, label = "glint size" },

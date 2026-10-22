@@ -93,7 +93,7 @@ describe("impact data", function()
 		for _, name in { "HumanoidRootPart", "Sheath", "FX" } do
 			expect(impact.silhouette.excludeNames).toContain(name)
 		end
-		-- The blade is in the white figure, at rest size (D-NEW: decision 1).
+		-- The blade is in the white figure, at rest size (D-066).
 		expect(table.find(impact.silhouette.excludeNames, "Weapon")).toBeNil()
 		expect(impact.silhouette.maxRigs).toBeGreaterThan(0)
 		expect(impact.silhouette.poolCap).toBeGreaterThanOrEqual(impact.quality.High.maxPartsPerRig)

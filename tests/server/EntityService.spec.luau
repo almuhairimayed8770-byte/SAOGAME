@@ -208,6 +208,22 @@ describe("EntityService registration", function()
 		expect(CollectionService:HasTag(model, "SkyspireEnemy")).toBe(true)
 	end)
 
+	it("labels an Elite variant's model Elite next to its DefId; an ordinary mob carries no label", function()
+		fresh()
+		-- The server still owns everything; Elite is a replicated label (the client shatters it heavy).
+		local _, boarModel = spawnBoar()
+		expect(boarModel:GetAttribute("Elite")).toBeNil()
+		local elite = Enemies.variant(BOAR, "Elite")
+		local model = rigModel("EliteBoar", Vector3.new(6, 1.6, -6), Vector3.new(2.4, 2.4, 5))
+		local id = EntityService.registerEnemy(model, elite)
+		expect(model:GetAttribute("DefId")).toBe("FrenzyBoar")
+		expect(model:GetAttribute("Elite")).toBe(true)
+		-- Published once: later ticks leave it alone, and it survives them.
+		advance(0.2)
+		expect(model:GetAttribute("Elite")).toBe(true)
+		expect(EntityService.get(id).enemyDef.elite).toBe(true)
+	end)
+
 	it("pins the engine Humanoid's health (D-012) and re-pins it every tick", function()
 		fresh()
 		local _, model = spawnBoar()

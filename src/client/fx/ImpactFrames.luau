@@ -163,13 +163,7 @@ end
 -- The size a silhouette draws a part at: the smear's stored rest size for a stretched sword
 -- (Smear.restSize), else the part's own.
 local function restSizeOf(part: BasePart): Vector3
-	local size: any = nil
-	local accessor = (Smear :: any).restSize
-	if typeof(accessor) == "function" then
-		local ok, value = pcall(accessor, part)
-		size = if ok then value else nil
-	end
-	return if typeof(size) == "Vector3" then size else part.Size
+	return Smear.restSize(part) or part.Size
 end
 
 -- Binds the step after the camera's own (CameraController binds at Camera priority), so the

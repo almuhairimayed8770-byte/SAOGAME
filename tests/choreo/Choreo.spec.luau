@@ -338,6 +338,82 @@ describe("Choreo", function()
 		restore()
 	end)
 
+	it("the default Animate script is disabled at once and destroyed only at the next resumption", function()
+		-- Destroying it inside the handler, while the engine is still parenting it, makes Studio
+		-- print "Something unexpectedly tried to set the parent of Animate to NULL". The engine's
+		-- task.defer is replaced by a queue this test runs by hand.
+		local queued: { () -> () } = {}
+		local function runDeferred()
+			local now = table.clone(queued)
+			table.clear(queued)
+			for _, fn in now do
+				fn()
+			end
+		end
+		Choreo.configure({
+			defer = function(fn)
+				table.insert(queued, fn)
+			end,
+		})
+		local fire, restore = recordConnections()
+		local function animateScript(parent)
+			local script = Instance.new("LocalScript")
+			script.Name = "Animate"
+			script.Enabled = true
+			script.Parent = parent
+			return script
+		end
+
+		-- Already in the character when the animator attaches.
+		local model = buildUpgradedCharacter(true)
+		local present = animateScript(model)
+		local animator = Choreo.get(model)
+		expect(present.Parent).toBe(model)
+		expect(present.Enabled).toBe(false)
+		expect(#queued).toBe(1)
+		runDeferred()
+		expect(present.Parent).toBeNil()
+
+		-- Arriving after (a respawned character's scripts replicate in): DescendantAdded fires while
+		-- the engine is parenting it, so the handler only disables it.
+		local arriving = animateScript(model)
+		fire(model, "DescendantAdded", arriving)
+		expect(arriving.Parent).toBe(model)
+		expect(arriving.Enabled).toBe(false)
+		-- The rig keeps animating in between.
+		animator:step(FRAME)
+		expect(jointOf(model, "RightShoulder").Transform == CFrame.identity).toBe(false)
+		runDeferred()
+		expect(arriving.Parent).toBeNil()
+
+		-- Anything else called Animate (not a script), and a script with another name, stay.
+		local folder = Instance.new("Folder")
+		folder.Name = "Animate"
+		folder.Parent = model
+		fire(model, "DescendantAdded", folder)
+		local other = Instance.new("LocalScript")
+		other.Name = "Health"
+		other.Parent = model
+		fire(model, "DescendantAdded", other)
+		expect(#queued).toBe(0)
+		expect(folder.Parent).toBe(model)
+		expect(other.Parent).toBe(model)
+
+		-- A rig released before the deferred destroy runs still loses the script.
+		local late = animateScript(model)
+		fire(model, "DescendantAdded", late)
+		Choreo.release(model)
+		runDeferred()
+		expect(late.Parent).toBeNil()
+
+		restore()
+		Choreo.configure({
+			defer = function(fn)
+				task.defer(fn)
+			end,
+		})
+	end)
+
 	it("a Humanoid model without a Rig attribute is a PlayerR15; a bare model is an error", function()
 		local model = Instance.new("Model")
 		local humanoid = Instance.new("Humanoid")

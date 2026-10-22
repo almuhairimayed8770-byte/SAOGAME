@@ -488,6 +488,7 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		handles = {} :: { [string]: any },
 		fallHandle = nil :: any,
 		jumpHandle = nil :: any,
+		jumpHandoff = nil :: any, -- the finished connection that hands the jump to the fall
 		turnHandle = nil :: any,
 		landHandle = nil :: any,
 		drawn = character:GetAttribute(DRAWN_ATTRIBUTE) == true,
@@ -568,6 +569,14 @@ end
 
 local function playOneShot(self: any, name: string, weight: number?)
 	return self.animator:play(clipId(name), { weight = weight })
+end
+
+-- Drops the jump's handoff to the fall (landed before the jump clip ended, jumped again, or gone).
+local function dropJumpHandoff(self: any)
+	if self.jumpHandoff ~= nil then
+		self.jumpHandoff:Disconnect()
+		self.jumpHandoff = nil
+	end
 end
 
 local function footDeltas(self: any, root: BasePart): (number?, number?)
@@ -662,17 +671,24 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 
 	local oneShot = output.oneShot
 	if oneShot == "Jump" then
+		dropJumpHandoff(self)
 		local handle = playOneShot(self, "Jump")
 		self.jumpHandle = handle
-		-- Fall takes over when the jump clip ends, if still airborne.
-		animator.finished:Once(function(finished: any)
-			if finished == handle and not self.destroyed and self.state.phase == "Air" then
+		-- Fall takes over when the jump clip ends, if still airborne. Another clip (a flinch, a
+		-- guard hit, a parry) can finish first, so the handoff waits for the jump's own handle.
+		self.jumpHandoff = animator.finished:Connect(function(finished: any)
+			if finished ~= handle then
+				return
+			end
+			dropJumpHandoff(self)
+			if not self.destroyed and self.state.phase == "Air" then
 				self.fallHandle = playOneShot(self, "Fall")
 			end
 		end)
 	elseif oneShot == "Fall" then
 		self.fallHandle = playOneShot(self, "Fall")
 	elseif oneShot == "Land" then
+		dropJumpHandoff(self)
 		if self.fallHandle ~= nil then
 			animator:stop(self.fallHandle, ChoreoData.oneShotBlendIn)
 			self.fallHandle = nil
@@ -735,6 +751,7 @@ function Locomotion.destroy(self: any)
 		return
 	end
 	self.destroyed = true
+	dropJumpHandoff(self)
 	if self.unhook ~= nil then
 		self.unhook()
 		self.unhook = nil

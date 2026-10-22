@@ -241,6 +241,12 @@ local function publish(record: Record)
 	setAttribute(record, "EntityId", record.id)
 	setAttribute(record, "EntityKind", record.kind)
 	setAttribute(record, "DefId", record.defId)
+	-- A spawn-time Elite variant (Enemies.variant) carries a replicated label; the client only
+	-- reads it (an Elite's death shatters heavy). Ordinary mobs carry none.
+	local enemyDef = record.enemyDef
+	if enemyDef ~= nil and enemyDef.elite == true then
+		setAttribute(record, "Elite", true)
+	end
 	setAttribute(record, "Rig", record.rig)
 	setAttribute(record, "DisplayName", record.name)
 	setAttribute(record, "HP", roundValue(record.hp))

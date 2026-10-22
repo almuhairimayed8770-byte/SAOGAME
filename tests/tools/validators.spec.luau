@@ -1310,6 +1310,34 @@ describe("impact validator", function()
 		})
 	end)
 
+	it("caps Reduce flashing at a whole number of dims a window, costing less than the flash budget", function()
+		-- ImpactFrames counts dims against it: a fraction or zero is a broken setting.
+		expect(runImpact(function(impact)
+			impact.reduced.maxPerWindow = 0
+		end)).toEqual({ "impact: reduced.maxPerWindow 0 must be a whole number of at least 1" })
+		expect(runImpact(function(impact)
+			impact.reduced.maxPerWindow = 1.5
+		end)).toEqual({ "impact: reduced.maxPerWindow 1.5 must be a whole number of at least 1" })
+		expect(runImpact(function(impact)
+			impact.reduced.maxPerWindow = nil
+		end)).toEqual({ "impact: reduced.maxPerWindow nil must be a whole number of at least 1" })
+		-- Three dims of cost 1 are the whole budget: the setting would flash as much as without it.
+		expect(runImpact(function(impact)
+			impact.reduced.maxPerWindow = 3
+		end)).toEqual({
+			"impact: reduced.maxPerWindow 3 dims cost 3 flashes, not fewer than flash.maxPerWindow (3): Reduce flashing must flash less",
+		})
+		-- Passing: two dims of cost 1 under a budget of 3, and free dims (too faint to be a flash).
+		expect(runImpact(function(impact)
+			impact.reduced.maxPerWindow = 2
+		end)).toEqual({})
+		expect(runImpact(function(impact)
+			impact.reduced.flashCost = 0
+			impact.reduced.opacity = 0.04
+			impact.reduced.maxPerWindow = 5
+		end)).toEqual({})
+	end)
+
 	it("keeps the overlay above the HUD and every quality tier covered, each drawing the figures", function()
 		local problems = runImpact(function(impact)
 			impact.overlay.displayOrder = 5
@@ -1323,5 +1351,207 @@ describe("impact validator", function()
 			"impact: quality.Low needs silhouettes and strokes booleans",
 			"impact: quality.Medium must draw the silhouettes: an impact frame without its figures is a bare blink",
 		})
+	end)
+end)
+
+describe("accents validator: the swing memory and the crescent's tilt", function()
+	local function deepCopy(value: any): any
+		if typeof(value) ~= "table" then
+			return value
+		end
+		local copy = {}
+		for key, element in value do
+			copy[key] = deepCopy(element)
+		end
+		return copy
+	end
+
+	-- Runs the accents validator on a copy of the real accents.luau that `mutate` breaks.
+	local function runAccents(mutate: (accents: any) -> ()): { string }
+		local accents = deepCopy(Harness.load("src/shared/data/accents"))
+		mutate(accents)
+		local validate = loadTool("tools/validators/accents")
+		return validate({
+			load = function(path: string)
+				if path == "src/shared/data/accents" then
+					return accents
+				end
+				return Harness.load(path)
+			end,
+			listFiles = Harness.listFiles,
+			readFile = Harness.readFile,
+			repoRoot = root,
+		})
+	end
+
+	it("is clean on the real table", function()
+		expect(runAccents(function() end)).toEqual({})
+		expect(loadTool("tools/validators/accents")(realContext)).toEqual({})
+	end)
+
+	it("keeps the swing memory past the sample ring and under a second", function()
+		local samples = Harness.load("src/shared/data/accents").swing.samples
+		local function memoryProblem(value: any): string
+			return ("accents: swing.memorySeconds %s must be longer than the %d-sample ring and below 1 second"):format(
+				tostring(value),
+				samples
+			)
+		end
+		for _, value in { 1, 1.5, samples / 60 } do
+			expect(runAccents(function(accents)
+				accents.swing.memorySeconds = value
+				accents.swing.snapFrames = 1
+			end)).toEqual({ memoryProblem(value) })
+		end
+		-- No memory at all also leaves no room for the snap.
+		for _, value in { 0, -0.2 } do
+			expect(runAccents(function(accents)
+				accents.swing.memorySeconds = value
+				accents.swing.snapFrames = 1
+			end)).toEqual({
+				memoryProblem(value),
+				"accents: swing.snapFrames 1 must be a whole number of frames, at least 1, read well inside swing.memorySeconds",
+			})
+		end
+		expect(runAccents(function(accents)
+			accents.swing.memorySeconds = nil
+		end)).toEqual({
+			memoryProblem(nil),
+			"accents: swing.snapFrames 2 must be a whole number of frames, at least 1, read well inside swing.memorySeconds",
+		})
+		-- Passing: a shorter memory that still outlasts the ring and the snap.
+		expect(runAccents(function(accents)
+			accents.swing.memorySeconds = 0.2
+		end)).toEqual({})
+	end)
+
+	it("reads the snap over whole frames, at least one, well inside the memory", function()
+		local function snapProblem(value: any): string
+			return ("accents: swing.snapFrames %s must be a whole number of frames, at least 1, read well inside swing.memorySeconds"):format(
+				tostring(value)
+			)
+		end
+		for _, value in { 0, 1.5, 24, 30 } do
+			expect(runAccents(function(accents)
+				accents.swing.snapFrames = value
+			end)).toEqual({ snapProblem(value) })
+		end
+		-- Passing: one frame, and 23 frames (0.383 s) inside the 0.4 s memory.
+		for _, value in { 1, 23 } do
+			expect(runAccents(function(accents)
+				accents.swing.snapFrames = value
+			end)).toEqual({})
+		end
+	end)
+
+	it("bounds the crescent's turn toward the camera", function()
+		expect(runAccents(function(accents)
+			accents.slashArc.tilt.maxDegrees = 0
+		end)).toEqual({ "accents: slashArc.tilt.maxDegrees must be above 0" })
+		expect(runAccents(function(accents)
+			accents.slashArc.tilt.faceDegrees = 90
+			accents.slashArc.tilt.maxDegrees = -5
+		end)).toEqual({
+			"accents: slashArc.tilt.maxDegrees must be above 0",
+			"accents: slashArc.tilt.faceDegrees must be above 0 and below 90",
+		})
+		-- A 45-degree turn brings an edge-on crescent 45 off the camera, nearer than faceDegrees 50.
+		expect(runAccents(function(accents)
+			accents.slashArc.tilt.maxDegrees = 45
+		end)).toEqual({
+			"accents: slashArc.tilt.maxDegrees 45 turns an edge-on crescent nearer the camera than faceDegrees 50",
+		})
+		for _, value in { 0, 1, nil :: any } do
+			expect(runAccents(function(accents)
+				accents.slashArc.tilt.minPlaneSine = value
+			end)).toEqual({
+				"accents: slashArc.tilt.minPlaneSine must be above 0 and below 1 (the sine of a swing's least angle to its radius)",
+			})
+		end
+		expect(runAccents(function(accents)
+			accents.slashArc.tilt = nil
+		end)).toEqual({ "accents: slashArc.tilt must be {faceDegrees, maxDegrees, minPlaneSine}" })
+		-- Passing: a full 40-degree turn from edge-on stops exactly at faceDegrees 50.
+		expect(runAccents(function(accents)
+			accents.slashArc.tilt.maxDegrees = 40
+		end)).toEqual({})
+	end)
+
+	it("snaps the crescent's wipe to at least 4 whole steps a frame of the longest wipe", function()
+		local longest = 0
+		for _, size in Harness.load("src/shared/data/accents").slashArc.sizes do
+			longest = math.max(longest, size.wipeFrames)
+		end
+		local function stepsProblem(value: any): string
+			return ("accents: slashArc.wipeSteps %s must be a whole number, at least 4 per frame of the longest wipe (%d)"):format(
+				tostring(value),
+				4 * longest
+			)
+		end
+		for _, value in { 4 * longest - 1, 0, 32.5, nil :: any } do
+			expect(runAccents(function(accents)
+				accents.slashArc.wipeSteps = value
+			end)).toEqual({ stepsProblem(value) })
+		end
+		-- A longer wipe needs more steps.
+		expect(runAccents(function(accents)
+			accents.slashArc.wipeSteps = 4 * longest
+			accents.slashArc.sizes.Large.wipeFrames = longest + 1
+		end)).toEqual({
+			("accents: slashArc.wipeSteps %d must be a whole number, at least 4 per frame of the longest wipe (%d)"):format(
+				4 * longest,
+				4 * (longest + 1)
+			),
+		})
+		-- Passing: exactly 4 a frame.
+		expect(runAccents(function(accents)
+			accents.slashArc.wipeSteps = 4 * longest
+		end)).toEqual({})
+	end)
+
+	it("samples an idle blade as far as every moment's accents show", function()
+		local moments = Harness.load("src/shared/data/moments")
+		expect(runAccents(function(accents)
+			accents.swing.sampleDistance = 0
+		end)).toEqual({ "accents: swing.sampleDistance must be above 0" })
+		expect(runAccents(function(accents)
+			accents.swing.sampleDistance = nil
+		end)).toEqual({ "accents: swing.sampleDistance must be above 0" })
+		-- Short of a row's range (the Kill row reads across the fight) but past accentRange.
+		local farthest = moments.accentRange
+		for _, row in moments.rows do
+			farthest = math.max(farthest, row.range or 0)
+		end
+		local problems = runAccents(function(accents)
+			accents.swing.sampleDistance = farthest - 1
+		end)
+		expect(#problems > 0).toBe(true)
+		for _, problem in problems do
+			expect(
+				problem:find(
+					("^accents: swing%%.sampleDistance %d must reach moments%%.rows%%.%%w+%%.range %d$"):format(
+						farthest - 1,
+						farthest
+					)
+				) ~= nil
+			).toBe(true)
+		end
+		-- Short of accentRange too.
+		local short = runAccents(function(accents)
+			accents.swing.sampleDistance = moments.accentRange - 1
+		end)
+		expect(
+			table.find(
+				short,
+				("accents: swing.sampleDistance %d must reach moments.accentRange %d"):format(
+					moments.accentRange - 1,
+					moments.accentRange
+				)
+			) ~= nil
+		).toBe(true)
+		-- Passing: exactly the farthest range.
+		expect(runAccents(function(accents)
+			accents.swing.sampleDistance = farthest
+		end)).toEqual({})
 	end)
 end)

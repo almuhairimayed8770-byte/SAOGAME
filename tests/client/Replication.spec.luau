@@ -1500,6 +1500,47 @@ describe("Replication", function()
 		expect(#t.find("impact", "dodge")).toBe(1)
 	end)
 
+	it("ActionStarted: a remote dodge the catch-up started late hands the director its lateness", function()
+		local t = setup()
+		-- The Mixer started the dodge 0.1 s into its clip at speed 1.25: its cue (the whoosh and the
+		-- landing at dodgeDuration) is 0.08 s of real time behind, so the landing keeps the clip's
+		-- clock instead of sounding after the clip's own footstep.
+		local handle: any =
+			{ clipId = "player/OneHandedSword/DodgeBack", clip = { events = {} }, time = 0.1, speed = 1.25 }
+		local animator = t.deps.choreo.get(t.models.ally)
+		function animator.play(_self: any, clipId: string, opts: any): any
+			table.insert(t.calls, { module = "animator:ally", fn = "play", args = { clipId, opts } })
+			return handle
+		end
+		Replication.dispatch("ActionStarted", {
+			entityId = 2,
+			clipId = "player/OneHandedSword/DodgeBack",
+			serverTime = 99.9,
+			speed = 1.25,
+			facing = { 0, 0, -1 },
+		})
+		local dodges = t.find("impact", "dodge")
+		expect(#dodges).toBe(1)
+		expect(dodges[1].args[1]).toBe(t.models.ally)
+		expect(dodges[1].args[2]).toBe(false)
+		expect(dodges[1].args[3]).toBeCloseTo(0.1 / 1.25, 1e-12)
+		-- On time, or a handle with no clip clock (an engine Animation): no lateness.
+		handle = { clipId = "player/OneHandedSword/DodgeLeft", clip = { events = {} }, time = 0, speed = 1 }
+		Replication.dispatch(
+			"ActionStarted",
+			{ entityId = 2, clipId = "player/OneHandedSword/DodgeLeft", serverTime = 100 }
+		)
+		handle = { clipId = "player/OneHandedSword/DodgeRight", rbx = {}, speed = 1 }
+		Replication.dispatch(
+			"ActionStarted",
+			{ entityId = 2, clipId = "player/OneHandedSword/DodgeRight", serverTime = 99 }
+		)
+		dodges = t.find("impact", "dodge")
+		expect(#dodges).toBe(3)
+		expect(dodges[2].args[3]).toBeNil()
+		expect(dodges[3].args[3]).toBeNil()
+	end)
+
 	it("ActionStarted: the clip sounds a late start jumped over play from where they would be by now", function()
 		local t = setup()
 		-- A clip the network catch-up starts 0.05 s in, at speed 1.25: the whoosh at 0 and the vocal
@@ -1731,7 +1772,9 @@ end)
 
 -- A remote player on the real Choreo and Locomotion: a Lune rig with the server's sword, a
 -- Humanoid standing still on the ground for the default tracker, and foot IK off (no raycast in
--- Lune). Everything else is a recorder.
+-- Lune). Everything else is a recorder (each call stamped with the spec clock in `at`), and
+-- Replication reads the spec clock. A handler that throws inside a Signal only warns, so every
+-- test here checks `live.handlerErrors()` too.
 local function liveRemote()
 	local function frameSignal()
 		return {
@@ -1809,6 +1852,16 @@ local function liveRemote()
 	local record =
 		{ id = 2, model = model, kind = "Player", rig = "PlayerR15", weaponId = "TrialistSword", name = "Ren" }
 	local calls = {}
+	local warningsBefore = #Harness.warnings()
+	local function stamped(moduleName)
+		return setmetatable({}, {
+			__index = function(_, key)
+				return function(...)
+					table.insert(calls, { module = moduleName, fn = key, args = { ... }, at = clock })
+				end
+			end,
+		})
+	end
 	Replication.bind({
 		net = { on = function() end },
 		entities = {
@@ -1841,6 +1894,7 @@ local function liveRemote()
 		hud = recorder("hud", calls),
 		systemLine = recorder("systemLine", calls),
 		sfx = recorder("sfx", calls),
+		impact = stamped("impact"),
 		camera = recorder("camera", calls),
 		weaponCategory = function()
 			return "OneHandedSword"
@@ -1852,6 +1906,9 @@ local function liveRemote()
 			return Vector3.zero
 		end,
 		schedule = function() end,
+		now = function()
+			return clock
+		end,
 	})
 	Replication.watch(record)
 	local animator = Choreo.get(model)
@@ -1883,6 +1940,27 @@ local function liveRemote()
 	function live.now(): number
 		return clock
 	end
+	-- The calls the recorders took for `module.fn`, in order.
+	function live.calls(moduleName: string, fn: string): { any }
+		local found = {}
+		for _, call in calls do
+			if call.module == moduleName and call.fn == fn then
+				table.insert(found, call)
+			end
+		end
+		return found
+	end
+	-- Signal handler errors warned since this rig was built (a throw inside Replication's handlers).
+	function live.handlerErrors(): { string }
+		local found = {}
+		local warnings = Harness.warnings()
+		for index = warningsBefore + 1, #warnings do
+			if warnings[index]:find("[Signal] handler error", 1, true) then
+				table.insert(found, warnings[index])
+			end
+		end
+		return found
+	end
 	function live.release()
 		Replication.unwatch(record)
 		Choreo.release(model)
@@ -1908,9 +1986,10 @@ describe("Replication on a remote player's rig", function()
 			for _ = 1, late do
 				live.step()
 			end
+			local dispatchedAt = live.now()
 			Replication.dispatch(
 				"ActionStarted",
-				{ entityId = 2, clipId = horizontal, serverTime = live.now() - 0.1, facing = { 0, 0, -1 } }
+				{ entityId = 2, clipId = horizontal, serverTime = dispatchedAt - 0.1, facing = { 0, 0, -1 } }
 			)
 			live.step()
 			-- The sword is in the hand on the Art's first posed frame, and no Draw ever played.
@@ -1920,6 +1999,18 @@ describe("Replication on a remote player's rig", function()
 			end
 			expect(live.drawSteps).toBe(0)
 			expect(live.inHand()).toBe(true)
+			-- The clip's ActivationHold (0.15, the clip starting 0.1 in) reached the impact director
+			-- once, on the frame the clip crossed it, as a remote rig at the clip's own speed.
+			expect(live.handlerErrors()).toEqual({})
+			local activations = live.calls("impact", "activation")
+			expect(#activations).toBe(1)
+			local call = activations[1]
+			expect(call.args[1]).toBe(live.model)
+			expect(call.args[2]).toBe(horizontal)
+			expect(call.args[4]).toBe(false)
+			expect(call.args[5]).toBeNil()
+			expect(call.at).toBeGreaterThanOrEqual(dispatchedAt + 0.05 - 1e-9)
+			expect(call.at).toBeLessThanOrEqual(dispatchedAt + 0.05 + 1 / 60 + 1e-9)
 			live.release()
 		end
 	end)
@@ -1936,6 +2027,7 @@ describe("Replication on a remote player's rig", function()
 		local delaySteps = math.ceil(ChoreoData.sheath.remoteDrawDelay * 60 - 1e-6)
 		expect(live.firstDraw).toBe(60 + delaySteps)
 		expect(live.inHand()).toBe(true)
+		expect(live.handlerErrors()).toEqual({})
 		live.release()
 	end)
 end)

@@ -17,7 +17,8 @@
 	- The soft dim is low (opacity at most DIM_MAX_OPACITY), eased in over at least 2 frames and
 	  out over at least as many, with known easings, and charged: when its dip over the reference
 	  scene (ImpactSequence.dimDip, the sRGB blend) is a transition, its flashCost is at least 1,
-	  and never above the hard limit.
+	  and never above the hard limit. Reduce flashing allows a whole reduced.maxPerWindow of at
+	  least 1 dims a window, costing fewer flashes than flash.maxPerWindow.
 	- The overlay sits above the HUD, the silhouette and stroke numbers are sane, and every fx
 	  quality tier has a row that draws the figures with a whole part cap of at least 1.
 ]]
@@ -229,6 +230,22 @@ return function(ctx: Context): { string }
 		isWhole(dim.flashCost) and dim.flashCost >= 0 and dim.flashCost <= maxCost,
 		("reduced.flashCost %s must be a whole number from 0 to %d"):format(tostring(dim.flashCost), maxCost)
 	)
+	-- ImpactFrames reads it as a count; Reduce flashing must flash less than the full budget.
+	check(
+		isWhole(dim.maxPerWindow) and dim.maxPerWindow >= 1,
+		("reduced.maxPerWindow %s must be a whole number of at least 1"):format(tostring(dim.maxPerWindow))
+	)
+	local costOk = isWhole(dim.flashCost) and dim.flashCost >= 0 and dim.flashCost <= maxCost
+	if isWhole(dim.maxPerWindow) and costOk and typeof(flash.maxPerWindow) == "number" then
+		check(
+			dim.maxPerWindow * dim.flashCost < flash.maxPerWindow,
+			("reduced.maxPerWindow %d dims cost %d flashes, not fewer than flash.maxPerWindow (%d): Reduce flashing must flash less"):format(
+				dim.maxPerWindow,
+				dim.maxPerWindow * dim.flashCost,
+				flash.maxPerWindow
+			)
+		)
+	end
 	if isToken(dim.referenceScene) and isToken(dim.token) and typeof(dim.opacity) == "number" then
 		local dip = ImpactSequence.dimDip(dim.referenceScene, dim.opacity, dim.token)
 		local delta = if typeof(flash.transitionDelta) == "number"

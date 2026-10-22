@@ -692,7 +692,9 @@ function Impact.cancelActivation(model: Model?)
 end
 
 --- A dodge: speed lines on the dodging fighter's own screen, the cue for everyone in range.
-function Impact.dodge(model: Model, isLocal: boolean)
+--- `lateBy` is how far into the dodge clip a remote catch-up started it (seconds), so the cue's
+--- layers stay on the clip's clock.
+function Impact.dodge(model: Model, isLocal: boolean, lateBy: number?)
 	local name = "Dodge"
 	local row = Moments.byId(name)
 	local position = positionOf(model)
@@ -701,7 +703,7 @@ function Impact.dodge(model: Model, isLocal: boolean)
 		call("speedLines", "play", lines.kind)
 	end
 	if row.cue ~= nil and allowed(name, "Cue", isLocal, position) then
-		call("sfx", "cue", row.cue, position)
+		call("sfx", "cue", row.cue, position, lateBy)
 	end
 end
 

@@ -5,7 +5,8 @@
 	Net.server()'s receive path, loaded with a fake os.clock, so the token bucket runs with the
 	world.luau numbers. Mashing a state (lock, next, unlock...) must always end with the server
 	holding the client's last state, and never trip the limiter. The control shows the harness can
-	lose a state: firing on every change (the old TargetController) loses the last one.
+	lose a state: firing on every change (the old TargetController) loses the last one. Last, the
+	real Main.client's Tab gate: mashing Tab at any rate never trips SwitchCallRequest's bucket.
 ]]
 
 local luau = require("@lune/luau")
@@ -989,5 +990,134 @@ describe("CharacterController's guard tap and the server's parry rearm", functio
 			end
 		end
 		expect(table.concat(refused, "; ")).toBe("")
+	end)
+end)
+
+-- The real Main.client, loaded fresh with fakes for every controller it starts: its Net.client()
+-- fires into the link and its os.clock reads the link's clock. Each press is one Tab press
+-- (InputController.switchCall). No sibling package loads, so nothing else starts.
+local MAIN_NODE = "src/client/Main" -- the LocalScript node Rojo builds from Main.client.luau
+local MAIN_FILE = "src/client/Main.client.luau"
+
+local function loadMainClient(link: Link): any
+	local function stubModule(signals: { string }): any
+		local module: { [string]: any } = {}
+		for _, name in signals do
+			module[name] = Signal.new()
+		end
+		return setmetatable(module, {
+			__index = function(): any
+				return function() end
+			end,
+		})
+	end
+	local input = stubModule({
+		"artPressed",
+		"artReleased",
+		"artCancelled",
+		"basicAttack",
+		"guardChanged",
+		"dodge",
+		"sprintChanged",
+		"switchCall",
+	})
+	local fakes: { [string]: any } = {
+		Net = {
+			client = function(): any
+				return { fire = link.fire, on = function() end }
+			end,
+		},
+		EntityTracker = stubModule({ "localChanged" }),
+		Replication = stubModule({}),
+		CharacterController = stubModule({}),
+		InputController = input,
+		TargetController = stubModule({ "targetChanged" }),
+		CameraController = stubModule({}),
+		Siblings = {
+			load = function(): (any, boolean)
+				return nil, false
+			end,
+			call = function() end,
+		},
+	}
+	local services: { [string]: any } = {
+		ReplicatedStorage = Harness.game():GetService("ReplicatedStorage"),
+	}
+	local env = Harness.environment()
+	env.script = Harness.node(MAIN_NODE)
+	env.require = function(target: any): any
+		return fakes[target.Name] or Harness.loadModule(target)
+	end
+	env.game = {
+		GetService = function(_self: any, name: string): any
+			return services[name]
+		end,
+	}
+	env.os = {
+		clock = function(): number
+			return link.clock.now
+		end,
+	}
+	luau.load(Harness.readFile(MAIN_FILE), { debugName = MAIN_FILE, environment = env :: any })()
+	return input
+end
+
+-- Tab pressed `presses` times `interval` apart from t = 1 through the real Main.client into Net's
+-- limiter. Returns the server's rate rejections and the SwitchCallRequests it accepted.
+local function mashTab(presses: number, interval: number, latency: () -> number): (number, number)
+	local link = newLink(latency, "SwitchCallRequest", "unused")
+	local accepted = 0
+	link.clock.runUntil(0)
+	local input = loadMainClient({
+		clock = link.clock,
+		fire = function(name: string, payload: any)
+			if name == "SwitchCallRequest" then
+				accepted += 1
+			end
+			link.fire(name, payload)
+		end,
+		server = link.server,
+		rejected = link.rejected,
+		forget = link.forget,
+	})
+	for press = 1, presses do
+		link.clock.runUntil(1 + (press - 1) * interval)
+		input.switchCall:Fire()
+	end
+	link.clock.runUntil(1 + presses * interval + 2)
+	return link.rejected(), accepted - link.rejected()
+end
+
+describe("Main.client's Tab over Net's rate limiter", function()
+	it("Tab at 4 presses a second for 10 s never trips SwitchCallRequest's bucket", function()
+		local rate = World.anticheat.remoteRates.SwitchCallRequest
+		local rejected, accepted = mashTab(40, 0.25, function(): number
+			return 0.05
+		end)
+		expect(rejected).toBe(0)
+		-- One call per refill goes out: every other press at 4 a second against 2 a second.
+		expect(accepted).toBe(math.floor(10 * rate.perSecond))
+	end)
+
+	it("mashing Tab at 2.5 to 60 presses a second on a jittery network never trips the bucket", function()
+		local rng = Random.new(77)
+		local tripped: { string } = {}
+		for _, perSecond in { 2.5, 3, 4, 6, 10, 20, 60 } do
+			local rejected = mashTab(math.floor(perSecond * 10), 1 / perSecond, function(): number
+				return 0.05 + rng:NextNumber() * 0.2
+			end)
+			if rejected > 0 then
+				table.insert(tripped, ("%s a second: %d rejected"):format(tostring(perSecond), rejected))
+			end
+		end
+		expect(table.concat(tripped, "; ")).toBe("")
+	end)
+
+	it("a single Tab press after a pause still goes out at once", function()
+		local rejected, accepted = mashTab(1, 1, function(): number
+			return 0.05
+		end)
+		expect(rejected).toBe(0)
+		expect(accepted).toBe(1)
 	end)
 end)

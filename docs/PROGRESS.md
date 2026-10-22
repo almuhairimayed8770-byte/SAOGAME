@@ -135,7 +135,7 @@ game window rendering. What it found and what changed:
   at a run and 11 at a sprint, because the gaits still play at rate 1 whatever the body's speed (D-054 and D-059 now pace the
   gaits and carry the stop; not yet re-checked in Play, STUDIO_TASKS items 37 to 43). The sheathe about 6 s after lock-off was not seen: the enemies killed the character during the wait. A
   respawn logs "Something unexpectedly tried to set the parent of Animate to NULL": Choreo removes the engine's
-  Animate script from inside the engine's own parenting; the removal is to be deferred a frame.
+  Animate script from inside the engine's own parenting; the removal is now deferred (D-103, STUDIO_TASKS item 82).
 
 ## After the Play-test (a556f8d, 8e88bf0, 3f9c671, 6e0fd5e)
 
@@ -216,8 +216,8 @@ Built and checked in Lune only; none of it has been seen in Studio yet (STUDIO_T
   turns the Basic trail kind off; judge at 0.25x whether the tail reads short.
 - Guard requests go through TrailingSend with a client burst of 2 (D-056): tapping guard never trips GuardRequest's
   rate limit, a tap's raise and release go out together, and the server always ends on the last state. Parry spam
-  gains nothing past the 0.25 s re-arm (D-031). `SwitchCallRequest` still fires on every Tab press: about 4 presses a
-  second for 10 s gets the player kicked.
+  gains nothing past the 0.25 s re-arm (D-031). Tab is gated on the client at `SwitchCallRequest`'s rate (D-107), so
+  mashing it no longer gets a player kicked.
 - The walk-run blends are not posed by GroundClearance. Straight ahead at 8 to 10 studs a second, the sheathed blend
   brings the scabbard within 0.023 stud of the left forearm box (the arms margin is 0.03; no contact), and a drawn
   walk-run blend puts the held guard 0.009 stud into the right shin box for 10 frames. Watch Run from behind for the
@@ -283,24 +283,27 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
    (MicroProfiler), client memory (**View > Stats > Memory**), the 8 players + 30 enemies case and a 2020 phone. Then
    merge `phase-0` into `main` and tag it once every gate line reads Met.
 
-### Open items (as of 6e0fd5e, not in the three above)
+### Open items (after the leftover fixes, not in the three above)
 
-- **Code, other owners.** `Smear.restSize` (the impact-frame figure draws a smeared sword stretched until it exists).
-  The server sends no `speed` on `ActionStarted` (every remote Art rises at speed 1), no `isSwitch` on hits (the
-  Switch moment, digit and partner flash never fire live) and sets no `Elite` attribute on Elite spawns (none spawn in
-  Phase 0); it should confirm `hitStop = "Final"` on a guard-breaking hit (the client lifts it today). A client gate
-  for `SwitchCallRequest` on Tab. The engine Animate removal deferred a frame. Locomotion's Jump-to-Fall handoff
-  (`animator.finished:Once`).
-- **Checks.** The accents validator does not check `swing.memorySeconds`, `swing.snapFrames` or `slashArc.tilt`, and
-  the impact validator not `reduced.maxPerWindow` (the specs do). `CharacterController.spec` has no case for the stop
-  carry's speed cap and `stopGait`, or the four Impact calls. The sfx coverage scan counts names inside comments.
-  Not posed yet: a flinch over a FullBody one-shot, Draw with a flinch on top, the sheathed set with the sword still
-  in the hand during `sheatheDelay`, the walk-run blends, gait weight pops.
-- **Clean-up.** Three code comments still say "D-NEW": `Replication.luau` (now D-079), `tests/data/impact.spec.luau`
-  and `tests/client/ImpactFrames.spec.luau` (now D-066). `SfxPool.hit`, `parry` and `hitStopTick` and Replication's
-  `SOUNDS.impact`, `block`, `parry` and `switchLand` have no game caller: keep or delete. Two deaths in one frame start
-  two ShatterBloom contours; the no-rig shatter fallback skips `SfxPool.shatter`'s merge; the merge remembers only the
-  last shatter of each cue.
+- **Code, other owners.** The server sends no `speed` on `ActionStarted` (every remote Art rises at speed 1) and no
+  `isSwitch` on hits (the Switch moment, digit and partner flash never fire live); it should confirm
+  `hitStop = "Final"` on a guard-breaking hit (the client lifts it today).
+- **From the merge check (each has a Studio check, items 91 to 96).** A remote sprint into a dodge plays Skid's
+  landing and the Dodge cue's (fix: skip Skid while a FullBody action holds the body). A remote opener from the sheath
+  at 85 ms or more of catch-up measures its slash from the back mount, about 80 degrees off (fix: reset the tip ring
+  when the weapon motor changes part). The stop carry treats `Humanoid.MoveDirection` as the stick and can keep
+  walking with no active controller (fix: read the control module's move vector). The impact overlay and speed lines
+  stop at the safe area on notched phones (fix: `ScreenInsets` None, `ClipToDeviceSafeArea` false). `OutlineManager.flash`
+  enables Highlights past the 31 budget on a wide kill. Impact frames clone up to 48 parts per rig on the hit frame
+  itself (fix: prewarm).
+- **Not built yet.** The FX have no time-scale hook, so Capture's slow motion slows only the animation (D-111).
+  `Trails.reset()` has no caller until a place change or teleport flow exists.
+- **Checks.** The sfx coverage scan counts names inside comments. Not posed yet: a flinch over a FullBody one-shot,
+  Draw with a flinch on top, the sheathed set with the sword still in the hand during `sheatheDelay`, the walk-run
+  blends, gait weight pops.
+- **Clean-up.** `SfxPool.hit`, `parry` and `hitStopTick` and Replication's `SOUNDS.impact`, `block`, `parry` and
+  `switchLand` have no game caller: keep or delete. Two deaths in one frame start two ShatterBloom contours; the
+  no-rig shatter fallback skips `SfxPool.shatter`'s merge; the merge remembers only the last shatter of each cue.
 - **Design calls.** The settings menu (later phase) must write `SettingReduceFlashing` and `SettingQuality`, and every
   later full-screen flash must ask `FlashBudget`. A cue-level material slot for armor and construct hits. Stance Arts
   against the stop carry (MoveDirection stays non-zero up to 1.2 s) before Phase 1. Strafe and backpedal run clips,

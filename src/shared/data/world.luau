@@ -99,9 +99,9 @@ local World = {
 		reasons = { speed = "speed", teleport = "teleport", abuse = "abuse" },
 		-- Per-remote rate limits (section 17) for every client-to-server remote in net/Remotes.luau:
 		-- requests per second refilled and the burst a bucket holds; a rejection is one abuse report
-		-- weighted by abuseWeight. The client never sends BasicAttackRequest faster than its
-		-- perSecond (ActionLogic.basicReady), so honest mashing stays inside the bucket and the
-		-- burst only absorbs network jitter.
+		-- weighted by abuseWeight. The client never sends BasicAttackRequest or SwitchCallRequest
+		-- faster than its perSecond (ActionLogic.basicReady; Main.client gates Tab), so honest
+		-- mashing stays inside the bucket and the burst only absorbs network jitter.
 		-- A stall an honest client's paced sends must ride out without tripping its bucket: a
 		-- clientBurst plus perSecond times this must fit inside burst.
 		remoteStallSeconds = 0.3,

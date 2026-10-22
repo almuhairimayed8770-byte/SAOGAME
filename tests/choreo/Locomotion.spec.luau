@@ -982,3 +982,68 @@ describe("Locomotion: the gait clock", function()
 		end
 	end)
 end)
+
+describe("Locomotion's jump", function()
+	it("the fall takes over when the jump clip ends, even if another clip ends first", function()
+		-- A flinch or a guard hit that ends during the jump fires the animator's finished first; it
+		-- must not use up the jump's handoff to the fall.
+		local fall = Config.clipPrefix .. "Fall"
+		ClipLibrary.get(fall) -- loaded first: a handler that loads a module yields in Lune
+		for _, other in { false, "FlinchFront", "GuardHit" } do
+			local model = buildRig("PlayerR15")
+			local animator = Choreo.get(model)
+			local state = still()
+			local driver = Locomotion.attach(animator, model, { footIK = false, tracker = trackerOf(state) })
+			for _ = 1, 30 do
+				animator:step(FRAME)
+			end
+			state.grounded = false
+			state.verticalVelocity = Config.jumpVelocity + 10
+			animator:step(FRAME)
+			state.verticalVelocity = 0
+			if other then
+				local clip = ClipLibrary.get(Config.clipPrefix .. other)
+				-- It must end inside the jump clip for the case to mean anything.
+				expect(clip.duration < ClipLibrary.get(Config.clipPrefix .. "Jump").duration).toBe(true)
+				animator:play(clip.id)
+			end
+			-- The jump clip (0.4 s) ends well inside the second in the air.
+			for _ = 1, 60 do
+				animator:step(FRAME)
+			end
+			expect(handleOf(animator, fall)).toBeTruthy()
+			driver:destroy()
+			Choreo.release(model)
+		end
+	end)
+
+	it("a hop that lands before the jump clip ends leaves no handoff behind", function()
+		local model = buildRig("PlayerR15")
+		local animator = Choreo.get(model)
+		local state = still()
+		local driver = Locomotion.attach(animator, model, { footIK = false, tracker = trackerOf(state) })
+		animator:step(FRAME)
+		local baseline = animator.finished:ConnectionCount()
+		for _ = 1, 5 do
+			state.grounded = false
+			state.verticalVelocity = Config.jumpVelocity + 10
+			animator:step(FRAME)
+			state.verticalVelocity = 0
+			for _ = 1, 6 do
+				animator:step(FRAME)
+			end
+			state.grounded = true
+			for _ = 1, 60 do
+				animator:step(FRAME)
+			end
+		end
+		expect(animator.finished:ConnectionCount()).toBe(baseline)
+		-- And a driver that goes while a jump is in the air leaves none either.
+		state.grounded = false
+		state.verticalVelocity = Config.jumpVelocity + 10
+		animator:step(FRAME)
+		driver:destroy()
+		expect(animator.finished:ConnectionCount()).toBe(baseline)
+		Choreo.release(model)
+	end)
+end)

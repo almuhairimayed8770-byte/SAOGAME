@@ -12,9 +12,11 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Client = script.Parent
 
 local Net = require(Shared.net.Net)
+local TrailingSend = require(Shared.net.TrailingSend)
 local EntityTracker = require(Client.controllers.EntityTracker)
 local Replication = require(Client.controllers.Replication)
 local CharacterController = require(Client.controllers.CharacterController)
+local ActionLogic = require(Client.controllers.ActionLogic)
 local InputController = require(Client.controllers.InputController)
 local TargetController = require(Client.controllers.TargetController)
 local CameraController = require(Client.camera.CameraController)
@@ -44,7 +46,16 @@ InputController.basicAttack:Connect(CharacterController.basicAttack)
 InputController.guardChanged:Connect(CharacterController.setGuard)
 InputController.dodge:Connect(CharacterController.dodge)
 InputController.sprintChanged:Connect(CharacterController.setSprinting)
+-- Tab presses faster than SwitchCallRequest's refill are dropped here, as basic attacks are, so
+-- mashing Tab never reads as abuse.
+local switchCallGap = TrailingSend.gapOf("SwitchCallRequest")
+local switchCalledAt = -math.huge
 InputController.switchCall:Connect(function()
+	local t = os.clock()
+	if not ActionLogic.basicReady(switchCalledAt, t, switchCallGap) then
+		return
+	end
+	switchCalledAt = t
 	net.fire("SwitchCallRequest", {})
 end)
 

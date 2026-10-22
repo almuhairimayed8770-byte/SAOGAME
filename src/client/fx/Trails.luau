@@ -23,7 +23,9 @@
 	stay off. Every instance is reused; nothing is created per frame.
 
 	`swingDirection(model)`: every Heartbeat the module records each tracked blade tip's
-	(TrailEnd's) world position in a short ring (accents.swing.samples long) and answers with
+	(TrailEnd's) WorldPosition in a short ring (accents.swing.samples long; only a swinging rig,
+	or an idle one within accents.swing.sampleDistance, and never a weapon that left the world; a
+	rig skipped for a frame starts its ring over) and answers with
 	the unit motion from the oldest of those samples to the newest, or nil when the tip moved
 	less than accents.swing.minTravel (or jumped more than maxTravel: a respawn, a teleport).
 	The snap: when a strike begins (an Art or Basic kind turns on: TrailOn, or a HitWindowOpen,
@@ -443,16 +445,27 @@ local function measureSnap(entry: Entry, position: Vector3, at: number)
 end
 
 --- Records each tracked blade tip's world position in its ring (Heartbeat runs it; specs call
---- it), and remembers the direction of a rig that is swinging (a trail kind on).
+--- it), and remembers the direction of a rig that is swinging (a trail kind on). Only a rig whose
+--- answer can matter is read: one swinging, or an idle one within accents.swing.sampleDistance of
+--- the viewer; a weapon that left the world is never read. A rig not read this frame starts its
+--- ring over, so no chord ever spans the frames it missed.
 function Trails.sample()
 	local at = Engine.now()
+	local viewer = Engine.viewerPosition()
+	local range = Accents.swing.sampleDistance
 	for _, entry in entries do
-		-- The attachment's world position: its part's frame times its own (Attachment.WorldPosition).
-		local position = (entry.weapon.CFrame * entry.tip.CFrame).Position
+		local weapon = entry.weapon
+		local swinging = activeKind(entry) ~= nil
+		local idleFar = not swinging and (viewer == nil or (weapon.Position - (viewer :: Vector3)).Magnitude > range)
+		if weapon.Parent == nil or idleFar then
+			entry.tipCount = 0
+			continue
+		end
+		local position = entry.tip.WorldPosition
 		entry.tipHead = entry.tipHead % SWING_SAMPLES + 1
 		entry.tips[entry.tipHead] = position
 		entry.tipCount = math.min(entry.tipCount + 1, SWING_SAMPLES)
-		if activeKind(entry) ~= nil then
+		if swinging then
 			local direction = ringDirection(entry)
 			if direction ~= nil then
 				entry.lastSwing = direction
@@ -485,6 +498,17 @@ function Trails.swingDirection(model: Instance): Vector3?
 		return remembered
 	end
 	return current
+end
+
+--- Forgets every rig (a place change, specs): each one's trail and light go off, as on detach.
+function Trails.reset()
+	local models: { Instance } = {}
+	for model in entries do
+		table.insert(models, model)
+	end
+	for _, model in models do
+		Trails.detach(model)
+	end
 end
 
 --- Starts the periodic budget re-rank (rigs move) and follows quality changes.

@@ -279,8 +279,7 @@ basic attack, RMB the guard, Space the dodge, F the lock-on and Shift the sprint
     hit two frames of white figures on black, then the white flash on the target and the slash line in the world, and
     the view pushes in about 3 degrees and springs back. The crescent lies in the swing's plane, bulging away from
     you, never edge-on (turned at most 30 degrees toward the camera); Sharp Nail's stands upright along the thrust.
-    The sword shows inside the white figure; a stretched blade there is expected until `Smear.restSize` exists
-    (D-066). A hit that kills shows the kill frames instead (item 54).
+    The sword shows inside the white figure at its rest size, never the smear's stretch (D-066). A hit that kills shows the kill frames instead (item 54).
 49. [ ] **An Art's sounds (D-074, D-075, D-077, D-082) (listen).** Record this one. Use each Art three times on any
     target, once with a quick tap and once holding the key about 0.8 s before letting go. Then cap the frame rate at
     20 fps (the graphics driver's per-app frame limit, or a low-end device) and use Vertical (2) five times. Pass: the
@@ -438,3 +437,69 @@ client windows. Add the slab and the ramp again from the server window if you wa
     the Idle glance at 10 s, RisingArc (the re-cock at 0.56 s), and Draw over RunDrawn and SprintDrawn (the point stays
     well above the grass). Each keeps its timing and snap, and the sheathed hilt and scabbard stay clear of the head,
     arms and legs. Note any that now look stiffer than before, in the hand columns of `docs/ANIMATION_REVIEW.md` (item 12).
+
+## N. After the merge: leftover fixes and engine checks (D-103 to D-111)
+
+All in the Playground (places/Playground.rbxl, or `rojo build places/Playground.project.json`) unless said otherwise.
+
+82. [ ] **Default Animate removal.** Press F5 and open View > Output. Press Esc > Reset Character twice. Pass: no
+    'Something unexpectedly tried to set the parent of Animate to NULL' warning; in Explorer, Workspace > <your
+    player> has no Animate LocalScript once spawned; no default idle frame shows before the Choreo idle.
+83. [ ] **Slash line placement.** Land an Art's final hit on a kobold (Q), then press Test > Pause at once. In
+    Explorer open Workspace > FxSlashLines > SlashLine. Pass: the StartSystemWhite and EndSystemWhite attachments sit
+    on either side of the hit point along the swing, the Core beam crosses the hit, and the two Edge copies (rose,
+    cyan) sit one on each side of it.
+84. [ ] **(optional) Far swing on Low quality.** Test > Clients and Servers, 2 players. In client 1's command bar run
+    `game.Players.LocalPlayer:SetAttribute("SettingQuality", "Low")` and stand about 100 studs from client 2, who
+    swings at a kobold (LMB). Pass on client 1: the crescent bulges along client 2's swing, not in a flat default
+    direction.
+85. [ ] **Jump-to-Fall under a hit.** Stand beside a Kobold Axeman holding RMB (guard). When it winds up, run
+    `game.Players.LocalPlayer.Character.HumanoidRootPart.AssemblyLinearVelocity = Vector3.new(0, 50, 0)` in the client
+    command bar (the Jump pose plays above choreo jumpVelocity). Pass: the guard hit (or a flinch) plays mid-air, the
+    Fall pose still plays before landing, and the character never freezes in the Jump pose.
+86. [ ] **Tab mash.** Lock onto a kobold (F), then mash Tab at about 4 to 10 presses a second for 10 s. Pass: no kick,
+    no anticheat anomaly in the server Output, and at most 2 Switch prompts a second.
+87. [ ] **Remote dodge landing (listen).** Test > Clients and Servers, 2 players. Set 100 ms incoming lag (File >
+    Studio Settings > Network > Incoming Replication Lag = 0.1, or the Test tab's network simulator; verify). Client A
+    runs (W) and dodges (Space) while client B watches from within 60 studs. Pass on B: the dodge's landing thud plays
+    before or with the clip's footstep, never after it.
+88. [ ] **Capture time-scale label.** Press O to cycle the time scale on the Capture panel (press H if the panel is
+    hidden). Pass: it reads 'Time scale 0.5x (animation only: hit FX and sounds run at 1x)' at 0.5x, the same note at
+    0.25x, and just 'Time scale 1x' at 1x; the line wraps inside the panel.
+89. [ ] **Riser at 30 fps (listen).** Cap the frame rate at 30 (Esc > Settings > Maximum Frame Rate 30, or a low-end
+    phone; verify). Hold Q for an Art that has a hold and release it onto a kobold. Pass: the riser's end and its fade
+    land on the hit frame, not a frame after.
+90. [ ] **Humanoid writes.** In the client command bar run `local h = game.Players.LocalPlayer.Character.Humanoid
+    h:GetPropertyChangedSignal("WalkSpeed"):Connect(function() print("WS", h.WalkSpeed, os.clock()) end)
+    h:GetPropertyChangedSignal("AutoRotate"):Connect(function() print("AR", h.AutoRotate) end)`. Run with W and let
+    go. Pass: at most one WS print a frame during the stop carry, and no AR print unless a dodge or an attack locks
+    movement.
+91. [ ] **Sprint into a dodge, one landing (listen).** Test > Clients and Servers, 2 players; B watches A from within
+    60 studs. A sprints (LeftShift + W) for 2 s and presses Space at once. Pass on B and on A: exactly one landing
+    thud, at the end of the dodge (no Skid LandSoft about 0.18 s before the Dodge cue's). Repeat at run speed (W
+    only): one thud. If two thuds sound, note how loud the first is.
+92. [ ] **Remote opener from the sheath.** Test > Clients and Servers, 2 players; set B's incoming lag to 0.09 s (as
+    in step 6). A lands no hit for 7 s so the sword goes onto the back (combatTagDuration 6 s plus sheatheDelay), then
+    opens with LMB (Basic1) on a kobold while B watches. Pass on B: the slash crescent follows the blade's arc, not
+    back over A's shoulder. Repeat at 0 lag for comparison.
+93. [ ] **Stop carry without a controller (PC, then Device emulator phone).** (a) Press F5, sprint forward 2 s and
+    release W. Watch Workspace > <player> > HumanoidRootPart.AssemblyLinearVelocity: it falls to 0 within choreo
+    stopStepsSeconds (1.2 s), and Humanoid.MoveDirection reads (0, 0, 0) after the carry. (b) In Test > Device
+    emulator (a phone), spawn and act with only a tap and the dodge button, never touching the thumbstick: the
+    character never walks on its own. (c) During a run, run
+    `require(game.Players.LocalPlayer.PlayerScripts.PlayerModule):GetControls():Disable()` in the client command bar,
+    then release: the character stops and stays stopped.
+94. [ ] **Impact overlay on a notched phone.** Test > Device emulator, iPhone 14 Pro (or another notched phone),
+    landscape. Land a Kill or an Art final hit on a kobold and pause on the impact frame (Test > Pause, or 0.25x with
+    O on the Capture panel). Pass: the white or ink fill reaches every screen edge, including the notch side and the
+    rounded corners. Then hold the thumbstick through an impact frame: the character keeps moving and the stick does
+    not drop.
+95. [ ] **Highlight budget under a wide kill.** Before pressing F5, open ReplicatedStorage > Shared > data >
+    playground and set the first KoboldAxeman spawn's packSize to { min = 35, max = 35 } (Studio only, never saved to
+    the repo). Press F5, lock one kobold (F) and get a telegraph showing. Hit 6 or more unranked kobolds with a wide
+    Art that ends in a Kill. Pass: during the white flash the locked target's outline and the telegraph's weapon fill
+    stay visible.
+96. [ ] **Impact-frame clone hitch (phone).** Test > Device emulator, a phone; open View > MicroProfiler. Land the
+    session's first Kill and look for a spike on the impact frame (labels with Clone); then land a second Kill on the
+    same enemy type and compare. Pass: no frame spike on the first impact large enough to read as a stutter; note the
+    ms in PROGRESS either way.

@@ -98,6 +98,7 @@ local timeScale = 1
 local lastPredictAt: number? = nil
 local lastParryAt: number? = nil
 local lastWalkSpeed: number? = nil
+local lastLocked: boolean? = nil
 local dodgeReadyAt = 0
 local basicChain = 0
 local basicLastTime = 0
@@ -582,10 +583,11 @@ local function step(dt: number)
 
 	local locked = ActionLogic.movementLocked(state)
 	local walkSpeed = ActionLogic.speedFor(state, sprinting, speeds)
-	if walkSpeed ~= lastWalkSpeed then
-		hum.WalkSpeed = walkSpeed
+	-- Each Humanoid write fires its Changed handlers (and WalkSpeed replicates), so each property
+	-- is written once, only when it changes: AutoRotate here, WalkSpeed below with the carry.
+	if locked ~= lastLocked then
 		hum.AutoRotate = not locked
-		lastWalkSpeed = walkSpeed
+		lastLocked = locked
 	end
 
 	-- Locomotion keeps the Drawn attribute from its change signal, so no attribute is read per frame.
@@ -621,10 +623,13 @@ local function step(dt: number)
 		STOP_CARRY,
 		gait
 	)
+	local targetSpeed = if carrySpeed > 0 then carrySpeed else walkSpeed
+	if targetSpeed ~= lastWalkSpeed then
+		hum.WalkSpeed = targetSpeed
+		lastWalkSpeed = targetSpeed
+	end
 	if carrySpeed > 0 then
 		moveDir = Vector3.new(stopCarry.x, 0, stopCarry.z)
-		hum.WalkSpeed = carrySpeed
-		lastWalkSpeed = carrySpeed
 		hum:Move(moveDir)
 		carrying = true
 	elseif carrying then
@@ -672,6 +677,7 @@ local function clearCharacter()
 	predicted = nil
 	actionEndsAt = nil
 	lastWalkSpeed = nil
+	lastLocked = nil
 	lastPredictAt = nil
 	fallTracker = { airborneSince = nil, peakY = 0 }
 	stopCarry = ActionLogic.newStopCarry()

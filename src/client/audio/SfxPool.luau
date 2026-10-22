@@ -29,13 +29,15 @@
 	play. No play ends above sfx.limits.maxPlayVolume, the heartbeat's lift included.
 
 	The reel's sound on top (sfx.luau `cues`, `contours`, `effects`):
-	- `cue(name, position?)` plays a layered recipe: every layer goes through the same play path
+	- `cue(name, position?, lateBy?)` plays a layered recipe: every layer goes through the same play path
 	  (dedupe, placeholders, trims, 3D or 2D per entry) at its delay, at entry.volume x
 	  10^(gainDb / 20) for that play (the entry's base volume never changes; a fade starts from it),
 	  and at the layer's pitch when it names one (else the entry's random pick); every PlaybackSpeed
 	  stays inside sfx.engine.playbackSpeed. A layer whose delay is under
 	  sfx.playback.sameFrameSeconds plays on the cue's own call: task.delay resumes a thread once
-	  per frame, so a few-ms wait would land a whole frame (17 to 33 ms) after the crack.
+	  per frame, so a few-ms wait would land a whole frame (17 to 33 ms) after the crack. With
+	  `lateBy` (a remote dodge the network catch-up started late) the cue keeps its own clock:
+	  each layer comes lateBy sooner, and one already due plays as `playLate` would.
 	- `contour(name)` runs mix automation: eased ramps of the EQ bands and the reverb wet level on
 	  the SoundGroups in `effects.groups`. `start()` gives each of those groups one
 	  EqualizerSoundEffect and one ReverbSoundEffect, flat, dry and disabled while no contour
@@ -47,7 +49,9 @@
 	- `playEndingAt(name, seconds, position?)` lands the end of the audible region (stopAt, else
 	  the loaded TimeLength) `seconds` from now: a riser that ends on the hit. It starts at
 	  TimePosition = end - seconds x PlaybackSpeed when that is at or after startAt, else at
-	  startAt after a wait of seconds - (end - startAt) / PlaybackSpeed. A sound whose asset has
+	  startAt after a wait of seconds - (end - startAt) / PlaybackSpeed; the engine resumes that
+	  wait on a frame boundary, so the play starts as much further in as it was resumed late and
+	  its end (and its fade) still land on the hit. A sound whose asset has
 	  not loaded yet is skipped, never played out of time, and asked to load for the next one. A
 	  riser whose hit is now or already past (seconds <= 0) is skipped too.
 	- `playLate(name, lateBy, position?)` plays a sound as if it had started `lateBy` seconds ago
@@ -915,30 +919,44 @@ local function startSound(
 
 	local fadeOut = if late then 0 else entry.fadeOut or 0
 	local fadeEnd = audibleEnd(entry, loaded)
+	local aimedAt = now + wait
 	local function begin()
 		if voice.serial ~= serial then
 			return -- the voice was taken for another play while this one waited
 		end
 		local playedAt = deps.now()
+		local from = timePosition
+		local length = playLength
+		if endIn ~= nil and fadeEnd ~= nil then
+			-- task.delay resumes on the first frame boundary after the wait (up to 33 ms late at
+			-- 30 fps): start that much further in, so the end still lands where it was aimed.
+			local slip = playedAt - aimedAt
+			if slip > 0 then
+				from = math.min(timePosition + slip * speed, fadeEnd :: number)
+				if length ~= nil then
+					length = math.max(length - slip, 0)
+				end
+			end
+		end
 		-- Play starts from the last TimePosition a script set: every play sets it.
-		sound.TimePosition = timePosition
+		sound.TimePosition = from
 		if fadeOut > 0 and fadeEnd ~= nil then
 			local fade: Fade = {
 				voice = voice,
 				serial = serial,
 				from = volume,
-				startsAt = playedAt + ((fadeEnd :: number) - fadeOut - timePosition) / speed,
-				endsAt = playedAt + ((fadeEnd :: number) - timePosition) / speed,
+				startsAt = playedAt + ((fadeEnd :: number) - fadeOut - from) / speed,
+				endsAt = playedAt + ((fadeEnd :: number) - from) / speed,
 			}
 			sound.Volume = fadeLevel(fade, playedAt)
 			table.insert(fades, fade)
 			ensureStepper()
 		end
-		if playLength ~= nil then
+		if length ~= nil then
 			-- Ended may or may not fire at a region end: the voice frees itself when the region is over.
 			voice.startedAt = playedAt
-			voice.busyUntil = playedAt + playLength
-			deps.delay(playLength, finish)
+			voice.busyUntil = playedAt + length
+			deps.delay(length, finish)
 		end
 		if deps.play(sound) then
 			stats.played += 1
@@ -1130,21 +1148,26 @@ function SfxPool.play(name: string, position: Vector3?): Sound?
 	return startSound(name, position, 0, nil)
 end
 
---- Plays sfx.cues[name]: each layer through the play path at its delay (under a frame: with the call), at entry.volume x 10^(gainDb / 20) and its own pitch when it sets one.
-function SfxPool.cue(name: string, position: Vector3?)
+--- Plays sfx.cues[name]: each layer through the play path at its delay (under a frame: with the call), at entry.volume x 10^(gainDb / 20) and its own pitch when it sets one. With `lateBy` (a remote action the network catch-up started late) the cue runs as if it had started that long ago: each layer comes at delay - lateBy, one already due starts that far into its region (playLate), and one already over is dropped.
+function SfxPool.cue(name: string, position: Vector3?, lateBy: number?)
 	local layers = Sfx.cue(name)
 	for _, layer in layers do
 		-- Resolve every layer now, so a bad name fails at the call and not inside the scheduler.
 		local family, entryName = splitName(layer.name)
 		Sfx.get(family, entryName)
 	end
+	local late = if lateBy ~= nil and lateBy > 0 then lateBy else 0
 	for _, layer in layers do
 		local layerName, gainDb, layerPitch = layer.name, layer.gainDb, layer.pitch
-		-- Under a frame, a scheduled thread would resume on the next frame: play it with the call.
-		if layer.delay < Sfx.playback.sameFrameSeconds then
+		local wait = layer.delay - late
+		if wait < 0 then
+			-- Already due: it plays from where it would be by now, or not at all when it is over.
+			startSound(layerName, position, gainDb, nil, layerPitch, -wait)
+		elseif wait < Sfx.playback.sameFrameSeconds then
+			-- Under a frame, a scheduled thread would resume on the next frame: play it with the call.
 			startSound(layerName, position, gainDb, nil, layerPitch)
 		else
-			deps.delay(layer.delay, function()
+			deps.delay(wait, function()
 				startSound(layerName, position, gainDb, nil, layerPitch)
 			end)
 		end
