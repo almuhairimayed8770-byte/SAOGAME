@@ -17,6 +17,7 @@ src/shared/
                                Pose.chain reads the joints once for many solves
   net/Remotes.luau             remote definitions: kind, direction, schema, rate limit (from world.luau)
   net/Net.luau                 typed wrapper; server validates and rate-limits every payload
+  net/TrailingSend.luau        paces a state request (lock-on target, held guard) to its rate limit with a client token bucket; the last state always goes out (D-056)
   util/                        Signal, Easing, Spring, Verlet, Rng, Check
 src/server/
   Main.server.luau             starts services in order
@@ -37,26 +38,38 @@ src/server/
 src/client/
   Main.client.luau             starts controllers in order
   controllers/InputController  ContextActionService bindings (PC, gamepad, mobile), Art hold/release
-  controllers/CharacterController  locomotion state, root motion, dodge, requests to the server
+  controllers/CharacterController  locomotion state, root motion, the two-step stop carry (D-059), dodge, requests to the server;
+                               calls Impact.guardRaise / dodge / release / cancelActivation for the local fighter
   controllers/TargetController lock-on
   controllers/EntityTracker    client-side entity registry from CollectionService tags + attributes
   controllers/Replication      remote events -> Choreo, FX, HUD, camera
   choreo/Choreo.luau           per-rig animator: layers, clock, blend, root motion, events
   choreo/ClipLibrary.luau      loads clip modules by id
-  choreo/Locomotion.luau       8-direction blend space, turn-in-place, skid, landing squash, foot IK, the sheath
+  choreo/Locomotion.luau       8-direction blend space paced to the root on one gait phase (D-054), turn-in-place, skid, landing squash, foot IK, the sheath
   choreo/LocomotionState.luau  pure blend-space weights: sheathed and drawn sets, gaits, turns, stops
   choreo/WeaponMount.luau      moves the client's copy of the sword between hand and back (D-050)
   choreo/SheathState.luau      pure: when Draw and Sheathe play, stop and move the sword (D-050)
-  camera/CameraController      spring follow, FOV, nudge, shake, lock-on framing, orbit presets
+  camera/CameraController      spring follow, FOV, nudge, shake, the FOV punch (D-072), lock-on framing, orbit presets
   fx/Trails, Smear, Shatter, Sparks, Telegraphs, OutlineManager, SwitchRing, Digits, Quality
+                               (Trails also keeps each rig's swing direction, D-068)
+  fx/Impact.luau               the impact director: one call per combat moment fires what moments.luau names (D-069)
+  fx/ImpactFrames.luau         impact-frame overlay: pooled ScreenGui, ViewportFrame silhouettes, ink strokes, the soft dim (D-060)
+  fx/ImpactSequence.luau       pure: look timing, per-region flash cost, the dim curve (D-061, D-064)
+  fx/FlashBudget.luau          the 3-per-second full-screen flash budget and the Reduce flashing setting (D-061, D-062)
+  fx/Glint, SlashArc, SpeedLines  flat reel accents: four-point glint, crescent and slash line, screen-edge speed lines (D-067)
+  fx/AccentStep.luau           the accents' shared clock, render step and viewport seam
   ui/lib/                      el(), state cells
   ui/Hud, Nameplates, SystemLine
-  audio/SfxPool, MusicDirector
+  audio/SfxPool                pooled voices: layered cues, EQ and reverb contours, trims, fades, playEndingAt, playLate, loops, preload (D-075 to D-094)
+  audio/Ambience.luau          the island bed and the rim wind (D-095)
+  audio/MusicDirector
   dev/Capture.client.luau      on-screen prompts for gate clips (Playground / ClipLab only)
   dev/ClipLab.client.luau      clip review scene at 0.25x / 0.5x / 1x with a frame counter
 tests/                         Lune specs (*.spec.luau) and run-in-roblox smoke scripts (smoke/)
 tests/project/                 project-file guards (empty Animate everywhere, HttpEnabled in dev places only)
-tests/choreo/GroundClearance   every player clip at 240 Hz on the hit matrix's body: the sword stays above the field (D-047)
+tests/choreo/GroundClearance   every player clip at 240 Hz on the hit matrix's body: the sword stays above the field (D-047) and off the body, on the back or in the hand (D-050, D-055)
+tests/choreo/TurnClearance    drawn turns through the real Locomotion at 240 Hz: the scabbard keeps the off-body margin (D-058)
+tests/choreo/Stride           re-measures each gait clip's ground speed and feet against choreo.luau stride, and the pacing, starts and stops (D-054, D-059)
 tools/validate.luau            runs tools/validators/*.luau
 tools/smoke.sh                 runs the smoke scripts in Studio through tools/smoke-wrap.luau + smoke/SmokeRunner
 tools/hit-matrix.luau          prints the server hit matrix (tools/hitmatrix/HitMatrix.luau, dev.luau hitMatrix, D-045);
@@ -76,6 +89,13 @@ tools/PoseEditor/              Studio plugin (Rojo project) + tools/pose-server.
 - Errors are caught at service boundaries and logged with the player id; the server never crashes
   on a bad client message.
 - Public functions have a one-line doc comment (`--- ...`).
+- Every full-screen flash (anything that changes the whole picture's brightness: the impact frames and the soft dim
+  today; later the finisher's fade to white and the teleport and login white-outs) asks
+  `FlashBudget.request(Engine.now(), cost, seconds)` first, with its own per-region cost (`ImpactSequence.costOfLooks`)
+  and the seconds its picture lasts, and falls back to a slow fade when refused. Never more than 3 in any second
+  (D-061). Accents that cover a small part of the screen (glints, crescents, speed lines) are not full-screen flashes.
+- ImpactFrames binds the render step `impact.overlay.renderStepName` (`SkyspireImpactFrames`) at
+  `RenderPriority.Camera + 1`, after the camera's step; no other module reuses that name.
 
 ## Entities
 
@@ -171,8 +191,39 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
   key says, acts at once, and survives a joint rebuild.
 - Footsteps (D-051): the Base layer runs every walk clip and its drawn twin at once. Only the Base
   clip with Footstep events that the limbs show most (eased fade times weight; the first wins a tie;
-  nothing at weight 0) passes its Footstep on, so a rig standing still is silent. FullBody and
-  Additive clips (Land, a dodge, Stagger) fire their own.
+  nothing at weight 0) passes its Footstep on, so a rig standing still is silent. All gait clips run on
+  one shared phase (D-054). FullBody clips add up per priority group as the Mixer blends them; while they
+  cover more than half of the limbs (a dodge, a landing, a jump, a fall, an Art, a stagger), the walk is
+  silent and only their own steps sound, so nothing steps in the air. FullBody and Additive clips with
+  Footstep events (Land, a dodge, Stagger) fire their own. A step plays `footsteps.<Surface>Light` from
+  `fx.audio.materialSurface` (D-089).
+- The back mount (D-055): `weaponModels.luau` `sheaths.OneHandedSword.mount` puts the grip behind the right
+  shoulder blade and the scabbard 0.2 stud off the back. `dev.luau` `groundClearance.offBody` holds the sword on
+  the back, the scabbard and the sword in the hand off every body part (head 0.01, arms 0.03, legs 0.04, hips
+  0.01 stud) in every pose GroundClearance and TurnClearance check.
+- A remote player's driver reads `Drawn` through `SheathState.riseFilter(delay, initial)`: a rise counts only after
+  `choreo.luau` `sheath.remoteDrawDelay` (0.06 s), a fall at once (D-057). `riseFilter(...):step(dt, raw)` returns
+  the filtered value; Replication feeds it.
+
+## Gait pacing and the stop (client, D-054, D-058, D-059)
+
+- `choreo.luau` `locomotion.stride` holds each gait clip's measured `groundSpeed` (how fast its planted foot
+  moves back at rate 1) and `touchdown` (where each foot is at its Footstep), with the pacing bounds
+  (`rateFloor` 0.25, `rateCeiling` 3, `startPhase` 0.5, `turnYawRate` 300) and the check bars (`slideBar`,
+  `transientBar`, `contact`). `tests/choreo/Stride.spec.luau` re-measures them on the hit matrix's player and
+  prints the drift after a re-key.
+- Locomotion keeps one gait phase (0 at every gait clip's left Footstep, 0.5 at its right) on the mixer's clock.
+  Before each animator step it blends the shown clips' stride and duration by their shown weights, sets every
+  gait clip that shows (or is about to) to the phase and plays it at stride over the root's speed, clamped to the
+  rate bounds. `LocomotionState.gaitWeights` / `walkGait` / `walkWeights` give the cadence shares; `plantedAlong`
+  and `settlePoints` read the feet. `walkSpeed`, `runSpeed` and `sprintSpeed` are movement speeds only.
+- The lean (`locomotion.lean.upright`, today `WalkLeftDrawn = 1`): before `LocomotionState.leanOffsets` poses a lean
+  toward a listed clip's side, Locomotion scales it by one minus that clip's shown weight (D-058).
+- The two-step stop: `locomotion:stopGait(into)` writes the phase and where each foot of the last move's walk is
+  over its Idle spot into a `StopGait` (no allocation). `ActionLogic.stopCarryStep(carry, moveX, moveZ, speed,
+  walkSpeed, grounded, state, dt, config, gait)` returns this frame's carry speed along `(carry.x, carry.z)`,
+  from `ActionLogic.newStopCarry()`; CharacterController feeds the result to the Humanoid while the stick is
+  let go, and the dodge reads the stick, not the carry (`stopStepsSeconds`, `stopMinCycles`, `stopEndSpeed`).
 
 ## Clips
 
@@ -197,8 +248,9 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
   the back mount. `ReviewMarkers.mountAt(clip, time)` ("Hand" or "Back") is the one source for where
   the sword is; `ReviewMarkers.mountProblems(clip)` lists the sheath rules. The clips validator,
   GroundClearance, the review and the ClipLab use them. GroundClearance also checks the handoff
-  (`dev.luau` `groundClearance.handoff`), the sheathed set against the body (`backOverlap`) and the
-  pull along the sheath (`sheathSlide`).
+  (`dev.luau` `groundClearance.handoff`), the sword and scabbard against the body in every checked pose
+  (`offBody`, D-055) and the slide along the sheath from the event until the blade is clear, with Breathe and
+  the flinches (`sheathSlide`).
   `src/shared/data/scope.luau` lists the Arts, enemies, bosses and rigs whose clips the current
   phase must ship; the clips validator fails on those and folds the later-phase backlog into one
   summary warning (D-015). Boss attack clips (`bosses.luau` phase attacks, id
@@ -221,8 +273,12 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
   the trail but keep its whiter color, and the fading tail keeps the look of the swing that drew it.
 - Sounds: a `Sfx` or `Voice` event carries `data.name = "family.Name"` from `sfx.luau`; the client
   plays it through `SfxPool.play` at the rig, and the clips validator rejects a name `Sfx.get`
-  cannot resolve. Sounds a server remote already triggers (parry, block, guard break) are not
-  repeated as clip events (D-036).
+  cannot resolve. Sounds a server remote already triggers (hits, parry, block, guard break) are not
+  repeated as clip events (D-036); the impact director plays them (D-069). A whoosh sits at
+  max(0, HitWindowOpen - `Sfx.peakLead(entry)`), no sound sits less than 0.05 s after an Art's
+  ActivationHold before its first HitWindowOpen, and an enemy's strike vocal is a Voice event on its
+  HitWindowOpen (D-082; `tests/data/sfx.spec.luau` holds all three). A remote clip started late replays
+  the Sfx and Voice events it jumped over through `SfxPool.playLate` (D-101).
 - Enemy attack clips: the wind-up pose must be held for the attack's `windUp` (the validator
   compares the clip's `Anticipation` beat to `enemies.luau`).
 - Hit windows sit on the strike (D-043): the n-th `HitWindowOpen` is at or before the n-th snap's
@@ -271,11 +327,74 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
    `HitConfirmed` carries the hit's `staggerDirection` (Front, Back, Left, Right in the target's frame).
    A parry staggers the enemy (`parryStagger`) and (Phase 1) opens a Switch window.
 4. Death: `EntityService` sets `Dead`, fires `EntityDied {shatter}` to all; the client freezes the
-   rig for `deathFreeze` with the Music, SFX and UI groups ducked by `deathDuckDb`, plays `Shatter`, then shows
-   the system line (D-035).
+   rig, waits out the kill's hit-stop, ducks the Music, SFX and UI groups by `deathDuckDb` for `deathFreeze`,
+   plays `Shatter`, then shows the system line (D-035, D-073).
 
-Hit-stop, trails, camera, digits and highlight flashes are client reactions to `HitConfirmed`;
-nothing about animation runs on the server except the pose sampling used by the sweep.
+Hit-stop, trails, camera, digits, highlight flashes, impact frames, accents and hit sounds are client
+reactions to `HitConfirmed`; nothing about animation runs on the server except the pose sampling used by
+the sweep.
+
+## Hit feel and sound (client, D-060 to D-102)
+
+- **Start order.** `Main.client` loads its sibling packages in `SIBLING_ORDER` and starts each that exists:
+  fx.Quality, audio.SfxPool, audio.Ambience, audio.MusicDirector, fx.OutlineManager, fx.Trails, fx.Shatter,
+  fx.ImpactFrames, fx.Glint, fx.SlashArc, fx.SpeedLines, fx.Impact, fx.Sparks, fx.Digits, fx.SwitchRing,
+  fx.Telegraphs, ui.Hud, ui.Nameplates, ui.SystemLine, then choreo.Choreo (not started there). Ambience comes
+  right after SfxPool, and Impact after everything it fires; `tests/client/Impact.spec.luau` checks the order.
+- **`fx/Impact`** (the director). `Impact.hit(info: HitInfo): string` picks the moment
+  (`Impact.select`, moments.luau `select`) and fires its row: cue and extra sound, impact frames, glint,
+  crescent, slash line, Highlight, trail flash, contour and punch, each for the audience `moments.audience`
+  allows (D-070), once per sweep (D-098); the 3D accents wait `Impact.hiddenSeconds()` (D-071). HitInfo:
+  `tier`, `position`, `attacker?`, `target?`, `involved`, `localAttacker`, `trailToken`, `parried`,
+  `guarded`, `crit`, `isSwitch`, `killed`, `art?` (true an Art, false a player's basic, nil otherwise),
+  `partner?`. Also: `activation(model, clipId, token, isLocal, speed?, lateBy?)`, `release(model, clipId,
+  clipTime, frozenSeconds, speed?)`, `cancelActivation(model?)` (D-074); `dodge(model, isLocal)` (D-100);
+  `guardBreak(model?, isLocal)`, `guardRaise(model?, isLocal)` (D-097); `shatterCue(boss, heavy?)` and
+  `death(model?, position, boss, heavy?)` (D-079); `ownsHighlight(info)`; the pure helpers `swingTangent`,
+  `planeNormal(tangent, radial?, toCamera?)` (D-096), `holdTime`, `windowAfter`, `riserLead`; `bind(deps)`
+  and `start()` (loads its siblings through `Siblings`).
+- **`fx/ImpactFrames`.** `play(sequence, models, opts?) -> seconds` (opts: `slashDirection?`, `now?`,
+  `position?`) asks FlashBudget itself and shows the dim instead when refused or when Reduce flashing is on;
+  `isShowing()`, `look()`, `remaining()`, `hiddenSeconds()` (seconds the opaque frames still hide the world,
+  0 while idle or dimming), `cancel()`, `screenDirection(position, direction)`, `start()`, `bind(deps?)`.
+  `ImpactSequence` is pure (`flashCost`, `costOfLooks`, `framesOf`, `capSeconds`, `dimOpacity`, `dimDip`,
+  `luminanceOf`, `regionsOf`, ...), so the impact validator scores a table that is not the live one.
+- **`fx/FlashBudget`.** `request(now, cost, seconds?) -> boolean` and `claim(...) -> Claim?` record a cost only
+  when it fits; `hold(claim, at)` pushes a claim's finish while its picture shows; `raise(claim, now, cost)`
+  charges a takeover's difference; `used(now)`; `reduced()` and `set(value)` for the Reduce flashing setting
+  (the player attribute `impact.reduceFlashingAttribute`, watched after `start()`); `reset()`. Every caller
+  passes times from `Engine.now()`.
+- **Accents.** `Glint.play(position, size, token?)`, `SlashArc.play(position, tangent, normal, token, size)`,
+  `SlashArc.line(position, tangent, size)`, `SpeedLines.play(kind)`; each has `step`, `bind(overrides?)`,
+  `reset` and `start`, pools its instances and caps what plays at once by quality tier. `AccentStep` is their
+  shared seam: `renderStepped(fn)`, `viewport()`, `deps(overrides?)` (clock, per-frame step, screen size).
+- **`Trails.swingDirection(model): Vector3?`**: the strike's snap chord for `accents.swing.memorySeconds` after
+  it was sampled, then the live ring while a trail kind is on, then the last good direction sampled while one
+  was on (within memorySeconds), then the ring now. `setActive(model, true, kind)` with kind Art or Basic starts
+  a new snap; Smear does not. `Trails.sample()` runs on Heartbeat (D-068).
+- **`CameraController.punch(kind)`** (`"Final"` or `"Kill"`): the FOV push in, on top of the FOV spring (D-072).
+- **`audio/SfxPool`.** `play(name, position?) -> Sound?`; `cue(name, position?)` (sub-frame layers play inside
+  the call, D-084); `contour(name)`; `playEndingAt(name, seconds, position?) -> Sound?` (D-078);
+  `playLate(name, lateBy, position?) -> Sound?` (a sound started as if `lateBy` seconds ago: speed first, then
+  TimePosition = startAt + lateBy x speed; nil when deduped, a placeholder or already over, D-101);
+  `loop(name, gain)` (D-087); `shatter(position?, weight?)` and `shatterCue(weight?) -> string` (weight
+  `normal`, `heavy`, `boss`, a shatterCues cue name, or the old boolean; D-079, D-102); `footstep(model?,
+  surface?, weight?)`, `surfaceOf`; `duck(db, seconds)`, `setGroupVolume`, `group`, `mixState(group)`;
+  `cueNames`, `contourNames`; `preloadNames()` and `preload()` (D-093); `timeLength(sound)`; `stats()` ->
+  { requested, played, deduped, placeholders, unloaded, lateStarts }; `reset()`, `start()`. `hit`, `parry`
+  and `hitStopTick` stay as spec-tested helpers with no game caller. Engine seam, `bind(overrides?)`: `now`,
+  `delay`, `onStep` (contours and fades), `play`, `stop`, `isPlaying`, `timeLength` (0 while unloaded),
+  `preload`, `onEnded(sound, fn) -> disconnect?`. Play rule: Volume = entry volume x 10^(gainDb/20) (plus the
+  heartbeat lift) clamped under `limits.maxPlayVolume` (D-086); PlaybackSpeed = the layer's pitch, else random
+  in pitchRange, clamped to `engine.playbackSpeed` (D-085); a trimmed entry gets PlaybackRegion from
+  `Sfx.region` and TimePosition on every play (D-088); fades and voice release follow D-090 to D-092.
+- **`audio/Ambience`.** `start()` (idempotent), `stop()` (silences both beds, then disconnects),
+  `bind(overrides?)` (stops first; nil restores the engine seams), `state()`, `edgeDistance(position)`,
+  `rimGainAt(edge)`. Seams: `onStep` (Heartbeat), `position` (the local character's root) and `loop`
+  (`SfxPool.loop`). It reads `fx.audio.ambience` and `playground.luau` fieldRadius and allocates nothing per
+  frame (D-095).
+- **`fx/Shatter.play(model, kind, weight?)`** plays `SfxPool.shatter` with the weight; a `Boss` kind always plays
+  the boss shatter, and the two-argument call keeps the old behaviour.
 
 ## Data tables (src/shared/data)
 
@@ -297,18 +416,21 @@ nothing about animation runs on the server except the pose sampling used by the 
 | `paths.luau` | the six Paths |
 | `apex.luau` | floor 1 Apex set |
 | `lighting.luau` | section 11 lighting values per floor |
-| `sfx.luau` | sound ids (placeholders) by name |
+| `sfx.luau` | every sound by `family.Name` (D-080): entries `{ id, placeholder, volume, pitchRange?, spatial, note?, startAt?, stopAt?, fadeOut?, loop?, length?, title?, creator?, peakAt? }` (times in asset seconds before PlaybackSpeed; `Sfx.isReal`, `Sfx.region`, `Sfx.peakLead`, `Sfx.gainOf`, `Sfx.vocalName`); `cues` (layers of `{ name, delay, gainDb, pitch? }`), `contours` (EQ and reverb steps per group), `effects`, `engine` (playbackSpeed, soundVolume), `limits` (cueLayers, hitCueMinLayers, cueDelaySeconds, layerGainDb, maxPlayVolume, loopMinSeconds, contourSeconds, subLayers, bassBackDb, sharedAssetSemitones), `playback` (openEndSeconds, sameFrameSeconds), `preload`, `shatterCues` (normal, heavy, boss), `mix`, `music` |
 | `assets.luau` | asset ids by name; missing ids are reported |
-| `choreo.luau` | animation tunables: blend times and the blend easing, smear scale, idle cycle, locomotion speeds and clip names, `priority.Sheath` and the `sheath` table (clips, draw-cuts, predictSeconds, sheatheDelay, stopBlend) |
-| `camera.luau` | section 10 camera numbers |
-| `fx.luau` | budgets, shard counts, trail lifetimes, telegraph sizes, the parry spark burst, quality tiers |
+| `choreo.luau` | animation tunables: blend times and the blend easing, smear scale, idle cycle, locomotion speeds and clip names, `locomotion.stride` (ground speeds, touchdowns, pacing bounds and check bars, D-054), the stop (`stopStepsSeconds`, `stopMinCycles`, `stopEndSpeed`, D-059), `locomotion.lean.upright` (D-058), `priority.Sheath` and the `sheath` table (clips, draw-cuts, predictSeconds, sheatheDelay, stopBlend, remoteDrawDelay) |
+| `camera.luau` | section 10 camera numbers and the `punch` rows (Final, Kill; D-072) |
+| `fx.luau` | budgets, shard counts, trail lifetimes, telegraph sizes, the parry spark burst, quality tiers; `audio` (dedupe, `maxSoundLength`, the heartbeat loop and ramp, `materialSurface`, `ambience`: bed, rim wind, ramp, sample rate, rim band and floor, D-095) |
 | `playground.luau` | the Playground: field radius, rim, pillars, clouds, spawn tables, loadout |
 | `ai.luau` | every AI tunable: perception, archetype tuning, pathing, tick rates |
-| `world.luau` | world builder tunables (folders, railing, pillars, clouds, kill volume) and the anti-cheat policy, including the shadow and teleport-cap fractions and the per-remote rate limits (`anticheat.remoteRates`) |
-| `weaponModels.luau` | placeholder weapon geometry per category, the names the client relies on, and the back mounts (`sheaths`, `sheath(category)`, D-050) |
+| `world.luau` | world builder tunables (folders, railing, pillars, clouds, kill volume) and the anti-cheat policy, including the shadow and teleport-cap fractions, the per-remote rate limits (`anticheat.remoteRates`, with an optional `clientBurst` for a TrailingSend sender) and `anticheat.remoteStallSeconds` (a client burst plus perSecond times it must fit inside the server's burst, D-056) |
+| `weaponModels.luau` | placeholder weapon geometry per category, the names the client relies on, and the back mounts (`sheaths`, `sheath(category)`, D-050; the one-handed sword's `mount`, D-055) |
 | `input.luau` | key, gamepad and touch bindings |
 | `ui.luau` | HUD, nameplate and system-line layout numbers, and the death system-line text |
-| `dev.luau` | dev tooling numbers: Capture panel, ClipLab, PoseEditor, pose server (D-028), clip review tolerances (D-043), hit matrix setups and real-fight ranges (D-045), ground clearance and the sheath checks (D-047, D-050), the WeaponDraw and WeaponSheathe tokens |
+| `impact.luau` | the impact frames (D-060 to D-066): looks, sequences (tier, rank, steps), the flash budget and the luminance curve, the reduced dim, the Reduce flashing attribute, the overlay, viewport, silhouette and strokes, quality part caps |
+| `accents.luau` | the reel accents (D-067, D-068, D-096): glint, slashArc (with `tilt`), slashLine and speedLines sizes and timings, `limits`, `budget`, `swing` (samples, travel bounds, memorySeconds, snapFrames), quality caps |
+| `moments.luau` | what each combat moment fires (D-069 to D-073, D-098): `effects`, default `audience`, `accentRange`, `select` rules and `fallback`, `hitFields`, `death.duckDelayFrames`, `sweep.mergeSeconds`, `rows`; `byId`, `rangeOf`, `audienceOf`, `selectFor`, `deathDuckDelay`, `deathFor` |
+| `dev.luau` | dev tooling numbers: Capture panel, ClipLab, PoseEditor, pose server (D-028), clip review tolerances (D-043), hit matrix setups and real-fight ranges (D-045), ground clearance and the sheath checks (`groundClearance.offBody` with its `turns`, `sheathSlide`; D-047, D-050, D-055, D-058), the WeaponDraw and WeaponSheathe tokens |
 
 Row convention (D-017): tables with many rows keep them under `Module.rows` with `byId(id)` and
 `list()` functions; `list()` returns a clone. Validators read `rows` first and fall back to the
@@ -322,19 +444,21 @@ scans every text file in the repo except `docs/GAME_SPEC.md` and the blocklist i
 
 | Remote | Client reaction |
 | --- | --- |
-| `ActionStarted` | `Choreo.play(rig, clipId, serverTime)` on that entity's rig; local player ignores its own |
+| `ActionStarted` | `Choreo.play(rig, clipId, serverTime)` on that entity's rig at `payload.speed` (1 when absent); the local player ignores its own. It remembers `{ clipId, speed }` per entity, replays the Sfx and Voice events the catch-up start jumped over through `SfxPool.playLate`, and an ActivationHold it jumped over while the first damage window is still ahead (light, late chime, `Impact.activation` with `lateBy`; D-101). A clip whose id contains `/Dodge` calls `Impact.dodge(model, false)` |
 | `Telegraph` | `Telegraphs.show(entity, kind, windUp, shape)`: weapon Highlight fill + ground decal |
-| `HitConfirmed` | hit-stop on attacker and target rigs, `Digits`, Highlight flash, `Trails` flash on Switch, camera nudge/shake, HUD HP flash; on a parry `Sparks.parry(position)`; on an enemy hit that neither kills nor breaks, the additive `Flinch<staggerDirection>` clip |
-| `StateChanged` | stagger/break/guard-break clips, HUD status; `Stagger`, `Break`, `GuardBroken` and `Dead` hide that enemy's telegraph |
-| `EntityDied` | freeze `deathFreeze`, `SfxPool.duck(deathDuckDb, deathFreeze)` on the Music, SFX and UI groups, `Shatter.play(model, shatterKind)` (which plays the crack); the crack plays directly through `SfxPool` only when the rig is already gone; each shatter first releases the duck (`SfxPool.duck(0, 0)`) so its crack is heard even while another death is still frozen; after the shatter the system line: `ui.luau` `systemLine.deathSelf` for the dying player, `deathOther` with the name for everyone else |
+| `HitConfirmed` | builds a `HitInfo` (`art` from the artId and the attacker's kind, the Switch `partner` from the open window, a blow that breaks a player's guard as `guarded`). Hit-stop on attacker and target rigs, `Digits`, the white outline flash unless `Impact.ownsHighlight(info)` or the blow breaks a player's guard (GuardBroken's HPRed fill stays), the GuardHit reaction, and on an enemy hit that neither kills nor breaks the additive `Flinch<staggerDirection>` clip. For the people in the hit: one camera nudge per attacker's sweep, `camera.shake(tier)` and one hit-stop tick per attacker's sweep (Final for a player's guard-breaking hit; a stronger tier takes over; D-098). Then the HUD HP flash and `Impact.hit(info)`, which plays every hit sound and reel accent (D-069). On a parry: `Impact.hit(info)`, then `Trails.flashWhite` and `Sparks.parry(position)` after `Impact.hiddenSeconds()`, the Parry reaction and `shake(Normal)` (D-071) |
+| `StateChanged` | stagger/break/guard-break clips, HUD status; `Stagger`, `Break`, `GuardBroken` and `Dead` hide that enemy's telegraph. `GuardBroken` flashes HPRed and calls `Impact.guardBreak(model, isLocal)`; `Guard` on a remote player plays the guard pose and `Impact.guardRaise(model, false)` (the local raise is predicted in `CharacterController.setGuard`; D-097) |
+| `EntityDied` | DeathFreeze, time scale 0, trails off and the enemy's death vocal at once (once per voice for one sweep's deaths). A death landing inside another death's silence first restores full volume (`SfxPool.duck(0, 0)`). At `Moments.deathDuckDelay()` (the kill's hit-stop) the newest death runs `SfxPool.duck(deathDuckDb, deathFreeze)` on the Music, SFX and UI groups; an older one does not. At that lead plus `deathFreeze`: `duck(0, 0)` when this is the newest death or the silence ends within `moments.sweep.mergeSeconds`; then `Shatter.play(model, kind, cueName)` (or `SfxPool.cue(cueName, position)` when the rig is already gone), then `Impact.death(model?, position, boss, heavy)`. `cueName` is `Impact.shatterCue(boss, heavy)` (heavy for a player or an Elite). The system line follows at lead + `deathFreeze` + shatter time: `ui.luau` `systemLine.deathSelf` for the dying player, `deathOther` with the name for everyone else (D-073, D-079, D-102) |
 | `ActionRejected` | cancel the predicted clip, no digit |
 | `SystemLine` | centered system text with chime |
-| `SwitchWindow` | `SwitchRing` on the enemy, SWITCH prompt (Phase 1 logic, Phase 0 visuals) |
+| `SwitchWindow` | `SwitchRing` on the enemy, SWITCH prompt (Phase 1 logic, Phase 0 visuals); remembers the opener per enemy, and the window's own close clears only that window (D-099) |
+| clip events (every watched rig) | trail, smear and footstep events to the FX and audio packages; `Sfx` and `Voice` through `SfxPool.play`; `ActivationHold` lights the blade, plays the art chime, kicks the FOV for the local player and calls `Impact.activation(model, clipId, token, isLocal, speed)` (D-074) |
 
 Rig lifecycle: `EntityTracker.added` -> `Replication.watch(record)` registers the outline, attaches
 the trail, routes the rig's clip events to the FX package and, for every rig the local
 `CharacterController` does not own, drives locomotion with `Locomotion.attach(animator, model)`
-(other players run the blend space, enemies their data Idle/Walk pair). Replication tells the local
+(other players run the blend space, enemies their data Idle/Walk pair; a remote player's driver reads `Drawn`
+through `SheathState.riseFilter`, D-057). Replication tells the local
 rig apart by `EntityTracker.peekLocalId`, then by `Players.LocalPlayer.Character`, and drops a
 driver that reached the local rig before its id resolved when `EntityTracker.localChanged` fires.
 `EntityTracker.removed` -> `Replication.unwatch(record)` destroys that driver and releases the rig's

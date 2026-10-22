@@ -37,7 +37,7 @@ has no Wally packages (D-004), so there is nothing to `wally install`.
 tools/lint.sh             # stylua --check, selene, lune tests, validators, rojo build, places
 tools/lint.sh --offline   # same, with selene using tools/lint/roblox-lite.yml when the API dump cannot be downloaded
 lune run tests/run.luau [filter]      # the Lune unit suite; filter is a path substring (e.g. tests/tools)
-lune run tools/validate.luau          # the 23 data validators and the naming blocklist
+lune run tools/validate.luau          # the 28 validators (the naming blocklist among them)
 rojo build default.project.json -o build/Skyspire.rbxl
 tools/build-places.sh                 # places/Playground.rbxl and places/ClipLab.rbxl (gitignored)
 tools/build-plugin.sh                 # build/SkyspirePoseEditor.rbxm, the Studio plugin

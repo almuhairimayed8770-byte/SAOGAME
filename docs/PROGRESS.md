@@ -1,6 +1,6 @@
 # Progress
 
-Phase **0: Foundations and the vertical slice (the feel)**. Branch `phase-0`. Last update 2026-10-18.
+Phase **0: Foundations and the vertical slice (the feel)**. Branch `phase-0`. Last update 2026-10-22 (6e0fd5e).
 
 This file is the one the spec asks for in section 1 ("phase, what shipped, what is stubbed, next three tasks") and
 section 21 (the gate checklist, pasted with its results). Everything below was run from a clean clone with the pinned
@@ -11,27 +11,31 @@ an automated solo Play session); every line that still needs a person in Studio 
 
 | Package | What is in the tree | Tests |
 | --- | --- | --- |
-| Foundation | Rojo project (`default.project.json`, `places/`), `aftman.toml` / `rokit.toml`, StyLua + Selene (online and offline configs), GitHub Actions CI, Lune test harness with a virtual DataModel (D-002), `tools/validate.luau` with 25 validators, the naming blocklist (D-014), the phase scope (D-015) | `tests/tools/validators.spec.luau`, `naming.spec.luau` |
-| Shared data | 28 tables under `src/shared/data/` (combat, arts, weapons, armor, apex, enemies, bosses, floors, loot, origins, paths, tiers, ai, camera, choreo, fx, input, lighting, palette, playground, rigs, scope, sfx, assets, ui, weaponModels, world, dev), `types.luau`, `util/` (Signal, Spring, Easing, Verlet, Rng, Check) | `tests/data/*`, `tests/util/*` |
+| Foundation | Rojo project (`default.project.json`, `places/`), `aftman.toml` / `rokit.toml`, StyLua + Selene (online and offline configs), GitHub Actions CI, Lune test harness with a virtual DataModel (D-002), `tools/validate.luau` with 28 validators, the naming blocklist (D-014), the phase scope (D-015) | `tests/tools/validators.spec.luau`, `naming.spec.luau` |
+| Shared data | 31 tables under `src/shared/data/` (combat, arts, weapons, armor, apex, enemies, bosses, floors, loot, origins, paths, tiers, ai, camera, choreo, fx, input, lighting, palette, playground, rigs, scope, sfx, assets, ui, weaponModels, world, dev, and new: impact, accents, moments), `types.luau`, `util/` (Signal, Spring, Easing, Verlet, Rng, Check) | `tests/data/*`, `tests/util/*` |
 | Clips | 64 Choreo clips: 44 `player/OneHandedSword/*` (locomotion in a sheathed and a drawn set, Draw and Sheathe, guard, parry, dodges, flinches, Basic1-3, Horizontal, Vertical, RisingArc, SharpNail, DeathFreeze), 10 `enemy/Boar/*`, 10 `enemy/Kobold/*` | `tests/choreo/clips.spec.luau`, `ClipLibrary.spec.luau`, clips validator |
-| Choreo (client) | `ClipSampler` (per-clip structure cache), `Pose`, `Mixer` (layers, pause, time scale, catch-up), `Choreo` (animator per rig, quality tiers, Roblox Animation fallback), `ClipLibrary`, `Locomotion` + `LocomotionState`, the sheathed weapon (`WeaponMount`, `SheathState`, D-050) | `tests/choreo/*` |
-| Controllers, camera, net | Input, Character, Target, EntityTracker, Replication (drives every remote rig's locomotion), ActionLogic, WeaponInfo, Siblings; CameraController + CameraMath; `Net` / `Remotes` (D-008) | `tests/client/*`, `tests/net/*` |
-| FX | Trails, Smear, Shatter (+ ShatterMath), Sparks, Telegraphs (+ TelegraphShapes), OutlineManager (+ OutlineRanking), Digits, SwitchRing, Quality, FrameClock, Engine | `tests/client/*` |
-| UI and audio | `El` component library (D-007), Hud (+ HudLogic), Nameplates, SystemLine; MusicDirector (+ MusicState), SfxPool | `tests/client/*` |
+| Choreo (client) | `ClipSampler` (per-clip structure cache), `Pose`, `Mixer` (layers, pause, time scale, catch-up), `Choreo` (animator per rig, quality tiers, Roblox Animation fallback), `ClipLibrary`, `Locomotion` + `LocomotionState` (gaits paced to the root on one phase, D-054; the lean held upright under the drawn left walk, D-058), the sheathed weapon (`WeaponMount`, `SheathState` with the remote rise filter, D-050, D-057) | `tests/choreo/*`, new `Stride.spec` (11) and `TurnClearance.spec` (1, 40 drawn turns); `GroundClearance.spec` 20 |
+| Controllers, camera, net | Input, Character (the two-step stop carry, D-059), Target, EntityTracker, Replication (drives every remote rig's locomotion; builds each hit's `HitInfo` for the impact director, the death lead and the late-start replay, D-069 to D-102), ActionLogic, WeaponInfo, Siblings; CameraController (+ the FOV punch, D-072) + CameraMath; `Net` / `Remotes` (D-008), `TrailingSend` (D-056) | `tests/client/*` (new `CharacterController.spec` 3; `Replication.spec` 48), `tests/net/*` (new `TrailingSend.spec` 17) |
+| FX | Trails (+ the swing direction, D-068), Smear, Shatter (+ ShatterMath, the shatter weight), Sparks, Telegraphs (+ TelegraphShapes), OutlineManager (+ OutlineRanking), Digits, SwitchRing, Quality, FrameClock, Engine; new: Impact (the director, D-069), ImpactFrames + ImpactSequence + FlashBudget (D-060 to D-066), Glint, SlashArc, SpeedLines + AccentStep (D-067) | `tests/client/*`: new `Impact.spec` 57, `ImpactFrames.spec` 38, `ImpactSequence.spec` 17, `FlashBudget.spec` 10, `Glint.spec` 11, `SlashArc.spec` 14, `SpeedLines.spec` 9, `Shatter.spec` 4; `tests/data/impact`, `accents`, `moments` specs 10, 17, 25 |
+| UI and audio | `El` component library (D-007), Hud (+ HudLogic), Nameplates, SystemLine; MusicDirector (+ MusicState), SfxPool (layered cues, contours, `playEndingAt`, `playLate`, trims and fades, preload; D-075 to D-094), Ambience (D-095); 50 licensed library sounds on 54 slots (D-080) | `tests/client/*` (new `SfxPool.spec` 86, `Ambience.spec` 11), `tests/data/sfx.spec` 64 |
 | Server | EntityService, CombatService (DamageMath, HitSweep with the per-sample blade overlap and the arc-following sweep D-010 / D-042 / D-044, the section 17 request checks including the quick-slot check), EnemyService with Brain / Charger / Brute AI, PlaygroundService, AntiCheatService (+ anticheat Rules), world builders (RigBuilder, WeaponBuilder, PlaygroundBuilder, PlaygroundLayout) and CharacterReady (D-046), `Main.server.luau` | `tests/server/*` (with the hit matrix, D-045), `tests/smoke/*.smoke.luau` (six, all pass on the owner's PC) |
 | Tools and docs | `Capture.client.luau` (gate shot prompts), the ClipLab (`places/ClipLab.project.json`, `ClipLab.server.luau`, `ClipLab.client.luau`, `ReviewMarkers`), the PoseEditor Studio plugin (`tools/PoseEditor`) with `Serialize` / `Session`, `tools/pose-server.luau`, `tools/assets.luau`, `tools/smoke.sh`, `tools/animation-review.luau`, `tools/hit-matrix.luau`, `tools/build-plugin.sh`, `data/dev.luau`, this docs set | `tests/tools/*` |
 
-Suite at the time of writing: `lune run tests/run.luau` 1051 passed, 0 failed, 77 spec files. `lune run tools/validate.luau`:
-25 validators, 0 problems; the clips validator prints one warning for the 160 later-phase clips (66 Arts, 65 enemy
-attacks, 29 boss attacks) that are not authored yet and are outside the Phase 0 scope (D-015).
+Suite at the time of writing (6e0fd5e): `lune run tests/run.luau` 1559 passed, 0 failed, 94 spec files (about 145 s;
+GroundClearance and Stride take most of it). `lune run tools/validate.luau`: 28 validators, 0 problems; the clips
+validator warns about the 160 later-phase clips (66 Arts, 65 enemy attacks, 29 boss attacks) that are not authored
+yet and are outside the Phase 0 scope (D-015), and about the boar's and kobold's long wind-ups, which are checked
+against `enemies.luau` instead.
 `tools/animation-review.luau` flags no review-rule finding on the 64 clips (9 attacks); the hand-filled columns are
 still empty (they come from watching the recordings at 0.25x). `lune run tools/hit-matrix.luau --check`: every real-fight
-placement registered on its strike at every frame phase. `tools/lint.sh --offline` (StyLua, Selene, tests, validators, every Rojo build) passes.
+placement registered on its strike at every frame phase. `tools/lint.sh --offline` (StyLua, Selene, tests, validators, every Rojo build) prints ALL GREEN.
 
 ## Stubbed or not started
 
-- Everything in `docs/PLACEHOLDERS.md`: every mesh, texture, font and sound id is 0 (part-built rigs, blade-shaped
-  weapon parts, flat telegraph parts, Trails without a texture, silent SFX, Gotham / Garamond fallback fonts).
+- Everything in `docs/PLACEHOLDERS.md`: every mesh, texture and font id is 0 (part-built rigs, blade-shaped weapon
+  parts, flat telegraph parts, Trails without a texture, Gotham / Garamond fallback fonts), and 92 of the 146 sound
+  slots are silent placeholders (later floors, weapons, enemies, UI and the system voice). No music stems exist; the
+  MusicDirector runs with silence.
 - The IK layer (feet on stairs, hands on grips) and procedural cloth: `util/Verlet.luau` exists, no coat chain uses it.
 - The Roblox `Animation` fallback path in Choreo is written but no clip uses an `rbxassetid://` id yet.
 - Server: no saves (ProfileStore), party, Switch, Tempo / Guard Gauge break, loot drops in the world, quests, market,
@@ -102,7 +106,7 @@ Run over Remote Control: `tools/smoke.sh` (all six smokes) and a solo Play sessi
   stopped Draw's late event moving the sword; per-frame part and attribute lookups; footsteps from every walk at weight
   0 (332 events in 10 s standing still, now 0; D-051); the hilt up to 0.28 stud into the head and the left hand into
   the scabbard in the sheathed set; the blade cutting through the scabbard wall on the pull. GroundClearance now also
-  checks the handoff, the sheathed set against the body and the pull along the sheath. The rigs and combat smokes check
+  checks the handoff, the sword and scabbard against the body (D-055) and the pull along the sheath. The rigs and combat smokes check
   the scabbard and `Drawn`.
 
 ## Play-test on the owner's PC (2026-10-20)
@@ -120,24 +124,83 @@ game window rendering. What it found and what changed:
 - **Frame rate:** 59.9 fps standing and running (the frame cap is 60; p95 17.6 ms, max 18.7 ms), render CPU 1.7 to
   1.8 ms, GPU 0.5 to 0.6 ms, with the enemies 66+ studs away. Memory read 2.7 GB, the whole Studio process.
 - **The sheath** sits where it should and turns rigidly with the body, but on this avatar the grip and guard reach up
-  to 0.16 stud into the head box and into the hat brim; the mount move under way fixes that.
+  to 0.16 stud into the head box and into the hat brim. D-055 moved the mount: on the hit-matrix body the grip and guard
+  now keep at least 0.013 stud from the head box in every checked pose (the real-avatar check is STUDIO_TASKS item 30).
 - **Re-check on 6d6eb74 (same day, same avatar):** the limbs now move in Play: at idle the elbows, knees and neck
   breathe (up to 8 degrees), and the feet lift 0.6 to 0.9 stud at a guard walk and 1.6 to 1.8 at run and sprint (hip
   up to 90 degrees, knee up to 125). A 32 s sprint (766 studs, eight direction changes) logged no anti-cheat line.
   Lock-on drew the sword: Drawn turned true and the sword reached the hand 0.30 s later, 0.30 stud from the grip.
   Frame rate unchanged: 60.0 fps, p95 17.6 to 17.7 ms, render CPU 1.5 to 1.6 ms, GPU 0.6 to 0.7 ms.
 - **Still open from the re-check:** the planted foot slides about 0.2 stud a second at a guard walk (clean) but 6 to 7
-  at a run and 11 at a sprint, because the gaits still play at rate 1 whatever the body's speed (the walk pacing work
-  under way). The sheathe about 6 s after lock-off was not seen: the enemies killed the character during the wait. A
+  at a run and 11 at a sprint, because the gaits still play at rate 1 whatever the body's speed (D-054 and D-059 now pace the
+  gaits and carry the stop; not yet re-checked in Play, STUDIO_TASKS items 37 to 43). The sheathe about 6 s after lock-off was not seen: the enemies killed the character during the wait. A
   respawn logs "Something unexpectedly tried to set the parent of Animate to NULL": Choreo removes the engine's
   Animate script from inside the engine's own parenting; the removal is to be deferred a frame.
+
+## After the Play-test (a556f8d, 8e88bf0, 3f9c671, 6e0fd5e)
+
+Built and checked in Lune only; none of it has been seen in Studio yet (STUDIO_TASKS items 37 to 81).
+
+- **Walk pacing (D-054, D-059):** the gait clips play on one shared phase, paced to the body's speed from ground
+  speeds measured on the hit matrix's player (`tests/choreo/Stride.spec.luau`). A stop below the skid threshold
+  carries the body through one more step to a planted stand. On the 240 Hz Lune body, the worst plant per stance went
+  from before to now: Guard walk 3.95 to 0.13 stud; straight back at walk speeds 4.16 to 0.05; forward at 6 to 10 studs
+  a second 2.46-4.56 to under 0.18; a stop from a Guard walk or a run, wherever in the stride the stick lets go, under
+  0.24 (the old dead stop up to 3.95); a turn into a walk 6.2-9.2 to 0.1-2.3; a landing on the move 3.8-13.9 to under
+  1.0. Still open, in the clips: the swing foot scrapes the field in the drawn walk and run (up to 1.84 studs a step in
+  the Guard walk); the walk-to-run band at 3.75 to 4.75 studs a second slides up to 1.16; side and back moves at run
+  speed slide until strafe and backpedal clips exist; and sheathed reversals slide 2.2 to 3.6, as before.
+- **The back mount moved** (D-055): the grip sits behind the right shoulder blade, and the scabbard lies flat on the
+  back, 0.2 stud off it. GroundClearance poses the sword and scabbard against every body part at 240 Hz (head 0.01,
+  arms 0.03, legs 0.04, hips 0.01 stud: Breathe's reach rounded up). It covers the sheathed and drawn sets, every
+  one-shot over every base of its set, the attacks, Guard, Parry, Draw and Sheathe, and the sword in the hand. On the
+  old mount and clips it found 241 problems with the sword on the back (TurnRight's grip 0.327 stud into the head) and
+  99 with it drawn (Vertical's scabbard 0.183 into the hips). Now there are none. The closest gaps are 0.013 stud (the
+  hilt to the head) and 0.019 (the scabbard to the hips). Draw and Sheathe's grab, middle and reach keys were solved
+  again; Draw settles with the point higher, so a draw during a sprint no longer sinks the tip about 1 stud into the
+  field. The flinches no longer move the right shoulder (a hit during the pull pushed the blade 0.525 stud out through
+  the scabbard). 17 other clips were re-keyed by a few degrees (D-055 lists them). The hit matrix stays green.
+- **Small fixes (D-051, D-056, D-057):** TargetRequest and GuardRequest go through a trailing send, so the last lock
+  state and the last guard raise or release always reach the server (simulated mashes lost 392 and 149 of 1400 before,
+  0 after). The guard sender has a burst of 2, so a tap's raise and release go out together and a parry right after a
+  tap is no longer refused. The lock-on clears with the character and is resent after a respawn. FullBody clips that
+  cover more than half of the limbs silence the walk's footsteps, so nothing steps in the air (648 probe cases: 0
+  missed, 18 doubled). A remote rig's Drawn rise waits 0.06 s, so an attack draw-cuts with no Draw flash.
+- **Integration and fix rounds:** the dodge reads the stick, not the stop's carry, so a dodge pressed just after
+  letting go steps back. A drawn reversal to the left showed the drawn left walk at high weight with the lean near its
+  cap, putting the scabbard up to 0.172 stud into the left foot. The lean now stands up under that walk, and
+  `tests/choreo/TurnClearance.spec.luau` keeps the scabbard at least 0.071 stud off the body over 40 drawn turns
+  (D-058). Adversarial checks of the pacing, the mount and the small fixes found 8 + 9 + 2 confirmed problems; each
+  was fixed with a spec that fails on the old code, or is listed as open.
+- **Impact frames (D-060 to D-066):** an Art's final hit shows two frames of white figures on black, a kill a black
+  beat, the figures and ink strokes (2 frames each), a perfect parry one inverted frame, all inside the hit-stop and
+  only for the fighters in the hit. The sword is part of the figure. Every full-screen flash is costed per screen
+  region by the WCAG general-flash rule and must fit a budget of 3 flashes in any second (`FlashBudget`); a refused
+  one shows a soft dim. The local player's `SettingReduceFlashing` attribute swaps the frames for the dim, at most one
+  a second. Every quality tier keeps the figures.
+- **Reel accents and the director (D-067 to D-072, D-096, D-098):** a four-point glint, a slash crescent in the
+  swing's plane and a slash line, made of flat frames and beams in palette colors; speed lines on the dodger's screen;
+  a short FOV push on a final hit or kill. `moments.luau` says what each moment fires and who sees it, and
+  `fx/Impact.luau` only reads it. One attacker's hits within 0.1 s are one sweep: one cue, one contour, one push, one
+  tick, one picture.
+- **Real sounds (D-073 to D-095, D-097 to D-102):** 54 sound slots now hold 50 picks from Roblox's licensed library,
+  trimmed and faded (credits in `ASSETS.md`, the list and the weak picks in `PLACEHOLDERS.md`). Every hit is a layered
+  cue (crack, flesh, body, ring; a final hit's sub after the hold; a kill's weight with the bass cut), with contours
+  that cut and bring back the lows, a reverse riser that ends on the first damage frame, whooshes timed by each take's
+  measured peak, and the guard's raise, block, break and parry. The death plays the enemy's scream at once and starts
+  the 0.5 s silence after the kill's hit-stop; a player's (or an Elite's) death shatters heavier. The Plains bed and
+  the rim wind play on the island. A remote clip that starts late replays the sounds and the Art light it jumped over.
+  1559 tests pass in 94 spec files, 28 validators, ALL GREEN.
 
 ## Known review items for the Studio pass
 
 - The sheathed sword at 0.25x in the ClipLab: Draw and Sheathe (the hand meets the hilt at 0.22 s and 0.42 s; the last
-  2 studs of blade leave the sheath by swinging over the top in about 2 frames at 1x, so judge whether that reads as a
-  whip or a glitch), the hilt behind the head with a real avatar's hair, and whether the scabbard's lower end visibly
-  enters the hips on drawn-set waist twists (up to 0.18 stud on the test body's boxes).
+  2 studs of blade leave the sheath by swinging over the mouth between two frames at 1x, 0.284 to 0.295 s, an edge up to
+  0.16 stud out through the wall for 7 ms, so judge whether that reads as a whip or a glitch), the hilt behind the head
+  with a real avatar's hair, and the re-keyed one-shots (D-055: DodgeLeft leans 30 degrees, DodgeBack 18, TurnRight
+  turns the torso 24 and the head 12 past it, FlinchFront brings the left leg forward, the flinches no longer move the
+  right shoulder, and the dodge, Stagger and GuardBreak recoveries hold the head lower). The scabbard now keeps at
+  least 0.019 stud from the hips box in every checked pose.
 - The shared one-shots (turns, jump, fall, land, skid, dodges, stagger) key a sword grip, so while sheathed they show a
   gripping empty hand; sheathed twins are later work.
 
@@ -151,9 +214,22 @@ game window rendering. What it found and what changed:
 - Section 8 startups below 0.25 s for later weapon lines are kept verbatim (D-020); nothing in Phase 0 uses them.
 - A Basic swing's trail goes out about two frames before the clip's `TrailOff`, because its hit window closing
   turns the Basic trail kind off; judge at 0.25x whether the tail reads short.
-- Each guard tap sends two `GuardRequest`s, so tapping guard faster than six times a second for a few seconds
-  would trip that remote's rate limit. Parry spam gains nothing past the 0.25 s re-arm (D-031); raise
-  `remoteRates.GuardRequest` in `world.luau` if play-testing shows honest players reaching it.
+- Guard requests go through TrailingSend with a client burst of 2 (D-056): tapping guard never trips GuardRequest's
+  rate limit, a tap's raise and release go out together, and the server always ends on the last state. Parry spam
+  gains nothing past the 0.25 s re-arm (D-031). `SwitchCallRequest` still fires on every Tab press: about 4 presses a
+  second for 10 s gets the player kicked.
+- The walk-run blends are not posed by GroundClearance. Straight ahead at 8 to 10 studs a second, the sheathed blend
+  brings the scabbard within 0.023 stud of the left forearm box (the arms margin is 0.03; no contact), and a drawn
+  walk-run blend puts the held guard 0.009 stud into the right shin box for 10 frames. Watch Run from behind for the
+  left forearm brushing the scabbard.
+- WalkBack and WalkBackDrawn (re-keyed with 32 keys for the toe, D-054) stop and start every joint at every key: 283
+  and 198 stop-go dips per cycle at 960 Hz, against 41 and 12 before. It shows at 0.25x and on a 240 Hz display; judge
+  the backpedal in the recording.
+- Feel calls kept as they are until Studio says otherwise: the basic whoosh lands about 54 to 69 ms after the snap
+  (the take peaks too late, PLACEHOLDERS); the body holds still about 10 frames after the death tremor fades, before
+  the shatter (D-073); an older kill's shatter plays quiet inside a newer kill's silence (D-073); a swing during a
+  death's silence is ducked with everything else; the speed lines stay on with Reduce flashing (D-062); the bass cut
+  still plays when the dim replaces the frames.
 
 ## Phase 0 gate (section 20) and the section 21 checklist
 
@@ -165,18 +241,18 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 | The 20-second fight: six beats on every attack, the parry sparks, the kill shatters | Needs the owner's recording (`fight-boar-kobold.mp4`) |
 | The server registered every hit | **Met** in the hit matrix (every window, both enemies, real fight distances, four frame phases; D-045) and in `combat.smoke` in Studio; the recording shows it again as a digit per hit |
 | 60 fps in Studio | **Partly met**: 59.9 to 60.0 fps in Play with the window rendering on the owner's PC (2026-10-20, builds 927dbed and 6d6eb74, frame cap 60, p95 17.6 to 17.7 ms), standing and running with the enemies 66+ studs away; still to read during the recorded fight (**View > Stats**) |
-| All tests green | **Met** (1051 tests, 25 validators, six smokes in Studio, CI) |
+| All tests green | **Met** in Lune on 6e0fd5e (1559 tests in 94 spec files, 28 validators, `tools/lint.sh --offline` ALL GREEN); the six Studio smokes and CI last passed on earlier builds (1051 tests) and still have to run on this one |
 
 | Line | State | Evidence / what is missing |
 | --- | --- | --- |
 | CI is green: StyLua, Selene, Lune tests, data validators, naming blocklist, `rojo build` | **Met** | GitHub Actions run 39462350246 on `phase-0` (open it from the repository's Actions tab) (format, Selene with the real Roblox std, 1051 tests, 25 validators, the review-report check, the game, both places and the plugin build). `tools/lint.sh --offline` reproduces every step except Selene's Roblox-only lints, which need the API dump; those run only in CI. `aftman.toml` pins the tool versions. |
 | Every new clip is in `docs/ANIMATION_REVIEW.md` with the six beats marked present and the hit-stop tier noted | **Met** (generated), hand columns empty | All 64 clips are in the table; 9 attacks show the six beats and a tier. The three hand-filled columns need the ClipLab pass in Studio. |
 | A recorded clip for every new Art, enemy and boss phase exists in `docs/clips/` and was watched at 0.25x | **Needs the owner's recordings** | `docs/clips/phase-0/README.md` lists the ten files the Capture panel prompts for. None recorded yet; each is reviewed frame by frame once it is in the repository. |
-| No T-pose, A-pose, frozen rig, popping limb or sliding foot appears in any clip | **Needs the owner's recordings** | Judged from the recordings. Before D-053 the local character stood frozen in Play with its feet sliding (the engine's Animator reset every pose); the re-check on 6d6eb74 shows the limbs moving and the feet lifting, with the planted foot still sliding at run and sprint until the walk pacing lands (STUDIO_TASKS item 34). Remote rigs now walk (Replication drives their locomotion) and the root motor name matches the live R15 rig (D-016), the two defects a reviewer would have seen first. |
+| No T-pose, A-pose, frozen rig, popping limb or sliding foot appears in any clip | **Needs the owner's recordings** | Judged from the recordings. Before D-053 the local character stood frozen in Play with its feet sliding (the engine's Animator reset every pose); the re-check on 6d6eb74 shows the limbs moving and the feet lifting, with the planted foot still sliding at run and sprint on that build; D-054 now paces the gaits to the body's speed, D-059 carries the body through the stop, and D-058 keeps the scabbard off the left leg in drawn turns (STUDIO_TASKS items 34 and 37 to 43). Remote rigs now walk (Replication drives their locomotion) and the root motor name matches the live R15 rig (D-016), the two defects a reviewer would have seen first. |
 | Every enemy attack has a wind-up of at least 0.3 s with a colored telegraph that reads from behind | **Met in data**, seen in the recordings | `enemies.luau` wind-ups (boar 0.6 s, kobold 1.0 s) and the clips validator's Anticipation-covers-windUp check pass; Telegraphs FX exist. |
 | The server rejects a scripted client that spams Arts, teleports, or reports its own hits | **Met** | `CombatService` validates every request (section 17 list, including the quick slot), `AntiCheatService` + `anticheat/Rules` and the Net rate limits have Lune specs; clients never send hits (the server sweeps). In Studio on the owner's PC: `combat.smoke` refuses 20 Art repeats while locked (one hit lands) and a forged request with a target field, and no client remote is named for hits or damage; `playground.smoke` shadow-flags and then kicks a teleporting stand-in. The smokes drive the same request checks the remotes call, from the server. |
 | Part count, draw calls, server heartbeat and memory are measured in the Playground and within section 16 | **Partly met** | Part count and server frame time measured and well inside the targets (table below). Client fps, draw calls and client memory need Play mode with the game window rendering, read by hand while recording. |
-| `docs/PLACEHOLDERS.md` lists every stand-in asset with a replacement plan | **Met** | Written from `tools/assets.luau` plus the dev-scene stand-ins. |
+| `docs/PLACEHOLDERS.md` lists every stand-in asset with a replacement plan | **Met** | Written from `tools/assets.luau` plus the dev-scene stand-ins; the sounds from `sfx.luau`: the 50 licensed picks with their trims, the 4 reuses, the 5 real slots nothing plays yet, the 92 silent slots with the reason for each, and the picks to improve. |
 | `docs/STUDIO_TASKS.md` lists every manual Studio step with exact menu paths | **Met** (paths marked "(verify)" where unsure) | |
 | Every number introduced this phase lives in `src/shared/data/`, not in a script | **Met** | `numbers` validator green over every gameplay directory; dev tooling numbers live in `data/dev.luau`. |
 | Every new name passed the blocklist and is in the section 4 table or an addendum | **Met** | `naming` validator green over the whole repo (D-014, D-030). |
@@ -196,13 +272,45 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 
 ## Next three tasks
 
-1. The owner records the ten gate shots in the Playground with the Capture panel (`docs/clips/phase-0/README.md`), with
-   **View > Stats** open during the fight for the fps reading, and hands the files over (here in the project or in
-   `docs/clips/phase-0/` on the PC).
-2. Review every recording frame by frame at 0.25x, fill the hand columns of `docs/ANIMATION_REVIEW.md`, and fix with the
-   PoseEditor anything that reads wrong (that shot is then recorded again).
-3. Fill the client rows of the performance table, then merge `phase-0` into `main` and tag it once every gate line reads
-   Met.
+1. Play-test the new hits and sounds in Studio: `docs/STUDIO_TASKS.md` items 37 to 81 in one sitting (a solo Play, then
+   two players, then the ClipLab), with headphones for the items marked (listen). Report each result, the counts the
+   items ask for, and the decisions they hand back (the heartbeat speed into D-083, the region-end result into D-091).
+2. The owner records the ten gate shots in the Playground with the Capture panel (`docs/clips/phase-0/README.md`),
+   with **View > Stats** open during the fight for the fps reading, and hands the files over (here in the project or in
+   `docs/clips/phase-0/` on the PC). Each is then reviewed frame by frame at 0.25x, the hand columns of
+   `docs/ANIMATION_REVIEW.md` are filled, and anything that reads wrong is fixed with the PoseEditor and recorded again.
+3. Fill the section 16 numbers in the performance table: client fps during the recorded fight, draw calls
+   (MicroProfiler), client memory (**View > Stats > Memory**), the 8 players + 30 enemies case and a 2020 phone. Then
+   merge `phase-0` into `main` and tag it once every gate line reads Met.
+
+### Open items (as of 6e0fd5e, not in the three above)
+
+- **Code, other owners.** `Smear.restSize` (the impact-frame figure draws a smeared sword stretched until it exists).
+  The server sends no `speed` on `ActionStarted` (every remote Art rises at speed 1), no `isSwitch` on hits (the
+  Switch moment, digit and partner flash never fire live) and sets no `Elite` attribute on Elite spawns (none spawn in
+  Phase 0); it should confirm `hitStop = "Final"` on a guard-breaking hit (the client lifts it today). A client gate
+  for `SwitchCallRequest` on Tab. The engine Animate removal deferred a frame. Locomotion's Jump-to-Fall handoff
+  (`animator.finished:Once`).
+- **Checks.** The accents validator does not check `swing.memorySeconds`, `swing.snapFrames` or `slashArc.tilt`, and
+  the impact validator not `reduced.maxPerWindow` (the specs do). `CharacterController.spec` has no case for the stop
+  carry's speed cap and `stopGait`, or the four Impact calls. The sfx coverage scan counts names inside comments.
+  Not posed yet: a flinch over a FullBody one-shot, Draw with a flinch on top, the sheathed set with the sword still
+  in the hand during `sheatheDelay`, the walk-run blends, gait weight pops.
+- **Clean-up.** Three code comments still say "D-NEW": `Replication.luau` (now D-079), `tests/data/impact.spec.luau`
+  and `tests/client/ImpactFrames.spec.luau` (now D-066). `SfxPool.hit`, `parry` and `hitStopTick` and Replication's
+  `SOUNDS.impact`, `block`, `parry` and `switchLand` have no game caller: keep or delete. Two deaths in one frame start
+  two ShatterBloom contours; the no-rig shatter fallback skips `SfxPool.shatter`'s merge; the merge remembers only the
+  last shatter of each cue.
+- **Design calls.** The settings menu (later phase) must write `SettingReduceFlashing` and `SettingQuality`, and every
+  later full-screen flash must ask `FlashBudget`. A cue-level material slot for armor and construct hits. Stance Arts
+  against the stop carry (MoveDirection stays non-zero up to 1.2 s) before Phase 1. Strafe and backpedal run clips,
+  stance sync markers, foot lock, sheathed reversals and sheathed twins of the shared one-shots, skid only on a stick
+  release, a stop carry for remote rigs, hip-height scaling, the hit matrix's wide head box, `ActionRejected` for rate
+  drops. The trail snap at 20 fps (up to 42 degrees off on a thrust).
+- **Clip re-keys.** The swing foot scraping in the drawn walk and run, Idle's feet below the field, WalkBack's stop-go
+  dips, WalkLeftDrawn's left leg (then the lean rule can go, D-058), Breathe's arm keys during Draw and Sheathe (then
+  `sheathSlide.breathe` drops to 0, D-050), Draw and Sheathe's elbow. If item 53 hears a double landing, delete the
+  dodge clips' Footstep at 0.3 s (keep the Dodge cue's landing layer: it is also the remote dodge's landing).
 
 ## Expected gate recordings
 

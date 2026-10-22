@@ -161,19 +161,22 @@ and the smoke scripts (D-039, D-038).
     `Sheath/Scabbard` is welded to UpperTorso by `ScabbardWeld` with CanQuery off and that a freshly registered
     stand-in has `Drawn` = false. Combat now also checks `Drawn` false, then true as the Horizontal starts, the `Weapon`
     Motor6D on RightHand at the strike, and `Drawn` false again about 6 s after the post-motion (about 7 s longer).
-28. [ ] **Draw at 0.25x in the ClipLab.** Play `Draw` over IdleDrawn and over RunDrawn. The hand dips, takes the hilt over
-    the right shoulder at 0.22 s, and the blade slides straight up out of the scabbard with no edge through its side; the
-    wrist turns a little on the grip, the blade swings out over the top and settles a little past the carry with a
-    small spring. At 0.28 to 0.29 s the last 2 studs of blade leave the sheath by swinging: note whether that reads as
-    cutting through the mouth.
-29. [ ] **Sheathe at 0.25x.** Play `Sheathe` over Idle and over Run. The point finds the mouth at 0.37 s and the blade
-    slides home; at 0.42 s the hand lets go with a snap and falls to the side. Fill the Draw and Sheathe cells of
+28. [ ] **Draw at 0.25x in the ClipLab.** Play `Draw` over IdleDrawn and over RunDrawn. The hand dips, reaches back over
+    the right shoulder and takes the hilt behind it at 0.22 s, and the blade slides straight up out of the scabbard as
+    the arm rises, with no edge through its side; the
+    wrist turns a little on the grip, the blade swings out over the top and settles with its point a little higher
+    than the drawn carry, with a small spring, then eases into the base's carry as Draw blends out. From 0.284 to
+    0.295 s (between two frames at 1x, about three at 0.25x) the last 2 studs of blade leave the sheath by swinging over
+    the mouth: note whether that reads as cutting through it.
+29. [ ] **Sheathe at 0.25x.** Play `Sheathe` over Idle and over Run. Over Run the guard stays clear of the rising thigh at the
+    start. The point swings in over the mouth at 0.36 s (about two frames at 0.25x) and the blade slides home; at 0.42 s the hand lets go with a snap and falls to the side. Fill the Draw and Sheathe cells of
     `docs/ANIMATION_REVIEW.md`.
 30. [ ] **The hilt behind a real head.** With your avatar (hair and accessories on), watch from the side: the sheathed
     idle (the glance at 10 s), the walks, Run and Sprint. The hilt must stay behind the head, not through hair or ears.
     If it goes through, the mount in `weaponModels.luau` `sheaths.OneHandedSword` moves back and the Draw and Sheathe
-    grab keys are solved again (ask in the project). Also watch IdleDrawn, the attacks and DodgeBack from behind and
-    note whether the scabbard's lower end visibly enters the hips on waist twists.
+    grab keys are solved again (ask in the project). Also watch from behind: the scabbard now lies 0.2 stud off the back
+    (D-055); note whether it reads as worn or as floating, and whether its lower end touches the hips in RisingArc or
+    the left leg in DodgeLeft.
 31. [ ] **The arm rule in the Playground**, sheathed: lock on and at once turn in place; take a hit (Draw plays after the
     Stagger). In each, Draw plays after the other clip ends with no frame where the sword jumps from the back to the
     hand. Then lock on while sprinting and check that the hand meets the hilt.
@@ -184,7 +187,7 @@ and the smoke scripts (D-039, D-038).
 33. [ ] **Footsteps, once real step sounds exist:** standing still is silent; walking, running and sprinting make one
     step per foot plant, drawn or sheathed; an idle enemy makes none.
 
-## I. Play check after the pose rewrite and the sprint margin (D-052, D-053)
+## I. Play check after the pose rewrite, the sprint margin, walk pacing and the mount move (D-052 to D-059)
 
 34. [ ] **The legs move in Play.** Pull the latest `phase-0`, build, open the Playground and press **Play**. Walk,
     run (W) and sprint (Shift + W) on flat ground: the knees bend, each foot lifts and plants, and a planted foot
@@ -193,3 +196,245 @@ and the smoke scripts (D-039, D-038).
     the session stays open. (Done 2026-10-20 on 6d6eb74: 32 s, 766 studs, no anti-cheat line.)
 36. [ ] **The draw on lock-on.** Walk up to the kobold and lock on: Draw plays, the hand meets the hilt and the sword
     comes out; lock off and about 6 s later Sheathe puts it back.
+
+Items 37 to 81 are one sitting, top to bottom: one solo Play of the Playground (37 to 71), one two-player test (72
+to 80), then the ClipLab (81). Items 33, 34 and 36 above fit into it: do 33 with item 38, 34 with item 37 and 36 with
+item 47. Items marked **(listen)** are judged by ear: wear headphones. A screen recorder that keeps the sound is
+needed for the items that ask for a recording.
+
+Setup: pull the latest `phase-0`, run `tools/build-places.sh`, open the Playground and connect Rojo (items 6 and 7),
+then press **Play** (F5). The **Test** tab's Server/Client toggle switches between the two views (verify); open
+**View > Command Bar** as well. The field is all grass and Phase 0 has no jump (Space is the dodge), so in the Server
+view paste this once: it adds a slate slab at X 0, Z 40 (the spawn is at the middle) and a ramp up to a 4-stud ledge
+at X -40, Z 0.
+
+```lua
+local s=Instance.new('Part'); s.Name='StoneSlab'; s.Anchored=true; s.Material=Enum.Material.Slate; s.Size=Vector3.new(40,0.4,40); s.Position=Vector3.new(0,0.2,40); s.Parent=workspace
+local p=Instance.new('Part'); p.Name='Ledge'; p.Anchored=true; p.Size=Vector3.new(12,4,12); p.Position=Vector3.new(-40,2,0); p.Parent=workspace
+local w=Instance.new('WedgePart'); w.Name='Ramp'; w.Anchored=true; w.Size=Vector3.new(12,4,16); w.CFrame=CFrame.new(-40,2,14)*CFrame.Angles(0,math.pi,0); w.Parent=workspace
+```
+
+The ramp's high end must meet the ledge; if it slopes the other way, set the Ramp's Orientation Y to 0 (verify). Then
+switch back to the Client view for everything below. The enemies stand where `playground.luau` puts them: boar packs
+of one or two at X 60, Z -40; X -90, Z 30; X 20, Z 110, and one kobold each at X -70, Z -50 and X 85, Z 45. A dead one
+comes back after 20 s. The Arts are Q (Horizontal), 2 (Vertical), 3 (Rising Arc) and 4 (Sharp Nail); LMB is the
+basic attack, RMB the guard, Space the dodge, F the lock-on and Shift the sprint.
+
+37. [ ] **Feet stay planted at every speed (D-054; also item 34).** On the grass near the spawn, walk (hold guard,
+    RMB, + W), run (W) and sprint (Shift + W) in straight lines and wide curves, sheathed and drawn (tap guard once to
+    draw; the sword stays out about 6 s). Pass: each planted foot stays put on the grass while the body passes over
+    it, and the steps quicken as the speed rises: no slow-motion walk at full speed, no flurry of steps at a walk.
+    From standing into each speed, the first steps push off with no skate. Walk backward a few steps (S): the feet push
+    off with no toe drag. Note any foot that scrapes the grass as it swings forward (the drawn walk and run are known
+    to, D-054).
+38. [ ] **Footsteps on grass and stone (D-051, D-089; also item 33) (listen).** Stand still for 5 s, then walk, run and
+    sprint on the grass and then on the slate slab, sheathed and drawn. Pass: standing still is silent; there is one
+    step per foot plant at every speed, a soft contact on the grass and a hard click on the slate; nothing steps while
+    a dodge or a landing plays; an idle enemy makes no steps. Note whether one take per surface sounds like a machine
+    gun at a sprint and whether the slate step sounds mechanical (`PLACEHOLDERS.md`, picks to improve 10).
+39. [ ] **Stops (D-059).** Run and Guard-walk, and let go at random moments. Pass: the body takes one more step, slows
+    and stands with both feet planted, not on one foot; nothing slides once it stands, and there is no hitch where the
+    control script and the carry fight. Let go of W during a sprint: Skid plays. Let go of Shift only, still holding W:
+    Skid plays as well; note whether that reads wrong (D-059). Let go of a run and press Space at once: the dodge steps
+    back, not forward.
+40. [ ] **Turns into a walk and landings on the move (D-059) (listen).** Stand still facing away from the camera, then
+    press S: the character turns as it walks off, with no turn-in-place clip over the first steps. Run up the ramp
+    onto the ledge and straight off its far side: the run carries on mid-stride with one landing thud and no crouch.
+    Walk off the ledge and let go of the keys before you land: the landing crouch plays; walk off again and press W as
+    you land: the crouch is cut short with no slide.
+41. [ ] **Run and sprint look (D-054).** Run (W) for 5 s: the Run clip shows, never the Sprint lean, and drawn, never
+    the low-and-back sword. Sprint: the Sprint lean shows. (The remote view is item 72.)
+42. [ ] **Reversals and drawn turns (D-054, D-058).** Drawn and locked on (F) to a boar, walk backward (S): the walk-back
+    plays, never a run. Unlocked, reverse direction at a run, sheathed and drawn: the turn reads as a turn with no long
+    skate (note anything over half a stride). Drawn, run and swing round hard to the left, then to the right. In a
+    recording watched at 0.25x from behind, the scabbard's lower end stays clear of the left leg, and the body leans
+    into the right turns, and into the left ones until the side walk shows.
+43. [ ] **Dev slow motion.** Press O (the Capture panel's time-scale key, `dev.luau` `capture.hotkeys`) until it reads
+    0.5x, then walk and run: the feet stay planted. Press O until it reads 1x again.
+44. [ ] **Ambience on the island (D-095) (listen).** Stand at the middle: the Plains birds play steadily with a faint
+    wind under them, never twice over. Walk straight out to the railing (200 studs). Pass: from about 60 studs out
+    (`fx.audio.ambience.rimBand.far`, 140 studs inside the edge) the wind starts to rise, slowly at first, and it is
+    full within 15 studs of the railing; walking back, it falls to its faint floor. No click or jump in level anywhere.
+45. [ ] **Ambience off the island and back (D-095) (listen).** Face the railing up close and step past it from the
+    command bar (Client view): `local c=game.Players.LocalPlayer.Character; c:PivotTo(c:GetPivot()*CFrame.new(0,2,-8))`.
+    Pass: as you fall, both beds fade out over about 2 s, and in the Explorer no Sound named `ambience.Plains` or
+    `ambience.RimWind` under SoundService is still playing; after the respawn both fade back in over about 2 s.
+
+## J. Hit feel and the real sounds (same Play, D-060 to D-102)
+
+46. [ ] **The first hits of the session are heard (D-093) (listen).** Before any fight, look under SoundService in the
+    Explorer: about 200 pooled Sounds (4 for each of the 50 preloaded names, named like `impact.Flesh`). Click
+    `impact.Flesh`, `telegraph.Unblockable` and `enemy.ChargerDeath`: IsLoaded is true and TimeLength is above 0.
+    Pass: the first basic hit, the first boar telegraph and the first kobold wind-up of the session (items 47 and 50)
+    are all heard; write down any that is silent.
+47. [ ] **Basic chain (D-069, D-082) (listen; do item 36 first).** Walk up to the kobold at X -70, Z -50 and lock on
+    (F). Chain basic 1-2-3 (LMB three times) ten times, then swing five times quickly. Pass: each swing whooshes once,
+    with the swing, swelling no later than about 70 ms after the hit spark (`whoosh.Basic` is a known late take: 54 to 69 ms, D-082); each
+    hit plays the basic cue (crack, flesh, body and ring, the crack and body a little down) with no impact frames and
+    no push in; the third swing ticks the Final click; no sound ends in a click or pop, and a quick swing never
+    carries the tail of the one before. If a basic swing kills, the kill's slash line and ink strokes run along the
+    swing, never back toward where it started.
+48. [ ] **An Art's final hit, the look (D-060, D-066, D-071, D-072, D-096).** At the boar pack at X 60, Z -40, press Q
+    and let the Art's last hit land; repeat with 2, 3 and 4, watching from behind and from above. Pass: on the final
+    hit two frames of white figures on black, then the white flash on the target and the slash line in the world, and
+    the view pushes in about 3 degrees and springs back. The crescent lies in the swing's plane, bulging away from
+    you, never edge-on (turned at most 30 degrees toward the camera); Sharp Nail's stands upright along the thrust.
+    The sword shows inside the white figure; a stretched blade there is expected until `Smear.restSize` exists
+    (D-066). A hit that kills shows the kill frames instead (item 54).
+49. [ ] **An Art's sounds (D-074, D-075, D-077, D-082) (listen).** Record this one. Use each Art three times on any
+    target, once with a quick tap and once holding the key about 0.8 s before letting go. Then cap the frame rate at
+    20 fps (the graphics driver's per-app frame limit, or a low-end device) and use Vertical (2) five times. Pass: the
+    chime plays as the stance completes; the reverse riser builds and stops at full level exactly on the first damage
+    frame, for a tap and a 0.8 s hold alike, the first Art of the session included; each whoosh is loudest on the
+    frame the hit spark appears, with no swell after the spark, none starting before the hold ends and none while the
+    stance glows (at 20 fps too); each hit is one stacked hit, not a flam; on a final hit the bass drops out under the
+    frames and the sub thumps back after the 6-frame hold; the long ring tail's dip is not heard as a second hit.
+50. [ ] **Enemy strikes and telegraphs (D-081, D-082) (listen).** Stand about 6 studs from a kobold and let it do its
+    Overhead three times (dodge out each time), then let a boar charge you three times. Pass, kobold: the yellow
+    edge's two-burst tone and the growl from the start of the wind-up, the axe's whoosh swelling as it lands, the
+    strike shout once on the strike frame, then the thud. Boar: the red edge's buzzer and the squeal over the 0.6 s
+    crouch, and the strike snort once at the charge launch.
+51. [ ] **Guard raise and guard break (D-097) (listen).** Hold RMB: the quiet raise plays once (no second one a moment
+    later from the server). Keep holding through a kobold's Overhead. Pass: the guard-break crack with its sub, the
+    block thud and the whoosh, and no clean flesh hit; the red fill shows on you with no white flash over it; one Final
+    hit-stop click.
+52. [ ] **Parry (D-060, D-071) (listen).** Let go of the guard, wait at least 0.25 s, then raise it (RMB) just before
+    the kobold's axe lands (the window is 0.15 s). Pass: one cyan inverted frame, then the big rainbow-edged glint,
+    the blade flash and the sparks right after it, not under it; the clash and its 2.5 s ring play as one clash with a
+    long tail, and the ring's dip and swell is not heard as a second hit.
+53. [ ] **Dodge (D-067, D-100) (listen).** Dodge four times each way (W, A, S or D, plus Space) on the grass and on the
+    slab, then swing at a target for 5 s and dodge out. Pass: one whoosh per dodge; no landing sound at the start and
+    one soft landing at the end; the quiet step about 50 ms after it does not read as a second landing (flag any
+    double near 0.25 to 0.3 s); speed lines only at the screen edges, never in the middle third, gone within 0.25 s; no
+    ring is cut short when the dodge ends a chain.
+54. [ ] **Kills (D-060, D-073, D-079) (listen).** Kill a boar, then a kobold. Pass: a black beat, then white figures,
+    then ink strokes on white; the kill's crack is heard at full; the death scream starts with the kill; about 10
+    frames later everything goes silent (the birds and wind too) for 0.5 s with the body frozen; the shatter cracks as
+    the silence ends, and its slam does not read as boom-boom. Note any dead-still hold after the death tremor fades
+    (D-073). Then wear down both boars of a pack and kill one with Rising Arc's (3) first hit and the other with its
+    second, about 0.4 s apart. Pass: both cracks at full; the first shatter stays quiet inside the second silence; the
+    second silence lasts its full half second and ends on the second shatter.
+55. [ ] **A pack in one sweep (D-098, D-102) (listen).** Bring a boar pack and a kobold together, 2 to 9 studs apart,
+    wear one down, and sweep them with Horizontal (Q) so one dies (a pack of 6 needs a spawn tool the Playground does
+    not have yet). Pass: one hit cue (no doubled crack or flesh), one push in, one camera nudge, one hit-stop click and
+    one impact-frame picture, though the hits confirm over several frames; the kill's bass cut holds to its end; one
+    death scream per enemy kind and one shatter crack; every target's glint, crescent and white flash appear after
+    the black frames, never under them.
+56. [ ] **Flash budget (D-061, D-063).** Record at 60 fps while chaining Arts and kills on everything in reach for
+    10 s, then step through the recording a frame at a time. Pass: at most 3 full-screen flashes in any one second (a
+    flash is a change to a dark or white picture and back), and a kill's frames are never replaced by a dim while
+    nothing else flashed in the second before. Note the busiest second's count.
+57. [ ] **Reduce flashing (D-062).** In the command bar run
+    `game.Players.LocalPlayer:SetAttribute("SettingReduceFlashing", true)`, then land Arts and kills as fast as you
+    can for 10 s with a white trail or the sky behind the target. Pass: only the soft dim shows, starting at most once
+    in any second (a hit inside that second shows none), and the dodge's speed lines still show. Set it back to
+    `false`: the frames return on the next final hit.
+58. [ ] **Quality Low (D-065).** Run `game.Players.LocalPlayer:SetAttribute("SettingQuality", "Low")` and land a final
+    hit and a kill. Pass: the impact frames still show the figures and the strokes, with fewer parts. Set it back to
+    `"High"`.
+59. [ ] **Volume balance (D-075, D-077, D-083) (listen).** Over the fights above: a hit, a crit, a final hit, a kill and
+    a shatter step up in weight; a crit is brighter than a hit but not heavier; a final hit is heavier, with the sub
+    after the hold; a kill is heavier again, with no bass under its frames; the shatter's slam is the loudest moment.
+    Nothing distorts, and the kill's click stays audible over the final hit's.
+60. [ ] **Low HP and your own death (D-079, D-083, D-095) (listen).** Let a kobold hit you until your HP is under 25%
+    (75 of 300). Pass: one steady lub-dub fades in over about 1.5 s with no click at the loop seam (under SoundService,
+    `ui.LowHpHeartbeat` shows Looped on and LoopRegion 0.18 to 1.12). Then let it kill you: your shatter has the
+    deeper, louder bass dive of a player's death, the birds and wind drop out with the silence, and after the respawn
+    the beds fade back in and the heartbeat is gone.
+
+## K. Listening in the command bar (same Play, Client view)
+
+A command-bar `require` gets its own module cache and does not see the game's sound pool, so these snippets make their
+own Sound. Paste this helper once, and destroy each Sound (`s:Destroy()`) before the next:
+
+```lua
+_G.try=function(id,a,b,vol,speed,loop) local s=Instance.new('Sound'); s.SoundId='rbxassetid://'..id; s.Volume=vol or 1; s.PlaybackSpeed=speed or 1; s.PlaybackRegionsEnabled=true; s.PlaybackRegion=NumberRange.new(a,b); if loop then s.Looped=true; s.LoopRegion=NumberRange.new(a,b) end; s.Parent=game:GetService('SoundService'); if not s.IsLoaded then s.Loaded:Wait() end; s.TimePosition=a; s:Play(); return s end
+```
+
+61. [ ] **A region's end, and a start inside it (D-088, D-091) (listen).** Run
+    `local s=Instance.new('Sound'); s.SoundId='rbxassetid://9119749044'; s.PlaybackRegionsEnabled=true; s.PlaybackRegion=NumberRange.new(0.34,0.55); s.Parent=game:GetService('SoundService'); if not s.IsLoaded then s.Loaded:Wait() end; s.Ended:Connect(function() print('Ended', s.IsPlaying, s.TimePosition) end); s.TimePosition=0.34; s:Play(); task.wait(0.5); print('after 0.5 s', s.IsPlaying, s.TimePosition)`.
+    Write into D-091 whether "Ended" printed and whether IsPlaying was false after 0.5 s. Then run
+    `s.TimePosition=0.45; s:Play(); task.wait(0.2); print(s.IsPlaying, s.TimePosition)`. Pass: only the last 0.1 s of
+    the swish is heard and it stops at 0.55 (the late start's path).
+62. [ ] **A start before the sound has loaded (D-092).** `telegraph.Tick` is not preloaded and nothing in the game
+    plays it. Run
+    `local t=Instance.new('Sound'); t.SoundId='rbxassetid://9113399659'; t.PlaybackRegionsEnabled=true; t.PlaybackRegion=NumberRange.new(0.085,0.32); t.Parent=game:GetService('SoundService'); print('TimeLength at Play', t.TimeLength); t.Ended:Connect(function() print('Ended', t.TimePosition) end); t.TimePosition=0.085; t:Play()`.
+    Pass: TimeLength prints 0; the beep is heard from 0.085 once it loads and stops at 0.32. Note whether Ended
+    prints.
+63. [ ] **Loop seams (D-087, D-095) (listen).** `local w=_G.try(9113286782,0.3,11.5,1,1,true)` and listen for 30 s
+    across the 11.5-to-0.3 seam, then `w:Destroy()`. `local p=_G.try(9119383684,2,125,0.36,1,true); p.TimePosition=120`
+    and listen across the 125-to-2 seam, then `p:Destroy()`. Pass: no pop or gap at either seam.
+64. [ ] **Heartbeat speed (D-083) (listen).** Compare `_G.try(1841124374,0.18,1.12,0.7,1,true)` with the same call at
+    speed 1.2, then play the one you prefer on a phone speaker. Decide whether low HP should race (a pitch range of
+    1.15 to 1.3 in `sfx.luau`, about 74 to 83 bpm) and write the answer into D-083. Pass: the chosen speed is still
+    heard on the phone.
+65. [ ] **The guard raise against the block (D-097) (listen).** `_G.try(9119075376,0.27,0.58,0.14)`, then
+    `_G.try(9116673678,0.02,0.5,0.2)`. Pass: the raise does not read as a quiet block.
+66. [ ] **Whoosh peaks (D-082).** Paste this; it plays each whoosh asset whole and prints the time of its loudest frame:
+    `local function peak(id,len) local s=_G.try(id,0,len,1,1); local best,at=0,0; local c=game:GetService('RunService').RenderStepped:Connect(function() if s.PlaybackLoudness>best then best=s.PlaybackLoudness; at=s.TimePosition end end); task.wait(len+0.1); c:Disconnect(); s:Destroy(); print(id,at,best) end; peak(9119749145,0.96); peak(9119749044,0.9); peak(9126229280,1.45); peak(9119750698,3.08)`.
+    Pass: each time is within 0.02 s of `sfx.luau` `peakAt` (Small 0.066, Medium 0.401, Large 0.234, Basic 1.199).
+    Report any miss: the `peakAt` changes and the specs re-time the clips.
+67. [ ] **The bass dive (listen).** `_G.try(1835344220,0.22,2.2,0.55)`. Pass: it dives in pitch over about 2 s.
+68. [ ] **The slam, A/B (listen).** `_G.try(9125484367,0.07,1.2,0.9)`, then `_G.try(9120769331,0.29,1.3,0.9)` (Sonic
+    Boom 1 from about 0.29 s). Pass: note which reads as one slam (the first swells again at 0.20 to 0.25 s); report
+    it if Sonic Boom 1 wins.
+69. [ ] **Death vocals (D-073) (listen).** `_G.try(9118314102,0.58,1.05,0.65)` (boar) and
+    `_G.try(9113988191,0.04,0.76,1,0.88)` (kobold). Pass: the boar reads as a boar and the kobold as a kobold; with
+    item 54 in mind, note whether the silence cutting each scream reads as intended.
+70. [ ] **The reuses are distinct (D-081) (listen).** Compare `_G.try(9113634896,0.04,0.36,1,0.79)` (ChargerStrike)
+    with `_G.try(9113634896,0.04,0.36,1,1)` (the snort); `_G.try(9118314102,0.58,1.05,0.45,1.17)` (ChargerStagger)
+    with `_G.try(9118314102,0.58,1.05,0.65,1)` (ChargerDeath); `_G.try(9113988191,0.04,0.76,0.6,1.15)` (BruteStagger)
+    and `_G.try(9113988191,0.04,0.76,0.75,1.01)` (BruteStrike) with `_G.try(9113988191,0.04,0.76,1,0.88)`
+    (BruteDeath). Pass: each reads as its own sound, and no stagger is heard as a death (in the game too: items 50
+    and 54).
+71. [ ] **The Switch landing against the guard-break telegraph (listen).** A Switch does not land in the game yet (the
+    server sends no `isSwitch`), so compare `_G.try(9116730789,0.12,0.45,0.3)` with `_G.try(9125673878,0,0.45,0.6)`.
+    Pass: the Switch landing is not heard as a guard-break warning.
+
+## L. Two players (D-054 to D-057, D-097 to D-102)
+
+Stop Play, then **Test tab > Clients and Servers > 2 Players > Start** (verify); player A and player B are the two
+client windows. Add the slab and the ramp again from the server window if you want them. Items 74 and 75 add lag with
+**File > Studio Settings > Network > Incoming Replication Lag** (verify) on both clients; set it back to 0 after them.
+
+72. [ ] **A remote run and sprint (D-054, D-059).** B runs and sprints in front of A for 10 s and stops a few times.
+    Pass on A: B's rig takes the Sprint lean only while B sprints, with no flicker at a steady run, and its feet
+    plant. B's stops slide as before (remote rigs do not run the stop carry, D-059): note how far.
+73. [ ] **Guard taps and a remote draw-cut (D-056, D-057).** A, not locked on, taps guard about 10 times a second for
+    2 s and lets go: about 6 s later A's sword sheathes on both screens (the server heard the last release). Then A,
+    sheathed, attacks a boar: on B's screen the attack draw-cuts with no Draw flashing in first. Then A taps guard
+    once, and about 0.3 s after letting go raises it into a kobold's Overhead: the parry sparks (the guard sender's
+    burst of 2 sends the tap's release at once).
+74. [ ] **Remote swings under lag (D-082, D-101) (listen).** Lag 0.1 s, then 0.15 s. B chains basic 1-2-3 and uses Q,
+    2, 3 and 4 within 20 studs of A. Pass on A: every one of B's swings whooshes once, peaking with the swing as on B's
+    own screen, never silent or doubled; every one of B's Arts lights the blade and chimes.
+75. [ ] **A remote Art's riser (D-074, D-101) (listen).** Same lag. B uses each Art near A, once tapped and once held
+    about 0.8 s. Pass on A: the riser ends on the first damage frame. Every remote clip plays at speed 1 until the
+    server sends `ActionStarted.speed`; repeat with an Art at another speed once it does.
+76. [ ] **A remote dodge, a remote guard and a bystander (D-070, D-097, D-100) (listen).** No lag. B dodges within 60
+    studs of A, then 80 studs away; then B raises guard within 60 studs, then farther. Pass on A: B's dodge whoosh and
+    guard raise are heard only within 60 studs, and A never sees speed lines for B's dodge. Then B walks 100 or more
+    studs away and kills an enemy: A sees no impact frames, no push in and no full-screen dim.
+77. [ ] **A cleave through two players (D-098) (listen).** A and B stand side by side in front of a kobold so its
+    Overhead hits both, with B worn down so the blow kills B. Do it three times: A takes the hit, A parries, A holds
+    the guard (it breaks). Pass on A: A's own hit, parry or guard break always sounds, at A's position, whatever
+    happens to B.
+78. [ ] **A player's heavy shatter (D-079) (listen).** Kill a mob near both players, then let B die near A. Pass on A:
+    B's shatter has a clearly deeper, louder bass dive than the mob's (3 dB more) with the same slam, crack and chime,
+    and each death plays one shatter. The Playground has no Elite or boss yet; check those when one spawns.
+79. [ ] **Shatters far apart (D-102) (listen).** B kills a mob 150 or more studs from A at the same moment that A kills
+    one next to A (count down together). Pass on A: A's kill shatters with its full crack. Then A kills both boars of
+    a worn-down pack with one Horizontal: one shatter crack, not two.
+80. [ ] **Remote Draw flash under jitter (D-057).** Run the Playground with two clients behind a network shaper that
+    adds jitter (about 100 ms delay, 50 ms jitter). Studio's Incoming Replication Lag adds only fixed lag, which
+    delays both messages equally and so does not show the flash. On client A, attack from sheathed 20 times. On client
+    B, count how often the Draw shows before the attack starts. Report the count and the longest flash in frames.
+
+## M. The ClipLab after the mount move (D-055)
+
+81. [ ] **The re-keyed one-shots at 0.25x (D-055).** In the ClipLab, play DodgeLeft (now leaning 30 degrees),
+    DodgeBack (18), DodgeForward, DodgeRight, TurnRight (the torso turns 24, the head 12 past it), TurnLeft, Skid,
+    Stagger and GuardBreak. Then play the four flinches over Idle and IdleDrawn, Sprint (the left arm swings wider),
+    the Idle glance at 10 s, RisingArc (the re-cock at 0.56 s), and Draw over RunDrawn and SprintDrawn (the point stays
+    well above the grass). Each keeps its timing and snap, and the sheathed hilt and scabbard stay clear of the head,
+    arms and legs. Note any that now look stiffer than before, in the hand columns of `docs/ANIMATION_REVIEW.md` (item 12).
