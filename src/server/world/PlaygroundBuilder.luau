@@ -15,9 +15,14 @@
 	  actual Heartbeat check; the part marks the plane and never traps anything);
 
 	and, directly under workspace, the Enemies and Entities folders (EnemyService parents rigs into
-	workspace.Enemies). Every part is anchored. The build is idempotent: calling it again rebuilds
-	the folders it owns and leaves the place's own parts alone. workspace.Playground gets the
-	attribute PartCount (every BasePart under it) and the builder warns past world.partBudget.
+	workspace.Enemies), and the sky's Clouds (section 11) under workspace.Terrain with
+	lighting.luau's cover and density. The engine takes a Clouds only as a child of Terrain (one
+	under Lighting logs "Cloud instance must exist under Terrain node" and draws nothing), and a
+	place file cannot hold it there reliably, so the server makes it at start; it replicates. A
+	Clouds an older place build left under Lighting is removed. Every part is anchored. The build
+	is idempotent: calling it again rebuilds the folders it owns and leaves the place's own parts
+	alone. workspace.Playground gets the attribute PartCount (every BasePart under it) and the
+	builder warns past world.partBudget.
 
 	Layout math lives in PlaygroundLayout (Lune-tested); this file only makes Instances.
 ]]
@@ -29,6 +34,7 @@ local Playground = require(Shared.data.playground)
 local World = require(Shared.data.world)
 local Fx = require(Shared.data.fx)
 local Assets = require(Shared.data.assets)
+local LightingData = require(Shared.data.lighting)
 local PlaygroundLayout = require(script.Parent.PlaygroundLayout)
 
 export type BuildResult = {
@@ -40,6 +46,7 @@ export type BuildResult = {
 	rails: number,
 	pillars: number,
 	clouds: number,
+	skyClouds: Instance?, -- workspace.Terrain's Clouds; nil when the container has no Terrain
 }
 
 local PlaygroundBuilder = {}
@@ -54,7 +61,7 @@ local MATERIALS: { [string]: Enum.Material } = {
 }
 
 local CLOUD_INDEX_ATTRIBUTE = "CloudIndex"
-local CLOUD_TEXTURE = "CloudBillboard"
+local SKY_CLOUDS_CLASS = "Clouds"
 
 local function color3(rgb: { number }): Color3
 	return Color3.new(rgb[1], rgb[2], rgb[3])
@@ -242,13 +249,39 @@ function PlaygroundBuilder.buildClouds(parent: Instance, count: number, random: 
 		emitter.LockedToPart = false
 		emitter.Acceleration = Vector3.zero
 		emitter.Drag = 0
-		if Assets.isReady(CLOUD_TEXTURE) then
-			emitter.Texture = Assets.url(CLOUD_TEXTURE)
+		if Assets.isReady(cloudData.textureAsset) then
+			emitter.Texture = Assets.url(cloudData.textureAsset)
 		end
 		emitter.Parent = host
 		host.Parent = folder
 	end
 	return #clouds
+end
+
+--- Builds the sky's Clouds under `root`'s Terrain from lighting.luau (the engine takes a Clouds
+--- only there) and removes any Clouds left under `lighting`; returns it, or nil with no Terrain.
+function PlaygroundBuilder.buildSkyClouds(root: Instance, lighting: Instance?): Instance?
+	if lighting ~= nil then
+		for _, child in lighting:GetChildren() do
+			if child:IsA(SKY_CLOUDS_CLASS) then
+				child:Destroy()
+			end
+		end
+	end
+	local terrain = root:FindFirstChildOfClass("Terrain")
+	if terrain == nil then
+		return nil
+	end
+	local clouds = terrain:FindFirstChildOfClass(SKY_CLOUDS_CLASS) :: Clouds?
+	if clouds == nil then
+		local made = Instance.new(SKY_CLOUDS_CLASS) :: Clouds
+		made.Parent = terrain
+		clouds = made
+	end
+	local sky = clouds :: Clouds
+	sky.Cover = LightingData.clouds.cover
+	sky.Density = LightingData.clouds.density
+	return sky
 end
 
 --- Builds the kill volume slab under `parent` (invisible, non-colliding; the plane PlaygroundService checks).
@@ -294,6 +327,9 @@ function PlaygroundBuilder.build(container: Instance?, random: Random?): BuildRe
 	PlaygroundBuilder.buildKillVolume(model)
 	local enemies = findOrCreate(root, World.playground.folders.enemies, "Folder")
 	local entities = findOrCreate(root, World.playground.folders.entities, "Folder")
+	-- Only the real workspace's Lighting is cleaned; a test container brings its own Terrain or none.
+	local skyClouds =
+		PlaygroundBuilder.buildSkyClouds(root, if container == nil then game:GetService("Lighting") else nil)
 
 	local partCount = PlaygroundBuilder.countParts(model)
 	model:SetAttribute(World.playground.partCountAttribute, partCount)
@@ -315,6 +351,7 @@ function PlaygroundBuilder.build(container: Instance?, random: Random?): BuildRe
 		rails = rails,
 		pillars = pillars,
 		clouds = clouds,
+		skyClouds = skyClouds,
 	}
 end
 

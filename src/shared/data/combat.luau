@@ -150,6 +150,25 @@ local Combat = {
 	sweepRootSpeedMargin = 1.25, -- how much faster than the fastest honest travel a jump must be
 	facingTolerance = 0.35, -- cosine slack when comparing reported facing to the server's
 
+	-- Aim (D-112). While a lock is held and the body is free (Idle, Guard, the held Art stance), the
+	-- body turns to face the target instead of the stick, and the stick strafes at walk speed. A
+	-- basic swing or an Art release turns the rest of the way at once, but never more than
+	-- snapDegrees (a bigger unanimated turn reads as a pop, section 10); with no lock the same snap
+	-- aims at the best enemy in the assist cone. The server sweeps where the request faces and
+	-- accepts a facing within acos(1 - facingTolerance) (49.46 degrees) of the root it has seen, so
+	-- snapDegrees plus replicationMarginDegrees, the turn the server may not have seen yet, must fit
+	-- inside it (tools/validators/combat.luau).
+	aim = {
+		lockTurnRate = 720, -- degrees a second the body turns toward the lock (180 in 0.25 s)
+		lockFaceWhileSprinting = false, -- sprinting hands the facing back to the stick
+		snapDegrees = 40, -- the most a swing or a release turns the body at once
+		replicationMarginDegrees = 9, -- turn the server may still be behind on when a request lands
+		assistRange = 10.5, -- studs, flat, root to root: the farthest real-fight placement (10.1) and a little
+		assistConeDegrees = 90, -- the whole assist cone around the body's look (45 each side)
+		assistAngleWeightStuds = 6, -- assist ranking: one radian off the look costs this many studs
+		minFaceDistance = 0.5, -- studs, flat: a target closer than this gives no direction to face
+	},
+
 	-- Anti-cheat basics (section 17)
 	artRequestTolerance = 0.05, -- seconds early an Art may be requested before its lock ends
 	maxSpeedStudsPerSecond = 24, -- sprint cap outside root motion

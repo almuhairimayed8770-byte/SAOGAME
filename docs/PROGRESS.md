@@ -270,11 +270,36 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 | Memory, PC | under 1.2 GB | not yet: 1,909 MB (Run) and 2,709 to 2,751 MB (Play, 2026-10-20) are the whole Studio process, server and client together | read a client in Play mode (View > Stats > Memory) or a live server |
 | Memory, mobile | under 600 MB | | device test |
 
+## Play-test on the owner's PC (2026-10-23, f7b0722)
+
+- Ran part of the round, sound audible (MasterVolume cannot be set from a script). Studio stopped drawing when the
+  display slept part-way; the rest waits for the rerun.
+- Pass: no "set the parent of Animate to NULL" warning after two resets and four deaths (item 82); 215 of 219 sounds
+  load (the 4 that do not are the placeholder music stems, fixed by D-115); the kobold's kill on the player showed
+  the impact frames in order (Black, Dark, Ink, 6 frames), the sword in the figure at rest size, the FOV punch 60 to
+  55 and back with a 60.8 overshoot, every impact layer starting on the hit frame, nothing played twice; frame time
+  p50 16.7 ms, p95 17.7, max 67.6 (not on a hit), about 60 fps against the 59.9 baseline.
+- Fail: no player swing ever damaged an enemy (about 15 swings). The body faced 156 to 175 degrees away from the
+  enemy: nothing turned it, lock-on only moved the camera, and the server sweeps around the body. The server path
+  itself is sound for a real AJU player (probe and `tests/server/PlayerSwing.spec.luau`). Fixed by D-112 (the body
+  faces the lock, each swing snaps up to 40 degrees, soft assist) and D-113 (the server sweeps along the validated
+  facing).
+- Measured: a regioned Sound fires Ended at the region end and will not start at or past it; a loop's first pass
+  starts at TimePosition (D-091). The server keeps the sword motor on the right hand while the client shows it on the
+  back; the server's Basic1 blade runs 2.9 to 6 studs in front of the root at about hip height.
+- Console: four "Failed to load sound rbxassetid://0" and three ContentId errors (the music stems, D-115), two
+  "Cloud instance must exist under Terrain node" (D-116), three "rbxassetid://203785492 Asset type does not match"
+  (not in the repo; item 98).
+- After the fixes: 1778 specs in 107 files, 30 validators, offline lint green, hit matrix unchanged, no new strict
+  type messages in src or tools. Studio checks 97 to 106 cover the rest; the dev hooks (D-114) let a Studio session
+  land swings and read why one missed even with the display asleep.
+
 ## Next three tasks
 
-1. Play-test the new hits and sounds in Studio: `docs/STUDIO_TASKS.md` items 37 to 81 in one sitting (a solo Play, then
-   two players, then the ClipLab), with headphones for the items marked (listen). Report each result, the counts the
-   items ask for, and the decisions they hand back (the heartbeat speed into D-083, the region-end result into D-091).
+1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and
+   106 first), Reduce flashing, sheathing after lock-off, foot slide, then `docs/STUDIO_TASKS.md` items 37 to 96 in one
+   sitting (a solo Play, then two players, then the ClipLab), with headphones for the items marked (listen). Report
+   each result, the counts the items ask for, and the decisions they hand back (the heartbeat speed into D-083).
 2. The owner records the ten gate shots in the Playground with the Capture panel (`docs/clips/phase-0/README.md`),
    with **View > Stats** open during the fight for the fps reading, and hands the files over (here in the project or in
    `docs/clips/phase-0/` on the PC). Each is then reviewed frame by frame at 0.25x, the hand columns of
@@ -304,6 +329,13 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - **Clean-up.** `SfxPool.hit`, `parry` and `hitStopTick` and Replication's `SOUNDS.impact`, `block`, `parry` and
   `switchLand` have no game caller: keep or delete. Two deaths in one frame start two ShatterBloom contours; the
   no-rig shatter fallback skips `SfxPool.shatter`'s merge; the merge remembers only the last shatter of each cue.
+- **From the aim fix (D-112 to D-116).** A swing sent during the lock's acquisition turn sweeps along the facing the
+  server accepts, up to about 49 degrees short of the client's body, so it may miss until the turn has replicated
+  (about latency + 0.11 s). Server lag past `combat.lagAllowance` can still get a mid-turn swing refused "Facing".
+  The lock turn runs on the render step (not while the display sleeps; DevAim "face" covers tests). Strafing at walk
+  speed may slide the WalkLeft/WalkRight feet (item 103). CharacterController reaches TargetController through
+  Siblings because `tests/net/TrailingSend.spec.luau` has no TargetController fake. `Assets.url` still returns the
+  placeholder id (guarded by the content validator only). MusicDirector's Stop() rewinds a stem (item 104).
 - **Design calls.** The settings menu (later phase) must write `SettingReduceFlashing` and `SettingQuality`, and every
   later full-screen flash must ask `FlashBudget`. A cue-level material slot for armor and construct hits. Stance Arts
   against the stop carry (MoveDirection stays non-zero up to 1.2 s) before Phase 1. Strafe and backpedal run clips,

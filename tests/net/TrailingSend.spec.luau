@@ -379,7 +379,7 @@ local function guardPolicy(link: Link): (any) -> any
 		},
 	}
 	local services: { [string]: any } = {
-		RunService = { BindToRenderStep = function() end },
+		RunService = { BindToRenderStep = function() end, Heartbeat = Signal.new() },
 		Players = {
 			LocalPlayer = { CharacterAdded = Signal.new(), CharacterRemoving = Signal.new(), Character = model },
 		},

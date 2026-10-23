@@ -151,13 +151,6 @@
 					"MoonAngularSize": 8,
 					"StarCount": 1500
 				}
-			},
-			"Clouds": {
-				"$className": "Clouds",
-				"$properties": {
-					"Cover": 0.55,
-					"Density": 0.3
-				}
 			}
 		},
 		"HttpService": {

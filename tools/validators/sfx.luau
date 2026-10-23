@@ -34,6 +34,8 @@
 	moment's cue with its contour and checks every sub layer starts with the bass back).
 	The HP heartbeat (fx.audio.heartbeatLoop) plays mix.heartbeatOverAllDb above its entry's
 	volume, and that lifted volume is at or under limits.maxPlayVolume too.
+	music.stemIds holds one rbxassetid:// id per music.stems name and nothing else (MusicDirector
+	makes a stem's Sound only for a real id).
 ]]
 
 type Context = {
@@ -770,6 +772,35 @@ return function(ctx: Context): { string }
 			problem("sfx.shatterCues.%s must name the cue SfxPool.shatter plays", kind)
 		elseif typeof(cues[cueName]) ~= "table" then
 			problem("sfx.shatterCues.%s '%s' is not in sfx.cues", kind, cueName)
+		end
+	end
+
+	-- The floor's music stems: one id per stem, each an rbxassetid:// string (0 while a placeholder).
+	local music = if typeof(Sfx.music) == "table" then Sfx.music else {}
+	local stemNames = if typeof(music.stems) == "table" then music.stems else {}
+	local stemIds = music.stemIds
+	if typeof(stemIds) ~= "table" then
+		problem("sfx.music.stemIds must hold one asset id per stem")
+	else
+		local isStem: { [string]: boolean } = {}
+		for _, name in stemNames do
+			isStem[name] = true
+			if stemIds[name] == nil then
+				problem("sfx.music.stemIds is missing the '%s' stem", tostring(name))
+			end
+		end
+		local named = {}
+		for name in stemIds do
+			table.insert(named, tostring(name))
+		end
+		table.sort(named)
+		for _, name in named do
+			local id = stemIds[name]
+			if not isStem[name] then
+				problem("sfx.music.stemIds.%s is not a stem in music.stems", name)
+			elseif typeof(id) ~= "string" or id:match("^rbxassetid://%d+$") == nil then
+				problem("sfx.music.stemIds.%s must be an rbxassetid:// string", name)
+			end
 		end
 	end
 

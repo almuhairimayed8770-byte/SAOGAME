@@ -134,7 +134,9 @@ local Choreo = {
 			-- right one): it holds there while no gait clip shows.
 			startPhase = 0.5,
 			-- Degrees a second: a facing turning faster than this is turning to the move (a reversal),
-			-- so Run and Sprint keep carrying a move behind it. Lock-on circling turns slower.
+			-- so Run and Sprint keep carrying a move behind it. Lock-on circling turns slower. The
+			-- lock's acquisition turn (combat.luau aim.lockTurnRate, D-112) is faster for at most a
+			-- quarter second, at the walk speed a body facing its lock is held to.
 			turnYawRate = 300,
 			-- Most a planted foot may slide in one stance (studs): a tenth of the foot's length,
 			-- under a 60 Hz frame of travel at a walk, so a plant reads as planted at 0.25x.

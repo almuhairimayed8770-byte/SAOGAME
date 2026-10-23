@@ -5,6 +5,11 @@
 	  inserts its default character animation script (it writes Motor6D.Transform and would fight Choreo);
 	- HttpService.HttpEnabled = true in the dev places only (the PoseEditor plugin posts to the local pose
 	  server), never in default.project.json, which is the shipped game.
+
+	And no place file holds a Clouds: the engine takes one only under Workspace.Terrain ("Cloud
+	instance must exist under Terrain node", 2026-10-23 Play test), so the server builds the sky's
+	Clouds there at start from lighting.luau (PlaygroundBuilder.buildSkyClouds). What a place's
+	Lighting holds is the sky, the atmosphere and the post effects.
 ]]
 
 local fs = require("@lune/fs")
@@ -31,6 +36,28 @@ local function allProjects(): { string }
 	end
 	table.sort(paths)
 	return paths
+end
+
+-- The classes a place's Lighting may hold: the engine draws these only as Lighting's children.
+local LIGHTING_CHILDREN = {
+	Sky = true,
+	Atmosphere = true,
+	BloomEffect = true,
+	ColorCorrectionEffect = true,
+	SunRaysEffect = true,
+	DepthOfFieldEffect = true,
+	BlurEffect = true,
+}
+
+-- Every instance node of a project tree as (path, className), "$" keys skipped.
+local function eachNode(node: any, path: string, visit: (path: string, className: string, node: any) -> ())
+	for key, child in node do
+		if typeof(key) == "string" and key:sub(1, 1) ~= "$" and typeof(child) == "table" then
+			local childPath = path .. "." .. key
+			visit(childPath, child["$className"] or key, child)
+			eachNode(child, childPath, visit)
+		end
+	end
 end
 
 local function httpEnabled(project: any): any
@@ -79,5 +106,41 @@ describe("project files", function()
 
 	it("leaves HttpEnabled out of the shipped game", function()
 		expect(httpEnabled(readProject(GAME_PROJECT))).toBeNil()
+	end)
+
+	it("puts no Clouds in any place (the server builds the sky's under workspace.Terrain)", function()
+		local found = {}
+		for _, path in allProjects() do
+			eachNode(readProject(path).tree, "game", function(nodePath: string, className: string)
+				if className == "Clouds" then
+					table.insert(found, path .. ": " .. nodePath)
+				end
+			end)
+		end
+		expect(found).toEqual({})
+	end)
+
+	it("keeps only the sky, the atmosphere and the post effects under a place's Lighting", function()
+		local strays = {}
+		for _, path in allProjects() do
+			local lighting = readProject(path).tree.Lighting
+			if lighting == nil then
+				continue
+			end
+			for key, child in lighting do
+				if key:sub(1, 1) ~= "$" and typeof(child) == "table" then
+					local className = child["$className"] or key
+					if not LIGHTING_CHILDREN[className] then
+						table.insert(strays, ("%s: Lighting.%s (%s)"):format(path, key, className))
+					end
+				end
+			end
+		end
+		expect(strays).toEqual({})
+		-- The Playground still carries its sky and post effects.
+		local playground = readProject("places/Playground.project.json").tree.Lighting
+		for _, name in { "Sky", "Atmosphere", "Bloom", "ColorCorrection", "SunRays" } do
+			expect(playground[name]).toBeTruthy()
+		end
 	end)
 end)

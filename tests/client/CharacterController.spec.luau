@@ -15,6 +15,7 @@ local luau = require("@lune/luau")
 local Signal = Harness.load("src/shared/util/Signal")
 local Siblings = Harness.load("src/client/controllers/Siblings")
 local ChoreoData = Harness.load("src/shared/data/choreo")
+local AimLogic = Harness.load("src/client/controllers/AimLogic")
 
 local CONTROLLER_PATH = "src/client/controllers/CharacterController"
 local FRAME = 1 / 60
@@ -24,12 +25,22 @@ type Rig = {
 	sent: { { name: string, payload: any } },
 	-- One frame with the stick at a world direction (zero for none).
 	frame: (stick: Vector3) -> (),
+	-- One frame with the display asleep: the clock moves and Heartbeat fires, no render step runs.
+	heartbeat: () -> (),
 	humanoid: any,
 	model: any,
 	-- Every Humanoid property write, in order ({ key, value }).
 	writes: { { key: string, value: any } },
 	-- The sends and the fake Impact's calls in one ordered list ({ kind = "send" | "impact", name, args }).
 	log: { { kind: string, name: string, args: { any } } },
+	-- The HumanoidRootPart (CFrame and Position kept in step, as on a part).
+	root: any,
+	-- Locks an enemy standing at `position` (nil: no lock).
+	setLock: (position: Vector3?) -> (),
+	-- The enemies the soft assist sees: { id, position }.
+	setEnemies: (enemies: { { id: number, position: Vector3 } }) -> (),
+	-- The last input the controller handed Locomotion.update.
+	locomotionInput: () -> any,
 }
 
 type Options = {
@@ -68,7 +79,25 @@ local function load(options: Options?): Rig
 			props[key] = value
 		end,
 	})
-	local root: any = { CFrame = CFrame.new(), Position = Vector3.zero, AssemblyLinearVelocity = Vector3.zero }
+	local rootState: { [string]: any } = { CFrame = CFrame.new(), AssemblyLinearVelocity = Vector3.zero }
+	local root: any = setmetatable({}, {
+		__index = function(_self: any, key: string): any
+			if key == "Position" then
+				return rootState.CFrame.Position
+			end
+			return rootState[key]
+		end,
+		__newindex = function(_self: any, key: string, value: any)
+			if key == "Position" then
+				rootState.CFrame = rootState.CFrame.Rotation + value
+			else
+				rootState[key] = value
+			end
+		end,
+	})
+	local lockRecord: any = nil
+	local enemies: { { id: number, position: Vector3 } } = {}
+	local lastInput: any = nil
 	local model = {
 		WaitForChild = function(_self: any, name: string): any
 			return if name == "Humanoid" then humanoid else root
@@ -87,7 +116,9 @@ local function load(options: Options?): Rig
 				serverDrawn = function(): boolean
 					return false
 				end,
-				update = function() end,
+				update = function(_self: any, _dt: number, input: any)
+					lastInput = input
+				end,
 				stopGait = if opts.stopGait ~= nil
 					then function(_self: any, into: any)
 						gaitPhase = (gaitPhase + (opts.stopGait :: number)) % 1
@@ -104,6 +135,24 @@ local function load(options: Options?): Rig
 			table.insert(log, { kind = "impact", name = name, args = { ... } })
 		end
 	end
+	-- TargetController, through Siblings: the lock and the soft assist's candidates.
+	local targetController = {
+		current = function(): any
+			return lockRecord
+		end,
+		assistCandidates = function(origin: Vector3, look: Vector3): { any }
+			local list = {}
+			for _, enemy in enemies do
+				local dx, dz = enemy.position.X - origin.X, enemy.position.Z - origin.Z
+				table.insert(list, {
+					id = enemy.id,
+					distance = math.sqrt(dx * dx + dz * dz),
+					bearing = AimLogic.bearing(look.X, look.Z, dx, dz),
+				})
+			end
+			return list
+		end,
+	}
 	local fakes: { [string]: any } = {
 		Net = {
 			client = function(): any
@@ -136,17 +185,22 @@ local function load(options: Options?): Rig
 				if path == "fx.Impact" and opts.impact then
 					return impact, true
 				end
+				if path == "controllers.TargetController" then
+					return targetController, true
+				end
 				return Siblings.stub(), false
 			end,
 			call = Siblings.call,
 			stub = Siblings.stub,
 		},
 	}
+	local heartbeat = Signal.new()
 	local services: { [string]: any } = {
 		RunService = {
 			BindToRenderStep = function(_self: any, _name: string, _priority: number, fn: (dt: number) -> ())
 				step = fn
 			end,
+			Heartbeat = heartbeat,
 		},
 		Players = {
 			LocalPlayer = { CharacterAdded = Signal.new(), CharacterRemoving = Signal.new(), Character = model },
@@ -187,6 +241,22 @@ local function load(options: Options?): Rig
 		model = model,
 		writes = writes,
 		log = log,
+		root = root,
+		setLock = function(position: Vector3?)
+			lockRecord = if position ~= nil
+				then { id = 1, kind = "Enemy", state = "Idle", model = { PrimaryPart = { Position = position } } }
+				else nil
+		end,
+		setEnemies = function(list: { { id: number, position: Vector3 } })
+			enemies = list
+		end,
+		locomotionInput = function(): any
+			return lastInput
+		end,
+		heartbeat = function()
+			clock += FRAME
+			heartbeat:Fire(FRAME)
+		end,
 		frame = function(stick: Vector3)
 			clock += FRAME
 			humanoid:Move(stick)
@@ -194,6 +264,11 @@ local function load(options: Options?): Rig
 			runStep(FRAME)
 			root.AssemblyLinearVelocity = humanoid.MoveDirection * humanoid.WalkSpeed
 			root.Position += root.AssemblyLinearVelocity * FRAME
+			local move = humanoid.MoveDirection
+			if props.AutoRotate and move.Magnitude > 0 then
+				root.CFrame = CFrame.lookAt(root.Position, root.Position + Vector3.new(move.X, 0, move.Z))
+			end
+			heartbeat:Fire(FRAME) -- after the render step and the physics, as in a frame
 		end,
 	}
 end
@@ -498,5 +573,325 @@ describe("CharacterController's impact director calls", function()
 		-- Nothing held: a cancel is a no-op.
 		rig.controller.cancelArt(1)
 		expect(#impactCalls(rig, "cancelActivation")).toBe(3)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- Aim (D-112): the body faces a held lock; a swing snaps the rest by at most aim.snapDegrees
+-- ------------------------------------------------------------------------------------------
+
+local Combat = Harness.load("src/shared/data/combat")
+local AIM = Combat.aim
+local ACCEPTANCE = math.deg(math.acos(1 - Combat.facingTolerance)) -- 49.46
+
+-- The root's yaw (degrees, + = left of -Z).
+local function yawOf(rig: Rig): number
+	local look = rig.root.CFrame.LookVector
+	return AimLogic.yawOf(look.X, look.Z)
+end
+
+-- A point `distance` studs from the root at `bearing` degrees (+ = left) from its look.
+local function pointAt(rig: Rig, bearing: number, distance: number): Vector3
+	local direction = CFrame.Angles(0, math.rad(yawOf(rig) + bearing), 0).LookVector
+	return rig.root.Position + direction * distance
+end
+
+-- Degrees (+ = left) from the root's look to a point.
+local function bearingOf(rig: Rig, point: Vector3): number
+	local look = rig.root.CFrame.LookVector
+	local offset = point - rig.root.Position
+	return AimLogic.bearing(look.X, look.Z, offset.X, offset.Z)
+end
+
+-- The facing of the last request named `name`, as a yaw.
+local function sentYaw(rig: Rig, name: string): number?
+	for index = #rig.sent, 1, -1 do
+		local entry = rig.sent[index]
+		if entry.name == name then
+			local f = entry.payload.facing
+			return AimLogic.yawOf(f[1], f[3])
+		end
+	end
+	return nil
+end
+
+local function wrapped(degrees: number): number
+	return (degrees + 180) % 360 - 180
+end
+
+local STILL = Vector3.zero
+
+describe("CharacterController aim: the body faces a held lock (D-112)", function()
+	it("a body walked away from the target turns back to it at lockTurnRate once it is locked", function()
+		local rig = load()
+		-- Backing off with S: AutoRotate turns the body to the stick, away from where it looked.
+		for _ = 1, 10 do
+			rig.frame(Vector3.new(0, 0, 1))
+		end
+		local frames = math.ceil(ChoreoData.locomotion.stopStepsSeconds / FRAME) + 2
+		for _ = 1, frames do
+			rig.frame(STILL)
+		end
+		expect(math.abs(wrapped(yawOf(rig)))).toBeCloseTo(180, 1e-6)
+		local boar = pointAt(rig, 165, 5) -- the Play-test's 165 degrees
+		rig.setLock(boar)
+		local before = #rig.writes + 1
+		local turned = 0
+		local previous = yawOf(rig)
+		for _ = 1, 30 do
+			rig.frame(STILL)
+			local now = yawOf(rig)
+			local step = math.abs(wrapped(now - previous))
+			-- CFrames hold single-precision floats: 1e-4 of slack.
+			expect(step <= AIM.lockTurnRate * FRAME + 1e-4).toBe(true)
+			if step > 1e-4 then
+				turned += 1
+			end
+			previous = now
+		end
+		-- 165 degrees at 12 a frame: 14 frames, then it holds on the target.
+		expect(turned).toBe(14)
+		expect(bearingOf(rig, boar)).toBeCloseTo(0, 1e-4)
+		-- AutoRotate went off once, on the first locked frame, and was not written again.
+		expect(writesOf(rig, "AutoRotate", before)).toEqual({ false })
+		-- The turn is the body's own: Locomotion hears no stick angle to turn in place on.
+		expect(rig.locomotionInput().turning).toBe(0)
+		-- Unlocked, AutoRotate comes back once.
+		rig.setLock(nil)
+		local after = #rig.writes + 1
+		rig.frame(STILL)
+		rig.frame(STILL)
+		expect(writesOf(rig, "AutoRotate", after)).toEqual({ true })
+	end)
+
+	it("strafes around the lock at walk speed, still facing it", function()
+		local rig = load()
+		rig.frame(STILL)
+		local boar = pointAt(rig, 0, 6)
+		rig.setLock(boar)
+		for _ = 1, 30 do
+			rig.frame(Vector3.new(1, 0, 0))
+			expect(math.abs(bearingOf(rig, boar)) < 3).toBe(true)
+			expect(rig.humanoid.AutoRotate).toBe(false)
+			expect(rig.humanoid.WalkSpeed).toBe(ChoreoData.locomotion.walkSpeed)
+			expect(rig.locomotionInput().turning).toBe(0)
+		end
+		-- The strafe moved the body sideways; the walk set shows it (D-054).
+		expect(rig.humanoid.MoveDirection.X).toBeCloseTo(1, 1e-6)
+	end)
+
+	it("sprinting hands the facing back to the stick; letting go of sprint faces the lock again", function()
+		local rig = load()
+		rig.frame(STILL)
+		local boar = pointAt(rig, 0, 8)
+		rig.setLock(boar)
+		rig.frame(STILL)
+		expect(rig.humanoid.AutoRotate).toBe(false)
+		rig.controller.setSprinting(true)
+		-- Sprint held while standing still is not a sprint: the body keeps facing the lock.
+		rig.frame(STILL)
+		expect(rig.humanoid.AutoRotate).toBe(false)
+		for _ = 1, 10 do
+			rig.frame(Vector3.new(1, 0, 0))
+		end
+		expect(rig.humanoid.AutoRotate).toBe(true)
+		expect(rig.humanoid.WalkSpeed).toBe(ChoreoData.locomotion.sprintSpeed)
+		expect(math.abs(bearingOf(rig, boar)) > 45).toBe(true) -- the body follows the stick
+		rig.controller.setSprinting(false)
+		for _ = 1, 15 do
+			rig.frame(Vector3.new(1, 0, 0))
+		end
+		expect(rig.humanoid.AutoRotate).toBe(false)
+		expect(math.abs(bearingOf(rig, boar)) < 3).toBe(true)
+	end)
+
+	it("a raised guard and the held Art stance turn to the lock; a dodge or a swing does not", function()
+		local rig = load()
+		rig.frame(STILL)
+		rig.setLock(pointAt(rig, 90, 5))
+		rig.controller.setGuard(true)
+		for _ = 1, 10 do
+			rig.frame(STILL)
+		end
+		expect(rig.controller.state()).toBe("Guard")
+		-- The server's guard cone follows the replicated root, so the guard now covers the target.
+		expect(math.abs(yawOf(rig) - 90) < 1e-4).toBe(true)
+		rig.controller.setGuard(false)
+
+		local held = load()
+		held.frame(STILL)
+		held.controller.beginArt(1)
+		expect(held.controller.state()).toBe("Holding")
+		held.setLock(pointAt(held, -60, 5))
+		for _ = 1, 10 do
+			held.frame(STILL)
+		end
+		expect(math.abs(yawOf(held) + 60) < 1e-4).toBe(true)
+
+		local dodging = load()
+		for _ = 1, 40 do
+			dodging.frame(STILL)
+		end
+		dodging.setLock(pointAt(dodging, 120, 5))
+		dodging.controller.dodge()
+		local start = yawOf(dodging)
+		for _ = 1, 5 do
+			dodging.frame(STILL)
+		end
+		expect(dodging.controller.state()).toBe("Dodge")
+		expect(yawOf(dodging)).toBeCloseTo(start, 1e-9)
+	end)
+end)
+
+describe("CharacterController aim: a swing turns the rest of the way, at most aim.snapDegrees (D-112)", function()
+	-- A rig that has stood still long enough for its basic swing to be ready and the lag window to
+	-- hold one yaw.
+	local function standing(): Rig
+		local rig = load()
+		for _ = 1, 30 do
+			rig.frame(STILL)
+		end
+		return rig
+	end
+
+	it("a basic swing with the lock 30 degrees off faces the target and sends that facing", function()
+		local rig = standing()
+		local boar = pointAt(rig, 30, 5)
+		rig.setLock(boar) -- no frame in between: the body has not turned yet
+		rig.controller.basicAttack()
+		expect(rig.controller.state()).toBe("Basic")
+		expect(bearingOf(rig, boar)).toBeCloseTo(0, 1e-4)
+		expect(sentYaw(rig, "BasicAttackRequest")).toBeCloseTo(30, 1e-4)
+	end)
+
+	it("with the lock 120 degrees off the swing turns 40 and no more", function()
+		local rig = standing()
+		rig.setLock(pointAt(rig, 120, 5))
+		rig.controller.basicAttack()
+		expect(yawOf(rig)).toBeCloseTo(AIM.snapDegrees, 1e-4)
+		expect(sentYaw(rig, "BasicAttackRequest")).toBeCloseTo(AIM.snapDegrees, 1e-4)
+		local right = standing()
+		right.setLock(pointAt(right, -165, 5))
+		right.controller.basicAttack()
+		expect(sentYaw(right, "BasicAttackRequest")).toBeCloseTo(-AIM.snapDegrees, 1e-4)
+	end)
+
+	it(
+		"mid-turn, the swing turns only as far as the server can still accept from where it last saw the body",
+		function()
+			local rig = standing()
+			rig.setLock(pointAt(rig, 120, 5))
+			for _ = 1, 3 do
+				rig.frame(STILL) -- the lock turn: 36 degrees inside the lag window
+			end
+			expect(yawOf(rig)).toBeCloseTo(36, 1e-4)
+			rig.controller.basicAttack()
+			-- 13 more: the facing sits snap + margin (49) from the yaw the window began with, inside 49.46.
+			local facing = sentYaw(rig, "BasicAttackRequest") :: number
+			expect(facing).toBeCloseTo(AIM.snapDegrees + AIM.replicationMarginDegrees, 1e-4)
+			expect(facing <= ACCEPTANCE).toBe(true)
+		end
+	)
+
+	it("a swing deep in the lock's acquisition turn faces back just enough for the server to accept it", function()
+		local rig = standing()
+		rig.setLock(pointAt(rig, 165, 5))
+		for _ = 1, 7 do
+			rig.frame(STILL) -- 84 degrees round in 7 frames, all inside the lag window
+		end
+		expect(yawOf(rig)).toBeCloseTo(84, 1e-4)
+		rig.controller.basicAttack()
+		-- No snap: the body already left the server's acceptance of where the window began.
+		expect(yawOf(rig)).toBeCloseTo(84, 1e-4)
+		-- The request faces 49 from that yaw, not 84: it comes out instead of being refused.
+		local facing = sentYaw(rig, "BasicAttackRequest") :: number
+		expect(facing).toBeCloseTo(AIM.snapDegrees + AIM.replicationMarginDegrees, 1e-4)
+		expect(facing <= ACCEPTANCE).toBe(true)
+		-- Once the turn has settled for a lag window, the request faces where the body does.
+		local settled = standing()
+		settled.setLock(pointAt(settled, 165, 5))
+		for _ = 1, 30 do
+			settled.frame(STILL)
+		end
+		settled.controller.basicAttack()
+		expect(sentYaw(settled, "BasicAttackRequest")).toBeCloseTo(yawOf(settled), 1e-4)
+		expect(math.abs(wrapped(yawOf(settled) - 165)) < 1e-3).toBe(true)
+	end)
+
+	it("an Art release snaps the same way and its ArtRequest carries the facing", function()
+		local rig = standing()
+		rig.controller.beginArt(1)
+		for _ = 1, 12 do
+			rig.frame(STILL)
+		end
+		local boar = pointAt(rig, -25, 5)
+		rig.setLock(boar)
+		rig.controller.releaseArt(1, 12 * FRAME)
+		expect(rig.controller.state()).toBe("Art")
+		expect(sentYaw(rig, "ArtRequest")).toBeCloseTo(-25, 1e-4)
+		expect(bearingOf(rig, boar)).toBeCloseTo(0, 1e-4)
+	end)
+
+	it("with no lock the soft assist aims at the best enemy in the cone, by at most the snap", function()
+		local rig = standing()
+		rig.setEnemies({ { id = 4, position = pointAt(rig, 30, 5) } })
+		rig.controller.basicAttack()
+		expect(sentYaw(rig, "BasicAttackRequest")).toBeCloseTo(30, 1e-4)
+
+		-- Behind the cone (the Play-test's 165): no unanimated half turn; F is for that.
+		local behind = standing()
+		behind.setEnemies({ { id = 4, position = pointAt(behind, 165, 5) } })
+		behind.controller.basicAttack()
+		expect(sentYaw(behind, "BasicAttackRequest")).toBeCloseTo(0, 1e-9)
+		expect(yawOf(behind)).toBeCloseTo(0, 1e-9)
+
+		-- Past the assist range: nothing to aim at.
+		local far = standing()
+		far.setEnemies({ { id = 4, position = pointAt(far, 30, AIM.assistRange + 1) } })
+		far.controller.basicAttack()
+		expect(sentYaw(far, "BasicAttackRequest")).toBeCloseTo(0, 1e-9)
+
+		-- The nearer of two, angle priced in: 5 studs at 40 beats 9 studs at 10.
+		local two = standing()
+		two.setEnemies({
+			{ id = 1, position = pointAt(two, -10, 9) },
+			{ id = 2, position = pointAt(two, 40, 5) },
+		})
+		two.controller.basicAttack()
+		expect(sentYaw(two, "BasicAttackRequest")).toBeCloseTo(40, 1e-4)
+	end)
+
+	it(
+		"with the display asleep, a turn made on Heartbeat that has settled for a lag window sends the body's own look",
+		function()
+			-- Studio with its display asleep runs Heartbeat 60 times a second and RenderStepped never
+			-- (measured 2026-10-23), so the render step records no yaw. The dev aim hook's "face" turns
+			-- the root on Heartbeat at the lock turn's rate, waits, then swings: the server has long seen
+			-- that root, so the request must face where the body does.
+			local rig = standing()
+			local turned = 0
+			while turned < 150 do
+				local step = math.min(AIM.lockTurnRate * FRAME, 150 - turned)
+				local frame = rig.root.CFrame
+				rig.root.CFrame = CFrame.new(frame.Position) * CFrame.Angles(0, math.rad(step), 0) * frame.Rotation
+				turned += step
+				rig.heartbeat()
+			end
+			for _ = 1, math.ceil(2 * Combat.lagAllowance / FRAME) do
+				rig.heartbeat()
+			end
+			expect(yawOf(rig)).toBeCloseTo(150, 1e-3)
+			rig.controller.basicAttack()
+			expect(rig.controller.state()).toBe("Basic")
+			expect(sentYaw(rig, "BasicAttackRequest")).toBeCloseTo(150, 1e-3)
+		end
+	)
+
+	it("a held lock wins over the assist", function()
+		local rig = standing()
+		rig.setEnemies({ { id = 4, position = pointAt(rig, 30, 4) } })
+		rig.setLock(pointAt(rig, -20, 6))
+		rig.controller.basicAttack()
+		expect(sentYaw(rig, "BasicAttackRequest")).toBeCloseTo(-20, 1e-4)
 	end)
 end)

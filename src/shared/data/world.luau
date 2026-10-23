@@ -55,6 +55,7 @@ local World = {
 		radialJitter = 25,
 		emitterPartSize = 1, -- the invisible host part
 		color = { 1, 1, 1 },
+		textureAsset = "CloudBillboard", -- assets.luau Texture; the emitter keeps its default until it is uploaded
 		-- When fx.luau is present its High quality tier sets the emitter count; this is the fallback.
 		fallbackCountKey = "cloudCount",
 	},

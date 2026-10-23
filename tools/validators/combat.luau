@@ -30,6 +30,12 @@
 	A move the anti-cheat calls a teleport must never be swept across, so the farthest the sweep
 	follows the root over one anti-cheat sample (the speed over the sample, or one frame if that is
 	longer, plus the full credit) stays under teleportFlagDistance.
+
+	The aim table (D-112): every number is sound, and aim.snapDegrees plus
+	aim.replicationMarginDegrees stays within deg(acos(1 - facingTolerance)), the farthest a request's
+	facing may be from the root the server has seen. A swing turns the body by up to the snap the
+	instant it is sent, and the server may still be catching up on a turn before it, so a bigger sum
+	would get honest swings rejected (and their clips cancelled).
 ]]
 
 type Context = {
@@ -43,6 +49,8 @@ type Context = {
 local MAX_STEP_IN_RADII = 2
 -- The largest tolerance the speed check may put on the sprint cap (D-052).
 local MAX_SPEED_MARGIN = 1.25
+-- The widest a cone around the body can be.
+local FULL_TURN_DEGREES = 360
 
 local PLAYER_CLIPS = "src/shared/clips/player"
 
@@ -117,6 +125,72 @@ return function(ctx: Context): { string }
 			return false
 		end
 		return true
+	end
+
+	-- Aim (D-112): checked first, since the hit sweep checks below stop at their first gap.
+	local aim = combat.aim
+	if typeof(aim) ~= "table" then
+		problem(("aim must be a table (got %s)"):format(typeof(aim)))
+	else
+		local function aimPositive(name: string): boolean
+			local value = aim[name]
+			if not isNumber(value) or value <= 0 then
+				problem(("aim.%s must be a positive number (got %s)"):format(name, tostring(value)))
+				return false
+			end
+			return true
+		end
+		local function aimNonNegative(name: string): boolean
+			local value = aim[name]
+			if not isNumber(value) or value < 0 then
+				problem(("aim.%s must be a number, 0 or more (got %s)"):format(name, tostring(value)))
+				return false
+			end
+			return true
+		end
+		aimPositive("lockTurnRate")
+		aimPositive("assistRange")
+		aimNonNegative("assistAngleWeightStuds")
+		aimNonNegative("minFaceDistance")
+		if aimPositive("assistConeDegrees") and aim.assistConeDegrees > FULL_TURN_DEGREES then
+			problem(
+				("aim.assistConeDegrees %s is wider than a full turn (%d)"):format(
+					tostring(aim.assistConeDegrees),
+					FULL_TURN_DEGREES
+				)
+			)
+		end
+		if typeof(aim.lockFaceWhileSprinting) ~= "boolean" then
+			problem(
+				("aim.lockFaceWhileSprinting must be true or false (got %s)"):format(
+					tostring(aim.lockFaceWhileSprinting)
+				)
+			)
+		end
+		local snapOk = aimPositive("snapDegrees")
+		local marginOk = aimNonNegative("replicationMarginDegrees")
+		local toleranceOk = isNumber(combat.facingTolerance)
+			and combat.facingTolerance > 0
+			and combat.facingTolerance <= 2
+		if not toleranceOk then
+			problem(
+				("facingTolerance must be a number above 0 and at most 2 (got %s)"):format(
+					tostring(combat.facingTolerance)
+				)
+			)
+		end
+		if snapOk and marginOk and toleranceOk then
+			local acceptance = math.deg(math.acos(1 - combat.facingTolerance))
+			if aim.snapDegrees + aim.replicationMarginDegrees > acceptance then
+				problem(
+					("aim.snapDegrees %s + aim.replicationMarginDegrees %s is over the server's facing acceptance, deg(acos(1 - facingTolerance)) = %.2f: a swing turned that far would be rejected"):format(
+						tostring(aim.snapDegrees),
+						tostring(aim.replicationMarginDegrees),
+						acceptance
+					)
+				)
+			end
+		end
 	end
 
 	local rateOk = positive("hitSampleHz")

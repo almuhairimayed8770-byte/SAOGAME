@@ -1,0 +1,234 @@
+--!strict
+--[[
+	TargetController's engine glue, loaded fresh with fakes around it: EntityTracker records with
+	models and root parts, a recording CameraController and OutlineManager, Net.client() recording
+	every TargetRequest, the lock key as a Signal, a fake clock for the TargetRequest pacer, and the
+	local character's root. Covers TargetController.lockOn (the dev aim helper's and any caller's
+	way to lock a named enemy through the F key's path) and the soft assist's candidates (D-112).
+]]
+
+local luau = require("@lune/luau")
+
+local Signal = Harness.load("src/shared/util/Signal")
+local CameraData = Harness.load("src/shared/data/camera")
+local TrailingSend = Harness.load("src/shared/net/TrailingSend")
+
+local CONTROLLER_PATH = "src/client/controllers/TargetController"
+
+type Fixture = {
+	controller: any,
+	records: { [number]: any },
+	-- Adds a tracked record at a world position (nil: no PrimaryPart).
+	add: (id: number, kind: string, position: Vector3?, state: string?) -> any,
+	requests: { { entityId: number? } },
+	cameraLocks: { any },
+	outlines: { { model: any, importance: string } },
+	changes: { any },
+	-- Moves the fake clock past the TargetRequest pacer's gap.
+	wait: () -> (),
+	lockToggle: any,
+}
+
+local function load(origin: Vector3, cameraLook: Vector3): Fixture
+	local clock = 100
+	local records: { [number]: any } = {}
+	local requests: { { entityId: number? } } = {}
+	local cameraLocks: { any } = {}
+	local outlines: { { model: any, importance: string } } = {}
+	local lockToggle = Signal.new()
+	local root = {
+		Position = origin,
+		IsA = function(_self: any, name: string): boolean
+			return name == "BasePart"
+		end,
+	}
+	local character = {
+		FindFirstChild = function(_self: any, name: string): any
+			return if name == "HumanoidRootPart" then root else nil
+		end,
+	}
+	local fakes: { [string]: any } = {
+		Net = {
+			client = function(): any
+				return {
+					fire = function(name: string, payload: any)
+						if name == "TargetRequest" then
+							table.insert(requests, { entityId = payload.entityId })
+						end
+					end,
+				}
+			end,
+		},
+		EntityTracker = {
+			all = function(): { any }
+				local list = {}
+				for _, record in records do
+					table.insert(list, record)
+				end
+				table.sort(list, function(a, b)
+					return a.id < b.id
+				end)
+				return list
+			end,
+			get = function(id: number): any
+				return records[id]
+			end,
+			removed = Signal.new(),
+			changed = Signal.new(),
+			localChanged = Signal.new(),
+		},
+		InputController = { lockToggle = lockToggle },
+		CameraController = {
+			setLockTarget = function(model: any)
+				table.insert(cameraLocks, model or false)
+			end,
+		},
+		Siblings = {
+			load = function(_parent: any, path: string): (any, boolean)
+				if path == "fx.OutlineManager" then
+					return {
+						setImportance = function(model: any, importance: string)
+							table.insert(outlines, { model = model, importance = importance })
+						end,
+					},
+						true
+				end
+				return {}, false
+			end,
+		},
+	}
+	local services: { [string]: any } = {
+		RunService = { Heartbeat = { Connect = function() end } },
+		Players = { LocalPlayer = { Character = character } },
+		ReplicatedStorage = Harness.game():GetService("ReplicatedStorage"),
+	}
+	local env = Harness.environment()
+	env.script = Harness.node(CONTROLLER_PATH)
+	env.require = function(target: any): any
+		return fakes[target.Name] or Harness.loadModule(target)
+	end
+	env.game = {
+		GetService = function(_self: any, name: string): any
+			return services[name]
+		end,
+	}
+	env.workspace = { CurrentCamera = { CFrame = CFrame.lookAt(origin, origin + cameraLook) } }
+	env.os = {
+		clock = function(): number
+			return clock
+		end,
+	}
+	env.task = { delay = function() end }
+	local controller = luau.load(
+		Harness.readFile(CONTROLLER_PATH .. ".luau"),
+		{ debugName = CONTROLLER_PATH, environment = env :: any }
+	)()
+	controller.start()
+	local changes: { any } = {}
+	controller.targetChanged:Connect(function(record: any)
+		table.insert(changes, record or false)
+	end)
+	return {
+		controller = controller,
+		records = records,
+		add = function(id: number, kind: string, position: Vector3?, state: string?): any
+			local model =
+				{ Name = kind .. tostring(id), PrimaryPart = if position ~= nil then { Position = position } else nil }
+			local record = { id = id, kind = kind, state = state or "Idle", model = model }
+			records[id] = record
+			return record
+		end,
+		requests = requests,
+		cameraLocks = cameraLocks,
+		outlines = outlines,
+		changes = changes,
+		wait = function()
+			clock += TrailingSend.gapOf("TargetRequest") + 0.01
+		end,
+		lockToggle = lockToggle,
+	}
+end
+
+local ORIGIN = Vector3.new(0, 3, 0)
+local AHEAD = Vector3.new(0, 0, -1)
+
+describe("TargetController.lockOn", function()
+	it("locks a named live enemy the way the F key does: camera, outline, TargetRequest, signal", function()
+		local fixture = load(ORIGIN, AHEAD)
+		local boar = fixture.add(7, "Enemy", Vector3.new(0, 1, -5))
+		expect(fixture.controller.lockOn(7)).toBe(true)
+		expect(fixture.controller.current()).toBe(boar)
+		expect(fixture.cameraLocks[#fixture.cameraLocks]).toBe(boar.model)
+		expect(fixture.outlines[#fixture.outlines].model).toBe(boar.model)
+		expect(fixture.outlines[#fixture.outlines].importance).toBe("Lock")
+		expect(fixture.requests).toEqual({ { entityId = 7 } })
+		expect(fixture.changes).toEqual({ boar })
+		-- The same lock again changes nothing and sends nothing.
+		expect(fixture.controller.lockOn(7)).toBe(true)
+		expect(#fixture.requests).toBe(1)
+		expect(#fixture.changes).toBe(1)
+	end)
+
+	it("locks an enemy behind the camera too: the caller named it, so the F key's cone does not apply", function()
+		local fixture = load(ORIGIN, AHEAD)
+		local behind = fixture.add(3, "Enemy", Vector3.new(1, 1, 5))
+		-- F would not offer it (outside the camera cone)...
+		fixture.lockToggle:Fire()
+		expect(fixture.controller.current()).toBeNil()
+		-- ...but lockOn takes it.
+		expect(fixture.controller.lockOn(3)).toBe(true)
+		expect(fixture.controller.current()).toBe(behind)
+	end)
+
+	it("refuses an id that is not a live, lockable enemy and keeps the lock it had", function()
+		local fixture = load(ORIGIN, AHEAD)
+		local boar = fixture.add(1, "Enemy", Vector3.new(0, 1, -5))
+		fixture.add(2, "Player", Vector3.new(0, 3, -4))
+		fixture.add(3, "Enemy", Vector3.new(0, 1, -6), "Dead")
+		fixture.add(4, "Enemy", nil)
+		fixture.add(5, "Enemy", Vector3.new(0, 1, -(CameraData.lock.range + 1)))
+		expect(fixture.controller.lockOn(1)).toBe(true)
+		for _, id in { 2, 3, 4, 5, 99 } do
+			expect(fixture.controller.lockOn(id)).toBe(false)
+			expect(fixture.controller.current()).toBe(boar)
+		end
+		expect(fixture.requests).toEqual({ { entityId = 1 } })
+	end)
+
+	it("nil clears the lock through the same path", function()
+		local fixture = load(ORIGIN, AHEAD)
+		fixture.add(1, "Enemy", Vector3.new(0, 1, -5))
+		fixture.controller.lockOn(1)
+		fixture.wait()
+		expect(fixture.controller.lockOn(nil)).toBe(true)
+		expect(fixture.controller.current()).toBeNil()
+		expect(fixture.cameraLocks[#fixture.cameraLocks]).toBe(false)
+		expect(fixture.requests).toEqual({ { entityId = 1 }, { entityId = nil } })
+		expect(fixture.changes[#fixture.changes]).toBe(false)
+		-- Clearing with nothing locked is still a success and sends nothing new.
+		expect(fixture.controller.lockOn(nil)).toBe(true)
+		expect(#fixture.requests).toBe(2)
+	end)
+end)
+
+describe("TargetController.assistCandidates", function()
+	it("lists living enemies flat from the body with the signed bearing from its look", function()
+		local fixture = load(ORIGIN, AHEAD)
+		fixture.add(1, "Enemy", Vector3.new(-4, 1, -4)) -- ahead-left, 45 degrees, lower than the root
+		fixture.add(2, "Enemy", Vector3.new(3, 5, 0)) -- right, 90 degrees
+		fixture.add(3, "Player", Vector3.new(0, 3, -2))
+		fixture.add(4, "Enemy", Vector3.new(0, 1, -3), "Dead")
+		fixture.add(5, "Enemy", nil)
+		local list = fixture.controller.assistCandidates(ORIGIN, AHEAD)
+		expect(#list).toBe(2)
+		expect(list[1].id).toBe(1)
+		expect(list[1].distance).toBeCloseTo(math.sqrt(32), 1e-6)
+		expect(list[1].bearing).toBeCloseTo(45, 1e-6)
+		expect(list[2].id).toBe(2)
+		expect(list[2].distance).toBeCloseTo(3, 1e-6)
+		expect(list[2].bearing).toBeCloseTo(-90, 1e-6)
+		-- Measured from the look it is given, not the camera's.
+		local turned = fixture.controller.assistCandidates(ORIGIN, Vector3.new(1, 0, 0))
+		expect(turned[2].bearing).toBeCloseTo(0, 1e-6)
+	end)
+end)

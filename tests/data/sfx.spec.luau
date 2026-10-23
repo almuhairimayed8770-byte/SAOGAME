@@ -2242,3 +2242,29 @@ describe("sfx activation contours", function()
 		expect(Sfx.isReal(Sfx.get("artChime", "TrailCyanWhite"))).toBe(true)
 	end)
 end)
+
+describe("sfx validator: music stem ids", function()
+	it("wants one id per stem in music.stemIds, each an rbxassetid:// string", function()
+		expectOnly(
+			problemsWith(function(data)
+				data.music.stemIds.boss = nil
+			end),
+			"sfx.music.stemIds is missing the 'boss' stem"
+		)
+		expectOnly(
+			problemsWith(function(data)
+				data.music.stemIds.fishing = "rbxassetid://0"
+			end),
+			"sfx.music.stemIds.fishing is not a stem in music.stems"
+		)
+		expectOnly(
+			problemsWith(function(data)
+				data.music.stemIds.combat = "9120660382"
+			end),
+			"sfx.music.stemIds.combat must be an rbxassetid:// string"
+		)
+		expectClean(function(data)
+			data.music.stemIds.combat = "rbxassetid://9120660382"
+		end)
+	end)
+end)

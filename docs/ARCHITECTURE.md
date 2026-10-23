@@ -423,6 +423,30 @@ the sweep.
   swing.sampleDistance (> 0, reaching moments.accentRange and every row's range). tools/validators/impact.luau also
   checks reduced.maxPerWindow (a whole number ≥ 1, costing fewer flashes than flash.maxPerWindow).
 
+### After the play-test (D-112 to D-116)
+
+- Aim (client, D-112): `controllers/AimLogic` (pure, tested) holds the lock-facing, snap, soft-assist and yaw-history
+  rules. CharacterController applies them on its render step and before each BasicAttackRequest and ArtRequest, and
+  samples the root's yaw on Heartbeat too. It reads the lock and the assist candidates from TargetController through
+  Siblings. `TargetController.lockOn(entityId)` locks a named enemy through the F key's path; nil clears it.
+- Sweep facing (server, D-113): a player's run carries its validated flat facing, and every blade sample is solved
+  from `CFrame.lookAt(root position, root position + run.facing)`. Enemy strikes still read the server root.
+- `CombatService.traceSink` (diagnostics, nil in play) receives a TraceEvent per closed window of a player's run:
+  facing, root look, hits, and the nearest enemy's distance, bearing and blade clearance.
+- Dev hooks (D-114): `client/dev/DevAim.client` (+ pure `DevAimLogic`) and `server/dev/DevCombat.server` (+ pure
+  `DevTrace`) are Studio-only BindableFunctions (`SkyspireDevAim` under the LocalPlayer, `SkyspireDevCombat` under
+  ServerScriptService), on only with Workspace `DevCapture`.
+- Content (D-115): MusicDirector makes a stem Sound only for a real id; no code writes a placeholder id into a content
+  property. `tools/validators/content.luau` checks asset-id safety and engine parent rules across source, project
+  files and data.
+- Sky (D-116): `PlaygroundBuilder.buildSkyClouds` puts the Clouds under `workspace.Terrain` at start; no place
+  project sets a Clouds or any content property.
+- Tests: `tests/_harness/SoundEngine.luau` (Harness.SoundEngine) is a frame-stepped model of the Sound facts measured
+  in Studio: Ended at the region end, Play refused at or past the float32 region end, a loop's first pass starting at
+  TimePosition, PlaybackLoudness 0 for two frames after Play. `tests/server/PlayerSwing.spec.luau` drives a real AJU
+  player from the remote to the boar's HP.
+- Data: `combat.luau` aim; `dev.luau` aim and trace; `sfx.luau` music.stemIds; `world.luau` clouds.textureAsset.
+
 ## Data tables (src/shared/data)
 
 | File | Holds |

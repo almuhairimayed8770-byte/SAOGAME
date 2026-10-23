@@ -17,7 +17,10 @@
 	jumped farther than a body can travel (HitSweep.jumped, with a lag credit spent once per window)
 	is not followed: the frame starts a new chain at the live root and keeps the window's hits.
 	Only fighters the blade may damage count
-	toward the window's target cap (mayDamage). After the last window
+	toward the window's target cap (mayDamage). Every sample is solved from the live root's position
+	turned to the run's facing (D-113): the facing the request carried, which facingMatches already
+	held within deg(acos(1 - facingTolerance)) of the root, so a client that snapped its body toward a
+	target (D-112) sweeps there even while the replicated root is still turning. After the last window
 	the body is held in PostMotion (zero when the target was in Break), then freed. A requested Art
 	or basic swing runs that timeline from its clientTime clamped into combat.lagAllowance and
 	floored at the moment the body was last free (runStartOf), so a lagged swing's damage windows
@@ -31,6 +34,11 @@
 	deterministic and run under Lune with a fake clock, a fake spherecast and a fake overlap
 	query. `bind(deps)` swaps the engine; `start()` binds the real one and registers the Net
 	handlers.
+
+	`traceSink` (nil by default, and then nothing is measured for it): a diagnostic hook called once
+	each time a player's run closes a damage window, with the run's facing, the root's look, the
+	window's hits and the nearest enemy (distance, bearing from the facing, and how far the window's
+	blade passed its nearest part). A dev tool or a probe sets it; play never needs it.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -74,6 +82,31 @@ export type ValidationContext = {
 	lastParryAt: number?,
 }
 
+-- The nearest enemy to a closed window (traceSink): flat root-to-root studs, the signed bearing
+-- from the run's facing (degrees, + = left), and the studs between the window's blade path and the
+-- enemy's nearest part less combat.hitSphereRadius (0 or less: the blade reached it), nil when the
+-- window solved no blade.
+export type TraceNearest = {
+	entityId: number,
+	name: string,
+	distance: number,
+	bearingDegrees: number,
+	clearance: number?,
+}
+
+-- One closed damage window of a player's run (traceSink).
+export type TraceEvent = {
+	entityId: number,
+	clipId: string,
+	artId: string?,
+	windowIndex: number,
+	windowCount: number,
+	hits: number,
+	facing: Vector3, -- the run's validated facing (flat, unit)
+	rootLook: Vector3, -- the server root's flat look at the close
+	nearest: TraceNearest?,
+}
+
 export type ArtPayload = { artId: string, facing: { number }, clientTime: number }
 export type BasicPayload = { facing: { number }, clientTime: number }
 export type DodgePayload = { direction: { number }, clientTime: number }
@@ -98,6 +131,7 @@ type ArtRun = {
 	clipId: string,
 	clip: Types.ClipDef,
 	windows: { HitSweep.Window },
+	facing: Vector3, -- D-113: the validated flat unit facing; every sample's root takes its yaw
 	startedAt: number,
 	postMotionAt: number, -- clip time the body freezes in its end pose
 	multiplier: number,
@@ -111,6 +145,7 @@ type ArtRun = {
 	hitAny: boolean,
 	hitBreak: boolean, -- a target was in Break: zero post-motion
 	switchShown: boolean,
+	tracePath: { HitSweep.BladeSample }?, -- the window's blade, kept only while traceSink is set
 }
 
 -- What one server frame of one fighter's timeline shares across the windows it sweeps.
@@ -132,6 +167,9 @@ CombatService.ArtEnded = Signal.new() :: Signal.Signal<Record, Arts.Art, boolean
 CombatService.HitLanded = Signal.new() :: Signal.Signal<Types.AppliedHit>
 --- Fires (playerRecord, enemyRecord) on a perfect parry.
 CombatService.Parried = Signal.new() :: Signal.Signal<Record, Record>
+--- Diagnostics: called once per closed damage window of a player's run (TraceEvent). Nil by
+--- default, and then the sweep measures nothing for it.
+CombatService.traceSink = nil :: ((event: TraceEvent) -> ())?
 
 local deps: Deps? = nil
 local sessions: { [number]: Session } = {}
@@ -677,7 +715,10 @@ local function sweep(
 	-- start a new chain at the live root, and the window keeps its hits, so nothing is hit twice.
 	-- The lag a late root may catch up is spent once per window (run.rootCredit), so a jump split
 	-- over several frames is not followed past it.
-	local rootCFrame = root.CFrame
+	-- The root's position with the run's facing (D-113): the body the clients see, aimed where the
+	-- request faced, which facingMatches held within the server's acceptance of this root.
+	local rootPosition = root.CFrame.Position
+	local rootCFrame = CFrame.lookAt(rootPosition, rootPosition + run.facing)
 	local previous = run.lastSample
 	if previous ~= nil then
 		local jumped, credit = HitSweep.jumped(previous, rootCFrame, clipTime, run.rootCredit)
@@ -727,6 +768,13 @@ local function sweep(
 		frame.subdivisions
 	)
 	frame.subdivisions -= added
+	if CombatService.traceSink ~= nil then
+		local kept = run.tracePath or {}
+		for _, sample in refined do
+			table.insert(kept, sample)
+		end
+		run.tracePath = kept
+	end
 	local d = dependencies()
 	local hits = HitSweep.castBladePath(refined, {
 		exclude = { record.model },
@@ -751,6 +799,73 @@ local function sweep(
 			return -- the attacker fell or was knocked out of the Art by a reaction
 		end
 	end
+end
+
+-- The traceSink event for the window `run` is closing: the nearest enemy (flat, root to root) and
+-- how far the window's blade passed its nearest queryable part, measured where it stands now.
+local function traceOf(run: ArtRun, record: Record): TraceEvent
+	local root = record.model.PrimaryPart
+	local origin = if root ~= nil then root.CFrame.Position else Vector3.zero
+	local rootLook = if root ~= nil then unitOrNil(flat(root.CFrame.LookVector)) else nil
+	local nearest: Record? = nil
+	local nearestDistance = math.huge
+	local nearestOffset = Vector3.zero
+	for _, other in EntityService.all() do
+		local otherRoot = other.model.PrimaryPart
+		if otherRoot ~= nil and mayDamage(record, other) then
+			local offset = flat(otherRoot.CFrame.Position - origin)
+			if offset.Magnitude < nearestDistance then
+				nearest, nearestDistance, nearestOffset = other, offset.Magnitude, offset
+			end
+		end
+	end
+	local nearestTrace: TraceNearest? = nil
+	if nearest ~= nil then
+		local facing = run.facing
+		local cross = facing.Z * nearestOffset.X - facing.X * nearestOffset.Z
+		local dot = facing.X * nearestOffset.X + facing.Z * nearestOffset.Z
+		local clearance: number? = nil
+		local path = run.tracePath
+		if path ~= nil and #path > 0 then
+			local closest = math.huge
+			for _, part in nearest.model:GetDescendants() do
+				if part:IsA("BasePart") and (part.CanQuery or part.CanCollide) then
+					for _, sample in path do
+						local distance =
+							HitSweep.segmentBoxDistance(sample.start, sample.finish, part.CFrame, part.Size)
+						closest = math.min(closest, distance)
+					end
+				end
+			end
+			if closest < math.huge then
+				clearance = closest - Combat.hitSphereRadius
+			end
+		end
+		nearestTrace = {
+			entityId = nearest.id,
+			name = nearest.name,
+			distance = nearestDistance,
+			bearingDegrees = if nearestDistance > 0 then math.deg(math.atan2(cross, dot)) else 0,
+			clearance = clearance,
+		}
+	end
+	local hits = 0
+	for _, hit in run.windowHits do
+		if hit then
+			hits += 1
+		end
+	end
+	return {
+		entityId = record.id,
+		clipId = run.clipId,
+		artId = if run.art ~= nil then run.art.id else nil,
+		windowIndex = run.windowIndex,
+		windowCount = #run.windows,
+		hits = hits,
+		facing = run.facing,
+		rootLook = rootLook or run.facing,
+		nearest = nearestTrace,
+	}
 end
 
 local function stepRun(session: Session, run: ArtRun, now: number)
@@ -778,6 +893,17 @@ local function stepRun(session: Session, run: ArtRun, now: number)
 		end
 		run.sampledTo = toTime
 		if clipTime >= window.close then
+			local sink = CombatService.traceSink
+			if sink ~= nil and record.kind == "Player" then
+				-- A diagnostic hook never stops a swing: an error in it, or in measuring its event, is
+				-- a warning.
+				xpcall(function()
+					sink(traceOf(run, record))
+				end, function(problem: unknown)
+					warn(("[CombatService] traceSink failed: %s"):format(tostring(problem)))
+				end)
+			end
+			run.tracePath = nil
 			run.windowIndex += 1
 			run.sampledTo = nil
 			run.lastSample = nil
@@ -836,6 +962,7 @@ local function beginRun(
 		clipId = clipId,
 		clip = clip,
 		windows = windows,
+		facing = unitOrNil(flat(facing)) or Vector3.zAxis * -1,
 		startedAt = startAt,
 		postMotionAt = postMotionAt,
 		multiplier = multiplier,
@@ -849,6 +976,7 @@ local function beginRun(
 		hitAny = false,
 		hitBreak = false,
 		switchShown = false,
+		tracePath = nil,
 	}
 	fireAll("ActionStarted", {
 		entityId = record.id,
@@ -1350,6 +1478,7 @@ function CombatService.reset()
 	end
 	table.clear(signalConnections)
 	table.clear(sessions)
+	CombatService.traceSink = nil
 	started = false
 end
 

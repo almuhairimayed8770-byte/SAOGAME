@@ -5,6 +5,7 @@ local luau = require("@lune/luau")
 local World = Harness.load("src/shared/data/world")
 local Playground = Harness.load("src/shared/data/playground")
 local Fx = Harness.load("src/shared/data/fx")
+local Assets = Harness.load("src/shared/data/assets")
 
 -- tools/validators/world.luau reads every table through ctx.load and requires nothing, so it
 -- loads as a plain chunk; `overrides` swaps whole data tables (deep copies the test mutates).
@@ -69,6 +70,12 @@ describe("world data", function()
 		expect(live * 2).toBeLessThanOrEqual(Fx.budgets.particles)
 		expect(World.clouds.lifetime.max).toBeGreaterThanOrEqual(World.clouds.lifetime.min)
 		expect(Playground.rim[World.clouds.fallbackCountKey]).toBe(Playground.rim.cloudCount)
+	end)
+
+	it("names the cloud billboards' texture as an assets.luau Texture", function()
+		local def = Assets.registry[World.clouds.textureAsset]
+		expect(def).never.toBeNil()
+		expect(def.kind).toBe("Texture")
 	end)
 
 	it("lists the engine's Humanoid scale values", function()

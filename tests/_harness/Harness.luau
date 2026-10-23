@@ -10,7 +10,8 @@
 	Modules see `script`, `game`, `workspace`, the Roblox datatypes, `Random`, `task` and `tick`,
 	so unchanged game code runs here. Anything that needs the engine itself (rendering, physics,
 	real remotes) is covered by run-in-roblox smoke scripts instead; Net's send and receive paths run
-	under Lune against recording fake remotes (tests/net/Net.spec.luau).
+	under Lune against recording fake remotes (tests/net/Net.spec.luau). Sound playback (playhead,
+	region ends, loops, Ended) is `Harness.SoundEngine`, a model of what Studio measured.
 ]]
 
 local fs = require("@lune/fs")
@@ -20,8 +21,12 @@ local task = require("@lune/task")
 
 local VirtualTree = require("./VirtualTree")
 local RandomShim = require("./RandomShim")
+local SoundEngine = require("./SoundEngine")
 
 local Harness = {}
+
+-- The measured Sound playback model (SoundEngine.luau): specs bind SfxPool's seams to it.
+Harness.SoundEngine = SoundEngine
 
 local repoRoot: string = nil :: any
 local game: any = nil

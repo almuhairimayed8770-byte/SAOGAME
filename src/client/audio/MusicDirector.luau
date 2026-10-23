@@ -7,8 +7,11 @@
 	(`setLowHp`). A boss entrance cuts to silence for 1 s, then the boss stem. `duck(db, seconds)`
 	is the system voice and the death freeze.
 
-	Stem ids are placeholders until the user supplies the floor's music (`setStems` swaps them;
-	a placeholder stem is never played so the console stays clean).
+	Stem ids live in sfx.luau `music.stemIds`; `start()` applies them and `setStems` swaps them
+	for a floor. A stem's Sound is made the first time it gets a real id, and a placeholder id is
+	never written into a SoundId: writing id 0 alone makes the engine fetch it and log "Failed to
+	load sound rbxassetid://0" (the 2026-10-23 Play test). Every stem is a placeholder until the
+	user supplies the floor's music, so today no stem Sound exists and the director runs silent.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -22,7 +25,7 @@ local MusicState = require(script.Parent.MusicState)
 local SfxPool = require(script.Parent.SfxPool)
 
 type Stem = {
-	sound: Sound,
+	sound: Sound?, -- made on the stem's first real id; a placeholder stem has none
 	id: string,
 	playing: boolean,
 }
@@ -44,9 +47,19 @@ local function ensureStem(name: string): Stem
 	if existing ~= nil then
 		return existing
 	end
+	local stem: Stem = { sound = nil, id = "", playing = false }
+	stems[name] = stem
+	return stem
+end
+
+-- The stem's Sound, made the first time the stem gets a real id.
+local function soundOf(name: string, stem: Stem): Sound
+	local existing = stem.sound
+	if existing ~= nil then
+		return existing
+	end
 	local sound = Instance.new("Sound")
 	sound.Name = "Stem_" .. name
-	sound.SoundId = Sfx.placeholderId
 	sound.Looped = true
 	sound.Volume = 0
 	local group = SfxPool.group("Music")
@@ -56,24 +69,27 @@ local function ensureStem(name: string): Stem
 	pcall(function()
 		sound.Parent = SoundService
 	end)
-	local stem: Stem = { sound = sound, id = Sfx.placeholderId, playing = false }
-	stems[name] = stem
-	return stem
+	stem.sound = sound
+	return sound
 end
 
 local function applyLevels(levels: MusicState.Levels)
 	for name, stem in stems do
+		local sound = stem.sound
+		if sound == nil then
+			continue -- a placeholder stem: nothing to play
+		end
 		local gain = if levels.silence then 0 else (levels.stems[name] or 0) * levels.duckGain
-		stem.sound.Volume = gain
+		sound.Volume = gain
 		local shouldPlay = gain > Fx.audio.stemFadeFloor and not isPlaceholder(stem.id)
 		if shouldPlay and not stem.playing then
 			stem.playing = pcall(function()
-				stem.sound:Play()
+				sound:Play()
 			end)
 		elseif not shouldPlay and stem.playing then
 			stem.playing = false
 			pcall(function()
-				stem.sound:Stop()
+				sound:Stop()
 			end)
 		end
 	end
@@ -126,21 +142,26 @@ function MusicDirector.bossEntrance()
 	MusicDirector.update()
 end
 
---- Replaces the stem ids for the current floor ({ ambient = url, explore = url, combat = url, boss = url }).
+--- Replaces the stem ids for the current floor ({ ambient = url, explore = url, combat = url, boss = url }); a placeholder id leaves its stem with no asset.
 function MusicDirector.setStems(ids: { [string]: string })
 	MusicDirector.start()
 	for _, name in Sfx.music.stems do
 		local stem = ensureStem(name)
 		local id = ids[name]
 		if id ~= nil and id ~= stem.id then
-			if stem.playing then
+			local sound = stem.sound
+			if stem.playing and sound ~= nil then
 				stem.playing = false
 				pcall(function()
-					stem.sound:Stop()
+					sound:Stop()
 				end)
 			end
 			stem.id = id
-			stem.sound.SoundId = id
+			if not isPlaceholder(id) then
+				soundOf(name, stem).SoundId = id
+			elseif sound ~= nil then
+				sound.SoundId = "" -- back to no asset: the engine fetches nothing
+			end
 		end
 	end
 	MusicDirector.update()
@@ -156,7 +177,7 @@ function MusicDirector.levels(): MusicState.Levels?
 	return lastLevels
 end
 
---- Creates the four stems and starts the Heartbeat update.
+--- Sets up the four stems with sfx.luau's stem ids and starts the Heartbeat update.
 function MusicDirector.start()
 	if started then
 		return
@@ -167,7 +188,7 @@ function MusicDirector.start()
 	for _, name in Sfx.music.stems do
 		ensureStem(name)
 	end
-	MusicDirector.update()
+	MusicDirector.setStems(Sfx.music.stemIds) -- runs the first update
 	stopLoop = Engine.onHeartbeat(function()
 		MusicDirector.update()
 	end)

@@ -10,6 +10,10 @@
 	Every lock change goes to the server as a TargetRequest through TrailingSend: never faster than
 	the remote's rate limit, and the last change always arrives, so mashing the key cannot leave the
 	server holding a lock (and the sword drawn, D-050) that the client already let go of.
+
+	lockOn(entityId) locks a named enemy through the same path as the key (a dev helper, a tutorial
+	beat); the body then turns to face the lock (CharacterController, D-112). assistCandidates lists
+	the enemies the soft assist may aim a swing at when nothing is locked (AimLogic.assistPick).
 ]]
 
 local RunService = game:GetService("RunService")
@@ -26,6 +30,7 @@ local Signal = require(Shared.util.Signal)
 
 local EntityTracker = require(script.Parent.EntityTracker)
 local TargetRanking = require(script.Parent.TargetRanking)
+local AimLogic = require(script.Parent.AimLogic)
 local InputController = require(script.Parent.InputController)
 local Siblings = require(script.Parent.Siblings)
 local CameraController = require(Client.camera.CameraController)
@@ -61,6 +66,14 @@ local function rankingParams(): TargetRanking.Params
 	return { range = lock.range, coneDegrees = lock.coneDegrees, angleWeightStuds = lock.angleWeightStuds }
 end
 
+-- A record the lock may take: a living enemy with a position.
+local function lockablePosition(record: any): Vector3?
+	if record == nil or record.kind ~= "Enemy" or record.state == "Dead" then
+		return nil
+	end
+	return positionOf(record)
+end
+
 --- Lock candidates right now: living enemies with a position, measured from the player and the camera.
 function TargetController.candidates(): { TargetRanking.Candidate }
 	local origin = localPosition()
@@ -72,10 +85,7 @@ function TargetController.candidates(): { TargetRanking.Candidate }
 	local from = toTable(origin)
 	local list = {}
 	for _, record in EntityTracker.all() do
-		if record.kind ~= "Enemy" or record.state == "Dead" then
-			continue
-		end
-		local position = positionOf(record)
+		local position = lockablePosition(record)
 		if position == nil then
 			continue
 		end
@@ -84,6 +94,25 @@ function TargetController.candidates(): { TargetRanking.Candidate }
 			id = record.id,
 			distance = (position - origin).Magnitude,
 			angle = TargetRanking.angleFrom(forward, from, to),
+		})
+	end
+	return list
+end
+
+--- The soft assist's candidates (D-112): living enemies with a position, measured flat from
+--- `origin` (studs) with their signed bearing from the flat `look` (degrees, + = left).
+function TargetController.assistCandidates(origin: Vector3, look: Vector3): { AimLogic.Bearing }
+	local list: { AimLogic.Bearing } = {}
+	for _, record in EntityTracker.all() do
+		local position = lockablePosition(record)
+		if position == nil then
+			continue
+		end
+		local dx, dz = position.X - origin.X, position.Z - origin.Z
+		table.insert(list, {
+			id = record.id,
+			distance = math.sqrt(dx * dx + dz * dz),
+			bearing = AimLogic.bearing(look.X, look.Z, dx, dz),
 		})
 	end
 	return list
@@ -121,6 +150,25 @@ end
 --- Clears the lock.
 function TargetController.clear()
 	setTarget(nil)
+end
+
+--- Locks the enemy `entityId` through the lock key's path (camera, outline, TargetRequest through
+--- its pacer, targetChanged); nil clears. Returns false, and keeps the lock it had, when the id is
+--- not a living enemy with a position within the lock range of the player. The camera's cone does
+--- not apply: the caller named the enemy.
+function TargetController.lockOn(entityId: number?): boolean
+	if entityId == nil then
+		setTarget(nil)
+		return true
+	end
+	local record = EntityTracker.get(entityId)
+	local position = lockablePosition(record)
+	local origin = localPosition()
+	if position == nil or origin == nil or (position - origin).Magnitude > CameraData.lock.range then
+		return false
+	end
+	setTarget(record)
+	return true
 end
 
 --- The locked record, or nil.

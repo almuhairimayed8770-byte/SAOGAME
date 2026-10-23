@@ -1073,6 +1073,8 @@ describe("data validators on the real tables", function()
 			"numbers",
 			"scope",
 			"clips",
+			"content",
+			"world",
 		}
 	do
 		it(name .. " is clean", function()
@@ -1553,5 +1555,210 @@ describe("accents validator: the swing memory and the crescent's tilt", function
 		expect(runAccents(function(accents)
 			accents.swing.sampleDistance = farthest
 		end)).toEqual({})
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- Combat validator: the aim snap rule (D-112)
+-- ------------------------------------------------------------------------------------------
+
+describe("combat validator: the aim snap fits the server's facing acceptance", function()
+	-- The real combat table with `aim` fields and top-level fields replaced.
+	local function runCombat(aimFields: { [string]: any }, fields: { [string]: any }?): { string }
+		local real = Harness.load("src/shared/data/combat")
+		local copy = table.clone(real)
+		copy.aim = table.clone(real.aim)
+		for key, value in aimFields do
+			copy.aim[key] = value
+		end
+		for key, value in fields or {} do
+			copy[key] = value
+		end
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/combat" then
+				return copy
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/combat")(context)
+	end
+
+	it("passes the real table: 40 + 9 is inside 49.46 degrees", function()
+		expect(runCombat({})).toEqual({})
+	end)
+
+	it("a snap plus margin past deg(acos(1 - facingTolerance)) is a problem", function()
+		local problems = runCombat({ snapDegrees = 45, replicationMarginDegrees = 5 })
+		expect(#problems).toBe(1)
+		expect(hasProblem(problems, "aim.snapDegrees 45 + aim.replicationMarginDegrees 5")).toBe(true)
+		expect(hasProblem(problems, "deg(acos(1 - facingTolerance)) = 49.46")).toBe(true)
+		-- The same sum is fine once the server accepts a wider facing; a tighter one rejects 40 + 9.
+		expect(runCombat({ snapDegrees = 45, replicationMarginDegrees = 5 }, { facingTolerance = 0.4 })).toEqual({})
+		expect(hasProblem(runCombat({}, { facingTolerance = 0.3 }), "aim.snapDegrees 40")).toBe(true)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- Content: no placeholder id reaches an engine property; Clouds sits under Workspace.Terrain
+-- ------------------------------------------------------------------------------------------
+
+describe("content validator", function()
+	local Lighting = Harness.load("src/shared/data/lighting")
+	local World = Harness.load("src/shared/data/world")
+	local Fx = Harness.load("src/shared/data/fx")
+
+	-- A repository of synthetic files: `files` stands in for src/ and places/ (default.project.json
+	-- and src/shared/data are the real ones unless `files` replaces them); `loads` swaps data tables.
+	local function runContent(files: { [string]: string }, loads: { [string]: any }?): { string }
+		local validate = loadTool("tools/validators/content")
+		return validate({
+			load = function(path: string): any
+				if loads ~= nil and loads[path] ~= nil then
+					return loads[path]
+				end
+				return Harness.load(path)
+			end,
+			listFiles = function(directory: string, pattern: string?): { string }
+				if directory == "src/shared/data" then
+					return Harness.listFiles(directory, pattern)
+				end
+				local list = {}
+				for path in files do
+					if path:sub(1, #directory + 1) == directory .. "/" and (pattern == nil or path:match(pattern)) then
+						table.insert(list, path)
+					end
+				end
+				table.sort(list)
+				return list
+			end,
+			readFile = function(path: string): string
+				return files[path] or Harness.readFile(path)
+			end,
+			repoRoot = root,
+		})
+	end
+
+	local function source(lines: { string }): { [string]: string }
+		return { ["src/client/audio/Fake.luau"] = table.concat(lines, "\n") }
+	end
+
+	local function project(lighting: string, workspace: string?): { [string]: string }
+		return {
+			["places/Fake.project.json"] = ([[{ "name": "Fake", "tree": { "$className": "DataModel",
+				"Lighting": { %s }, "Workspace": { %s } } }]]):format(lighting, workspace or ""),
+		}
+	end
+
+	it("flags a placeholder id written anywhere, and lets a comparison through", function()
+		local problems = runContent(source({
+			"sound.SoundId = Sfx.placeholderId",
+			"local stem = { id = Sfx.placeholderId }",
+			'if id == Sfx.placeholderId or id ~= "" then end',
+			"local placeholder = Sfx.placeholderId == id",
+			"-- sound.SoundId = Sfx.placeholderId (a comment)",
+		}))
+		expect(hasProblem(problems, "Fake.luau:1: a placeholder id is only ever compared")).toBe(true)
+		expect(hasProblem(problems, "Fake.luau:1: SoundId gets a value nothing checked")).toBe(true)
+		expect(hasProblem(problems, "Fake.luau:2: a placeholder id is only ever compared")).toBe(true)
+		expect(#problems).toBe(3)
+	end)
+
+	it("keeps asset id literals in src/shared/data", function()
+		local problems = runContent({
+			["src/client/fx/Fake.luau"] = 'local ID = "rbxassetid://9119749145"',
+			["src/shared/data/Fake.luau"] = 'local ID = "rbxassetid://9119749145"',
+		})
+		expect(problems).toEqual({ "src/client/fx/Fake.luau:1: an asset id literal belongs in src/shared/data" })
+		expect(
+			hasProblem(
+				runContent(source({ 'local zero = "rbxassetid://0"' })),
+				"a placeholder id is only ever compared"
+			)
+		).toBe(true)
+	end)
+
+	it("wants an Assets.isReady check within three lines before Assets.url", function()
+		expect(runContent(source({
+			"if Assets.isReady(name) then",
+			"\tdecal.Texture = Assets.url(name)",
+			"end",
+		}))).toEqual({})
+		local far = runContent(source({
+			"if Assets.isReady(name) then",
+			"\tlocal a = 1",
+			"\tlocal b = 2",
+			"\tlocal c = 3",
+			"\tdecal.Texture = Assets.url(name)",
+			"end",
+		}))
+		expect(hasProblem(far, "Fake.luau:5: Assets.url without an Assets.isReady check")).toBe(true)
+	end)
+
+	it("wants every content write to be empty or checked against placeholders", function()
+		local problems = runContent(source({
+			"sound.SoundId = entry.id",
+			'sound.SoundId = if Sfx.isReal(entry) then entry.id else ""',
+			'beam.Texture = ""',
+			"if not isPlaceholder(id) then",
+			"\tstem.SoundId = id",
+			"end",
+			"if sound.SoundId == id then end",
+			"(clone :: any).TextureID = mesh",
+			'part.MeshId = if entry.placeholder then "" else entry.mesh',
+		}))
+		expect(problems).toEqual({
+			'src/client/audio/Fake.luau:1: SoundId gets a value nothing checked against placeholders (write "" for a placeholder)',
+			'src/client/audio/Fake.luau:8: TextureID gets a value nothing checked against placeholders (write "" for a placeholder)',
+		})
+	end)
+
+	it("puts a Clouds only under Workspace.Terrain, with lighting.luau's cover and density", function()
+		local cover, density = Lighting.clouds.cover, Lighting.clouds.density
+		local clouds = ('"Clouds": { "$className": "Clouds", "$properties": { "Cover": %s, "Density": %s } }'):format(
+			tostring(cover),
+			tostring(density)
+		)
+		expect(runContent(project("", '"Terrain": { "$className": "Terrain", ' .. clouds .. " }"))).toEqual({})
+		expect(runContent(project(clouds))).toEqual({
+			"places/Fake.project.json: game.Lighting.Clouds (Clouds) must be a direct child of Workspace.Terrain",
+		})
+		local thin = ('"Clouds": { "$className": "Clouds", "$properties": { "Cover": 0.1, "Density": %s } }'):format(
+			tostring(density)
+		)
+		expect(runContent(project("", '"Terrain": { "$className": "Terrain", ' .. thin .. " }"))).toEqual({
+			("places/Fake.project.json: game.Workspace.Terrain.Clouds.Cover is 0.1, lighting.luau clouds.cover is %s"):format(
+				tostring(cover)
+			),
+		})
+	end)
+
+	it("keeps the sky and the post effects directly under Lighting, and asset ids out of project files", function()
+		local problems = runContent(
+			project(
+				'"Sky": { "$className": "Sky", "$properties": { "SkyboxUp": "rbxassetid://1" } }',
+				'"Bloom": { "$className": "BloomEffect" }'
+			)
+		)
+		expect(problems).toEqual({
+			"places/Fake.project.json: game.Lighting.Sky sets SkyboxUp; asset ids live in src/shared/data",
+			"places/Fake.project.json: game.Workspace.Bloom (BloomEffect) must be a direct child of Lighting",
+		})
+	end)
+
+	it("wants every *TextureAsset field to name an assets.luau Texture", function()
+		local world = table.clone(World)
+		world.clouds = table.clone(World.clouds)
+		world.clouds.textureAsset = "TrialistSword"
+		local fx = table.clone(Fx)
+		fx.telegraph = table.clone(Fx.telegraph)
+		fx.telegraph.decal = table.clone(Fx.telegraph.decal)
+		fx.telegraph.decal.textureAssets = table.clone(Fx.telegraph.decal.textureAssets)
+		fx.telegraph.decal.textureAssets.Line = "NoSuchAsset"
+		local problems = runContent({}, { ["src/shared/data/world"] = world, ["src/shared/data/fx"] = fx })
+		expect(problems).toEqual({
+			"fx.telegraph.decal.textureAssets.Line: 'NoSuchAsset' is not in assets.luau",
+			"world.clouds.textureAsset: 'TrialistSword' is a Mesh; this field feeds a Texture property",
+		})
 	end)
 end)

@@ -22,7 +22,18 @@
 	it was moving, so the walk paced to it plants its feet instead of sliding over a body that
 	stopped dead. Any input ends it.
 
-	Every decision is in ActionLogic (tested); this file is the engine glue around it.
+	Lock-facing and aim (D-112): while TargetController holds a lock and the body is free (Idle,
+	Guard, the held Art stance; not while the stick sprints), AutoRotate is off and the root turns
+	toward the target at combat.luau aim.lockTurnRate on this render step, so the stick strafes and
+	backs off around it at walk speed. A basic swing or an Art release turns the rest of the way to
+	the lock at once, by at most aim.snapDegrees (with no lock, to the best enemy in the soft assist's
+	cone), and only then reads the facing it sends: the server sweeps where that facing points
+	(D-113). The snap also keeps the facing inside what the server accepts from a root it saw up to
+	combat.lagAllowance ago (AimLogic.requestTurn and the yaw history), and a request sent while the
+	lock's own turn is still sweeping the body round carries the nearest facing the server accepts
+	(AimLogic.sendOffset), so the swing comes out instead of being refused.
+
+	Every decision is in ActionLogic and AimLogic (tested); this file is the engine glue around them.
 ]]
 
 local Players = game:GetService("Players")
@@ -44,6 +55,7 @@ local TrailingSend = require(Shared.net.TrailingSend)
 local Signal = require(Shared.util.Signal)
 
 local ActionLogic = require(script.Parent.ActionLogic)
+local AimLogic = require(script.Parent.AimLogic)
 local EntityTracker = require(script.Parent.EntityTracker)
 local Replication = require(script.Parent.Replication)
 local WeaponInfo = require(script.Parent.WeaponInfo)
@@ -56,9 +68,13 @@ local ClipLibrary, hasClipLibrary = Siblings.load(Client, "choreo.ClipLibrary")
 local Trails = Siblings.load(Client, "fx.Trails")
 local Hud = Siblings.load(Client, "ui.Hud")
 local Impact = Siblings.load(Client, "fx.Impact")
+-- The lock (D-112). Through Siblings and Siblings.call, so a harness that loads this controller
+-- without the lock-on (or a build where it fails to load) simply has no lock and no assist.
+local TargetController = Siblings.load(Client, "controllers.TargetController")
 
 local RENDER_STEP_NAME = "SkyspireCharacter"
 local ART_SLOTS_ATTRIBUTE = "ArtSlots"
+local AIM: AimLogic.Config = Combat.aim
 
 type Hold = {
 	slot: number,
@@ -98,7 +114,9 @@ local timeScale = 1
 local lastPredictAt: number? = nil
 local lastParryAt: number? = nil
 local lastWalkSpeed: number? = nil
-local lastLocked: boolean? = nil
+local lastAutoRotate: boolean? = nil
+-- The root's yaw over the last combat.lagAllowance: what the server may still see (D-112).
+local yawHistory: AimLogic.YawHistory = AimLogic.newHistory()
 local dodgeReadyAt = 0
 local basicChain = 0
 local basicLastTime = 0
@@ -152,6 +170,75 @@ local function fire(remote: string, payload: any)
 	if net ~= nil then
 		net.fire(remote, payload)
 	end
+end
+
+-- ------------------------------------------------------------------ aim (D-112)
+
+-- The locked enemy's position, or nil with no lock (TargetController drops a dead or gone lock).
+local function lockPosition(): Vector3?
+	local record = Siblings.call(TargetController, "current")
+	if record == nil or record.model == nil then
+		return nil
+	end
+	local primary = record.model.PrimaryPart
+	return if primary ~= nil then primary.Position else nil
+end
+
+-- Turns the root about the world's up axis by `degrees` (+ = left), where it stands.
+local function yawRoot(rootPart: BasePart, degrees: number)
+	if degrees == 0 then
+		return
+	end
+	local frame = rootPart.CFrame
+	rootPart.CFrame = CFrame.new(frame.Position) * CFrame.Angles(0, math.rad(degrees), 0) * frame.Rotation
+end
+
+local function recordYaw(rootPart: BasePart, t: number)
+	local look = rootPart.CFrame.LookVector
+	AimLogic.record(yawHistory, t, AimLogic.yawOf(look.X, look.Z), Combat.lagAllowance)
+end
+
+-- Degrees (+ = left) from the root's look to the lock, or nil (no lock, or standing on it).
+local function lockBearing(rootPart: BasePart, lockAt: Vector3): number?
+	local frame = rootPart.CFrame
+	local look, origin = frame.LookVector, frame.Position
+	return AimLogic.bearingTo(look.X, look.Z, origin.X, origin.Z, lockAt.X, lockAt.Z, AIM.minFaceDistance)
+end
+
+-- The snap a basic swing or an Art release makes before it reads its facing: the rest of the way
+-- to the lock, or with no lock to the soft assist's pick, by at most aim.snapDegrees and never out
+-- of what the server can accept from a root it saw up to combat.lagAllowance ago. Returns the
+-- facing the request carries: the body's look, or mid-turn the nearest look to it the server can
+-- accept (AimLogic.sendOffset).
+local function aimForRequest(): { number }
+	local rootPart = root
+	if rootPart == nil then
+		return facingTable()
+	end
+	local t = now()
+	recordYaw(rootPart, t)
+	local delta: number? = nil
+	local lockAt = lockPosition()
+	if lockAt ~= nil then
+		delta = lockBearing(rootPart, lockAt)
+	else
+		local frame = rootPart.CFrame
+		local candidates = Siblings.call(TargetController, "assistCandidates", frame.Position, frame.LookVector)
+		local pick = if candidates ~= nil then AimLogic.assistPick(candidates, AIM) else nil
+		delta = if pick ~= nil then pick.bearing else nil
+	end
+	if delta ~= nil then
+		local lo, hi = AimLogic.range(yawHistory)
+		local turn = AimLogic.requestTurn(delta, lo, hi, AIM)
+		if turn ~= 0 then
+			yawRoot(rootPart, turn)
+			recordYaw(rootPart, t)
+		end
+	end
+	local lo, hi = AimLogic.range(yawHistory)
+	local offset = AimLogic.sendOffset(lo, hi, AIM)
+	local look = (CFrame.Angles(0, math.rad(offset), 0) * rootPart.CFrame.Rotation).LookVector
+	return { look.X, look.Y, look.Z }
 end
 
 -- GuardRequest goes through TrailingSend: never faster than its rate limit, and the last raise or
@@ -316,7 +403,7 @@ function CharacterController.releaseArt(slot: number, heldSeconds: number)
 	-- The server's Idle normally ends the Art; this is the fallback if that state never arrives.
 	actionEndsAt = ActionLogic.artFallbackEnd(releasedAt, plan.freezeClipTime, current.art, Combat.lagAllowance)
 	predictDraw()
-	fire("ArtRequest", { artId = current.art.id, facing = facingTable(), clientTime = serverNow() })
+	fire("ArtRequest", { artId = current.art.id, facing = aimForRequest(), clientTime = serverNow() })
 	task.delay(plan.freezeClipTime, function()
 		if predicted ~= nil and (predicted :: Predicted).token == launchToken then
 			setTimeScale(timeScale)
@@ -360,7 +447,7 @@ function CharacterController.basicAttack()
 	setState("Basic")
 	actionEndsAt = t + Combat.basicHitDuration
 	predictDraw()
-	fire("BasicAttackRequest", { facing = facingTable(), clientTime = serverNow() })
+	fire("BasicAttackRequest", { facing = aimForRequest(), clientTime = serverNow() })
 end
 
 --- Guard held or released; a tap inside the parry window is the server's call.
@@ -582,12 +669,25 @@ local function step(dt: number)
 	end
 
 	local locked = ActionLogic.movementLocked(state)
-	local walkSpeed = ActionLogic.speedFor(state, sprinting, speeds)
+	-- A held lock turns a free body to face it (D-112); a sprint (the sprint key with the stick
+	-- moving) hands the facing back to the stick unless aim.lockFaceWhileSprinting.
+	local lockAt = lockPosition()
+	local sprintingNow = sprinting and hum.MoveDirection.Magnitude > 0
+	local faceLock = AimLogic.facesLock(state, lockAt ~= nil, sprintingNow, AIM)
+	-- Facing the lock, the stick strafes and backs off at walk speed (the walk set's feet, D-054).
+	local walkSpeed = AimLogic.moveSpeed(ActionLogic.speedFor(state, sprinting, speeds), faceLock, speeds.walk)
 	-- Each Humanoid write fires its Changed handlers (and WalkSpeed replicates), so each property
 	-- is written once, only when it changes: AutoRotate here, WalkSpeed below with the carry.
-	if locked ~= lastLocked then
-		hum.AutoRotate = not locked
-		lastLocked = locked
+	local autoRotate = not locked and not faceLock
+	if autoRotate ~= lastAutoRotate then
+		hum.AutoRotate = autoRotate
+		lastAutoRotate = autoRotate
+	end
+	if faceLock and lockAt ~= nil then
+		local delta = lockBearing(rootPart, lockAt)
+		if delta ~= nil then
+			yawRoot(rootPart, AimLogic.turnStep(delta, AIM.lockTurnRate, dt))
+		end
 	end
 
 	-- Locomotion keeps the Drawn attribute from its change signal, so no attribute is read per frame.
@@ -640,13 +740,14 @@ local function step(dt: number)
 	end
 	-- Degrees from the facing to the direction the stick asks for (+ = left): Locomotion turns in
 	-- place past choreo.locomotion.turnInPlaceDegrees.
-	local turning = if locked then 0 else ActionLogic.turnAngle(look.X, look.Z, moveDir.X, moveDir.Z)
+	-- Facing a lock, the body turns itself: the stick's angle is a strafe, not a turn.
+	local turning = if locked or faceLock then 0 else ActionLogic.turnAngle(look.X, look.Z, moveDir.X, moveDir.Z)
 
 	if locomotion ~= nil and state ~= "Dead" then
 		locomotion:update(dt, {
 			moveDir = moveDir,
 			speed = speed,
-			sprinting = sprinting and not locked,
+			sprinting = sprinting and not locked and not faceLock,
 			grounded = grounded,
 			drawn = drawn,
 			turning = turning,
@@ -661,6 +762,7 @@ local function step(dt: number)
 			rootPart.CFrame = rootPart.CFrame * CFrame.new(delta)
 		end
 	end
+	recordYaw(rootPart, t)
 end
 
 -- ------------------------------------------------------------------ character lifecycle
@@ -677,7 +779,8 @@ local function clearCharacter()
 	predicted = nil
 	actionEndsAt = nil
 	lastWalkSpeed = nil
-	lastLocked = nil
+	lastAutoRotate = nil
+	yawHistory = AimLogic.newHistory()
 	lastPredictAt = nil
 	fallTracker = { airborneSince = nil, peakY = 0 }
 	stopCarry = ActionLogic.newStopCarry()
@@ -753,6 +856,15 @@ function CharacterController.start()
 	end
 
 	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Character.Value + 1, step)
+	-- The yaw history is kept on Heartbeat too, which runs while the display sleeps (RenderStepped
+	-- does not): a turn made outside the render step (the dev aim hook's face, the engine's own) is
+	-- timed when it happens, not taken for a turn made just before the next swing (D-112).
+	RunService.Heartbeat:Connect(function()
+		local rootPart = root
+		if rootPart ~= nil then
+			recordYaw(rootPart, now())
+		end
+	end)
 end
 
 return CharacterController

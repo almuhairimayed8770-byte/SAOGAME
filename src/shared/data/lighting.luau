@@ -54,6 +54,8 @@ local Lighting = {
 		offset = 0,
 	},
 
+	--- The sky's Clouds. The engine takes a Clouds only under Workspace.Terrain, so the server
+	--- builds it there at start (PlaygroundBuilder.buildSkyClouds); no place file holds one.
 	clouds = {
 		cover = 0.55,
 		density = 0.3,

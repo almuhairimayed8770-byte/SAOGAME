@@ -7,8 +7,9 @@
 	     grounded, drawn, the turning angle to the desired facing (when the caller knows it), the
 	     yaw rate, the vertical velocity and the fall height on landing. Standing still, the yaw
 	     rate is integrated: once the body has turned turnInPlaceDegrees since the last turn
-	     clip a TurnLeft / TurnRight one-shot fires, so a rig that is rotated by lock-on or by the
-	     engine (no desired-facing input) still steps round instead of pivoting on a planted foot.
+	     clip a TurnLeft / TurnRight one-shot fires, so a rig that is rotated by lock-on (the
+	     controller turns the root to a held lock and gives no angle, D-112) or by the engine (no
+	     desired-facing input) still steps round instead of pivoting on a planted foot.
 	     With the stick pushed no turn clip fires: the first steps take the turn.
 	Out: target weights for the Base-layer clips (the 8-direction walk blend space, Run, Sprint,
 	     Idle or IdleDrawn; with the weapon drawn the walks, Run and Sprint are the ...Drawn set,
@@ -437,8 +438,9 @@ end
 
 -- True when Run and Sprint may carry a move: one into the forward half, or one the body is turning
 -- to face (the controller's angle to the stick past turnInPlaceDegrees, or a facing turning faster
--- than stride.turnYawRate on a rig that gives no angle). A move held behind the facing (lock-on)
--- stays with the walks, whose feet push the right way.
+-- than stride.turnYawRate on a rig that gives no angle). A move held behind the facing (lock-on,
+-- where CharacterController also holds the speed to a walk, D-112) stays with the walks, whose feet
+-- push the right way.
 local function runsAhead(input: Input): boolean
 	if input.forward > 1e-6 or (math.abs(input.forward) <= 1e-6 and math.abs(input.right) <= 1e-6) then
 		return true

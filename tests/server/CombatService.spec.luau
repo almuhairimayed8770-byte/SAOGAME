@@ -2099,3 +2099,419 @@ describe("CombatService.enemyStrike", function()
 		expect(lastOf("EntityDied").byPlayer).toBe(false)
 	end)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- D-113: a player's swing sweeps where its validated facing points, from the live root's position
+-- ------------------------------------------------------------------------------------------
+
+-- A flat look `degrees` (+ = left) from -Z, as a payload facing and as a Vector3.
+local function turnedLook(degrees)
+	local look = CFrame.Angles(0, math.rad(degrees), 0).LookVector
+	return { look.X, look.Y, look.Z }, look
+end
+
+-- Binds the engine-like fakes, recording every overlap center and cast origin.
+local function recordQueries(centers, casts)
+	CombatService.bind({
+		now = function()
+			return clock.t
+		end,
+		net = fakeNet,
+		heartbeat = nil,
+		cast = function(origin, radius, direction, exclude)
+			table.insert(casts, origin)
+			return fakeCast(origin, radius, direction, exclude)
+		end,
+		overlap = function(center, radius, exclude)
+			table.insert(centers, center)
+			return fakeOverlap(center, radius, exclude)
+		end,
+		random = noCrit,
+	})
+end
+
+-- The root a sweep solves from under D-113: the root's position, the run facing's yaw.
+local function facingRoot(position, look)
+	return CFrame.lookAt(position, position + Vector3.new(look.X, 0, look.Z))
+end
+
+describe("CombatService run facing (D-113)", function()
+	it(
+		"an Art or a basic swing turned inside the acceptance sweeps where its facing points, not the root's yaw",
+		function()
+			for _, request in { "ArtRequest", "BasicAttackRequest" } do
+				fresh()
+				local centers, casts = {}, {}
+				recordQueries(centers, casts)
+				local playerId, player, character = spawnPlayer() -- the server's root still looks down -Z
+				spawnBoar(CFrame.new(0, 1.2, -40))
+				local facing, look = turnedLook(40) -- the client snapped 40 left; the root has not replicated it
+				if request == "ArtRequest" then
+					handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal", facing))
+				else
+					handlers.BasicAttackRequest(player, { facing = facing, clientTime = clock.t })
+				end
+				expect(#sentOf("ActionRejected")).toBe(0)
+				local started = lastOf("ActionStarted")
+				expect(started.entityId).toBe(playerId)
+				expect(Vector3.new(started.facing[1], started.facing[2], started.facing[3]):Dot(look)).toBeCloseTo(
+					1,
+					1e-6
+				)
+				local clip = CombatService.clipById(started.clipId)
+				local window = ClipSampler.hitWindows(clip)[1]
+				advance(window.close + 0.05)
+				expect(#centers).toBeGreaterThan(0)
+				-- The window's first sample is the blade at its open, solved from the root's position
+				-- turned to the facing; the root's own yaw would put it somewhere else entirely.
+				local root = character.PrimaryPart
+				local trailStart, trailEnd = HitSweep.trailAttachments(character)
+				local turned = HitSweep.bladeAt(
+					character,
+					facingRoot(root.CFrame.Position, look),
+					clip,
+					window.open,
+					trailStart,
+					trailEnd
+				)
+				local unturned = HitSweep.bladeAt(character, root.CFrame, clip, window.open, trailStart, trailEnd)
+				expect((centers[1] - turned.mid).Magnitude).toBeLessThan(1e-4)
+				expect((turned.mid - unturned.mid).Magnitude).toBeGreaterThan(1)
+				for _, center in centers do
+					expect((center - unturned.mid).Magnitude).toBeGreaterThan(1e-3)
+				end
+			end
+		end
+	)
+
+	it("a boar just past a swing's arc is cut once the facing turns 40 toward it, the root unturned", function()
+		-- At 5 studs (this file's rig and fake engine) Basic1 cuts bearings -120..60 and the Horizontal
+		-- -170..90 around the facing (+ = left); turned 40 left they reach 100 and 130. A boar 20
+		-- degrees past each arc's end is missed facing the root's look and cut facing 40 left.
+		for _, case in { { request = "BasicAttackRequest", bearing = 80 }, { request = "ArtRequest", bearing = 110 } } do
+			for _, degrees in { 0, 40 } do
+				fresh()
+				local _, player, character = spawnPlayer()
+				local origin = character.PrimaryPart.CFrame.Position
+				local _, toward = turnedLook(case.bearing)
+				local at = origin + toward * 5
+				local boarId =
+					spawnBoar(CFrame.lookAt(Vector3.new(at.X, 1.2, at.Z), Vector3.new(origin.X, 1.2, origin.Z)))
+				local facing = turnedLook(degrees)
+				if case.request == "ArtRequest" then
+					handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal", facing))
+				else
+					handlers.BasicAttackRequest(player, { facing = facing, clientTime = clock.t })
+				end
+				advance(0.8)
+				expect(#sentOf("ActionRejected")).toBe(0)
+				local cut = 0
+				for _, hit in sentOf("HitConfirmed") do
+					if hit.targetId == boarId then
+						cut += 1
+					end
+				end
+				expect(cut).toBe(if degrees == 40 then 1 else 0)
+			end
+		end
+	end)
+
+	it("a facing past the server's acceptance is still refused, and nothing is swept", function()
+		local beyond = math.deg(math.acos(1 - Combat.facingTolerance)) + 3
+		for _, request in { "ArtRequest", "BasicAttackRequest" } do
+			fresh()
+			local centers, casts = {}, {}
+			recordQueries(centers, casts)
+			local playerId, player = spawnPlayer()
+			local facing = turnedLook(beyond)
+			if request == "ArtRequest" then
+				handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal", facing))
+			else
+				handlers.BasicAttackRequest(player, { facing = facing, clientTime = clock.t })
+			end
+			expect(lastOf("ActionRejected").reason).toBe("Facing")
+			expect(#sentOf("ActionStarted")).toBe(0)
+			advance(0.7)
+			expect(#centers).toBe(0)
+			expect(EntityService.get(playerId).state).toBe("Idle")
+		end
+	end)
+
+	it("a root that moves and turns mid-window is followed by its position; the yaw stays the run's facing", function()
+		fresh()
+		local centers, casts = {}, {}
+		recordQueries(centers, casts)
+		local playerId, player, character = spawnPlayer()
+		local facing, look = turnedLook(40)
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal", facing))
+		local window = ClipSampler.hitWindows(Horizontal)[1]
+		local _, startedAt = CombatService.currentArt(playerId)
+		while clock.t - startedAt < window.open + 2 / 60 do
+			advance(1 / 60)
+		end
+		local lastTime = clock.t - startedAt
+		-- One hitch frame four samples long: the replicated root walked 6 studs and caught up with
+		-- the client's turn.
+		local root = character.PrimaryPart
+		local fromPosition = root.CFrame.Position
+		local toPosition = fromPosition + look * 6
+		root.CFrame = facingRoot(toPosition, look)
+		table.clear(centers)
+		advance(4 / 60, 4 / 60)
+		local clipTime = clock.t - startedAt
+		expect(clipTime).toBeLessThan(window.close)
+		local times = HitSweep.sampleTimes(lastTime, clipTime, Combat.hitSampleHz)
+		expect(#times).toBe(4)
+		local from, to = facingRoot(fromPosition, look), facingRoot(toPosition, look)
+		local trailStart, trailEnd = HitSweep.trailAttachments(character)
+		local nextFrame = 1
+		for _, center in centers do
+			if nextFrame <= #times then
+				local alpha = (times[nextFrame] - lastTime) / (clipTime - lastTime)
+				local blade = HitSweep.bladeAt(
+					character,
+					from:Lerp(to, alpha),
+					Horizontal,
+					times[nextFrame],
+					trailStart,
+					trailEnd
+				)
+				if (center - blade.mid).Magnitude < 1e-4 then
+					nextFrame += 1
+				end
+			end
+		end
+		expect(nextFrame).toBe(#times + 1)
+		-- A jump is still not followed: the next frame starts a new chain at the live root.
+		root.CFrame = facingRoot(toPosition + Vector3.new(20, 0, 0), look)
+		table.clear(centers)
+		table.clear(casts)
+		advance(1 / 60)
+		expect(#centers).toBe(1)
+		expect(#casts).toBe(0)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- CombatService.traceSink: one event per closed window of a player's run, only when set
+-- ------------------------------------------------------------------------------------------
+
+describe("CombatService.traceSink", function()
+	-- Engine fakes that never read EntityService, so a count of its scans is the trace's own.
+	local function quietEngine()
+		CombatService.bind({
+			now = function()
+				return clock.t
+			end,
+			net = fakeNet,
+			heartbeat = nil,
+			cast = function()
+				return nil
+			end,
+			overlap = function()
+				return {}
+			end,
+			random = noCrit,
+		})
+	end
+
+	it("is nil by default, and with nothing set a run never scans the field for it", function()
+		fresh()
+		expect(CombatService.traceSink).toBeNil()
+		quietEngine()
+		local playerId, player = spawnPlayer()
+		spawnBoar(CFrame.new(0, 1.2, -40))
+		local scans = 0
+		local all = EntityService.all
+		EntityService.all = function(...)
+			scans += 1
+			return all(...)
+		end
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		local window = ClipSampler.hitWindows(Horizontal)[1]
+		local counted = 0
+		while clock.t < 500 + window.close + 0.1 do
+			clock.t += 1 / 60
+			EntityService.tick(1 / 60)
+			local before = scans
+			CombatService.tick()
+			counted += scans - before
+		end
+		EntityService.all = all
+		expect(counted).toBe(0)
+		expect(EntityService.get(playerId).state).toBe("Art")
+	end)
+
+	it("reports each closed window of a player's swing: facing, root look, hits and the nearest enemy", function()
+		fresh()
+		local events = {}
+		CombatService.traceSink = function(event)
+			table.insert(events, event)
+		end
+		local playerId, player, character = spawnPlayer()
+		local root = character.PrimaryPart
+		local window = ClipSampler.hitWindows(Horizontal)[1]
+		local trailStart, trailEnd = HitSweep.trailAttachments(character)
+		local facing, look = turnedLook(40)
+		local opening = HitSweep.bladeAt(
+			character,
+			facingRoot(root.CFrame.Position, look),
+			Horizontal,
+			window.open,
+			trailStart,
+			trailEnd
+		)
+		local boarId, boarModel = spawnBoar(CFrame.new(opening.finish))
+		spawnBoar(CFrame.new(0, 1.2, -40)) -- farther: never the nearest
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal", facing))
+		advance(window.close - window.open + window.open + 0.05)
+		CombatService.traceSink = nil
+		expect(#events).toBe(1)
+		local event = events[1]
+		expect(event.entityId).toBe(playerId)
+		expect(event.clipId).toBe("player/OneHandedSword/Horizontal")
+		expect(event.artId).toBe("OneHandedSword.Horizontal")
+		expect(event.windowIndex).toBe(1)
+		expect(event.windowCount).toBe(1)
+		expect(event.hits).toBe(1)
+		expect(event.facing:Dot(look)).toBeCloseTo(1, 1e-6)
+		expect(event.rootLook:Dot(Vector3.new(0, 0, -1))).toBeCloseTo(1, 1e-6)
+		local nearest = event.nearest
+		expect(nearest).never.toBeNil()
+		expect(nearest.entityId).toBe(boarId)
+		expect(nearest.name).toBe(EntityService.get(boarId).name)
+		local offset = boarModel.PrimaryPart.CFrame.Position - root.CFrame.Position
+		expect(nearest.distance).toBeCloseTo(Vector3.new(offset.X, 0, offset.Z).Magnitude, 1e-4)
+		local cross = look.Z * offset.X - look.X * offset.Z
+		local dot = look.X * offset.X + look.Z * offset.Z
+		expect(nearest.bearingDegrees).toBeCloseTo(math.deg(math.atan2(cross, dot)), 1e-4)
+		-- The blade went through it: no clearance left.
+		expect(nearest.clearance).never.toBeNil()
+		expect(nearest.clearance <= 0).toBe(true)
+	end)
+
+	it("a miss names how far the blade passed the nearest enemy and where it stood", function()
+		fresh()
+		local events = {}
+		CombatService.traceSink = function(event)
+			table.insert(events, event)
+		end
+		local _, player, character = spawnPlayer()
+		local root = character.PrimaryPart
+		-- The Play-test's boar: 5 studs away, 165 degrees off the body's look.
+		local _, behind = turnedLook(165)
+		local boarId =
+			spawnBoar(CFrame.new(root.CFrame.Position.X + behind.X * 5, 1.2, root.CFrame.Position.Z + behind.Z * 5))
+		handlers.BasicAttackRequest(player, basicPayload())
+		advance(0.7)
+		CombatService.traceSink = nil
+		expect(#sentOf("HitConfirmed")).toBe(0)
+		expect(#events).toBeGreaterThan(0)
+		local event = events[#events]
+		expect(event.hits).toBe(0)
+		expect(event.artId).toBeNil()
+		expect(event.clipId).toBe("player/OneHandedSword/Basic1")
+		expect(event.windowIndex).toBe(event.windowCount)
+		expect(event.nearest.entityId).toBe(boarId)
+		expect(event.nearest.distance).toBeCloseTo(5, 1e-3)
+		expect(event.nearest.bearingDegrees).toBeCloseTo(165, 1e-3)
+		expect(event.nearest.clearance > 0).toBe(true)
+	end)
+
+	it("a sink that throws warns and never stops the swing", function()
+		fresh()
+		CombatService.traceSink = function()
+			error("dev tool bug")
+		end
+		local _, player, character = spawnPlayer()
+		local window = ClipSampler.hitWindows(Horizontal)[1]
+		local trailStart, trailEnd = HitSweep.trailAttachments(character)
+		local opening =
+			HitSweep.bladeAt(character, character.PrimaryPart.CFrame, Horizontal, window.open, trailStart, trailEnd)
+		local boarId = spawnBoar(CFrame.new(opening.finish))
+		local before = #Harness.warnings()
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		advance(0.7)
+		CombatService.traceSink = nil
+		expect(lastOf("HitConfirmed").targetId).toBe(boarId)
+		expect(EntityService.get(boarId).hp).toBe(BOAR.hp - HORIZONTAL_DAMAGE)
+		local warned = false
+		for index = before + 1, #Harness.warnings() do
+			if Harness.warnings()[index]:find("dev tool bug", 1, true) then
+				warned = true
+			end
+		end
+		expect(warned).toBe(true)
+	end)
+
+	it("an error while the event is measured only warns and never stops the swing", function()
+		fresh()
+		local events = {}
+		CombatService.traceSink = function(event)
+			table.insert(events, event)
+		end
+		local playerId, player, character = spawnPlayer()
+		local window = ClipSampler.hitWindows(Horizontal)[1]
+		local trailStart, trailEnd = HitSweep.trailAttachments(character)
+		local opening =
+			HitSweep.bladeAt(character, character.PrimaryPart.CFrame, Horizontal, window.open, trailStart, trailEnd)
+		local boarId = spawnBoar(CFrame.new(opening.finish))
+		-- After the boar is cut the sweep skips it (alreadyHit) before measuring it, so from then on
+		-- only the trace measures the blade against its parts: a measurement that fails there fails
+		-- the trace and nothing else.
+		local measure = HitSweep.segmentBoxDistance
+		local armed = false
+		HitSweep.segmentBoxDistance = function(...)
+			if armed then
+				error("trace measure bug")
+			end
+			return measure(...)
+		end
+		local before = #Harness.warnings()
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		local ok, problem = true, nil
+		for _ = 1, math.ceil(0.7 * 60) do
+			local tickOk, tickProblem = pcall(advance, 1 / 60)
+			if not tickOk and ok then
+				ok, problem = false, tickProblem
+			end
+			armed = #sentOf("HitConfirmed") > 0
+		end
+		HitSweep.segmentBoxDistance = measure
+		CombatService.traceSink = nil
+		expect(problem).toBeNil()
+		expect(ok).toBe(true)
+		expect(lastOf("HitConfirmed").targetId).toBe(boarId)
+		expect(EntityService.get(boarId).hp).toBe(BOAR.hp - HORIZONTAL_DAMAGE)
+		expect(EntityService.get(playerId).state).never.toBe("Idle")
+		expect(#events).toBe(0)
+		local warned = false
+		for index = before + 1, #Harness.warnings() do
+			if Harness.warnings()[index]:find("trace measure bug", 1, true) then
+				warned = true
+			end
+		end
+		expect(warned).toBe(true)
+	end)
+
+	it("one event per window of a multi-hit Art, and none with no enemy on the field", function()
+		fresh()
+		local events = {}
+		CombatService.traceSink = function(event)
+			table.insert(events, event)
+		end
+		local _, player = spawnPlayer()
+		handlers.ArtRequest(player, artPayload("OneHandedSword.SharpNail"))
+		local SharpNail = Harness.load("src/shared/clips/player/OneHandedSword/SharpNail")
+		local windows = ClipSampler.hitWindows(SharpNail)
+		advance(windows[#windows].close + 0.05)
+		CombatService.traceSink = nil
+		expect(#events).toBe(#windows)
+		for index, event in events do
+			expect(event.windowIndex).toBe(index)
+			expect(event.windowCount).toBe(#windows)
+			expect(event.hits).toBe(0)
+			expect(event.nearest).toBeNil()
+		end
+	end)
+end)

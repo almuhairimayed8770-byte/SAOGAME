@@ -352,7 +352,8 @@ _G.try=function(id,a,b,vol,speed,loop) local s=Instance.new('Sound'); s.SoundId=
 
 61. [ ] **A region's end, and a start inside it (D-088, D-091) (listen).** Run
     `local s=Instance.new('Sound'); s.SoundId='rbxassetid://9119749044'; s.PlaybackRegionsEnabled=true; s.PlaybackRegion=NumberRange.new(0.34,0.55); s.Parent=game:GetService('SoundService'); if not s.IsLoaded then s.Loaded:Wait() end; s.Ended:Connect(function() print('Ended', s.IsPlaying, s.TimePosition) end); s.TimePosition=0.34; s:Play(); task.wait(0.5); print('after 0.5 s', s.IsPlaying, s.TimePosition)`.
-    Write into D-091 whether "Ended" printed and whether IsPlaying was false after 0.5 s. Then run
+    The Ended half is measured (2026-10-23, written into D-091: Ended fires at the region end and IsPlaying is false
+    then); only the late-start half below is still open. Then run
     `s.TimePosition=0.45; s:Play(); task.wait(0.2); print(s.IsPlaying, s.TimePosition)`. Pass: only the last 0.1 s of
     the swish is heard and it stops at 0.55 (the late start's path).
 62. [ ] **A start before the sound has loaded (D-092).** `telegraph.Tick` is not preloaded and nothing in the game
@@ -503,3 +504,49 @@ All in the Playground (places/Playground.rbxl, or `rojo build places/Playground.
     session's first Kill and look for a spike on the impact frame (labels with Clone); then land a second Kill on the
     same enemy type and compare. Pass: no frame spike on the first impact large enough to read as a stutter; note the
     ms in PROGRESS either way.
+
+## O. After the play-test: aim, console errors and the dev hooks (D-112 to D-116)
+
+All in the Playground. Items 99 to 103 need the display awake (the lock turn runs on the render step).
+
+97. [ ] **Rebuild and a clean console.** Rebuild the places (`tools/build-places.sh`, or
+    `rojo build places/Playground.project.json -o <file>.rbxl`), open the Playground and press F5. Pass: View > Output
+    has no "Cloud instance must exist under Terrain node", no "Failed to load sound rbxassetid://0" and no
+    "ContentId: rbxassetid://0" line; in Explorer, Workspace > Terrain holds Clouds (Cover 0.55, Density 0.3) and
+    Lighting holds none.
+98. [ ] **Where rbxassetid://203785492 comes from.** It is in no repo file and no built place. During Play, search the
+    content properties of every instance (server and client, CoreGui too) for 203785492; check the avatar's
+    accessories and the installed plugins. Note the owner in docs/PLACEHOLDERS.md.
+99. [ ] **Lock facing.** Walk away from a boar so the body faces away, press F. Pass: the body turns to the boar in
+    about a quarter second, stepping round; A and D strafe round it facing it, S backs off facing it. Shift + W
+    sprints with the body turned to the stick; letting go turns back to the lock. Dodge and guard still work, and a
+    guard raised while locked faces the boar and blocks its strike.
+100. [ ] **Swings land.** Locked on a boar, then a kobold, at about 5 studs: the basic chain three times, then Q.
+    Pass: HP drops on every swing and View > Output shows no ActionRejected "Facing". Unlocked, with the boar about
+    30 degrees off the body, swing: the body snaps to it and the swing lands; with the boar behind, nothing snaps.
+101. [ ] **Lock and swing at once.** Facing away from a boar, press F and click at once. Pass: the swing comes out (no
+    "Facing" rejection); note whether it lands, then whether the next swing does.
+102. [ ] **The 40 degree snap at 0.25x.** Capture panel time scale 0.25x (O). Unlocked, boar 35 degrees off, swing.
+    Pass: the turn reads as part of the wind-up, not a pop. If it pops, note it for a turn clip or a smaller snap.
+103. [ ] **Strafe feet at walk speed.** Locked on a boar, hold D for 3 s at 0.25x. Pass: the WalkLeft/WalkRight feet
+    do not slide visibly; if they do, note it for the stride tuning (D-054).
+104. [ ] **(listen, later) Music stems.** Once real stem ids are in `sfx.luau` music.stemIds, walk into combat and
+    out. Pass: the stems crossfade. Decide whether a stem resumes or restarts (Sound:Stop() rewinds it today).
+105. [ ] **(optional) PlaybackLoudness lag.** Play a sustained sound, Stop() it and log PlaybackLoudness for the
+    next 3 Heartbeats, and log the first 3 after a Play. The harness assumes 0 for 2 frames after Play; if real,
+    item 66's peakAt readings are about 33 ms late.
+106. [ ] **Dev hooks (D-114).** Press F5 and wait for the spawn. Each line is one execute_luau (or command bar) call
+    in the context named; each returns JSON.
+    - Server, trace on: `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("trace", {on = true}))`
+    - Client, enemies with ids, distances and yaw: `local f = game.Players.LocalPlayer:WaitForChild("SkyspireDevAim", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("status"))`
+    - Client, lock one (an id from status): `local f = game.Players.LocalPlayer:WaitForChild("SkyspireDevAim", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("lock", {id = 12}))`. If it replies faced = false (the display is
+      asleep), turn with `local f = game.Players.LocalPlayer:WaitForChild("SkyspireDevAim", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("face"))`.
+    - Client, swing through the real request path: `local f = game.Players.LocalPlayer:WaitForChild("SkyspireDevAim", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("swing", {kind = "basic", count = 3}))`, or
+      `local f = game.Players.LocalPlayer:WaitForChild("SkyspireDevAim", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("swing", {kind = "art", slot = 1}))`; also `local f = game.Players.LocalPlayer:WaitForChild("SkyspireDevAim", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("guard", {held = true}))` and `local f = game.Players.LocalPlayer:WaitForChild("SkyspireDevAim", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("dodge"))`.
+    - Server, why a swing missed (facing, the root's turn off it, the nearest enemy's distance, bearing and blade
+      clearance): `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("events", {count = 10}))`
+    - Server, the sweep alone with no client: `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("basic"))`, `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("art", {artId = "OneHandedSword.Horizontal"}))`,
+      `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("hp"))`
+    - Server, trace off: `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("trace", {on = false}))`
+    Pass: every client swing at a faced enemy reports hits > 0 and no rejection, and each server window prints one
+    [DevCombat] line. Outside the Playground (no DevCapture attribute) neither BindableFunction exists.

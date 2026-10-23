@@ -927,7 +927,8 @@ describe("SfxPool Ended: only an untimed play listens", function()
 			w.run(0.081)
 			local second = SfxPool.play("spec.Tick")
 			expect(second).toBe(first)
-			-- The first play's Ended arrives late (its audio started a frame after Play).
+			-- The first play's Ended arrives after the pool's clock freed its voice (the engine
+			-- fires it on its own frame schedule, so it can land after the next play started).
 			w.run(0.09)
 			w.fireEnded(first)
 			w.run(0.115)

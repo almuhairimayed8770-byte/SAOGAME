@@ -6,8 +6,9 @@
 	frame budgets, the gate shot list and the clip file-name convention.
 
 	None of this ships to players: Capture and ClipLab run only when the place carries the
-	workspace attribute named below (set in places/Playground.project.json and ClipLab), and the
-	PoseEditor is a Studio plugin. Hotkeys are Enum.KeyCode names and never a function key: F9 is
+	workspace attribute named below (set in places/Playground.project.json and ClipLab), the Studio
+	hooks DevAim and DevCombat (aim, trace) also need RunService:IsStudio(), and the PoseEditor is
+	a Studio plugin. Hotkeys are Enum.KeyCode names and never a function key: F9 is
 	the developer console, F5 to F8 are Studio's play controls, F11 and F12 are fullscreen and
 	screenshot. Letters that input.luau binds (Q, E, F, R, Tab, Space, 2, 3, 4, Shift) are avoided
 	in the Playground, where gameplay input is live.
@@ -40,6 +41,62 @@ local Dev = {
 		-- Only the Choreo animators slow down: the reel's impact frames, accents, risers and every
 		-- sound keep real time, so a slowed recording judges poses, not hit sync.
 		slowNote = "animation only: hit FX and sounds run at 1x",
+	},
+
+	-- The Studio aim hook (src/client/dev/DevAim.client.luau, D-114). A Studio MCP execute_luau in
+	-- the Client context cannot drive the game's controllers itself: its require returns a fresh
+	-- module copy, not the game's live one. So a game LocalScript (Studio and DevCapture only)
+	-- puts a BindableFunction under the LocalPlayer, and :Invoke(command, args) runs inside the
+	-- game's module cache: it locks through TargetController.lockOn or the F path and swings by
+	-- firing InputController's own signals, so every request goes out through CharacterController
+	-- (aim snap, rate drop, prediction) and every server check runs unchanged. It reports the body's
+	-- yaw off the target at the send, the target's HP before and after, the hits and any
+	-- rejection. Every wait is task.wait (Heartbeat): with the Studio display asleep RenderStepped
+	-- runs 0 times a second while Heartbeat runs 60. tools/validators/dev.luau ties each number to
+	-- the game numbers it waits on.
+	aim = {
+		bindableName = "SkyspireDevAim",
+		-- "lock" waits until the body's flat look is this close to the lock: under combat.luau
+		-- aim.snapDegrees, so the swing's own snap finishes the turn.
+		faceToleranceDegrees = 10,
+		-- ...or this long. The lock turn (aim.lockTurnRate) comes round from straight behind in
+		-- 0.25 s while RenderStepped runs; with the display asleep it never comes.
+		faceTimeoutSeconds = 1,
+		-- "face" turns the root itself on Heartbeat, at the lock turn's rate: the stand-in for the
+		-- lock turn when no render step runs. Reported as a dev turn, never as the game's.
+		faceDegreesPerSecond = 720,
+		-- After a dev turn: the server sees the turned root (its facing check reads the replicated
+		-- root) and the client's yaw history (combat.lagAllowance long) holds only the new facing.
+		replicationSettleSeconds = 0.25,
+		-- Art key press to release: past the start pose and activation hold (0.25), well short of
+		-- the cancel time (1.0), so the release launches from the frozen glowing stance.
+		artHoldSeconds = 0.35,
+		-- Send to send for basic swings: no faster than BasicAttackRequest's refill, after the
+		-- server's swing (basicHitDuration) and its hit window plus the lag allowance, and inside
+		-- basicChainWindow, so three swings run the Basic1-2-3 chain. A swing's hits are the ones
+		-- that arrive before the next swing goes.
+		swingGapSeconds = 0.45,
+		-- The longest wait for the body to be free before a swing, and for an Art's run (Art,
+		-- PostMotion, then free) to end after its release.
+		runTimeoutSeconds = 3,
+		-- "guard" and "dodge": how long to listen for a rejection.
+		actionSettleSeconds = 0.25,
+		maxSwings = 10, -- one "swing" command at most
+		decimals = 2, -- reported studs, degrees and seconds are rounded to this many places
+	},
+
+	-- The Studio combat trace hook (src/server/dev/DevCombat.server.luau, D-114): a BindableFunction
+	-- under ServerScriptService, Studio and DevCapture only. "trace" sets CombatService.traceSink
+	-- (one compact Output line per closed damage window of a player's run: facing, root look, hits,
+	-- the nearest enemy's distance, bearing and blade clearance) and keeps the last keepEvents for
+	-- "events"; "basic" and "art" start a swing through the live CombatService and return its
+	-- windows' trace; "hp" lists the enemies.
+	trace = {
+		bindableName = "SkyspireDevCombat",
+		keepEvents = 60, -- at least aim.maxSwings x the most windows a loadout attack has
+		runTimeoutSeconds = 3, -- "basic" / "art" wait at most this long for the run's last window
+		printPrefix = "[DevCombat]",
+		decimals = 2,
 	},
 
 	-- tools/pose-server.luau (Lune) and the PoseEditor plugin's HttpService calls.

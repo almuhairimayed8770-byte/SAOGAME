@@ -226,3 +226,64 @@ describe("combat data: the server hit sweep", function()
 		end
 	end)
 end)
+
+describe("combat data: aim (D-112)", function()
+	-- A copy of the real aim table with `fields` replaced, for runValidator.
+	local function aimWith(fields: { [string]: any }): { [string]: any }
+		local copy = table.clone(combat.aim)
+		for key, value in fields do
+			copy[key] = value
+		end
+		return copy
+	end
+
+	it("starts at the lock-facing and snap values D-112 chose", function()
+		expect(combat.aim.lockTurnRate).toBe(720)
+		expect(combat.aim.lockFaceWhileSprinting).toBe(false)
+		expect(combat.aim.snapDegrees).toBe(40)
+		expect(combat.aim.replicationMarginDegrees).toBe(9)
+		expect(combat.aim.assistRange).toBe(10.5)
+		expect(combat.aim.assistConeDegrees).toBe(90)
+		expect(combat.aim.assistAngleWeightStuds).toBe(6)
+		expect(combat.aim.minFaceDistance).toBe(0.5)
+	end)
+
+	it("the snap and the replication margin stay inside the server's facing acceptance", function()
+		-- facingTolerance 0.35: the server accepts a request facing within acos(0.65) = 49.46 degrees
+		-- of its root. A snap the server has not seen yet plus the turn it may still be catching up on
+		-- must fit inside that, or the swing is rejected and its clip cancelled.
+		local acceptance = math.deg(math.acos(1 - combat.facingTolerance))
+		expect(acceptance).toBeCloseTo(49.46, 0.01)
+		expect(combat.aim.snapDegrees + combat.aim.replicationMarginDegrees).toBeLessThanOrEqual(acceptance)
+		local over = runValidator({ aim = aimWith({ snapDegrees = 41 }) })
+		expect(#over).toBe(1)
+		expect(mentions(over, "aim.snapDegrees 41 + aim.replicationMarginDegrees 9")).toBe(true)
+		expect(mentions(over, "49.46")).toBe(true)
+		expect(mentions(runValidator({ aim = aimWith({ replicationMarginDegrees = 10 }) }), "49.46")).toBe(true)
+		-- A looser facing tolerance makes room for a bigger snap.
+		expect(runValidator({ aim = aimWith({ snapDegrees = 41 }), facingTolerance = 0.4 })).toEqual({})
+		expect(runValidator({ aim = aimWith({ snapDegrees = 40.4 }) })).toEqual({})
+	end)
+
+	it("the validator wants every aim number sound", function()
+		for _, field in { "lockTurnRate", "snapDegrees", "assistRange", "assistConeDegrees" } do
+			for _, bad in { 0, -1, 0 / 0, math.huge, "5" } do
+				local problems = runValidator({ aim = aimWith({ [field] = bad }) })
+				expect(mentions(problems, "aim." .. field .. " must be a positive number")).toBe(true)
+			end
+		end
+		for _, field in { "replicationMarginDegrees", "assistAngleWeightStuds", "minFaceDistance" } do
+			for _, bad in { -1, 0 / 0, math.huge, "5" } do
+				local problems = runValidator({ aim = aimWith({ [field] = bad }) })
+				expect(mentions(problems, "aim." .. field .. " must be a number, 0 or more")).toBe(true)
+			end
+			expect(runValidator({ aim = aimWith({ [field] = 0 }) })).toEqual({})
+		end
+		-- The assist cone is a cone in front of the body: wider than a full turn means nothing.
+		expect(mentions(runValidator({ aim = aimWith({ assistConeDegrees = 361 }) }), "assistConeDegrees")).toBe(true)
+		expect(mentions(runValidator({ aim = aimWith({ lockFaceWhileSprinting = "no" }) }), "lockFaceWhileSprinting")).toBe(
+			true
+		)
+		expect(mentions(runValidator({ aim = "fast" }), "aim must be a table")).toBe(true)
+	end)
+end)

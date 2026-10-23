@@ -385,6 +385,15 @@ local Sfx = {
 	--- Adaptive music numbers (section 15) for MusicDirector.
 	music = {
 		stems = { "ambient", "explore", "combat", "boss" },
+		-- The floor's stem ids, one per stem (docs/PLACEHOLDERS.md "Music stems"). No stem exists
+		-- yet: every one is a placeholder, and MusicDirector makes no Sound for a placeholder (a
+		-- Sound whose SoundId is id 0 makes the engine fetch it and log "Failed to load sound").
+		stemIds = {
+			ambient = PLACEHOLDER,
+			explore = PLACEHOLDER,
+			combat = PLACEHOLDER,
+			boss = PLACEHOLDER,
+		} :: { [string]: string },
 		crossfadeSeconds = 2,
 		combatEndDelaySeconds = 6, -- combat music ends this long after the last shatter
 		bossEntranceSilenceSeconds = 1,

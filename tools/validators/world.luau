@@ -78,6 +78,7 @@ local function validate(ctx: Context): { string }
 			radialJitter = Check.number(0),
 			emitterPartSize = positive,
 			color = color,
+			textureAsset = Check.string(32),
 			fallbackCountKey = Check.string(32),
 		}),
 		killVolume = Check.strictInterface({

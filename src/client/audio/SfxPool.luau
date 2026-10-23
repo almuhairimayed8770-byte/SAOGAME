@@ -8,8 +8,9 @@
 	part at the position, roll-off from the data) or in 2D under SoundService. The same sound at
 	the same spot inside the dedupe window plays once, so a hit heard through two reactions does
 	not double (a 2D sound is heard everywhere, so it dedupes by name alone). Placeholder entries
-	(rbxassetid://0) go through the whole path but never call Play, so the console is not filled
-	with load failures until the real ids arrive.
+	(rbxassetid://0) go through the whole path but never call Play, and a placeholder's Sound (a
+	loop bed with no pick yet) gets an empty SoundId: writing id 0 alone makes the engine fetch it
+	and log "Failed to load sound", so the console stays clean until the real ids arrive.
 
 	Trims (sfx.luau Entry startAt / stopAt / fadeOut / loop / length, seconds of the asset before
 	PlaybackSpeed). A trimmed entry plays with PlaybackRegionsEnabled and PlaybackRegion =
@@ -19,12 +20,17 @@
 	the Sound's Volume linearly from the play's volume to 0, ending at stopAt in real time: it
 	starts (stopAt - fadeOut - TimePosition) / PlaybackSpeed seconds after Play and lasts
 	fadeOut / PlaybackSpeed, on the pool's per-frame step. A trimmed play's real-time length is
-	(stopAt - TimePosition) / PlaybackSpeed: its voice is free once that has passed, whether or not
-	the engine fired Ended or still reports IsPlaying there, and it never listens to Ended (an
-	Ended that arrives late for an earlier play must not free a newer one). Only an untrimmed play,
-	or a play whose asset has not loaded yet (Play then starts whenever the asset arrives, so no
-	clock is known: no Lua fade, a hard stop at the region end), waits on Ended through the seam,
-	one connection per voice, dropped when the voice plays again. Every play of a pooled voice
+	(stopAt - TimePosition) / PlaybackSpeed: its voice is free once that has passed. The engine
+	does fire Ended at a region end and reports IsPlaying false from then (measured in Studio
+	2026-10-23: a 0 .. 0.32 region ended 0.316 s after Play), but a timed play never listens to
+	Ended: an Ended that arrives late for an earlier play must not free a newer one. Only an
+	untrimmed play, or a play whose asset has not loaded yet (Play then starts whenever the asset
+	arrives, so no clock is known: no Lua fade, a hard stop at the region end), waits on Ended
+	through the seam, one connection per voice, dropped when the voice plays again. The engine
+	holds a region's ends as float32 and refuses a Play whose TimePosition is at or past the end
+	it holds (measured: nothing plays, TimePosition reads 0), so no play starts there: a late
+	start that would is not played, and a riser whose wait resumed past its whole region is let
+	go. Every play of a pooled voice
 	resets its Volume, PlaybackSpeed, regions, Looped and any fade still running from an earlier
 	play. No play ends above sfx.limits.maxPlayVolume, the heartbeat's lift included.
 
@@ -329,7 +335,8 @@ end
 local function newSound(entry: Sfx.Entry, family: string, entryName: string): Sound
 	local sound = Instance.new("Sound")
 	sound.Name = family .. "." .. entryName
-	sound.SoundId = entry.id
+	-- A placeholder's Sound carries no asset: an id 0 in SoundId is already a fetch that fails.
+	sound.SoundId = if Sfx.isReal(entry) then entry.id else ""
 	sound.Volume = entry.volume
 	sound.RollOffMinDistance = Sfx.mix.rolloffMinDistance
 	sound.RollOffMaxDistance = Sfx.mix.rolloffMaxDistance
@@ -399,6 +406,13 @@ end
 -- A NumberRange over two ends in either order (the engine refuses min > max).
 local function rangeOf(first: number, last: number): NumberRange
 	return NumberRange.new(math.min(first, last), math.max(first, last))
+end
+
+-- Where the engine ends a trimmed entry's region: its PlaybackRegion's Max as the engine holds it,
+-- a float32 up to 1e-8 under a double stopAt. A Play from there or later plays nothing (Studio
+-- 2026-10-23: TimePosition 0.6 against 0 .. 0.32 stayed at 0 with IsPlaying false).
+local function heldEndOf(entry: Sfx.Entry): number
+	return rangeOf(startOf(entry), regionEndOf(entry)).Max
 end
 
 -- Every Sound.Volume the pool writes: never above limits.maxPlayVolume (the picks' volumes sit on
@@ -826,6 +840,9 @@ local function startSound(
 		speedOverride = pitchOf(entry, speedOverride)
 		skip = lateBy * (speedOverride :: number)
 		local last = audibleEnd(entry, 0)
+		if last ~= nil and isTrimmed(entry) then
+			last = math.min(last, heldEndOf(entry)) -- the engine refuses a start at its float32 end
+		end
 		if last ~= nil and startOf(entry) + skip >= last then
 			return nil -- already over: nothing of it is left to hear
 		end
@@ -938,6 +955,12 @@ local function startSound(
 				end
 			end
 		end
+		if sound.PlaybackRegionsEnabled and from >= sound.PlaybackRegion.Max then
+			-- Slipped to the region's end (as the engine holds it): nothing is left to hear, and
+			-- the engine would refuse the start. Let the voice go.
+			finish()
+			return
+		end
 		-- Play starts from the last TimePosition a script set: every play sets it.
 		sound.TimePosition = from
 		if fadeOut > 0 and fadeEnd ~= nil then
@@ -953,7 +976,8 @@ local function startSound(
 			ensureStepper()
 		end
 		if length ~= nil then
-			-- Ended may or may not fire at a region end: the voice frees itself when the region is over.
+			-- The engine fires Ended at the region end, but a timed play frees itself on this
+			-- clock: a late Ended from an earlier play on this voice must not free this one.
 			voice.startedAt = playedAt
 			voice.busyUntil = playedAt + length
 			deps.delay(length, finish)

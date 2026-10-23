@@ -20,3 +20,229 @@ describe("dev.luau time-scale label", function()
 		expect(source:find("scaleLabel.Text = Dev.timeScaleLabel(Steps[timeScaleIndex])", 1, true)).never.toBeNil()
 	end)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- The Studio dev hooks (D-114): aim (DevAim.client) and trace (DevCombat.server)
+-- ------------------------------------------------------------------------------------------
+
+local luau = require("@lune/luau")
+
+local VALIDATOR = "tools/validators/dev.luau"
+
+local function runValidator(mutate: ((dev: any) -> ())?): { string }
+	local validator =
+		luau.load(Harness.readFile(VALIDATOR), { debugName = VALIDATOR, environment = {} :: any })() :: (any) -> { string }
+	local copy = Dev
+	if mutate ~= nil then
+		local function deepCopy(value: any): any
+			if typeof(value) ~= "table" then
+				return value
+			end
+			local out = {}
+			for key, inner in value do
+				out[key] = deepCopy(inner)
+			end
+			return setmetatable(out, getmetatable(value))
+		end
+		copy = deepCopy(Dev)
+		mutate(copy)
+	end
+	return validator({
+		load = function(path: string): any
+			if path == "src/shared/data/dev" then
+				return copy
+			end
+			return Harness.load(path)
+		end,
+		listFiles = Harness.listFiles,
+		readFile = Harness.readFile,
+		repoRoot = Harness.repoRoot(),
+	})
+end
+
+local function hasProblem(problems: { string }, needle: string): boolean
+	for _, line in problems do
+		if line:find(needle, 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+describe("dev.luau aim and trace", function()
+	it("passes the dev validator as written", function()
+		expect(table.concat(runValidator(nil), "\n")).toBe("")
+	end)
+
+	it("names a BindableFunction for each helper, and they differ", function()
+		expect(typeof(Dev.aim.bindableName)).toBe("string")
+		expect(typeof(Dev.trace.bindableName)).toBe("string")
+		expect(Dev.aim.bindableName).never.toBe(Dev.trace.bindableName)
+	end)
+
+	type Case = { name: string, needle: string, mutate: (any) -> () }
+	local cases: { Case } = {
+		{
+			name = "a missing aim table",
+			needle = "aim table is missing",
+			mutate = function(d)
+				d.aim = nil
+			end,
+		},
+		{
+			name = "a face tolerance the swing's snap cannot finish",
+			needle = "combat.aim.snapDegrees",
+			mutate = function(d)
+				d.aim.faceToleranceDegrees = 45
+			end,
+		},
+		{
+			name = "a face tolerance past the server's facing acceptance",
+			needle = "facing acceptance",
+			mutate = function(d)
+				d.aim.faceToleranceDegrees = 50
+			end,
+		},
+		{
+			name = "a face timeout shorter than the lock turn",
+			needle = "lock turn from straight behind",
+			mutate = function(d)
+				d.aim.faceTimeoutSeconds = 0.2
+			end,
+		},
+		{
+			name = "a dev turn too slow for the face timeout",
+			needle = "dev turn from straight behind",
+			mutate = function(d)
+				d.aim.faceDegreesPerSecond = 90
+			end,
+		},
+		{
+			name = "a settle shorter than the lag allowance",
+			needle = "replicationSettleSeconds",
+			mutate = function(d)
+				d.aim.replicationSettleSeconds = 0.1
+			end,
+		},
+		{
+			name = "an action settle shorter than the lag allowance",
+			needle = "actionSettleSeconds",
+			mutate = function(d)
+				d.aim.actionSettleSeconds = 0.1
+			end,
+		},
+		{
+			name = "an Art hold inside the start pose",
+			needle = "start pose and activation hold",
+			mutate = function(d)
+				d.aim.artHoldSeconds = 0.2
+			end,
+		},
+		{
+			name = "an Art hold past the cancel time",
+			needle = "activationCancelTime",
+			mutate = function(d)
+				d.aim.artHoldSeconds = 1.2
+			end,
+		},
+		{
+			name = "a swing gap faster than the request's refill",
+			needle = "refill",
+			mutate = function(d)
+				d.aim.swingGapSeconds = 0.1
+			end,
+		},
+		{
+			name = "a swing gap inside the server's basic swing",
+			needle = "basicHitDuration",
+			mutate = function(d)
+				d.aim.swingGapSeconds = 0.3
+			end,
+		},
+		{
+			name = "a swing gap that misses the window's hit",
+			needle = "latest basic hit window",
+			mutate = function(d)
+				d.aim.swingGapSeconds = 0.37
+			end,
+		},
+		{
+			name = "a swing gap that breaks the chain",
+			needle = "basicChainWindow",
+			mutate = function(d)
+				d.aim.swingGapSeconds = 0.7
+			end,
+		},
+		{
+			name = "a client run timeout shorter than the longest Art",
+			needle = "aim.runTimeoutSeconds",
+			mutate = function(d)
+				d.aim.runTimeoutSeconds = 1.5
+			end,
+		},
+		{
+			name = "a server run timeout shorter than the longest Art",
+			needle = "trace.runTimeoutSeconds",
+			mutate = function(d)
+				d.trace.runTimeoutSeconds = 1
+			end,
+		},
+		{
+			name = "a swing cap under one chain",
+			needle = "aim.maxSwings",
+			mutate = function(d)
+				d.aim.maxSwings = 2
+			end,
+		},
+		{
+			name = "a fractional swing cap",
+			needle = "aim.maxSwings",
+			mutate = function(d)
+				d.aim.maxSwings = 3.5
+			end,
+		},
+		{
+			name = "a trace buffer that drops a whole command's windows",
+			needle = "trace.keepEvents",
+			mutate = function(d)
+				d.trace.keepEvents = 5
+			end,
+		},
+		{
+			name = "one name for both helpers",
+			needle = "must differ",
+			mutate = function(d)
+				d.trace.bindableName = d.aim.bindableName
+			end,
+		},
+		{
+			name = "a name that is not a plain instance name",
+			needle = "aim.bindableName must be",
+			mutate = function(d)
+				d.aim.bindableName = "Dev Aim"
+			end,
+		},
+		{
+			name = "a negative rounding",
+			needle = "aim.decimals",
+			mutate = function(d)
+				d.aim.decimals = -1
+			end,
+		},
+		{
+			name = "an empty print prefix",
+			needle = "printPrefix",
+			mutate = function(d)
+				d.trace.printPrefix = ""
+			end,
+		},
+	}
+	for _, case in cases do
+		it(("catches %s"):format(case.name), function()
+			local problems = runValidator(case.mutate)
+			if not hasProblem(problems, case.needle) then
+				error(("expected a problem with '%s', got:\n%s"):format(case.needle, table.concat(problems, "\n")), 0)
+			end
+		end)
+	end
+end)
