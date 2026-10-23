@@ -31,6 +31,21 @@
 	unbinds and the clones go back to the pool (the oldest past impact.silhouette.poolCap are
 	destroyed).
 
+	Render stalls (a display asleep, a minimised window, a long hitch: RenderStepped stops while
+	Heartbeat goes on): every picture, the dim too, remembers when it was asked for. Its first
+	drawn frame starts it only within impact.overlay.staleFrames of that; a later one drops it,
+	so the frame that comes back never shows a hit long gone. A Heartbeat watchdog runs while
+	anything shows and ends a picture no frame drew within that limit, or one drawn that has
+	passed its hit-stop (a dim: its length), so the overlay is never left up and its figures go
+	back to the pool while nothing renders. A play that finds an undrawn picture gone stale (no
+	Heartbeat ran either) ends it first and starts its own. A picture never drawn changed nothing
+	on screen: its flash claim is kept as asked for and never held longer. A picture ended between
+	frames (the watchdog, a cut, a takeover) while drawn, or while a picture it took over is, is
+	still on the last frame shown, so the next rendered frame (the one that shows it gone, or the
+	next picture's first) is its last change: its claim is held at math.huge (FlashBudget never
+	prunes it, so a hit while the window sleeps still counts it) and the render step stays bound
+	until that frame settles it there, as when the render step ends it.
+
 	Hits that land together (one sweep through several targets confirms them all in one frame):
 	a play while a sequence shows never cuts it for a dim and is never charged again. A sequence
 	of the same or a lower rank joins the one showing (its rigs are drawn too); a higher rank
@@ -72,6 +87,7 @@ export type Options = {
 export type Deps = {
 	now: (() -> number)?,
 	onRender: ((step: (dt: number) -> ()) -> (() -> ())?)?, -- binds a per-frame step; returns its unbind
+	onHeartbeat: ((step: (dt: number) -> ()) -> (() -> ())?)?, -- the watchdog's step; returns its disconnect
 	playerGui: (() -> Instance?)?,
 	camera: (() -> Camera?)?,
 	project: ((position: Vector3) -> Vector2?)?, -- world point -> screen fractions (0..1), nil off screen
@@ -86,6 +102,8 @@ type Showing = {
 	kind: "Sequence" | "Dim",
 	name: string,
 	rank: number, -- a sequence's rank (impact.sequences); 0 for the dim
+	requestedAt: number, -- when the picture was asked for (a takeover of an undrawn one keeps its)
+	drawn: boolean, -- a render step has drawn it
 	startedAt: number?, -- a sequence's first drawn frame (nil until then); when a dim began
 	frames: { ImpactSequence.Frame },
 	index: number, -- the look on screen
@@ -95,6 +113,7 @@ type Showing = {
 	hold: number, -- seconds the dim's peak holds (a dim that merges into it extends this)
 	look: string?,
 	unbind: (() -> ())?,
+	unwatch: (() -> ())?, -- disconnects the Heartbeat watchdog
 	claim: FlashBudget.Claim?, -- the flash budget's record of what this picture costs
 	shownBefore: { string }, -- looks the sequences this one took over drew under the same claim
 	rigs: { Model }, -- the rigs drawn as silhouettes
@@ -120,7 +139,13 @@ local pooledOrder: { BasePart } = {}
 
 local showing: Showing? = nil
 local reducedDims: { FlashBudget.Claim } = {} -- the dims Reduce flashing let start, newest last
-local finish: () -> () -- ends what is showing; defined with the show / hide helpers below
+-- Claims of pictures ended between frames (the Heartbeat watchdog, a cut, a takeover) while the
+-- last frame shown still held them: held at math.huge until the next rendered frame, the one that
+-- shows them gone, settles each at its last change (never before `before`, its finish when ended).
+type TailEntry = { claim: FlashBudget.Claim, before: number }
+local tailClaims: { TailEntry } = {}
+local tailUnbind: (() -> ())? = nil -- the render step kept bound to wait for that frame
+local finish: (rendering: boolean?) -> () -- ends what is showing; defined with the helpers below
 local figuresOn = true
 local strokesOn = true
 local partsPerRig = 0
@@ -186,6 +211,18 @@ end
 local function onRender(step: (dt: number) -> ()): (() -> ())?
 	local fn = overrides.onRender
 	return if fn ~= nil then fn(step) else defaultOnRender(step)
+end
+
+-- Heartbeat keeps running when rendering stops (measured: 60/s with the display asleep while
+-- RenderStepped ran 0/s), so the watchdog rides on it.
+local function onHeartbeat(step: (dt: number) -> ()): (() -> ())?
+	local fn = overrides.onHeartbeat
+	return if fn ~= nil then fn(step) else Engine.onHeartbeat(step)
+end
+
+-- Seconds a picture may wait for its first drawn frame (impact.overlay.staleFrames).
+local function staleSeconds(): number
+	return Impact.overlay.staleFrames * Impact.frameSeconds
 end
 
 local function viewportSize(): Vector2?
@@ -709,19 +746,89 @@ local function holdClaim(current: Showing, at: number)
 	end
 end
 
-finish = function()
+-- The claim's picture stays on the last frame shown until the next one renders: it counts until
+-- that frame settles it (a claim already waiting keeps its first entry).
+local function pinTail(claim: FlashBudget.Claim)
+	for _, entry in tailClaims do
+		if entry.claim == claim then
+			return
+		end
+	end
+	table.insert(tailClaims, { claim = claim, before = claim.finish })
+	FlashBudget.hold(claim, math.huge)
+end
+
+-- The frame at `at` shows every waiting picture gone: that is its last change.
+local function settleTail(at: number)
+	for _, entry in tailClaims do
+		FlashBudget.settle(entry.claim, math.max(at, entry.before))
+	end
+	table.clear(tailClaims)
+end
+
+-- Lets go of the render step kept bound for the next rendered frame.
+local function releaseTail()
+	local unbind = tailUnbind
+	tailUnbind = nil
+	if unbind ~= nil then
+		unbind()
+	end
+end
+
+-- `rendering`: ended by the render step, so the frame being drawn hides it. Anything else ends
+-- it between frames (the Heartbeat watchdog, a cut, a takeover), and the last frame shown still
+-- holds it until the next one renders, however long that takes.
+finish = function(rendering: boolean?)
 	local current = showing
 	if current == nil then
 		return
 	end
 	showing = nil
-	if current.unbind ~= nil then
-		current.unbind()
+	if current.unwatch ~= nil then
+		current.unwatch()
 	end
 	hide()
 	releaseClones()
-	-- The frame the overlay hides is its last change: the scene comes back.
-	holdClaim(current, now())
+	-- The frame the overlay hides is its last change: the scene comes back. A claim nothing on
+	-- screen shows (no frame drew this picture or one it took over) changed nothing, so it stays
+	-- as it was asked for.
+	local claim = current.claim
+	if current.drawn or #current.shownBefore > 0 then
+		holdClaim(current, now())
+		if not rendering and claim ~= nil and current.unbind ~= nil then
+			pinTail(claim)
+		end
+	end
+	if current.unbind ~= nil then
+		if #tailClaims > 0 and tailUnbind == nil then
+			-- The render step stays bound to settle the waiting claims on the next frame.
+			tailUnbind = current.unbind
+		else
+			current.unbind()
+		end
+	end
+end
+
+-- True when what shows must end at `at` without another drawn frame: no frame drew it within the
+-- staleness limit of its request, or it has run past its hit-stop (a dim: past its length).
+local function expired(current: Showing, at: number): boolean
+	if not current.drawn then
+		return at - current.requestedAt > staleSeconds()
+	end
+	local began = current.startedAt or at
+	if current.kind == "Dim" then
+		return at - began >= ImpactSequence.dimSeconds(current.hold)
+	end
+	return at - began >= current.cap
+end
+
+-- The watchdog (Heartbeat, or a play between frames): ends what shows once it has expired,
+-- rendering or not.
+local function watch()
+	local current = showing
+	if current ~= nil and expired(current, now()) then
+		finish()
+	end
 end
 
 local function dimOpacityOf(current: Showing, at: number): number
@@ -752,9 +859,16 @@ local function drawnLooks(current: Showing): { string }
 end
 
 local function stepDim(current: Showing, at: number)
+	if not current.drawn then
+		if at - current.requestedAt > staleSeconds() then
+			finish(true) -- its first frame comes too late: the dip belonged to a hit long gone
+			return
+		end
+		current.drawn = true
+	end
 	local began = current.startedAt or at
 	if at - began >= ImpactSequence.dimSeconds(current.hold) then
-		finish()
+		finish(true)
 		return
 	end
 	(background :: Frame).BackgroundTransparency = 1 - dimOpacityOf(current, at)
@@ -764,7 +878,12 @@ end
 local function stepSequence(current: Showing, at: number)
 	local began = current.startedAt
 	if began == nil then
+		if at - current.requestedAt > staleSeconds() then
+			finish(true) -- its first frame comes too late: dropped, never started
+			return
+		end
 		-- The first frame drawn since play: the clock starts here, on the first look.
+		current.drawn = true
 		current.startedAt = at
 		syncFigures()
 		holdClaim(current, at)
@@ -776,7 +895,7 @@ local function stepSequence(current: Showing, at: number)
 	-- look is drawn at least once and a 60 fps frame clock that runs a hair fast never adds one.
 	local due = elapsed >= frame.finish - Impact.frameSeconds * 0.5
 	if elapsed >= current.cap or (due and current.index >= #current.frames) then
-		finish()
+		finish(true)
 		return
 	end
 	if due then
@@ -790,8 +909,13 @@ local function stepSequence(current: Showing, at: number)
 end
 
 local function step()
+	-- This frame shows the pictures ended since the last one gone: their last change.
+	if #tailClaims > 0 then
+		settleTail(now())
+	end
 	local current = showing
 	if current == nil then
+		releaseTail()
 		return
 	end
 	if current.kind == "Dim" then
@@ -801,9 +925,14 @@ local function step()
 	end
 end
 
--- Starts the per-frame step for what is showing; with no render step (no engine) the overlay
--- still ends on time through task.delay.
+-- Starts the per-frame step and the Heartbeat watchdog for what is showing; with no render step
+-- (no engine) the overlay still ends on time through task.delay.
 local function run(current: Showing)
+	-- Its own render step takes over the wait for the next rendered frame (the tail claims).
+	releaseTail()
+	current.unwatch = onHeartbeat(function()
+		watch()
+	end)
 	local unbind = onRender(function()
 		step()
 	end)
@@ -811,6 +940,8 @@ local function run(current: Showing)
 		current.unbind = unbind
 		return
 	end
+	-- No render step will come to settle the claims that waited for one: they end here.
+	settleTail(now())
 	task.delay(current.seconds, function()
 		if showing == current then
 			finish()
@@ -886,6 +1017,8 @@ local function playDim(name: string, budgetNow: number, reduced: boolean): numbe
 		kind = "Dim",
 		name = name,
 		rank = 0,
+		requestedAt = at,
+		drawn = false,
 		startedAt = at,
 		frames = {},
 		index = 0,
@@ -895,6 +1028,7 @@ local function playDim(name: string, budgetNow: number, reduced: boolean): numbe
 		hold = ImpactSequence.dimHoldSeconds(),
 		look = nil,
 		unbind = nil,
+		unwatch = nil,
 		claim = claim,
 		shownBefore = {},
 		rigs = {},
@@ -907,14 +1041,16 @@ local function playDim(name: string, budgetNow: number, reduced: boolean): numbe
 end
 
 -- Puts a sequence on screen with its claim (whatever showed before goes); `shownBefore` holds the
--- looks a sequence it takes over already drew under that claim.
+-- looks a sequence it takes over already drew under that claim, `requestedAt` when the undrawn
+-- picture it takes over was asked for (now when nil).
 local function showSequence(
 	sequence: string,
 	frames: { ImpactSequence.Frame },
 	rigs: { Model },
 	options: Options,
 	claim: FlashBudget.Claim,
-	shownBefore: { string }?
+	shownBefore: { string }?,
+	requestedAt: number?
 ): number
 	local screen = gui :: ScreenGui
 	ImpactFrames.cancel()
@@ -945,6 +1081,8 @@ local function showSequence(
 		kind = "Sequence",
 		name = sequence,
 		rank = ImpactSequence.rank(sequence),
+		requestedAt = requestedAt or now(),
+		drawn = false,
 		startedAt = nil,
 		frames = frames,
 		index = 1,
@@ -954,6 +1092,7 @@ local function showSequence(
 		hold = 0,
 		look = frames[1].look,
 		unbind = nil,
+		unwatch = nil,
 		claim = claim,
 		shownBefore = shownBefore or {},
 		rigs = table.clone(rigs),
@@ -990,6 +1129,9 @@ function ImpactFrames.play(sequence: string, models: { Model }, opts: Options?):
 	local options: Options = opts or {}
 	local budgetNow = if options.now ~= nil then options.now else now()
 	local rigs = uniqueRigs(models or {})
+	-- A picture the watchdog has not ended yet (no Heartbeat either: the window froze) but that
+	-- has expired goes first: this hit is never joined to a stale one.
+	watch()
 	if FlashBudget.reduced() then
 		return playDim(sequence, budgetNow, true)
 	end
@@ -1011,7 +1153,8 @@ function ImpactFrames.play(sequence: string, models: { Model }, opts: Options?):
 				for _, model in uniqueRigs(models or {}, current.rigs) do
 					table.insert(all, model)
 				end
-				return showSequence(sequence, frames, all, options, claim, shown)
+				local askedAt = if current.drawn then nil else current.requestedAt
+				return showSequence(sequence, frames, all, options, claim, shown, askedAt)
 			end
 		end
 		join(current, rigs)
@@ -1086,6 +1229,8 @@ end
 --- restores the engine. Drops the overlay and the pool so the next play builds fresh.
 function ImpactFrames.bind(deps: Deps?)
 	ImpactFrames.cancel()
+	settleTail(now())
+	releaseTail()
 	table.clear(reducedDims)
 	for source, clone in pooled do
 		pooled[source] = nil

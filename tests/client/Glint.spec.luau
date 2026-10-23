@@ -278,6 +278,31 @@ describe("Glint", function()
 		end)
 	end)
 
+	-- A render stall (the display asleep): no step for 55 s, then one frame whose dt the engine may
+	-- report as one frame or as the whole gap. The glint is timed from its play, so the first step
+	-- after the stall hides it (a render step runs before its frame draws) and lets the loop go.
+	for _, reported in { F, 55 } do
+		it(
+			("hides a glint asked for before a render stall on the first step after it (dt %.3f)"):format(reported),
+			function()
+				atTier("High", function()
+					fresh()
+					Glint.play(Vector3.zero, "Large")
+					frames(1)
+					expect(Glint.activeCount()).toBe(1)
+					clock += 55
+					local fn = stepFn :: (number) -> ()
+					fn(reported)
+					expect(Glint.activeCount()).toBe(0)
+					expect(disconnects).toBe(1)
+					for _, view in Glint.slots() do
+						expect((view.gui :: BillboardGui).Enabled).toBe(false)
+					end
+				end)
+			end
+		)
+	end
+
 	it("caps concurrent glints at the tier's count and reuses the oldest past it", function()
 		for _, tier in { "High", "Low" } do
 			atTier(tier, function()

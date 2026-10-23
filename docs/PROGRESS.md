@@ -294,6 +294,40 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   type messages in src or tools. Studio checks 97 to 106 cover the rest; the dev hooks (D-114) let a Studio session
   land swings and read why one missed even with the display asleep.
 
+## Rerun with the display awake (2026-10-23, 3b51432)
+
+- Pass: the lock turns the body to the target in 0.18 s; the basic chain landed 3 of 3 on a kobold (19 of 20 in the
+  earlier run); guard and dodge reach the server. An Art's final hit drew the impact frames for 2 frames (the Final
+  Dark look) with the sword in the figure at rest size, at most one picture a second over 8 Art hits; FOV 63.1 in the
+  wind-up, 57.5 on the hit, back to 60 by 10 frames later; the riser ends 2 frames before the hit, five impact layers
+  start on the hit frame and impact.Sub 7 frames later (the Final hold, by design); nothing played twice. Frame time
+  p50 16.7 ms, p95 17.6, max 38.3 over 2225 frames (about 60 fps, same as the baseline). Reduce flashing on Art final
+  hits: a soft 30 percent dim, no white, no figures. Items 88, 90, 93(a) and 100 pass; item 86 had no kick and no
+  anticheat line (no Switch prompt sound was heard, so the prompt was not confirmed).
+- Foot slide on real keys: running, the planted foot slides a median 0.07 (left) and 0.17 (right) studs a stance,
+  worst 0.22; sprinting backward, 0.11 and 0.21, worst 0.69 and 0.77.
+- Console: only "rbxassetid://203785492 Asset type does not match" (three times) remains. It loads only while the
+  viewport renders and no instance property holds it (client, server, accessories), so it is likely Studio's own UI
+  or a plugin; item 98 stays open.
+- Not reached: a kill (the player kept dying to the kobold, enemies heal 1 percent a second 8 s after their last hit,
+  and swings landed on a second boar), sheathing after lock-off (a boar's hit kept the sword out), the strafe feet
+  (103), items 99, 101, 102, 85, 93(c) and the parry. These need a quiet, controlled fight.
+- Seen: two kobolds' roars played over each other; with the display asleep the impact overlay stayed up and the lock
+  survived a respawn (fixed below).
+
+## Render stalls and the lock (2026-10-23, D-117 to D-119)
+
+- ImpactFrames drops a picture whose first frame comes more than 3 frames after the hit, and a Heartbeat watchdog
+  ends anything left showing and frees its figures (D-117). A picture ended between frames keeps its flash claim until
+  the frame that shows it gone, so the 3-a-second budget and Reduce flashing hold through stalls (a stall hit storm
+  drew 7 changes a second before this, 6 after).
+- The camera steps by real time with stable springs and never replays a punch or shake after a stall (D-118).
+- The lock ends with the local character on death, despawn and respawn (D-119).
+- Checks: 1821 specs in 108 files, 30 validators, offline lint and the hit matrix pass; no new strict type messages.
+- Open: Choreo still steps on RenderStepped (a stall freezes the clip, visual only); below 20 fps about half the Kill
+  and Final pictures drop; the engine's first dt after a stall and ParticleEmitter bursts on wake are untested
+  (item 107).
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and

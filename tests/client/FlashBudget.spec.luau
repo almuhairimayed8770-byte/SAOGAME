@@ -98,6 +98,26 @@ describe("FlashBudget window", function()
 		end)
 	end)
 
+	it("pins a claim on a frozen frame until settle names its last change", function()
+		fresh(function()
+			local claim = FlashBudget.claim(90, 2, 0.1) :: FlashBudget.Claim
+			expect(claim).never.toBeNil()
+			-- The window stopped rendering with the picture on its last frame: no end is known yet.
+			FlashBudget.hold(claim, math.huge)
+			-- Seconds later it still counts, through the prune of a request that sees it.
+			expect(FlashBudget.request(95, 2)).toBe(false)
+			expect(FlashBudget.used(95)).toBe(2)
+			-- The next rendered frame (at 96) shows it gone: it counts until a window after that.
+			FlashBudget.settle(claim, 96)
+			expect(claim.finish).toBe(96)
+			expect(FlashBudget.used(96 + WINDOW - 1e-3)).toBe(2)
+			expect(FlashBudget.used(96 + WINDOW)).toBe(0)
+			-- A bad time leaves the claim as it is.
+			FlashBudget.settle(claim, 0 / 0)
+			expect(claim.finish).toBe(96)
+		end)
+	end)
+
 	it("raises a claim by the difference only, and refuses a raise past the cap", function()
 		fresh(function()
 			local final = FlashBudget.claim(80, 1, 0.05) :: FlashBudget.Claim

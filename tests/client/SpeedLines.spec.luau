@@ -274,6 +274,30 @@ describe("SpeedLines", function()
 		end)
 	end)
 
+	-- A render stall (the display asleep): no step for 55 s, then one frame whose dt the engine may
+	-- report as one frame or as the whole gap. The lines are timed from their play, so the first
+	-- step after the stall hides them before that frame draws and lets the loop go.
+	for _, reported in { F, 55 } do
+		it(
+			("hides lines asked for before a render stall on the first step after it (dt %.3f)"):format(reported),
+			function()
+				atTier("High", function()
+					fresh(Vector2.new(1920, 1080))
+					SpeedLines.play("Dash")
+					frames(1)
+					expect(SpeedLines.isShowing()).toBe(true)
+					clock += 55
+					local fn = stepFn :: (number) -> ()
+					fn(reported)
+					expect(SpeedLines.isShowing()).toBe(false)
+					expect((SpeedLines.view().gui :: ScreenGui).Enabled).toBe(false)
+					expect(#visibleLines()).toBe(0)
+					expect(disconnects).toBe(1)
+				end)
+			end
+		)
+	end
+
 	it("covers a small share of the screen: thin lines, never a flash", function()
 		atTier("High", function()
 			local shape = Vector2.new(1920, 1080)

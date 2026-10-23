@@ -4,7 +4,9 @@
 	models and root parts, a recording CameraController and OutlineManager, Net.client() recording
 	every TargetRequest, the lock key as a Signal, a fake clock for the TargetRequest pacer, and the
 	local character's root. Covers TargetController.lockOn (the dev aim helper's and any caller's
-	way to lock a named enemy through the F key's path) and the soft assist's candidates (D-112).
+	way to lock a named enemy through the F key's path), the soft assist's candidates (D-112) and
+	the lock across the local character's death and respawn (the tracker's local id and the local
+	record's State).
 ]]
 
 local luau = require("@lune/luau")
@@ -27,6 +29,12 @@ type Fixture = {
 	-- Moves the fake clock past the TargetRequest pacer's gap.
 	wait: () -> (),
 	lockToggle: any,
+	-- The fake EntityTracker: its removed, changed and localChanged signals.
+	tracker: any,
+	-- Sets the tracker's local id and fires localChanged the way EntityTracker does.
+	setLocal: (id: number?) -> (),
+	-- Marks a record's State and fires changed the way EntityTracker does.
+	setState: (record: any, state: string) -> (),
 }
 
 local function load(origin: Vector3, cameraLook: Vector3): Fixture
@@ -36,6 +44,7 @@ local function load(origin: Vector3, cameraLook: Vector3): Fixture
 	local cameraLocks: { any } = {}
 	local outlines: { { model: any, importance: string } } = {}
 	local lockToggle = Signal.new()
+	local localId: number? = nil
 	local root = {
 		Position = origin,
 		IsA = function(_self: any, name: string): boolean
@@ -76,6 +85,15 @@ local function load(origin: Vector3, cameraLook: Vector3): Fixture
 			removed = Signal.new(),
 			changed = Signal.new(),
 			localChanged = Signal.new(),
+			peekLocalId = function(): number?
+				return localId
+			end,
+			isLocal = function(id: number?): boolean
+				return id ~= nil and id == localId
+			end,
+			localRecord = function(): any
+				return if localId ~= nil then records[localId] else nil
+			end,
 		},
 		InputController = { lockToggle = lockToggle },
 		CameraController = {
@@ -146,6 +164,15 @@ local function load(origin: Vector3, cameraLook: Vector3): Fixture
 			clock += TrailingSend.gapOf("TargetRequest") + 0.01
 		end,
 		lockToggle = lockToggle,
+		tracker = fakes.EntityTracker,
+		setLocal = function(id: number?)
+			localId = id
+			fakes.EntityTracker.localChanged:Fire(id)
+		end,
+		setState = function(record: any, state: string)
+			record.state = state
+			fakes.EntityTracker.changed:Fire(record, "State", state)
+		end,
 	}
 end
 
@@ -230,5 +257,101 @@ describe("TargetController.assistCandidates", function()
 		-- Measured from the look it is given, not the camera's.
 		local turned = fixture.controller.assistCandidates(ORIGIN, Vector3.new(1, 0, 0))
 		expect(turned[2].bearing).toBeCloseTo(0, 1e-6)
+	end)
+end)
+
+describe("TargetController across the local character's death and respawn", function()
+	-- A player record for the local character, made the tracker's local id, and a boar locked.
+	local function lockedWhileAlive(): (Fixture, any, any)
+		local fixture = load(ORIGIN, AHEAD)
+		local me = fixture.add(50, "Player", ORIGIN)
+		fixture.setLocal(50)
+		local boar = fixture.add(7, "Enemy", Vector3.new(0, 1, -5))
+		expect(fixture.controller.lockOn(7)).toBe(true)
+		fixture.wait()
+		return fixture, me, boar
+	end
+
+	it("clears the lock when the local character dies: camera, outline, TargetRequest, signal", function()
+		local fixture, me, boar = lockedWhileAlive()
+		fixture.setState(me, "Dead")
+		expect(fixture.controller.current()).toBeNil()
+		expect(fixture.cameraLocks[#fixture.cameraLocks]).toBe(false)
+		expect(fixture.outlines[#fixture.outlines].model).toBe(boar.model)
+		expect(fixture.outlines[#fixture.outlines].importance).toBe("Normal")
+		expect(fixture.requests).toEqual({ { entityId = 7 }, { entityId = nil } })
+		expect(fixture.changes[#fixture.changes]).toBe(false)
+	end)
+
+	it("keeps the lock on another player's death and on the local record's other states", function()
+		local fixture, me, boar = lockedWhileAlive()
+		fixture.setState(fixture.add(60, "Player", Vector3.new(4, 3, 0)), "Dead")
+		fixture.setState(me, "Stagger")
+		fixture.tracker.changed:Fire(me, "Hp", 0)
+		expect(fixture.controller.current()).toBe(boar)
+		expect(fixture.requests).toEqual({ { entityId = 7 } })
+	end)
+
+	it("clears the lock when a respawn replaces the local record (old id to a new id, no nil between)", function()
+		-- The new character's record can arrive before the old one is untracked, so the tracker
+		-- goes from the old id straight to the new one: the measured case, a boar 70 studs off
+		-- (inside the 80-stud break distance) still locked on the new character.
+		local fixture, _, boar = lockedWhileAlive()
+		boar.model.PrimaryPart.Position = Vector3.new(0, 1, -70)
+		fixture.add(51, "Player", ORIGIN)
+		fixture.setLocal(51)
+		expect(fixture.controller.current()).toBeNil()
+		expect(fixture.cameraLocks[#fixture.cameraLocks]).toBe(false)
+		expect(fixture.requests).toEqual({ { entityId = 7 }, { entityId = nil } })
+		expect(fixture.changes[#fixture.changes]).toBe(false)
+	end)
+
+	it("starts the respawned character unlocked when the old rig goes first (old id, nil, new id)", function()
+		local fixture, me = lockedWhileAlive()
+		fixture.setState(me, "Dead")
+		fixture.wait()
+		fixture.setLocal(nil)
+		fixture.add(51, "Player", ORIGIN)
+		fixture.setLocal(51)
+		expect(fixture.controller.current()).toBeNil()
+		expect(fixture.requests).toEqual({ { entityId = 7 }, { entityId = nil } })
+	end)
+
+	it("sends a lock taken before the first record arrives again when it does (nil to an id)", function()
+		local fixture = load(ORIGIN, AHEAD)
+		local boar = fixture.add(7, "Enemy", Vector3.new(0, 1, -5))
+		expect(fixture.controller.lockOn(7)).toBe(true)
+		fixture.wait()
+		fixture.add(50, "Player", ORIGIN)
+		fixture.setLocal(50)
+		expect(fixture.controller.current()).toBe(boar)
+		expect(fixture.requests).toEqual({ { entityId = 7 }, { entityId = 7 } })
+	end)
+
+	it("sends a lock again when the same local id comes back, and keeps it", function()
+		local fixture, _, boar = lockedWhileAlive()
+		fixture.setLocal(50)
+		expect(fixture.controller.current()).toBe(boar)
+		expect(fixture.requests).toEqual({ { entityId = 7 }, { entityId = 7 } })
+	end)
+
+	it("takes no lock while the local character is dead: neither the F key nor lockOn", function()
+		local fixture = load(ORIGIN, AHEAD)
+		local me = fixture.add(50, "Player", ORIGIN)
+		fixture.setLocal(50)
+		fixture.add(7, "Enemy", Vector3.new(0, 1, -5))
+		fixture.setState(me, "Dead")
+		fixture.lockToggle:Fire()
+		expect(fixture.controller.current()).toBeNil()
+		expect(fixture.controller.lockOn(7)).toBe(false)
+		expect(fixture.controller.current()).toBeNil()
+		expect(fixture.requests).toEqual({})
+		expect(fixture.changes).toEqual({})
+		-- Clearing is still allowed, and the respawned character locks again.
+		expect(fixture.controller.lockOn(nil)).toBe(true)
+		fixture.add(51, "Player", ORIGIN)
+		fixture.setLocal(51)
+		fixture.lockToggle:Fire()
+		expect(fixture.controller.current()).toBe(fixture.records[7])
 	end)
 end)

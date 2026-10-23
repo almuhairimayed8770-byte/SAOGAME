@@ -447,6 +447,23 @@ the sweep.
   player from the remote to the boar's HP.
 - Data: `combat.luau` aim; `dev.luau` aim and trace; `sfx.luau` music.stemIds; `world.luau` clouds.textureAsset.
 
+### After the render-stall test (D-117 to D-119)
+
+- Render stalls: RenderStepped can stop while Heartbeat runs (display asleep, a minimised window, a long hitch).
+  Anything that must end on time or free instances rides on Heartbeat or Engine.now, never on the render step alone.
+- ImpactFrames (D-117): each picture has `requestedAt` and `drawn`. A Heartbeat watchdog ends stale or overdue
+  pictures; only the render step finishes one as rendered. Any other finish of a picture on screen pins its flash
+  claim and keeps the render step bound until the next rendered frame settles it. Spec seam: `Deps.onHeartbeat`.
+- FlashBudget: `hold(claim, math.huge)` pins a claim and `settle(claim, at)` sets its end. A pinned claim is never
+  pruned, so it counts in every request and in Reduce flashing's dim count.
+- CameraController (D-118): steps by real time in pieces of at most 1/30 s and snaps past 2 s; punch, kick and shake
+  are timed from the request.
+- TargetController (D-119): tracks the local id (`ownerId`) and the local record's death; uses EntityTracker
+  `peekLocalId`, `isLocal` and `localRecord`.
+- Glint, SlashArc, SpeedLines and Smear are timed from deps.now() at play, so the first render step after a stall
+  hides them. FrameClock, Trails, OutlineManager, SwitchRing, Shatter, Digits, Telegraphs, Hud, Nameplates,
+  SystemLine and SfxPool run on Heartbeat, Engine.now or the wall clock. Choreo still steps on RenderStepped (open).
+
 ## Data tables (src/shared/data)
 
 | File | Holds |

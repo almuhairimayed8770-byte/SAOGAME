@@ -5,8 +5,19 @@
 	pitch and zoom limits, lock-on distances and the shake noise lanes. The punch rows (Final, Kill):
 	a few degrees, an attack inside the tier's hit-stop, a spring that swings back past rest by at
 	most a quarter and is settled when it ends, eased in (never linear), short; the kill pushes in
-	at least as far as the final hit.
+	at least as far as the final hit. The render-stall numbers (stall): the longest piece a frame
+	is cut into keeps every spring's semi-implicit Euler step from ringing or blowing up, and is at
+	least a 60 fps frame; the settle snap comes only once every spring has settled, and never cuts
+	one frame into more than MAX_PIECES pieces.
 ]]
+
+-- A 60 fps frame: a piece shorter than this would cut every ordinary frame up.
+local FRAME_SECONDS = 1 / 60
+-- How far off its target (a fraction of the gap it started with) a spring may still be when a
+-- stall past settleSeconds snaps it there: half a percent, under a pixel at the follow distance.
+local SETTLE_BAND = 0.005
+-- The most spring steps one long frame may take before the settle snap takes over.
+local MAX_PIECES = 120
 
 return function(ctx: any): { string }
 	local problems = {}
@@ -179,6 +190,88 @@ return function(ctx: any): { string }
 			if isNumber(final.degrees) and isNumber(kill.degrees) then
 				check(kill.degrees >= final.degrees, "punch.Kill must push in at least as far as punch.Final")
 			end
+		end
+	end
+
+	-- Render stalls: the springs CameraController steps, with the damping it gives each.
+	local stall = camera.stall
+	check(typeof(stall) == "table", "stall is missing (maxStepSeconds and settleSeconds)")
+	if typeof(stall) == "table" then
+		local complete = true
+		for _, field in { "maxStepSeconds", "settleSeconds" } do
+			local value = stall[field]
+			if typeof(value) ~= "number" or value ~= value or value <= 0 then
+				check(false, ("stall.%s must be a positive number"):format(field))
+				complete = false
+			end
+		end
+		if complete then
+			local Spring = ctx.load("src/shared/util/Spring")
+			local CameraMath = ctx.load("src/client/camera/CameraMath")
+			local springs = {
+				{ name = "follow", lag = camera.follow.lag, damping = camera.follow.damping },
+				{ name = "fov", lag = camera.fov.lag, damping = camera.fov.damping },
+				{ name = "lock yaw", lag = camera.lock.yawLag, damping = camera.follow.damping },
+				{ name = "collision pull-out", lag = camera.collision.pullOutLag, damping = camera.follow.damping },
+			}
+			local piece, settle = stall.maxStepSeconds, stall.settleSeconds
+			check(
+				piece >= FRAME_SECONDS - 1e-9,
+				("stall.maxStepSeconds %.4f s must be at least one 60 fps frame (%.4f s): a shorter piece cuts every frame up"):format(
+					piece,
+					FRAME_SECONDS
+				)
+			)
+			for _, row in springs do
+				if typeof(row.lag) ~= "number" or row.lag <= 0 or typeof(row.damping) ~= "number" then
+					continue
+				end
+				-- One step of Spring.Step on (displacement, velocity / omega) with h = omega x piece:
+				-- [[1 - h^2, h (1 - 2 zeta h)], [-h, 1 - 2 zeta h]]. It neither rings nor blows up
+				-- while both eigenvalues are real and in [0, 1).
+				local h = piece / row.lag
+				local trace = 2 - h * h - 2 * row.damping * h
+				local det = 1 - 2 * row.damping * h
+				local disc = trace * trace - 4 * det
+				local calm = disc >= 0 and det >= 0 and trace >= 0 and (trace + math.sqrt(math.max(disc, 0))) / 2 < 1
+				check(
+					calm,
+					("stall.maxStepSeconds %.4f s is too long a piece for the %s spring (lag %.3f s, damping %.2f): omega x step %.3f makes its step ring or blow up"):format(
+						piece,
+						row.name,
+						row.lag,
+						row.damping,
+						h
+					)
+				)
+				-- Where the spring is when the snap takes over: released from a unit gap at rest.
+				local spring = Spring.new(1, CameraMath.springFromLag(row.lag), row.damping)
+				spring.target = 0
+				local dt = math.min(piece, FRAME_SECONDS)
+				local t, off = 0, 0
+				while t < settle * 2 do
+					spring:Step(dt)
+					t += dt
+					if t >= settle then
+						off = math.max(off, math.abs(spring.position))
+					end
+				end
+				check(
+					off <= SETTLE_BAND,
+					("stall.settleSeconds %.2f s is too soon for the %s spring (lag %.3f s): it is still %.1f%% off its target, past %.1f%%"):format(
+						settle,
+						row.name,
+						row.lag,
+						off * 100,
+						SETTLE_BAND * 100
+					)
+				)
+			end
+			local pieces = math.ceil(settle / piece - 1e-9)
+			check(
+				pieces <= MAX_PIECES,
+				("stall.settleSeconds %.2f s cuts one frame into %d pieces, past %d"):format(settle, pieces, MAX_PIECES)
+			)
 		end
 	end
 

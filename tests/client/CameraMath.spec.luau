@@ -312,7 +312,7 @@ describe("CameraMath punch", function()
 	end)
 end)
 
-describe("camera validator: punch", function()
+describe("camera validator: punch and render stalls", function()
 	local function runValidator(change: ((any) -> ())?): { string }
 		local path = "tools/validators/camera.luau"
 		local chunk = luau.load(
@@ -391,4 +391,74 @@ describe("camera validator: punch", function()
 		expect(mentions(problems, "punch.Kill must be short")).toBe(true)
 		expect(mentions(problems, "punch.Kill must push in at least as far as punch.Final")).toBe(true)
 	end)
+
+	-- The springs CameraController steps, with the damping it gives each.
+	local springs = {
+		{ name = "follow", lag = camera.follow.lag, damping = camera.follow.damping },
+		{ name = "fov", lag = camera.fov.lag, damping = camera.fov.damping },
+		{ name = "lock yaw", lag = camera.lock.yawLag, damping = camera.follow.damping },
+		{ name = "collision pull-out", lag = camera.collision.pullOutLag, damping = camera.follow.damping },
+	}
+
+	it("keeps every camera spring from ringing at the longest piece a stalled frame is cut into", function()
+		for _, row in springs do
+			local spring = Spring.new(1, CameraMath.springFromLag(row.lag), row.damping)
+			spring.target = 0
+			local previous = 1
+			simulate(spring, 3, camera.stall.maxStepSeconds, function(position)
+				expect(position).toBeGreaterThanOrEqual(-1e-9) -- never past its target
+				expect(position).toBeLessThanOrEqual(previous + 1e-9)
+				previous = position
+			end)
+			expect(math.abs(spring.position)).toBeLessThan(0.01)
+		end
+		-- One quarter-second piece throws the stiffest spring past its target: why the gap is cut up.
+		local fov = Spring.new(1, CameraMath.springFromLag(camera.fov.lag), camera.fov.damping)
+		fov.target = 0
+		fov:Step(0.25)
+		expect(fov.position).toBeLessThan(-1)
+	end)
+
+	it("is clean on the real stall numbers and wants both of them", function()
+		expect(mentions(runValidator(), "stall")).toBe(false)
+		local missing = runValidator(function(copy)
+			copy.stall = nil
+		end)
+		expect(mentions(missing, "stall is missing")).toBe(true)
+		local broken = runValidator(function(copy)
+			copy.stall = { maxStepSeconds = 0, settleSeconds = "2" }
+		end)
+		expect(mentions(broken, "stall.maxStepSeconds must be a positive number")).toBe(true)
+		expect(mentions(broken, "stall.settleSeconds must be a positive number")).toBe(true)
+	end)
+
+	it("rejects a piece too long for the stiffest spring and one shorter than a frame", function()
+		local long = runValidator(function(copy)
+			copy.stall = { maxStepSeconds = 0.05, settleSeconds = camera.stall.settleSeconds }
+		end)
+		expect(mentions(long, "stall.maxStepSeconds 0.0500 s is too long a piece for the fov spring")).toBe(true)
+		expect(mentions(long, "for the follow spring")).toBe(false)
+		local short = runValidator(function(copy)
+			copy.stall = { maxStepSeconds = 1 / 120, settleSeconds = camera.stall.settleSeconds }
+		end)
+		expect(mentions(short, "stall.maxStepSeconds 0.0083 s must be at least one 60 fps frame")).toBe(true)
+	end)
+
+	it(
+		"rejects a settle that snaps a spring still on its way and one that cuts a frame into too many pieces",
+		function()
+			local soon = runValidator(function(copy)
+				copy.stall = { maxStepSeconds = camera.stall.maxStepSeconds, settleSeconds = 1.6 }
+			end)
+			-- The 0.25 s pull-out is 1.2% off at 1.6 s; the 0.2 s lock yaw is inside half a percent.
+			expect(mentions(soon, "stall.settleSeconds 1.60 s is too soon for the collision pull-out spring")).toBe(
+				true
+			)
+			expect(mentions(soon, "too soon for the lock yaw spring")).toBe(false)
+			local late = runValidator(function(copy)
+				copy.stall = { maxStepSeconds = camera.stall.maxStepSeconds, settleSeconds = 10 }
+			end)
+			expect(mentions(late, "stall.settleSeconds 10.00 s cuts one frame into 300 pieces")).toBe(true)
+		end
+	)
 end)

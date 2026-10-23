@@ -541,6 +541,104 @@ describe("Impact.hit, after the impact frames", function()
 		Impact.hit(hitInfo(world, { tier = "Final", art = true }))
 		only(world, "glint.play")
 	end)
+
+	it("never holds the accents for impact frames no frame drew (the display asleep)", function()
+		-- The real overlay on a hand clock: Heartbeat runs, RenderStepped does not.
+		local ImpactFrames = Harness.load("src/client/fx/ImpactFrames")
+		local FlashBudget = Harness.load("src/client/fx/FlashBudget")
+		local ImpactSequence = Harness.load("src/client/fx/ImpactSequence")
+		local F = combat.hitStopFrameSeconds
+		local world = newWorld()
+		local heartbeat: ((dt: number) -> ())? = nil
+		local render: ((dt: number) -> ())? = nil
+		local timers: { { at: number, fn: () -> () } } = {}
+		ImpactFrames.bind({
+			now = function(): number
+				return world.clock
+			end,
+			onRender = function(step: (dt: number) -> ())
+				render = step
+				return function()
+					render = nil
+				end
+			end,
+			onHeartbeat = function(step: (dt: number) -> ())
+				heartbeat = step
+				return function()
+					if heartbeat == step then
+						heartbeat = nil
+					end
+				end
+			end,
+			playerGui = function()
+				return Instance.new("Folder")
+			end,
+			camera = function()
+				return nil
+			end,
+			project = function()
+				return nil
+			end,
+			aspect = function()
+				return 16 / 9
+			end,
+			quality = function()
+				return "High"
+			end,
+			random = Random.new(3),
+		})
+		FlashBudget.reset()
+		world.deps.impactFrames = ImpactFrames
+		world.deps.delay = function(seconds: number, fn: () -> ())
+			table.insert(timers, { at = world.clock + seconds, fn = fn })
+		end
+		bind(world)
+		-- One 60 fps engine frame with nothing rendered: the clock, Heartbeat, then due timers.
+		local function beat()
+			world.clock += F
+			if heartbeat ~= nil then
+				(heartbeat :: (dt: number) -> ())(F)
+			end
+			for index = #timers, 1, -1 do
+				local timer = timers[index]
+				if timer.at <= world.clock + 1e-9 then
+					table.remove(timers, index)
+					timer.fn()
+				end
+			end
+		end
+		local ok, err = pcall(function()
+			world.swing = Vector3.new(1, 0, 0)
+			local hitAt = world.clock
+			Impact.hit(hitInfo(world, { tier = "Kill", killed = true }))
+			expect(ImpactFrames.look()).toBe("Black")
+			none(world, "glint.play")
+			local playedAt: number? = nil
+			for _ = 1, 120 do
+				beat()
+				if playedAt == nil and #callsTo(world, "glint.play") > 0 then
+					playedAt = world.clock
+				end
+			end
+			-- Played while the window still slept, as soon as the picture would have ended: never
+			-- held for the whole stall, so never shown after it for a hit long gone.
+			expect(playedAt).never.toBeNil()
+			expect((playedAt :: number) - hitAt).toBeLessThanOrEqual(ImpactSequence.seconds("Kill") + F + 1e-9)
+			expect(ImpactFrames.isShowing()).toBe(false)
+			-- The display wakes: no picture and no second round of accents.
+			if render ~= nil then
+				(render :: (dt: number) -> ())(F)
+			end
+			expect(ImpactFrames.isShowing()).toBe(false)
+			expect(#callsTo(world, "glint.play")).toBe(1)
+			expect(#timers).toBe(0)
+		end)
+		ImpactFrames.bind(nil)
+		FlashBudget.reset()
+		if not ok then
+			error(err, 0)
+		end
+	end)
 end)
 
 describe("Impact swing tangent", function()

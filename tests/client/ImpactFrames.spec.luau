@@ -2,8 +2,8 @@
 -- ImpactFrames built in Lune: the pooled ScreenGui tree, silhouettes cloned flat and stripped,
 -- looks changed by elapsed time through a hand clock and a hand-fired render step, the soft dim
 -- (charged) when the flash budget says no or Reduce flashing is on, hits of one frame joining
--- or taking over the sequence showing, cancel and the clone pool, and each quality tier's part
--- cap.
+-- or taking over the sequence showing, cancel and the clone pool, each quality tier's part cap,
+-- and render stalls (a hand-fired Heartbeat with no render step: the display asleep).
 local ImpactFrames = Harness.load("src/client/fx/ImpactFrames")
 local FlashBudget = Harness.load("src/client/fx/FlashBudget")
 local ImpactSequence = Harness.load("src/client/fx/ImpactSequence")
@@ -25,10 +25,12 @@ type World = {
 	render: ((dt: number) -> ())?,
 	binds: number,
 	unbinds: number,
+	heartbeat: ((dt: number) -> ())?,
 	gui: Folder,
 	camera: Camera,
 	quality: string,
 	hasGui: boolean,
+	renderFails: boolean, -- onRender binds nothing (no engine render step)
 }
 
 local world: World = nil :: any
@@ -44,21 +46,34 @@ local function withWorld(body: () -> (), random: any?)
 		render = nil,
 		binds = 0,
 		unbinds = 0,
+		heartbeat = nil,
 		gui = Instance.new("Folder"),
 		camera = camera,
 		quality = "High",
 		hasGui = true,
+		renderFails = false,
 	}
 	ImpactFrames.bind({
 		now = function()
 			return world.clock
 		end,
 		onRender = function(step: (dt: number) -> ())
+			if world.renderFails then
+				return nil
+			end
 			world.binds += 1
 			world.render = step
 			return function()
 				world.unbinds += 1
 				world.render = nil
+			end
+		end,
+		onHeartbeat = function(step: (dt: number) -> ())
+			world.heartbeat = step
+			return function()
+				if world.heartbeat == step then
+					world.heartbeat = nil
+				end
 			end
 		end,
 		playerGui = function()
@@ -93,6 +108,15 @@ local function advance(seconds: number)
 	local render = world.render
 	if render ~= nil then
 		render(seconds)
+	end
+end
+
+-- Moves the hand clock and fires Heartbeat only: a frame the window did not render.
+local function beat(seconds: number)
+	world.clock += seconds
+	local heartbeat = world.heartbeat
+	if heartbeat ~= nil then
+		heartbeat(seconds)
 	end
 end
 
@@ -641,7 +665,10 @@ describe("ImpactFrames ink strokes", function()
 		withWorld(function()
 			local config = impact.strokes
 			ImpactFrames.play("Kill", { rig("Fighter", Vector3.new(0, 3, 0)) }, { slashDirection = Vector2.new(1, 1) })
-			advance(5.5 * F)
+			-- A first frame inside the staleness limit, then on to the Ink look.
+			advance(F)
+			advance(2 * F)
+			advance(2 * F)
 			local _, _, _, strokes = tree()
 			local shown = visibleStrokes(strokes)
 			expect(#shown >= config.count.min and #shown <= config.count.max).toBe(true)
@@ -673,7 +700,10 @@ describe("ImpactFrames ink strokes", function()
 		withWorld(function()
 			local config = impact.strokes
 			ImpactFrames.play("Kill", {}, { slashDirection = Vector2.new(0, 1), position = Vector3.zero })
-			advance(5.5 * F)
+			-- A first frame inside the staleness limit, then on to the Ink look.
+			advance(F)
+			advance(2 * F)
+			advance(2 * F)
 			local _, _, _, strokes = tree()
 			local shown = visibleStrokes(strokes)
 			table.sort(shown, function(a, b)
@@ -699,7 +729,10 @@ describe("ImpactFrames ink strokes", function()
 	it("falls back to the default angle without a slash direction", function()
 		withWorld(function()
 			ImpactFrames.play("Kill", {})
-			advance(5.5 * F)
+			-- A first frame inside the staleness limit, then on to the Ink look.
+			advance(F)
+			advance(2 * F)
+			advance(2 * F)
 			local _, _, _, strokes = tree()
 			local shown = visibleStrokes(strokes)
 			expect(#shown).toBeGreaterThan(0)
@@ -855,7 +888,8 @@ describe("ImpactFrames flash safety", function()
 			ImpactFrames.play("Kill", {})
 			expect(ImpactFrames.look()).toBe("Reduced")
 			local fadeIn = impact.reduced.fadeInFrames * F
-			advance(fadeIn + ImpactSequence.dimHoldSeconds() + 4 * F)
+			advance(F) -- the first drawn frame, inside the staleness limit
+			advance(fadeIn + ImpactSequence.dimHoldSeconds() + 3 * F)
 			local _, background = tree()
 			local fading = 1 - background.BackgroundTransparency
 			expect(fading).toBeLessThan(impact.reduced.opacity)
@@ -908,7 +942,8 @@ describe("ImpactFrames flash safety", function()
 		withWorld(function()
 			FlashBudget.set(true)
 			ImpactFrames.play("Final", {})
-			advance(impact.reduced.fadeInFrames * F + ImpactSequence.dimHoldSeconds() + 4 * F)
+			advance(F) -- the first drawn frame, inside the staleness limit
+			advance(impact.reduced.fadeInFrames * F + ImpactSequence.dimHoldSeconds() + 3 * F)
 			local _, background = tree()
 			local before = 1 - background.BackgroundTransparency
 			local left = ImpactFrames.remaining()
@@ -924,7 +959,8 @@ describe("ImpactFrames flash safety", function()
 			FlashBudget.set(true)
 			ImpactFrames.play("Final", {})
 			local fadeIn = impact.reduced.fadeInFrames * F
-			advance(fadeIn + ImpactSequence.dimHoldSeconds() + 4 * F)
+			advance(F) -- the first drawn frame, inside the staleness limit
+			advance(fadeIn + ImpactSequence.dimHoldSeconds() + 3 * F)
 			expect(FlashBudget.request(world.clock, impact.flash.maxPerWindow - impact.reduced.flashCost)).toBe(true)
 			local left = ImpactFrames.remaining()
 			expect(ImpactFrames.play("Final", {})).toBeCloseTo(left, 1e-9)
@@ -940,7 +976,8 @@ describe("ImpactFrames flash safety", function()
 		withWorld(function()
 			FlashBudget.set(true)
 			ImpactFrames.play("Final", {})
-			advance((impact.reduced.fadeInFrames + 1) * F)
+			advance(F) -- the first drawn frame, inside the staleness limit
+			advance(impact.reduced.fadeInFrames * F)
 			local _, background = tree()
 			local before = background.BackgroundTransparency
 			expect(1 - before).toBeCloseTo(impact.reduced.opacity, 1e-6)
@@ -1185,6 +1222,7 @@ describe("ImpactFrames quality", function()
 				local _, _, figures = tree()
 				expect(figures.Visible).toBe(true)
 				ImpactFrames.cancel()
+				advance(F) -- the frame that shows it gone (a cut picture counts until then)
 			end
 		end)
 	end)
@@ -1207,5 +1245,400 @@ describe("ImpactFrames quality", function()
 			expect(strokes.Visible).toBe(true)
 			expect(#visibleStrokes(strokes)).toBeGreaterThan(0)
 		end)
+	end)
+end)
+
+-- Rig folders in the viewport that still hold a clone.
+local function filledRigFolders(): number
+	local _, _, figures = tree()
+	local count = 0
+	for _, child in figures:GetChildren() do
+		if child:IsA("Model") and #child:GetChildren() > 0 then
+			count += 1
+		end
+	end
+	return count
+end
+
+describe("ImpactFrames render stalls", function()
+	local LIMIT = impact.overlay.staleFrames * F
+
+	it("drops a sequence whose first drawn frame comes past the staleness limit, never starting it", function()
+		withWorld(function()
+			local model = rig("Fighter", Vector3.new(0, 3, 0))
+			-- A first frame just inside the limit starts the picture.
+			ImpactFrames.play("Kill", { model })
+			advance(LIMIT - 0.25 * F)
+			expect(ImpactFrames.look()).toBe("Black")
+			expect(ImpactFrames.remaining()).toBeCloseTo(ImpactSequence.seconds("Kill"), 1e-9)
+			ImpactFrames.cancel()
+
+			-- One just past it is a hit long gone: the frame shows nothing of it.
+			world.clock += 2
+			ImpactFrames.play("Kill", { model })
+			advance(LIMIT + 0.25 * F)
+			expect(ImpactFrames.isShowing()).toBe(false)
+			expect(ImpactFrames.look()).toBeNil()
+			local gui, background, figures = tree()
+			expect(gui.Enabled).toBe(false)
+			expect(background.BackgroundTransparency).toBeCloseTo(1, 1e-6)
+			expect(figures.Visible).toBe(false)
+			expect(#ImpactFrames.clones()).toBe(0)
+			expect(ImpactFrames.pooledCount()).toBe(FIGURE)
+			expect(world.render).toBeNil()
+			expect(world.heartbeat).toBeNil()
+		end)
+	end)
+
+	it("lets Heartbeat end a picture no frame drew: the overlay off and its figures freed", function()
+		withWorld(function()
+			local a = rig("A", Vector3.new(0, 3, 0))
+			local b = rig("B", Vector3.new(6, 3, 0))
+			ImpactFrames.play("Kill", { a, b })
+			local gui = tree()
+			expect(gui.Enabled).toBe(true)
+			-- Heartbeat runs, RenderStepped does not (the display asleep): inside the limit it waits.
+			beat(LIMIT - 0.5 * F)
+			expect(ImpactFrames.isShowing()).toBe(true)
+			beat(F)
+			expect(ImpactFrames.isShowing()).toBe(false)
+			expect(gui.Enabled).toBe(false)
+			expect(#ImpactFrames.clones()).toBe(0)
+			expect(ImpactFrames.pooledCount()).toBe(2 * FIGURE)
+			expect(filledRigFolders()).toBe(0)
+			expect(world.render).toBeNil()
+			expect(world.heartbeat).toBeNil()
+			expect(ImpactFrames.hiddenSeconds()).toBe(0)
+			-- When rendering comes back, its first frame draws nothing of the old hit.
+			advance(F)
+			expect(ImpactFrames.isShowing()).toBe(false)
+			expect(gui.Enabled).toBe(false)
+		end)
+	end)
+
+	it("lets Heartbeat end a drawn picture past its hit-stop when rendering stops mid-way", function()
+		withWorld(function()
+			ImpactFrames.play("Kill", { rig("Fighter", Vector3.new(0, 3, 0)) })
+			advance(F) -- the first drawn frame: the clock starts
+			expect(ImpactFrames.look()).toBe("Black")
+			local cap = ImpactSequence.capSeconds("Kill")
+			beat(cap - 0.5 * F)
+			expect(ImpactFrames.isShowing()).toBe(true)
+			beat(F)
+			expect(ImpactFrames.isShowing()).toBe(false)
+			expect(tree().Enabled).toBe(false)
+			expect(#ImpactFrames.clones()).toBe(0)
+			expect(ImpactFrames.pooledCount()).toBe(FIGURE)
+			-- Its cost still counts until a window after the overlay went.
+			local endedAt = world.clock
+			world.clock = endedAt + impact.flash.windowSeconds - F
+			expect(FlashBudget.used(world.clock)).toBe(ImpactSequence.flashCost("Kill"))
+		end)
+	end)
+
+	it("keeps a drawn picture Heartbeat ended counted until the frame that shows it gone", function()
+		withWorld(function()
+			-- Drawn, then rendering stops: the last frame shown still holds the Black look, and
+			-- the scene only comes back on the next rendered frame, whenever that is.
+			ImpactFrames.play("Kill", { rig("Fighter", Vector3.new(0, 3, 0)) })
+			advance(F)
+			local cap = ImpactSequence.capSeconds("Kill")
+			for _ = 1, math.ceil(cap / F) + 1 do
+				beat(F)
+			end
+			expect(ImpactFrames.isShowing()).toBe(false)
+			expect(tree().Enabled).toBe(false)
+			expect(#ImpactFrames.clones()).toBe(0)
+			-- Two seconds more with nothing rendered, then the frame that comes back.
+			for _ = 1, 120 do
+				beat(F)
+			end
+			advance(F)
+			local resumedAt = world.clock
+			-- That frame is the picture's last change: its cost counts a window after it.
+			expect(FlashBudget.used(resumedAt + impact.flash.windowSeconds - F)).toBe(ImpactSequence.flashCost("Kill"))
+			expect(FlashBudget.used(resumedAt + impact.flash.windowSeconds + F)).toBe(0)
+			-- The render step that waited for that frame lets go.
+			expect(world.render).toBeNil()
+			expect(world.binds - world.unbinds).toBe(0)
+		end)
+	end)
+
+	it("keeps that picture counted through hits that land while the window still sleeps", function()
+		withWorld(function()
+			ImpactFrames.play("Kill", { rig("A", Vector3.new(0, 3, 0)) })
+			advance(F)
+			-- Heartbeat ends it, then the window sleeps on for two seconds.
+			for _ = 1, math.ceil(ImpactSequence.capSeconds("Kill") / F) + 1 + 120 do
+				beat(F)
+			end
+			-- A hit while it sleeps asks the budget, which still counts the frozen Kill.
+			expect(FlashBudget.used(world.clock)).toBe(ImpactSequence.flashCost("Kill"))
+			ImpactFrames.play("Parry", { rig("B", Vector3.new(4, 3, 0)) })
+			for _ = 1, 90 do
+				beat(F)
+			end
+			advance(F)
+			local resumedAt = world.clock
+			-- The frame that comes back is the Kill's last change; the Parry no frame drew is long gone.
+			expect(FlashBudget.used(resumedAt + impact.flash.windowSeconds - F)).toBe(ImpactSequence.flashCost("Kill"))
+			expect(FlashBudget.used(resumedAt + impact.flash.windowSeconds + F)).toBe(0)
+		end)
+	end)
+
+	it("lets Reduce flashing start no second dim within a window of the frame that shows one gone", function()
+		withWorld(function()
+			FlashBudget.set(true)
+			ImpactFrames.play("Final", {})
+			advance(F) -- drawn
+			-- Heartbeat ends it at its length; the window sleeps two seconds more.
+			for _ = 1, math.ceil(ImpactSequence.dimSeconds() / F) + 120 do
+				beat(F)
+			end
+			expect(ImpactFrames.isShowing()).toBe(false)
+			advance(F) -- the frame that shows it gone
+			world.clock += F
+			-- One dim per window: the one that just left the screen still counts.
+			expect(ImpactFrames.play("Final", {})).toBe(0)
+			expect(ImpactFrames.isShowing()).toBe(false)
+			world.clock += impact.flash.windowSeconds
+			expect(ImpactFrames.play("Final", {})).toBeGreaterThan(0)
+			FlashBudget.set(false)
+		end)
+	end)
+
+	it("keeps a drawn picture cut between frames counted until the frame that shows it gone", function()
+		withWorld(function()
+			ImpactFrames.play("Kill", { rig("A", Vector3.new(0, 3, 0)) })
+			advance(F)
+			beat(F) -- rendering has stopped
+			ImpactFrames.cancel()
+			for _ = 1, 120 do
+				beat(F)
+			end
+			advance(F)
+			local resumedAt = world.clock
+			expect(FlashBudget.used(resumedAt + impact.flash.windowSeconds - F)).toBe(ImpactSequence.flashCost("Kill"))
+			expect(FlashBudget.used(resumedAt + impact.flash.windowSeconds + F)).toBe(0)
+			expect(world.render).toBeNil()
+			expect(world.binds - world.unbinds).toBe(0)
+		end)
+	end)
+
+	it("keeps a taken-over picture counted when the one taking over is never drawn", function()
+		withWorld(function()
+			ImpactFrames.play("Parry", { rig("A", Vector3.new(0, 3, 0)) })
+			advance(F) -- the inverted frame is on screen
+			beat(F) -- rendering stops with it there
+			-- A kill lands while the window sleeps: it takes the claim, and no frame ever draws it.
+			ImpactFrames.play("Kill", { rig("B", Vector3.new(4, 3, 0)) })
+			local cost = FlashBudget.used(world.clock)
+			expect(cost).toBeGreaterThan(0)
+			for _ = 1, 120 do
+				beat(F)
+			end
+			expect(ImpactFrames.isShowing()).toBe(false)
+			advance(F)
+			local resumedAt = world.clock
+			-- The frame that comes back is the parry frame's last change.
+			expect(FlashBudget.used(resumedAt + impact.flash.windowSeconds - F)).toBe(cost)
+			expect(FlashBudget.used(resumedAt + impact.flash.windowSeconds + F)).toBe(0)
+			expect(world.binds - world.unbinds).toBe(0)
+		end)
+	end)
+
+	it("keeps a dim a sequence cut while the window sleeps counted until the frame that shows it gone", function()
+		withWorld(function()
+			-- An earlier flash (its picture long gone) leaves room for a dim but not a kill.
+			local t0 = world.clock
+			FlashBudget.request(t0 - 0.8, 2, 0)
+			ImpactFrames.play("Kill", { rig("A", Vector3.new(0, 3, 0)) })
+			expect(ImpactFrames.look()).toBe("Reduced") -- the dim
+			advance(F)
+			-- Rendering stops while the dim shows; the earlier flash leaves the window.
+			while world.clock < t0 - 0.8 + impact.flash.windowSeconds + F do
+				beat(F)
+			end
+			expect(ImpactFrames.isShowing()).toBe(true)
+			expect(ImpactFrames.play("Final", { rig("B", Vector3.new(4, 3, 0)) })).toBeGreaterThan(0)
+			expect(ImpactFrames.look()).toBe("Dark")
+			for _ = 1, 120 do
+				beat(F)
+			end
+			expect(ImpactFrames.isShowing()).toBe(false)
+			advance(F)
+			local resumedAt = world.clock
+			-- The frozen dim leaves the screen on that frame; the Final no frame drew is long gone.
+			expect(FlashBudget.used(resumedAt + impact.flash.windowSeconds - F)).toBe(impact.reduced.flashCost)
+			expect(FlashBudget.used(resumedAt + impact.flash.windowSeconds + F)).toBe(0)
+			expect(world.binds - world.unbinds).toBe(0)
+		end)
+	end)
+
+	it("settles a waiting claim at once when the next picture gets no render step", function()
+		withWorld(function()
+			ImpactFrames.play("Kill", { rig("A", Vector3.new(0, 3, 0)) })
+			advance(F)
+			beat(F)
+			ImpactFrames.cancel()
+			-- The next picture lets go of the render step that waited, and no new one binds: no
+			-- frame will ever settle the cut kill, so it ends here.
+			world.renderFails = true
+			ImpactFrames.play("Parry", { rig("B", Vector3.new(4, 3, 0)) })
+			expect(world.render).toBeNil()
+			-- Both still count a window on (the kill to a window past the length it asked for)...
+			expect(FlashBudget.used(world.clock + impact.flash.windowSeconds - F)).toBe(
+				ImpactSequence.flashCost("Kill") + ImpactSequence.flashCost("Parry")
+			)
+			-- ...and nothing counts the kill for ever.
+			expect(FlashBudget.used(world.clock + 2 * impact.flash.windowSeconds)).toBe(0)
+			ImpactFrames.cancel()
+		end)
+	end)
+
+	it("hands the frame it waits for to the next picture's own render step", function()
+		withWorld(function()
+			ImpactFrames.play("Kill", { rig("A", Vector3.new(0, 3, 0)) })
+			advance(F)
+			local cap = ImpactSequence.capSeconds("Kill")
+			for _ = 1, math.ceil(cap / F) + 1 + 120 do
+				beat(F)
+			end
+			-- A hit while the window still sleeps, its picture dropped unseen; then another
+			-- that the frame coming back draws.
+			ImpactFrames.play("Parry", { rig("B", Vector3.new(4, 3, 0)) })
+			for _ = 1, 30 do
+				beat(F)
+			end
+			expect(ImpactFrames.isShowing()).toBe(false)
+			world.clock += 2 -- past every window
+			FlashBudget.reset()
+			ImpactFrames.play("Final", { rig("C", Vector3.new(8, 3, 0)) })
+			expect(world.binds - world.unbinds).toBe(1)
+			advance(F)
+			expect(ImpactFrames.look()).toBe("Dark")
+			advance(2 * F)
+			expect(ImpactFrames.isShowing()).toBe(false)
+			expect(world.render).toBeNil()
+			expect(world.binds - world.unbinds).toBe(0)
+		end)
+	end)
+
+	it("replaces an undrawn picture that went stale with the next play, its figures freed", function()
+		withWorld(function()
+			local a = rig("A", Vector3.new(0, 3, 0))
+			local b = rig("B", Vector3.new(6, 3, 0))
+			ImpactFrames.play("Kill", { a })
+			-- The window froze: no frame and no Heartbeat for two seconds.
+			world.clock += 2
+			expect(ImpactFrames.play("Final", { b })).toBeCloseTo(ImpactSequence.seconds("Final"), 1e-9)
+			-- The new hit's own picture from its start, never joined to the stale kill.
+			expect(ImpactFrames.look()).toBe("Dark")
+			expect(#ImpactFrames.clones()).toBe(FIGURE)
+			for _, clone in ImpactFrames.clones() do
+				expectFrame(clone.CFrame, sourceOf(b, clone.Name).CFrame)
+			end
+			expect(ImpactFrames.pooledCount()).toBe(FIGURE)
+			expect(filledRigFolders()).toBe(1)
+			expect(world.binds - world.unbinds).toBe(1)
+			advance(F)
+			expect(ImpactFrames.look()).toBe("Dark")
+			advance(2 * F)
+			expect(ImpactFrames.isShowing()).toBe(false)
+		end)
+	end)
+
+	it("treats the soft dim the same: dropped when its first frame is late, ended by Heartbeat", function()
+		withWorld(function()
+			FlashBudget.set(true)
+			local gap = 2 -- seconds between plays, past Reduce flashing's window
+			-- First drawn frame past the limit: dropped.
+			ImpactFrames.play("Final", {})
+			expect(ImpactFrames.look()).toBe("Reduced")
+			advance(LIMIT + 0.25 * F)
+			expect(ImpactFrames.isShowing()).toBe(false)
+			expect(tree().Enabled).toBe(false)
+			-- Never drawn while Heartbeat runs: ended past the limit.
+			world.clock += gap
+			ImpactFrames.play("Final", {})
+			beat(LIMIT - 0.5 * F)
+			expect(ImpactFrames.look()).toBe("Reduced")
+			beat(F)
+			expect(ImpactFrames.isShowing()).toBe(false)
+			expect(tree().Enabled).toBe(false)
+			-- Drawn, then rendering stops: ended once it has run its length.
+			world.clock += gap
+			ImpactFrames.play("Final", {})
+			advance(F)
+			expect(ImpactFrames.look()).toBe("Reduced")
+			beat(ImpactSequence.dimSeconds() - 1.5 * F)
+			expect(ImpactFrames.isShowing()).toBe(true)
+			beat(F)
+			expect(ImpactFrames.isShowing()).toBe(false)
+			expect(tree().Enabled).toBe(false)
+			FlashBudget.set(false)
+		end)
+	end)
+
+	it("keeps the display-asleep minute clean: never up past the limit, no figures piling up", function()
+		withWorld(function()
+			-- Measured in Play: with the display asleep RenderStepped ran 0 times a second and
+			-- Heartbeat 60, for 55 s, while hits kept landing.
+			local attacker = rig("Attacker", Vector3.new(0, 3, 4))
+			local gui: ScreenGui? = nil
+			local longestUp = 0
+			local mostClones = 0
+			local mostFolders = 0
+			for second = 1, 55 do
+				local target = rig("T" .. second, Vector3.new(second, 3, 0))
+				ImpactFrames.play(if second % 2 == 0 then "Kill" else "Final", { attacker, target })
+				gui = gui or tree()
+				local up = 0
+				for _ = 1, 60 do
+					beat(F)
+					if (gui :: ScreenGui).Enabled then
+						up += F
+					end
+					mostClones = math.max(mostClones, #ImpactFrames.clones())
+					mostFolders = math.max(mostFolders, filledRigFolders())
+				end
+				longestUp = math.max(longestUp, up)
+			end
+			expect(longestUp).toBeLessThanOrEqual(LIMIT + 1e-9)
+			expect(mostClones).toBeLessThanOrEqual(2 * FIGURE)
+			expect(mostFolders).toBeLessThanOrEqual(2)
+			-- The display wakes: its first frame draws nothing of any hit from the minute asleep.
+			advance(F)
+			expect(ImpactFrames.isShowing()).toBe(false)
+			expect((gui :: ScreenGui).Enabled).toBe(false)
+			expect(#ImpactFrames.clones()).toBe(0)
+		end)
+	end)
+
+	it("never cuts a picture that renders: every look drawn at 60 and at 30 fps with Heartbeat between", function()
+		for _, every in { 1, 2 } do
+			withWorld(function()
+				ImpactFrames.play("Kill", { rig("Fighter", Vector3.new(0, 3, 0)) })
+				local seen = {}
+				for tick = 1, 16 do
+					-- One 60 fps engine frame: the render step on the frames that draw, then Heartbeat.
+					world.clock += F
+					local render = world.render
+					if tick % every == 0 and render ~= nil then
+						render(every * F)
+						local look = ImpactFrames.look()
+						if look ~= nil and seen[#seen] ~= look then
+							table.insert(seen, look)
+						end
+					end
+					local heartbeat = world.heartbeat
+					if heartbeat ~= nil then
+						heartbeat(F)
+					end
+				end
+				expect(seen).toEqual({ "Black", "Dark", "Ink" })
+				expect(ImpactFrames.isShowing()).toBe(false)
+			end)
+		end
 	end)
 end)

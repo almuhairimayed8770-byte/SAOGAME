@@ -270,6 +270,16 @@ local function loadTargetController(link: Link): (any, any)
 			removed = Signal.new(),
 			changed = Signal.new(),
 			localChanged = Signal.new(),
+			-- No local record until the spec fires localChanged.
+			peekLocalId = function(): number?
+				return nil
+			end,
+			isLocal = function(_id: number?): boolean
+				return false
+			end,
+			localRecord = function(): any
+				return nil
+			end,
 		},
 		InputController = { lockToggle = Signal.new() },
 		CameraController = { setLockTarget = function() end },

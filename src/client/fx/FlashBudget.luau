@@ -16,7 +16,9 @@
 
 	`claim` is `request` that hands back the recorded entry, so the overlay can `hold` it while it
 	shows and `raise` it when a bigger sequence replaces the one showing (only the difference is
-	asked for).
+	asked for). A picture left on screen while nothing renders has no known end: the overlay holds
+	its claim at math.huge (never pruned, so every request meanwhile counts it) and `settle`s it at
+	the frame that shows it gone.
 
 	Every caller passes times from the same clock (Engine.now(), the fx package clock); specs pass
 	their own numbers.
@@ -146,9 +148,18 @@ function FlashBudget.raise(claim: Claim, now: number, cost: number): boolean
 	return true
 end
 
---- The claim's picture still changes at `at`: it counts until one window after that.
+--- The claim's picture still changes at `at`: it counts until one window after that. A picture
+--- left on a frozen frame (nothing renders) is held at math.huge until `settle` says when it went.
 function FlashBudget.hold(claim: Claim, at: number)
 	if validTime(at) and at > claim.finish then
+		claim.finish = at
+	end
+end
+
+--- The claim's picture made its last change at `at` (one held at math.huge while it sat on a
+--- frozen frame): it counts until one window after that.
+function FlashBudget.settle(claim: Claim, at: number)
+	if validTime(at) then
 		claim.finish = at
 	end
 end

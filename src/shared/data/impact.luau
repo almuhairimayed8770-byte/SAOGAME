@@ -136,6 +136,14 @@ local Impact = {
 		displayOrder = 30,
 		renderStepName = "SkyspireImpactFrames", -- bound after the camera's step
 		zIndex = { background = 1, figures = 2, strokes = 3 },
+		-- Frames (60 fps) a picture may wait for its first drawn frame after it was asked for.
+		-- One that waits longer is dropped, never started: a window that stopped rendering (a
+		-- display asleep, a minimised window, a long hitch) never brings back a hit long gone,
+		-- and a Heartbeat watchdog ends it and frees its figures while nothing renders. 3 is
+		-- the shortest hit-stop any sequence rides on (the parry's Normal tier): a first frame
+		-- later than that is drawn after the pose it freezes has let go. A 30 fps first frame
+		-- comes at most 2 frames after the hit, so it still plays, with a frame to spare.
+		staleFrames = 3,
 	},
 
 	-- The ViewportFrame lights every clone flat: white ambient, no directional light, so the

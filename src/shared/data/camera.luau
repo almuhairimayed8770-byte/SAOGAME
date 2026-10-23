@@ -142,6 +142,24 @@ local Camera = {
 		blendOut = 0.6, -- seconds to ease from a scripted shot back to the follow
 	},
 
+	-- Render stalls (a display asleep, a minimised window, a long hitch): RenderStepped stops
+	-- while the game goes on, then one frame comes back whose dt the engine may report as one
+	-- frame or as the whole gap. The camera steps by the real time since its last frame. The
+	-- punch, the kicks and the shake run from when they were asked for, so one asked for before
+	-- the stall is over when the frame comes back, never replayed. The springs integrate the gap
+	-- in pieces of at most maxStepSeconds: their semi-implicit Euler step swings past the target
+	-- once omega x step passes 0.5 at critical damping, and blows up past 2 sqrt 2 - 2 (about
+	-- 0.83). The stiffest spring (the FOV, lag 0.08 s) starts swinging past 0.04 s, so a 30 fps
+	-- frame is still one calm piece. A gap past settleSeconds snaps them where they would have
+	-- settled (by then the slowest, the 0.25 s pull-out, is within half a percent of its
+	-- target), so a nudge from before the stall never plays out, and a frame never takes more
+	-- than settleSeconds / maxStepSeconds pieces (60 here). tools/validators/camera.luau holds
+	-- both to these limits (and the pieces to at most 120).
+	stall = {
+		maxStepSeconds = 1 / 30,
+		settleSeconds = 2,
+	},
+
 	epsilon = 0.000001, -- vector lengths below this count as zero
 }
 

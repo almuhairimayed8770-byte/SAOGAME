@@ -341,6 +341,35 @@ describe("SlashArc crescent", function()
 		end)
 	end)
 
+	-- A render stall (the display asleep): no step for 55 s, then one frame whose dt the engine may
+	-- report as one frame or as the whole gap. The crescent is timed from its play, so the first
+	-- step after the stall turns its beams off before that frame draws and lets the loop go.
+	for _, reported in { F, 55 } do
+		it(
+			("turns off a crescent asked for before a render stall on the first step after it (dt %.3f)"):format(
+				reported
+			),
+			function()
+				atTier("High", function()
+					fresh()
+					SlashArc.play(HIT, TANGENT, NORMAL, "TrailJade", "Large")
+					local view = activeArcs()[1]
+					frames(1)
+					expect(SlashArc.activeCount()).toBe(1)
+					clock += 55
+					local fn = stepFn :: (number) -> ()
+					fn(reported)
+					expect(SlashArc.activeCount()).toBe(0)
+					expect(#activeLines()).toBe(0)
+					for _, beam in { view.outer[1], view.outer[2], view.inner[1], view.inner[2] } do
+						expect(beam.Enabled).toBe(false)
+					end
+					expect(disconnects).toBe(1)
+				end)
+			end
+		)
+	end
+
 	it("shows the wipe at its snapped step: at most half a step off, and every wipe frame moves it", function()
 		atTier("High", function()
 			local halfStep = (1 + arc.wipeSoftness) / arc.wipeSteps / 2

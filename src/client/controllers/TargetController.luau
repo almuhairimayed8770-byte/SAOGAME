@@ -3,9 +3,12 @@
 	TargetController: lock-on (section 6: F / R3). A press locks the best enemy inside the camera
 	data's range and cone (nearest, with off-center angle priced in studs); repeated presses cycle
 	down the ranked list and past the last one unlock. The lock clears when the target dies, leaves
-	or walks beyond the break distance, and when the player's own character goes. The camera
-	frames both fighters and the outline manager marks the target. Ranking lives in TargetRanking
-	(tested).
+	or walks beyond the break distance, and it ends with the player's own character: when its
+	record goes Dead, when its rig goes (the tracker's local id to nil) and when a respawn replaces
+	it (the local id to a different one, which can come before the old rig is gone), so a
+	respawned player always starts unlocked. No lock is taken while the local record is Dead. The
+	camera frames both fighters and the outline manager marks the target. Ranking lives in
+	TargetRanking (tested).
 
 	Every lock change goes to the server as a TargetRequest through TrailingSend: never faster than
 	the remote's rate limit, and the last change always arrives, so mashing the key cannot leave the
@@ -45,6 +48,8 @@ TargetController.targetChanged = Signal.new() :: Signal.Signal<any>
 local target: any = nil
 local sender: TrailingSend.TrailingSend? = nil -- TargetRequest, paced to its rate limit
 local started = false
+-- The local record's id the lock belongs to (EntityTracker's local id when last told).
+local ownerId: number? = nil
 
 local function toTable(v: Vector3): { number }
 	return { v.X, v.Y, v.Z }
@@ -64,6 +69,12 @@ end
 local function rankingParams(): TargetRanking.Params
 	local lock = CameraData.lock
 	return { range = lock.range, coneDegrees = lock.coneDegrees, angleWeightStuds = lock.angleWeightStuds }
+end
+
+-- True while the local character's record is Dead: it takes no lock until the respawn.
+local function localDead(): boolean
+	local record = EntityTracker.localRecord()
+	return record ~= nil and record.state == "Dead"
 end
 
 -- A record the lock may take: a living enemy with a position.
@@ -136,8 +147,12 @@ local function setTarget(record: any)
 	TargetController.targetChanged:Fire(record)
 end
 
---- The lock key: best candidate, then the next one down, then unlock.
+--- The lock key: best candidate, then the next one down, then unlock. Does nothing while the
+--- local character is dead.
 function TargetController.toggle()
+	if localDead() then
+		return
+	end
 	local ranked = TargetRanking.rank(TargetController.candidates(), rankingParams())
 	local ids = {}
 	for _, candidate in ranked do
@@ -154,12 +169,15 @@ end
 
 --- Locks the enemy `entityId` through the lock key's path (camera, outline, TargetRequest through
 --- its pacer, targetChanged); nil clears. Returns false, and keeps the lock it had, when the id is
---- not a living enemy with a position within the lock range of the player. The camera's cone does
---- not apply: the caller named the enemy.
+--- not a living enemy with a position within the lock range of the player, or the local character
+--- is dead. The camera's cone does not apply: the caller named the enemy.
 function TargetController.lockOn(entityId: number?): boolean
 	if entityId == nil then
 		setTarget(nil)
 		return true
+	end
+	if localDead() then
+		return false
 	end
 	local record = EntityTracker.get(entityId)
 	local position = lockablePosition(record)
@@ -213,16 +231,25 @@ function TargetController.start()
 			setTarget(nil)
 		end
 	end)
+	-- The target's death, and the local character's: the lock ends with either.
 	EntityTracker.changed:Connect(function(record: any, attribute: string, value: any)
-		if record == target and attribute == "State" and value == "Dead" then
+		if attribute ~= "State" or value ~= "Dead" then
+			return
+		end
+		if record == target or EntityTracker.isLocal(record.id) then
 			setTarget(nil)
 		end
 	end)
 	-- A respawn gives the player a new server record, and it starts with no lock. The old
-	-- character's lock ends with it; a lock the client holds when the new record arrives (taken
-	-- before the server registered it) is sent again, so the server never misses it.
+	-- character's lock ends with it, whether its rig goes first (old id, nil, new id) or the new
+	-- record arrives first (old id straight to the new one). A lock the client holds when the
+	-- first record arrives (nil to an id: taken before the server registered the character) or
+	-- when the same id comes back is sent again, so the server never misses it.
+	ownerId = EntityTracker.peekLocalId()
 	EntityTracker.localChanged:Connect(function(id: number?)
-		if id == nil then
+		local previous = ownerId
+		ownerId = id
+		if id == nil or (previous ~= nil and id ~= previous) then
 			setTarget(nil)
 		elseif target ~= nil and sender ~= nil then
 			sender:set(target.id)

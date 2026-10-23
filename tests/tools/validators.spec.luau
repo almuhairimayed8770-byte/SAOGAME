@@ -1354,6 +1354,26 @@ describe("impact validator", function()
 			"impact: quality.Medium must draw the silhouettes: an impact frame without its figures is a bare blink",
 		})
 	end)
+
+	it("keeps the staleness limit between a 30 fps first frame and the shortest hit-stop", function()
+		-- Too short: a 30 fps first frame (2 frames after the hit) would be dropped.
+		expect(runImpact(function(impact)
+			impact.overlay.staleFrames = 1
+		end)).toEqual({
+			"impact: overlay.staleFrames 1 must be at least 2: a 30 fps first frame comes 2 frames after the hit and must still play",
+		})
+		-- Too long: the parry (Normal tier, 3 frames) could start after its hit-stop let go.
+		expect(runImpact(function(impact)
+			impact.overlay.staleFrames = 4
+		end)).toEqual({
+			"impact: overlay.staleFrames 4 is past sequences.Parry's Normal hit-stop (3 frames): it could start after the pose it freezes let go",
+		})
+		expect(runImpact(function(impact)
+			impact.overlay.staleFrames = nil
+		end)).toEqual({
+			"impact: overlay.staleFrames nil must be at least 2: a 30 fps first frame comes 2 frames after the hit and must still play",
+		})
+	end)
 end)
 
 describe("accents validator: the swing memory and the crescent's tilt", function()

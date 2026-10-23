@@ -9,6 +9,14 @@
 	is summed-sine noise with a fast exponential decay; lock-on frames both fighters from behind
 	the player; Duel and Raid presets change the orbit; a spherecast from the focus pulls the
 	camera in front of walls. Every number is in camera.luau; the math is in CameraMath (tested).
+
+	Render stalls (a display asleep, a minimised window, a long hitch: RenderStepped stops while the
+	game goes on): every step runs on the real time since the last one, whatever dt the engine
+	reports for the frame that comes back. The punch, the kicks and the shake are timed from when
+	they were asked for, so one asked for before a stall is over by the frame after it, never
+	replayed. The springs integrate the gap in pieces of at most camera.stall.maxStepSeconds (a
+	semi-implicit Euler step thrown by a long one would fling the camera), and past
+	camera.stall.settleSeconds they snap where they would have settled, a nudge's push included.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -50,19 +58,67 @@ local distanceSpring = Spring.new(
 	CameraMath.springFromLag(CameraData.collision.pullOutLag),
 	CameraData.follow.damping
 )
-local fovKickAmount = 0
--- The punch showing: its numbers, seconds since it started, the offset it started from (a punch
--- over a punch eases on from where the first one is) and the offset it shows now.
+-- The kick and the shake: their size when last asked for and when (os.clock); each decays from there.
+local kickPeak = 0
+local kickAt = 0
+local shakePeak = 0
+local shakeAt = 0
+-- The punch showing: its numbers, when it was asked for and the offset it started from (a punch
+-- over a punch eases on from where the first one is).
 local punchParams: CameraMath.PunchParams? = nil
-local punchElapsed = 0
+local punchAt = 0
 local punchFrom = 0
-local punchOffset = 0
-local shakeEnergy = 0
 local shakeTime = 0
+local lastStepAt: number? = nil -- os.clock of the last render step
 local scripted: Scripted? = nil
 local blendBack: BlendBack? = nil
 local raycastParams: RaycastParams? = nil
 local started = false
+
+-- The clock every transient is timed on (monotonic seconds).
+local function now(): number
+	return os.clock()
+end
+
+-- The FOV kick at `at`: its size when asked for, decayed since (never linearly).
+local function kickValue(at: number): number
+	return CameraMath.decay(kickPeak, CameraData.fov.kickDecay, math.max(at - kickAt, 0))
+end
+
+-- The shake energy at `at`: its size when asked for, decayed since; zero under the cutoff.
+local function shakeValue(at: number): number
+	local energy = CameraMath.decay(shakePeak, CameraData.shake.decay, math.max(at - shakeAt, 0))
+	return if energy < CameraData.shake.cutoff then 0 else energy
+end
+
+-- The punch's FOV offset at `at` (0 with none showing); a punch that has settled is let go.
+local function punchValue(at: number): number
+	local params = punchParams
+	if params == nil then
+		return 0
+	end
+	local offset, done = CameraMath.punchOffset(at - punchAt, params, punchFrom)
+	if done then
+		punchParams = nil
+		return 0
+	end
+	return offset
+end
+
+-- Steps a spring over `span` seconds in pieces of at most camera.stall.maxStepSeconds, or snaps it
+-- to its target when `settle` (a stall past camera.stall.settleSeconds). Returns its position.
+local function advanceSpring<T>(spring: Spring.Spring<T>, span: number, settle: boolean): T
+	if settle then
+		spring:Snap(spring.target)
+		return spring.position
+	end
+	local pieces = math.max(1, math.ceil(span / CameraData.stall.maxStepSeconds))
+	local piece = span / pieces
+	for _ = 1, pieces do
+		spring:Step(piece)
+	end
+	return spring.position
+end
 
 local function toVector(v: { number }): Vector3
 	local x, y, z = table.unpack(v)
@@ -126,6 +182,13 @@ local function stepScripted(dt: number, camera: Camera)
 end
 
 local function step(dt: number)
+	-- The real time since the last frame: the engine's dt, or the clock's gap when the engine
+	-- reports less (the first frame after a stall may say one frame).
+	local at = now()
+	local gap = if lastStepAt ~= nil then at - (lastStepAt :: number) else dt
+	lastStepAt = at
+	local span = math.max(dt, gap, 0)
+	local settle = span > CameraData.stall.settleSeconds
 	local camera = workspace.CurrentCamera
 	if camera == nil then
 		return
@@ -136,23 +199,12 @@ local function step(dt: number)
 	UserInputService.MouseBehavior = if mouseCaptured then Enum.MouseBehavior.LockCenter else Enum.MouseBehavior.Default
 
 	-- FOV: rest plus a decaying kick, on its own spring.
-	fovKickAmount = CameraMath.decay(fovKickAmount, CameraData.fov.kickDecay, dt)
-	fovSpring.target = CameraData.fov.rest + fovKickAmount + (if mobile then CameraData.mobile.fovAdd else 0)
+	fovSpring.target = CameraData.fov.rest + kickValue(at) + (if mobile then CameraData.mobile.fovAdd else 0)
 	-- The punch rides on top of the spring: the spring would smooth a 3-frame push away.
-	local params = punchParams
-	if params ~= nil then
-		punchElapsed += dt
-		local offset, done = CameraMath.punchOffset(punchElapsed, params, punchFrom)
-		punchOffset = offset
-		if done then
-			punchParams = nil
-			punchOffset = 0
-		end
-	end
-	camera.FieldOfView = fovSpring:Step(dt) + punchOffset
+	camera.FieldOfView = advanceSpring(fovSpring, span, settle) + punchValue(at)
 
 	if scripted ~= nil then
-		stepScripted(dt, camera)
+		stepScripted(span, camera)
 		return
 	end
 
@@ -161,10 +213,10 @@ local function step(dt: number)
 		return
 	end
 
-	-- Right stick: integrate the held deflection.
-	if gamepadLook.Magnitude > 0 then
+	-- Right stick: integrate the held deflection over the frame (never over a stall).
+	if gamepadLook.Magnitude > 0 and not settle then
 		local perSecond = CameraData.input.gamepadDegreesPerSecond
-		applyLook(gamepadLook.X * dt, -gamepadLook.Y * dt, perSecond)
+		applyLook(gamepadLook.X * span, -gamepadLook.Y * span, perSecond)
 	end
 
 	local orbit = CameraData.orbit[mode]
@@ -178,7 +230,7 @@ local function step(dt: number)
 		local lock = CameraData.lock
 		local frame = CameraMath.lockFrame(toTable(root.Position), toTable(targetRoot.Position), lock)
 		yawSpring.target = yawSpring.position + CameraMath.shortestDelta(yawSpring.position, frame.yaw)
-		yaw = CameraMath.wrapDegrees(yawSpring:Step(dt))
+		yaw = CameraMath.wrapDegrees(advanceSpring(yawSpring, span, settle))
 		lookAt = toVector(CameraMath.raise(frame.focus, CameraData.follow.focusHeight))
 		distance = frame.distance
 		height, side = lock.height, lock.side
@@ -209,7 +261,7 @@ local function step(dt: number)
 			distanceSpring:Snap(allowed)
 		else
 			distanceSpring.target = allowed
-			distanceSpring:Step(dt)
+			advanceSpring(distanceSpring, span, settle)
 		end
 		direction = direction.Unit * distanceSpring.position
 	end
@@ -225,14 +277,11 @@ local function step(dt: number)
 		follow:Snap(desired)
 	end
 	follow.target = desired
-	local position = follow:Step(dt)
+	local position = advanceSpring(follow, span, settle)
 
 	-- Shake: noise scaled by a decaying energy, in the camera's own axes.
-	shakeEnergy = CameraMath.decay(shakeEnergy, CameraData.shake.decay, dt)
-	if shakeEnergy < CameraData.shake.cutoff then
-		shakeEnergy = 0
-	end
-	shakeTime += dt
+	local shakeEnergy = shakeValue(at)
+	shakeTime += span
 	local shakeVector = Vector3.zero
 	if shakeEnergy > 0 then
 		local sx, sy, sz = table.unpack(
@@ -246,7 +295,7 @@ local function step(dt: number)
 	local back = blendBack
 	if back ~= nil then
 		local alpha = CameraMath.easeBlend(back.elapsed, CameraData.scripted.blendOut)
-		back.elapsed += dt
+		back.elapsed += span
 		followCFrame = back.from:Lerp(followCFrame, alpha)
 		if alpha >= 1 then
 			blendBack = nil
@@ -271,28 +320,33 @@ function CameraController.nudge(toward: Vector3, studs: number)
 	spring:Impulse(direction.Unit * CameraMath.impulseForDisplacement(studs, followStiffness))
 end
 
---- Starts (or raises) a shake at the tier's amplitude; it decays on its own.
+--- Starts (or raises) a shake at the tier's amplitude; it decays on its own from now.
 function CameraController.shake(tier: string)
 	local amplitude = CameraData.shake.amplitude[tier] or CameraData.shake.amplitude.Normal
-	shakeEnergy = math.max(shakeEnergy, amplitude)
+	local at = now()
+	shakePeak = math.max(shakeValue(at), amplitude)
+	shakeAt = at
 end
 
---- Kicks the FOV by the Art or dash amount; the kick decays back to rest.
+--- Kicks the FOV by the Art or dash amount; the kick decays back to rest from now.
 function CameraController.fovKick(kind: KickKind?)
 	local amount = if kind == "Dash" then CameraData.fov.dashKick else CameraData.fov.artKick
-	fovKickAmount = math.max(fovKickAmount, amount)
+	local at = now()
+	kickPeak = math.max(kickValue(at), amount)
+	kickAt = at
 end
 
 --- Pushes the FOV in by camera.luau punch[kind] ("Final" | "Kill"), eased in and sprung back; a
---- punch over a punch starts from the offset showing, so the FOV never jumps.
+--- punch over a punch starts from the offset showing now, so the FOV never jumps.
 function CameraController.punch(kind: string)
 	local params = CameraData.punch[kind]
 	if params == nil then
 		return
 	end
-	punchFrom = punchOffset
+	local at = now()
+	punchFrom = punchValue(at)
 	punchParams = params
-	punchElapsed = 0
+	punchAt = at
 end
 
 --- Locks the framing on a model (nil clears it).

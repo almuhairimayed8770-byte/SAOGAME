@@ -550,3 +550,19 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
     - Server, trace off: `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("trace", {on = false}))`
     Pass: every client swing at a faced enemy reports hits > 0 and no rejection, and each server window prints one
     [DevCombat] line. Outside the Playground (no DevCapture attribute) neither BindableFunction exists.
+
+## P. Render stalls and the lock (D-117 to D-119)
+
+107. [ ] **Render stalls and the lock across respawn.**
+    (a) Display asleep: fight a boar and land a hit with impact frames, let the PC display sleep for about 55 s, then
+    wake it. Pass: during the sleep (Client command bar) PlayerGui.SkyspireImpact.Enabled is false and no Rig folder
+    under its ViewportFrame holds parts; nothing flashes on wake.
+    (b) Minimise and restore Studio right after a hit with impact frames, then drag the window during a hit to cause a
+    hitch. Pass: no stale black or white frame on restore; the camera neither jumps nor replays a shake or punch.
+    (c) Print the first RenderStepped dt after a 5 s stall (a temporary LocalScript). Note in PROGRESS whether the
+    engine reports one frame or the whole gap; the specs cover both.
+    (d) Lock a boar, die, respawn. Pass: you respawn unlocked, swings do not aim at the old boar, and F locks again
+    once the character is back. Note how long F does nothing after the respawn.
+    (e) With the display asleep, let hits land (a kill shatter and parry sparks if possible), then wake it. Pass: no
+    burst of sparks or shards plays on wake (ParticleEmitter:Emit during a stall is untested).
+    (f) Reduce flashing on (SettingReduceFlashing true): with sleeps or hitches between hits, at most one dim a second.

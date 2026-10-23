@@ -269,4 +269,23 @@ describe("EntityTracker", function()
 		env.characterAdded:Fire(me)
 		expect(EntityTracker.peekLocalId()).toBe(9)
 	end)
+
+	it("goes from the old local id straight to the new one when the respawned rig arrives first", function()
+		-- A respawn tags the new character before the old rig is untracked: localChanged never
+		-- fires nil between them (TargetController ends the lock on the id change, D-119).
+		local old = entityModel({ EntityId = 4, EntityKind = "Player", Rig = "PlayerR15" })
+		local env = fresh({ old }, old)
+		EntityTracker.wire()
+		expect(EntityTracker.peekLocalId()).toBe(4)
+		local localIds = {}
+		EntityTracker.localChanged:Connect(function(id)
+			table.insert(localIds, { id = id })
+		end)
+		local new = entityModel({ EntityId = 5, EntityKind = "Player", Rig = "PlayerR15" })
+		env.localCharacter = new
+		env.added:Fire(new)
+		env.removed:Fire(old)
+		expect(localIds).toEqual({ { id = 5 } })
+		expect(EntityTracker.peekLocalId()).toBe(5)
+	end)
 end)

@@ -21,6 +21,8 @@
 	  least 1 dims a window, costing fewer flashes than flash.maxPerWindow.
 	- The overlay sits above the HUD, the silhouette and stroke numbers are sane, and every fx
 	  quality tier has a row that draws the figures with a whole part cap of at least 1.
+	- The overlay's staleness limit (overlay.staleFrames) lets a 30 fps first frame play (at least
+	  MIN_STALE_FRAMES) and is no longer than any sequence's hit-stop.
 ]]
 
 local roblox = require("@lune/roblox")
@@ -40,6 +42,9 @@ local DIM_MAX_OPACITY = 0.4
 local DIM_MIN_FADE_IN_FRAMES = 2
 -- A look with nothing drawn on its field may be no brighter than this (the black beat is ink).
 local PLAIN_LOOK_MAX_LUMINANCE = 0.2
+-- A 30 fps first frame comes at most this many 60 fps frames after the hit: the staleness limit
+-- must still let it play.
+local MIN_STALE_FRAMES = 2
 
 local function isWhole(value: any): boolean
 	return typeof(value) == "number" and value == value and value % 1 == 0
@@ -290,6 +295,35 @@ return function(ctx: Context): { string }
 		overlay.zIndex.background < overlay.zIndex.figures and overlay.zIndex.figures <= overlay.zIndex.strokes,
 		"overlay.zIndex must stack background < figures <= strokes"
 	)
+	-- The staleness limit: a 30 fps first frame still plays, and no sequence starts after the
+	-- hit-stop that freezes its pose.
+	local stale = overlay.staleFrames
+	local staleOk = typeof(stale) == "number" and stale == stale and stale >= MIN_STALE_FRAMES
+	check(
+		staleOk,
+		("overlay.staleFrames %s must be at least %d: a 30 fps first frame comes %d frames after the hit and must still play"):format(
+			tostring(stale),
+			MIN_STALE_FRAMES,
+			MIN_STALE_FRAMES
+		)
+	)
+	if staleOk then
+		for _, name in sortedKeys(impact.sequences) do
+			local sequence = impact.sequences[name]
+			local tierFrames = combat.hitStopFrames[sequence.tier]
+			if typeof(tierFrames) == "number" then
+				check(
+					stale <= tierFrames,
+					("overlay.staleFrames %s is past sequences.%s's %s hit-stop (%d frames): it could start after the pose it freezes let go"):format(
+						tostring(stale),
+						name,
+						tostring(sequence.tier),
+						tierFrames
+					)
+				)
+			end
+		end
+	end
 	check(isToken(impact.viewport.ambientToken), "viewport.ambientToken is not a palette token")
 	check(isToken(impact.viewport.lightToken), "viewport.lightToken is not a palette token")
 

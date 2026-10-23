@@ -147,7 +147,7 @@ local function load(options: Options): World
 	local input =
 		stub({ "artPressed", "artReleased", "basicAttack", "guardChanged", "dodge", "lockToggle", "sprintChanged" })
 	local replication = stub({ "hit", "rejected" })
-	local tracker = stub({ "changed" })
+	local tracker = stub({ "changed", "localChanged" })
 	tracker.all = function(): { any }
 		local list = { localRecord }
 		for _, record in enemies do
@@ -446,6 +446,30 @@ describe("DevAim commands", function()
 		expect(reply.lockId).toBe(11)
 		local cleared = world.invoke("lock", { clear = true })
 		expect(cleared.ok).toBe(true)
+		expect(world.lock).toBeNil()
+	end)
+
+	it("never locks again on its own across the local character's death and respawn", function()
+		local world = load({ studio = true, capture = true, renderSteps = true })
+		world.invoke("lock", { id = 11 })
+		expect(world.lockOnCalls).toEqual({ 11 })
+		-- The character dies: TargetController lets the lock go (its own spec); DevAim only watches.
+		world.localRecord.state = "Dead"
+		world.tracker.changed:Fire(world.localRecord, "State", "Dead")
+		world.lock = nil
+		world.clock.advance(5)
+		-- The respawn: a new local record, straight from the old id and through nil.
+		world.tracker.localChanged:Fire(nil)
+		world.tracker.localChanged:Fire(2)
+		world.localRecord.state = "Idle"
+		world.tracker.changed:Fire(world.localRecord, "State", "Idle")
+		for _ = 1, 120 do
+			world.clock.advance(1 / 60)
+		end
+		local status = world.invoke("status", nil)
+		expect(status.lockId).toBeNil()
+		expect(world.lockOnCalls).toEqual({ 11 })
+		expect(table.find(world.fired, "lockToggle")).toBeNil()
 		expect(world.lock).toBeNil()
 	end)
 
