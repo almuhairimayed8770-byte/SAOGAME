@@ -3,7 +3,8 @@
 -- looks changed by elapsed time through a hand clock and a hand-fired render step, the soft dim
 -- (charged) when the flash budget says no or Reduce flashing is on, hits of one frame joining
 -- or taking over the sequence showing, cancel and the clone pool, each quality tier's part cap,
--- and render stalls (a hand-fired Heartbeat with no render step: the display asleep).
+-- and render stalls (a hand-fired Heartbeat with no render step: the display asleep). A picture
+-- waits for its first drawn frame as long as its own hit-stop (a dim: its own length), D-122.
 local ImpactFrames = Harness.load("src/client/fx/ImpactFrames")
 local FlashBudget = Harness.load("src/client/fx/FlashBudget")
 local ImpactSequence = Harness.load("src/client/fx/ImpactSequence")
@@ -1261,22 +1262,27 @@ local function filledRigFolders(): number
 end
 
 describe("ImpactFrames render stalls", function()
-	local LIMIT = impact.overlay.staleFrames * F
+	-- How long each picture waits for its first drawn frame: its own hit-stop; a dim, its length.
+	local KILL_LIMIT = ImpactSequence.capSeconds("Kill")
+	local FINAL_LIMIT = ImpactSequence.capSeconds("Final")
+	local DIM_LIMIT = ImpactSequence.dimSeconds()
 
 	it("drops a sequence whose first drawn frame comes past the staleness limit, never starting it", function()
 		withWorld(function()
 			local model = rig("Fighter", Vector3.new(0, 3, 0))
 			-- A first frame just inside the limit starts the picture.
 			ImpactFrames.play("Kill", { model })
-			advance(LIMIT - 0.25 * F)
+			advance(KILL_LIMIT - 0.25 * F)
 			expect(ImpactFrames.look()).toBe("Black")
 			expect(ImpactFrames.remaining()).toBeCloseTo(ImpactSequence.seconds("Kill"), 1e-9)
 			ImpactFrames.cancel()
+			advance(F) -- the frame that shows it gone settles its claim
 
 			-- One just past it is a hit long gone: the frame shows nothing of it.
 			world.clock += 2
 			ImpactFrames.play("Kill", { model })
-			advance(LIMIT + 0.25 * F)
+			expect(ImpactFrames.look()).toBe("Black") -- the Kill itself, not a dim the budget chose
+			advance(KILL_LIMIT + 0.25 * F)
 			expect(ImpactFrames.isShowing()).toBe(false)
 			expect(ImpactFrames.look()).toBeNil()
 			local gui, background, figures = tree()
@@ -1298,7 +1304,7 @@ describe("ImpactFrames render stalls", function()
 			local gui = tree()
 			expect(gui.Enabled).toBe(true)
 			-- Heartbeat runs, RenderStepped does not (the display asleep): inside the limit it waits.
-			beat(LIMIT - 0.5 * F)
+			beat(KILL_LIMIT - 0.5 * F)
 			expect(ImpactFrames.isShowing()).toBe(true)
 			beat(F)
 			expect(ImpactFrames.isShowing()).toBe(false)
@@ -1555,13 +1561,13 @@ describe("ImpactFrames render stalls", function()
 			-- First drawn frame past the limit: dropped.
 			ImpactFrames.play("Final", {})
 			expect(ImpactFrames.look()).toBe("Reduced")
-			advance(LIMIT + 0.25 * F)
+			advance(DIM_LIMIT + 0.25 * F)
 			expect(ImpactFrames.isShowing()).toBe(false)
 			expect(tree().Enabled).toBe(false)
 			-- Never drawn while Heartbeat runs: ended past the limit.
 			world.clock += gap
 			ImpactFrames.play("Final", {})
-			beat(LIMIT - 0.5 * F)
+			beat(DIM_LIMIT - 0.5 * F)
 			expect(ImpactFrames.look()).toBe("Reduced")
 			beat(F)
 			expect(ImpactFrames.isShowing()).toBe(false)
@@ -1580,18 +1586,19 @@ describe("ImpactFrames render stalls", function()
 		end)
 	end)
 
-	it("keeps the display-asleep minute clean: never up past the limit, no figures piling up", function()
+	it("keeps the display-asleep minute clean: never up past its hit-stop, no figures piling up", function()
 		withWorld(function()
 			-- Measured in Play: with the display asleep RenderStepped ran 0 times a second and
 			-- Heartbeat 60, for 55 s, while hits kept landing.
 			local attacker = rig("Attacker", Vector3.new(0, 3, 4))
 			local gui: ScreenGui? = nil
-			local longestUp = 0
+			local longestUp = { Kill = 0, Final = 0 }
 			local mostClones = 0
 			local mostFolders = 0
 			for second = 1, 55 do
 				local target = rig("T" .. second, Vector3.new(second, 3, 0))
-				ImpactFrames.play(if second % 2 == 0 then "Kill" else "Final", { attacker, target })
+				local name = if second % 2 == 0 then "Kill" else "Final"
+				ImpactFrames.play(name, { attacker, target })
 				gui = gui or tree()
 				local up = 0
 				for _ = 1, 60 do
@@ -1602,9 +1609,10 @@ describe("ImpactFrames render stalls", function()
 					mostClones = math.max(mostClones, #ImpactFrames.clones())
 					mostFolders = math.max(mostFolders, filledRigFolders())
 				end
-				longestUp = math.max(longestUp, up)
+				longestUp[name] = math.max(longestUp[name], up)
 			end
-			expect(longestUp).toBeLessThanOrEqual(LIMIT + 1e-9)
+			expect(longestUp.Kill).toBeLessThanOrEqual(KILL_LIMIT + 1e-9)
+			expect(longestUp.Final).toBeLessThanOrEqual(FINAL_LIMIT + 1e-9)
 			expect(mostClones).toBeLessThanOrEqual(2 * FIGURE)
 			expect(mostFolders).toBeLessThanOrEqual(2)
 			-- The display wakes: its first frame draws nothing of any hit from the minute asleep.
@@ -1640,5 +1648,288 @@ describe("ImpactFrames render stalls", function()
 				expect(ImpactFrames.isShowing()).toBe(false)
 			end)
 		end
+	end)
+end)
+
+-- ---------------------------------------------------------------------------------------------
+-- Staleness per sequence (D-122): each picture waits for its first drawn frame as long as its
+-- own hit-stop, a dim as long as its own length
+-- ---------------------------------------------------------------------------------------------
+
+-- A rig of one part: the storm makes thousands, and their figures do not matter here.
+local function bareRig(name: string): Model
+	local model = Instance.new("Model")
+	model.Name = name
+	local torso = Instance.new("Part")
+	torso.Name = "UpperTorso"
+	torso.Parent = model
+	model.Parent = Instance.new("Folder")
+	return model
+end
+
+-- One 60 Hz engine frame: the render step when this frame draws (a display drawing every
+-- `every` frames), then Heartbeat.
+local function engineFrame(draws: boolean, every: number)
+	world.clock += F
+	local render = world.render
+	if draws and render ~= nil then
+		render(every * F)
+	end
+	local heartbeat = world.heartbeat
+	if heartbeat ~= nil then
+		heartbeat(F)
+	end
+end
+
+-- Plays `name` `lead` engine frames before the next drawn frame of a display that draws every
+-- `every` frames; the look on each drawn frame ("-" once nothing shows).
+local function looksAt(name: string, every: number, lead: number): { string }
+	local seen: { string } = {}
+	ImpactFrames.play(name, { rig("Fighter", Vector3.new(0, 3, 0)) })
+	local tick = every - lead
+	for _ = 1, 60 do
+		tick += 1
+		local draws = tick % every == 0
+		engineFrame(draws, every)
+		if draws then
+			local look = ImpactFrames.look()
+			table.insert(seen, look or "-")
+			if look == nil then
+				break
+			end
+		end
+	end
+	return seen
+end
+
+describe("ImpactFrames staleness per sequence (D-122)", function()
+	it("at 15 fps a Kill and a Final play wherever the hit lands between two drawn frames", function()
+		for lead = 1, 4 do
+			withWorld(function()
+				expect(looksAt("Kill", 4, lead)).toEqual({ "Black", "Dark", "Ink", "-" })
+			end)
+			withWorld(function()
+				expect(looksAt("Final", 4, lead)).toEqual({ "Dark", "-" })
+			end)
+		end
+	end)
+
+	it("at 10 fps a Kill still plays from a first frame six frames after the hit", function()
+		for lead = 1, 6 do
+			withWorld(function()
+				local seen = looksAt("Kill", 6, lead)
+				expect(seen[1]).toBe("Black")
+				expect(seen[#seen]).toBe("-")
+				expect(#seen).toBeGreaterThanOrEqual(3)
+			end)
+		end
+	end)
+
+	it("changes nothing at 60 and 30 fps: the same looks on the same drawn frames", function()
+		local expected = {
+			[1] = {
+				Kill = { "Black", "Black", "Dark", "Dark", "Ink", "Ink", "-" },
+				Final = { "Dark", "Dark", "-" },
+				Parry = { "Inverted", "-" },
+			},
+			[2] = {
+				Kill = { "Black", "Dark", "Ink", "-" },
+				Final = { "Dark", "-" },
+				Parry = { "Inverted", "-" },
+			},
+		}
+		for every, rows in expected do
+			for name, looks in rows do
+				for lead = 1, every do
+					withWorld(function()
+						expect(looksAt(name, every, lead)).toEqual(looks)
+					end)
+				end
+			end
+		end
+	end)
+
+	it("waits for the first drawn frame exactly as long as each sequence's own hit-stop", function()
+		for _, name in { "Kill", "Final", "Parry" } do
+			local limit = ImpactSequence.capSeconds(name)
+			local first = ImpactSequence.frames(name)[1].look
+			-- Heartbeat only (the window rendered nothing), then a frame just inside the limit: drawn.
+			withWorld(function()
+				ImpactFrames.play(name, { rig("A", Vector3.new(0, 3, 0)) })
+				beat(limit - 0.75 * F)
+				expect(ImpactFrames.isShowing()).toBe(true)
+				advance(0.5 * F)
+				expect(ImpactFrames.look()).toBe(first)
+				expect(tree().Enabled).toBe(true)
+			end)
+			-- Just past it: Heartbeat ends it unseen and the next frame draws nothing of it.
+			withWorld(function()
+				ImpactFrames.play(name, { rig("A", Vector3.new(0, 3, 0)) })
+				beat(limit - 0.5 * F)
+				expect(ImpactFrames.isShowing()).toBe(true)
+				beat(F)
+				expect(ImpactFrames.isShowing()).toBe(false)
+				advance(F)
+				expect(ImpactFrames.look()).toBeNil()
+				expect(tree().Enabled).toBe(false)
+				expect(#ImpactFrames.clones()).toBe(0)
+			end)
+		end
+	end)
+
+	it("lets a dim wait for its first drawn frame as long as its own length", function()
+		withWorld(function()
+			FlashBudget.set(true)
+			ImpactFrames.play("Kill", {})
+			expect(ImpactFrames.look()).toBe("Reduced")
+			beat(ImpactSequence.dimSeconds() - 1.5 * F)
+			expect(ImpactFrames.isShowing()).toBe(true)
+			advance(0.5 * F)
+			-- Drawn late, it shows where its own curve is by now: fading out, never a fresh rise.
+			local _, background = tree()
+			expect(ImpactFrames.look()).toBe("Reduced")
+			expect(1 - background.BackgroundTransparency).toBeLessThan(impact.reduced.opacity)
+			FlashBudget.set(false)
+		end)
+	end)
+
+	it("never puts more than the limit of flashes on screen at 15 or 10 fps, or through hitches", function()
+		-- Random hit storms (1 to 3 of Final, Kill or Parry at once, 12% of frames) read off only
+		-- the frames that draw: the worst region's luminance changes in any second, where a change
+		-- into or out of the dim or the scene counts once.
+		local function picture(): { any }
+			local gui = ImpactFrames.gui()
+			local look = ImpactFrames.look()
+			if gui == nil or not (gui :: ScreenGui).Enabled or look == nil then
+				return { "Scene" }
+			end
+			if look == "Reduced" then
+				local background = (gui :: ScreenGui):FindFirstChild("Background") :: Frame
+				return if background.BackgroundTransparency >= 0.999 then { "Scene" } else { "Dim" }
+			end
+			local regions = ImpactSequence.regionsOf(impact.looks[look])
+			return {
+				ImpactSequence.luminanceOf(regions[1]),
+				ImpactSequence.luminanceOf(regions[2]),
+				ImpactSequence.luminanceOf(regions[3]),
+			}
+		end
+		local function changed(a: { any }, b: { any }): boolean
+			if typeof(a[1]) == "string" or typeof(b[1]) == "string" then
+				return a[1] ~= b[1]
+			end
+			for index = 1, 3 do
+				if math.abs(a[index] - b[index]) >= impact.flash.transitionDelta then
+					return true
+				end
+			end
+			return false
+		end
+		local function storm(seed: number, every: number, reduced: boolean, hitches: { number }): number
+			local most = 0
+			withWorld(function()
+				FlashBudget.set(reduced)
+				local rng = Random.new(seed)
+				local names = { "Final", "Kill", "Parry" }
+				local changes: { number } = {}
+				local last: { any } = { "Scene" }
+				local stallLeft = 0
+				local plays = 0
+				for tick = 1, 60 * 20 do
+					local rendering = stallLeft == 0
+					if stallLeft > 0 then
+						stallLeft -= 1
+					elseif rng:NextNumber() < 0.02 then
+						stallLeft = rng:NextInteger(hitches[1], hitches[2])
+					end
+					local draws = rendering and tick % every == 0
+					engineFrame(draws, every)
+					if draws then
+						local now = picture()
+						if changed(last, now) then
+							table.insert(changes, world.clock)
+						end
+						last = now
+					end
+					if rng:NextNumber() < 0.12 then
+						for _ = 1, rng:NextInteger(1, 3) do
+							plays += 1
+							ImpactFrames.play(names[rng:NextInteger(1, 3)], { bareRig("R" .. plays) })
+						end
+					end
+				end
+				local first = 1
+				for index = 1, #changes do
+					while changes[index] - changes[first] >= impact.flash.windowSeconds do
+						first += 1
+					end
+					most = math.max(most, index - first + 1)
+				end
+				FlashBudget.set(false)
+			end)
+			return most
+		end
+		for _, every in { 1, 4, 6 } do
+			for _, reduced in { false, true } do
+				-- No hitches, short hitches inside a hit-stop, and long stalls.
+				for _, hitches in { { 0, 0 }, { 2, 12 }, { 20, 150 } } do
+					for seed = 1, 3 do
+						local most = storm(seed, every, reduced, hitches)
+						local limit = if reduced then 2 * impact.reduced.maxPerWindow else 2 * impact.flash.maxPerWindow
+						expect(most).toBeLessThanOrEqual(limit)
+					end
+				end
+			end
+		end
+	end)
+
+	it("holds the hit's pose past the hit-stop: a picture first drawn late never shows the rigs move again", function()
+		withWorld(function()
+			local cap = ImpactSequence.capSeconds("Kill")
+			local model = rig("Fighter", Vector3.new(0, 3, 0))
+			local torso = sourceOf(model, "UpperTorso")
+			local hitAt = world.clock
+			ImpactFrames.play("Kill", { model })
+			local overlay = ImpactFrames.camera() :: Camera
+			-- A hitch at the kill. Inside the hit-stop the root still drifts and the camera still
+			-- moves, and the first drawn frame (just inside the Kill's wait) copies both.
+			beat(cap - 1.5 * F)
+			torso.CFrame = torso.CFrame + Vector3.new(0, 0, 0.5)
+			world.camera.CFrame = world.camera.CFrame + Vector3.new(0, 0.5, 0)
+			advance(F)
+			expect(ImpactFrames.look()).toBe("Black")
+			local held: { [BasePart]: Vector3 } = {}
+			local copied = false
+			for _, clone in ImpactFrames.clones() do
+				held[clone] = clone.CFrame.Position
+				copied = copied or (clone.CFrame.Position - torso.CFrame.Position).Magnitude < 1e-6
+			end
+			expect(copied).toBe(true)
+			local heldCamera = overlay.CFrame
+			expect((heldCamera.Position - world.camera.CFrame.Position).Magnitude).toBeLessThan(1e-6)
+			-- The hit-stop is over: the rig and the camera move again every frame. The picture runs
+			-- its looks to the end, still showing the frozen moment.
+			local figuresPast = 0
+			for _ = 1, 30 do
+				if world.clock - hitAt >= cap then
+					torso.CFrame = torso.CFrame + Vector3.new(1, 0, 0)
+					world.camera.CFrame = world.camera.CFrame + Vector3.new(0, 0, 1)
+				end
+				advance(F)
+				if not ImpactFrames.isShowing() then
+					break
+				end
+				local look = ImpactFrames.look()
+				if world.clock - hitAt > cap and (look == "Dark" or look == "Ink") then
+					figuresPast += 1
+				end
+				for _, clone in ImpactFrames.clones() do
+					expect((clone.CFrame.Position - held[clone]).Magnitude).toBeLessThan(1e-6)
+				end
+				expect((overlay.CFrame.Position - heldCamera.Position).Magnitude).toBeLessThan(1e-6)
+			end
+			expect(figuresPast).toBeGreaterThan(0)
+			expect(ImpactFrames.isShowing()).toBe(false)
+		end)
 	end)
 end)

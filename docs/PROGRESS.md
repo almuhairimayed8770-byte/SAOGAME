@@ -328,6 +328,35 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   and Final pictures drop; the engine's first dt after a stall and ParticleEmitter bursts on wake are untested
   (item 107).
 
+## Stall and lock check on the owner's PC (2026-10-23, 2cd153c)
+
+- Pass, item 107(a): an Art's impact frames showed for 2 frames, then the overlay went off with its figures freed;
+  through a 55 s display sleep the overlay stayed off with no figures, and nothing flashed in the 60 frames after
+  waking.
+- Pass, item 107(d): after a respawn the lock is gone, the next swing does not aim at the old boar, and F locks again
+  0.58 s after the new character appears.
+- Measured, item 107(c): the first RenderStepped dt after a stall is the whole gap (5.4 s, 54.1 s, 188.3 s); the camera
+  and accent specs cover this case.
+- Item 107(b): minimising Studio does not stop RenderStepped (60 a second throughout), so it is not a stall case; the
+  window-drag hitch is left for the owner. Item 107(e): one hit landed while the display slept and nothing burst on
+  waking; a kill shatter during a sleep is still unchecked. Item 107(f): one dim for one Art hit with Reduce flashing
+  on; several hits with sleeps between them are still unchecked.
+- Item 98: rbxassetid://203785492 is an audio asset ("Pop Close Sound" by another creator). Something asks for it as
+  a non-audio type only while the viewport renders, and no instance in the place holds it, so it is most likely a
+  Studio plugin or the engine's own UI. Left for the owner: Play with plugins turned off.
+
+## A controlled fight and the idle phase (2026-10-23, D-120 to D-124)
+
+- Studio dev hooks for a fight that cannot go wrong: DevCombat "hold" stops chosen enemies (they still take hits and
+  never heal while held), "sethp" sets HP (never a kill, so the death still comes from a real swing), "heal" refills.
+  The hold is also the cinematic hold for boss entrances and cutscenes (D-120, D-121). Item 108 is the recipe for the
+  kill sequence, sheathing after lock-off, strafe feet, lock facing, the snap, the parry and the lock across death.
+- Each impact picture now waits for its first drawn frame as long as its own hit-stop, so Kill and Final pictures play
+  at 15 fps; the figures keep the frozen frame past the hit-stop (D-122).
+- Enemy idles and walks start at a different point of their loop for each enemy, so a herd no longer sways and roars
+  in unison (D-123). A same-sound gap between different enemies was left out on purpose (D-124).
+- Checks: 1862 specs in 108 files, 30 validators, offline lint and the hit matrix pass; no new strict type messages.
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and

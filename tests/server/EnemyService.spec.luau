@@ -851,3 +851,242 @@ describe("EnemyService step", function()
 		expect(reported).toBe(true)
 	end)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- Hold: the cinematic freeze (story beats, cutscenes) and the Studio dev hooks (D-120)
+-- ------------------------------------------------------------------------------------------
+
+local function lethalHit(attackerId: number, damage: number): any
+	return {
+		attackerId = attackerId,
+		rawDamage = damage,
+		gaugeDamage = 0,
+		crit = false,
+		parried = false,
+		guarded = false,
+		artId = "OneHandedSword.Horizontal",
+		hitIndex = 1,
+		hitStop = "Normal",
+		position = { 0, 3, -2 },
+	}
+end
+
+local function telegraphsOf(id: number): number
+	local count = 0
+	for _, payload in sentOf("Telegraph") do
+		if payload.entityId == id then
+			count += 1
+		end
+	end
+	return count
+end
+
+describe("EnemyService hold", function()
+	it("a held enemy sleeps at once, its mover stops, and a player next to it never wakes it", function()
+		fresh()
+		local id, model = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		physicsEnabled = false
+		putPlayer(1, Vector3.new(0, 3, -20))
+		expect(advanceUntil(function()
+			return phaseOf(id) == "Chase" and bodyOf(model).goal ~= nil
+		end, 3)).toBe(true)
+		local body = bodyOf(model)
+		local stops = body.stops
+		expect(EnemyService.setHeld(id, true)).toBe(true)
+		expect(EnemyService.isHeld(id)).toBe(true)
+		expect(EnemyService.isAwake(id)).toBe(false)
+		expect(EnemyService.brainOf(id):isAwake()).toBe(false)
+		expect(body.goal).toBeNil()
+		expect(body.stops).toBe(stops + 1)
+		expect(EnemyService.heldIds()).toEqual({ id })
+		-- The player walks right up to it: the sleep check runs many times and never wakes it.
+		putPlayer(1, Vector3.new(0, 3, -3))
+		local sentBefore = telegraphsOf(id)
+		local issued = #body.moveTos
+		advance(AI.sleepCheckInterval * 10)
+		expect(EnemyService.isAwake(id)).toBe(false)
+		expect(telegraphsOf(id)).toBe(sentBefore)
+		expect(#body.moveTos).toBe(issued)
+		expect(strikes).toHaveLength(0)
+		expect(phaseOf(id)).toBe("Idle")
+		-- Holding twice changes nothing.
+		expect(EnemyService.setHeld(id, true)).toBe(true)
+		expect(EnemyService.heldIds()).toEqual({ id })
+	end)
+
+	it("held in the middle of a wind-up, the strike never lands", function()
+		fresh()
+		local id = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -6))
+		expect(advanceUntil(function()
+			return phaseOf(id) == "WindUp"
+		end, 5)).toBe(true)
+		EnemyService.setHeld(id, true)
+		advance(OVERHEAD.windUp + OVERHEAD.strike + OVERHEAD.recovery + 2)
+		expect(strikes).toHaveLength(0)
+		expect(EnemyService.isAwake(id)).toBe(false)
+		-- The wind-up's timed Art state runs out on EntityService's clock as it would asleep.
+		expect(EntityService.get(id).state).toBe("Idle")
+	end)
+
+	it("hits still land on a held enemy: HP, the stagger, and the kill path with reason Died", function()
+		fresh()
+		local id = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -4))
+		EnemyService.setHeld(id, true)
+		local record = EntityService.get(id)
+		local maxHp = record.maxHp
+		local applied = EntityService.applyHit(id, lethalHit(77, 30))
+		expect(applied.damage).toBeGreaterThan(0)
+		expect(record.hp).toBeLessThan(maxHp)
+		EntityService.setState(id, "Stagger", Combat.parryStagger)
+		expect(phaseOf(id)).toBe("Interrupted")
+		expect(EnemyService.isAwake(id)).toBe(false)
+		advance(Combat.parryStagger + AI.sleepCheckInterval * 4)
+		expect(record.state).toBe("Idle")
+		expect(EnemyService.isAwake(id)).toBe(false)
+		expect(telegraphsOf(id)).toBe(0)
+		local killing = EntityService.applyHit(id, lethalHit(77, maxHp * 10))
+		expect(killing.killed).toBe(true)
+		expect(killing.hitStop).toBe("Kill")
+		expect(despawned).toHaveLength(1)
+		expect(despawned[1].id).toBe(id)
+		expect(despawned[1].reason).toBe("Died")
+		expect(EnemyService.isHeld(id)).toBe(false)
+		expect(EnemyService.heldIds()).toEqual({})
+		local died = sentOf("EntityDied")
+		expect(died).toHaveLength(1)
+		expect(died[1].entityId).toBe(id)
+	end)
+
+	it("a held enemy's HP never regenerates, so a low HP set up for a hit waits for it; release resumes", function()
+		fresh()
+		local held = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		local free = spawnAt("FrenzyBoar", Vector3.new(0, 3, 40))
+		EnemyService.setHeld(held, true)
+		expect(EntityService.setHp(held, 1)).toBe(1)
+		expect(EntityService.setHp(free, 1)).toBe(1)
+		advance(Combat.outOfCombatRegenDelay + 5)
+		expect(EntityService.get(held).hp).toBe(1)
+		expect(EntityService.get(free).hp).toBeGreaterThan(1) -- the regen rule itself still runs
+		expect(EnemyService.setHeld(held, false)).toBe(true)
+		advance(1)
+		expect(EntityService.get(held).hp).toBeGreaterThan(1)
+	end)
+
+	it("an enemy that starts held under hold-new never regenerates either", function()
+		fresh()
+		EnemyService.setHoldNew(true)
+		local id = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		expect(EntityService.setHp(id, 1)).toBe(1)
+		advance(Combat.outOfCombatRegenDelay + 5)
+		expect(EntityService.get(id).hp).toBe(1)
+	end)
+
+	it("a held enemy EnemyService lets go of while its record lives on (reset) regenerates again", function()
+		fresh()
+		local id = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		EnemyService.setHeld(id, true)
+		expect(EntityService.setHp(id, 1)).toBe(1)
+		EnemyService.reset()
+		expect(EntityService.get(id)).toBeTruthy()
+		advance(Combat.outOfCombatRegenDelay + 5)
+		expect(EntityService.get(id).hp).toBeGreaterThan(1)
+	end)
+
+	it("release returns it to the sleep rules: near a player it wakes on the next tick and attacks", function()
+		fresh()
+		local near = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		local far = spawnAt("FrenzyBoar", Vector3.new(0, 3, AI.sleepRadius + 200))
+		putPlayer(1, Vector3.new(0, 3, -20))
+		EnemyService.setHeld(near, true)
+		EnemyService.setHeld(far, true)
+		advance(2)
+		expect(EnemyService.setHeld(near, false)).toBe(true)
+		expect(EnemyService.setHeld(far, false)).toBe(true)
+		expect(EnemyService.isHeld(near)).toBe(false)
+		expect(EnemyService.heldIds()).toEqual({})
+		advance(TICK)
+		expect(EnemyService.isAwake(near)).toBe(true)
+		expect(EnemyService.isAwake(far)).toBe(false)
+		expect(advanceUntil(function()
+			return telegraphsOf(near) > 0
+		end, 5)).toBe(true)
+		expect(telegraphsOf(far)).toBe(0)
+	end)
+
+	it("setHeld on an id that is not a living enemy returns false and holds nothing", function()
+		fresh()
+		expect(EnemyService.setHeld(999, true)).toBe(false)
+		local id = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		EntityService.die(id)
+		expect(EnemyService.setHeld(id, true)).toBe(false)
+		expect(EnemyService.heldIds()).toEqual({})
+	end)
+
+	it("hold-new makes every later spawn start held; earlier ones keep their own setting", function()
+		fresh()
+		putPlayer(1, Vector3.new(0, 3, -10))
+		local before = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		expect(EnemyService.holdsNew()).toBe(false)
+		EnemyService.setHoldNew(true)
+		expect(EnemyService.holdsNew()).toBe(true)
+		local after = spawnAt("KoboldAxeman", Vector3.new(4, 3, 0))
+		expect(EnemyService.isHeld(before)).toBe(false)
+		expect(EnemyService.isHeld(after)).toBe(true)
+		expect(EnemyService.isAwake(after)).toBe(false)
+		expect(phaseOf(after)).toBe("Idle")
+		expect(advanceUntil(function()
+			return telegraphsOf(before) > 0
+		end, 5)).toBe(true)
+		advance(3)
+		expect(telegraphsOf(after)).toBe(0)
+		EnemyService.setHoldNew(false)
+		local later = spawnAt("FrenzyBoar", Vector3.new(-4, 3, 0))
+		expect(EnemyService.isHeld(later)).toBe(false)
+		expect(EnemyService.isHeld(after)).toBe(true) -- turning hold-new off releases nobody
+	end)
+
+	it("a PlaygroundService respawn comes back held under hold-new", function()
+		fresh()
+		local Playground = Harness.load("src/shared/data/playground")
+		local PlaygroundService = Harness.load("src/server/services/PlaygroundService")
+		PlaygroundService.bind({
+			now = function()
+				return clock.t
+			end,
+			entities = EntityService,
+			enemies = EnemyService,
+			weaponBuilder = nil,
+			build = nil,
+			players = nil,
+			heartbeat = nil,
+			waitForChild = function(parent, name)
+				return parent:FindFirstChild(name)
+			end,
+			random = Random.new(5),
+		} :: any)
+		local first = PlaygroundService.spawnMember(1)
+		expect(EnemyService.isHeld(first)).toBe(false)
+		EnemyService.setHoldNew(true)
+		EntityService.die(first)
+		expect(PlaygroundService.pendingRespawns()).toBe(1)
+		clock.t += Playground.respawnSeconds + 1
+		PlaygroundService.tick(TICK)
+		local alive = PlaygroundService.enemyIds()
+		expect(alive).toHaveLength(1)
+		expect(alive[1]).never.toBe(first)
+		expect(EnemyService.isHeld(alive[1])).toBe(true)
+		expect(EnemyService.isAwake(alive[1])).toBe(false)
+		PlaygroundService.reset()
+	end)
+
+	it("reset forgets hold-new", function()
+		fresh()
+		EnemyService.setHoldNew(true)
+		fresh()
+		expect(EnemyService.holdsNew()).toBe(false)
+		local id = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		expect(EnemyService.isHeld(id)).toBe(false)
+	end)
+end)

@@ -47,7 +47,9 @@
 	Locomotion.attach(animator, character) runs a driver off the animator's own step: a player rig
 	gets this same blend space fed by Locomotion.humanoidTracker (MoveDirection, velocity, floor
 	contact, fall height); an enemy rig gets its data Idle / Walk pair (data/choreo.luau rigs)
-	crossfaded by speed with the walk clip paced to the rig's walkSpeed, so no foot slides.
+	crossfaded by speed with the walk clip paced to the rig's walkSpeed, so no foot slides. Both of
+	an enemy's loops start at its own phase (Locomotion.idlePhase of its entity id, D-123), so
+	neighbours never breathe or roar in step.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -108,6 +110,9 @@ export type Dependencies = {
 	raycast: Raycast?,
 	footIK: boolean?, -- default true
 	tracker: ((dt: number) -> State?)?, -- attach only: the state source (default humanoidTracker)
+	-- attach only, an enemy rig: how far round the loop (0 .. 1) its idle and walk start
+	-- (Locomotion.idlePhase of its entity id; default 0).
+	phase: number?,
 	-- The change signal of an attribute on the character (default GetAttributeChangedSignal).
 	attributeSignal: ((instance: Instance, name: string) -> any)?,
 }
@@ -786,10 +791,11 @@ end
 -- ---------------------------------------------------------------------------------------------
 
 -- An enemy rig's locomotion: its data Idle and Walk crossfaded by speed, the walk paced to the
--- rig's walkSpeed. Reactions and attacks ride above on FullBody / Additive as on every rig.
+-- rig's walkSpeed. Reactions and attacks ride above on FullBody / Additive as on every rig. Both
+-- loops start `phase` of the way round (D-123), so a herd never breathes or roars in step.
 RigDriver.__index = RigDriver
 
-local function newRigDriver(animator: any, idleId: string, walkId: string, walkSpeed: number): any
+local function newRigDriver(animator: any, idleId: string, walkId: string, walkSpeed: number, phase: number): any
 	local self = setmetatable({
 		animator = animator,
 		handles = {} :: { [string]: any },
@@ -797,9 +803,18 @@ local function newRigDriver(animator: any, idleId: string, walkId: string, walkS
 		unhook = nil :: (() -> ())?,
 		destroyed = false,
 	}, RigDriver)
-	self.handles.Idle = animator:play(idleId, { coexist = true, weight = 1, blendIn = 0 })
-	self.handles.Walk = animator:play(walkId, { coexist = true, weight = 0, blendIn = 0 })
+	local idleStart = phase * ClipLibrary.get(idleId).duration
+	local walkStart = phase * ClipLibrary.get(walkId).duration
+	self.handles.Idle = animator:play(idleId, { coexist = true, weight = 1, blendIn = 0, startTime = idleStart })
+	self.handles.Walk = animator:play(walkId, { coexist = true, weight = 0, blendIn = 0, startTime = walkStart })
 	return self
+end
+
+--- How far round its loops (0 .. 1) an enemy rig's idle and walk start: the fraction part of
+--- id x choreo.enemyIdlePhaseStep (D-123). The same id always gets the same phase, and ids in a
+--- row (a herd spawned together) land far apart. Cosmetic and client-only.
+function Locomotion.idlePhase(entityId: number): number
+	return (entityId * ChoreoData.enemyIdlePhaseStep) % 1
 end
 
 function RigDriver.update(self: any, _dt: number, state: State): LocomotionState.Output
@@ -871,7 +886,13 @@ function Locomotion.attach(animator: any, character: Model, deps: Dependencies?)
 			("Locomotion.attach: data/choreo.luau rigs.%s needs idle and walk clip ids"):format(rigId)
 		)
 		local rig = Rigs[rigId]
-		driver = newRigDriver(animator, rigClips.idle, rigClips.walk, (rig and rig.walkSpeed) or Config.walkSpeed)
+		driver = newRigDriver(
+			animator,
+			rigClips.idle,
+			rigClips.walk,
+			(rig and rig.walkSpeed) or Config.walkSpeed,
+			dependencies.phase or 0
+		)
 	end
 	local source: (dt: number) -> State? = tracker or Locomotion.humanoidTracker(character)
 	driver.unhook = animator:onStep(function(dt: number)

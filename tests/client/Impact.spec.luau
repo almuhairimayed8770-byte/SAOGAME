@@ -620,10 +620,14 @@ describe("Impact.hit, after the impact frames", function()
 					playedAt = world.clock
 				end
 			end
-			-- Played while the window still slept, as soon as the picture would have ended: never
-			-- held for the whole stall, so never shown after it for a hit long gone.
+			-- Played while the window still slept, at the first ask after the picture gave up its
+			-- wait for a first drawn frame (its hit-stop, D-122; a frame drawn inside it would still
+			-- hide the world, so the accents wait that long): never held for the whole stall, so
+			-- never shown after it for a hit long gone.
 			expect(playedAt).never.toBeNil()
-			expect((playedAt :: number) - hitAt).toBeLessThanOrEqual(ImpactSequence.seconds("Kill") + F + 1e-9)
+			local latest = ImpactSequence.capSeconds("Kill") + ImpactSequence.seconds("Kill") + F + 1e-9
+			expect((playedAt :: number) - hitAt).toBeLessThanOrEqual(latest)
+			expect((playedAt :: number) - hitAt).toBeGreaterThan(ImpactSequence.capSeconds("Kill"))
 			expect(ImpactFrames.isShowing()).toBe(false)
 			-- The display wakes: no picture and no second round of accents.
 			if render ~= nil then

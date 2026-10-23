@@ -31,7 +31,9 @@ export type Look = {
 export type Step = { look: string, frames: number }
 
 -- A sequence rides on a hit-stop tier (combat.hitStopFrames) and must fit inside it: the rigs are
--- frozen while it shows, so the silhouettes hold the pose of the hit. `rank` orders sequences that
+-- frozen while it shows, so the silhouettes hold the pose of the hit. One first drawn late (a
+-- stall, D-122) runs past that hit-stop, and from there its figures keep the last frozen frame
+-- instead of following the rigs. `rank` orders sequences that
 -- land on top of each other: a higher rank replaces the one showing, a lower or equal one joins
 -- it (its rigs are drawn too) and is never charged.
 export type Sequence = { tier: string, rank: number, steps: { Step } }
@@ -136,14 +138,13 @@ local Impact = {
 		displayOrder = 30,
 		renderStepName = "SkyspireImpactFrames", -- bound after the camera's step
 		zIndex = { background = 1, figures = 2, strokes = 3 },
-		-- Frames (60 fps) a picture may wait for its first drawn frame after it was asked for.
-		-- One that waits longer is dropped, never started: a window that stopped rendering (a
-		-- display asleep, a minimised window, a long hitch) never brings back a hit long gone,
-		-- and a Heartbeat watchdog ends it and frees its figures while nothing renders. 3 is
-		-- the shortest hit-stop any sequence rides on (the parry's Normal tier): a first frame
-		-- later than that is drawn after the pose it freezes has let go. A 30 fps first frame
-		-- comes at most 2 frames after the hit, so it still plays, with a frame to spare.
-		staleFrames = 3,
+		-- No number of its own for how long a picture waits for its first drawn frame (D-122):
+		-- a sequence waits as long as the hit-stop it rides on (combat.hitStopFrames[tier]; the
+		-- world is frozen for all of it, so a first frame anywhere inside it still shows the
+		-- frozen moment) and the soft dim as long as its own length (past it nothing of the dim
+		-- would show). Later, it is dropped, never started, and the Heartbeat watchdog ends it
+		-- while nothing renders. The validator keeps every hit-stop a sequence rides on at least
+		-- 2 frames, so a 30 fps first frame always plays.
 	},
 
 	-- The ViewportFrame lights every clone flat: white ambient, no directional light, so the

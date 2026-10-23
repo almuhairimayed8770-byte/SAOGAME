@@ -90,7 +90,9 @@ local Dev = {
 	-- (one compact Output line per closed damage window of a player's run: facing, root look, hits,
 	-- the nearest enemy's distance, bearing and blade clearance) and keeps the last keepEvents for
 	-- "events"; "basic" and "art" start a swing through the live CombatService and return its
-	-- windows' trace; "hp" lists the enemies.
+	-- windows' trace; "hp" lists the enemies; "hold" freezes enemies (EnemyService.setHeld and
+	-- setHoldNew, D-120); "sethp" and "heal" set HP (EntityService.setHp and heal, D-121). The
+	-- last three need no numbers of their own.
 	trace = {
 		bindableName = "SkyspireDevCombat",
 		keepEvents = 60, -- at least aim.maxSwings x the most windows a loadout attack has

@@ -28,6 +28,10 @@
 
 	Root motion is a gameplay displacement, not a visual: it is never attenuated by a clip's
 	blend-in (the dodge travels its whole dodgeDistance) and only fades with a clip that is stopping.
+
+	The fallback idle (the rig's idle the animator plays the frame a rig appears) fires its events
+	only while it is the Base layer's idle: hidden under another Base clip it keeps its clock but
+	reports nothing it crosses, so its sounds never double the clip that shows (D-123).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -305,6 +309,9 @@ function Mixer.clear(self: any)
 	self._pause = 0
 end
 
+-- Where a hidden fallback idle's crossed events go: dropped, cleared every step.
+local hiddenEvents: { FiredEvent } = {}
+
 -- Events with time in (from, to], or [from, to] when `inclusive` (the first step after play).
 local function collectEvents(handle: Handle, from: number, to: number, inclusive: boolean, into: { FiredEvent })
 	for _, event in handle.clip.events do
@@ -510,6 +517,9 @@ function Mixer.step(self: any, dt: number): StepResult
 	end
 
 	local events: { FiredEvent } = {}
+	-- A fallback idle hidden under another Base clip fires nothing: its sounds belong to the clip
+	-- that shows (an enemy's own idle plays the same loop at its own phase, D-123).
+	table.clear(hiddenEvents)
 	local finished: { Handle } = {}
 	local rootDelta: Types.Vec3 = { 0, 0, 0 }
 	local fractions = weightFractions(self._handles, dt, paused)
@@ -549,7 +559,8 @@ function Mixer.step(self: any, dt: number): StepResult
 		-- keeps running while the rest of the rig is frozen at scale zero).
 		if not handle.done then
 			local wasEnded = handle.ended
-			advance(handle, if handle.ignorePause then dt else scaledDt, paused, events, rootDelta)
+			local into = if handle.fallback and handle.targetWeight == 0 then hiddenEvents else events
+			advance(handle, if handle.ignorePause then dt else scaledDt, paused, into, rootDelta)
 			if handle.ended and not wasEnded then
 				table.insert(finished, handle)
 				self:stop(handle)

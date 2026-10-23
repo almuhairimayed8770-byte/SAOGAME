@@ -1,6 +1,6 @@
 --!strict
 --[[
-	DevCombat: the Studio combat trace hook (D-114). Runs only in Studio (RunService:IsStudio()) in
+	DevCombat: the Studio combat hook (D-114, D-120, D-121). Runs only in Studio (RunService:IsStudio()) in
 	a place whose Workspace carries the DevCapture attribute (places/Playground.project.json);
 	anywhere else it returns before it requires a service or makes an instance.
 
@@ -23,14 +23,33 @@
 		"art" { entityId?, artId?, facing? }
 		                               the same through CombatService.beginArt; artId defaults to the
 		                               entity's first Art slot (the playground loadout's)
-		"hp"                           every enemy: id, name, HP, State, flat distance and bearing
-		                               from the first player's root
+		"hp"                           every enemy: id, name, HP, State, whether it is held, flat
+		                               distance and bearing from the first player's root
+		"hold" { ids?, except?, all?, on? }
+		                               EnemyService.setHeld on (the default) or off for the listed
+		                               enemy ids (a number or a list), or for every enemy except the
+		                               listed ones (every enemy with neither); all = true also sets
+		                               EnemyService.setHoldNew(on), so enemies spawned later
+		                               (respawns too) start held, and on = false with all releases
+		                               everything and stops it. A held enemy stands still, never
+		                               attacks and never regenerates HP; hits, staggers and kills
+		                               land on it as ever. Replies
+		                               the held ids now, hold-new, the ids that changed and the ids
+		                               that are no living enemy (missing)
+		"sethp" { entityId, hp }       EntityService.setHp on an enemy or a player: HP clamped to
+		                               [1, maxHp], never a kill; the regen wait restarts, and a held
+		                               enemy never regenerates, so on one the value holds until the
+		                               hit however long it takes; replies before and after
+		"heal" { entityId? }           full HP through EntityService.heal; entityId defaults to the
+		                               first player's entity; replies before and after
 
 	The sink is set only while a trace is on or a swing is collecting, so CombatService measures
 	nothing for it the rest of the time; a sink someone else set is chained and given back. Nothing
 	the sink does can break the combat tick that calls it (errors are caught and warned once).
 	"basic" and "art" skip the client and the request path: they test the server's sweep alone (the
-	client hook, DevAim, drives the real request path). Every wait is task.wait (Heartbeat).
+	client hook, DevAim, drives the real request path). "hold", "sethp" and "heal" only set up the
+	fight: they fire no remote and decide no hit, so a kill on a held enemy at 1 HP is still a real
+	swing's sweep through CombatService. Every wait is task.wait (Heartbeat).
 	Replies are plain tables execute_luau can JSON-encode; a failure is { ok = false, error = ... }.
 ]]
 
@@ -49,6 +68,7 @@ end
 local Server = script.Parent.Parent
 local Playground = require(Shared.data.playground)
 local CombatService = require(Server.services.CombatService)
+local EnemyService = require(Server.services.EnemyService)
 local EntityService = require(Server.services.EntityService)
 local DevTrace = require(script.Parent.DevTrace)
 
@@ -58,7 +78,7 @@ type Sink = (event: TraceEvent) -> ()
 type Record = EntityService.Record
 
 local Trace = Dev.trace
-local COMMANDS = { "help", "trace", "events", "basic", "art", "hp" }
+local COMMANDS = { "help", "trace", "events", "basic", "art", "hp", "hold", "sethp", "heal" }
 
 local printing = false
 local kept: { DevTrace.Plain } = {}
@@ -155,6 +175,33 @@ local function entityOf(args: { [string]: any }): (number?, string?)
 		return nil, "entityId must be an entity id (a number)"
 	end
 	return id, nil
+end
+
+-- An entity id or a list of them (nil when the argument is absent).
+local function idList(value: unknown, name: string): ({ number }?, string?)
+	if value == nil then
+		return nil, nil
+	end
+	if typeof(value) == "number" then
+		return { value }, nil
+	end
+	local message = ("%s must be an entity id or a list of entity ids"):format(name)
+	if typeof(value) ~= "table" then
+		return nil, message
+	end
+	local list = {}
+	for _, id in value :: { [any]: any } do
+		if typeof(id) ~= "number" then
+			return nil, message
+		end
+		table.insert(list, id)
+	end
+	return list, nil
+end
+
+local function ascending(list: { number }): { number }
+	table.sort(list)
+	return list
 end
 
 local function enemyHp(): { [number]: number }
@@ -286,6 +333,7 @@ local function hp(): Reply
 			hp = enemy.hp,
 			maxHp = enemy.maxHp,
 			state = enemy.state,
+			held = EnemyService.isHeld(enemy.id),
 			distance = round(distance),
 			bearing = round(bearing),
 		})
@@ -298,6 +346,118 @@ local function hp(): Reply
 		return a.id < b.id
 	end)
 	return { ok = true, entityId = if record ~= nil then record.id else nil, enemies = list }
+end
+
+local function holdCommand(args: { [string]: any }): Reply
+	local on = if args.on == nil then true else args.on
+	if typeof(on) ~= "boolean" then
+		return fail("on must be true or false")
+	end
+	if args.all ~= nil and typeof(args.all) ~= "boolean" then
+		return fail("all must be true or false")
+	end
+	local ids, idsError = idList(args.ids, "ids")
+	if idsError ~= nil then
+		return fail(idsError)
+	end
+	local except, exceptError = idList(args.except, "except")
+	if exceptError ~= nil then
+		return fail(exceptError)
+	end
+	if ids ~= nil and except ~= nil then
+		return fail("give ids or except, not both")
+	end
+	local targets: { number }
+	if ids ~= nil then
+		targets = ids
+	else
+		local skip: { [number]: boolean } = {}
+		if except ~= nil then
+			for _, id in except do
+				skip[id] = true
+			end
+		end
+		targets = {}
+		for _, id in EnemyService.ids() do
+			if not skip[id] then
+				table.insert(targets, id)
+			end
+		end
+	end
+	local changed: { number } = {}
+	local missing: { number } = {}
+	for _, id in targets do
+		local was = EnemyService.isHeld(id)
+		if not EnemyService.setHeld(id, on) then
+			table.insert(missing, id)
+		elseif was ~= on then
+			table.insert(changed, id)
+		end
+	end
+	if args.all == true then
+		EnemyService.setHoldNew(on)
+	end
+	return {
+		ok = true,
+		on = on,
+		held = EnemyService.heldIds(),
+		holdNew = EnemyService.holdsNew(),
+		changed = ascending(changed),
+		missing = ascending(missing),
+	}
+end
+
+local function sethp(args: { [string]: any }): Reply
+	local id = args.entityId
+	if typeof(id) ~= "number" then
+		return fail("entityId must be an entity id (a number)")
+	end
+	if typeof(args.hp) ~= "number" then
+		return fail("hp must be a number")
+	end
+	local record = EntityService.get(id)
+	if record == nil then
+		return fail(("no entity %d"):format(id))
+	end
+	local before = record.hp
+	local after = EntityService.setHp(id, args.hp)
+	if after == nil then
+		return fail(("entity %d is dead, or hp is not a number"):format(id))
+	end
+	return {
+		ok = true,
+		entityId = id,
+		name = record.name,
+		kind = record.kind,
+		before = round(before),
+		after = round(after),
+		maxHp = record.maxHp,
+	}
+end
+
+local function heal(args: { [string]: any }): Reply
+	local id, entityError = entityOf(args)
+	if id == nil then
+		return fail(entityError or "no entity")
+	end
+	local record = EntityService.get(id)
+	if record == nil then
+		return fail(("no entity %d"):format(id))
+	end
+	if record.state == "Dead" then
+		return fail(("entity %d is dead"):format(id))
+	end
+	local before = record.hp
+	EntityService.heal(id, record.maxHp - before)
+	return {
+		ok = true,
+		entityId = id,
+		name = record.name,
+		kind = record.kind,
+		before = round(before),
+		after = round(record.hp),
+		maxHp = record.maxHp,
+	}
 end
 
 -- ------------------------------------------------------------------ the BindableFunction
@@ -313,6 +473,9 @@ local HANDLERS: { [string]: (args: { [string]: any }) -> Reply } = {
 		return swing("art", args)
 	end,
 	hp = hp,
+	hold = holdCommand,
+	sethp = sethp,
+	heal = heal,
 }
 local YIELDS: { [string]: boolean } = { basic = true, art = true }
 

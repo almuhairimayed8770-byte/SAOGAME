@@ -252,12 +252,16 @@ end
 
 type ClipsExtra = { scope: any?, bosses: any?, sfx: any?, choreo: any?, prints: { string }? }
 
+-- The real idle phase step (D-123): every choreo stand-in carries it.
+local IDLE_PHASE_STEP = Harness.load("src/shared/data/choreo").enemyIdlePhaseStep
+
 -- A choreo.luau stand-in that names no locomotion or sheath clips (the synthetic trees hold none).
 local function emptyChoreo(): any
 	return {
 		priority = { Sheath = 8 },
 		locomotion = { clipPrefix = "player/OneHandedSword/", clips = {} },
 		sheath = { clips = {}, drawCutClips = {} },
+		enemyIdlePhaseStep = IDLE_PHASE_STEP,
 	}
 end
 
@@ -784,6 +788,7 @@ describe("clips validator", function()
 			priority = { Sheath = 8 },
 			locomotion = { clipPrefix = "player/OneHandedSword/", clips = { Run = "Run", RunDrawn = "RunDrawn" } },
 			sheath = { clips = { draw = "Draw", sheathe = "Sheathe" }, drawCutClips = { "Guard" } },
+			enemyIdlePhaseStep = IDLE_PHASE_STEP,
 		}
 	end
 
@@ -860,6 +865,41 @@ describe("clips validator", function()
 		})
 		problems = runClips(sheathTree(), { rows = {} }, { rows = {} }, { choreo = false })
 		expect(hasProblem(problems, "src/shared/data/choreo.luau is missing or failed to load")).toBe(true)
+	end)
+
+	it("keeps the enemy idle phase step spread over a run of ids and every enemy rig's idle and walk a loop", function()
+		local tree = {
+			["enemy/Boar/Idle"] = idleClip("enemy/Boar/Idle", "Boar"),
+			["enemy/Boar/Walk"] = idleClip("enemy/Boar/Walk", "Boar"),
+		}
+		local function run(step: any, walkLoops: boolean): { string }
+			local choreo = emptyChoreo()
+			choreo.enemyIdlePhaseStep = step
+			choreo.rigs = { Boar = { idle = "enemy/Boar/Idle", walk = "enemy/Boar/Walk" } }
+			tree["enemy/Boar/Walk"].loop = walkLoops
+			return runClips(tree, { rows = {} }, { rows = {} }, { choreo = choreo })
+		end
+		expect(run(IDLE_PHASE_STEP, true)).toEqual({})
+		expect(run(IDLE_PHASE_STEP, false)).toEqual({
+			"choreo rigs.Boar walk enemy/Boar/Walk must loop: it starts at the rig's idle phase (D-123)",
+		})
+		local outside = "choreo enemyIdlePhaseStep must be a number above 0 and below 1"
+		for _, step in { 0, 1, -0.2, 1.4, "half" } do
+			expect(run(step, true)).toEqual({ outside })
+		end
+		expect(run(nil, true)).toEqual({ outside })
+		-- Two ids in a row share a phase at a half step; a quarter step brings back the first of
+		-- five; a tenth keeps two ids a tenth apart, under a sixth; 0.38 spreads like the golden step.
+		expect(run(0.5, true)).toEqual({
+			"choreo enemyIdlePhaseStep 0.5 puts two of 3 ids in a row closer than 1/9 of the loop",
+		})
+		expect(run(0.25, true)).toEqual({
+			"choreo enemyIdlePhaseStep 0.25 puts two of 5 ids in a row closer than 1/15 of the loop",
+		})
+		expect(run(0.1, true)).toEqual({
+			"choreo enemyIdlePhaseStep 0.1 puts two of 2 ids in a row closer than 1/6 of the loop",
+		})
+		expect(run(0.38, true)).toEqual({})
 	end)
 
 	it("without scope.luau the missing table is reported and every missing clip stays a problem", function()
@@ -1145,14 +1185,21 @@ describe("impact validator", function()
 	end
 
 	-- Runs the impact validator on a copy of the real impact.luau that `mutate` breaks.
-	local function runImpact(mutate: (impact: any) -> ()): { string }
+	local function runImpact(mutate: (impact: any) -> (), mutateCombat: ((combat: any) -> ())?): { string }
 		local impact = deepCopy(Harness.load("src/shared/data/impact"))
 		mutate(impact)
+		local combat = deepCopy(Harness.load("src/shared/data/combat"))
+		if mutateCombat ~= nil then
+			mutateCombat(combat)
+		end
 		local validate = loadTool("tools/validators/impact")
 		return validate({
 			load = function(path: string)
 				if path == "src/shared/data/impact" then
 					return impact
+				end
+				if path == "src/shared/data/combat" then
+					return combat
 				end
 				return Harness.load(path)
 			end,
@@ -1355,25 +1402,25 @@ describe("impact validator", function()
 		})
 	end)
 
-	it("keeps the staleness limit between a 30 fps first frame and the shortest hit-stop", function()
-		-- Too short: a 30 fps first frame (2 frames after the hit) would be dropped.
-		expect(runImpact(function(impact)
-			impact.overlay.staleFrames = 1
-		end)).toEqual({
-			"impact: overlay.staleFrames 1 must be at least 2: a 30 fps first frame comes 2 frames after the hit and must still play",
-		})
-		-- Too long: the parry (Normal tier, 3 frames) could start after its hit-stop let go.
-		expect(runImpact(function(impact)
-			impact.overlay.staleFrames = 4
-		end)).toEqual({
-			"impact: overlay.staleFrames 4 is past sequences.Parry's Normal hit-stop (3 frames): it could start after the pose it freezes let go",
-		})
-		expect(runImpact(function(impact)
-			impact.overlay.staleFrames = nil
-		end)).toEqual({
-			"impact: overlay.staleFrames nil must be at least 2: a 30 fps first frame comes 2 frames after the hit and must still play",
-		})
-	end)
+	it(
+		"lets each picture wait as long as its own hit-stop: no global staleFrames, no hit-stop under 2 frames",
+		function()
+			-- The single limit is gone (D-122): a leftover key would read as if it still bound something.
+			expect(runImpact(function(impact)
+				impact.overlay.staleFrames = 3
+			end)).toEqual({
+				"impact: overlay.staleFrames is gone (D-122): each picture waits for its first drawn frame as long as its own hit-stop (a dim: its own length)",
+			})
+			-- A sequence on a hit-stop shorter than 2 frames would drop every 30 fps first frame.
+			expect(runImpact(function(impact)
+				impact.sequences.Parry.tier = "Blink"
+			end, function(combat)
+				combat.hitStopFrames.Blink = 1
+			end)).toEqual({
+				"impact: sequences.Parry rides a 1-frame Blink hit-stop: under 2 frames, a 30 fps first frame (2 frames after the hit) would never draw it",
+			})
+		end
+	)
 end)
 
 describe("accents validator: the swing memory and the crescent's tilt", function()

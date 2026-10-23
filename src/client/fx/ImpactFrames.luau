@@ -16,9 +16,11 @@
 	    SurfaceAppearance, Highlight, script, sound, joint or attachment, SmoothPlastic, flat white.
 	    The viewport's white Ambient and black LightColor render every clone flat, and ImageColor3
 	    tints the whole picture to the look's figure token. Each clone copies its source part's
-	    CFrame every overlay frame; the rigs are frozen by hit-stop, so the silhouettes hold the
-	    pose. Each clone takes its source's rest size: the sword's smear stretch (Smear.restSize)
-	    can still be on in a hit-stop that froze the snap, and the figure draws the blade at rest.
+	    CFrame every overlay frame while the hit-stop the sequence rides on lasts (the rigs are
+	    frozen, so the silhouettes hold the pose); a sequence first drawn late runs past it, and
+	    from there the figures and their camera keep the last frozen frame (D-122). Each clone
+	    takes its source's rest size: the sword's smear stretch (Smear.restSize) can still be on
+	    in a hit-stop that froze the snap, and the figure draws the blade at rest.
 	    Every quality tier draws them; lower tiers draw fewer parts per rig (impact.quality).
 	  - Strokes: a layer of OutlineInk Frames (UICorner round ends, UIGradient transparency
 	    taper) rotated to the slash angle across the hit; no image assets.
@@ -26,15 +28,19 @@
 	Timing: the sequence's clock starts on the first frame drawn after `play` (a HitConfirmed
 	lands between frames), and every look gets at least one drawn frame: a look ends on the first
 	drawn frame at or past its finish (to the nearest frame), so a slow device shows each look
-	once instead of skipping the parry's single frame. Nothing shows past the hit-stop the
-	sequence rides on (ImpactSequence.capSeconds). At the end everything hides, the render step
+	once instead of skipping the parry's single frame. A sequence runs at most the length of the
+	hit-stop it rides on (ImpactSequence.capSeconds) from its first drawn frame; one first drawn
+	late (a stall, below) so runs past the hit-stop itself, its figures held on the last frozen
+	frame. At the end everything hides, the render step
 	unbinds and the clones go back to the pool (the oldest past impact.silhouette.poolCap are
 	destroyed).
 
 	Render stalls (a display asleep, a minimised window, a long hitch: RenderStepped stops while
 	Heartbeat goes on): every picture, the dim too, remembers when it was asked for. Its first
-	drawn frame starts it only within impact.overlay.staleFrames of that; a later one drops it,
-	so the frame that comes back never shows a hit long gone. A Heartbeat watchdog runs while
+	drawn frame starts it only within its own hit-stop of that (D-122: the world is frozen for all
+	of it, so a first frame anywhere inside it still shows the frozen moment; a dim, within its own
+	length); a later one drops it, so the frame that comes back never shows a hit long gone, and
+	a 15 fps window still draws a Kill and a Final. A Heartbeat watchdog runs while
 	anything shows and ends a picture no frame drew within that limit, or one drawn that has
 	passed its hit-stop (a dim: its length), so the overlay is never left up and its figures go
 	back to the pool while nothing renders. A play that finds an undrawn picture gone stale (no
@@ -218,11 +224,6 @@ end
 local function onHeartbeat(step: (dt: number) -> ()): (() -> ())?
 	local fn = overrides.onHeartbeat
 	return if fn ~= nil then fn(step) else Engine.onHeartbeat(step)
-end
-
--- Seconds a picture may wait for its first drawn frame (impact.overlay.staleFrames).
-local function staleSeconds(): number
-	return Impact.overlay.staleFrames * Impact.frameSeconds
 end
 
 local function viewportSize(): Vector2?
@@ -809,11 +810,21 @@ finish = function(rendering: boolean?)
 	end
 end
 
--- True when what shows must end at `at` without another drawn frame: no frame drew it within the
--- staleness limit of its request, or it has run past its hit-stop (a dim: past its length).
+-- Seconds a picture may wait for its first drawn frame (D-122): a sequence, the hit-stop it rides
+-- on (its cap); the dim, its own length (it runs from its request, so past that nothing of it
+-- would show).
+local function staleSeconds(current: Showing): number
+	if current.kind == "Dim" then
+		return ImpactSequence.dimSeconds(current.hold)
+	end
+	return current.cap
+end
+
+-- True when what shows must end at `at` without another drawn frame: no frame drew it within its
+-- own wait for a first frame, or it has run past its hit-stop (a dim: past its length).
 local function expired(current: Showing, at: number): boolean
 	if not current.drawn then
-		return at - current.requestedAt > staleSeconds()
+		return at - current.requestedAt > staleSeconds(current)
 	end
 	local began = current.startedAt or at
 	if current.kind == "Dim" then
@@ -860,7 +871,7 @@ end
 
 local function stepDim(current: Showing, at: number)
 	if not current.drawn then
-		if at - current.requestedAt > staleSeconds() then
+		if at - current.requestedAt > staleSeconds(current) then
 			finish(true) -- its first frame comes too late: the dip belonged to a hit long gone
 			return
 		end
@@ -875,17 +886,26 @@ local function stepDim(current: Showing, at: number)
 	holdClaim(current, at)
 end
 
+-- Copies the rigs and the camera into the figures only while the hit-stop the sequence was asked
+-- under still freezes them (D-122): a sequence first drawn late runs past that, and from there the
+-- figures hold the last frozen pose instead of showing the fighters move again.
+local function syncWhileFrozen(current: Showing, at: number)
+	if at - current.requestedAt < current.cap then
+		syncFigures()
+	end
+end
+
 local function stepSequence(current: Showing, at: number)
 	local began = current.startedAt
 	if began == nil then
-		if at - current.requestedAt > staleSeconds() then
+		if at - current.requestedAt > staleSeconds(current) then
 			finish(true) -- its first frame comes too late: dropped, never started
 			return
 		end
 		-- The first frame drawn since play: the clock starts here, on the first look.
 		current.drawn = true
 		current.startedAt = at
-		syncFigures()
+		syncWhileFrozen(current, at)
 		holdClaim(current, at)
 		return
 	end
@@ -904,7 +924,7 @@ local function stepSequence(current: Showing, at: number)
 		current.look = look
 		applyLook(look)
 	end
-	syncFigures()
+	syncWhileFrozen(current, at)
 	holdClaim(current, at)
 end
 
@@ -961,7 +981,7 @@ local function join(current: Showing, models: { Model })
 	end
 	if figuresOn and current.wantsFigures then
 		buildSilhouettes(added, firstIndex)
-		syncFigures()
+		syncWhileFrozen(current, now())
 	end
 end
 

@@ -464,6 +464,32 @@ the sweep.
   hides them. FrameClock, Trails, OutlineManager, SwitchRing, Shatter, Digits, Telegraphs, Hud, Nameplates,
   SystemLine and SfxPool run on Heartbeat, Engine.now or the wall clock. Choreo still steps on RenderStepped (open).
 
+### Controlled fights and idle phase (D-120 to D-124)
+
+- **EnemyService hold (D-120):**
+  - API: `setHeld(id, on)`, `isHeld`, `heldIds`, `setHoldNew(on)`, `holdsNew`.
+  - hold(entry) sets Entry.held, puts the brain to sleep, stops the mover and calls EntityService.setHpRegenHeld(id, true), when the bound EntityService has it.
+  - refreshSleep skips held entries.
+  - A release calls setHpRegenHeld(id, false) and makes the next sleep check run on the next tick. forget() does the same for a held entry (death, despawn, Unregistered, reset).
+  - Hold-new is checked in spawn, after the entry is registered and before Spawned fires.
+  - It is the cinematic hold and the Studio dev hook's tool.
+- **EntityService (D-120, D-121):**
+  - setHp is dev and GM only. It clamps to [1, maxHp], publishes, restarts the regen wait (lastCombatAt), and never kills, revives or draws.
+  - setHpRegenHeld(id, held) sets record.hpRegenHeld (types.luau EntityRecord). stepAlive skips HP regen while it is set; Guard Gauge regen is unchanged. It returns false for an unknown or dead id. Only EnemyService's hold calls it.
+- **DevCombat** (server hook, Studio and DevCapture only):
+  - Commands: help, trace, events, basic, art, hp (now with `held`), hold, sethp, heal.
+  - hold, sethp and heal only set a fight up; every hit and kill still comes from a real swing through CombatService.
+- **ImpactFrames (D-122):**
+  - `staleSeconds(current)` is the sequence's cap (its hit-stop) or the dim's own length. The watchdog, stepDim and stepSequence all use it.
+  - `syncWhileFrozen(current, at)` copies the CurrentCamera and every rig part into the viewport only while `at - requestedAt < cap`. stepSequence (first drawn frame and each frame) and join use it; showSequence still syncs once at play. A sequence first drawn late therefore holds its last frozen frame past the hit-stop.
+  - impact.overlay has no staleFrames; the impact validator requires every sequence's hit-stop to be at least 2 frames.
+- **Idle phase (D-123):**
+  - `Locomotion.idlePhase(id)` = (id x choreo.enemyIdlePhaseStep) % 1.
+  - Locomotion.attach's `phase` option starts the enemy RigDriver's Idle and Walk at phase x their clip durations (Mixer wraps a loop's startTime).
+  - Replication.attachDriver passes `{ phase = locomotion.idlePhase(record.id) }` for non-player records when the package has idlePhase.
+- **Mixer:** a fallback handle whose targetWeight is 0 (another Base clip active) advances into a scratch list cleared every step, so its crossed events never reach Choreo's events signal. Root motion and the clock are unchanged.
+- **Clips validator:** its choreo cross-check also owns the idle-phase spread (validator constants PHASE_RUN 8 and PHASE_SHARE 3) and the rule that every choreo.rigs entry with a walk has a looping idle and walk.
+
 ## Data tables (src/shared/data)
 
 | File | Holds |

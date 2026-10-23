@@ -315,6 +315,7 @@ type Swing = {
 	-- from the body's yaw history and `lockBearing` (or the soft assist with no lock).
 	facingYaw: number?,
 	lockBearing: number?, -- the lock's bearing from the starting look (nil: no lock)
+	boarHp: number?, -- set through EntityService.setHp after the boar registers (the dev hook's sethp)
 }
 
 type Result = {
@@ -326,6 +327,9 @@ type Result = {
 	facingYaw: number,
 	facing: Vector3, -- the request's facing, world space
 	serverYawAtReceipt: number,
+	confirmed: { any }, -- HitConfirmed payloads
+	died: { any }, -- EntityDied payloads
+	boarState: string,
 }
 
 local BASE_YAW = 30 -- any world heading: the swing works in the body's frame
@@ -349,7 +353,9 @@ local function swing(s: Swing): Result
 	local net, remotes, abuse = newNet()
 	EntityService.bind({
 		now = now,
-		fireAll = nil,
+		fireAll = function(remote: string, payload: any)
+			net.fireAll(remote, payload)
+		end,
 		heartbeat = nil,
 		addTag = function(instance: any, tag: string)
 			instance:AddTag(tag)
@@ -423,7 +429,10 @@ local function swing(s: Swing): Result
 	local yawAttachment = Instance.new("Attachment")
 	yawAttachment.Name = "EnemyYaw"
 	yawAttachment.Parent = boar.PrimaryPart
-	EntityService.registerEnemy(boar, boarDef, {})
+	local boarId = EntityService.registerEnemy(boar, boarDef, {})
+	if s.boarHp ~= nil then
+		EntityService.setHp(boarId, s.boarHp)
+	end
 	local hpBefore = boar:GetAttribute("HP")
 
 	-- The engine queries over everything in the world.
@@ -532,6 +541,13 @@ local function swing(s: Swing): Result
 		heartbeat()
 	end
 	CombatService.traceSink = nil
+	local function payloads(name: string): { any }
+		local list = {}
+		for _, entry in remotes[name].sent do
+			table.insert(list, entry.payload)
+		end
+		return list
+	end
 	return {
 		rejected = rejected,
 		abuse = abuse,
@@ -541,6 +557,9 @@ local function swing(s: Swing): Result
 		facingYaw = facingYaw :: number,
 		facing = facingLook,
 		serverYawAtReceipt = serverYawAtReceipt,
+		confirmed = payloads("HitConfirmed"),
+		died = payloads("EntityDied"),
+		boarState = boar:GetAttribute("State"),
 	}
 end
 
@@ -620,5 +639,20 @@ describe("A player's basic swing through the real remote (D-112, D-113)", functi
 		).toBe(true)
 		-- The server swept along the facing the request carried (D-113).
 		expect(result.events[1].facing:Dot(result.facing)).toBeCloseTo(1, 1e-6)
+	end)
+end)
+
+describe("A controlled kill through the real remote (D-121)", function()
+	it("a boar set to 1 HP by the dev hook dies to one basic swing: Kill hit-stop, Dead, EntityDied", function()
+		local result = swing({ boarBearing = 0, facingYaw = 0, boarHp = 1 })
+		expect(result.rejected).toEqual({})
+		expect(result.hpBefore).toBe(1)
+		expect(result.hpAfter).toBe(0)
+		expect(result.boarState).toBe("Dead")
+		expect(#result.confirmed).toBe(1)
+		expect(result.confirmed[1].killed).toBe(true)
+		expect(result.confirmed[1].hitStop).toBe("Kill")
+		expect(#result.died).toBe(1)
+		expect(result.died[1].byPlayer).toBe(true)
 	end)
 end)

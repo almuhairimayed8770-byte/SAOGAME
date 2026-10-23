@@ -35,7 +35,11 @@
 	  their ...Drawn counterparts (and IdleDrawn) are not; each pair has the same duration and loop
 	  and the same Footstep feet at times within one 60 fps frame, so a crossfade between the sets
 	  stays in step; Draw is sheathed with one WeaponDraw, Sheathe has one WeaponSheathe, and both
-	  are UpperBody at priority.Sheath; every sheath.drawCutClips name is a clip file.
+	  are UpperBody at priority.Sheath; every sheath.drawCutClips name is a clip file;
+	- the enemy idle phase (D-123): enemyIdlePhaseStep is a number above 0 and below 1 that keeps
+	  any PHASE_RUN ids in a row at least 1 / (PHASE_SHARE x run) of the loop apart, for every run
+	  up to PHASE_RUN long, and every rig in choreo.rigs with a walk (an enemy rig) has an idle and
+	  a walk that loop (they start at the rig's phase; a one-shot would end early).
 
 	Phase scope (D-015, src/shared/data/scope.luau): a missing clip for an Art, enemy or boss in
 	the current phase's scope is a problem; missing clips for later-phase rows are collected into
@@ -60,6 +64,11 @@ local ANTICIPATION_FRAMES = { min = 4, max = 10 }
 local SNAP_FRAMES = { min = 2, max = 4 }
 
 local CLIPS_DIRECTORY = "src/shared/clips"
+
+-- The enemy idle phase spread (D-123): the longest run of ids in a row checked (a herd, with room
+-- to spare), and the share of an even spread every two of them must keep (a third of 1 / run).
+local PHASE_RUN = 8
+local PHASE_SHARE = 3
 
 local EVENT_KINDS = {
 	HitWindowOpen = true,
@@ -752,6 +761,62 @@ return function(ctx: Context): { string }
 	if choreo == nil then
 		problem("src/shared/data/choreo.luau is missing or failed to load (%s)", choreoError or "?")
 	else
+		-- The enemy idle phase (D-123): a step that spreads ids in a row round the loop.
+		local step = choreo.enemyIdlePhaseStep
+		if typeof(step) ~= "number" or step ~= step or step <= 0 or step >= 1 then
+			problem("choreo enemyIdlePhaseStep must be a number above 0 and below 1")
+		else
+			for run = 2, PHASE_RUN do
+				local phases = {}
+				for id = 1, run do
+					table.insert(phases, (id * step) % 1)
+				end
+				table.sort(phases)
+				local gap = phases[1] + 1 - phases[run]
+				for index = 2, run do
+					gap = math.min(gap, phases[index] - phases[index - 1])
+				end
+				if gap < 1 / (PHASE_SHARE * run) then
+					problem(
+						"choreo enemyIdlePhaseStep %s puts two of %d ids in a row closer than 1/%d of the loop",
+						tostring(step),
+						run,
+						PHASE_SHARE * run
+					)
+					break
+				end
+			end
+		end
+		local choreoRigs = if typeof(choreo.rigs) == "table" then choreo.rigs else {}
+		for _, row in sortedRows(choreoRigs) do
+			local rigClips = row.def
+			if typeof(rigClips) ~= "table" or rigClips.walk == nil then
+				continue
+			end
+			for _, key in { "idle", "walk" } do
+				local id = rigClips[key]
+				if typeof(id) ~= "string" or not present[id] then
+					problem(
+						"choreo rigs.%s %s: clip file %s/%s.luau is missing",
+						row.key,
+						key,
+						CLIPS_DIRECTORY,
+						tostring(id)
+					)
+					continue
+				end
+				local clip = loaded[id]
+				if clip ~= nil and clip.loop ~= true then
+					problem(
+						"choreo rigs.%s %s %s must loop: it starts at the rig's idle phase (D-123)",
+						row.key,
+						key,
+						id
+					)
+				end
+			end
+		end
+
 		local locomotion = if typeof(choreo.locomotion) == "table" then choreo.locomotion else {}
 		local sheath = if typeof(choreo.sheath) == "table" then choreo.sheath else {}
 		local prefix = if typeof(locomotion.clipPrefix) == "string" then locomotion.clipPrefix else ""

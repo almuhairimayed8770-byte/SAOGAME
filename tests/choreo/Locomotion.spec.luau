@@ -246,6 +246,79 @@ describe("Locomotion.attach", function()
 		Choreo.release(model)
 	end)
 
+	it("starts an enemy rig's idle and walk loops at the phase it is given", function()
+		local model = buildRig("Kobold")
+		local animator = Choreo.get(model)
+		local driver = Locomotion.attach(animator, model, { tracker = trackerOf(still()), phase = 0.25 })
+		local idle = handleOf(animator, ChoreoData.rigs.Kobold.idle)
+		local walk = handleOf(animator, ChoreoData.rigs.Kobold.walk)
+		expect(idle.time).toBeCloseTo(0.25 * idle.clip.duration, 1e-9)
+		expect(walk.time).toBeCloseTo(0.25 * walk.clip.duration, 1e-9)
+		driver:destroy()
+		Choreo.release(model)
+	end)
+
+	it("gives one id the same idle phase every time and spreads ids in a row round the loop", function()
+		for id = -3, 64 do
+			local phase = Locomotion.idlePhase(id)
+			expect(phase >= 0 and phase < 1).toBe(true)
+			expect(Locomotion.idlePhase(id)).toBe(phase)
+		end
+		-- A herd spawns with ids in a row: no two of eight in a row share a phase.
+		for first = 1, 64 do
+			local phases = {}
+			for id = first, first + 7 do
+				table.insert(phases, Locomotion.idlePhase(id))
+			end
+			table.sort(phases)
+			local gap = phases[1] + 1 - phases[#phases]
+			for index = 2, #phases do
+				gap = math.min(gap, phases[index] - phases[index - 1])
+			end
+			expect(gap > 1 / 24).toBe(true)
+		end
+	end)
+
+	it("two rigs of one herd roar apart, each once a loop: the hidden fallback idle is silent", function()
+		local roars: { [number]: { number } } = {}
+		local rigs = {}
+		for id = 1, 2 do
+			local model = buildRig("Kobold")
+			local animator = Choreo.get(model)
+			roars[id] = {}
+			local clock = 0
+			animator.events:Connect(function(_clipId, event)
+				if event.kind == "Sfx" then
+					table.insert(roars[id], clock)
+				end
+			end)
+			local driver =
+				Locomotion.attach(animator, model, { tracker = trackerOf(still()), phase = Locomotion.idlePhase(id) })
+			table.insert(rigs, {
+				model = model,
+				animator = animator,
+				driver = driver,
+				tick = function()
+					clock += FRAME
+					animator:step(FRAME)
+				end,
+			})
+		end
+		local loop = ClipLibrary.get(ChoreoData.rigs.Kobold.idle).duration
+		for _ = 1, math.floor(2 * loop / FRAME) do
+			for _, rig in rigs do
+				rig.tick()
+			end
+		end
+		expect(#roars[1]).toBe(2)
+		expect(#roars[2]).toBe(2)
+		expect(math.abs(roars[1][1] - roars[2][1]) > loop / 24).toBe(true)
+		for _, rig in rigs do
+			rig.driver:destroy()
+			Choreo.release(rig.model)
+		end
+	end)
+
 	it("runs the full blend space on a remote player rig and skips frames with no state", function()
 		local model = buildRig("PlayerR15")
 		local animator = Choreo.get(model)

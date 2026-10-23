@@ -12,6 +12,16 @@
 	sleep. The brain owns its yaw and publishes it through an AlignOrientation on the root, so a
 	Charger really does turn slowly.
 
+	Hold (D-120): setHeld(id, true) puts one enemy's brain to sleep and stops its mover, and the
+	sleep check never wakes it while it is held; setHoldNew(true) makes every enemy spawned after
+	it (PlaygroundService respawns included) start held. A held enemy's HP never regenerates
+	(EntityService.setHpRegenHeld), so a low HP set up for a hit waits for it. Hits still land on a
+	held enemy: HP, the Stagger interrupt, Break, death and the kill path all run through
+	EntityService as before.
+	Releasing it hands it back to the sleep rules on the next tick. This is the cinematic hold
+	(a boss entrance, the announcement, any story beat or cutscene freezes the field) and what
+	the Studio dev hook uses to run a controlled fight.
+
 	A brain's telegraph becomes the Telegraph remote (wind-up, kind, origin, facing, ground shape),
 	its clip the ActionStarted remote, its strike a CombatService.enemyStrike call, its state an
 	EntityService.setState call (EntityService fires StateChanged itself). EntityService's Died and
@@ -97,6 +107,7 @@ export type Entry = {
 	brain: Brain.Brain,
 	mover: Mover,
 	awake: boolean,
+	held: boolean, -- the cinematic / dev hold: asleep, and the sleep check never wakes it
 	home: Vector3,
 }
 
@@ -128,6 +139,7 @@ local heartbeatConnection: Connection? = nil
 local signalConnections: { Connection } = {}
 local started = false
 local warnedNoCombat = false
+local holdNew = false
 
 local function dependencies(): Deps
 	if deps == nil then
@@ -413,16 +425,41 @@ local function archetypeFor(def: Enemies.Enemy): Brain.Archetype
 	return archetype
 end
 
+-- Pauses (true) or resumes (false) an enemy's HP regen in EntityService (setHpRegenHeld).
+local function holdRegen(id: number, held: boolean)
+	local entities = dependencies().entities
+	if typeof(entities.setHpRegenHeld) == "function" then
+		entities.setHpRegenHeld(id, held)
+	end
+end
+
 local function forget(id: number, reason: string)
 	local entry = entries[id]
 	if entry == nil then
 		return
 	end
 	entries[id] = nil
+	if entry.held then
+		-- A record that outlives the entry (reset) gets its regen back; a dead or gone one is a no-op.
+		entry.held = false
+		holdRegen(id, false)
+	end
 	entry.awake = false
 	entry.brain:die()
 	moverStop(entry.mover)
 	EnemyService.Despawned:Fire(id, entry.defId, reason)
+end
+
+-- Holds an enemy: its brain sleeps (it stops and forgets its target), its mover stops and its HP
+-- stops regenerating.
+local function hold(entry: Entry)
+	entry.held = true
+	if entry.awake then
+		entry.awake = false
+		entry.brain:sleep()
+	end
+	moverStop(entry.mover)
+	holdRegen(entry.id, true)
 end
 
 --- The scaled, variant-applied def an enemy spawns with (what EntityService registers).
@@ -481,11 +518,15 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 		model = model,
 		mover = newMover(model, def.moveSpeed),
 		awake = true,
+		held = false,
 		home = d.engine.position(model),
 		brain = nil :: any,
 	}
 	entry.brain = Brain.new(makeContext(entry), archetypeFor(def))
 	entries[id] = entry
+	if holdNew then
+		hold(entry)
+	end
 	EnemyService.Spawned:Fire(id, defId, model)
 	return id
 end
@@ -536,6 +577,57 @@ function EnemyService.isAwake(id: number): boolean
 	return entry ~= nil and entry.awake
 end
 
+--- Holds (true) or releases (false) a living enemy: a held enemy's brain sleeps, its mover stops,
+--- the sleep check never wakes it and its HP never regenerates (EntityService.setHpRegenHeld);
+--- hits, staggers and death still land on it. A release hands it back to the sleep rules on the
+--- next tick and lets its HP regenerate again. The cinematic hold (boss entrances, story
+--- beats, cutscenes) and the Studio dev hook (D-120). Returns false when `id` is no living enemy.
+function EnemyService.setHeld(id: number, held: boolean): boolean
+	local entry = entries[id]
+	if entry == nil then
+		return false
+	end
+	if held then
+		hold(entry)
+	elseif entry.held then
+		entry.held = false
+		holdRegen(id, false)
+		-- Asleep until the sleep check says otherwise: run it on the next tick, not in up to
+		-- ai.sleepCheckInterval.
+		lastSleepCheck = -math.huge
+	end
+	return true
+end
+
+--- Whether a living enemy is held.
+function EnemyService.isHeld(id: number): boolean
+	local entry = entries[id]
+	return entry ~= nil and entry.held
+end
+
+--- Every held enemy id, ascending.
+function EnemyService.heldIds(): { number }
+	local ids = {}
+	for id, entry in entries do
+		if entry.held then
+			table.insert(ids, id)
+		end
+	end
+	table.sort(ids)
+	return ids
+end
+
+--- Hold-new: true makes every enemy spawned from now on (PlaygroundService respawns too) start
+--- held; false stops that and releases nobody. reset() turns it off.
+function EnemyService.setHoldNew(held: boolean)
+	holdNew = held
+end
+
+--- Whether enemies spawned now start held.
+function EnemyService.holdsNew(): boolean
+	return holdNew
+end
+
 --- Every living enemy id, ascending.
 function EnemyService.ids(): { number }
 	local ids = {}
@@ -563,6 +655,9 @@ local function refreshSleep(now: number)
 	local engine = dependencies().engine
 	local radius = AI.sleepRadius
 	for _, entry in entries do
+		if entry.held then
+			continue -- held: asleep until released, whoever stands next to it
+		end
 		local position = engine.position(entry.model)
 		local awake = false
 		for _, player in currentPlayers do
@@ -898,6 +993,7 @@ function EnemyService.reset()
 	lastSleepCheck = -math.huge
 	started = false
 	warnedNoCombat = false
+	holdNew = false
 end
 
 return EnemyService

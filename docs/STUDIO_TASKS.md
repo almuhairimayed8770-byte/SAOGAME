@@ -548,8 +548,15 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
     - Server, the sweep alone with no client: `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("basic"))`, `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("art", {artId = "OneHandedSword.Horizontal"}))`,
       `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("hp"))`
     - Server, trace off: `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("trace", {on = false}))`
+    - Server, hold every enemy now and every one spawned later (respawns too): `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("hold", {all = true}))`
+    - Server, hold every enemy but one (an id from "hp"): `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("hold", {except = {12}}))`
+    - Server, hold some, or release some: `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("hold", {ids = {12, 14}}))`, `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("hold", {ids = {12}, on = false}))`
+    - Server, release everything and stop holding new spawns: `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("hold", {all = true, on = false}))`
+    - Server, set one fighter's HP (clamped to 1 .. max, never a kill; a held enemy never regenerates, anyone else waits 8 s again before regen): `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("sethp", {entityId = 12, hp = 1}))`
+    - Server, full HP (your own entity when no id is given, or any entity): `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("heal"))`, `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke("heal", {entityId = 12}))`
     Pass: every client swing at a faced enemy reports hits > 0 and no rejection, and each server window prints one
     [DevCombat] line. Outside the Playground (no DevCapture attribute) neither BindableFunction exists.
+    "hp" shows held = true on each held enemy and its entityId is yours. A held enemy never walks or attacks, yet flinches, staggers and dies to hits, and its HP never climbs back. "sethp" with hp = 0 replies after = 1.
 
 ## P. Render stalls and the lock (D-117 to D-119)
 
@@ -566,3 +573,39 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
     (e) With the display asleep, let hits land (a kill shatter and parry sparks if possible), then wake it. Pass: no
     burst of sparks or shards plays on wake (ParticleEmitter:Emit during a stall is untested).
     (f) Reduce flashing on (SettingReduceFlashing true): with sleeps or hitches between hits, at most one dim a second.
+
+## Q. A controlled fight (D-120 to D-124)
+
+108. [ ] **A controlled fight.** In the Playground press F5 and wait for the spawn. Each step is one execute_luau (or command bar) call.
+    Shorthand: S(cmd, args) is the Server line `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke(cmd, args))`. C(cmd, args) is the Client line `local f = game.Players.LocalPlayer:WaitForChild("SkyspireDevAim", 5); return game:GetService("HttpService"):JSONEncode(f:Invoke(cmd, args))`. The full one-liners are in item 106.
+    Set up: S("hold", {all = true}), then S("hp") for the enemy ids, their distances and your entityId. A held enemy never regenerates HP, so a value set with "sethp" waits for the swing however long you take. A released enemy, and you, regenerate 1% a second after 8 s without a hit.
+    (a) The kill sequence. S("sethp", {entityId = <boar>, hp = 1}), then walk to about 5 studs from that boar, C("lock", {id = <boar>}), C("swing", {kind = "basic", count = 1}) (or click). Pass:
+        - S("hp") still shows hp = 1 for it however long the walk took.
+        - The one swing kills it with the kill hit-stop, the Kill impact frames (black beat, white figures, ink strokes), the shatter and the death vocal.
+        - Afterwards S("hp") lists it as Dead with held = false until its corpse goes about 4 s later, then not at all.
+        - Its respawn about 20 s later shows held = true.
+    (b) Sheathe after lock-off. Lock a held boar (F) and swing once so the sword is out. Clear the lock (F, or C("lock", {clear = true})) and stand still. Pass: about 6 s after the swing (the combat tag) the Sheathe clip plays once and the sword lands on the back with no pop. Nothing interrupts it, because the boar is held.
+    (c) Item 103 (strafe feet): locked on a held boar, Capture time scale 0.25x (O), hold D for 3 s. Pass as item 103.
+    (d) Item 99 (lock facing): walk away from a held boar until the body faces away, press F, then strafe with A and D and back off with S. Pass as item 99. The guard part needs a strike; do it in (g).
+    (e) Item 101: facing away from a held boar, press F and click at once. Pass as item 101. Between tries, S("heal", {entityId = <boar>}) so it does not die.
+    (f) Item 102: unlocked, a held boar 35 degrees off the body, 0.25x, swing. Pass as item 102.
+    (g) The parry.
+        1. Release one Kobold Axeman only: S("hold", {ids = {<kobold>}, on = false}).
+        2. Run S("heal") so you are at full HP.
+        3. Stand about 4 studs in front of it, lock it (F), and raise the guard (RMB) just before its strike lands.
+        4. Pass: the parry's inverted impact frame, the parry sparks, its Parry reaction and the Switch window ring. A guard raised while locked faces it and blocks (the guard part of item 99).
+        5. Then hold it again: S("hold", {ids = {<kobold>}}).
+    (h) Item 107(d).
+        1. Lock a held boar.
+        2. Run S("sethp", {entityId = <you>, hp = 1}), then S("hold", {ids = {<kobold>}, on = false}) right after; you are not held, so your HP starts climbing 8 s after the sethp.
+        3. Let the kobold land a hit (or press Esc > Reset Character), and respawn.
+        4. Pass as item 107(d).
+        5. Then S("hold", {all = true}) again.
+    (i) (optional) Item 85 against the released kobold of (g).
+    (j) Idle phase (D-123). Stand among a held herd at 1x for 10 s. Pass: no two neighbours sway in step; each Kobold roars once per 4 s idle loop, never in unison, and no roar sounds doubled.
+    (k) A Kill drawn at a low frame rate (D-122).
+        1. Client: `game:GetService("RunService"):BindToRenderStep("SkyspireSlow", 0, function() local t = os.clock() while os.clock() - t < 0.06 do end end)` (about 15 fps).
+        2. Repeat (a) on another held boar.
+        3. Pass: the Kill frames play (black beat, white figures, ink). The white figures never move while they show, even as the world starts moving under them, and the overlay is gone within about a quarter second.
+        4. Then: `game:GetService("RunService"):UnbindFromRenderStep("SkyspireSlow")`.
+    End: S("hold", {all = true, on = false}). Pass: every enemy wakes and fights again. Outside the Playground (no DevCapture attribute) neither BindableFunction exists.

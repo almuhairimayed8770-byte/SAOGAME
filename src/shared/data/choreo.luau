@@ -66,6 +66,12 @@ local Choreo = {
 		Boar = { idle = "enemy/Boar/Idle", walk = "enemy/Boar/Walk" },
 		Kobold = { idle = "enemy/Kobold/Idle", walk = "enemy/Kobold/Walk" },
 	} :: { [string]: { idle: string, breathing: string?, walk: string? } },
+	-- An enemy rig's idle and walk loops start this far round the loop per entity id: the phase is
+	-- the fraction part of id x step (D-123). A herd spawns with ids in a row, and the golden-ratio
+	-- step puts every run of ids far apart round the loop, so neighbours never breathe, sniff or
+	-- roar in step. Cosmetic and client-only: no server roll. The clips validator keeps any eight
+	-- ids in a row at least a third of an even share (1 / 24 of the loop) apart.
+	enemyIdlePhaseStep = 0.6180339887,
 
 	-- Roblox Animation fallback (clip ids that look like rbxassetid://): layer -> AnimationPriority name
 	rbxPriority = {

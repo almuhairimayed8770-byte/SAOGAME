@@ -63,11 +63,18 @@ end
 local function fakeLocomotion(calls)
 	local attached = 0
 	return {
-		attach = function(animator, model)
+		attach = function(animator, model, options)
 			attached += 1
 			local driver = { animator = animator, model = model, index = attached }
-			table.insert(calls, { module = "locomotion", fn = "attach", args = { animator, model }, driver = driver })
+			table.insert(
+				calls,
+				{ module = "locomotion", fn = "attach", args = { animator, model, options }, driver = driver }
+			)
 			return driver
+		end,
+		-- A stand-in phase a test can read back: the entity id in hundredths of a loop.
+		idlePhase = function(id: number): number
+			return id / 100
 		end,
 		destroy = function(driver)
 			table.insert(calls, { module = "locomotion", fn = "destroy", args = { driver } })
@@ -1082,6 +1089,15 @@ describe("Replication", function()
 		Replication.watch(t.records[2])
 		expect(#t.find("locomotion", "attach")).toBe(2)
 		expect(t.find("locomotion", "attach")[2].args[2]).toBe(t.models.ally)
+	end)
+
+	it("an enemy rig's driver starts its idle and walk at its own id's phase", function()
+		local t = setup()
+		Replication.watch(t.records[7])
+		Replication.watch(t.records[8])
+		local attaches = t.find("locomotion", "attach")
+		expect(attaches[1].args[3].phase).toBe(0.07)
+		expect(attaches[2].args[3].phase).toBe(0.08)
 	end)
 
 	it("the local player's rig gets no driver: the character controller owns its locomotion", function()

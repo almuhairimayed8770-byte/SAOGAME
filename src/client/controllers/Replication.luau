@@ -31,7 +31,8 @@
 	`data.kind` ("Art" | "Basic") picks the trail kind for the rest of that clip's trail events.
 
 	Every tracked rig this client does not own (other players, enemies) gets a locomotion driver
-	(Locomotion.attach) when it is watched, so it walks instead of sliding on its idle pose. The
+	(Locomotion.attach) when it is watched, so it walks instead of sliding on its idle pose; an
+	enemy's idle and walk start at its own id's phase (Locomotion.idlePhase, D-123). The
 	local rig's locomotion belongs to the character controller (Locomotion.new), so watch skips it:
 	by id once the tracker has resolved it, by the character model before that, and a driver that
 	slipped onto the local rig in between is dropped when the tracker's `localChanged` fires.
@@ -70,7 +71,9 @@ export type Deps = {
 	entities: any, -- EntityTracker-like: get(id), all(), added, removed
 	localId: () -> number?, -- never yields
 	localCharacter: (() -> Instance?)?, -- the local player's character model when it exists; never yields
-	locomotion: any, -- Locomotion-like: attach(animator, model, deps?) -> driver, destroy(driver), humanoidTracker?
+	-- Locomotion-like: attach(animator, model, deps?) -> driver, destroy(driver), humanoidTracker?,
+	-- idlePhase?(id) -> 0 .. 1
+	locomotion: any,
 	choreo: any, -- Choreo.get(model) -> animator
 	clipLibrary: any, -- ClipLibrary.has(clipId)
 	trails: any,
@@ -739,8 +742,17 @@ local function remotePlayerOptions(locomotion: any, model: Instance, driverOf: (
 	}
 end
 
+-- The driver options for an enemy rig: its idle and walk start at its own id's phase (D-123), so
+-- a herd never breathes or roars in step. Nil when the locomotion package has no idlePhase.
+local function enemyOptions(locomotion: any, id: number): any
+	if typeof(locomotion.idlePhase) ~= "function" then
+		return nil
+	end
+	return { phase = locomotion.idlePhase(id) }
+end
+
 -- Attaches the remote-rig locomotion driver (a player rig runs the blend space, an enemy rig its
--- idle / walk pair) unless the rig is the local player's own.
+-- idle / walk pair at its own phase) unless the rig is the local player's own.
 local function attachDriver(record: any, animator: any)
 	if drivers[record.id] ~= nil or isLocalRecord(record) then
 		return
@@ -751,7 +763,7 @@ local function attachDriver(record: any, animator: any)
 		then remotePlayerOptions(d.locomotion, record.model, function(): any
 			return attached
 		end)
-		else nil
+		else enemyOptions(d.locomotion, record.id)
 	local ok, driver = pcall(d.locomotion.attach, animator, record.model, options)
 	if not ok then
 		warn(("[Replication] locomotion for %s failed: %s"):format(tostring(record.name), tostring(driver)))

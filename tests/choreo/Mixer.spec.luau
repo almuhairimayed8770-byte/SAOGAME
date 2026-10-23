@@ -257,6 +257,43 @@ describe("Mixer", function()
 		expect(idle.weight).toBeCloseTo(1, 1e-6)
 	end)
 
+	it(
+		"a fallback idle hidden under another Base clip fires none of its events; it fires again once it shows",
+		function()
+			local mixer = Mixer.new()
+			local events = { { time = 0.25, kind = "Sfx", data = { name = "enemy.BruteRoar" } } }
+			mixer:play(clip("idle", { layer = "Base", loop = true, events = events }), { fallback = true })
+			local function sounds(frames: number): number
+				local count = 0
+				for _ = 1, frames do
+					for _, fired in mixer:step(FRAME).events do
+						if fired.clipId == "idle" then
+							count += 1
+						end
+					end
+				end
+				return count
+			end
+			expect(sounds(60)).toBe(1) -- alone, it is the rig's idle: one sound a loop
+			-- The same loop played as the rig's own idle (a later phase) hides it: only the shown
+			-- copy is heard.
+			local shown = mixer:play(
+				clip("idle", { layer = "Base", loop = true, events = events }),
+				{ coexist = true, startTime = 0.5 }
+			)
+			local heard = 0
+			for _ = 1, 120 do
+				for _, fired in mixer:step(FRAME).events do
+					expect(fired.handle).toBe(shown)
+					heard += 1
+				end
+			end
+			expect(heard).toBe(2)
+			mixer:stop(shown, 0)
+			expect(sounds(60)).toBe(1)
+		end
+	)
+
 	it("blend-space weights move toward their target at the data rate", function()
 		local mixer = Mixer.new()
 		local walk = mixer:play(clip("walk", { layer = "Base", loop = true }), { coexist = true, weight = 0 })

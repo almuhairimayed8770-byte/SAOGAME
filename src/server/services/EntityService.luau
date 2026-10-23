@@ -354,6 +354,7 @@ local function baseRecord(kind: Kind, model: Model): Record
 		invulnerableUntil = now,
 		combatUntil = now,
 		lastCombatAt = nil,
+		hpRegenHeld = nil,
 		lastArtHitAt = nil,
 		proficiency = {},
 		weaponId = nil,
@@ -927,6 +928,36 @@ function EntityService.heal(id: number, amount: number)
 	publish(record)
 end
 
+--- Dev and GM only (the Studio dev hook, D-121; never a remote or a gameplay rule): sets a living
+--- fighter's HP to `hp` clamped to [1, maxHp] and publishes it as heal does. It never kills (a
+--- death only comes from a hit) and never revives. It restarts the out-of-combat regen wait
+--- (combat.outOfCombatRegenDelay), and an enemy held through EnemyService.setHeld never
+--- regenerates (setHpRegenHeld), so a low value waits for the hit it is set up for. It draws no
+--- sword. Returns the HP the fighter has now, or nil for an unknown or dead id or a NaN.
+function EntityService.setHp(id: number, hp: number): number?
+	local record = records[id]
+	if record == nil or record.state == "Dead" or hp ~= hp then
+		return nil
+	end
+	record.lastCombatAt = dependencies().now()
+	setHp(record, math.clamp(hp, math.min(1, record.maxHp), record.maxHp))
+	publish(record)
+	return record.hp
+end
+
+--- The hold's half in here (EnemyService.setHeld, D-120): true stops a living fighter's HP regen
+--- until false (the Guard Gauge still refills), so a low HP set up for a hit waits for it however
+--- long the tester takes. Hits, heal, setHp and death are untouched. Returns false for an unknown
+--- or dead id.
+function EntityService.setHpRegenHeld(id: number, held: boolean): boolean
+	local record = records[id]
+	if record == nil or record.state == "Dead" then
+		return false
+	end
+	record.hpRegenHeld = if held then true else nil
+	return true
+end
+
 -- ------------------------------------------------------------------------------------------
 -- The loop
 -- ------------------------------------------------------------------------------------------
@@ -967,8 +998,9 @@ local function stepAlive(record: Record, dt: number, now: number)
 		end
 	end
 
-	-- HP never regenerates in combat: 1%/s after outOfCombatRegenDelay since the last hit dealt or taken.
-	if record.hp < record.maxHp then
+	-- HP never regenerates in combat: 1%/s after outOfCombatRegenDelay since the last hit dealt or
+	-- taken. A held fighter (D-120) never regenerates.
+	if record.hp < record.maxHp and not record.hpRegenHeld then
 		local lastCombatAt = record.lastCombatAt
 		if lastCombatAt == nil or now - lastCombatAt >= Combat.outOfCombatRegenDelay then
 			setHp(record, record.hp + record.maxHp * Combat.outOfCombatRegenPerSecond * dt)

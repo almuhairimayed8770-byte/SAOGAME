@@ -426,6 +426,7 @@ export type EntityRecord = {
 	invulnerableUntil: number,
 	combatUntil: number, -- in combat while now < combatUntil
 	lastCombatAt: number?, -- last hit dealt or taken; HP regen waits on it
+	hpRegenHeld: boolean?, -- true while EnemyService holds the fighter (D-120): no HP regen at all
 	lastArtHitAt: number?, -- last Art hit taken; Guard Gauge regen waits on it
 	proficiency: { [WeaponCategory]: number },
 	weaponId: string?,
