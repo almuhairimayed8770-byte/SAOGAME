@@ -11,6 +11,19 @@
 	hold, glowing); release launches it (the request goes out and the clip resumes in step with
 	the server's copy, see ActionLogic.syncPlan); holding past the cancel time lets go of it.
 
+	The hold across a render stall (D-138): RenderStepped stops while the display sleeps and
+	Heartbeat and task.delay do not, so the section 6 fallback can freeze a hold whose rig was not
+	stepped far enough to reach its hold pose; and an engine hitch stops the timers too, so the
+	wake's step (a jump, or a shorter hitch's long frame) would carry the held clip past it. Either
+	way the clip is moved on to its hold pose as it freezes (Choreo seek, ActionLogic.freezeAt), its
+	ActivationHold firing as on a hold the display saw: the stance glows at the wake, and the
+	release launches on a normal hold's timing. A hold the cancel time ran out on during a hitch is
+	left to the cancel that comes in the same frame.
+
+	The rig's step (D-139): the controller steps the local rig itself (Choreo.stepLocal) between
+	feeding Locomotion and reading the root delta, so the body moves by this frame's root motion
+	(the engine does not pin Choreo's RenderStepped against this render step).
+
 	The sheathed sword: the server's Drawn attribute says whether the sword is out. Every combat
 	request this client sends (an Art, a basic attack, a guard), a hit dealt or taken and a lock-on
 	also predict it for choreo.luau sheath.predictSeconds, so the draw shows at once; a dodge does
@@ -88,6 +101,8 @@ local TargetController = Siblings.load(Client, "controllers.TargetController")
 local RENDER_STEP_NAME = "SkyspireCharacter"
 local ART_SLOTS_ATTRIBUTE = "ArtSlots"
 local AIM: AimLogic.Config = Combat.aim
+-- The section 6 time an Art hold freezes by when its clip carries no earlier ActivationHold.
+local HOLD_FALLBACK = Combat.startPoseTime + Combat.activationHold
 
 type Hold = {
 	slot: number,
@@ -159,6 +174,9 @@ local STOP_CARRY: ActionLogic.StopCarryConfig = {
 }
 -- Locomotion.stopGait writes it.
 local stopGait: ActionLogic.StopGait = { phase = 0, leftStep = 0, leftAfter = 0, rightStep = 0.5, rightAfter = 0 }
+-- When the local rig last stepped (now()); nil before its first step. A render stall stops it.
+local rigSteppedAt: number? = nil
+local unhookRigStep: (() -> ())? = nil
 local started = false
 
 local function now(): number
@@ -389,7 +407,19 @@ local function clearHold()
 	end
 end
 
---- Freezes the held Art clip at its activation hold (the glowing stance).
+-- The clip time of the held Art's hold pose (ActionLogic.holdClipTime), or nil when its handle has
+-- no clip clock (an engine Animation).
+local function holdClipTime(current: Hold): number?
+	local handle = current.handle
+	if typeof(handle) ~= "table" or typeof(handle.time) ~= "number" then
+		return nil
+	end
+	return ActionLogic.holdClipTime(handle.clip, HOLD_FALLBACK)
+end
+
+--- Freezes the held Art clip at its activation hold (the glowing stance). A clip a render stall
+--- kept from getting there (the rig was not stepped since before it could) is moved on to its
+--- hold pose first, its ActivationHold firing on the way as it would have (D-138).
 function CharacterController.freezeHold()
 	if hold == nil or animator == nil then
 		return
@@ -398,8 +428,39 @@ function CharacterController.freezeHold()
 	if current.frozenClipTime ~= nil then
 		return
 	end
-	current.frozenClipTime = math.max(now() - current.pressedAt, 0)
+	local clipTime, seek = ActionLogic.freezeAt(current.pressedAt, now(), holdClipTime(current), rigSteppedAt)
+	current.frozenClipTime = clipTime
 	setTimeScale(0)
+	if seek then
+		-- Replication lights the blade and chimes on the ActivationHold; the clipEvent listener
+		-- finds the hold frozen already.
+		animator:seek(current.handle, clipTime)
+	end
+end
+
+-- Runs before every step of the local rig (Choreo onStep, with the dt the rig takes). A render
+-- stall's jump would carry a held clip past its hold pose in one step, and after an engine hitch
+-- the wake's step comes before task.delay resumes the fallback; a hitch shorter than a jump is
+-- no jump at all, so its step would carry the clip on into the swing with its trail and smear
+-- lit. A hold old enough to be at its hold pose that nothing froze yet freezes there first when
+-- the step is a jump or would carry the clip past its activation hold (combat.luau
+-- activationHold after the hold pose; no steady frame rate of 10 fps or more does); one the
+-- cancel time has run out on is left to the cancel, which comes in the same frame (D-138). Then
+-- the step is remembered, so a freeze can tell a rig that was not stepped from one that was.
+local function beforeRigStep(dt: number)
+	local current = hold
+	if current ~= nil and current.frozenClipTime == nil then
+		local holdAt = holdClipTime(current)
+		local age = now() - current.pressedAt
+		if holdAt ~= nil and age >= holdAt and age < Combat.activationCancelTime then
+			-- Where the step would leave the clip (an Art plays at speed 1, ActionLogic.freezeAt).
+			local reached = current.handle.time + dt * appliedScale
+			if dt > ChoreoData.stall.jumpSeconds or reached > holdAt + Combat.activationHold then
+				CharacterController.freezeHold()
+			end
+		end
+	end
+	rigSteppedAt = now()
 end
 
 --- The Art key went down: enter the start pose of the Art this slot picks from the current stance.
@@ -428,7 +489,7 @@ function CharacterController.beginArt(slot: number)
 	predictDraw()
 	Siblings.call(Hud, "noteArtUse")
 	-- If the clip carries no ActivationHold event the freeze still lands at the section 6 time.
-	task.delay(Combat.startPoseTime + Combat.activationHold, function()
+	task.delay(HOLD_FALLBACK, function()
 		if hold ~= nil and (hold :: Hold).token == holdToken then
 			CharacterController.freezeHold()
 		end
@@ -855,6 +916,10 @@ local function step(dt: number)
 		})
 	end
 
+	-- The rig's step, here and nowhere else (D-139): this frame's pose, clip events and root delta,
+	-- moved by just below. A step after a render stall is a jump (Choreo, D-132).
+	Siblings.call(Choreo, "stepLocal", dt)
+
 	if ActionLogic.rootMotionActive(state) then
 		local delta = animator:currentRootMotionDelta()
 		if typeof(delta) == "Vector3" and delta.Magnitude > 0 then
@@ -875,6 +940,11 @@ local function clearCharacter()
 	if typeof(locomotion) == "table" and typeof(locomotion.destroy) == "function" then
 		locomotion:destroy()
 	end
+	if unhookRigStep ~= nil then
+		unhookRigStep()
+		unhookRigStep = nil
+	end
+	rigSteppedAt = nil
 	Siblings.call(Choreo, "setLocalModel", nil)
 	character, humanoid, root, animator, locomotion = nil, nil, nil, nil, nil
 	predicted = nil
@@ -910,8 +980,9 @@ local function onCharacter(model: Model)
 	if captureScale ~= 1 then
 		setTimeScale(captureScale)
 	end
-	-- The local rig is always stepped at full rate (root motion is read every RenderStepped).
-	Siblings.call(Choreo, "setLocalModel", model)
+	unhookRigStep = animator:onStep(beforeRigStep)
+	-- The local rig is always at full rate, and this controller's to step (stepLocal, D-139).
+	Siblings.call(Choreo, "setLocalModel", model, true)
 	locomotion = Locomotion.new(animator, model)
 	model:GetAttributeChangedSignal(ART_SLOTS_ATTRIBUTE):Connect(refreshSlots)
 	refreshSlots()
@@ -930,10 +1001,12 @@ function CharacterController.start()
 		onRejected(action)
 	end)
 	Replication.hit:Connect(onHit)
-	Replication.clipEvent:Connect(function(record: any, clipId: string, event: any)
+	Replication.clipEvent:Connect(function(record: any, clipId: string, event: any, _jumped: boolean)
 		if hold == nil or character == nil or record.model ~= character then
 			return
 		end
+		-- A jumped one freezes it too: the hold is state (D-132). None should come: before a jump
+		-- that would carry the clip past its hold, beforeRigStep froze it at its hold pose.
 		if event.kind == "ActivationHold" and clipId == (hold :: Hold).art.clip then
 			CharacterController.freezeHold()
 		end

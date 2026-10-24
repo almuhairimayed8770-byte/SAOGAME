@@ -8,6 +8,13 @@
 	velocity of the frame before, as it does in the engine). The Humanoid records every property
 	write (each one fires Changed, and a client WalkSpeed write is networked), and an optional fake
 	fx.Impact sibling records the director calls the controller makes.
+
+	With `choreo` the controller gets a real Choreo (a fresh copy of the module, on the spec's clock)
+	animating a real PlayerR15 rig, whose clip events reach the controller as Replication's
+	clipEvent does, and task.delay runs on the spec's clock (after Heartbeat, as the engine resumes
+	it). The render step's order against Choreo's RenderStepped connection is the spec's to pick
+	(`renderOrder`), since the engine does not pin it. A render stall (the display asleep) runs
+	Heartbeat and the timers and no render step; an engine hitch runs nothing at all.
 ]]
 
 local luau = require("@lune/luau")
@@ -16,9 +23,57 @@ local Signal = Harness.load("src/shared/util/Signal")
 local Siblings = Harness.load("src/client/controllers/Siblings")
 local ChoreoData = Harness.load("src/shared/data/choreo")
 local AimLogic = Harness.load("src/client/controllers/AimLogic")
+local Rigs = Harness.load("src/shared/data/rigs")
 
 local CONTROLLER_PATH = "src/client/controllers/CharacterController"
+local CHOREO_PATH = "src/client/choreo/Choreo"
 local FRAME = 1 / 60
+
+-- A fresh copy of Choreo (its own registry and frame loops) whose RunService is `runService`.
+local function freshChoreo(runService: any): any
+	local env = Harness.environment()
+	env.script = Harness.node(CHOREO_PATH)
+	env.require = function(target: any): any
+		return Harness.loadModule(target)
+	end
+	env.game = {
+		GetService = function(_self: any, name: string): any
+			if name == "RunService" then
+				return runService
+			end
+			return Harness.game():GetService(name)
+		end,
+	}
+	return luau.load(Harness.readFile(CHOREO_PATH .. ".luau"), { debugName = CHOREO_PATH, environment = env :: any })()
+end
+
+-- A PlayerR15 rig model: one Part per rig part, one Motor6D per joint (as tests/choreo/Choreo.spec).
+local function buildPlayerRig(): any
+	local model = Instance.new("Model")
+	model.Name = "PlayerR15"
+	model:SetAttribute("Rig", "PlayerR15")
+	local parts: { [string]: any } = {}
+	local function part(name: string): any
+		local existing = parts[name]
+		if existing then
+			return existing
+		end
+		local created = Instance.new("Part")
+		created.Name = name
+		created.Position = Vector3.zero
+		created.Parent = model
+		parts[name] = created
+		return created
+	end
+	for _, joint in Rigs.PlayerR15.joints do
+		part(joint.part0)
+		local motor = Instance.new("Motor6D")
+		motor.Name = joint.name
+		motor.Parent = part(joint.part1)
+	end
+	model.PrimaryPart = parts.HumanoidRootPart
+	return model
+end
 
 type Rig = {
 	controller: any,
@@ -49,6 +104,16 @@ type Rig = {
 	reject: (action: string) -> (),
 	-- The character goes and comes back (CharacterRemoving, then CharacterAdded with the same model).
 	respawn: () -> (),
+	-- The spec's clock (os.clock and the server clock both read it).
+	now: () -> number,
+	-- The first rendered frame after a render stall: the render step's dt is the whole gap.
+	wake: () -> (),
+	-- An engine hitch: the clock moves `seconds` and nothing runs (no Heartbeat, no timers).
+	hitch: (seconds: number) -> (),
+	-- With `choreo`: the real animator, its clip events in order, and how many steps it took.
+	animator: any,
+	clipEvents: { { clipId: string, kind: string, jumped: boolean, at: number } },
+	rigSteps: () -> number,
 }
 
 type Options = {
@@ -64,6 +129,11 @@ type Options = {
 	capture: boolean?,
 	-- false: the place runs on a live server, not in Studio (RunService:IsStudio()); default Studio.
 	studio: boolean?,
+	-- Hand the controller a real Choreo animating a real rig, and run task.delay on the clock.
+	choreo: boolean?,
+	-- Which runs first in a rendered frame: "bound" (the controller's render step, the default) or
+	-- "connections" (Choreo's RenderStepped connection).
+	renderOrder: string?,
 }
 
 local IMPACT_CALLS = { "guardRaise", "dodge", "release", "cancelActivation", "activation" }
@@ -156,8 +226,11 @@ local function load(options: Options?): Rig
 		currentRootMotionDelta = function(_self: any): Vector3
 			return rootMotion
 		end,
+		onStep = function(): () -> ()
+			return function() end
+		end,
 	}
-	local choreo = {
+	local choreo: any = {
 		get = function(): any
 			return animator
 		end,
@@ -219,7 +292,7 @@ local function load(options: Options?): Rig
 				if path == "fx.Impact" and opts.impact then
 					return impact, true
 				end
-				if path == "choreo.Choreo" and opts.animator then
+				if path == "choreo.Choreo" and (opts.animator or opts.choreo) then
 					return choreo, true
 				end
 				if path == "controllers.TargetController" then
@@ -232,6 +305,8 @@ local function load(options: Options?): Rig
 		},
 	}
 	local heartbeat = Signal.new()
+	local renderStepped = Signal.new()
+	local preSimulation = Signal.new()
 	local localPlayer = { CharacterAdded = Signal.new(), CharacterRemoving = Signal.new(), Character = model }
 	local services: { [string]: any } = {
 		RunService = {
@@ -239,6 +314,8 @@ local function load(options: Options?): Rig
 				step = fn
 			end,
 			Heartbeat = heartbeat,
+			RenderStepped = renderStepped,
+			PreSimulation = preSimulation,
 			IsStudio = function(_self: any): boolean
 				return opts.studio ~= false
 			end,
@@ -246,6 +323,65 @@ local function load(options: Options?): Rig
 		Players = { LocalPlayer = localPlayer },
 		ReplicatedStorage = Harness.game():GetService("ReplicatedStorage"),
 	}
+	-- task.delay on the spec's clock (with `choreo`; a no-op otherwise, as before).
+	local timers: { { at: number, fn: () -> () } } = {}
+	local function runTimers()
+		while true do
+			local due: number? = nil
+			for index, timer in timers do
+				if timer.at <= clock and (due == nil or timer.at < timers[due :: number].at) then
+					due = index
+				end
+			end
+			if due == nil then
+				return
+			end
+			local timer = table.remove(timers, due :: number)
+			if timer ~= nil then
+				timer.fn()
+			end
+		end
+	end
+	-- The real Choreo, its rig and what it did.
+	local rigAnimator: any = nil
+	local clipEvents: { { clipId: string, kind: string, jumped: boolean, at: number } } = {}
+	local rigSteps = 0
+	if opts.choreo then
+		local realChoreo = freshChoreo(services.RunService)
+		realChoreo.configure({
+			now = function(): number
+				return clock
+			end,
+			cameraPosition = function(): Vector3?
+				return Vector3.zero
+			end,
+		})
+		local rigModel = buildPlayerRig()
+		rigAnimator = realChoreo.get(rigModel)
+		local setScale = rigAnimator.setTimeScale
+		rigAnimator.setTimeScale = function(self: any, scale: number)
+			table.insert(timeScales, scale)
+			setScale(self, scale)
+		end
+		rigAnimator:onStep(function()
+			rigSteps += 1
+		end)
+		rigAnimator.events:Connect(function(clipId: string, event: any, jumped: boolean)
+			table.insert(clipEvents, { clipId = clipId, kind = event.kind, jumped = jumped, at = clock })
+			fakes.Replication.clipEvent:Fire({ model = model }, clipId, event, jumped)
+		end)
+		local wrapper: { [string]: any } = {
+			get = function(): any
+				return rigAnimator
+			end,
+			setLocalModel = function(target: any, ...: any)
+				realChoreo.setLocalModel(if target ~= nil then rigModel else nil, ...)
+			end,
+		}
+		-- Only where this Choreo has it.
+		wrapper.stepLocal = realChoreo.stepLocal
+		choreo = wrapper :: any
+	end
 	local env = Harness.environment()
 	env.script = Harness.node(CONTROLLER_PATH)
 	env.require = function(target: any): any
@@ -270,13 +406,44 @@ local function load(options: Options?): Rig
 			return clock
 		end,
 	}
-	env.task = { delay = function() end }
+	env.task = {
+		delay = function(seconds: number, fn: () -> ())
+			if opts.choreo then
+				table.insert(timers, { at = clock + seconds, fn = fn })
+			end
+		end,
+	}
 	local controller = luau.load(
 		Harness.readFile(CONTROLLER_PATH .. ".luau"),
 		{ debugName = CONTROLLER_PATH, environment = env :: any }
 	)()
 	controller.start()
 	assert(step ~= nil, "the controller bound no render step")
+	local lastRenderAt = clock
+	-- One rendered frame of `dt`: the control script's Move, the render step and Choreo's
+	-- RenderStepped connection in the order the spec picked, the physics, then Heartbeat and the
+	-- timers due by now (task.delay resumes there).
+	local function render(stick: Vector3, dt: number)
+		humanoid:Move(stick)
+		local runStep = step :: (dt: number) -> ()
+		if opts.renderOrder == "connections" then
+			renderStepped:Fire(dt)
+		end
+		runStep(dt)
+		if opts.renderOrder ~= "connections" then
+			renderStepped:Fire(dt)
+		end
+		lastRenderAt = clock
+		preSimulation:Fire(FRAME)
+		root.AssemblyLinearVelocity = humanoid.MoveDirection * humanoid.WalkSpeed
+		root.Position += root.AssemblyLinearVelocity * FRAME
+		local move = humanoid.MoveDirection
+		if props.AutoRotate and move.Magnitude > 0 then
+			root.CFrame = CFrame.lookAt(root.Position, root.Position + Vector3.new(move.X, 0, move.Z))
+		end
+		heartbeat:Fire(FRAME) -- after the render step and the physics, as in a frame
+		runTimers()
+	end
 	return {
 		controller = controller,
 		sent = sent,
@@ -310,19 +477,26 @@ local function load(options: Options?): Rig
 		heartbeat = function()
 			clock += FRAME
 			heartbeat:Fire(FRAME)
+			runTimers()
 		end,
 		frame = function(stick: Vector3)
 			clock += FRAME
-			humanoid:Move(stick)
-			local runStep = step :: (dt: number) -> ()
-			runStep(FRAME)
-			root.AssemblyLinearVelocity = humanoid.MoveDirection * humanoid.WalkSpeed
-			root.Position += root.AssemblyLinearVelocity * FRAME
-			local move = humanoid.MoveDirection
-			if props.AutoRotate and move.Magnitude > 0 then
-				root.CFrame = CFrame.lookAt(root.Position, root.Position + Vector3.new(move.X, 0, move.Z))
-			end
-			heartbeat:Fire(FRAME) -- after the render step and the physics, as in a frame
+			render(stick, FRAME)
+		end,
+		now = function(): number
+			return clock
+		end,
+		wake = function()
+			clock += FRAME
+			render(Vector3.zero, clock - lastRenderAt)
+		end,
+		hitch = function(seconds: number)
+			clock += seconds
+		end,
+		animator = rigAnimator,
+		clipEvents = clipEvents,
+		rigSteps = function(): number
+			return rigSteps
 		end,
 	}
 end
@@ -1264,5 +1438,442 @@ describe("CharacterController in a slowed capture", function()
 		-- A respawned body comes back on the capture's clock.
 		rig.respawn()
 		expect(last(rig.timeScales)).toBe(0.5)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- The Art hold across a render stall (D-132), and the order of the rig's step and the root read
+-- (a real Choreo animating a real rig on the spec's clock)
+-- ------------------------------------------------------------------------------------------
+
+local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
+local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
+
+type ClipEventRow = { clipId: string, kind: string, jumped: boolean, at: number }
+
+-- The clip time of a clip's first ActivationHold (its glowing hold pose), read from the data.
+local function holdTimeOf(clipId: string): number
+	local hold = math.huge
+	for _, event in ClipLibrary.get(clipId).events do
+		if event.kind == "ActivationHold" then
+			hold = math.min(hold, event.time)
+		end
+	end
+	return hold
+end
+
+-- The rig's clip events of one clip (any clip when nil), from row `from` on.
+local function clipEventsOf(rig: Rig, clipId: string?, from: number?): { ClipEventRow }
+	local rows = {}
+	for index = from or 1, #rig.clipEvents do
+		local row = rig.clipEvents[index]
+		if clipId == nil or row.clipId == clipId then
+			table.insert(rows, row)
+		end
+	end
+	return rows
+end
+
+-- A rig that has stood still long enough for every send to be ready.
+local function standingRig(options: Options): Rig
+	local rig = load(options)
+	for _ = 1, 40 do
+		rig.frame(STILL)
+	end
+	return rig
+end
+
+-- Lets the held Art go `heldExtra` frames later and follows it: the director hears the clip time
+-- it waits at (`frozen`) and waits that long, the clip holds still until then, and from then on
+-- it runs on the server's clock (which starts the clip at the release, ActionLogic.syncPlan).
+local function releaseInStep(rig: Rig, art: any, handle: any, pressedAt: number, frozen: number)
+	for _ = 1, 6 do
+		rig.frame(STILL)
+	end
+	local waiting = handle.time
+	local releasedAt = rig.now()
+	rig.controller.releaseArt(1, releasedAt - pressedAt)
+	local releases = impactCalls(rig, "release")
+	expect(#releases).toBe(1)
+	expect(releases[1][2]).toBe(art.clip)
+	expect(releases[1][3]).toBe(frozen)
+	expect(releases[1][4]).toBe(frozen)
+	expect(sends(rig, "ArtRequest")).toBe(1)
+	local resumedAt: number? = nil
+	for _ = 1, 40 do
+		rig.frame(STILL)
+		if resumedAt == nil then
+			if rig.timeScales[#rig.timeScales] ~= 0 then
+				resumedAt = rig.now()
+			else
+				expect(handle.time).toBe(waiting)
+			end
+		else
+			-- The server's clip started at the release: the local one is within a frame of it.
+			expect(math.abs(handle.time - (rig.now() - releasedAt)) <= FRAME + 1e-9).toBe(true)
+		end
+	end
+	expect(resumedAt).never.toBeNil()
+	expect((resumedAt :: number) >= releasedAt + frozen - 1e-9).toBe(true)
+	expect((resumedAt :: number) < releasedAt + frozen + FRAME).toBe(true)
+end
+
+describe("CharacterController's Art hold across a render stall (D-132)", function()
+	it("display awake: the hold freezes on the frame its clip crosses its ActivationHold", function()
+		-- The guard on the normal hold: the freeze, the clip time it waits at, the director's
+		-- release and the resume are what they were before the stall fixes, to the bit.
+		local rig = standingRig({ choreo = true, impact = true })
+		local art = rig.controller.slots()[1]
+		local hold = holdTimeOf(art.clip)
+		local pressedAt = rig.now()
+		rig.controller.beginArt(1)
+		local handle = rig.animator.mixer:find(art.clip)
+		local frozenAt: number? = nil
+		for _ = 1, 60 do
+			rig.frame(STILL)
+			if rig.timeScales[#rig.timeScales] == 0 then
+				frozenAt = rig.now()
+				break
+			end
+		end
+		expect(frozenAt).never.toBeNil()
+		local holds = clipEventsOf(rig, art.clip)
+		expect(#holds).toBe(1)
+		expect(holds[1].kind).toBe("ActivationHold")
+		expect(holds[1].jumped).toBe(false)
+		expect(holds[1].at).toBe(frozenAt)
+		-- Frozen where its own steps took it: the first frame at or past the hold.
+		local clipAtFreeze = handle.time
+		expect(clipAtFreeze >= hold).toBe(true)
+		expect(clipAtFreeze < hold + FRAME).toBe(true)
+		releaseInStep(rig, art, handle, pressedAt, (frozenAt :: number) - pressedAt)
+		expect(clipEventsOf(rig, art.clip)[1].kind).toBe("ActivationHold")
+		expect(#clipEventsOf(rig, art.clip, nil) > 1).toBe(true)
+	end)
+
+	it("a slowed capture still freezes the stance where its slowed clip has got to at the section 6 time", function()
+		-- Dev slow motion (D-111): the clip runs at 0.25x while the fallback waits real seconds. The
+		-- rig steps every frame, so this is no stall: nothing moves the clip on to its hold.
+		local rig = load({ choreo = true, capture = true })
+		rig.frame(STILL)
+		expect(rig.controller.setCaptureTimeScale(0.25)).toBe(true)
+		for _ = 1, 40 do
+			rig.frame(STILL)
+		end
+		local art = rig.controller.slots()[1]
+		rig.controller.beginArt(1)
+		local handle = rig.animator.mixer:find(art.clip)
+		local frames = 0
+		repeat
+			rig.frame(STILL)
+			frames += 1
+		until rig.timeScales[#rig.timeScales] == 0 or frames > 60
+		local Combat = Harness.load("src/shared/data/combat")
+		expect(frames).toBe(math.ceil((Combat.startPoseTime + Combat.activationHold) / FRAME - 1e-9))
+		expect(handle.time).toBeCloseTo(frames * FRAME * 0.25, 1e-9)
+		expect(handle.time < holdTimeOf(art.clip)).toBe(true)
+		expect(#clipEventsOf(rig, art.clip)).toBe(0)
+	end)
+
+	it("an Art pressed while the display sleeps and held at the wake shows its glowing hold pose", function()
+		local rig = standingRig({ choreo = true, impact = true })
+		local art = rig.controller.slots()[1]
+		local hold = holdTimeOf(art.clip)
+		for _ = 1, 60 do
+			rig.heartbeat() -- the display sleeps: Heartbeat and the timers run, no render step
+		end
+		local pressedAt = rig.now()
+		rig.controller.beginArt(1)
+		local handle = rig.animator.mixer:find(art.clip)
+		for _ = 1, 30 do
+			rig.heartbeat() -- held on in the dark, past the section 6 fallback's freeze
+		end
+		rig.wake()
+		-- The hold pose, and its activation fired as it does on a hold the display saw: unmarked,
+		-- so the light glows (Replication starts nothing for a jumped one).
+		expect(handle.time).toBeCloseTo(hold, 1e-9)
+		local events = clipEventsOf(rig, art.clip)
+		expect(#events).toBe(1)
+		expect(events[1].kind).toBe("ActivationHold")
+		expect(events[1].jumped).toBe(false)
+		expect(rig.controller.state()).toBe("Holding")
+		-- Launched on a normal hold's timing: frozen at the hold, it waits that long after the release.
+		releaseInStep(rig, art, handle, pressedAt, hold)
+	end)
+
+	for _, frames in { 18, 36 } do
+		it(("pressed before a %d-frame display sleep, held through: hold pose at the wake"):format(frames), function()
+			-- 18: a stall shorter than stall.jumpSeconds (the wake is no jump); 36: a jump. The hold
+			-- is let go well inside the cancel time either way.
+			local rig = standingRig({ choreo = true, impact = true })
+			local art = rig.controller.slots()[1]
+			local hold = holdTimeOf(art.clip)
+			local pressedAt = rig.now()
+			rig.controller.beginArt(1)
+			local handle = rig.animator.mixer:find(art.clip)
+			for _ = 1, 5 do
+				rig.frame(STILL)
+			end
+			expect(handle.time < hold).toBe(true) -- still moving into the stance
+			for _ = 1, frames do
+				rig.heartbeat()
+			end
+			rig.wake()
+			expect(handle.time).toBeCloseTo(hold, 1e-9)
+			local events = clipEventsOf(rig, art.clip)
+			expect(#events).toBe(1)
+			expect(events[1].kind).toBe("ActivationHold")
+			expect(events[1].jumped).toBe(false)
+			releaseInStep(rig, art, handle, pressedAt, hold)
+		end)
+	end
+
+	it("an engine hitch (no timers either): the wake's jump stops the held clip at its hold", function()
+		-- The jump comes before task.delay resumes, so the fallback cannot freeze it first; a jump
+		-- that carried the clip past its hold would leave the stance mid-swing or ended.
+		local rig = standingRig({ choreo = true, impact = true })
+		local art = rig.controller.slots()[1]
+		local hold = holdTimeOf(art.clip)
+		local pressedAt = rig.now()
+		rig.controller.beginArt(1)
+		local handle = rig.animator.mixer:find(art.clip)
+		for _ = 1, 5 do
+			rig.frame(STILL)
+		end
+		rig.hitch(0.6)
+		rig.wake()
+		expect(handle.time).toBeCloseTo(hold, 1e-9)
+		local events = clipEventsOf(rig, art.clip)
+		expect(#events).toBe(1)
+		expect(events[1].kind).toBe("ActivationHold")
+		expect(events[1].jumped).toBe(false)
+		expect(rig.controller.state()).toBe("Holding")
+		releaseInStep(rig, art, handle, pressedAt, hold)
+	end)
+
+	for _, seconds in { 0.2, 0.3, 0.45 } do
+		it(
+			("a %.2f s engine hitch (shorter than a jump): the wake stops the held clip at its hold"):format(seconds),
+			function()
+				-- The wake's step is no jump, so the clip would take the whole gap and its events would
+				-- start for real: frozen mid-swing with its trail and smear lit. It waits at its hold pose.
+				local rig = standingRig({ choreo = true, impact = true })
+				local art = rig.controller.slots()[1]
+				local hold = holdTimeOf(art.clip)
+				local pressedAt = rig.now()
+				rig.controller.beginArt(1)
+				local handle = rig.animator.mixer:find(art.clip)
+				for _ = 1, 5 do
+					rig.frame(STILL)
+				end
+				rig.hitch(seconds)
+				rig.wake()
+				expect(rig.now() - pressedAt < ChoreoData.stall.jumpSeconds + 5 * FRAME).toBe(true)
+				expect(handle.time).toBeCloseTo(hold, 1e-9)
+				local events = clipEventsOf(rig, art.clip)
+				expect(#events).toBe(1)
+				expect(events[1].kind).toBe("ActivationHold")
+				expect(events[1].jumped).toBe(false)
+				expect(rig.controller.state()).toBe("Holding")
+				releaseInStep(rig, art, handle, pressedAt, hold)
+			end
+		)
+	end
+
+	-- One rendered frame `dt` long (a low frame rate): the render step's dt is the whole frame.
+	local function longFrame(rig: Rig, dt: number)
+		rig.hitch(dt - FRAME)
+		rig.wake()
+	end
+
+	for _, fps in { 30, 20, 10 } do
+		it(("at %d fps the hold freezes where its own steps took it, as it always has"):format(fps), function()
+			-- The guard on a slow but steady frame rate: a step that keeps the clip inside its
+			-- activation hold (combat.luau activationHold after the hold pose) moves nothing on.
+			local rig = standingRig({ choreo = true, impact = true })
+			local art = rig.controller.slots()[1]
+			local hold = holdTimeOf(art.clip)
+			local pressedAt = rig.now()
+			rig.controller.beginArt(1)
+			local handle = rig.animator.mixer:find(art.clip)
+			local frozenAt: number? = nil
+			for _ = 1, 20 do
+				longFrame(rig, 1 / fps)
+				if rig.timeScales[#rig.timeScales] == 0 then
+					frozenAt = rig.now()
+					break
+				end
+			end
+			expect(frozenAt).never.toBeNil()
+			local age = (frozenAt :: number) - pressedAt
+			expect(handle.time).toBeCloseTo(age, 1e-9)
+			expect(handle.time >= hold and handle.time < hold + 1 / fps).toBe(true)
+			local events = clipEventsOf(rig, art.clip)
+			expect(#events).toBe(1)
+			expect(events[1].kind).toBe("ActivationHold")
+			expect(events[1].jumped).toBe(false)
+			expect(events[1].at).toBe(frozenAt)
+			releaseInStep(rig, art, handle, pressedAt, age)
+		end)
+	end
+
+	it("in a slowed capture a short hitch moves the held clip by its slowed share, no further", function()
+		-- At 0.25x the hitch's frame carries the clip a quarter of the gap, still short of the end
+		-- of its activation hold: nothing moves it on, and the section 6 fallback freezes it where
+		-- it is, as on any slowed hold.
+		local rig = load({ choreo = true, capture = true })
+		rig.frame(STILL)
+		expect(rig.controller.setCaptureTimeScale(0.25)).toBe(true)
+		for _ = 1, 40 do
+			rig.frame(STILL)
+		end
+		local art = rig.controller.slots()[1]
+		local pressedAt = rig.now()
+		rig.controller.beginArt(1)
+		local handle = rig.animator.mixer:find(art.clip)
+		for _ = 1, 5 do
+			rig.frame(STILL)
+		end
+		rig.hitch(0.3)
+		rig.wake()
+		expect(handle.time).toBeCloseTo((rig.now() - pressedAt) * 0.25, 1e-9)
+		expect(#clipEventsOf(rig, art.clip)).toBe(0)
+		expect(rig.timeScales[#rig.timeScales]).toBe(0)
+		expect(rig.controller.state()).toBe("Holding")
+	end)
+
+	for _, seconds in { 1, 5 } do
+		it(
+			("a %d s engine hitch past the cancel time: the wake neither chimes nor holds the stance"):format(seconds),
+			function()
+				-- The cancel (InputController's timer) lets the hold go in the wake's frame: nothing of
+				-- its activation starts (the gap's events come marked), and the stance relaxes.
+				local rig = standingRig({ choreo = true, impact = true })
+				local art = rig.controller.slots()[1]
+				local pressedAt = rig.now()
+				rig.controller.beginArt(1)
+				for _ = 1, 5 do
+					rig.frame(STILL)
+				end
+				rig.hitch(seconds)
+				rig.wake()
+				expect(rig.now() - pressedAt >= Combat.activationCancelTime).toBe(true)
+				local events = clipEventsOf(rig, art.clip)
+				expect(#events > 0).toBe(true)
+				for _, row in events do
+					expect(row.jumped).toBe(true)
+				end
+				rig.controller.cancelArt(1)
+				expect(rig.controller.state()).toBe("Idle")
+				expect(rig.timeScales[#rig.timeScales]).toBe(1)
+				expect(sends(rig, "ArtRequest")).toBe(0)
+			end
+		)
+	end
+
+	it("a key pressed in the dark just before the wake plays its start pose on from its own age", function()
+		local rig = standingRig({ choreo = true, impact = true })
+		local art = rig.controller.slots()[1]
+		local hold = holdTimeOf(art.clip)
+		for _ = 1, 60 do
+			rig.heartbeat()
+		end
+		local pressedAt = rig.now()
+		rig.controller.beginArt(1)
+		local handle = rig.animator.mixer:find(art.clip)
+		for _ = 1, 3 do
+			rig.heartbeat()
+		end
+		rig.wake()
+		-- Younger than its hold: nothing froze it; the wake moved it by its own age (D-132 sinceStep).
+		expect(handle.time).toBeCloseTo(rig.now() - pressedAt, 1e-9)
+		expect(handle.time < hold).toBe(true)
+		expect(#clipEventsOf(rig, art.clip)).toBe(0)
+		-- It goes on into the stance and freezes there as any hold does.
+		local frames = 0
+		repeat
+			rig.frame(STILL)
+			frames += 1
+		until rig.timeScales[#rig.timeScales] == 0 or frames > 30
+		local events = clipEventsOf(rig, art.clip)
+		expect(#events).toBe(1)
+		expect(events[1].jumped).toBe(false)
+		expect(handle.time >= hold and handle.time < hold + FRAME).toBe(true)
+	end)
+end)
+
+describe("CharacterController reads the root motion of the frame its rig stepped", function()
+	-- The root offset a clip has reached at a clip time (Types.Vec3 as a Vector3).
+	local function rootAt(clip: any, clipTime: number): Vector3
+		local offset = ClipSampler.rootMotionAt(clip, clipTime)
+		return Vector3.new(offset[1], offset[2], offset[3])
+	end
+
+	local function dodgeHandle(rig: Rig): any
+		for _, handle in rig.animator.mixer:handles() do
+			if string.find(handle.clipId, "/Dodge", 1, true) ~= nil and not handle.stopping then
+				return handle
+			end
+		end
+		return nil
+	end
+
+	for _, order in { "bound", "connections" } do
+		it(("order %s: the root moves by this frame's step, the rig steps once"):format(order), function()
+			local rig = standingRig({ choreo = true, renderOrder = order })
+			rig.controller.dodge()
+			local handle = dodgeHandle(rig)
+			expect(handle).never.toBeNil()
+			local start = rig.root.Position
+			local origin = rootAt(handle.clip, 0)
+			local steps = rig.rigSteps()
+			for frame = 1, 12 do
+				rig.frame(STILL)
+				expect(rig.rigSteps()).toBe(steps + frame)
+				expect(rig.controller.state()).toBe("Dodge")
+				-- The root faces -Z unturned, so the clip's root space is the world's.
+				local moved = rig.root.Position - start
+				local expected = rootAt(handle.clip, handle.time) - origin
+				expect((moved - expected).Magnitude < 1e-4).toBe(true)
+			end
+			expect((rig.root.Position - start).Magnitude > 1).toBe(true)
+		end)
+	end
+
+	it("through the controller's step a stalled frame is a jump: no root motion, events marked", function()
+		local rig = standingRig({ choreo = true, impact = true })
+		local art = rig.controller.slots()[1]
+		local pressedAt = rig.now()
+		rig.controller.beginArt(1)
+		for _ = 1, 15 do
+			rig.frame(STILL)
+		end
+		rig.controller.releaseArt(1, rig.now() - pressedAt)
+		local handle = rig.animator.mixer:find(art.clip)
+		repeat
+			rig.frame(STILL)
+		until rig.timeScales[#rig.timeScales] ~= 0
+		rig.frame(STILL)
+		expect(rig.controller.state()).toBe("Art")
+		local clipTime = handle.time
+		local before = rig.root.Position
+		local from = #rig.clipEvents + 1
+		local steps = rig.rigSteps()
+		for _ = 1, 48 do
+			rig.heartbeat()
+		end
+		rig.wake()
+		expect(rig.rigSteps()).toBe(steps + 1)
+		expect(rig.controller.state()).toBe("Art")
+		-- The gap carried the clip over its swing...
+		expect(handle.time > clipTime + 0.5).toBe(true)
+		expect(rootAt(handle.clip, handle.time) ~= rootAt(handle.clip, clipTime)).toBe(true)
+		-- ...and the body none of the way: the server saw it stand still through the gap.
+		expect((rig.root.Position - before).Magnitude < 1e-6).toBe(true)
+		local crossed = clipEventsOf(rig, art.clip, from)
+		expect(#crossed > 0).toBe(true)
+		for _, row in crossed do
+			expect(row.jumped).toBe(true)
+		end
 	end)
 end)

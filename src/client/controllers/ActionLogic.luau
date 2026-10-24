@@ -441,6 +441,35 @@ function ActionLogic.stopCarryStep(
 	return math.min(carry.from, slowing, walkSpeed)
 end
 
+--- The clip time of an Art clip's hold pose: its first ActivationHold, or `fallback` (the section 6
+--- time, combat.luau startPoseTime + activationHold) when that comes first or the clip has none,
+--- since the hold freezes at whichever comes first. Nil for a clip that is not clip data.
+function ActionLogic.holdClipTime(clip: any, fallback: number): number?
+	if typeof(clip) ~= "table" or typeof(clip.events) ~= "table" then
+		return nil
+	end
+	local at = fallback
+	for _, event in clip.events do
+		if typeof(event) == "table" and event.kind == "ActivationHold" and typeof(event.time) == "number" then
+			at = math.min(at, event.time)
+		end
+	end
+	return at
+end
+
+--- The clip time the held Art freezes at, and whether the clip must be moved there first. Normally
+--- the rig's own steps took the clip there: it freezes where it is, at the time the key has been
+--- down. After a render stall (D-138) the rig was last stepped (`steppedAt`; nil, never) before the
+--- clip could reach its hold pose (`holdAt`, nil when it has no clip clock) and still shows an
+--- earlier pose: it freezes at the hold pose, moved there (true).
+function ActionLogic.freezeAt(pressedAt: number, now: number, holdAt: number?, steppedAt: number?): (number, boolean)
+	local held = math.max(now - pressedAt, 0)
+	if holdAt ~= nil and held >= holdAt and (steppedAt == nil or steppedAt < pressedAt + holdAt) then
+		return holdAt, true
+	end
+	return held, false
+end
+
 --- When the local clip resumes after a release so its clock matches the server's, which starts
 --- the clip at the release: the clip stays frozen for the clip time it had reached.
 function ActionLogic.syncPlan(pressedAt: number, frozenClipTime: number?, releasedAt: number): SyncPlan

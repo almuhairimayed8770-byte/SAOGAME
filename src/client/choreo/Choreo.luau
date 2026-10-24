@@ -14,10 +14,12 @@
 		animator.events:Connect(function(clipId, event, jumped) ... end)
 		animator:hitStop(frames)                      -- the rig holds; camera/FX read isPaused()
 		animator:currentRootMotionDelta()             -- Vector3, rig-local studs since last frame (zero once stale)
+		animator:seek(handle, clipTime)               -- the clip's clock forward now: its events fire, no root
 		animator:joint("Weapon")                      -- the joint Choreo writes for that name
 		animator:pin("Weapon", true)                  -- the joint rests at identity, whatever is keyed
 		Choreo.hitStopAll(models, "Final")
 		Choreo.setQuality("Medium")
+		Choreo.setLocalModel(character, true)         -- its owner steps it: Choreo.stepLocal(dt)
 
 	Footsteps: the Base layer blends many walk clips (and a drawn twin of each), all running at
 	once, and each has its own steps. Only the one the limbs show most sounds its Footstep events,
@@ -41,7 +43,11 @@
 	wake step does not move the body by the last frame before the stall.
 
 	Update rates: the local character and the nearest rigs step on RenderStepped; the rest step
-	on Heartbeat at the quality tier's distant / far rate (data/choreo.luau quality). A clip id
+	on Heartbeat at the quality tier's distant / far rate (data/choreo.luau quality). While its
+	owner drives the local character (setLocalModel(model, true): the character controller), the
+	owner steps it from its own render step with Choreo.stepLocal and RenderStepped leaves it
+	alone, so the owner reads the root delta of this frame's step (D-139): the engine does not
+	pin a RenderStepped connection's order against a BindToRenderStep callback. A clip id
 	that looks like "rbxassetid://..." plays as a Roblox AnimationTrack on the same layer with the
 	matching AnimationPriority, so hand-authored clips can replace data clips later.
 
@@ -99,6 +105,7 @@ export type Animator = {
 	setTimeScale: (self: Animator, scale: number) -> (),
 	isPlaying: (self: Animator, clipId: string) -> boolean,
 	currentRootMotionDelta: (self: Animator) -> Vector3,
+	seek: (self: Animator, handle: Handle, clipTime: number) -> (),
 	setWeight: (self: Animator, handle: Handle, weight: number, immediate: boolean?) -> (),
 	setSpeed: (self: Animator, handle: Handle, speed: number) -> (),
 	setProcedural: (self: Animator, name: string, offsets: ClipSampler.Offsets?, weight: number?) -> (),
@@ -136,6 +143,8 @@ local registry: { [Model]: any } = {}
 local ordered: { any } = {}
 local quality: Types.Quality = "High"
 local localModel: Model? = nil
+-- The local model's owner steps it (Choreo.stepLocal); RenderStepped leaves it alone (D-139).
+local localDriven = false
 local started = false
 local rankTimer = 0
 
@@ -609,6 +618,36 @@ local function footstepSource(self: any): Handle?
 	return best
 end
 
+-- Fires crossed events (a step's or a seek's) on the animator's `events`; of the Base layer's
+-- footsteps only those of the walk the limbs show most sound (footstepSource).
+local function fireEvents(self: any, events: { Mixer.FiredEvent })
+	local stepSource: Handle? = nil
+	local sourceKnown = false
+	for _, fired in events do
+		if fired.event.kind == FOOTSTEP and fired.handle.layer == "Base" then
+			if not sourceKnown then
+				stepSource = footstepSource(self)
+				sourceKnown = true
+			end
+			if fired.handle ~= stepSource then
+				continue
+			end
+		end
+		self.events:Fire(fired.clipId, fired.event, fired.jumped)
+	end
+end
+
+--- Moves a playing clip's clock forward to `clipTime` now, whatever the time scale or a hit-stop,
+--- as if it had played there: fires the events it crosses, unmarked, and moves no root; the pose
+--- shows at the rig's next step. An engine Animation's handle is left alone. (The Art hold whose
+--- clip a render stall kept from its hold pose, D-138.)
+function AnimatorClass.seek(self: any, handle: Handle, clipTime: number)
+	if self.destroyed or (handle :: any).rbx ~= nil then
+		return
+	end
+	fireEvents(self, self.mixer:seek(handle, clipTime))
+end
+
 function AnimatorClass.step(self: any, dt: number)
 	if self.destroyed then
 		return
@@ -639,20 +678,7 @@ function AnimatorClass.step(self: any, dt: number)
 	self.rootDelta = Vector3.new(delta[1], delta[2], delta[3])
 	self.rootDeltaAt = now
 	applyOffsets(self, result.offsets)
-	local stepSource: Handle? = nil
-	local sourceKnown = false
-	for _, fired in result.events do
-		if fired.event.kind == FOOTSTEP and fired.handle.layer == "Base" then
-			if not sourceKnown then
-				stepSource = footstepSource(self)
-				sourceKnown = true
-			end
-			if fired.handle ~= stepSource then
-				continue
-			end
-		end
-		self.events:Fire(fired.clipId, fired.event, fired.jumped)
-	end
+	fireEvents(self, result.events)
 	for _, handle in result.finished do
 		self.finished:Fire(handle)
 	end
@@ -825,7 +851,8 @@ local function start()
 		end
 		for index = 1, #ordered do
 			local animator = ordered[index]
-			if animator ~= nil and animator.rate == "Full" then
+			-- A driven local rig is its owner's to step (stepLocal), never twice in a frame.
+			if animator ~= nil and animator.rate == "Full" and not (localDriven and animator.model == localModel) then
 				animator:step(dt)
 			end
 		end
@@ -916,10 +943,28 @@ function Choreo.quality(): Types.Quality
 	return quality
 end
 
---- Marks the local player's model: always full rate, never budgeted out.
-function Choreo.setLocalModel(model: Model?)
+--- Marks the local player's model: always full rate, never budgeted out. `driven`: its owner (the
+--- character controller) steps it itself with Choreo.stepLocal from its own render step, so what
+--- it reads of the rig (the root delta) comes from this frame's step; RenderStepped leaves it
+--- alone then (D-139). Without it, RenderStepped steps it as any near rig (the ClipLab).
+function Choreo.setLocalModel(model: Model?, driven: boolean?)
 	localModel = model
+	localDriven = model ~= nil and driven == true
 	rerank()
+end
+
+--- Steps the local model's rig once, while its owner drives it (setLocalModel(model, true)); a
+--- no-op otherwise, so the rig is never stepped twice in a frame. A step that comes back from a
+--- render stall is a jump, as on RenderStepped (the rig's own clock saw the gap, D-132).
+function Choreo.stepLocal(dt: number)
+	local model = localModel
+	if not localDriven or model == nil then
+		return
+	end
+	local animator = registry[model]
+	if animator ~= nil then
+		animator:step(dt)
+	end
 end
 
 --- Number of registered animators.

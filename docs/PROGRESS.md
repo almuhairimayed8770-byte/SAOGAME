@@ -423,6 +423,39 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   hitch over 0.5 s drops that span's one-shots and root motion by design. The gait clip generator still lives outside
   the repo; commit it under tools/ once it is --!strict.
 
+## Studio check of the wake fix (2026-10-24, bb316b4)
+
+- Pass: waking after a 21 s screen sleep plays no stale chime, whoosh or footstep, the root moves 0.004 studs, the FOV
+  stays at 60 and the trail is off (120); a released kobold's Art does not replay at the wake (121, a stand-in for a
+  second player); a normal Art, dodge (7.97 studs) and kill keep every sound and the same timing as before (122); a
+  swing pressed 0.27 s before the wake plays on with its whoosh and trail, one pressed 2.2 s before ends silently
+  (123a); the first render dt after a wake equals the server-time gap every time (123c); a locked drawn walk with
+  Guard held slides 0.15 at most (125).
+- Fail or partly: a dodge pressed 0.2 s before the wake plays its landing thud at +0.07 s, before the body travels;
+  an Art fired just before the sleep shows its trail on the first wake frame; slowed captures leave one foot per gait
+  at about 0.20 a stance (the other is under 0.15); walking into a held boar keeps the legs walking in place (one
+  stance slid 3.35 at 0.25x) and slides along its flank in bursts of 1.4 to 3.7 studs/s at 1x (126).
+- Seen: the server anticheat kicked the test session for its own client teleports; a half-magnitude Player:Move
+  walk at 8 studs/s keeps median slides near 0.01 with outliers up to 0.68 (128).
+
+## Held Arts across stalls, root order and the gait generator (2026-10-24, D-138 to D-140)
+
+- An Art held across a display sleep or a client hitch now waits at its hold pose with the blade lit, and its
+  release launches on a normal hold's timing (D-138). It used to stay at its start or run past its stance, then
+  launch about 0.25 s late. A hitch shorter than 0.5 s no longer freezes the hold mid-swing with its trail lit, and
+  a hitch past the 1 s cancel time no longer chimes for a hold the cancel ends.
+- The controller steps the local rig itself just before it reads the root motion, so a dodge or a lunge moves the
+  body in the frame it is posed, with no one-frame lag. The other rigs, their rate tiers and ClipLab are unchanged
+  (D-139).
+- The gait clip generator is committed as strict tooling under tools/gaitgen, with a `--check` mode and a spec. 10 of
+  the 12 gait clips are byte-checked; Run and Sprint keep their hand-keyed back-mount upper bodies (D-140). This
+  closes two items left open in the section above (the held Art across a sleep, and the generator outside the repo).
+- Checks: 1983 specs in 114 files, 32 validators, offline lint, the hit matrix, the animation review (64 clips) and
+  gaitgen --check all pass. No new strict type messages in src.
+- Open: the hold's chime and FOV kick play in the dark when the timer freezes it during a display sleep (item 130);
+  an Art pressed in the wake frame of a 0.15 to 0.5 s hitch starts that far into its clip, and a release in that
+  frame leaves the clip up to about 0.47 s behind, as before; Run's and Sprint's upper bodies are not byte-checked.
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and

@@ -124,6 +124,7 @@ export type Mixer = {
 	find: (self: Mixer, clipId: string) -> Handle?,
 	handles: (self: Mixer) -> { Handle },
 	step: (self: Mixer, dt: number) -> StepResult,
+	seek: (self: Mixer, handle: Handle, clipTime: number) -> { FiredEvent },
 	lastOffsets: (self: Mixer) -> Offsets,
 	clear: (self: Mixer) -> (),
 }
@@ -526,6 +527,27 @@ local function composeOverrideLayer(result: Offsets, handles: { Handle })
 		end
 		first = last + 1
 	end
+end
+
+--- Moves one handle's clock forward to `clipTime` now, whatever the pause or the time scale, as if
+--- it had played there (the Art hold a render stall kept from its hold pose, D-138): returns the
+--- events it crosses, unmarked, each once (the next step goes on from there). The root it covers
+--- goes nowhere: the next step's root delta starts at `clipTime`. A time at or before the handle's
+--- own, or past a looping clip's end, moves nothing; a clip's end is the next step's to report.
+function Mixer.seek(_self: any, handle: Handle, clipTime: number): { FiredEvent }
+	local events: { FiredEvent } = {}
+	local clip = handle.clip
+	local target = math.min(clipTime, clip.duration)
+	if handle.done or target <= handle.time or (clip.loop and target >= clip.duration) then
+		return events
+	end
+	collectEvents(handle, handle.time, target, handle.fresh, events, false)
+	handle.fresh = false
+	if handle.hasRoot then
+		handle.lastRoot = ClipSampler.rootMotionAt(clip, target)
+	end
+	handle.time = target
+	return events
 end
 
 function Mixer.step(self: any, dt: number): StepResult

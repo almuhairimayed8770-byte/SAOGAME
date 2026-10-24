@@ -74,6 +74,8 @@ tools/validate.luau            runs tools/validators/*.luau
 tools/smoke.sh                 runs the smoke scripts in Studio through tools/smoke-wrap.luau + smoke/SmokeRunner
 tools/hit-matrix.luau          prints the server hit matrix (tools/hitmatrix/HitMatrix.luau, dev.luau hitMatrix, D-045);
                                HitMatrix.standing() lends its posed body and field to other specs
+tools/gaitgen.luau             regenerates the OneHandedSword gait loops from tools/gaitgen/ (GaitGen, Gaits, Ik, Emit,
+                               Rig, sources/); --check exits 1 on drift; Run and Sprint are GaitGen.DRIFTED (D-140)
 tools/PoseEditor/              Studio plugin (Rojo project) + tools/pose-server.luau (Lune, writes clips)
 ```
 
@@ -462,7 +464,7 @@ the sweep.
   `peekLocalId`, `isLocal` and `localRecord`.
 - Glint, SlashArc, SpeedLines and Smear are timed from deps.now() at play, so the first render step after a stall
   hides them. FrameClock, Trails, OutlineManager, SwitchRing, Shatter, Digits, Telegraphs, Hud, Nameplates,
-  SystemLine and SfxPool run on Heartbeat, Engine.now or the wall clock. Choreo still steps on RenderStepped; a render stall's gap is handled as a jump (D-132).
+  SystemLine and SfxPool run on Heartbeat, Engine.now or the wall clock. Choreo steps rigs on RenderStepped, except the local character, which CharacterController steps from its render step (Choreo.stepLocal, D-139); a render stall's gap is handled as a jump (D-132).
 
 ### Controlled fights and idle phase (D-120 to D-124)
 
@@ -513,6 +515,32 @@ the sweep.
 - tests/choreo/Stride.spec.luau guards each clip's authored slide: every walk under slideBar, every gait clip under transientBar, and a lock-on forward walk at walkSpeed (the walk/Run cadence blend) within transientBar (D-133).
 - The capture path: setCaptureTimeScale → WalkSpeed × scale + animator:setTimeScale (mixer:timeScale, which Locomotion.stepGait divides the root speed by) + Locomotion clockScale. Locomotion paces from |AssemblyLinearVelocity| with the direction from MoveDirection (D-127, D-137).
 - tools/validators/choreo.luau (new): stall.jumpSeconds is at least 2/rate for every tier's distantHz and farHz and at most camera.stall.settleSeconds. tools/validators/stride.luau keeps locomotion.stopHandOverCycles inside (0, 0.5). The validator count is now 32.
+
+### After the controller round (D-138 to D-140)
+
+- src/client/choreo/Mixer.luau: `seek(handle, clipTime) -> { FiredEvent }` moves one handle's clock forward now, ignoring pause and time scale. It returns the crossed events unmarked and sets lastRoot, so the skipped span adds no root delta. It does nothing for a time at or before the handle's own, for a done handle, or for a looping clip at or past its end. A one-shot's end is reported by the next step (D-138).
+- src/client/choreo/Choreo.luau:
+  - `animator:seek(handle, clipTime)` fires the seek's events on `animator.events`, with the same footstep-source filter as step. It leaves engine Animation handles and destroyed animators alone.
+  - `Choreo.setLocalModel(model, driven?)` marks the local rig; `Choreo.stepLocal(dt)` steps the driven local rig once and does nothing otherwise.
+  - RenderStepped skips a driven local rig. `Choreo.stepAll` (ClipLab and tests) still steps every rig (D-138, D-139).
+- src/client/controllers/ActionLogic.luau: `holdClipTime(clip, fallback) -> number?` and `freezeAt(pressedAt, now, holdAt?, steppedAt?) -> (clipTime, seek)` (D-138).
+- src/client/controllers/CharacterController.luau:
+  - It hooks `animator:onStep(beforeRigStep)`. Before each step of the local rig, a hold freezes at its hold pose when the step is a jump or would carry the clip past hold time + combat activationHold. This applies to a hold that is at least its hold time old, not yet frozen, and younger than combat activationCancelTime. The hook then records rigSteppedAt.
+  - freezeHold seeks the clip when freezeAt says so.
+  - step() calls Choreo.stepLocal between Locomotion:update and the root-motion read.
+  - On spawn it calls setLocalModel(model, true), and clearCharacter unhooks the step hook.
+  - The clipEvent listener takes `jumped` (D-138, D-139).
+- tools/gaitgen.luau and tools/gaitgen/: the gait clip generator for the OneHandedSword locomotion loops (WalkForward, Back, Left and Right, Run, Sprint and their Drawn twins; D-054, D-128, D-134, D-135, D-140).
+  - GaitGen holds the names, the DRIFTED list, and generate, write, check and compare.
+  - Gaits.luau holds each gait's foot plans, key times and sheathed upper body.
+  - Ik.luau is a damped least-squares leg solver.
+  - Emit.luau writes the clip text already in StyLua format.
+  - Rig.luau poses HitMatrix.standing's PlayerR15 rig through Pose.solve.
+  - sources/ holds pinned copies of the drawn upper bodies and WalkForward's arm swing from git 927dbed.
+  - `lune run tools/gaitgen.luau --check` regenerates in memory and exits 1 on drift. tests/tools/gaitgen.spec.luau runs the same check plus the ownership, hand-edit and Run/Sprint root-and-legs tests.
+- Tests:
+  - New spec files: tests/choreo/MixerSeek.spec.luau, tests/choreo/ChoreoLocalStep.spec.luau (a fresh Choreo copy on fake frame signals), tests/client/ActionLogicHold.spec.luau and tests/tools/gaitgen.spec.luau.
+  - tests/client/CharacterController.spec.luau has a `choreo` option: a fresh real Choreo animating a real PlayerR15 rig on the spec clock, with task.delay on that clock, `renderOrder` ("bound" or "connections"), and `heartbeat()`, `wake()` and `hitch(seconds)` for render stalls and engine hitches. Its hold specs cover sleeps, jump and shorter hitches, hitches past the cancel time, 10, 20 and 30 fps holds and a slowed capture.
 
 ## Data tables (src/shared/data)
 
