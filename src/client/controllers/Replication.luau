@@ -86,7 +86,9 @@
 	A Charger's rush is drawn on the server's timeline (D-171, choreo/RushDraw): its telegraph arms
 	the launch it predicts (wind-up start + windUp + the pauses), RushStarted replaces the line and
 	the clock with the server's, RushEnded caps it (a jam) or stops it, a Stagger or a Break stops
-	it where it is drawn, and a death leaves the body where it was drawn. While the body is drawn
+	it where it is drawn, and a death leaves the body where it was drawn. The world stops it where
+	it stops the root (the server's worldAhead cast from the drawn body, RushDraw.room), and it
+	hands back from there as from a jam, before any RushEnded says so. While the body is drawn
 	away from its root the root part is hidden, and a launched rush is not held by a hit on it (the
 	server holds nothing of it either). An enemy's flinch during its attack plays with the rig's
 	attackFlinch weights (D-173): the weapon arm stays on the attack. An enemy's own strike holds
@@ -156,6 +158,16 @@ export type Deps = {
 	-- telegraphs start on it and rushes are drawn on it. Without it a telegraph starts on receipt
 	-- and no rush is drawn.
 	serverNow: (() -> number)?,
+	-- workspace:Blockcast as the server's worldAhead makes it (RushDraw.WorldCast: how far, and the
+	-- face's normal): a drawn rush stops where the world stops its root, never at ground it climbs.
+	-- Without it the drawn rush stops only at RushEnded.
+	worldCast: ((
+		start: CFrame,
+		size: Vector3,
+		vector: Vector3,
+		group: string,
+		exclude: Instance
+	) -> (number?, Vector3?))?,
 }
 
 -- Sound names (family.Name in sfx.luau) the reactions play; Replication.spec checks each resolves.
@@ -265,7 +277,8 @@ local silenceEnd: number? = nil
 local attacks: { [number]: Attack } = {}
 -- enemy id -> its rush being drawn (D-171): the drawing state, the animator and root it draws on,
 -- the step hook, whether RushStarted came (`launched`), the server time from which a RushEnded is
--- this rush's (`since`) and the root's transparency modifier before it was hidden.
+-- this rush's (`since`), the root's transparency modifier before it was hidden and how far the
+-- world lets the drawn body move (nil without a world cast).
 type Rush = {
 	state: any,
 	animator: any,
@@ -274,6 +287,7 @@ type Rush = {
 	launched: boolean,
 	since: number,
 	shownAs: number?,
+	room: ((from: CFrame, direction: Vector3, distance: number) -> number?)?,
 }
 local rushes: { [number]: Rush } = {}
 
@@ -708,7 +722,7 @@ local function stepRush(id: number, rush: Rush, dt: number)
 		return
 	end
 	local rootFrame = root.CFrame
-	local drawn = RushDraw.step(rush.state, now, dt, rootFrame)
+	local drawn = RushDraw.step(rush.state, now, dt, rootFrame, rush.room)
 	if drawn ~= nil then
 		rush.animator:setBodyOffset(rootFrame:Inverse() * drawn)
 		hideRoot(rush, true)
@@ -728,15 +742,25 @@ local function armRush(record: any, line: any, since: number, launched: boolean)
 		return
 	end
 	local model = record.model
+	local root: BasePart? = if model ~= nil then (model :: Model).PrimaryPart else nil
 	local rush: Rush = {
 		state = RushDraw.new(line),
 		animator = animator,
-		root = if model ~= nil then (model :: Model).PrimaryPart else nil,
+		root = root,
 		unhook = nil,
 		launched = launched,
 		since = since,
 		shownAs = nil,
+		room = nil,
 	}
+	local cast = dependencies().worldCast
+	if cast ~= nil and root ~= nil then
+		-- The server's worldAhead from the drawn body: its root's own box, never its own model.
+		local part = root :: BasePart
+		rush.room = function(from: CFrame, direction: Vector3, distance: number): number?
+			return RushDraw.room(from, part.Size, direction, distance, cast, model)
+		end
+	end
 	rushes[record.id] = rush
 	rush.unhook = animator:onStep(function(dt: number)
 		stepRush(record.id, rush, dt)
@@ -1727,6 +1751,35 @@ function Replication.subscribe()
 	end
 end
 
+local castParams: RaycastParams? = nil
+
+-- workspace:Blockcast with the parts that collide with `group` and can collide, as the server's
+-- worldAhead casts (EnemyService defaultWorldCast): a hitbox or an effect is not a wall.
+local function worldCast(
+	start: CFrame,
+	size: Vector3,
+	vector: Vector3,
+	group: string,
+	exclude: Instance
+): (number?, Vector3?)
+	local params = castParams
+	if params == nil then
+		local created = RaycastParams.new()
+		created.FilterType = Enum.RaycastFilterType.Exclude
+		created.RespectCanCollide = true
+		castParams = created
+		params = created
+	end
+	local query = params :: RaycastParams
+	query.FilterDescendantsInstances = { exclude }
+	query.CollisionGroup = group
+	local result = workspace:Blockcast(start, size, vector, query)
+	if result == nil then
+		return nil, nil
+	end
+	return result.Distance, result.Normal
+end
+
 --- Binds the real modules (missing siblings become no-op stubs) and subscribes to the remotes.
 function Replication.start()
 	local Client = script.Parent.Parent
@@ -1785,6 +1838,7 @@ function Replication.start()
 		serverNow = function(): number
 			return workspace:GetServerTimeNow()
 		end,
+		worldCast = worldCast,
 	})
 	Replication.subscribe()
 end

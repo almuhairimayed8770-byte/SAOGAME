@@ -756,19 +756,19 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
    (b) Kill one mid-rush. The plate stays over the frozen body until the shatter.
    (c) Parry one mid-rush. SWITCH sits over the staggered body, and both slide back with it at the hand-back, with no jump.
 182. [ ] **Lock camera on a charging boar (D-193).** Use the same lag as item 181. Pass: the boar stays inside the frame for the whole run.
-   (a) Step frame by frame and note whether the framing is a frame behind the body's motion. That would mean Choreo's RenderStepped runs after the camera (measured worst: 0.9 studs / 3.9°).
+   (a) Step frame by frame and note whether the framing is a frame behind the body's motion. That would mean Choreo's RenderStepped runs after the camera (measured worst: 0.9 studs / 3.9°). Superseded by item 194.
 183. [ ] **Nothing of the hidden parts shows (D-193, D-198).**
    (a) During a rush, the Highlight outline and the shadow never draw the boar's hidden 2.4×2.4×5 root box where the root trails behind the body.
    (b) While a boar and a kobold telegraph (outline and tint) and while they stand, at midday and at a low sun, there is no outline or shadow of the 7-stud blocker box.
-184. [ ] **Legs at the end of a rush (D-193).** With 0.5 s of lag, watch the frames after the rush clip ends while the hidden root catches up (Settle and HandBack). Note whether the legs run in place on a body that has stopped.
+184. [ ] **Legs at the end of a rush (D-193).** With 0.5 s of lag, watch the frames after the rush clip ends while the hidden root catches up (Settle and HandBack). Note whether the legs run in place on a body that has stopped. Superseded by item 193.
 185. [ ] **Free-rush lag under keepUpStuds (D-195).** On flat ground, log a real boar's free-rush lag every server frame: speed × (now − bodyStartedAt) − progress.
    (a) It must stay below keepUpStuds (1). If it does not, hits land late.
    (b) If it stays well under, lower keepUpStuds to shrink the remaining gap.
 186. [ ] **A rush into a wall hits only what it reaches (D-195, D-197).** Use anchored walls across the boar's line. Distances are measured from the boar's root at its crouch along the telegraph.
    (a) Repeat the ef698e5 setup: a wall face 8 studs down the line, you 12 studs out behind it. Pass: no hit. RushEnded says Jammed, with the root against the face (distance about face − 2.5).
    (b) Wall faces at 6, 8 and 10, with dummies at 5, 9.5 and 14. Pass: wall 6 and wall 8 hit only 5; wall 10 hits 5 and 9.5; 14 is never hit.
-   (c) Note how far the drawn boar overruns before the report, and how far its head shows through the wall once it is held.
-   (d) If the Playground has a ramp or a low step, rush along it. The line must not end early (it should hit a dummy up the ramp).
+   (c) Note how far the drawn boar overruns before the report, and how far its head shows through the wall once it is held. Superseded by item 191.
+   (d) If the Playground has a ramp or a low step, rush along it. The line must not end early (it should hit a dummy up the ramp). Superseded by item 196.
 187. [ ] **Late paths never turn a walk back (D-196).** Watch a kobold walk to a goal more than 60 studs away over open ground. It must never turn back to a waypoint it passed.
    (a) Wedge it in a dead end. It still backs out along the route.
 188. [ ] **Walking into an enemy is a solid stop (D-198; supersedes item 180).** Log your root's Y every frame.
@@ -783,3 +783,34 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
 190. [ ] **A rush still passes through you and rejoins cleanly (D-167, D-190, D-198).**
    (a) Stand on a boar's line. The rush passes through you, and you are never pushed or lifted.
    (b) Repeat the item 178 setup with the D-190 log. The boar turns solid again only after you have been clear of it (root and blocker) for 0.5 s.
+
+## Z. The end of a charge (D-199 to D-204)
+
+191. [ ] **A charge into a wall stops at the face, on the server and on screen (D-199, D-202; replaces item 186(c)).** Use anchored wall faces 6, 8 and 10 studs down the line, with dummies at 5, 6.5, 9.5 and 14. Log server times.
+   (a) RushEnded "Jammed" arrives before the root touches the face, with distance about face − 2.5.
+   (b) Set Incoming Replication Lag to 0.25 s, then 0.5 s. The drawn boar stops at the face: no overrun, and no snap back at RushEnded.
+   (c) Hits match item 186(b).
+   (d) Note how much of the head shows through the wall (3.1 studs expected).
+192. [ ] **The client can cast in the rushing group (D-199, D-204).** On a client, call workspace:Blockcast with RaycastParams.CollisionGroup = "SkyspireRushing" against a wall and against a WedgePart ramp.
+   (a) It does not error. If it does, the drawn rush silently falls back to the jam path.
+   (b) The result has a Normal: about horizontal for the wall, tilted up for the ramp.
+193. [ ] **Legs stop with the body (D-200; answers item 184).** With 0.5 s of lag, charge a boar into a wall and watch the frames frame by frame through Settle and HandBack.
+   (a) The legs stop when the body stops: no running in place, no foot slide.
+   (b) Repeat with a free rush and with a parry mid-rush.
+194. [ ] **The lock camera has no one-frame lag behind the drawn body (D-201; answers item 182(a)).** Record the lock camera during a charge and step through it frame by frame.
+   (a) Do it with the default load and with a heavy RenderStepped load.
+   (b) Pass: the framing never trails the body's motion by a frame.
+195. [ ] **Hit holds start on the same frame (D-201).** Hit a remote enemy and the local rig in the same swing. Pass: both hit holds start on the same frame.
+196. [ ] **A charge up a ramp runs on (D-204; replaces item 186(d)).** Build anchored WedgePart ramps at 10°, 20° and 30°, and a 40° one, with a dummy up each. Rush up each at no lag and at 0.5 s.
+   (a) Pass for 10°, 20° and 30°: the rush is not ended "Jammed" at the foot, the dummy up the ramp is hit, and the drawn boar runs up with its root, with no stop partway and no slide at the hand-back.
+   (b) Put a wall across the top of the 20° ramp. Pass: nobody behind the wall is hit. Note how far the drawn boar overruns.
+   (c) On the 40° ramp, report whether the boar climbs it or stops, and when it is reported "Jammed".
+   (d) Rush up a flight of steps and note whether the drawn boar stops at a riser while the server's runs on.
+197. [ ] **Glancing walls and pillars (D-202).**
+   (a) Line a rush so that only a corner of the root's box clips a pillar beside the line. Note whether it ends "Jammed" at the pillar or carries on.
+   (b) Rush into a wall at 60° to the line. The rush now stops dead where it meets the wall instead of sliding along it.
+   (c) Say whether each stop reads right.
+198. [ ] **Free-rush lag against jamLagStuds (D-203; extends item 185).** Every server frame, log speed × (now − bodyStartedAt) − progress.
+   (a) Log it for a flat free rush at the default frame rate and with a capped client frame rate.
+   (b) Log it once across a forced server hitch.
+   (c) Pass: it stays below 4, and below 1 on flat ground.

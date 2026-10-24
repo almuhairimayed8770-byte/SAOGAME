@@ -717,6 +717,41 @@ the sweep.
   - enemies kept from players;
   - blockerHeight above every enemy rig's hipHeight + root height.
 
+### The end of a charge (D-199 to D-204)
+
+- **Client frame order:** FrameClock (First) → SkyspireRigs 199 (Choreo rig step, D-201) → SkyspireCamera 200 → ImpactFrames 201 → CharacterController/contact 301 (Character+1) → SkyspireCameraLate 2000 → FrameClock (Last).
+- **client/choreo/Choreo**:
+  - `RENDER_STEP` ("SkyspireRigs") and `renderPriority()` (Camera − 1).
+  - Full-rate rigs step in that bound step; Engine.renderStepped defaults to it. The local driven rig is still stepped only by stepLocal at 301 (D-139).
+- **client/choreo/RushDraw**:
+  - `room(from, size, direction, distance, cast, exclude): number?` is the server's worldAhead cast made from the drawn body, in AI.collision.rushing. It returns the free distance, or nil for nothing in the way, a failed cast, or ground (D-199, D-204).
+  - `isGround(normal)` applies ai.luau collision.groundSlopeDegrees.
+  - `WorldCast` returns (distance?, normal?); `Room` type.
+  - `step(state, now, dt, root, room?)` cuts a step the world stops and jams the limit there.
+  - `retime` keeps the limit's world point.
+- **client/controllers/Replication**:
+  - The `worldCast` dependency defaults to workspace:Blockcast (cached RaycastParams: Exclude, RespectCanCollide, the given group) and returns Distance and Normal.
+  - armRush builds `rush.room` from the root's size and its own model; stepRush passes it to RushDraw.step.
+- **client/choreo/Locomotion**: `drawnTracker(animator, character)` feeds the gait from the drawn body's movement while a body offset is drawn (D-200).
+- **server/ai/Charger**:
+  - `stopAtWall(brain, rush, face)` (D-202) marks rushJammed, sends rushEnded("Jammed", clamp(face − rootReach, progress, length)), then moveDirects there or calls context.stop(). It does nothing unless the rush is rushing, not yet jammed, and in Strike.
+  - `sweep` caps each stretch at any face worldAhead finds, and calls stopAtWall only when that face is not ground (D-204).
+  - Past the strike beat, `sweep` casts once per pass (memory.rushLooked, reset in onStrikeStart) to min(speed × elapsed + front, reached, length + rootReach).
+  - `onStrike`'s jamLagStuds check now covers only stops the cast misses.
+- **server/ai/Brain**:
+  - `rootReach(direction): number` asks Context.rootReach (0 with no hook, never negative).
+  - `worldAhead(direction, distance): (number?, boolean)` returns the face and whether it is ground, or nil and false. This replaces "worldAhead(direction, distance): number?" in the D-193 to D-198 section.
+  - Context gains `rootReach`; Context.worldAhead returns (number?, boolean?).
+- **server/services/EnemyService**:
+  - `rootReach(model, direction)`: half the root box's extent along the flattened direction; 0 with no root or a vertical direction.
+  - `worldAhead(model, direction, distance, cast?)` starts the cast from rootReach and returns (distance?, isGround?).
+  - `isGround(normal)`.
+  - `WorldCast` returns (number?, Vector3?); defaultWorldCast returns Distance and Normal.
+  - engine.worldAhead returns (number?, boolean?).
+  - makeContext wires rootReach and passes both worldAhead values.
+- **shared/data/ai**: `collision.groundSlopeDegrees` (45); the comment on archetypes.Charger.jamLagStuds is rewritten (the value stays 4).
+- **tools/validators/ai**: groundSlopeDegrees must be a number below 90 and at least each Charger rig's atan(hipHeight / half its root's length).
+
 ## Data tables (src/shared/data)
 
 | File | Holds |

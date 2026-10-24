@@ -569,6 +569,29 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   - A client still draws a jammed boar running past the wall until the jam report.
   - A remaining hit gap of up to 1.47 studs for stops the world cast does not see.
 
+## The end of a charge (2026-10-24, D-199 to D-204)
+
+- **Clients (D-199 to D-201):**
+  - A charging boar is drawn stopping at the wall its root runs into, instead of overrunning by 4 to 16 studs and sliding back.
+  - Its legs follow the drawn body.
+  - Rigs step in a bound render step just before the camera, so the lock camera and the hit holds see this frame's pose in either engine order.
+- **Server (D-202, D-203):**
+  - A wall the cast sees ends the rush on that frame. Clients are told 0.12–0.13 s before the root arrives.
+  - jamLagStuds stays 4 for stops the cast misses.
+- **Verification fix (D-204):**
+  - Ramp faces are ground, not walls. A charge runs up ramps of 5–20° on both sides, where the combined change had stopped the drawn boar partway up and ended a 20° rush at its foot.
+  - The line still never resolves past a ramp's contact, so nobody behind a wall at the top is hit.
+- **Checks:**
+  - 2459 specs in 136 files pass.
+  - Validators, stylua, offline lint, the hit matrix, the animation review and gaitgen are clean.
+  - luau-lsp shows no new messages in src or tools.
+- **Open:**
+  - Studio items 191 to 198 (items 186(c), 186(d), 184 and 182(a) are superseded).
+  - The snout still shows 3.1 studs through a wall.
+  - Glancing walls and pillars stop a charge dead.
+  - A drawn boar can still stop at a stair riser.
+  - A wall hidden behind a ramp's contact still waits for the jam.
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and

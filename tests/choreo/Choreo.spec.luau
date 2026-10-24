@@ -30,10 +30,34 @@ end
 local renderStepped = fakeSignal()
 local heartbeat = fakeSignal()
 local preSimulation = fakeSignal()
-Harness.stubService(
-	"RunService",
-	{ RenderStepped = renderStepped, Heartbeat = heartbeat, PreSimulation = preSimulation }
-)
+-- The engine's render steps: a bound step runs on the frame as a RenderStepped handler does here
+-- (Fire drives both), and each binding and RenderStepped connection is counted.
+local bindings: { { name: string, priority: number } } = {}
+local bound: { [string]: any } = {}
+local connected = 0
+Harness.stubService("RunService", {
+	RenderStepped = {
+		Connect = function(_self: any, handler: (dt: number) -> ()): any
+			connected += 1
+			return renderStepped:Connect(handler)
+		end,
+	},
+	Heartbeat = heartbeat,
+	PreSimulation = preSimulation,
+	BindToRenderStep = function(_self: any, name: string, priority: number, fn: (dt: number) -> ())
+		table.insert(bindings, { name = name, priority = priority })
+		if bound[name] ~= nil then
+			bound[name].Disconnect()
+		end
+		bound[name] = renderStepped:Connect(fn)
+	end,
+	UnbindFromRenderStep = function(_self: any, name: string)
+		if bound[name] ~= nil then
+			bound[name].Disconnect()
+			bound[name] = nil
+		end
+	end,
+})
 
 local Choreo = Harness.load("src/client/choreo/Choreo")
 local ChoreoData = Harness.load("src/shared/data/choreo")
@@ -234,6 +258,19 @@ local function count(list, value)
 end
 
 describe("Choreo", function()
+	it("steps its rigs in a render step bound just before the camera's, not on RenderStepped (D-201)", function()
+		local model = buildRig("Boar", Vector3.zero)
+		Choreo.get(model)
+		-- The camera (Camera priority) and the local controller's step and contact read
+		-- (Character + 1) come after it whatever order the engine runs RenderStepped in.
+		expect(connected).toBe(0)
+		expect(#bindings).toBe(1)
+		expect(bindings[1].name).toBe(Choreo.RENDER_STEP)
+		expect(bindings[1].priority).toBe(Enum.RenderPriority.Camera.Value - 1)
+		expect(Choreo.renderPriority()).toBe(Enum.RenderPriority.Camera.Value - 1)
+		Choreo.release(model)
+	end)
+
 	it("registers a rig and poses it the same frame: idle and breathing play, no joint is left at rest", function()
 		local model = buildRig("PlayerR15")
 		local animator = Choreo.get(model)

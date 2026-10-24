@@ -84,15 +84,23 @@ export type Engine = {
 	-- D-167: whether the model's root overlaps no player and no other enemy, so it can rejoin the
 	-- enemies group without being pushed out of anyone (CollisionGroups.clear). Nil: always clear.
 	bodyClear: ((model: Model) -> boolean)?,
-	-- D-197: how far ahead of the root's centre along `direction` the world stops the root (what the
+	-- D-197: how far ahead of the root's centre along `direction` the world meets the root (what the
 	-- root collides with in its own group: a rushing body's walls, never a player or an enemy),
-	-- within `distance` studs; nil when nothing is in the way (EnemyService.worldAhead). Nil: no world.
-	worldAhead: ((model: Model, direction: Vector3, distance: number) -> number?)?,
+	-- within `distance` studs, and whether that face is ground it climbs (D-204); nil when nothing is
+	-- in the way (EnemyService.worldAhead). Nil: no world.
+	worldAhead: ((model: Model, direction: Vector3, distance: number) -> (number?, boolean?))?,
 }
 
 -- The world cast worldAhead makes: a box of `size` at `start` moved by `vector`, colliding as
--- `group` does and never with `exclude`; how far it travelled before it met something, or nil.
-export type WorldCast = (start: CFrame, size: Vector3, vector: Vector3, group: string, exclude: Instance) -> number?
+-- `group` does and never with `exclude`; how far it travelled before it met something, or nil, and
+-- the normal of the face it met (nil: a face named no way, taken for a wall).
+export type WorldCast = (
+	start: CFrame,
+	size: Vector3,
+	vector: Vector3,
+	group: string,
+	exclude: Instance
+) -> (number?, Vector3?)
 
 export type Deps = {
 	entities: any, -- EntityService
@@ -618,7 +626,13 @@ local function makeContext(entry: Entry): Brain.Context
 		end,
 		worldAhead = function(direction, distance)
 			local cast = d.engine.worldAhead
-			return if cast ~= nil then cast(model, direction, distance) else nil
+			if cast == nil then
+				return nil, nil
+			end
+			return cast(model, direction, distance)
+		end,
+		rootReach = function(direction)
+			return EnemyService.rootReach(model, direction)
 		end,
 		rushStarted = function(rush)
 			rushStarted(entry, rush)
@@ -1167,7 +1181,7 @@ local function defaultWorldCast(
 	vector: Vector3,
 	group: string,
 	exclude: Instance
-): number?
+): (number?, Vector3?)
 	local params = castParams
 	if params == nil then
 		local created = RaycastParams.new()
@@ -1180,7 +1194,19 @@ local function defaultWorldCast(
 	query.FilterDescendantsInstances = { exclude }
 	query.CollisionGroup = group
 	local result = workspace:Blockcast(start, size, vector, query)
-	return if result ~= nil then result.Distance else nil
+	if result == nil then
+		return nil, nil
+	end
+	return result.Distance, result.Normal
+end
+
+--- Whether a face the world cast met is ground a body climbs, not a wall (D-204): its normal is
+--- within ai.luau collision.groundSlopeDegrees of straight up. Nil (a face named no way) is a wall.
+function EnemyService.isGround(normal: Vector3?): boolean
+	if normal == nil or normal.Magnitude < 1e-6 then
+		return false
+	end
+	return normal.Unit.Y >= math.cos(math.rad(AI.collision.groundSlopeDegrees))
 end
 
 --- How far ahead of a model's root centre along `direction` (flattened) the world stops the root,
@@ -1188,24 +1214,45 @@ end
 --- root's own collision group (a rushing body's group collides with the world only), from where its
 --- front face stands at the root's centre: a root pressed against a wall overlaps it by a hair, and
 --- a cast never sees what its box starts in. Only the root collides, so this is where the body
---- stops; its snout and limbs run on through the wall. `cast` stands in for workspace:Blockcast.
-function EnemyService.worldAhead(model: Model, direction: Vector3, distance: number, cast: WorldCast?): number?
+--- stops; its snout and limbs run on through the wall. The second value is whether the face is
+--- ground the root climbs (a ramp's, EnemyService.isGround, D-204): a rush's line still never
+--- resolves past it (whatever stands behind it is unseen), but it stops no body. `cast` stands in
+--- for workspace:Blockcast.
+function EnemyService.worldAhead(
+	model: Model,
+	direction: Vector3,
+	distance: number,
+	cast: WorldCast?
+): (number?, boolean?)
 	local root = model.PrimaryPart
 	local flat = Brain.horizontal(direction)
 	if root == nil or flat == nil or not (distance > 0) then
-		return nil
+		return nil, nil
+	end
+	local frame = root.CFrame
+	local start = frame - flat * EnemyService.rootReach(model, flat)
+	local ok, travelled, normal =
+		pcall(cast or defaultWorldCast, start, root.Size, flat * distance, root.CollisionGroup, model)
+	if not ok or typeof(travelled) ~= "number" then
+		return nil, nil
+	end
+	return math.max(0, travelled), EnemyService.isGround(if typeof(normal) == "Vector3" then normal else nil)
+end
+
+--- How far a model's root box reaches from its centre along `direction` (flattened): half its extent
+--- that way, 0 with no root or no direction. A root that worldAhead's face stops stands this far
+--- short of the face (D-202).
+function EnemyService.rootReach(model: Model, direction: Vector3): number
+	local root = model.PrimaryPart
+	local flat = Brain.horizontal(direction)
+	if root == nil or flat == nil then
+		return 0
 	end
 	local frame = root.CFrame
 	local half = root.Size / 2
-	local reach = math.abs(frame.RightVector:Dot(flat)) * half.X
+	return math.abs(frame.RightVector:Dot(flat)) * half.X
 		+ math.abs(frame.UpVector:Dot(flat)) * half.Y
 		+ math.abs(frame.LookVector:Dot(flat)) * half.Z
-	local start = frame - flat * reach
-	local ok, travelled = pcall(cast or defaultWorldCast, start, root.Size, flat * distance, root.CollisionGroup, model)
-	if not ok or typeof(travelled) ~= "number" then
-		return nil
-	end
-	return math.max(0, travelled)
 end
 
 -- `groups` is world.CollisionGroups (nil while it has not landed: no groups, as before D-167).

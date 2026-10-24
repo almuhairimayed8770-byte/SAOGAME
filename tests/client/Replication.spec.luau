@@ -2184,10 +2184,14 @@ local function liveRemote(liveOptions: { isLocal: boolean? }?)
 			end,
 		}
 	end
-	Harness.stubService(
-		"RunService",
-		{ RenderStepped = frameSignal(), Heartbeat = frameSignal(), PreSimulation = frameSignal() }
-	)
+	Harness.stubService("RunService", {
+		RenderStepped = frameSignal(),
+		Heartbeat = frameSignal(),
+		PreSimulation = frameSignal(),
+		-- Choreo's rig step (bound just before the camera's): the spec steps the rigs itself.
+		BindToRenderStep = function() end,
+		UnbindFromRenderStep = function() end,
+	})
 	local Choreo = Harness.load("src/client/choreo/Choreo")
 	local Locomotion = Harness.load("src/client/choreo/Locomotion")
 	local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")

@@ -454,6 +454,246 @@ describe("Charger", function()
 		expect(furthest).toBeGreaterThan(FACE - 1e-6) -- everything up to the face resolved
 	end)
 
+	-- A rush at a wall whose face stands `face` studs down the line (D-202): the world cast sees the face
+	-- while `seen()` says so, and the body is held with its root's front at the face. Steps to the
+	-- recovery; returns the world, what the rush reported (time, reason, distance) and the stretches.
+	type WallOptions = {
+		seen: ((ends: { any }) -> boolean)?,
+		hold: boolean?,
+		ground: boolean?, -- the cast names the face ground the root climbs (a ramp's, D-204)
+		onStrike: ((w: any, span: any) -> ())?,
+	}
+	local function wallRun(face: number, options: WallOptions?): (any, { any }, { any })
+		local opts: WallOptions = options or {}
+		local FRONT, BACK, ROOT_HALF = 5.6, 3.3, 2.5
+		local w = world({
+			extents = function()
+				return FRONT, BACK
+			end,
+		})
+		local seen = opts.seen
+		local ends = {}
+		w.context.worldAhead = function(_direction: Vector3, distance: number): (number?, boolean?)
+			if seen ~= nil and not seen(ends) then
+				return nil
+			end
+			local gap = face - -w.position.Z -- the line runs down -Z from the origin
+			if gap >= 0 and gap <= distance then
+				return gap, opts.ground == true
+			end
+			return nil
+		end
+		w.context.rootReach = function(direction: Vector3): number
+			return math.abs(direction.Z) * ROOT_HALF
+		end
+		-- Each report with where the root stood and how many MoveTo goals had gone out by then.
+		w.context.rushEnded = function(_rush, reason, distance)
+			table.insert(
+				ends,
+				{ time = w.time, reason = reason, distance = distance, at = -w.position.Z, goals = #w.goals }
+			)
+		end
+		local spans = {}
+		local strike = w.context.strike
+		w.context.strike = function(attack, origin, facing, strikeOptions)
+			strike(attack, origin, facing, strikeOptions)
+			local span = { time = w.time, from = strikeOptions.span.from, to = strikeOptions.span.to }
+			table.insert(spans, span)
+			if opts.onStrike ~= nil then
+				opts.onStrike(w, span)
+			end
+		end
+		w.players = { player(1, 0, -20) }
+		w.stepUntil(function()
+			return w.phase() == "WindUp"
+		end, 2)
+		local guard = 0
+		while w.phase() ~= "Recover" and w.phase() ~= "Interrupted" and guard < 200 do
+			w.step(1)
+			if opts.hold ~= false and -w.position.Z > face - ROOT_HALF then
+				w.position = Vector3.new(w.position.X, w.position.Y, -(face - ROOT_HALF)) -- held at the face
+			end
+			guard += 1
+		end
+		return w, ends, spans
+	end
+
+	it("ground the root climbs caps the line while ahead of it but never ends the rush (D-204)", function()
+		-- Faces on the line, and in the overshoot the run looks ahead to once the line has resolved.
+		for _, face in { 6, 8, 10, 18, 21 } do
+			local _, ends, spans = wallRun(face, { ground = true, hold = false })
+			-- The line runs on once the body has climbed past the face; the run is over only when its
+			-- time has run.
+			if face < 12 then
+				local farthest = -math.huge
+				for _, span in spans do
+					farthest = math.max(farthest, span.to)
+				end
+				expect(farthest).toBeGreaterThan(face + 1)
+			end
+			expect(#ends).toBe(1)
+			expect(ends[1].reason).toBe("Done")
+		end
+	end)
+
+	it(
+		"a stretch the world caps ends the rush at once (D-202): Jammed with the root's stop at the face, sent no further",
+		function()
+			local ROOT_HALF = 2.5
+			for _, face in { 6, 8, 10 } do
+				local w, ends, spans = wallRun(face)
+				-- The first stretch the face capped.
+				local cappedAt: number? = nil
+				for _, span in spans do
+					expect(span.to).toBeLessThanOrEqual(face + 1e-9)
+					if cappedAt == nil and span.to >= face - 1e-9 then
+						cappedAt = span.time
+					end
+				end
+				expect(cappedAt).never.toBeNil()
+				-- Reported on that tick, with the root standing its own reach short of the face; the run
+				-- still waits out its time (Done), and nothing resolves after the report.
+				expect(#ends).toBe(2)
+				expect(ends[1].reason).toBe("Jammed")
+				expect(ends[1].time).toBeCloseTo(cappedAt :: number, 1e-9)
+				expect(ends[1].distance).toBeCloseTo(face - ROOT_HALF, 1e-9)
+				expect(ends[2].reason).toBe("Done")
+				for _, span in spans do
+					expect(span.time).toBeLessThanOrEqual(ends[1].time + 1e-9)
+				end
+				-- The body was told before its root reached the face, sent straight to that stop and never
+				-- past it: no goal after the report reaches further down the line.
+				local stop = w.telegraphs[1].origin + FORWARD * (face - ROOT_HALF)
+				expect(ends[1].at).toBeLessThan(face - ROOT_HALF - 1e-6)
+				local sent = 0
+				for index = ends[1].goals + 1, #w.goals do
+					local goal = w.goals[index]
+					if goal.phase == "Strike" then
+						sent += 1
+						expect((goal.goal - stop).Magnitude).toBeLessThan(1e-6)
+						expect(goal.direct).toBe(true)
+					end
+				end
+				expect(sent).toBeGreaterThan(0)
+				expect(w.moving).toBe(false) -- the recovery stopped it there
+				expect(Brain.horizontalDistance(w.position, stop)).toBeLessThan(1e-6)
+			end
+		end
+	)
+
+	it("the root is told before it meets the face: never held at the wall unreported (D-202)", function()
+		local ROOT_HALF = 2.5
+		for _, face in { 6, 8, 10 } do
+			local reportedAt: number? = nil
+			local heldBefore = false
+			local w = world({
+				extents = function()
+					return 5.6, 3.3
+				end,
+			})
+			w.context.worldAhead = function(_direction: Vector3, distance: number): number?
+				local gap = face - -w.position.Z
+				return if gap >= 0 and gap <= distance then gap else nil
+			end
+			w.context.rootReach = function(): number
+				return ROOT_HALF
+			end
+			w.context.rushEnded = function(_rush, reason)
+				if reason == "Jammed" and reportedAt == nil then
+					reportedAt = w.time
+				end
+			end
+			w.players = { player(1, 0, -20) }
+			w.stepUntil(function()
+				return w.phase() == "Strike"
+			end, 2)
+			while w.phase() == "Strike" do
+				-- Before the brain's tick: is the root already pressed at the face?
+				if reportedAt == nil and -w.position.Z >= face - ROOT_HALF - 1e-9 then
+					heldBefore = true
+				end
+				w.step(1)
+				if -w.position.Z > face - ROOT_HALF then
+					w.position = Vector3.new(w.position.X, w.position.Y, -(face - ROOT_HALF))
+				end
+			end
+			expect(reportedAt).never.toBeNil()
+			expect(heldBefore).toBe(false)
+		end
+	end)
+
+	it("a wall right in front of the crouch ends the rush on its launch (D-202)", function()
+		local ROOT_HALF = 2.5
+		-- The root can go half a stud, or not at all (pressed against the face).
+		for _, room in { 0.5, 0 } do
+			local face = ROOT_HALF + room
+			local w, ends, spans = wallRun(face)
+			local launchAt = spans[1].time
+			expect(ends[1].reason).toBe("Jammed")
+			expect(ends[1].time).toBeCloseTo(launchAt, 1e-9)
+			expect(ends[1].distance).toBeCloseTo(room, 1e-9)
+			expect(#spans).toBe(1) -- the launch's own stretch, up to the face
+			expect(spans[1].to).toBeCloseTo(face, 1e-9)
+			expect(Brain.horizontalDistance(w.position, w.telegraphs[1].origin)).toBeLessThan(room + 1e-6)
+		end
+	end)
+
+	it("once a wall ended it the rush is over: the face gone, the body goes no further and nothing resolves", function()
+		local ROOT_HALF = 2.5
+		local face = 10
+		local w, ends, spans = wallRun(face, {
+			seen = function(ends: { any }): boolean
+				return #ends == 0 -- a door that opens on the report
+			end,
+			hold = false, -- and nothing holds the body after it
+		})
+		expect(ends[1].reason).toBe("Jammed")
+		for _, span in spans do
+			expect(span.time).toBeLessThanOrEqual(ends[1].time + 1e-9)
+			expect(span.to).toBeLessThanOrEqual(face + 1e-9)
+		end
+		expect(-w.position.Z).toBeCloseTo(face - ROOT_HALF, 1e-6)
+	end)
+
+	it("a wall in the overshoot, after the line resolved, ends it at once too, hits unchanged (D-202)", function()
+		local ROOT_HALF = 2.5
+		local length = CHARGE.reach + tuning.overshoot
+		local face = length -- the root's stop, 2.5 short of the run's end
+		local free = select(3, wallRun(1000))
+		local w, ends, spans = wallRun(face)
+		expect(ends[1].reason).toBe("Jammed")
+		expect(ends[1].distance).toBeCloseTo(face - ROOT_HALF, 1e-9)
+		-- Told before the root got there, and sent no further than its stop.
+		expect(ends[1].at).toBeLessThan(face - ROOT_HALF - 1e-6)
+		local stop = w.telegraphs[1].origin + FORWARD * (face - ROOT_HALF)
+		for index = ends[1].goals + 1, #w.goals do
+			local goal = w.goals[index]
+			if goal.phase == "Strike" then
+				expect((goal.goal - stop).Magnitude).toBeLessThan(1e-6)
+			end
+		end
+		-- The line resolved by the strike beat exactly as a free run's.
+		expect(#spans).toBe(#free)
+		for index, span in spans do
+			expect(span.time).toBeCloseTo(free[index].time, 1e-9)
+			expect(span.from).toBeCloseTo(free[index].from, 1e-9)
+			expect(span.to).toBeCloseTo(free[index].to, 1e-9)
+		end
+	end)
+
+	it("a parry on the stretch the world capped ends the rush Interrupted, never Jammed (D-202)", function()
+		local face = 8
+		local _, ends = wallRun(face, {
+			onStrike = function(w, span)
+				if span.to >= face - 1e-9 and w.brain:getPhase() == "Strike" then
+					w.brain:interrupt("Stagger", 1.0) -- the parry staggers the boar inside its strike
+				end
+			end,
+		})
+		expect(#ends).toBe(1)
+		expect(ends[1].reason).toBe("Interrupted")
+	end)
+
 	it("overshoots past the target, then recovers for the attack's 1.2 s with a slow turn back", function()
 		local w = world()
 		w.players = { player(1, 0, -20) }

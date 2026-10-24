@@ -637,6 +637,111 @@ describe("A stopped rush never carries a player (D-190)", function()
 		end
 	)
 
+	it(
+		"a wall the cast sees ends the rush at once (D-202): faces 6, 8 and 10, told before the root gets there",
+		function()
+			for face, expected in
+				{
+					[6] = { [5] = true, [6.5] = true, [9.5] = false, [12] = false },
+					[8] = { [5] = true, [6.5] = true, [9.5] = false, [12] = false },
+					[10] = { [5] = true, [6.5] = true, [9.5] = true, [12] = false },
+				}
+			do
+				fresh()
+				local boarId = EnemyService.spawn("FrenzyBoar", CFrame.new(0, 3, 0))
+				local boar = EnemyService.modelOf(boarId) :: Model
+				local rootHalf = (boar.PrimaryPart :: BasePart).Size.Z / 2
+				local targetId, target = spawnPlayer(Vector3.new(0, 3, -12))
+				local guard = 0
+				while #sentOf("Telegraph") == 0 and guard < 600 do
+					frame()
+					guard += 1
+				end
+				local telegraph = sentOf("Telegraph")[1].payload
+				local origin = Vector3.new(telegraph.origin[1], telegraph.origin[2], telegraph.origin[3])
+				local direction = Vector3.new(telegraph.facing[1], 0, telegraph.facing[3]).Unit
+				movePlayer(target, origin + direction * 12)
+				local ids: { [number]: number } = { [12] = targetId }
+				for _, along in { 5, 6.5, 9.5 } do
+					ids[along] = spawnPlayer(origin + direction * along)
+				end
+				table.insert(
+					walls,
+					{ model = boar, origin = origin, along = direction, at = face - rootHalf, face = face }
+				)
+				local body = bodies[boar]
+				local movesAtReport: number? = nil
+				while phaseOf(boarId) ~= "Recover" and guard < 2000 do
+					frame()
+					guard += 1
+					if movesAtReport == nil and #sentOf("RushEnded") > 0 then
+						movesAtReport = #body.moveTos
+					end
+				end
+				-- What the rush did with the body, up to its recovery. Still in the rushing group: it stopped
+				-- with players under it, who now step off to the side.
+				local movesAtRecover = #body.moveTos
+				local rest = body.position
+				expect(solidAt(boar)).toBeNil()
+				for _, model in playerModels do
+					movePlayer(model, (model.PrimaryPart :: BasePart).CFrame.Position + Vector3.new(12, 0, 0))
+				end
+				local clearFrom = clock.t
+				local limit = clock.t + 2
+				while solidAt(boar) == nil and clock.t < limit do
+					frame()
+				end
+				-- Which players it hit: exactly D-197's line, which still ends at the face.
+				for along, id in ids do
+					local count = 0
+					for _, entry in sentOf("HitConfirmed") do
+						if entry.payload.attackerId == boarId and entry.payload.targetId == id then
+							count += 1
+						end
+					end
+					expect(count == 1).toBe(expected[along])
+				end
+				-- Jammed once, on the frame the first stretch met the face, with the root's stop: its front at
+				-- the face. Nothing resolved after it, and nothing past the face.
+				local ended = sentOf("RushEnded")
+				expect(#ended).toBe(1)
+				expect(ended[1].payload.reason).toBe("Jammed")
+				expect(ended[1].payload.distance + rootHalf).toBeCloseTo(face, 1e-3)
+				local cappedAt: number? = nil
+				for _, span in spans do
+					expect(span.to).toBeLessThanOrEqual(face + 1e-3)
+					expect(span.time).toBeLessThanOrEqual(ended[1].time + 1e-9)
+					if cappedAt == nil and span.to >= face - 1e-3 then
+						cappedAt = span.time
+					end
+				end
+				expect(cappedAt).never.toBeNil()
+				expect(ended[1].time).toBeCloseTo(cappedAt :: number, 1e-9)
+				-- Told before the root reached the face: the world had not stopped it yet.
+				local worldStop: number? = nil
+				for _, sample in body.history do
+					if worldStop == nil and (sample.position - origin):Dot(direction) + rootHalf >= face - 1e-3 then
+						worldStop = sample.t
+					end
+				end
+				expect(worldStop).never.toBeNil()
+				expect(ended[1].time).toBeLessThan(worldStop :: number)
+				-- Sent to that stop and never further; it rests there.
+				local stop = origin + direction * ended[1].payload.distance
+				for index = (movesAtReport :: number) + 1, movesAtRecover do
+					local goal = body.moveTos[index].position
+					expect((goal - origin):Dot(direction)).toBeLessThanOrEqual(ended[1].payload.distance + 1e-6)
+				end
+				expect(((rest - stop) * Vector3.new(1, 0, 1)).Magnitude).toBeLessThan(0.05)
+				-- And turned solid only after the rejoin wait once clear (D-190).
+				local at = solidAt(boar)
+				expect(at).never.toBeNil()
+				expect((at :: number) - clearFrom).toBeGreaterThan(GROUPS.rejoinClearSeconds - TICK - FRAME)
+				expect((at :: number) - clearFrom).toBeLessThan(GROUPS.rejoinClearSeconds + TICK + FRAME)
+			end
+		end
+	)
+
 	it("a rush that ran its time turns solid only when no client still draws its root in a player", function()
 		for _, distance in { 12, 14, 16, 18 } do
 			local boarId, boar, player, launch = launched(distance)

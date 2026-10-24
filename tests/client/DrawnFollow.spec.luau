@@ -11,8 +11,9 @@
 	Each frame the plate's anchor (its adornee, the root part, plus StudsOffsetWorldSpace, less its
 	own height) is held against the drawn body (the root part moved by the animator's body offset),
 	and the lock camera against an ideal one locked on a stand-in rig standing exactly on the drawn
-	body. The rig steps before the camera here, as when Choreo's RenderStepped runs first; the other
-	order is measured, not pinned (the camera then reads the last step's offset).
+	body. The rig steps before the camera here; with `order` the frame is the engine's instead:
+	Choreo's own frame loop and the real camera run on one list of render steps, with RenderStepped
+	connections before or after every bound step (the engine pins neither, D-201).
 ]]
 
 local luau = require("@lune/luau")
@@ -24,10 +25,63 @@ local function frameSignal()
 		end,
 	}
 end
-Harness.stubService(
-	"RunService",
-	{ RenderStepped = frameSignal(), Heartbeat = frameSignal(), PreSimulation = frameSignal() }
-)
+Harness.stubService("RunService", {
+	RenderStepped = frameSignal(),
+	Heartbeat = frameSignal(),
+	PreSimulation = frameSignal(),
+	-- Choreo's rig step (bound just before the camera's): the spec steps the rig itself.
+	BindToRenderStep = function() end,
+	UnbindFromRenderStep = function() end,
+})
+
+-- The engine's render steps for `order` runs: RenderStepped connections and bound steps (by
+-- priority, a name bound again replacing its step), shared by a fresh Choreo and the lock camera.
+type Bound = { name: string, priority: number, fn: (dt: number) -> () }
+local connections: { (dt: number) -> () } = {}
+local bound: { Bound } = {}
+local function bind(name: string, priority: number, fn: (dt: number) -> ())
+	for index, entry in bound do
+		if entry.name == name then
+			table.remove(bound, index)
+			break
+		end
+	end
+	table.insert(bound, { name = name, priority = priority, fn = fn })
+	table.sort(bound, function(a, b)
+		return a.priority < b.priority
+	end)
+end
+local engineRunService = {
+	RenderStepped = {
+		Connect = function(_self: any, fn: (dt: number) -> ()): any
+			table.insert(connections, fn)
+			return { Disconnect = function() end }
+		end,
+	},
+	Heartbeat = frameSignal(),
+	PreSimulation = frameSignal(),
+	BindToRenderStep = function(_self: any, name: string, priority: number, fn: (dt: number) -> ())
+		bind(name, priority, fn)
+	end,
+	UnbindFromRenderStep = function() end,
+}
+
+-- One engine frame: RenderStepped's connections before or after every bound step.
+local function engineFrame(order: string)
+	if order == "RenderStepped first" then
+		for _, fn in connections do
+			fn(1 / 60)
+		end
+	end
+	for _, entry in table.clone(bound) do
+		entry.fn(1 / 60)
+	end
+	if order ~= "RenderStepped first" then
+		for _, fn in connections do
+			fn(1 / 60)
+		end
+	end
+end
 
 local Choreo = Harness.load("src/client/choreo/Choreo")
 local Replication = Harness.load("src/client/controllers/Replication")
@@ -93,6 +147,31 @@ local function fresh(path: string, overrides: { [string]: any }?): any
 	return luau.load(Harness.readFile(path .. ".luau"), { debugName = path, environment = env :: any })()
 end
 
+-- A fresh Choreo whose frame loop runs on the engine's render steps (its own registry and loops:
+-- the shared copy started on another spec's engine).
+local function engineChoreo(): any
+	table.clear(connections)
+	local choreo = fresh("src/client/choreo/Choreo", {
+		game = {
+			GetService = function(_self: any, name: string): any
+				if name == "RunService" then
+					return engineRunService
+				end
+				return Harness.game():GetService(name)
+			end,
+		},
+	})
+	choreo.configure({
+		now = function()
+			return clock
+		end,
+		cameraPosition = function()
+			return Vector3.zero
+		end,
+	})
+	return choreo
+end
+
 local function flat(v: Vector3): Vector3
 	return Vector3.new(v.X, 0, v.Z)
 end
@@ -135,14 +214,18 @@ end
 type Cam = { controller: any, camera: any, steps: { { priority: number, fn: (number) -> () } } }
 
 -- A real CameraController with a fake engine around it (as CameraFraming.spec), its render steps
--- collected so the frame can run them by hand.
-local function makeCamera(subject: Model): Cam
+-- collected so the frame can run them by hand, or (`engine`) bound with the engine's.
+local function makeCamera(subject: Model, engine: boolean?): Cam
 	local steps: { { priority: number, fn: (number) -> () } } = {}
 	local signal = { Connect = function() end }
 	local camera = { CFrame = CFrame.new(0, 10, 20), FieldOfView = 70, CameraType = nil, Focus = CFrame.new() }
 	local services: { [string]: any } = {
 		RunService = {
-			BindToRenderStep = function(_self: any, _name: string, priority: number, fn: (number) -> ())
+			BindToRenderStep = function(_self: any, name: string, priority: number, fn: (number) -> ())
+				if engine then
+					bind(name, priority, fn)
+					return
+				end
 				table.insert(steps, { priority = priority, fn = fn })
 				table.sort(steps, function(a, b)
 					return a.priority < b.priority
@@ -197,6 +280,9 @@ type Options = {
 	deathAt: number?, -- seconds after the launch the server kills it
 	staggerAt: number?, -- seconds after the launch a parry staggers it (and opens a Switch window)
 	frames: number?,
+	-- The engine's frame ("RenderStepped first" or "RenderStepped last") steps the rig and the lock
+	-- camera instead of the spec (nil: the rig, then the camera, by hand).
+	order: string?,
 }
 
 type Row = {
@@ -218,6 +304,8 @@ type Row = {
 
 local function run(options: Options): { Row }
 	clock = WIND_UP_START - 0.4
+	local order = options.order
+	local choreo = if order ~= nil then engineChoreo() else Choreo
 	local world = Instance.new("Folder")
 	local model = RigBuilder.build("Boar")
 	local root = model.PrimaryPart :: BasePart
@@ -257,7 +345,7 @@ local function run(options: Options): { Row }
 		locomotion = recorder(),
 		choreo = {
 			get = function(target: any): any
-				return if target == hero then myAnimator else Choreo.get(target)
+				return if target == hero then myAnimator else choreo.get(target)
 			end,
 		},
 		clipLibrary = ClipLibrary,
@@ -291,7 +379,7 @@ local function run(options: Options): { Row }
 			return clock
 		end,
 	} :: any)
-	local animator = Choreo.get(model)
+	local animator = choreo.get(model)
 	animator:step(FRAME)
 	local Nameplates = fresh("src/client/ui/Nameplates")
 	local Hud = fresh("src/client/ui/Hud")
@@ -302,11 +390,15 @@ local function run(options: Options): { Row }
 	-- The lock camera on the boar, and the ideal one on a stand-in standing on the drawn body.
 	local proxy = character("Proxy", root.Position, world)
 	local proxyRoot = proxy.PrimaryPart :: BasePart
-	local actual = makeCamera(hero)
+	local actual = makeCamera(hero, order ~= nil)
 	local ideal = makeCamera(hero)
 	for _ = 1, 30 do
 		clock += FRAME
-		stepCamera(actual)
+		if order ~= nil then
+			engineFrame(order)
+		else
+			stepCamera(actual)
+		end
 		stepCamera(ideal)
 	end
 	actual.controller.setLockTarget(model)
@@ -432,12 +524,18 @@ local function run(options: Options): { Row }
 		end
 		local position = ORIGIN + DIRECTION * d
 		place(CFrame.lookAt(position, position + DIRECTION))
-		animator:step(FRAME)
+		if order ~= nil then
+			engineFrame(order)
+		else
+			animator:step(FRAME)
+		end
 		local offset: CFrame? = (animator :: any).bodyOffset
 		local drawn = root.CFrame * (offset or CFrame.identity)
 		proxyRoot.CFrame = drawn
 		proxyRoot.Position = drawn.Position
-		stepCamera(actual)
+		if order == nil then
+			stepCamera(actual)
+		end
 		stepCamera(ideal)
 		Nameplates.step(FRAME)
 		Hud.step(FRAME)
@@ -469,6 +567,7 @@ local function run(options: Options): { Row }
 		lastIdeal = ideal.camera.CFrame
 	end
 	Nameplates.detach(record)
+	choreo.release(model)
 	return rows
 end
 
@@ -585,4 +684,23 @@ describe("a charging boar's plate and lock camera follow its drawn body (D-193)"
 		expect(((final.plateLift :: Vector3) - PLATE_LIFT).Magnitude).toBeLessThan(EPSILON)
 		expect(((final.switchLift :: Vector3) - SWITCH_LIFT).Magnitude).toBeLessThan(EPSILON)
 	end)
+end)
+
+describe("the lock camera frames this frame's drawn body whichever way the engine orders its frame (D-201)", function()
+	for _, order in { "RenderStepped first", "RenderStepped last" } do
+		for _, lag in { 0.25, 0.5 } do
+			it(("%s, %.2f s of root lag"):format(order, lag), function()
+				local rows = run({ lag = lag, order = order })
+				expect(most(rows, function(row)
+					return if row.drawing then row.rootGap else nil
+				end)).toBeGreaterThan(SPEED * lag * 0.9)
+				expect(most(rows, function(row)
+					return row.camGap
+				end)).toBeLessThan(0.02)
+				expect(most(rows, function(row)
+					return row.camTurn
+				end)).toBeLessThan(0.25)
+			end)
+		end
+	end
 end)

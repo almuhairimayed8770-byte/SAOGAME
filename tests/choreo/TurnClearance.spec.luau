@@ -27,10 +27,14 @@ local function fakeSignal()
 	end
 	return signal
 end
-Harness.stubService(
-	"RunService",
-	{ RenderStepped = fakeSignal(), Heartbeat = fakeSignal(), PreSimulation = fakeSignal() }
-)
+Harness.stubService("RunService", {
+	RenderStepped = fakeSignal(),
+	Heartbeat = fakeSignal(),
+	PreSimulation = fakeSignal(),
+	-- Choreo's rig step (bound just before the camera's): the spec steps the rigs itself.
+	BindToRenderStep = function() end,
+	UnbindFromRenderStep = function() end,
+})
 
 local Choreo = Harness.load("src/client/choreo/Choreo")
 Choreo.configure({

@@ -1638,6 +1638,43 @@ describe("EnemyService.worldAhead: where the world stops a root (D-197)", functi
 		expect(called).toBe(false)
 	end)
 
+	it("names a face the root climbs ground, not a wall: one within groundSlopeDegrees of up (D-204)", function()
+		local model = rootModel()
+		local slope = AI.collision.groundSlopeDegrees
+		local function hitting(normal: Vector3?)
+			return function(): (number?, Vector3?)
+				return 4.5, normal
+			end
+		end
+		-- A rise down the root's look (-Z): its face leans back toward the root (+Z) by its slope.
+		local function rise(degrees: number): Vector3
+			local up = math.rad(degrees)
+			return Vector3.new(0, math.cos(up), math.sin(up))
+		end
+		local function ahead(normal: Vector3?): (number?, boolean?)
+			return EnemyService.worldAhead(model, FORWARD, 10, hitting(normal))
+		end
+		-- Ground still says where the face is (a rush's line never resolves past it).
+		for _, normal in { rise(14), rise(slope - 1) } do
+			local face, ground = ahead(normal)
+			expect(face).toBe(4.5)
+			expect(ground).toBe(true)
+		end
+		-- A steeper rise, a wall, an overhang and a face named no way are walls.
+		for _, normal in { rise(slope + 1), Vector3.new(0, 0, 1), rise(150) } do
+			local face, ground = ahead(normal)
+			expect(face).toBe(4.5)
+			expect(ground).toBe(false)
+		end
+		local face, ground = ahead(nil)
+		expect(face).toBe(4.5)
+		expect(ground).toBe(false)
+		expect(EnemyService.isGround(rise(slope - 1))).toBe(true)
+		expect(EnemyService.isGround(rise(slope + 1))).toBe(false)
+		expect(EnemyService.isGround(Vector3.zero)).toBe(false)
+		expect(EnemyService.isGround(nil)).toBe(false)
+	end)
+
 	it("a brain asks through the engine with its own model; no engine cast is no world", function()
 		fresh()
 		local id, model = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
@@ -1654,5 +1691,28 @@ describe("EnemyService.worldAhead: where the world stops a root (D-197)", functi
 		expect(asked[1].model).toBe(model)
 		expect(asked[1].distance).toBe(6)
 		expect(brain:worldAhead(FORWARD, 6)).toBeNil()
+	end)
+
+	it("rootReach: how far the root's box reaches from its centre along a flattened direction (D-202)", function()
+		local model, root = rootModel()
+		-- (Part sizes are single precision.)
+		expect(EnemyService.rootReach(model, FORWARD)).toBeCloseTo(2.5, 1e-4) -- half its length
+		expect(EnemyService.rootReach(model, Vector3.new(0, 0.5, -2))).toBeCloseTo(2.5, 1e-4) -- flattened
+		expect(EnemyService.rootReach(model, Vector3.new(-1, 0, 0))).toBeCloseTo(1.2, 1e-4) -- half its width
+		-- Turned 30 degrees: its box's corner reach along the line.
+		root.CFrame = CFrame.new(0, 3, 0) * CFrame.Angles(0, math.rad(30), 0)
+		local expected = 1.2 * math.sin(math.rad(30)) + 2.5 * math.cos(math.rad(30))
+		expect(EnemyService.rootReach(model, FORWARD)).toBeCloseTo(expected, 1e-4)
+		expect(EnemyService.rootReach(model, Vector3.new(0, 1, 0))).toBe(0) -- no direction
+		expect(EnemyService.rootReach(Instance.new("Model"), FORWARD)).toBe(0) -- no root
+	end)
+
+	it("a brain's rootReach is its own root's, so a face it found stops its centre that far short", function()
+		fresh()
+		local id, model = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		local brain = EnemyService.brainOf(id)
+		local root = model.PrimaryPart :: BasePart
+		expect(brain:rootReach(root.CFrame.LookVector)).toBeCloseTo(root.Size.Z / 2, 1e-4)
+		expect(brain:rootReach(root.CFrame.RightVector)).toBeCloseTo(root.Size.X / 2, 1e-4)
 	end)
 end)

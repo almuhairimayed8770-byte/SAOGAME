@@ -108,9 +108,13 @@ export type Context = {
 	-- Studs the body reaches ahead of and behind its root along the facing (a rush sweeps it, D-166).
 	-- Nil: the root alone (0, 0).
 	bodyExtents: (() -> (number, number))?,
-	-- How far ahead of the root's centre along `direction` the world stops the root, within
-	-- `distance` studs; nil when nothing does (D-197: a rush's line ends at the wall). Nil: no world.
-	worldAhead: ((direction: Vector3, distance: number) -> number?)?,
+	-- How far ahead of the root's centre along `direction` the world meets the root, within
+	-- `distance` studs, and whether that face is ground the root climbs (D-204); nil when nothing does
+	-- (D-197: a rush's line ends at the face). Nil: no world.
+	worldAhead: ((direction: Vector3, distance: number) -> (number?, boolean?))?,
+	-- How far the root's own box reaches ahead of its centre along `direction`: a root stopped by a
+	-- face that worldAhead found stands this far short of it (D-202). Nil: 0.
+	rootReach: ((direction: Vector3) -> number)?,
 	-- A rush launched / stopped (D-169): EnemyService switches collision groups and tells the clients.
 	rushStarted: ((rush: Rush) -> ())?,
 	rushEnded: ((rush: Rush, reason: RushEnd, distance: number) -> ())?,
@@ -414,14 +418,26 @@ function Brain.bodyExtents(self: Brain): (number, number)
 	return extents()
 end
 
---- How far ahead of the root's centre along `direction` the world stops the body, within
---- `distance` studs; nil when nothing does or the context knows no world (D-197).
-function Brain.worldAhead(self: Brain, direction: Vector3, distance: number): number?
+--- How far ahead of the root's centre along `direction` the world meets the body, within
+--- `distance` studs, and whether that face is ground the root climbs (true) or a wall that stops it
+--- (D-204); nil when nothing does or the context knows no world (D-197).
+function Brain.worldAhead(self: Brain, direction: Vector3, distance: number): (number?, boolean)
 	local cast = self.context.worldAhead
 	if cast == nil or not (distance > 0) then
-		return nil
+		return nil, false
 	end
-	return cast(direction, distance)
+	local face, ground = cast(direction, distance)
+	return face, ground == true
+end
+
+--- How far the root's own box reaches ahead of its centre along `direction` (0 when the context
+--- knows no root): where a face found by worldAhead stops the root's centre (D-202).
+function Brain.rootReach(self: Brain, direction: Vector3): number
+	local reach = self.context.rootReach
+	if reach == nil then
+		return 0
+	end
+	return math.max(0, reach(direction))
 end
 
 --- Resolves one stretch of the attack's line, `from` to `to` studs along it from `origin` (the

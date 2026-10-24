@@ -157,6 +157,13 @@ local AI = {
 		-- player (an R15 at the place's 1.08 body scale stands about 5.6 studs; its legs never
 		-- collide, its root's bottom is at HipHeight), so a walk-in meets one flat face, no edge.
 		blockerHeight = 7,
+		-- Degrees from straight up within which a face a rushing root's world cast meets is ground the
+		-- body climbs, not a wall (D-204): the server's rush still never resolves its line past it but
+		-- does not end there, and the client's drawn rush runs on through it (RushDraw.room). At least
+		-- every Charger root's climb (the slope its box's front edge first touches, atan(hipHeight /
+		-- half its length): 32.6 for the Boar) and below a wall's 90 (the ai validator checks both);
+		-- a face steeper than the root climbs but within this stops the body on its own (the jam).
+		groundSlopeDegrees = 45,
 		-- Engine fact: every client draws a server-owned body up to this late (physics replication),
 		-- while a part's collision group reaches it sooner.
 		clientDrawLagSeconds = 0.3,
@@ -204,8 +211,11 @@ local AI = {
 			overshoot = 8,
 			wheelAngle = 45,
 			wheelSpeedMultiplier = 0.5,
-			-- About three 20 Hz AI ticks of the boar's rush at chargeSpeed: a body this far behind the
-			-- clock is stuck, not slow to accelerate (D-169).
+			-- A body this far behind the rush's clock is stuck, not slow to accelerate (D-169). Checked
+			-- every server frame (D-184): a free body on flat ground trails it by under a stud at 30 and
+			-- 60 fps with frame jitter, a body held to 0.85 of the rush speed by 3.7, a throttled 0.1 s
+			-- hitch by 2.7; a stop the world cast misses is still told within about 0.13 s. A wall the
+			-- cast sees ends the rush at once instead (D-202, D-203).
 			jamLagStuds = 4,
 			-- A free-running body trails its own run by well under a stud (its acceleration over the
 			-- first frame); a body held back by a wall falls further behind, and the rush's line stops

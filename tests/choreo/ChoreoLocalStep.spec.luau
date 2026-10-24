@@ -51,10 +51,22 @@ type World = {
 
 -- A fresh Choreo on the spec's clock, the camera at the origin.
 local function newWorld(): World
+	local renderStepped = frameSignal()
+	local bound: { [string]: any } = {}
 	local runService = {
-		RenderStepped = frameSignal(),
+		RenderStepped = renderStepped,
 		Heartbeat = frameSignal(),
 		PreSimulation = frameSignal(),
+		-- The rigs' render step (bound just before the camera's) runs on the spec's frame signal.
+		BindToRenderStep = function(_self: any, name: string, _priority: number, fn: (dt: number) -> ())
+			bound[name] = renderStepped:Connect(fn)
+		end,
+		UnbindFromRenderStep = function(_self: any, name: string)
+			if bound[name] ~= nil then
+				bound[name].Disconnect()
+				bound[name] = nil
+			end
+		end,
 	}
 	local env = Harness.environment()
 	env.script = Harness.node(CHOREO_PATH)

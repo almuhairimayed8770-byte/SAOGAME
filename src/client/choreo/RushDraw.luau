@@ -22,7 +22,8 @@
 	  Run       from the launch: it starts where the root is drawn and closes on the timeline, each
 	            frame moving the timeline's own travel give or take catchUpFraction of a frame's
 	            travel at the rush speed (none on the launch frame), never backward. An offset off the line closes at that pace
-	            too, and the facing turns onto the line at turnRate.
+	            too, and the facing turns onto the line at turnRate. It never moves where the world
+	            would stop its root (`room`, the server's worldAhead cast): it stops there as at a jam.
 	  Settle    the timeline is done: the body still closes on its end (never backward), and waits
 	            until the root has come within settleStuds of where the server's body stopped (or
 	            settleSeconds).
@@ -53,10 +54,25 @@ export type Line = {
 	startedAt: number, -- server time of the launch
 }
 
+--- How far the root's centre may move from `from` along `direction` before the world stops it,
+--- when that is less than `distance`; nil when nothing stops it within `distance` (RushDraw.room).
+export type Room = (from: CFrame, direction: Vector3, distance: number) -> number?
+
+--- The engine's world cast (EnemyService's WorldCast): a box of `size` at `start` moved by
+--- `vector`, colliding as `group` does and never with `exclude`; how far it travelled before it met
+--- something, or nil, and the normal of the face it met (nil: a face named no way, taken for a wall).
+export type WorldCast = (
+	start: CFrame,
+	size: Vector3,
+	vector: Vector3,
+	group: string,
+	exclude: Instance
+) -> (number?, Vector3?)
+
 export type State = {
 	line: Line,
 	phase: Phase,
-	limit: number?, -- the farthest down the line the body goes (a jam, a stop)
+	limit: number?, -- the farthest down the line the body goes (a jam, a stop, the world)
 	endsAt: number?, -- server time the run stopped early
 	along: number, -- the drawn body's distance down the line
 	lateral: Vector3, -- the drawn body's flat offset off the line
@@ -198,15 +214,23 @@ function RushDraw.new(line: Line): State
 end
 
 --- The server's own line and clock (RushStarted) replace the predicted ones. The drawn body keeps
---- its place in the world: what it now stands at on the new line is where it closes from.
+--- its place in the world: what it now stands at on the new line is where it closes from. A limit
+--- already set (the world, a halt: RushEnded never comes before its RushStarted) keeps its place
+--- in the world too.
 function RushDraw.retime(state: State, line: Line)
 	local old = state.line
+	local oldDirection = unitFlat(old.direction, Vector3.zAxis)
+	local direction = unitFlat(line.direction, Vector3.zAxis)
 	if state.phase == "Run" or state.phase == "Settle" then
-		local world = flat(old.origin) + unitFlat(old.direction, Vector3.zAxis) * state.along + state.lateral
-		local direction = unitFlat(line.direction, Vector3.zAxis)
+		local world = flat(old.origin) + oldDirection * state.along + state.lateral
 		local rel = world - flat(line.origin)
 		state.along = rel:Dot(direction)
 		state.lateral = rel - direction * state.along
+	end
+	local limit = state.limit
+	if limit ~= nil then
+		local stop = flat(old.origin) + oldDirection * limit
+		state.limit = math.max(0, (stop - flat(line.origin)):Dot(direction))
 	end
 	state.line = line
 	if state.phase == "Settle" and state.endsAt == nil then
@@ -282,6 +306,51 @@ local function compose(state: State, root: CFrame): CFrame
 	return CFrame.lookAt(position, position + state.facing)
 end
 
+--- Whether a face the world cast met is ground the body climbs, not a wall (D-204): its normal is
+--- within ai.luau collision.groundSlopeDegrees of straight up, as EnemyService.isGround rules on the
+--- server. Nil (a face named no way) is a wall.
+function RushDraw.isGround(normal: Vector3?): boolean
+	if normal == nil or normal.Magnitude < 1e-6 then
+		return false
+	end
+	return normal.Unit.Y >= math.cos(math.rad(AI.collision.groundSlopeDegrees))
+end
+
+--- How far a root of `size` at `from` may move along `direction` (flattened) before the world stops
+--- it, when that is less than `distance`; nil when nothing does, or with no world to ask (`cast`
+--- failed). The server's worldAhead cast (EnemyService, D-197) made from the drawn body: the root's
+--- own box in the rushing group (the world only: a rush passes through players and enemies,
+--- D-167), cast from where its front face stands at its centre, never against its own `exclude`.
+--- Ground the root climbs is no stop (RushDraw.isGround, D-204): the drawn body stands at its
+--- late root's height, below a rising ramp's surface ahead, so its box meets the ramp.
+function RushDraw.room(
+	from: CFrame,
+	size: Vector3,
+	direction: Vector3,
+	distance: number,
+	cast: WorldCast,
+	exclude: Instance
+): number?
+	local f = flat(direction)
+	if f.Magnitude < 1e-6 or not (distance > 0) then
+		return nil
+	end
+	f = f.Unit
+	local half = size / 2
+	local reach = math.abs(from.RightVector:Dot(f)) * half.X
+		+ math.abs(from.UpVector:Dot(f)) * half.Y
+		+ math.abs(from.LookVector:Dot(f)) * half.Z
+	local ok, travelled, normal =
+		pcall(cast, from - f * reach, size, f * (distance + reach), AI.collision.rushing, exclude)
+	if not ok or typeof(travelled) ~= "number" then
+		return nil
+	end
+	if RushDraw.isGround(if typeof(normal) == "Vector3" then normal else nil) then
+		return nil
+	end
+	return math.max(0, travelled - reach)
+end
+
 -- Turns `from` toward `to` (flat unit vectors) by at most `radians`.
 local function turnToward(from: Vector3, to: Vector3, radians: number): Vector3
 	local angle = math.acos(math.clamp(from:Dot(to), -1, 1))
@@ -295,8 +364,8 @@ end
 
 --- One frame: where to draw the root part at server time `now` (`dt` the frame's length) given
 --- where its replicated root stands, or nil when the body is drawn on its root (before the launch,
---- and once Done).
-function RushDraw.step(state: State, now: number, dt: number, root: CFrame): CFrame?
+--- and once Done). `room` asks the world how far the drawn body may move (nil: never stopped).
+function RushDraw.step(state: State, now: number, dt: number, root: CFrame, room: Room?): CFrame?
 	local line = state.line
 	local phase = state.phase
 	local launching = false
@@ -327,8 +396,17 @@ function RushDraw.step(state: State, now: number, dt: number, root: CFrame): CFr
 		-- No catching up on the launch frame itself: its first move is never more than a frame of
 		-- the run's own travel, however late the launch was heard.
 		local slack = if launching then 0 else TUNING.catchUpFraction * line.speed * math.max(0, dt)
-		local step = math.clamp(goal - state.along, natural - slack, natural + slack)
-		state.along += math.max(0, step)
+		local step = math.max(0, math.clamp(goal - state.along, natural - slack, natural + slack))
+		if step > 0 and room ~= nil then
+			-- The world stops the root short of the move: the body stops there, as at a jam.
+			local free = room(compose(state, root), unitFlat(line.direction, Vector3.zAxis), step)
+			if free ~= nil and free < step then
+				step = math.max(0, free)
+				RushDraw.jam(state, state.along + step)
+				goal = math.min(goal, state.along + step)
+			end
+		end
+		state.along += step
 		local off = state.lateral.Magnitude
 		if off > 1e-6 then
 			state.lateral = state.lateral * (math.max(0, off - slack) / off)

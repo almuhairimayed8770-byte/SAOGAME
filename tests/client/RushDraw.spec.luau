@@ -21,10 +21,14 @@ local function frameSignal()
 		end,
 	}
 end
-Harness.stubService(
-	"RunService",
-	{ RenderStepped = frameSignal(), Heartbeat = frameSignal(), PreSimulation = frameSignal() }
-)
+Harness.stubService("RunService", {
+	RenderStepped = frameSignal(),
+	Heartbeat = frameSignal(),
+	PreSimulation = frameSignal(),
+	-- Choreo's rig step (bound just before the camera's): the spec steps the rigs itself.
+	BindToRenderStep = function() end,
+	UnbindFromRenderStep = function() end,
+})
 
 local Choreo = Harness.load("src/client/choreo/Choreo")
 local RushDraw = Harness.load("src/client/choreo/RushDraw")
@@ -38,6 +42,8 @@ local Pose = Harness.load("src/shared/choreo/Pose")
 local Joints = Harness.load("src/shared/choreo/Joints")
 local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
 local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
+local Locomotion = Harness.load("src/client/choreo/Locomotion")
+local Rigs = Harness.load("src/shared/data/rigs")
 
 local FRAME = 1 / 60
 local TUNING = ChoreoData.enemy.rush
@@ -234,6 +240,220 @@ describe("RushDraw's timeline (D-171)", function()
 	end)
 end)
 
+-- A wall across the pure line (down -Z from the origin) whose face stands `face` studs down it, for
+-- a root that reaches `reach` studs ahead of its centre: how much farther its centre may go from
+-- `from`, or nil while the wall is beyond `distance` (what RushDraw.room answers). `asked` collects
+-- the distances it was asked about.
+local function wallRoom(face: number, reach: number, asked: { number }?)
+	return function(from: CFrame, _direction: Vector3, distance: number): number?
+		if asked ~= nil then
+			table.insert(asked, distance)
+		end
+		local free = face - reach + from.Position.Z -- the root's centre is -Z studs down the line
+		if free < distance then
+			return math.max(0, free)
+		end
+		return nil
+	end
+end
+
+describe("the world stops a drawn rush where it stops the root (D-199)", function()
+	local REACH = 2.5 -- the Boar root's half length
+
+	-- Steps a rush on line(0) with `room`, its root `lag` seconds behind and stopped at `stopAt`.
+	local function run(room: any, lag: number, stopAt: number, seconds: number?): (any, { CFrame }, number)
+		local state = RushDraw.new(line(0))
+		local drawn: { CFrame } = {}
+		local now = 0
+		while now < (seconds or 3) and state.phase ~= "Done" do
+			now += FRAME
+			local rootAt = at(math.clamp(SPEED * (now - lag), 0, stopAt))
+			table.insert(drawn, RushDraw.step(state, now, FRAME, rootAt, room) or rootAt)
+		end
+		return state, drawn, now
+	end
+
+	local function worstStep(drawn: { CFrame }): number
+		local worst = 0
+		for index = 2, #drawn do
+			worst = math.max(worst, (drawn[index].Position - drawn[index - 1].Position).Magnitude)
+		end
+		return worst
+	end
+
+	it("holds the body where the world stops its root, then hands it back as for a jam", function()
+		for _, face in { 6, 8, 10 } do
+			local stop = face - REACH
+			local state, drawn = run(wallRoom(face, REACH), 0.25, stop)
+			local farthest = 0
+			for _, frame in drawn do
+				farthest = math.max(farthest, -frame.Position.Z)
+			end
+			expect(farthest <= stop + EPSILON).toBe(true)
+			expect(farthest).toBeCloseTo(stop, EPSILON)
+			expect(state.limit).toBeCloseTo(stop, EPSILON)
+			expect(state.phase).toBe("Done")
+			expect(worstStep(drawn) <= FRAME_TRAVEL + EPSILON).toBe(true)
+			-- It waits at the wall for the late root, as for a jam.
+			local held = run(wallRoom(face, REACH), 0.25, stop, stop / SPEED + 0.1)
+			expect(held.phase).toBe("Settle")
+			expect(held.along).toBeCloseTo(stop, EPSILON)
+		end
+	end)
+
+	it("a jam heard after the world stopped it draws the body neither back nor on", function()
+		for _, jammed in { 3, 3.2, 5 } do
+			local state = RushDraw.new(line(0))
+			local room = wallRoom(6, REACH)
+			local now = 0
+			while now < 0.3 do
+				now += FRAME
+				RushDraw.step(state, now, FRAME, at(0), room)
+			end
+			expect(state.along).toBeCloseTo(3.5, EPSILON)
+			RushDraw.jam(state, jammed)
+			local drawn: { CFrame } = {}
+			while state.phase ~= "Done" and now < 3 do
+				now += FRAME
+				local rootAt = at(math.min(jammed, 3.5))
+				local frame = RushDraw.step(state, now, FRAME, rootAt, room) or rootAt
+				table.insert(drawn, frame)
+				expect(-frame.Position.Z <= 3.5 + EPSILON).toBe(true)
+			end
+			expect(state.phase).toBe("Done")
+			expect(worstStep(drawn) <= FRAME_TRAVEL + EPSILON).toBe(true)
+		end
+	end)
+
+	it("a free rush is drawn exactly as before: the world is asked, and finds nothing", function()
+		for _, lag in { 0, 0.25, 0.5 } do
+			local asked: { number } = {}
+			local open = function(_from: CFrame, _direction: Vector3, distance: number): number?
+				table.insert(asked, distance)
+				return nil
+			end
+			local _, free = run(open, lag, LENGTH)
+			local _, plain = run(nil, lag, LENGTH)
+			expect(#free).toBe(#plain)
+			for index, frame in free do
+				expect(frame == plain[index]).toBe(true)
+			end
+			expect(#asked > 0).toBe(true)
+			for _, distance in asked do
+				expect(distance > 0).toBe(true)
+			end
+		end
+	end)
+
+	it("the server's line keeps a world stop where it stands in the world", function()
+		local state = RushDraw.new(line(0))
+		local room = wallRoom(6, REACH)
+		local now = 0
+		while now < 0.3 do
+			now += FRAME
+			RushDraw.step(state, now, FRAME, at(0), room)
+		end
+		local before = (state.drawn :: CFrame).Position
+		-- The server's line starts a stud further back than the telegraph predicted.
+		local server = line(0)
+		server.origin = Vector3.new(0, 0, 1)
+		RushDraw.retime(state, server)
+		expect(state.along).toBeCloseTo(4.5, EPSILON)
+		expect(state.limit).toBeCloseTo(4.5, EPSILON)
+		now += FRAME
+		local after = (RushDraw.step(state, now, FRAME, at(0), room) :: CFrame).Position
+		expect((after - before).Magnitude <= EPSILON).toBe(true)
+	end)
+
+	it("RushDraw.room casts the root's own box as the server's worldAhead does, in the rushing group", function()
+		local model = RigBuilder.build("Boar")
+		local root = model.PrimaryPart :: BasePart
+		root.CFrame = CFrame.new(4, 3, -2) * CFrame.Angles(0, math.rad(30), 0)
+		root.CollisionGroup = AI.collision.rushing
+		local direction = Vector3.new(1, 0.4, -1) -- flattened by both
+		local flatDirection = Vector3.new(direction.X, 0, direction.Z).Unit
+		local half = root.Size / 2
+		local reach = math.abs(root.CFrame.RightVector:Dot(flatDirection)) * half.X
+			+ math.abs(root.CFrame.UpVector:Dot(flatDirection)) * half.Y
+			+ math.abs(root.CFrame.LookVector:Dot(flatDirection)) * half.Z
+		local function recording(into: { any }, travelled: number?)
+			return function(start: CFrame, size: Vector3, vector: Vector3, group: string, exclude: Instance): number?
+				table.insert(into, { start = start, size = size, vector = vector, group = group, exclude = exclude })
+				return travelled
+			end
+		end
+		local server: { any } = {}
+		local client: { any } = {}
+		expect(EnemyService.worldAhead(model, direction, 3 + reach, recording(server, 5))).toBe(5)
+		expect(RushDraw.room(root.CFrame, root.Size, direction, 3, recording(client, 5), model)).toBeCloseTo(
+			5 - reach,
+			EPSILON
+		)
+		local s, c = server[1], client[1]
+		expect((s.start.Position - c.start.Position).Magnitude <= EPSILON).toBe(true)
+		expect(s.start.LookVector:Dot(c.start.LookVector) >= 1 - EPSILON).toBe(true)
+		expect(s.size).toBe(c.size)
+		expect((s.vector - c.vector).Magnitude <= EPSILON).toBe(true)
+		expect(c.group).toBe(AI.collision.rushing)
+		expect(s.group).toBe(c.group)
+		expect(c.exclude).toBe(model)
+		-- A face nearer than the root's own reach leaves no room; nothing in the way is no stop.
+		expect(RushDraw.room(root.CFrame, root.Size, direction, 3, recording({}, 1), model)).toBe(0)
+		expect(RushDraw.room(root.CFrame, root.Size, direction, 3, recording({}, nil), model)).toBe(nil)
+		local broken = function(): number?
+			error("no world")
+		end
+		expect(RushDraw.room(root.CFrame, root.Size, direction, 3, broken, model)).toBe(nil)
+		expect(RushDraw.room(root.CFrame, root.Size, Vector3.yAxis, 3, recording({}, 1), model)).toBe(nil)
+	end)
+
+	it(
+		"RushDraw.room calls ground what the server's worldAhead does: a face within groundSlopeDegrees of up (D-204)",
+		function()
+			local model = RigBuilder.build("Boar")
+			local root = model.PrimaryPart :: BasePart
+			root.CFrame = CFrame.new(4, 3, -2) * CFrame.Angles(0, math.rad(30), 0)
+			root.CollisionGroup = AI.collision.rushing
+			local direction = root.CFrame.LookVector
+			local slope = AI.collision.groundSlopeDegrees
+			local function hitting(normal: Vector3?)
+				return function(): (number?, Vector3?)
+					return 5, normal
+				end
+			end
+			-- A rise down the look: its face leans back toward the root by its slope.
+			local function rise(degrees: number): Vector3
+				local up = math.rad(degrees)
+				return (Vector3.yAxis * math.cos(up) - direction * math.sin(up)).Unit
+			end
+			local reach = root.Size.Z / 2
+			for _, case in
+				{
+					{ normal = rise(10) :: Vector3?, ground = true },
+					{ normal = rise(slope - 1), ground = true },
+					{ normal = rise(slope + 1), ground = false },
+					{ normal = -direction, ground = false },
+					{ normal = rise(150), ground = false },
+					{ normal = nil, ground = false },
+				}
+			do
+				local client = RushDraw.room(root.CFrame, root.Size, direction, 3, hitting(case.normal), model)
+				local server, ground = EnemyService.worldAhead(model, direction, 3 + reach, hitting(case.normal))
+				-- The server still caps its line at ground (its root stops only at a wall, D-204); the
+				-- drawn body is stopped only by a wall.
+				expect(server).toBe(5)
+				expect(ground).toBe(case.ground)
+				expect(RushDraw.isGround(case.normal)).toBe(case.ground)
+				if case.ground then
+					expect(client).toBe(nil)
+				else
+					expect(client).toBeCloseTo(5 - reach, EPSILON)
+				end
+			end
+		end
+	)
+end)
+
 -- ---------------------------------------------------------------------------------------------
 -- The real path
 -- ---------------------------------------------------------------------------------------------
@@ -296,6 +516,10 @@ type Frame = {
 	pause: number, -- the rig's hit-stop left
 	head: Vector3, -- the drawn head
 	pose: Vector3, -- the head in the drawn body's own space: the clip's pose alone
+	-- With `gait`: the weight the locomotion driver gave the walk this frame, and the ground speed
+	-- it paced the walk to (its clip speed times the rig's walkSpeed; 0 with no walk).
+	walkTarget: number,
+	gait: number,
 }
 
 type Options = {
@@ -308,6 +532,9 @@ type Options = {
 	hitAt: number?, -- the local blade touches the boar this many seconds after the launch
 	frames: number?,
 	phase: number?, -- where the launch falls in its frame (0 to 1, default 0)
+	wall: number?, -- a wall's face this far down the line, which the client's world cast sees
+	wallNormal: Vector3?, -- the face's normal the cast reports (default: none named)
+	gait: boolean?, -- the real locomotion driver walks the rig (Replication.watch)
 }
 
 local WIND_UP_START = 10
@@ -321,11 +548,52 @@ local function bodyAt(t: number, stopAt: number?): CFrame
 	return CFrame.lookAt(position, position + DIRECTION)
 end
 
+-- The server body's velocity at `t` (what the replicated root carries with it).
+local function velocityAt(t: number, stopAt: number?): Vector3
+	local d = SPEED * (t - LAUNCH)
+	return if d > 0 and d < (stopAt or LENGTH) then DIRECTION * SPEED else Vector3.zero
+end
+
 local function vec(v: Vector3): { number }
 	return { v.X, v.Y, v.Z }
 end
 
-type Run = { frames: { Frame }, front: number, model: Model, root: BasePart, calls: { any } }
+type Cast = { group: string, exclude: Instance }
+
+-- The engine's Blockcast against a wall across the line whose face stands `face` studs down it
+-- (nil: no wall): how far the box at `start` moves along `vector` before it meets the face, or nil.
+-- Like the engine's, it never sees a face its box starts in or past. `casts` collects the calls.
+local function wallCast(face: number?, casts: { Cast }, normal: Vector3?)
+	return function(
+		start: CFrame,
+		size: Vector3,
+		vector: Vector3,
+		group: string,
+		exclude: Instance
+	): (number?, Vector3?)
+		table.insert(casts, { group = group, exclude = exclude })
+		local length = vector.Magnitude
+		local along = if length > 1e-9 then (vector / length):Dot(DIRECTION) else 0
+		if face == nil or along <= 1e-9 then
+			return nil
+		end
+		local half = size / 2
+		local front = (start.Position - ORIGIN):Dot(DIRECTION)
+			+ math.abs(start.RightVector:Dot(DIRECTION)) * half.X
+			+ math.abs(start.UpVector:Dot(DIRECTION)) * half.Y
+			+ math.abs(start.LookVector:Dot(DIRECTION)) * half.Z
+		if front > face then
+			return nil
+		end
+		local travel = (face - front) / along
+		if travel > length then
+			return nil
+		end
+		return travel, normal
+	end
+end
+
+type Run = { frames: { Frame }, front: number, model: Model, root: BasePart, calls: { any }, casts: { Cast } }
 
 local function rush(options: Options): Run
 	clock = WIND_UP_START - 0.2 + (options.phase or 0) * FRAME
@@ -336,6 +604,12 @@ local function rush(options: Options): Run
 	local function place(frame: CFrame)
 		root.CFrame = frame
 		root.Position = frame.Position -- Lune keeps the two apart; the engine does not
+		root.AssemblyLinearVelocity = velocityAt(clock - options.lag, options.stopAt)
+	end
+	if options.gait then
+		local humanoid = model:FindFirstChildOfClass("Humanoid") :: any
+		humanoid.MoveDirection = Vector3.zero
+		humanoid.FloorMaterial = Enum.Material.Grass
 	end
 	place(bodyAt(clock - options.lag, options.stopAt))
 	local folder = Instance.new("Folder")
@@ -359,6 +633,7 @@ local function rush(options: Options): Run
 		end,
 	}
 	local calls: { any } = {}
+	local casts: { Cast } = {}
 	Replication.bind({
 		net = { on = function() end },
 		entities = {
@@ -369,7 +644,7 @@ local function rush(options: Options): Run
 		localId = function(): number?
 			return 1
 		end,
-		locomotion = recorder(calls, "locomotion"),
+		locomotion = if options.gait then Locomotion else recorder(calls, "locomotion"),
 		choreo = {
 			get = function(target: any): any
 				return if target == me then myAnimator else Choreo.get(target)
@@ -405,7 +680,11 @@ local function rush(options: Options): Run
 		serverNow = function(): number
 			return clock
 		end,
+		worldCast = if options.wall ~= nil then wallCast(options.wall, casts, options.wallNormal) else nil,
 	} :: any)
+	if options.gait then
+		Replication.watch(record)
+	end
 	local animator = Choreo.get(model)
 	animator:step(FRAME)
 
@@ -480,6 +759,13 @@ local function rush(options: Options): Run
 		local offset: CFrame? = (animator :: any).bodyOffset
 		local drawn = root.CFrame * (offset or CFrame.identity)
 		local solved = solve(model, root.CFrame)
+		local walkTarget, gait = 0, 0
+		for _, handle in (animator :: any).mixer:handles() do
+			if handle.clipId == ChoreoData.rigs.Boar.walk and not handle.stopping then
+				walkTarget = handle.targetWeight
+				gait = if walkTarget > 0 then handle.speed * Rigs.Boar.walkSpeed else 0
+			end
+		end
 		table.insert(frames, {
 			t = clock - LAUNCH,
 			offset = offset ~= nil,
@@ -490,9 +776,14 @@ local function rush(options: Options): Run
 			pause = animator:pauseRemaining(),
 			head = solved.Head.Position,
 			pose = drawn:PointToObjectSpace(solved.Head.Position),
+			walkTarget = walkTarget,
+			gait = gait,
 		})
 	end
-	return { frames = frames, front = front, model = model, root = root, calls = calls }
+	if options.gait then
+		Replication.unwatch(record)
+	end
+	return { frames = frames, front = front, model = model, root = root, calls = calls, casts = casts }
 end
 
 -- The server time (since the launch) the drawn snout first reaches `distance` down the line.
@@ -772,6 +1063,181 @@ describe("a Boar's rush through Replication and Choreo (D-171, item 1)", functio
 			end
 		end
 	end)
+end)
+
+describe("a Boar's rush into a wall through Replication and Choreo (D-199)", function()
+	-- The root's half length: the server's body stops this far short of the wall's face (D-197).
+	local REACH = 2.5
+	for _, face in { 6, 8, 10 } do
+		for _, lag in { 0, 0.25, 0.5 } do
+			it(
+				("the body is drawn no farther than the wall stops its root (wall %d studs, %.2f s late)"):format(
+					face,
+					lag
+				),
+				function()
+					local stop = face - REACH
+					-- The server says Jammed once its clock is jamLagStuds past the stuck body (the
+					-- latest word it sends; the body has stood at the wall a while by then).
+					local jammedAt = (stop + AI.archetypes.Charger.jamLagStuds) / SPEED + AI.tickSeconds()
+					local run = rush({
+						latency = lag,
+						lag = lag,
+						stopAt = stop,
+						wall = face,
+						events = {
+							{
+								at = jammedAt,
+								name = "RushEnded",
+								payload = {
+									entityId = 5,
+									launchedAt = LAUNCH,
+									serverTime = LAUNCH + jammedAt,
+									distance = stop,
+									reason = "Jammed",
+								},
+							},
+						},
+					})
+					local farthest = -math.huge
+					for _, frame in run.frames do
+						farthest = math.max(farthest, frame.along)
+					end
+					expect(farthest <= stop + EPSILON).toBe(true)
+					-- Nothing jumps, the RushEnded included; it ends on its root, shown.
+					local starts, ends, worst = steps(run)
+					expect(starts <= FRAME_TRAVEL + EPSILON).toBe(true)
+					expect(ends <= FRAME_TRAVEL + EPSILON).toBe(true)
+					expect(worst <= FRAME_TRAVEL + EPSILON).toBe(true)
+					local last = run.frames[#run.frames]
+					expect(last.offset).toBe(false)
+					expect(last.hidden).toBe(0)
+					expect(last.along).toBeCloseTo(stop, EPSILON)
+					-- The cast is the rushing root's: the world only, never its own model.
+					expect(#run.casts > 0).toBe(true)
+					for _, cast in run.casts do
+						expect(cast.group).toBe(AI.collision.rushing)
+						expect(cast.exclude).toBe(run.model)
+					end
+				end
+			)
+		end
+	end
+
+	it("a rise the root climbs is ground, not a wall: the rush is drawn as with nothing ahead", function()
+		local up = math.rad(AI.collision.groundSlopeDegrees - 1)
+		local rise = (Vector3.yAxis * math.cos(up) - DIRECTION * math.sin(up)).Unit
+		for _, lag in { 0.25, 0.5 } do
+			local ramp = rush({ latency = lag, lag = lag, wall = 8, wallNormal = rise })
+			local plain = rush({ latency = lag, lag = lag })
+			expect(#ramp.casts > 0).toBe(true)
+			for index, frame in ramp.frames do
+				expect(frame.along).toBe(plain.frames[index].along)
+			end
+			-- A face as steep as a wall still stops it.
+			local wall = rush({ latency = lag, lag = lag, stopAt = 8 - REACH, wall = 8, wallNormal = -DIRECTION })
+			local farthest = -math.huge
+			for _, frame in wall.frames do
+				farthest = math.max(farthest, frame.along)
+			end
+			expect(farthest <= 8 - REACH + EPSILON).toBe(true)
+		end
+	end)
+
+	it("a rush with no wall ahead is drawn as before (the cast finds nothing)", function()
+		for _, lag in { 0.25, 0.5 } do
+			local open = rush({ latency = lag, lag = lag, wall = 1000 })
+			local plain = rush({ latency = lag, lag = lag })
+			expect(#open.casts > 0).toBe(true)
+			for index, frame in open.frames do
+				expect(frame.along).toBe(plain.frames[index].along)
+			end
+		end
+	end)
+end)
+
+describe("the legs follow the drawn body while it is drawn away from its root (D-200)", function()
+	local THRESHOLD = ChoreoData.locomotion.idleSpeedThreshold
+	local WALK = Rigs.Boar.walkSpeed
+	local function jam(stop: number): any
+		local at = (stop + AI.archetypes.Charger.jamLagStuds) / SPEED + AI.tickSeconds()
+		return {
+			at = at,
+			name = "RushEnded",
+			payload = {
+				entityId = 5,
+				launchedAt = LAUNCH,
+				serverTime = LAUNCH + at,
+				distance = stop,
+				reason = "Jammed",
+			},
+		}
+	end
+	local cases: { { name: string, lag: number, options: any } } = {}
+	for _, lag in { 0, 0.25, 0.5 } do
+		table.insert(cases, { name = "a free rush", lag = lag, options = {} })
+		table.insert(
+			cases,
+			{ name = "a rush into a wall", lag = lag, options = { wall = 8, stopAt = 5.5, events = { jam(5.5) } } }
+		)
+	end
+	table.insert(cases, {
+		name = "a Staggered rush",
+		lag = 0.25,
+		options = {
+			stopAt = 8.4,
+			events = {
+				{ at = 0.3, name = "StateChanged", payload = { entityId = 5, state = "Stagger", duration = 0.6 } } :: any,
+				{
+					at = 0.3,
+					name = "RushEnded",
+					payload = {
+						entityId = 5,
+						launchedAt = LAUNCH,
+						serverTime = LAUNCH + 0.3,
+						distance = 8.4,
+						reason = "Interrupted",
+					},
+				},
+			},
+		},
+	})
+	for _, case in cases do
+		it(
+			("%s, the root %.2f s late: the walk runs at the drawn body's own speed, still when it is"):format(
+				case.name,
+				case.lag
+			),
+			function()
+				local options = table.clone(case.options)
+				options.latency = case.lag
+				options.lag = case.lag
+				options.gait = true
+				options.frames = 240
+				local run = rush(options)
+				local drawnFrames, still, moving = 0, 0, 0
+				for index = 2, #run.frames do
+					local frame, previous = run.frames[index], run.frames[index - 1]
+					if frame.offset then
+						drawnFrames += 1
+						local moved = Vector3.new(frame.drawn.X - previous.drawn.X, 0, frame.drawn.Z - previous.drawn.Z)
+						local speed = moved.Magnitude / FRAME
+						if speed > THRESHOLD then
+							moving += 1
+							local paced = math.clamp(speed, ChoreoData.minSpeed * WALK, ChoreoData.maxSpeed * WALK)
+							expect(math.abs(frame.gait - paced) <= 1e-2).toBe(true)
+							expect(frame.walkTarget).toBeCloseTo(math.min(1, speed / WALK), 1e-3)
+						else
+							still += 1
+							expect(frame.walkTarget).toBe(0)
+						end
+					end
+				end
+				expect(drawnFrames > 0).toBe(true)
+				expect(moving > 0).toBe(true)
+			end
+		)
+	end
 end)
 
 describe("an enemy that does not rush is drawn on its root", function()

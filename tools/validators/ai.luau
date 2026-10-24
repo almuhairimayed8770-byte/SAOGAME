@@ -308,6 +308,35 @@ local function validate(ctx: Context): { string }
 				end
 			end
 		end
+		-- D-204: every slope a rushing root climbs is ground to the world casts, and a wall never is.
+		local groundSlope = collision.groundSlopeDegrees
+		positiveNumber(groundSlope, "collision.groundSlopeDegrees")
+		if typeof(groundSlope) == "number" then
+			if groundSlope >= 90 then
+				problem(("collision.groundSlopeDegrees must be below 90, got %s"):format(tostring(groundSlope)))
+			end
+			local Rigs = ctx.load("src/shared/data/rigs")
+			local checked: { [string]: boolean } = {}
+			for _, def in Enemies.list() do
+				local rig = if def.archetype == "Charger" then Rigs[def.skin] else nil
+				local parts = if rig ~= nil then rig.parts else nil
+				local root = if parts ~= nil then parts[rig.rootPart] else nil
+				if root ~= nil and not checked[def.skin] then
+					checked[def.skin] = true
+					-- The slope the root's box first touches with its front edge.
+					local climb = math.deg(math.atan(rig.hipHeight / (root.size[3] / 2)))
+					if groundSlope < climb then
+						problem(
+							("collision.groundSlopeDegrees %s must be at least rig %s's climb (%.1f)"):format(
+								tostring(groundSlope),
+								def.skin,
+								climb
+							)
+						)
+					end
+				end
+			end
+		end
 		-- D-190: a stopped rush turns solid only once no client still draws it where it was, and
 		-- before its recovery ends (it moves off then).
 		local lag = collision.clientDrawLagSeconds

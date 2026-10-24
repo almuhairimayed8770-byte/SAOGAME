@@ -22,10 +22,14 @@ local function frameSignal()
 		end,
 	}
 end
-Harness.stubService(
-	"RunService",
-	{ RenderStepped = frameSignal(), Heartbeat = frameSignal(), PreSimulation = frameSignal() }
-)
+Harness.stubService("RunService", {
+	RenderStepped = frameSignal(),
+	Heartbeat = frameSignal(),
+	PreSimulation = frameSignal(),
+	-- Choreo's rig step (bound just before the camera's): the spec steps the rigs itself.
+	BindToRenderStep = function() end,
+	UnbindFromRenderStep = function() end,
+})
 
 local Choreo = Harness.load("src/client/choreo/Choreo")
 local Mixer = Harness.load("src/client/choreo/Mixer")

@@ -8,10 +8,14 @@ local function fakeSignal()
 	end
 	return signal
 end
-Harness.stubService(
-	"RunService",
-	{ RenderStepped = fakeSignal(), Heartbeat = fakeSignal(), PreSimulation = fakeSignal() }
-)
+Harness.stubService("RunService", {
+	RenderStepped = fakeSignal(),
+	Heartbeat = fakeSignal(),
+	PreSimulation = fakeSignal(),
+	-- Choreo's rig step (bound just before the camera's): the spec steps the rigs itself.
+	BindToRenderStep = function() end,
+	UnbindFromRenderStep = function() end,
+})
 
 local Choreo = Harness.load("src/client/choreo/Choreo")
 Choreo.configure({
@@ -243,6 +247,71 @@ describe("Locomotion.attach", function()
 		driver:destroy()
 		animator:step(FRAME)
 		expect(animator:isPlaying(ChoreoData.rigs.Boar.walk)).toBe(false)
+		Choreo.release(model)
+	end)
+
+	it("walks an enemy rig at its drawn body's speed while the body is drawn away from its root (D-200)", function()
+		local model = buildRig("Boar")
+		local root = model.PrimaryPart :: BasePart
+		root.CFrame = CFrame.new()
+		local animator = Choreo.get(model)
+		local state = still()
+		local driver = Locomotion.attach(animator, model, { tracker = trackerOf(state) })
+		-- A rush's drawing, armed after the rig was watched: its hook runs first each step.
+		local drawnAt: Vector3? = nil
+		local unhook = animator:onStep(function()
+			local at = drawnAt
+			animator:setBodyOffset(if at ~= nil then root.CFrame:Inverse() * CFrame.new(at) else nil)
+		end)
+		local walk = handleOf(animator, ChoreoData.rigs.Boar.walk)
+		local walkSpeed = Rigs.Boar.walkSpeed
+		animator:step(FRAME) -- the rig stands on its root first
+		-- The drawn body runs on ahead of its late root at the rush speed, the root standing.
+		local rush = 2 * walkSpeed
+		drawnAt = Vector3.zero
+		for _ = 1, 3 do
+			drawnAt = (drawnAt :: Vector3) + Vector3.new(0, 0, -rush * FRAME)
+			animator:step(FRAME)
+			expect(walk.targetWeight).toBeCloseTo(1, 1e-3)
+			expect(walk.speed).toBeCloseTo(2, 1e-3)
+		end
+		-- The late root still runs on at the rush speed; the drawn body stands at the wall.
+		state.speed = rush
+		state.moveDir = Vector3.new(0, 0, -1)
+		for _ = 1, 3 do
+			root.CFrame = root.CFrame * CFrame.new(0, 0, -rush * FRAME)
+			animator:step(FRAME)
+			expect(walk.targetWeight).toBe(0)
+		end
+		-- The drawn body moves at half the walk speed while its root stands.
+		state.speed = 0
+		state.moveDir = Vector3.zero
+		for _ = 1, 3 do
+			drawnAt = (drawnAt :: Vector3) + Vector3.new(0, 0, -walkSpeed / 2 * FRAME)
+			animator:step(FRAME)
+			expect(walk.targetWeight).toBeCloseTo(0.5, 1e-3)
+			expect(walk.speed).toBeCloseTo(0.5, 1e-3)
+		end
+		-- Back on its root: the root's own state again.
+		drawnAt = nil
+		animator:step(FRAME)
+		expect(walk.targetWeight).toBe(0)
+		unhook()
+		driver:destroy()
+		Choreo.release(model)
+	end)
+
+	it("hands the tracker's state back untouched while no body is drawn away from its root", function()
+		local model = buildRig("Boar")
+		local follow = Locomotion.drawnTracker(Choreo.get(model), model)
+		local state = still()
+		state.speed = 9
+		for _ = 1, 3 do
+			expect(follow(FRAME, state)).toBe(state)
+		end
+		-- An animator with no body offset at all (a stand-in) is never followed.
+		local plain = Locomotion.drawnTracker({}, model)
+		expect(plain(FRAME, state)).toBe(state)
 		Choreo.release(model)
 	end)
 

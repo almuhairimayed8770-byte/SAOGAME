@@ -1040,16 +1040,49 @@ function Locomotion.attach(animator: any, character: Model, deps: Dependencies?)
 		)
 	end
 	local source: (dt: number) -> State? = tracker or Locomotion.humanoidTracker(character)
+	local follow = Locomotion.drawnTracker(animator, character)
 	driver.unhook = animator:onStep(function(dt: number)
 		if driver.destroyed then
 			return
 		end
 		local state = source(dt)
 		if state ~= nil then
-			driver:update(dt, state)
+			driver:update(dt, follow(dt, state))
 		end
 	end)
 	return (driver :: any) :: Locomotion
+end
+
+--- The gait of a body drawn away from its root part (a rush, D-171): while the animator draws an
+--- offset (Choreo getBodyOffset), `state`'s speed, velocity, move direction and sprint are the drawn
+--- body's own over the frame, so the legs stop when it stops and run when it runs, whatever the
+--- late root does. Otherwise `state` is handed back untouched. Read after the hook that sets the
+--- offset (Choreo runs the newest hook first, and a rush's hook is armed after the rig is watched).
+function Locomotion.drawnTracker(animator: any, character: Model): (dt: number, state: State) -> State
+	local last: Vector3? = nil
+	return function(dt: number, state: State): State
+		local root = character.PrimaryPart
+		if root == nil then
+			last = nil
+			return state
+		end
+		local get = animator.getBodyOffset
+		local offset: CFrame? = if typeof(get) == "function" then get(animator) else nil
+		local drawn = (if offset ~= nil then root.CFrame * offset else root.CFrame).Position
+		local previous = last
+		last = drawn
+		if offset == nil or previous == nil or not (dt > 0) then
+			return state
+		end
+		local moved = Vector3.new(drawn.X - previous.X, 0, drawn.Z - previous.Z) / dt
+		local speed = moved.Magnitude
+		local followed = table.clone(state)
+		followed.speed = speed
+		followed.velocity = Vector3.new(moved.X, if state.velocity ~= nil then state.velocity.Y else 0, moved.Z)
+		followed.moveDir = if speed > Config.idleSpeedThreshold then moved.Unit else Vector3.zero
+		followed.sprinting = speed > (Config.runSpeed + Config.sprintSpeed) / 2
+		return followed
+	end
 end
 
 --- A per-frame state source for rigs driven by a Humanoid (other players, enemies): returns a

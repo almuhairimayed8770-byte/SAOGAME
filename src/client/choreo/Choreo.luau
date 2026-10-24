@@ -42,12 +42,16 @@
 	ever. A root delta older than jumpSeconds reads as zero, so a reader that steps before the
 	wake step does not move the body by the last frame before the stall.
 
-	Update rates: the local character and the nearest rigs step on RenderStepped; the rest step
-	on Heartbeat at the quality tier's distant / far rate (data/choreo.luau quality). While its
+	Update rates: the local character and the nearest rigs step every rendered frame, in a render
+	step bound just before the camera's (Choreo.RENDER_STEP at Choreo.renderPriority(), Camera
+	priority - 1); the rest step on Heartbeat at the quality tier's distant / far rate
+	(data/choreo.luau quality). The engine does not pin a RenderStepped connection's order against
+	a BindToRenderStep callback, so the rigs' step is a bound one: the camera (Camera priority)
+	frames the body offset and pose of this frame's step, as do the local controller's step and
+	its contact read (Character + 1), whatever order the engine runs the rest in. While its
 	owner drives the local character (setLocalModel(model, true): the character controller), the
-	owner steps it from its own render step with Choreo.stepLocal and RenderStepped leaves it
-	alone, so the owner reads the root delta of this frame's step (D-139): the engine does not
-	pin a RenderStepped connection's order against a BindToRenderStep callback. A clip id
+	owner steps it from its own render step with Choreo.stepLocal and the rigs' step leaves it
+	alone, so the owner reads the root delta of this frame's step (D-139). A clip id
 	that looks like "rbxassetid://..." plays as a Roblox AnimationTrack on the same layer with the
 	matching AnimationPriority, so hand-authored clips can replace data clips later.
 
@@ -125,6 +129,7 @@ export type Animator = {
 	keepBeat: (self: Animator, handle: Handle, serverTime: number?) -> (),
 	shiftBeat: (self: Animator, handle: Handle, seconds: number) -> (),
 	setBodyOffset: (self: Animator, offset: CFrame?) -> (),
+	getBodyOffset: (self: Animator) -> CFrame?,
 	setWeight: (self: Animator, handle: Handle, weight: number, immediate: boolean?) -> (),
 	setSpeed: (self: Animator, handle: Handle, speed: number) -> (),
 	setProcedural: (self: Animator, name: string, offsets: ClipSampler.Offsets?, weight: number?) -> (),
@@ -167,6 +172,28 @@ local localDriven = false
 local started = false
 local rankTimer = 0
 
+--- The render step the rigs step in, bound just before the camera's (Choreo.renderPriority).
+Choreo.RENDER_STEP = "SkyspireRigs"
+
+--- The rigs' render step priority: one before the camera's (Enum.RenderPriority.Camera), so the
+--- camera and everything bound after it read this frame's poses and body offsets.
+function Choreo.renderPriority(): number
+	return Enum.RenderPriority.Camera.Value - 1
+end
+
+-- The engine's per-frame render signal for the rigs: a render step bound at renderPriority, not a
+-- RenderStepped connection (whose order against the camera's bound step the engine leaves open).
+local boundRenderStep = {
+	Connect = function(_self: any, fn: (dt: number) -> ()): any
+		RunService:BindToRenderStep(Choreo.RENDER_STEP, Choreo.renderPriority(), fn)
+		return {
+			Disconnect = function()
+				RunService:UnbindFromRenderStep(Choreo.RENDER_STEP)
+			end,
+		}
+	end,
+}
+
 -- The engine surface; replaced by tests with Choreo.configure.
 local engine: Engine = {
 	now = function(): number
@@ -176,7 +203,7 @@ local engine: Engine = {
 		local camera = workspace.CurrentCamera
 		return if camera then camera.CFrame.Position else nil
 	end,
-	renderStepped = RunService.RenderStepped :: any,
+	renderStepped = boundRenderStep,
 	heartbeat = RunService.Heartbeat :: any,
 	preSimulation = (RunService :: any).PreSimulation,
 	connect = function(instance: Instance, eventName: string, fn: (...any) -> ()): any
@@ -580,7 +607,9 @@ function AnimatorClass.setProcedural(self: any, name: string, offsets: ClipSampl
 end
 
 --- Runs `fn(dt)` before every step of this animator (drivers that feed it: a remote rig's
---- locomotion). Returns the function that removes it. Plain callbacks, no Signal: this is per frame.
+--- locomotion), the newest hook first: a rush's drawing (added when it is armed) runs before the
+--- locomotion that reads its offset (added when the rig is watched). Returns the function that
+--- removes it. Plain callbacks, no Signal: this is per frame.
 function AnimatorClass.onStep(self: any, fn: (dt: number) -> ()): () -> ()
 	local hooks: { (dt: number) -> () } = self.stepHooks
 	table.insert(hooks, fn)
@@ -756,6 +785,12 @@ end
 --- or back on its root with nil (D-171). The root part itself does not move.
 function AnimatorClass.setBodyOffset(self: any, offset: CFrame?)
 	self.bodyOffset = offset
+end
+
+--- The offset the body is drawn at from its root part (setBodyOffset), nil while it is on its root.
+--- A step hook added after the one that sets it reads this step's (newer hooks run first).
+function AnimatorClass.getBodyOffset(self: any): CFrame?
+	return self.bodyOffset
 end
 
 function AnimatorClass.step(self: any, dt: number)

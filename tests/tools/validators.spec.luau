@@ -2126,6 +2126,27 @@ describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", fun
 		)).toBe(true)
 	end)
 
+	it("every slope a rushing root climbs is ground to the world casts, and a wall never is", function()
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.collision.groundSlopeDegrees = 30
+			end),
+			"collision.groundSlopeDegrees 30 must be at least rig Boar's climb (32.6)"
+		)).toBe(true)
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.collision.groundSlopeDegrees = 90
+			end),
+			"collision.groundSlopeDegrees must be below 90"
+		)).toBe(true)
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.collision.groundSlopeDegrees = nil
+			end),
+			"collision.groundSlopeDegrees must be a number"
+		)).toBe(true)
+	end)
+
 	it("a rush's line keeps up with its body by less than the jam lag (D-195)", function()
 		expect(hasProblem(
 			runAi(function(copy)
