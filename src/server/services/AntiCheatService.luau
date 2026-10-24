@@ -20,6 +20,13 @@
 	else over the allowance is an over-speed anomaly. Net.server().abuse (rate limits, schema
 	failures) adds an anomaly per report.
 
+	A move the server makes itself (serverMoved: the Studio DevCombat "place", D-143) goes down the
+	respawn path: the sample forgets where the root was, and for the settle time the caller gives
+	every sample resets the same way instead of judging, while the client takes the new position
+	up and the positions it sent before it still arrive (the old spot, then the new one). The
+	first sample after that only records, the next one judges. Only server code calls it: no
+	remote reaches it.
+
 	Anomalies live combat.anomalyWindow seconds. At world.anticheat.shadowFraction of
 	combat.anomalyKickThreshold the player gets the attribute world.anticheat.shadowAttribute = true
 	(the shadow flag; Trial-server routing is a later phase). At the threshold, and never for a
@@ -74,6 +81,7 @@ type Entry = {
 	flags: { Rules.Flag },
 	shadowed: boolean,
 	kicked: boolean,
+	settleUntil: number?, -- a server move's settle: samples before this time are not judged
 }
 
 local KIND_SPEED = "speed"
@@ -146,6 +154,7 @@ local function newEntry(player: Player): Entry
 		flags = {},
 		shadowed = false,
 		kicked = false,
+		settleUntil = nil,
 	}
 end
 
@@ -202,6 +211,24 @@ local function resetSample(entry: Entry)
 	entry.lastState = STATE_IDLE
 	entry.lastMotion = nil
 	entry.credit = Rules.maxCredit(Combat)
+end
+
+--- The server moved the player's character itself (D-143: the Studio DevCombat "place"): the
+--- sample forgets where the root was, as on a respawn, and no sample is judged for
+--- `settleSeconds` (a later call extends it, never shortens it), so neither the jump nor the
+--- client's last positions from before it arriving after it count. The first sample after the
+--- settle only records. Server code only. Returns false when the player is not watched (nothing
+--- to judge, nothing to forgive) or the service is not bound.
+function AntiCheatService.serverMoved(player: Player, settleSeconds: number): boolean
+	local entry = entries[player]
+	if deps == nil or entry == nil then
+		return false
+	end
+	resetSample(entry)
+	local settleUntil = dependencies().now() + math.max(settleSeconds, 0)
+	local current = entry.settleUntil
+	entry.settleUntil = if current ~= nil then math.max(current, settleUntil) else settleUntil
+	return true
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -338,6 +365,15 @@ function AntiCheatService.sample(player: Player, interval: number): Rules.Verdic
 	if record.model ~= entry.model then
 		entry.model = record.model
 		resetSample(entry)
+	end
+	-- A server move settling (serverMoved): reset as on a respawn, judge nothing.
+	local settleUntil = entry.settleUntil
+	if settleUntil ~= nil then
+		if d.now() < settleUntil then
+			resetSample(entry)
+			return nil
+		end
+		entry.settleUntil = nil
 	end
 	-- EntityService.positionOf answers the origin, not nil, for a model without a root; a character
 	-- that was reset or removed while its record lives must not read as a teleport to (0, 0).

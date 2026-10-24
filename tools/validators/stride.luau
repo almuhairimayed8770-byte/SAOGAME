@@ -7,7 +7,11 @@
 	The lock-on strafe and backpedal move at that speed on one walk clip alone (D-112), so a walk
 	whose ground speed times rateCeiling falls short of it slides at every step. The two-step stop's
 	locomotion.stopHandOverCycles sits inside half a cycle, so a settle point can fall before the
-	other foot's Footstep.
+	other foot's Footstep. The blocked body's numbers (stride.blocked, D-144): an angle that tells a
+	velocity off the stick from one along it (0 < degrees < 90), a settle that is no wait at all or
+	under a second, a smoothing time above 0, and a speed match tighter than idleSpeedThreshold at
+	the slowest capture step (dev.luau timeScale.steps), so a velocity that is not the speed's
+	reading is never taken for it.
 	tests/choreo/Stride.spec.luau re-measures the ground speeds and touchdowns from the clips.
 ]]
 
@@ -36,6 +40,38 @@ return function(ctx: any): { string }
 		typeof(handOver) == "number" and handOver > 0 and handOver < 0.5,
 		"stopHandOverCycles must be a number of cycles between 0 and half a cycle (a settle point must fit before the other foot's Footstep)"
 	)
+
+	local blocked = stride.blocked
+	if typeof(blocked) ~= "table" then
+		check(false, "blocked must hold degrees, settleSeconds, followSeconds and matchSpeed")
+	else
+		local function number(value: any): boolean
+			return typeof(value) == "number" and value == value
+		end
+		check(
+			number(blocked.degrees) and blocked.degrees > 0 and blocked.degrees < 90,
+			"blocked.degrees must sit between 0 and 90 (a velocity more than it off the stick is off it)"
+		)
+		check(
+			number(blocked.settleSeconds) and blocked.settleSeconds >= 0 and blocked.settleSeconds < 1,
+			"blocked.settleSeconds must be from 0 to under a second (how long the stick holds still first)"
+		)
+		check(
+			number(blocked.followSeconds) and blocked.followSeconds > 0,
+			"blocked.followSeconds must be above 0 (the blocked gait's smoothing time)"
+		)
+		local slowest = 1
+		for _, step in ctx.load("src/shared/data/dev").timeScale.steps do
+			slowest = math.min(slowest, step)
+		end
+		local limit = locomotion.idleSpeedThreshold * slowest
+		check(
+			number(blocked.matchSpeed) and blocked.matchSpeed >= 0 and blocked.matchSpeed < limit,
+			("blocked.matchSpeed must be from 0 to under idleSpeedThreshold at the slowest capture step (%.3f)"):format(
+				limit
+			)
+		)
+	end
 
 	for _, set in SETS do
 		for _, gait in GAITS do

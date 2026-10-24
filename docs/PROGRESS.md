@@ -456,6 +456,36 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   an Art pressed in the wake frame of a 0.15 to 0.5 s hitch starts that far into its clip, and a release in that
   frame leaves the clip up to about 0.47 s behind, as before; Run's and Sprint's upper bodies are not byte-checked.
 
+## The owner's first recordings (2026-10-24, bb316b4)
+
+- Two free-play recordings (2 min 17 s and 1 min 52 s) reviewed frame by frame. The Capture panel was never started,
+  so only the kill-and-shatter shot could be cut from them; the other nine shots need new recordings.
+- Pass: kill impact frames Black 2, Dark 2, Ink 2 (one kill split 3/1/2); the half second of freeze and silence and
+  the shatter at +0.68 s; the parry's inverted frame, spark and ring; the boar's red and the kobold's yellow
+  telegraphs on time (0.55-0.60 s and 0.95-0.98 s); Art finals Dark 2; at most 3 full-screen flashes a second.
+- Fail, to fix: most boar charges never rush but still deal damage; the kobold's damage sometimes lands 8-12 frames
+  before its chop shows; hit flashes are 1 frame and boars never flash; the hit freeze starts after the blade has
+  passed; an Art's activation flashes the whole body white; after an Art kill the player holds about 23 frames, then
+  jumps; the camera sits high and the hat hides the kobold, with snap-ins on dodges and draws; enemy names float
+  after the shatter and every enemy shows two names; the death silence also mutes the player's next hit.
+- Not seen in this footage: legs walking in place against an enemy (fixed below anyway, from Studio item 126).
+
+## Wake round and blocked feet (2026-10-24, D-141 to D-144)
+
+- A dodge pressed while the display sleeps now plays whole from the wake, with its sounds at the travel (D-141).
+- Trails go out during a render stall longer than a jump (D-142).
+- The Studio-only DevCombat "place" moves a player without tripping the anticheat; a client teleport is still flagged
+  (D-143).
+- A body pushed off its stick by an enemy or a wall now stands, or steps the way it slides, instead of walking in
+  place: deflected off a boar 1.29-1.74 a stance down to 0.11-0.34, pushed back 3.38 to 0.16 (D-144). Open-ground
+  locomotion is frame-for-frame unchanged while the Humanoid's velocity follows its input within about 0.05 s.
+- Item 124's one-foot 0.20 in Studio does not reproduce in Lune (0.07-0.10 a stance at 0.5x and 0.25x); the recipe
+  split the R foot's stances on a small planted roll. Re-run with the blank R15 avatar and a Footstep log.
+- Checks: 2029 specs in 115 files, 32 validators, offline lint, hit matrix, animation review and gaitgen --check pass;
+  no new strict type messages.
+- Open: a velocity that lags the stick by 0.07 s or more could latch an open-ground turn as blocked for 3-5 frames
+  (item 137 measures it); a slow sideways creep near 0.4 studs/s shuffles; Idle has no re-plant step.
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and

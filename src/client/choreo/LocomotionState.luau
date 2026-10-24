@@ -408,6 +408,15 @@ function LocomotionState.walkGait(
 	return math.max(along, Stride.minGroundSpeed), duration
 end
 
+--- The speed (studs a second) from which the walk of a move direction shows alone: below it
+--- gaitWeights slows the walk to stride.rateFloor and hands weight to Idle. (forward, right) is the
+--- move direction in the character's frame.
+function LocomotionState.wholeWalkSpeed(forward: number, right: number, drawn: boolean): number
+	local walkSpeed =
+		LocomotionState.walkGait(LocomotionState.walkWeights(forward, right, drawn), forward, right, drawn)
+	return Stride.rateFloor * walkSpeed
+end
+
 -- The share of gait b at `speed`, between gaits a (slower) and b (faster), at which the blend's
 -- cycle is its natural one: speed x the blended duration equals the blended stride.
 local function cadenceShare(speed: number, aDuration: number, aStride: number, b: Gait): number

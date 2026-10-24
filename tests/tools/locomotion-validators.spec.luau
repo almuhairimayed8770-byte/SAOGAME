@@ -121,6 +121,47 @@ describe("stride validator", function()
 		)).toBe(true)
 	end)
 
+	it("flags blocked-body numbers that are missing or out of range (D-144)", function()
+		expect(hasProblem(
+			run(function(choreo: any)
+				choreo.locomotion.stride.blocked = nil
+			end),
+			"blocked"
+		)).toBe(true)
+		-- idleSpeedThreshold at the slowest capture step: the loosest match allowed is under it.
+		local slowest = 1
+		for _, step in Harness.load("src/shared/data/dev").timeScale.steps do
+			slowest = math.min(slowest, step)
+		end
+		local limit = Harness.load("src/shared/data/choreo").locomotion.idleSpeedThreshold * slowest
+		local cases: { { field: string, value: any } } = {
+			{ field = "degrees", value = 0 },
+			{ field = "degrees", value = 90 },
+			{ field = "degrees", value = "3" },
+			{ field = "settleSeconds", value = -0.1 },
+			{ field = "settleSeconds", value = 1 },
+			{ field = "followSeconds", value = 0 },
+			{ field = "followSeconds", value = 0 / 0 },
+			{ field = "matchSpeed", value = -0.01 },
+			{ field = "matchSpeed", value = limit },
+			{ field = "matchSpeed", value = nil },
+		}
+		for _, case in cases do
+			local problems = run(function(choreo: any)
+				choreo.locomotion.stride.blocked[case.field] = case.value
+			end)
+			expect(hasProblem(problems, "blocked." .. case.field)).toBe(true)
+		end
+		-- A settle of no wait at all, and a tight match, are fine.
+		expect(table.concat(
+			run(function(choreo: any)
+				choreo.locomotion.stride.blocked.settleSeconds = 0
+				choreo.locomotion.stride.blocked.matchSpeed = 0
+			end),
+			"; "
+		)).toBe("")
+	end)
+
 	it("flags a stop hand-over margin that is missing or leaves no settle point in a half cycle", function()
 		for _, value in { nil :: number?, 0, 0.5, -0.1 } do
 			local problems = run(function(choreo: any)

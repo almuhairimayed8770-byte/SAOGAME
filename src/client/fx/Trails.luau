@@ -38,6 +38,20 @@
 	late still gets the swing that hit, never the settle. The last good direction sampled while a
 	trail kind was on backs it up, then the tip's motion now. The slash crescent and the slash
 	line read it for their tangent.
+
+	Render stalls (D-142): RenderStepped stops while the display sleeps or the window is minimised
+	and Heartbeat goes on, and a frame can be presented or captured after a stall before the first
+	render step runs (D-125). A trail lit when the display went dark has nothing to put it out in
+	the dark (its TrailOff is a clip event, and the local and near rigs step on the render step),
+	and its blade can move meanwhile (the body or a remote's replicated root), so that frame would
+	draw one streak from where the blade was to where it is. So a Heartbeat watchdog puts out every
+	trail and clears it once no render step has run for longer than choreo.luau
+	stall.jumpSeconds (a jump, D-132); nothing lights one until a frame renders again, and that
+	render step clears each trail again before it lights what is still on, so a swing that goes
+	on past the wake starts where its blade is. On a frame that does run the render step, the
+	jump's TrailOff (Replication closes it) puts the trail out inside the step, before the frame
+	draws. A stall shorter than a jump is a long frame and changes nothing. The render step, the
+	watchdog, the clock and Trail:Clear() sit behind `bind`, so specs drive them by hand.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -45,15 +59,33 @@ local Shared = ReplicatedStorage.Shared
 
 local Fx = require(Shared.data.fx)
 local Accents = require(Shared.data.accents)
+local ChoreoData = require(Shared.data.choreo)
 local Palette = require(Shared.data.palette)
 local Weapons = require(Shared.data.weapons)
 local Assets = require(Shared.data.assets)
 local Engine = require(script.Parent.Engine)
+local AccentStep = require(script.Parent.AccentStep)
 local FrameClock = require(script.Parent.FrameClock)
 local Quality = require(script.Parent.Quality)
 local OutlineManager = require(script.Parent.OutlineManager)
 
 export type Kind = "Art" | "Basic" | "Smear"
+
+export type StepFn = (dt: number) -> ()
+
+export type Deps = {
+	now: () -> number, -- the watchdog's clock
+	onRender: (fn: StepFn) -> () -> (), -- the render step (RenderStepped); returns its disconnect
+	onWatch: (fn: StepFn) -> () -> (), -- Heartbeat (runs while nothing renders); returns its disconnect
+	clear: (trail: Trail) -> (), -- Trail:Clear(): drops every segment drawn so far
+}
+
+export type Overrides = {
+	now: (() -> number)?,
+	onRender: ((fn: StepFn) -> () -> ())?,
+	onWatch: ((fn: StepFn) -> () -> ())?,
+	clear: ((trail: Trail) -> ())?,
+}
 
 type Entry = {
 	model: Instance,
@@ -87,9 +119,39 @@ local SWING_SAMPLES = math.max(2, Accents.swing.samples)
 
 local Trails = {}
 
+-- Trail:Clear() is engine-only; under Lune the call fails quietly.
+local function engineClear(trail: Trail)
+	pcall(function()
+		trail:Clear()
+	end)
+end
+
+local function defaults(overrides: Overrides?): Deps
+	local deps: Deps = {
+		now = Engine.now,
+		onRender = AccentStep.renderStepped,
+		onWatch = Engine.onHeartbeat,
+		clear = engineClear,
+	}
+	if overrides ~= nil then
+		deps.now = overrides.now or deps.now
+		deps.onRender = overrides.onRender or deps.onRender
+		deps.onWatch = overrides.onWatch or deps.onWatch
+		deps.clear = overrides.clear or deps.clear
+	end
+	return deps
+end
+
+local deps: Deps = defaults(nil)
 local entries: { [Instance]: Entry } = {}
+local started = false
 local stopLoop: (() -> ())? = nil
+local stopRender: (() -> ())? = nil
 local sinceRank = 0
+-- When the render step last ran (deps.now); nil before the first one (and under Lune).
+local renderedAt: number? = nil
+-- No render step for longer than a jump: every trail is out and cleared until one runs (D-142).
+local stalled = false
 
 local function sequence(keys: { { number } }): NumberSequence
 	local points = {}
@@ -239,7 +301,7 @@ local function applyAppearance(entry: Entry)
 		color = entry.color:Lerp(Palette.color3("TrailWhite"), Fx.trail.basicWhiteBlend)
 	end
 	entry.trail.Color = ColorSequence.new(color)
-	entry.trail.Enabled = wantsTrail(entry) and entry.allowed
+	entry.trail.Enabled = wantsTrail(entry) and entry.allowed and not stalled
 end
 
 -- Re-ranks which active trails are allowed: nearest first, inside the tier's distance, up to maxTrails.
@@ -511,15 +573,37 @@ function Trails.reset()
 	end
 end
 
---- Starts the periodic budget re-rank (rigs move) and follows quality changes.
-function Trails.start()
-	if stopLoop ~= nil then
+-- The watchdog (Heartbeat): once no render step has run for longer than a jump, every trail
+-- goes out and drops what it drew, before any frame can show it (D-142).
+local function watchStall()
+	local at = renderedAt
+	if stalled or at == nil or deps.now() - at <= ChoreoData.stall.jumpSeconds then
 		return
 	end
-	Quality.changed:Connect(function()
-		rebalance()
-	end)
-	stopLoop = Engine.onHeartbeat(function(dt: number)
+	stalled = true
+	for _, entry in entries do
+		entry.trail.Enabled = false
+		deps.clear(entry.trail)
+	end
+end
+
+-- The render step: remembers when it ran; the first one after a stall clears each trail again
+-- and lights what is still on, from where its blade is now.
+local function rendered()
+	renderedAt = deps.now()
+	if not stalled then
+		return
+	end
+	stalled = false
+	for _, entry in entries do
+		deps.clear(entry.trail)
+		applyAppearance(entry)
+	end
+end
+
+local function connectLoops()
+	stopLoop = deps.onWatch(function(dt: number)
+		watchStall()
 		Trails.sample()
 		sinceRank += dt
 		if sinceRank >= Fx.trail.rankInterval then
@@ -527,6 +611,51 @@ function Trails.start()
 			rebalance()
 		end
 	end)
+	stopRender = deps.onRender(function()
+		rendered()
+	end)
+end
+
+local function disconnectLoops()
+	local stopWatch, stopStep = stopLoop, stopRender
+	stopLoop, stopRender = nil, nil
+	if stopWatch ~= nil then
+		stopWatch()
+	end
+	if stopStep ~= nil then
+		stopStep()
+	end
+end
+
+--- Starts the periodic budget re-rank (rigs move), the render-stall watchdog and its render step,
+--- and follows quality changes.
+function Trails.start()
+	if started then
+		return
+	end
+	started = true
+	Quality.changed:Connect(function()
+		rebalance()
+	end)
+	connectLoops()
+end
+
+--- Replaces the watchdog's clock, the render step, Heartbeat or Trail:Clear() (specs); nil
+--- restores the engine. Forgets when the last frame rendered (that time was on the old clock), so
+--- no stall is called until a render step runs, and lights again what a stall had put out.
+function Trails.bind(overrides: Overrides?)
+	disconnectLoops()
+	deps = defaults(overrides)
+	renderedAt = nil
+	if stalled then
+		stalled = false
+		for _, entry in entries do
+			applyAppearance(entry)
+		end
+	end
+	if started then
+		connectLoops()
+	end
 end
 
 return Trails

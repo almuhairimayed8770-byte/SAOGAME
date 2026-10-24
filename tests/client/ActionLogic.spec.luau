@@ -265,6 +265,23 @@ describe("ActionLogic", function()
 		expect(ActionLogic.fallStep(tracker, true, 1, 0.5)).toBeNil()
 	end)
 
+	it("calls the rig asleep once a whole frame went by with no render step (D-141)", function()
+		-- The render step, then that frame's Heartbeat: a press in the light has seen one.
+		expect(ActionLogic.rigAsleep(0)).toBe(false)
+		expect(ActionLogic.rigAsleep(1)).toBe(false)
+		expect(ActionLogic.rigAsleep(2)).toBe(true)
+		expect(ActionLogic.rigAsleep(600)).toBe(true)
+	end)
+
+	it("shows a dodge pressed in the dark whole from the wake, unless the stall skipped it (D-141)", function()
+		local jump = choreo.stall.jumpSeconds
+		expect(ActionLogic.wokenDodge(10, 10, jump)).toBe("Show")
+		expect(ActionLogic.wokenDodge(10, 10.2, jump)).toBe("Show")
+		expect(ActionLogic.wokenDodge(10, 10 + jump, jump)).toBe("Show")
+		expect(ActionLogic.wokenDodge(10, 10 + jump + 1 / 60, jump)).toBe("Drop")
+		expect(ActionLogic.wokenDodge(10, 20, jump)).toBe("Drop")
+	end)
+
 	it("keeps the held clip frozen for the clip time it reached so it resumes in step with the server", function()
 		local plan = ActionLogic.syncPlan(10, 0.15, 10.8)
 		expect(plan.freezeClipTime).toBeCloseTo(0.15)

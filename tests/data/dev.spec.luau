@@ -271,3 +271,22 @@ describe("dev.luau timeScale steps", function()
 		)).toBe(true)
 	end)
 end)
+
+describe("dev.luau place (D-143)", function()
+	local Combat = Harness.load("src/shared/data/combat")
+
+	it("lets a server move settle for at least a sample interval and the lag allowance", function()
+		local place = Dev.place
+		expect(typeof(place.settleSeconds)).toBe("number")
+		expect(place.settleSeconds >= Combat.anticheatSampleInterval).toBe(true)
+		expect(place.settleSeconds >= Combat.lagAllowance).toBe(true)
+		-- Never a long blind spot: the anti-cheat judges again within a few samples.
+		expect(place.settleSeconds <= Combat.anomalyWindow).toBe(true)
+	end)
+
+	it("bounds a position to a positive finite distance on each axis", function()
+		local limit = Dev.place.maxCoordinate
+		expect(typeof(limit)).toBe("number")
+		expect(limit > 0 and limit < math.huge).toBe(true)
+	end)
+end)

@@ -470,6 +470,22 @@ function ActionLogic.freezeAt(pressedAt: number, now: number, holdAt: number?, s
 	return held, false
 end
 
+--- Whether the local rig sleeps (D-141): a frame went by with no render step. In a frame the
+--- render step comes before Heartbeat, so a press in the display's light has seen one Heartbeat
+--- since the rig last stepped; a second means a whole frame ran (Heartbeat goes on while the
+--- display sleeps) and nothing on screen moved.
+function ActionLogic.rigAsleep(heartbeatsSinceStep: number): boolean
+	return heartbeatsSinceStep > 1
+end
+
+--- What a dodge pressed while the rig slept does at the wake's step (D-141): a press no older
+--- than `jumpSeconds` shows the whole dodge from the wake ("Show"); an older one lies in the time
+--- the stall skipped, like the events it crossed, and shows nothing ("Drop"). The server ran its
+--- dodge from the request either way.
+function ActionLogic.wokenDodge(pressedAt: number, now: number, jumpSeconds: number): "Show" | "Drop"
+	return if now - pressedAt <= jumpSeconds then "Show" else "Drop"
+end
+
 --- When the local clip resumes after a release so its clock matches the server's, which starts
 --- the clip at the release: the clip stays frozen for the clip time it had reached.
 function ActionLogic.syncPlan(pressedAt: number, frozenClipTime: number?, releasedAt: number): SyncPlan

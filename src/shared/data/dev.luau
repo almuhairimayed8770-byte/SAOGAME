@@ -105,6 +105,18 @@ local Dev = {
 		decimals = 2,
 	},
 
+	-- DevCombat "place" (D-143): the safe dev teleport. The server pivots a player's character to a
+	-- point (and a facing) and tells the anti-cheat the move was its own
+	-- (AntiCheatService.serverMoved): no sample is judged for settleSeconds while the client takes
+	-- the new position up and its positions from before the move still arrive, then the next
+	-- sample starts fresh. At least a sample interval and the lag allowance (combat.luau), with
+	-- room for Studio's simulated replication lag (tests/data/dev.spec.luau).
+	place = {
+		settleSeconds = 1,
+		-- Studs: a position past this on any axis is refused as a typo, not a place in the world.
+		maxCoordinate = 10000,
+	},
+
 	-- tools/pose-server.luau (Lune) and the PoseEditor plugin's HttpService calls.
 	poseServer = {
 		host = "127.0.0.1",

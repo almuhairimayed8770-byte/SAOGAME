@@ -42,6 +42,18 @@
 		                               hit however long it takes; replies before and after
 		"heal" { entityId? }           full HP through EntityService.heal; entityId defaults to the
 		                               first player's entity; replies before and after
+		"place" { position, facing?, entityId? | player? }
+		                               the safe dev teleport (D-143): pivots a living player's
+		                               character so its root stands at position (a Vector3 or
+		                               {x, y, z}, each axis within dev.luau place.maxCoordinate)
+		                               facing `facing` degrees (0 looks along -Z, + turns left; the
+		                               root's own facing when absent), and first tells the
+		                               anti-cheat the move is the server's own
+		                               (AntiCheatService.serverMoved for place.settleSeconds), so
+		                               neither the jump nor the client's positions from before it
+		                               count; entityId (a player's entity) or player (a Name or
+		                               UserId) picks the player, the first player by default;
+		                               replies from, to and facing
 
 	The sink is set only while a trace is on or a swing is collecting, so CombatService measures
 	nothing for it the rest of the time; a sink someone else set is chained and given back. Nothing
@@ -49,7 +61,10 @@
 	"basic" and "art" skip the client and the request path: they test the server's sweep alone (the
 	client hook, DevAim, drives the real request path). "hold", "sethp" and "heal" only set up the
 	fight: they fire no remote and decide no hit, so a kill on a held enemy at 1 HP is still a real
-	swing's sweep through CombatService. Every wait is task.wait (Heartbeat).
+	swing's sweep through CombatService. "place" moves only a player, on the server, and no client
+	can ask for it: the BindableFunction lives under ServerScriptService, which never replicates,
+	and no remote leads to it (a Studio MCP execute_luau in the Server context invokes it). Every
+	wait is task.wait (Heartbeat).
 	Replies are plain tables execute_luau can JSON-encode; a failure is { ok = false, error = ... }.
 ]]
 
@@ -70,6 +85,7 @@ local Playground = require(Shared.data.playground)
 local CombatService = require(Server.services.CombatService)
 local EnemyService = require(Server.services.EnemyService)
 local EntityService = require(Server.services.EntityService)
+local AntiCheatService = require(Server.services.AntiCheatService)
 local DevTrace = require(script.Parent.DevTrace)
 
 type Reply = { [string]: any }
@@ -78,7 +94,21 @@ type Sink = (event: TraceEvent) -> ()
 type Record = EntityService.Record
 
 local Trace = Dev.trace
-local COMMANDS = { "help", "trace", "events", "basic", "art", "hp", "hold", "sethp", "heal" }
+local Place = Dev.place
+local COMMANDS = { "help", "trace", "events", "basic", "art", "hp", "hold", "sethp", "heal", "place" }
+-- One line per command for "help": its arguments (? = optional).
+local USAGE: { [string]: string } = {
+	help = "help: this list",
+	trace = "trace { on? }: a line per closed damage window; off gives the sink back",
+	events = "events { count?, clear? }: the kept trace events, newest last",
+	basic = "basic { entityId?, facing? }: a basic swing through the live CombatService",
+	art = "art { entityId?, artId?, facing? }: an Art through the live CombatService",
+	hp = "hp: every enemy's HP, state, hold, distance and bearing",
+	hold = "hold { ids? | except?, all?, on? }: freeze enemies (no move, attack or regen)",
+	sethp = "sethp { entityId, hp }: HP clamped to [1, maxHp], never a kill",
+	heal = "heal { entityId? }: full HP",
+	place = "place { position = {x, y, z}, facing? = degrees, entityId? | player? }: move a player on the server; the anti-cheat lets it settle",
+}
 
 local printing = false
 local kept: { DevTrace.Plain } = {}
@@ -229,7 +259,7 @@ end
 -- ------------------------------------------------------------------ commands
 
 local function help(): Reply
-	return { ok = true, commands = COMMANDS, bindable = Trace.bindableName }
+	return { ok = true, commands = COMMANDS, usage = USAGE, bindable = Trace.bindableName }
 end
 
 local function trace(args: { [string]: any }): Reply
@@ -460,6 +490,118 @@ local function heal(args: { [string]: any }): Reply
 	}
 end
 
+local function isFinite(value: unknown): boolean
+	return typeof(value) == "number" and value == value and math.abs(value) ~= math.huge
+end
+
+-- The living player "place" moves: entityId (a player's entity), player (a Name or UserId), or the
+-- first player.
+local function placedRecord(args: { [string]: any }): (Record?, string?)
+	if args.entityId ~= nil and args.player ~= nil then
+		return nil, "give entityId or player, not both"
+	end
+	local record: Record? = nil
+	if args.player ~= nil then
+		local wanted = args.player
+		if typeof(wanted) ~= "string" and typeof(wanted) ~= "number" then
+			return nil, "player must be a player's Name or UserId"
+		end
+		for _, candidate in Players:GetPlayers() do
+			if candidate.Name == wanted or candidate.UserId == wanted then
+				record = EntityService.fromPlayer(candidate)
+				if record == nil then
+					return nil, ("player %s has no entity yet (spawning?)"):format(tostring(wanted))
+				end
+				break
+			end
+		end
+		if record == nil then
+			return nil, ("no player %s"):format(tostring(wanted))
+		end
+	else
+		local id, entityError = entityOf(args)
+		if id == nil then
+			return nil, entityError or "no entity"
+		end
+		record = EntityService.get(id)
+		if record == nil then
+			return nil, ("no entity %d"):format(id)
+		end
+	end
+	local found = record :: Record
+	if found.kind ~= "Player" or found.player == nil then
+		return nil, ("entity %d is not a player"):format(found.id)
+	end
+	if found.state == "Dead" then
+		return nil, ("entity %d is dead"):format(found.id)
+	end
+	return found, nil
+end
+
+local function placePosition(value: unknown): (Vector3?, string?)
+	local message = ("position must be a Vector3 or an {x, y, z} list of numbers, each within %g studs"):format(
+		Place.maxCoordinate
+	)
+	local position: Vector3? = nil
+	if typeof(value) == "Vector3" then
+		position = value
+	elseif typeof(value) == "table" then
+		local list = value :: { [any]: any }
+		if isFinite(list[1]) and isFinite(list[2]) and isFinite(list[3]) then
+			position = Vector3.new(list[1], list[2], list[3])
+		end
+	end
+	if position == nil then
+		return nil, message
+	end
+	local point = position :: Vector3
+	for _, axis in { point.X, point.Y, point.Z } do
+		if not isFinite(axis) or math.abs(axis) > Place.maxCoordinate then
+			return nil, message
+		end
+	end
+	return point, nil
+end
+
+local function plainVector(value: Vector3): { number }
+	return { round(value.X) :: number, round(value.Y) :: number, round(value.Z) :: number }
+end
+
+local function place(args: { [string]: any }): Reply
+	local position, positionError = placePosition(args.position)
+	if position == nil then
+		return fail(positionError or "no position")
+	end
+	if args.facing ~= nil and not isFinite(args.facing) then
+		return fail("facing must be a number of degrees (0 looks along -Z, + turns left)")
+	end
+	local record, recordError = placedRecord(args)
+	if record == nil then
+		return fail(recordError or "no player")
+	end
+	local model = record.model
+	local root = model.PrimaryPart
+	if root == nil or model.Parent == nil then
+		return fail(("entity %d has no character root in the world (respawning?)"):format(record.id))
+	end
+	local from = root.Position
+	local facing: number = if args.facing ~= nil then args.facing else DevTrace.yawOf(root.CFrame.LookVector) or 0
+	-- The anti-cheat first: the move is the server's own, so no sample judges the jump or the
+	-- client's positions from before it.
+	local watched = AntiCheatService.serverMoved(record.player :: Player, Place.settleSeconds)
+	model:PivotTo(CFrame.new(position) * CFrame.Angles(0, math.rad(facing), 0))
+	return {
+		ok = true,
+		entityId = record.id,
+		name = record.name,
+		from = plainVector(from),
+		to = plainVector(position),
+		facing = round(facing),
+		settleSeconds = Place.settleSeconds,
+		anticheat = watched,
+	}
+end
+
 -- ------------------------------------------------------------------ the BindableFunction
 
 local HANDLERS: { [string]: (args: { [string]: any }) -> Reply } = {
@@ -476,6 +618,7 @@ local HANDLERS: { [string]: (args: { [string]: any }) -> Reply } = {
 	hold = holdCommand,
 	sethp = sethp,
 	heal = heal,
+	place = place,
 }
 local YIELDS: { [string]: boolean } = { basic = true, art = true }
 

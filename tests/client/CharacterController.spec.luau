@@ -6,8 +6,9 @@
 	way the engine runs it: the control script's Move with the stick first, then the controller's
 	step, then physics moves the root at the Humanoid's move and WalkSpeed (so the step reads the
 	velocity of the frame before, as it does in the engine). The Humanoid records every property
-	write (each one fires Changed, and a client WalkSpeed write is networked), and an optional fake
-	fx.Impact sibling records the director calls the controller makes.
+	write (each one fires Changed, and a client WalkSpeed write is networked), an optional fake
+	fx.Impact sibling records the director calls the controller makes, and the camera's FOV kicks
+	go in the same ordered log.
 
 	With `choreo` the controller gets a real Choreo (a fresh copy of the module, on the spec's clock)
 	animating a real PlayerR15 rig, whose clip events reach the controller as Replication's
@@ -86,7 +87,8 @@ type Rig = {
 	model: any,
 	-- Every Humanoid property write, in order ({ key, value }).
 	writes: { { key: string, value: any } },
-	-- The sends and the fake Impact's calls in one ordered list ({ kind = "send" | "impact", name, args }).
+	-- The sends, the fake Impact's calls and the camera's FOV kicks in one ordered list
+	-- ({ kind = "send" | "impact" | "camera", name, args }).
 	log: { { kind: string, name: string, args: { any } } },
 	-- The HumanoidRootPart (CFrame and Position kept in step, as on a part).
 	root: any,
@@ -283,7 +285,11 @@ local function load(options: Options?): Rig
 			localChanged = Signal.new(),
 		},
 		Replication = { rejected = Signal.new(), hit = Signal.new(), clipEvent = Signal.new() },
-		CameraController = { fovKick = function() end },
+		CameraController = {
+			fovKick = function(...: any)
+				table.insert(log, { kind = "camera", name = "fovKick", args = { ... } })
+			end,
+		},
 		Siblings = {
 			load = function(_parent: any, path: string): (any, boolean)
 				if path == "choreo.Locomotion" then
@@ -1874,6 +1880,202 @@ describe("CharacterController reads the root motion of the frame its rig stepped
 		expect(#crossed > 0).toBe(true)
 		for _, row in crossed do
 			expect(row.jumped).toBe(true)
+		end
+	end)
+end)
+
+describe("CharacterController's dodge pressed while the display sleeps (D-141)", function()
+	-- The root offset a clip has reached at a clip time (Types.Vec3 as a Vector3).
+	local function rootAt(clip: any, clipTime: number): Vector3
+		local offset = ClipSampler.rootMotionAt(clip, clipTime)
+		return Vector3.new(offset[1], offset[2], offset[3])
+	end
+
+	-- The local dodge clip on the rig (not stopping), or nil.
+	local function dodgeHandle(rig: Rig): any
+		for _, handle in rig.animator.mixer:handles() do
+			if string.find(handle.clipId, "/Dodge", 1, true) ~= nil and not handle.stopping then
+				return handle
+			end
+		end
+		return nil
+	end
+
+	-- The log from row `from` on, as "kind name" rows.
+	local function logRows(rig: Rig, from: number): { string }
+		local rows = {}
+		for index = from, #rig.log do
+			table.insert(rows, rig.log[index].kind .. " " .. rig.log[index].name)
+		end
+		return rows
+	end
+
+	-- Follows the dodge `handle` for `frames` frames from `startedAt` (when its clip started): the
+	-- state is Dodge for dodgeDuration from the start, the root is where the clip's root has got to
+	-- on each of those frames' steps and stays there after, and nothing more is kicked, cued or sent.
+	local function followDodge(rig: Rig, handle: any, start: Vector3, startedAt: number, frames: number)
+		local origin = rootAt(handle.clip, 0)
+		local logged = #rig.log
+		local reached = Vector3.zero
+		for _ = 1, frames do
+			rig.frame(STILL)
+			local age = rig.now() - startedAt
+			expect(handle.time).toBeCloseTo(math.min(age, handle.clip.duration), 1e-9)
+			local ended = rig.now() >= startedAt + Combat.dodgeDuration
+			expect(rig.controller.state()).toBe(if ended then "Idle" else "Dodge")
+			if not ended then
+				-- The root faces -Z unturned, so the clip's root space is the world's.
+				reached = rootAt(handle.clip, handle.time) - origin
+			end
+			-- (Vector3 is single precision: the frames' deltas add up to the clip's root within 1e-4.)
+			expect((rig.root.Position - start - reached).Magnitude < 1e-4).toBe(true)
+		end
+		expect(#rig.log).toBe(logged)
+	end
+
+	it("display awake: the dodge plays at the press, as it always did (guard)", function()
+		local rig = standingRig({ choreo = true, impact = true })
+		local from = #rig.log + 1
+		local events = #rig.clipEvents + 1
+		local start = rig.root.Position
+		local pressedAt = rig.now()
+		rig.controller.dodge()
+		-- The kick, the speed lines and the whoosh, then the request, all in the press.
+		expect(logRows(rig, from)).toEqual({ "camera fovKick", "impact dodge", "send DodgeRequest" })
+		local handle = dodgeHandle(rig)
+		expect(handle).never.toBeNil()
+		expect(handle.time).toBe(0)
+		expect(rig.controller.state()).toBe("Dodge")
+		followDodge(rig, handle, start, pressedAt, 24)
+		local footsteps = clipEventsOf(rig, handle.clipId, events)
+		expect(#footsteps).toBe(1)
+		expect(footsteps[1].jumped).toBe(false)
+		expect(footsteps[1].at - pressedAt).toBeCloseTo(0.3, 1e-9)
+	end)
+
+	it("an engine hitch (nothing ran) is no sleep: the dodge plays at the press (guard)", function()
+		local rig = standingRig({ choreo = true, impact = true })
+		rig.hitch(2)
+		local from = #rig.log + 1
+		local start = rig.root.Position
+		local pressedAt = rig.now()
+		rig.controller.dodge()
+		expect(logRows(rig, from)).toEqual({ "camera fovKick", "impact dodge", "send DodgeRequest" })
+		local handle = dodgeHandle(rig)
+		expect(handle).never.toBeNil()
+		followDodge(rig, handle, start, pressedAt, 20)
+	end)
+
+	for _, before in { 12, 16 } do
+		it(
+			("pressed %d Heartbeats before the wake: the request goes at the press, the whole dodge after the wake"):format(
+				before
+			),
+			function()
+				local rig = standingRig({ choreo = true, impact = true })
+				for _ = 1, 600 do
+					rig.heartbeat()
+				end
+				local from = #rig.log + 1
+				local events = #rig.clipEvents + 1
+				local start = rig.root.Position
+				rig.controller.dodge()
+				-- The server's dodge starts from the request; nothing on this screen or speaker yet.
+				expect(logRows(rig, from)).toEqual({ "send DodgeRequest" })
+				expect(rig.controller.state()).toBe("Dodge")
+				expect(dodgeHandle(rig)).toBeNil()
+				for _ = 1, before do
+					rig.heartbeat()
+				end
+				expect(logRows(rig, from)).toEqual({ "send DodgeRequest" })
+				rig.wake()
+				local wokeAt = rig.now()
+				-- The wake shows the body where it stood, the dodge's first pose to come, and its kick
+				-- and cue (the landing sound is the cue's, dodgeDuration on: when the travel ends).
+				expect((rig.root.Position - start).Magnitude < 1e-9).toBe(true)
+				expect(logRows(rig, from)).toEqual({ "send DodgeRequest", "camera fovKick", "impact dodge" })
+				local dodges = impactCalls(rig, "dodge")
+				expect(dodges[#dodges][1]).toBe(rig.model)
+				expect(dodges[#dodges][2]).toBe(true)
+				local handle = dodgeHandle(rig)
+				expect(handle).never.toBeNil()
+				expect(handle.time).toBe(0)
+				expect(rig.controller.state()).toBe("Dodge")
+				-- Then the dodge a press on the wake's frame would have made, travel and length.
+				followDodge(rig, handle, start, wokeAt, 24)
+				local footsteps = clipEventsOf(rig, handle.clipId, events)
+				expect(#footsteps).toBe(1)
+				expect(footsteps[1].jumped).toBe(false)
+				expect(footsteps[1].at - wokeAt).toBeCloseTo(0.3, 1e-9)
+				expect(sends(rig, "DodgeRequest")).toBe(1)
+			end
+		)
+	end
+
+	it("pressed a moment into a short blackout that is no jump: the dodge still waits for the wake", function()
+		local rig = standingRig({ choreo = true, impact = true })
+		rig.heartbeat()
+		rig.heartbeat()
+		local from = #rig.log + 1
+		local start = rig.root.Position
+		rig.controller.dodge()
+		expect(logRows(rig, from)).toEqual({ "send DodgeRequest" })
+		rig.heartbeat()
+		rig.wake()
+		local wokeAt = rig.now()
+		expect((rig.root.Position - start).Magnitude < 1e-9).toBe(true)
+		local handle = dodgeHandle(rig)
+		expect(handle).never.toBeNil()
+		followDodge(rig, handle, start, wokeAt, 20)
+	end)
+
+	it("pressed longer than a jump before the wake: nothing shows or sounds; the request went", function()
+		local rig = standingRig({ choreo = true, impact = true })
+		for _ = 1, 600 do
+			rig.heartbeat()
+		end
+		local from = #rig.log + 1
+		local start = rig.root.Position
+		rig.controller.dodge()
+		local pressedAt = rig.now()
+		repeat
+			rig.heartbeat()
+		until rig.now() - pressedAt > ChoreoData.stall.jumpSeconds
+		rig.wake()
+		expect(rig.controller.state()).toBe("Idle")
+		expect(dodgeHandle(rig)).toBeNil()
+		for _ = 1, 30 do
+			rig.frame(STILL)
+			expect((rig.root.Position - start).Magnitude < 1e-9).toBe(true)
+		end
+		expect(logRows(rig, from)).toEqual({ "send DodgeRequest" })
+	end)
+
+	it("refused by the server, or the character gone, in the dark: the wake shows nothing", function()
+		for _, ending in { "reject", "respawn" } do
+			local rig = standingRig({ choreo = true, impact = true })
+			for _ = 1, 600 do
+				rig.heartbeat()
+			end
+			local from = #rig.log + 1
+			local start = rig.root.Position
+			rig.controller.dodge()
+			rig.heartbeat()
+			if ending == "reject" then
+				rig.reject("Dodge")
+			else
+				rig.respawn()
+			end
+			expect(rig.controller.state()).toBe("Idle")
+			rig.heartbeat()
+			rig.wake()
+			for _ = 1, 20 do
+				rig.frame(STILL)
+				expect((rig.root.Position - start).Magnitude < 1e-9).toBe(true)
+			end
+			expect(rig.controller.state()).toBe("Idle")
+			expect(dodgeHandle(rig)).toBeNil()
+			expect(logRows(rig, from)).toEqual({ "send DodgeRequest" })
 		end
 	end)
 end)

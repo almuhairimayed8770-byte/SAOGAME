@@ -665,3 +665,98 @@ describe("AntiCheatService resets and the clock", function()
 		expect(stats.samples).toBe(0)
 	end)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- A move the server makes itself (D-143: the Studio DevCombat "place")
+-- ------------------------------------------------------------------------------------------
+
+describe("AntiCheatService server moves (D-143)", function()
+	local SETTLE = 1
+
+	-- Puts the root at `x` on the ground line (the server's pivot, or the client's next update).
+	local function at(root: any, x: number)
+		local position = root.CFrame.Position
+		root.CFrame = CFrame.new(x, position.Y, position.Z)
+	end
+
+	-- One sample INTERVAL later.
+	local function sampleNext(who: any): any
+		clock.t += INTERVAL
+		return AntiCheatService.sample(who, INTERVAL)
+	end
+
+	it("without it, a server pivot and the client's last update from before it are teleports (guard)", function()
+		fresh()
+		local who, _, root = fighter()
+		at(root, TELEPORT)
+		expect(sampleNext(who).kind).toBe("teleport")
+		at(root, 0)
+		expect(sampleNext(who).kind).toBe("teleport")
+		expect(AntiCheatService.stats().teleport).toBe(2)
+	end)
+
+	it("judges nothing while the move settles: the jump, the stale spot, the new one; then starts fresh", function()
+		fresh()
+		local who, _, root = fighter()
+		local movedAt = clock.t
+		expect(AntiCheatService.serverMoved(who, SETTLE)).toBe(true)
+		at(root, TELEPORT)
+		expect(sampleNext(who)).toBe(nil)
+		-- The client's update from before the move arrives after it, then the client takes it up.
+		at(root, 0)
+		expect(sampleNext(who)).toBe(nil)
+		at(root, TELEPORT)
+		while clock.t + INTERVAL < movedAt + SETTLE do
+			expect(sampleNext(who)).toBe(nil)
+		end
+		-- Past the settle: the first sample only records where the root is, the next judges.
+		expect(sampleNext(who)).toBe(nil)
+		expect(move(who, root, 1).kind).toBe("ok")
+		expect(AntiCheatService.stats().flags).toBe(0)
+		-- And judges as ever: over the sprint allowance is an anomaly again.
+		expect(move(who, root, SPRINT + 1).kind).toBe("speed")
+	end)
+
+	it("the settle runs on the sample clock too (tick), and a later move extends it, never shortens it", function()
+		fresh()
+		local who, _, root = fighter()
+		local movedAt = clock.t
+		AntiCheatService.serverMoved(who, SETTLE)
+		AntiCheatService.serverMoved(who, SETTLE / 4)
+		at(root, TELEPORT)
+		local step = INTERVAL / 5
+		while clock.t + step < movedAt + SETTLE do
+			clock.t += step
+			AntiCheatService.tick(step)
+		end
+		expect(AntiCheatService.stats().samples).toBe(0)
+		expect(AntiCheatService.stats().flags).toBe(0)
+		for _ = 1, 15 do
+			clock.t += step
+			AntiCheatService.tick(step)
+		end
+		-- The first sample past the settle recorded, the ones after judged a still root.
+		expect(AntiCheatService.stats().samples > 0).toBe(true)
+		expect(AntiCheatService.stats().flags).toBe(0)
+	end)
+
+	it("is false for a player it does not watch, and before the service is bound", function()
+		fresh()
+		expect(AntiCheatService.serverMoved(player(), SETTLE)).toBe(false)
+		AntiCheatService.reset()
+		local loose = player()
+		expect(AntiCheatService.serverMoved(loose, SETTLE)).toBe(false)
+	end)
+
+	it("only server code calls it: no client or shared module, and no remote handler", function()
+		local callers = {}
+		for _, path in Harness.listFiles("src", "%.luau$") do
+			local source = Harness.readFile(path)
+			-- A call or the definition (a comment may name it without the parenthesis).
+			if source:find("serverMoved(", 1, true) then
+				table.insert(callers, path)
+			end
+		end
+		expect(callers).toEqual({ "src/server/dev/DevCombat.server.luau", "src/server/services/AntiCheatService.luau" })
+	end)
+end)

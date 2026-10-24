@@ -634,3 +634,249 @@ describe("Trails.sample", function()
 		expect(trailOf(weapon).Enabled).toBe(false)
 	end)
 end)
+
+-- Render stalls (D-142): RenderStepped stops while the display sleeps and Heartbeat goes on, and a
+-- frame can be presented after a stall before the first render step runs (D-125). The module's
+-- render step, its Heartbeat (the watchdog), its clock and Trail:Clear() are driven by hand
+-- through Trails.bind: a frame runs the render step and then Heartbeat, as the engine does; a
+-- frame in the dark runs Heartbeat alone.
+local choreo = Harness.load("src/shared/data/choreo")
+
+describe("Trails across a render stall (D-142)", function()
+	local FRAME = 1 / 60
+	local JUMP = choreo.stall.jumpSeconds
+
+	type Clear = { trail: Trail, enabled: boolean }
+
+	type Drive = {
+		now: () -> number,
+		render: () -> (),
+		heartbeat: () -> (),
+		frame: () -> (),
+		sleep: () -> (),
+		clears: { Clear },
+		finish: () -> (),
+	}
+
+	local function drive(): Drive
+		local clock = 0
+		local renderFn: ((dt: number) -> ())? = nil
+		local watchFn: ((dt: number) -> ())? = nil
+		local clears: { Clear } = {}
+		Engine.setViewer(function()
+			return Vector3.zero
+		end)
+		Trails.start()
+		Trails.bind({
+			now = function(): number
+				return clock
+			end,
+			onRender = function(fn: (dt: number) -> ()): () -> ()
+				renderFn = fn
+				return function()
+					renderFn = nil
+				end
+			end,
+			onWatch = function(fn: (dt: number) -> ()): () -> ()
+				watchFn = fn
+				return function()
+					watchFn = nil
+				end
+			end,
+			clear = function(trail: Trail)
+				table.insert(clears, { trail = trail, enabled = trail.Enabled })
+			end,
+		})
+		local function render()
+			assert(renderFn ~= nil, "Trails connected no render step")
+			renderFn(FRAME)
+		end
+		local function heartbeat()
+			assert(watchFn ~= nil, "Trails connected no watchdog")
+			watchFn(FRAME)
+		end
+		return {
+			now = function(): number
+				return clock
+			end,
+			render = render,
+			heartbeat = heartbeat,
+			frame = function()
+				clock += FRAME
+				render()
+				heartbeat()
+			end,
+			sleep = function()
+				clock += FRAME
+				heartbeat()
+			end,
+			clears = clears,
+			finish = function()
+				Trails.bind(nil)
+				Trails.reset()
+				Engine.setViewer(nil)
+			end,
+		}
+	end
+
+	-- A rig tracked from the start, its tip where the engine would put it (Lune derives no
+	-- WorldPosition), so the Heartbeat's sample can read it.
+	local function trackedRig(): (Model, BasePart)
+		local model, weapon = rig()
+		weapon.Position = Vector3.zero
+		Trails.attach(model)
+		local tip = weapon:FindFirstChild("TrailEnd") :: Attachment
+		tip.WorldPosition = Vector3.zero
+		return model, weapon
+	end
+
+	-- Sleeps until the last frame rendered more than a jump ago; returns when it went dark.
+	local function sleepPastJump(d: Drive): number
+		local dark = d.now()
+		repeat
+			d.sleep()
+		until d.now() - dark > JUMP
+		return dark
+	end
+
+	it("display awake: a lit trail stays lit frame after frame and is never cleared (guard)", function()
+		local d = drive()
+		local model, weapon = trackedRig()
+		d.frame()
+		Trails.setActive(model, true, "Art")
+		for _ = 1, 120 do
+			d.frame()
+			expect(trailOf(weapon).Enabled).toBe(true)
+		end
+		Trails.setActive(model, false, "Art")
+		expect(trailOf(weapon).Enabled).toBe(false)
+		expect(#d.clears).toBe(0)
+		d.finish()
+	end)
+
+	it("a stall shorter than a jump is a long frame: the trail stays lit, nothing is cleared (guard)", function()
+		local d = drive()
+		local model, weapon = trackedRig()
+		d.frame()
+		Trails.setActive(model, true, "Art")
+		local dark = d.now()
+		while d.now() + FRAME - dark <= JUMP do
+			d.sleep()
+			expect(trailOf(weapon).Enabled).toBe(true)
+		end
+		d.frame()
+		expect(trailOf(weapon).Enabled).toBe(true)
+		expect(#d.clears).toBe(0)
+		d.finish()
+	end)
+
+	it("a trail lit when the display sleeps is out and cleared on the first Heartbeat past a jump", function()
+		local d = drive()
+		local model, weapon = trackedRig()
+		d.frame()
+		Trails.setActive(model, true, "Art")
+		local dark = d.now()
+		repeat
+			d.sleep()
+			if d.now() - dark <= JUMP then
+				expect(trailOf(weapon).Enabled).toBe(true)
+			end
+		until d.now() - dark > JUMP
+		-- Out before any frame can show it, its segments dropped after it went out.
+		expect(trailOf(weapon).Enabled).toBe(false)
+		expect(#d.clears).toBe(1)
+		expect(d.clears[1].trail).toBe(trailOf(weapon))
+		expect(d.clears[1].enabled).toBe(false)
+		for _ = 1, 600 do
+			d.sleep()
+		end
+		expect(trailOf(weapon).Enabled).toBe(false)
+		expect(#d.clears).toBe(1)
+		d.finish()
+	end)
+
+	it("nothing lights a trail in the dark: a kind turned on there, or a white flash, waits for a frame", function()
+		local d = drive()
+		local model, weapon = trackedRig()
+		d.frame()
+		sleepPastJump(d)
+		-- A far rig steps on Heartbeat and its TrailOn routes as ever; a parry flashes the blade.
+		Trails.setActive(model, true, "Basic")
+		expect(trailOf(weapon).Enabled).toBe(false)
+		Trails.flashWhite(model, 2)
+		expect(trailOf(weapon).Enabled).toBe(false)
+		d.sleep()
+		expect(trailOf(weapon).Enabled).toBe(false)
+		-- The wake's render step lights it, cleared first.
+		local before = #d.clears
+		d.render()
+		expect(trailOf(weapon).Enabled).toBe(true)
+		expect(#d.clears).toBe(before + 1)
+		expect(d.clears[#d.clears].enabled).toBe(false)
+		d.finish()
+	end)
+
+	it("the wake's render step clears the trail before it lights again; the jump's TrailOff puts it out", function()
+		for _, order in { "trails first", "rig first" } do
+			local d = drive()
+			local model, weapon = trackedRig()
+			d.frame()
+			Trails.setActive(model, true, "Art")
+			sleepPastJump(d)
+			local before = #d.clears
+			if order == "trails first" then
+				-- The swing is still on when the render step runs: from where the blade is now.
+				d.render()
+				expect(#d.clears).toBe(before + 1)
+				expect(d.clears[#d.clears].trail).toBe(trailOf(weapon))
+				expect(d.clears[#d.clears].enabled).toBe(false)
+				expect(trailOf(weapon).Enabled).toBe(true)
+				-- Then the rig's jump step in the same render step: Replication closes the kind.
+				Trails.setActive(model, false, "Art")
+			else
+				Trails.setActive(model, false, "Art")
+				expect(trailOf(weapon).Enabled).toBe(false)
+				d.render()
+				expect(#d.clears).toBe(before + 1)
+			end
+			-- What the frame draws: the trail out.
+			expect(trailOf(weapon).Enabled).toBe(false)
+			d.heartbeat()
+			d.frame()
+			expect(trailOf(weapon).Enabled).toBe(false)
+			d.finish()
+		end
+	end)
+
+	it("a swing that goes on past the wake draws from there, and the next stall is caught again", function()
+		local d = drive()
+		local model, weapon = trackedRig()
+		d.frame()
+		Trails.setActive(model, true, "Art")
+		sleepPastJump(d)
+		d.frame()
+		expect(trailOf(weapon).Enabled).toBe(true)
+		local clears = #d.clears
+		for _ = 1, 30 do
+			d.frame()
+			expect(trailOf(weapon).Enabled).toBe(true)
+		end
+		expect(#d.clears).toBe(clears)
+		sleepPastJump(d)
+		expect(trailOf(weapon).Enabled).toBe(false)
+		expect(#d.clears).toBe(clears + 1)
+		d.finish()
+	end)
+
+	it("before the first render step (a client that has drawn nothing yet) no stall is called", function()
+		local d = drive()
+		local model, weapon = trackedRig()
+		Trails.setActive(model, true, "Art")
+		for _ = 1, 120 do
+			d.sleep()
+		end
+		expect(trailOf(weapon).Enabled).toBe(true)
+		expect(#d.clears).toBe(0)
+		d.finish()
+	end)
+end)

@@ -23,6 +23,13 @@
 	raycast foot IK ride as procedural additive channels. The raycast is injected so the IK math
 	stays pure and tested; the default uses workspace.
 
+	A body held off its stick (D-144: walking into an enemy or a wall, slid along its flank): once
+	the stick has settled, a root velocity off it blocks the body (locomotion.stride.blocked). The
+	gait then goes the way of the root's smoothed velocity, paced by the root's speed along it, and
+	stands while that velocity goes nowhere, so the legs never walk in place or skate. The stick
+	letting go, a jump, or a whole walk along the stick ends it. The velocity is State.velocity,
+	else the root's own when it is the reading `speed` came from; open ground is untouched.
+
 	The sheathed sword (a player rig whose weapon category has a weaponModels.luau sheaths row):
 	`drawn` is the target (the server's Drawn attribute, or the local player's prediction). Before
 	every animator step a hook feeds SheathState from the live clips and the target, plays or
@@ -69,6 +76,9 @@ local WeaponMount = require(script.Parent.WeaponMount)
 local Config = ChoreoData.locomotion
 local Sheath = ChoreoData.sheath
 local Stride = Config.stride
+local Blocked = Stride.blocked
+-- A velocity whose direction is within stride.blocked.degrees of the stick has a dot above this.
+local BLOCKED_COS = math.cos(math.rad(Blocked.degrees))
 local GAIT_NAMES = LocomotionState.GAIT_NAMES
 local WEIGHT_NAMES = LocomotionState.WEIGHT_NAMES
 
@@ -106,6 +116,9 @@ export type State = {
 	-- dev capture, CharacterController.setCaptureTimeScale; nil = real time, as for every remote
 	-- rig): the blend reads the root's speed and turn at 1x, dividing by it.
 	clockScale: number?,
+	-- The root's velocity, the reading `speed` came from (nil: Locomotion reads the root's own).
+	-- With the stick held, a velocity off the stick marks the body blocked (stride.blocked, D-144).
+	velocity: Vector3?,
 }
 
 export type Raycast = (origin: Vector3, direction: Vector3) -> Vector3?
@@ -524,6 +537,16 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		gaitPace = nil :: number?, -- cycles per second the phase last advanced at
 		shownNow = {} :: { [string]: number }, -- each Base clip's shown weight at this step's start
 		shownLast = {} :: { [string]: number }, -- and at the last step's
+		-- The body is held off its stick (stride.blocked, D-144): the gait follows the velocity.
+		blocked = false,
+		stickX = 0, -- the last update's stick: a unit world direction, or zero
+		stickZ = 0,
+		steadyX = 0, -- where the stick settled (a unit world direction, or zero)
+		steadyZ = 0,
+		stickSteady = 0, -- seconds the stick has stayed within stride.blocked.degrees of it
+		followX = 0, -- blocked: the velocity the gait follows (at 1x, smoothed)
+		followZ = 0,
+		unreadableRoot = nil :: Instance?, -- a root whose velocity cannot be read (a Lune test part)
 		destroyed = false,
 	}, Locomotion)
 	if self.raycast == nil and self.footIK then
@@ -633,6 +656,92 @@ local function uprightLean(self: any, lean: number): number
 	return lean
 end
 
+local function readVelocity(part: any): Vector3
+	return part.AssemblyLinearVelocity
+end
+
+-- The root's horizontal velocity (studs a second, real time) when it is the reading the state's
+-- speed came from, within stride.blocked.matchSpeed: the state's own, else the root's. Nil when it
+-- is unknown or another reading. A part never given a velocity (a Lune test rig) cannot be read;
+-- it is tried once. No allocation.
+local function trustedVelocity(self: any, root: BasePart, state: State): (number?, number?)
+	local velocity = state.velocity
+	if velocity == nil then
+		if self.unreadableRoot == root then
+			return nil, nil
+		end
+		local ok, value = pcall(readVelocity, root)
+		if not ok or typeof(value) ~= "Vector3" then
+			self.unreadableRoot = root
+			return nil, nil
+		end
+		velocity = value
+	end
+	local x, z = (velocity :: Vector3).X, (velocity :: Vector3).Z
+	if math.abs(math.sqrt(x * x + z * z) - math.max(0, state.speed)) > Blocked.matchSpeed then
+		return nil, nil
+	end
+	return x, z
+end
+
+-- Keeps whether the body is blocked (stride.blocked, D-144) from this update's stick (a unit world
+-- direction, or zero; `forward`, `right` in the character's frame) and the root's velocity. While
+-- it is blocked it keeps the velocity the gait follows (followX, followZ: at 1x, smoothed over
+-- stride.blocked.followSeconds of the root's clock, from zero at the block) and returns the root's
+-- velocity (world x and z, real studs a second); nil otherwise. No allocation.
+local function stepBlocked(
+	self: any,
+	root: BasePart,
+	state: State,
+	dt: number,
+	clock: number,
+	stickX: number,
+	stickZ: number,
+	forward: number,
+	right: number
+): (number?, number?)
+	local lastX, lastZ = self.stickX, self.stickZ
+	self.stickX, self.stickZ = stickX, stickZ
+	if (stickX == 0 and stickZ == 0) or not state.grounded then
+		self.blocked = false
+		self.steadyX, self.steadyZ, self.stickSteady = 0, 0, 0
+		return nil, nil
+	end
+	-- The stick holds still while it stays within stride.blocked.degrees of where it settled.
+	if stickX * self.steadyX + stickZ * self.steadyZ >= BLOCKED_COS then
+		self.stickSteady += dt
+	else
+		self.steadyX, self.steadyZ, self.stickSteady = stickX, stickZ, 0
+	end
+	local hadStick = lastX ~= 0 or lastZ ~= 0
+	local x, z = trustedVelocity(self, root, state)
+	if x == nil or z == nil then
+		self.blocked = false
+		return nil, nil
+	end
+	local scale = if clock > 0 then clock else 1
+	local speed = math.sqrt(x * x + z * z)
+	if speed / scale > Config.idleSpeedThreshold then
+		local cosine = BLOCKED_COS * speed
+		local along = x * stickX + z * stickZ >= cosine or (hadStick and x * lastX + z * lastZ >= cosine)
+		if not along then
+			if not self.blocked and self.stickSteady >= Blocked.settleSeconds then
+				self.blocked = true
+				self.followX, self.followZ = 0, 0
+			end
+		elseif self.blocked and speed / scale >= LocomotionState.wholeWalkSpeed(forward, right, self.drawn) then
+			self.blocked = false
+		end
+	end
+	if not self.blocked then
+		return nil, nil
+	end
+	local blend = math.min(1, dt * scale / Blocked.followSeconds)
+	self.followX += (x / scale - self.followX) * blend
+	self.followZ += (z / scale - self.followZ) * blend
+	return x, z
+end
+
 function Locomotion.update(self: any, dt: number, state: State): LocomotionState.Output
 	local animator = self.animator
 	local root: BasePart? = self.character.PrimaryPart or self.character:FindFirstChild("HumanoidRootPart") :: any
@@ -641,6 +750,7 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 	local clock = state.clockScale or 1
 	local blendSpeed = if clock > 0 then math.max(0, state.speed) / clock else math.max(0, state.speed)
 	local forward, right = 0, 0
+	local stickX, stickZ = 0, 0
 	local yawRate = 0
 	if root ~= nil then
 		local cframe = root.CFrame
@@ -649,6 +759,7 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 			move = move.Unit
 			forward = move:Dot(cframe.LookVector)
 			right = move:Dot(cframe.RightVector)
+			stickX, stickZ = move.X, move.Z
 		end
 		local yaw = yawOf(cframe)
 		if self.lastYaw ~= nil and dt > 0 and clock > 0 then
@@ -660,6 +771,28 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 		self.drawn = state.drawn
 	end
 	self.speed = math.max(0, state.speed)
+	if root ~= nil then
+		-- Held off the stick (D-144): the gait follows the root's smoothed velocity and is paced by
+		-- the root's speed along it; a jostle that goes nowhere stands, so the feet neither walk in
+		-- place nor skate along a flank.
+		local x, z = stepBlocked(self, root, state, dt, clock, stickX, stickZ, forward, right)
+		if x ~= nil and z ~= nil then
+			local followX, followZ = self.followX, self.followZ
+			local follow = math.sqrt(followX * followX + followZ * followZ)
+			if follow > Config.idleSpeedThreshold then
+				followX /= follow
+				followZ /= follow
+				local cframe = root.CFrame
+				local look, side = cframe.LookVector, cframe.RightVector
+				forward = followX * look.X + followZ * look.Z
+				right = followX * side.X + followZ * side.Z
+				self.speed = math.max(0, x * followX + z * followZ)
+				blendSpeed = self.speed / (if clock > 0 then clock else 1)
+			else
+				blendSpeed = 0
+			end
+		end
+	end
 	if forward ~= 0 or right ~= 0 then
 		self.travelForward, self.travelRight = forward, right
 	elseif blendSpeed > Config.idleSpeedThreshold then
@@ -954,6 +1087,7 @@ function Locomotion.humanoidTracker(character: Model, drawnOf: (() -> boolean)?)
 			turning = 0,
 			fallHeight = fallHeight,
 			verticalVelocity = velocity.Y,
+			velocity = velocity,
 		}
 	end
 end

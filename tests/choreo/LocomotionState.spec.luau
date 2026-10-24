@@ -186,6 +186,22 @@ describe("LocomotionState.gaitWeights", function()
 			end
 		end
 	end)
+
+	it("wholeWalkSpeed: from it the walk of a direction shows alone (D-144)", function()
+		for _, drawn in { false, true } do
+			for degrees = 0, 315, 45 do
+				local f, r = math.cos(math.rad(degrees)), math.sin(math.rad(degrees))
+				local walkSpeed, walkDuration =
+					LocomotionState.walkGait(LocomotionState.walkWeights(f, r, drawn), f, r, drawn)
+				local whole = LocomotionState.wholeWalkSpeed(f, r, drawn)
+				expect(whole).toBeCloseTo(Stride.rateFloor * walkSpeed, 1e-9)
+				local at = LocomotionState.gaitWeights(whole, walkSpeed, walkDuration, nil, nil)
+				local below = LocomotionState.gaitWeights(whole * 0.99, walkSpeed, walkDuration, nil, nil)
+				expect(at).toBeCloseTo(1, 1e-9)
+				expect(below).toBeLessThan(1)
+			end
+		end
+	end)
 end)
 
 describe("LocomotionState.plantedAlong and settlePoints", function()

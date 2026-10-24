@@ -428,6 +428,13 @@ type Case = {
 	measureFrom: number,
 	measureTo: number?,
 	start: ((animator: any) -> ())?,
+	-- A body held off its stick (D-144): the root's velocity (world, studs a second) moves it in
+	-- place of direction x speed, with the stick (default `direction`) held while `moving`. The
+	-- velocity reaches Locomotion in the state, or with `readRoot` on the root part (the local
+	-- controller gives none).
+	velocity: ((t: number) -> any)?,
+	stick: any?,
+	readRoot: boolean?,
 }
 
 type TrackSample = { t: number, net: any }
@@ -477,18 +484,27 @@ local function simulate(case: Case): Result
 		local t = frame * dt
 		now = t
 		local speed = case.speed(t, dt, locomotion)
-		position += case.direction * (speed * dt)
+		local velocity = if case.velocity ~= nil then case.velocity(t) else case.direction * speed
+		position += velocity * dt
 		model.PrimaryPart.CFrame = CFrame.new(position)
 		local held = if case.moving ~= nil then case.moving(t) else speed > 0
-		locomotion:update(dt, {
-			moveDir = if held then case.direction else Vector3.zero,
+		local state: any = {
+			moveDir = if held then case.stick or case.direction else Vector3.zero,
 			speed = speed,
 			sprinting = case.sprinting == true,
 			grounded = true,
 			drawn = case.drawn(t),
 			turning = 0,
 			verticalVelocity = 0,
-		})
+		}
+		if case.velocity ~= nil then
+			if case.readRoot then
+				model.PrimaryPart.AssemblyLinearVelocity = velocity
+			else
+				state.velocity = velocity
+			end
+		end
+		locomotion:update(dt, state)
 		animator:step(dt)
 		if t >= case.measureFrom and t <= measureTo then
 			for _, name in GAIT_NAMES do
@@ -1034,6 +1050,110 @@ describe("paced to the root's speed (Locomotion and the animator at measureHz)",
 				local still = stillSlide(result, stopped, stopped + 0.5)
 				if still > Stride.transientBar then
 					table.insert(problems, ("%s: settled %.3f, limit %.3f"):format(label, still, Stride.transientBar))
+				end
+			end
+		end
+		expect(table.concat(problems, "; ")).toBe("")
+	end)
+end)
+
+describe("held off the stick (D-144): the posed body against a wall", function()
+	-- Walks ahead at walkSpeed for a second into a wall, the stick held on. The root's velocity
+	-- after the contact: `after(t, jostle)`, jostle being a seeded draw for each 60 Hz frame (the
+	-- engine's), a unit direction and a 0 .. 1 size.
+	local CONTACT = 1
+	local function intoWall(drawn: boolean, readRoot: boolean, after: (t: number, jostle: any) -> any): Case
+		local random = Random.new(11)
+		local draws = {}
+		local function jostle(t: number): any
+			local frame = math.floor(t * 60)
+			local draw = draws[frame]
+			if draw == nil then
+				local angle = random:NextNumber() * math.pi * 2
+				draw = { direction = Vector3.new(math.cos(angle), 0, math.sin(angle)), size = random:NextNumber() }
+				draws[frame] = draw
+			end
+			return draw
+		end
+		local function velocity(t: number): any
+			if t < CONTACT then
+				return forward() * Config.walkSpeed
+			end
+			return after(t, jostle(t))
+		end
+		return {
+			direction = forward(),
+			speed = function(t: number): number
+				local v = velocity(t)
+				return Vector3.new(v.X, 0, v.Z).Magnitude
+			end,
+			velocity = velocity,
+			moving = always(true),
+			drawn = always(drawn),
+			readRoot = readRoot,
+			duration = CONTACT + 3,
+			measureFrom = CONTACT + 1,
+		}
+	end
+
+	it("jostled about nothing, the body stands on planted feet", function()
+		local problems = {}
+		for _, drawn in { false, true } do
+			for _, readRoot in { false, true } do
+				local label = ("%s, velocity %s"):format(drawnLabel(drawn), if readRoot then "on the root" else "given")
+				local case = intoWall(drawn, readRoot, function(_t: number, jostle: any): any
+					return jostle.direction * (0.5 * jostle.size)
+				end)
+				local result = simulate(case)
+				for name, weight in result.shown do
+					if weight > 0 then
+						table.insert(problems, ("%s: %s shows %.3f"):format(label, name, weight))
+					end
+				end
+				local still = stillSlide(result, case.measureFrom, case.duration)
+				if still > Stride.slideBar then
+					table.insert(problems, ("%s: a foot slid %.3f, limit %.3f"):format(label, still, Stride.slideBar))
+				end
+			end
+		end
+		expect(table.concat(problems, "; ")).toBe("")
+	end)
+
+	it("slid along its flank, the feet step the slide's way", function()
+		local shape = body()
+		local problems = {}
+		for _, drawn in { false, true } do
+			-- Square to the side, and a diagonal (back and right) whose swing is checked no more than
+			-- the open-ground diagonals' are (a blend's swing scrapes where its clips' do).
+			for _, row in
+				{
+					{ slide = shape.right * 3.2, swing = true },
+					{ slide = (shape.right * 0.6 - shape.forward * 0.8) * 3, swing = false },
+					{ slide = -shape.right * 2, swing = true },
+				}
+			do
+				local slide = row.slide
+				for _, readRoot in { false, true } do
+					local label = ("%s, slide (%.1f, %.1f), velocity %s"):format(
+						drawnLabel(drawn),
+						slide.X,
+						slide.Z,
+						if readRoot then "on the root" else "given"
+					)
+					local case = intoWall(drawn, readRoot, function(): any
+						return slide
+					end)
+					local result = simulate(case)
+					local ahead = (result.shown[LocomotionState.clipFor("WalkForward", drawn)] or 0)
+						+ (result.shown[LocomotionState.clipFor("Run", drawn)] or 0)
+					if ahead > 0 then
+						table.insert(problems, ("%s: steps ahead (%.3f)"):format(label, ahead))
+					end
+					if row.swing then
+						checkBounded(problems, label, result)
+					else
+						checkPlants(problems, label, result, owned(result) + Stride.slideBar, nil)
+					end
 				end
 			end
 		end

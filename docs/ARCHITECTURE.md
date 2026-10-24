@@ -542,6 +542,23 @@ the sweep.
   - New spec files: tests/choreo/MixerSeek.spec.luau, tests/choreo/ChoreoLocalStep.spec.luau (a fresh Choreo copy on fake frame signals), tests/client/ActionLogicHold.spec.luau and tests/tools/gaitgen.spec.luau.
   - tests/client/CharacterController.spec.luau has a `choreo` option: a fresh real Choreo animating a real PlayerR15 rig on the spec clock, with task.delay on that clock, `renderOrder` ("bound" or "connections"), and `heartbeat()`, `wake()` and `hitch(seconds)` for render stalls and engine hitches. Its hold specs cover sleeps, jump and shorter hitches, hitches past the cancel time, 10, 20 and 30 fps holds and a slowed capture.
 
+### After the wake round and the blocked feet (D-141 to D-144)
+
+- ActionLogic.rigAsleep(heartbeatsSinceStep) is true when more than one Heartbeat ran with no rig step. ActionLogic.wokenDodge(pressedAt, now, jumpSeconds) returns "Show" or "Drop".
+- CharacterController counts Heartbeats since the last rig step (beforeRigStep and clearCharacter reset the count).
+  - dodge() always sends DodgeRequest at the press. While asleep, it plays no clip, leaves actionEndsAt nil, and parks the dodge in sleptDodge {pressedAt, token}.
+  - wakeSleptDodge(t) runs in step() after the root-motion read and before recordYaw. It plays the clip, starts actionEndsAt and calls showDodge() (CameraController.fovKick("Dash") plus Impact.dodge), or ends the action on "Drop".
+- Trails.bind(overrides?) is the seam for now, onRender, onWatch and clear (defaults: Engine.now, AccentStep.renderStepped, Engine.onHeartbeat, a pcall'd Trail:Clear()). The Heartbeat watchdog runs before sample and rebalance, and the stalled flag gates Enabled.
+- AntiCheatService.serverMoved(player, settleSeconds): boolean (server code only; a spec pins its callers). It calls resetSample and extends settleUntil. sample() resets and judges nothing until settleUntil passes; the first sample after that only records.
+- DevCombat "place" goes through the server BindableFunction only. help returns one usage line per command. src/shared/data/dev.luau gains place = { settleSeconds, maxCoordinate }.
+- `Locomotion.State` has an optional `velocity: Vector3?`, and `Locomotion.humanoidTracker` fills it.
+  - When it is nil (the local CharacterController passes none), Locomotion reads `root.AssemblyLinearVelocity` through a pcall and caches a root it cannot read.
+  - The velocity is used only when its horizontal size matches `state.speed` within `blocked.matchSpeed`.
+- The blocked latch (D-144, `stepBlocked`) runs right after `self.speed` is set in `update`.
+  - While blocked, forward, right and speed come from the smoothed real velocity, or the body stands when that velocity is under the idle threshold.
+  - Otherwise the stick drives the gait exactly as before.
+- `LocomotionState.wholeWalkSpeed(forward, right, drawn)` is rateFloor × the walk gait speed for a stick: the slowest speed that paces a whole walk. It is the blocked latch's release bar.
+
 ## Data tables (src/shared/data)
 
 | File | Holds |
@@ -564,7 +581,7 @@ the sweep.
 | `lighting.luau` | section 11 lighting values per floor |
 | `sfx.luau` | every sound by `family.Name` (D-080): entries `{ id, placeholder, volume, pitchRange?, spatial, note?, startAt?, stopAt?, fadeOut?, loop?, length?, title?, creator?, peakAt? }` (times in asset seconds before PlaybackSpeed; `Sfx.isReal`, `Sfx.region`, `Sfx.peakLead`, `Sfx.gainOf`, `Sfx.vocalName`); `cues` (layers of `{ name, delay, gainDb, pitch? }`), `contours` (EQ and reverb steps per group), `effects`, `engine` (playbackSpeed, soundVolume), `limits` (cueLayers, hitCueMinLayers, cueDelaySeconds, layerGainDb, maxPlayVolume, loopMinSeconds, contourSeconds, subLayers, bassBackDb, sharedAssetSemitones), `playback` (openEndSeconds, sameFrameSeconds), `preload`, `shatterCues` (normal, heavy, boss), `mix`, `music` |
 | `assets.luau` | asset ids by name; missing ids are reported |
-| `choreo.luau` | animation tunables: blend times and the blend easing, smear scale, idle cycle, locomotion speeds and clip names, `locomotion.stride` (ground speeds, touchdowns, pacing bounds and check bars, D-054), the stop (`stopStepsSeconds`, `stopMinCycles`, `stopEndSpeed`, D-059), `locomotion.lean.upright` (D-058), `locomotion.stopHandOverCycles` (D-136), `stall.jumpSeconds` (D-132), `priority.Sheath` and the `sheath` table (clips, draw-cuts, predictSeconds, sheatheDelay, stopBlend, remoteDrawDelay) |
+| `choreo.luau` | animation tunables: blend times and the blend easing, smear scale, idle cycle, locomotion speeds and clip names, `locomotion.stride` (ground speeds, touchdowns, pacing bounds and check bars, D-054), the stop (`stopStepsSeconds`, `stopMinCycles`, `stopEndSpeed`, D-059), `locomotion.lean.upright` (D-058), `locomotion.stopHandOverCycles` (D-136), `locomotion.stride.blocked` (D-144), `stall.jumpSeconds` (D-132), `priority.Sheath` and the `sheath` table (clips, draw-cuts, predictSeconds, sheatheDelay, stopBlend, remoteDrawDelay) |
 | `camera.luau` | section 10 camera numbers and the `punch` rows (Final, Kill; D-072) |
 | `fx.luau` | budgets, shard counts, trail lifetimes, telegraph sizes, the parry spark burst, quality tiers; `audio` (dedupe, `maxSoundLength`, the heartbeat loop and ramp, `materialSurface`, `ambience`: bed, rim wind, ramp, sample rate, rim band and floor, D-095) |
 | `playground.luau` | the Playground: field radius, rim, pillars, clouds, spawn tables, loadout |

@@ -169,6 +169,20 @@ local Choreo = {
 			-- at one phase, and pacing takes up most but not all of it (measured worst: 0.28).
 			-- Under a third of the foot's length: the foot pivots, it never skates.
 			transientBar = 0.3,
+			-- A body held off its stick (D-144): walking into an enemy or a wall, or slid along its
+			-- flank. Once the stick has stayed within `degrees` of one direction for
+			-- `settleSeconds` (a turn swings the root's velocity across after the stick; a pan
+			-- faster than degrees / settleSeconds never settles), a root velocity more than
+			-- `degrees` from both this frame's stick and the last one's (the engine moves the root
+			-- a frame behind the stick) marks the body blocked. It stays blocked until the stick
+			-- lets go, the body leaves the ground, or the velocity runs along the stick again at a
+			-- whole walk (the speed from which the walk shows alone, at rateFloor). Blocked, the
+			-- gait goes the way of the root's velocity smoothed over `followSeconds` (from zero at
+			-- the block), paced by the root's speed along it, and stands while that smoothed
+			-- velocity is under idleSpeedThreshold: a jostle never walks the body in place.
+			-- `matchSpeed`: studs a second the root's velocity may differ from the speed the
+			-- caller gave and still be the reading that speed came from (else nothing is blocked).
+			blocked = { degrees = 3, settleSeconds = 0.2, followSeconds = 0.15, matchSpeed = 0.01 },
 			-- Where each clip has its feet (studs from the root: forward, right): a gait clip at
 			-- that foot's Footstep, an Idle at its start. From the Footstep a gait clip's foot moves
 			-- straight back along its axis at its ground speed. When the weights change (a start, a

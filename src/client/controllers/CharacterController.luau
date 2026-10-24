@@ -24,6 +24,14 @@
 	feeding Locomotion and reading the root delta, so the body moves by this frame's root motion
 	(the engine does not pin Choreo's RenderStepped against this render step).
 
+	A dodge pressed while the display sleeps (D-141): the rig is asleep when a whole frame went by
+	with no render step (ActionLogic.rigAsleep, Heartbeat counted). The DodgeRequest goes at the
+	press, so the server's dodge (its i-frames, its cooldown) runs as ever; the show waits for the
+	wake's step: after that step the clip plays from its start and the FOV kick, the speed lines
+	and the whoosh with its landing go with it, so the body travels the whole dodge after the wake
+	and nothing sounds before it moves. A press older than stall.jumpSeconds at the wake lies in the
+	time the stall skipped and shows nothing (ActionLogic.wokenDodge).
+
 	The sheathed sword: the server's Drawn attribute says whether the sword is out. Every combat
 	request this client sends (an Art, a basic attack, a guard), a hit dealt or taken and a lock-on
 	also predict it for choreo.luau sheath.predictSeconds, so the draw shows at once; a dodge does
@@ -176,6 +184,10 @@ local STOP_CARRY: ActionLogic.StopCarryConfig = {
 local stopGait: ActionLogic.StopGait = { phase = 0, leftStep = 0, leftAfter = 0, rightStep = 0.5, rightAfter = 0 }
 -- When the local rig last stepped (now()); nil before its first step. A render stall stops it.
 local rigSteppedAt: number? = nil
+-- Heartbeats since the local rig last stepped: past one, a frame went by unrendered (D-141).
+local heartbeatsSinceRigStep = 0
+-- A dodge pressed while the rig slept (D-141): its press time and token; its show waits for the wake.
+local sleptDodge: { pressedAt: number, token: number }? = nil
 local unhookRigStep: (() -> ())? = nil
 local started = false
 
@@ -461,6 +473,7 @@ local function beforeRigStep(dt: number)
 		end
 	end
 	rigSteppedAt = now()
+	heartbeatsSinceRigStep = 0
 end
 
 --- The Art key went down: enter the start pose of the Art this slot picks from the current stance.
@@ -604,6 +617,14 @@ function CharacterController.setGuard(held: boolean)
 	end
 end
 
+-- The dodge's show on this screen: the FOV kick, the speed lines and the whoosh for anyone near.
+local function showDodge()
+	CameraController.fovKick("Dash")
+	if character ~= nil then
+		Impact.dodge(character :: Model, true)
+	end
+end
+
 --- Dodge: a 0.25 s step in the move direction (back when there is no input), 0.6 s cooldown.
 function CharacterController.dodge()
 	if animator == nil or root == nil or humanoid == nil then
@@ -637,19 +658,22 @@ function CharacterController.dodge()
 		else right
 	local clipId = playerClip("Dodge" .. direction)
 	local dodgeToken = nextToken()
+	-- Pressed while the rig sleeps (D-141): the request goes now and the show waits for the wake.
+	local asleep = rigSteppedAt ~= nil and ActionLogic.rigAsleep(heartbeatsSinceRigStep)
 	predicted = {
 		action = "Dodge",
 		clipId = clipId or "",
-		handle = if clipId ~= nil then animator:play(clipId) else nil,
+		handle = if clipId ~= nil and not asleep then animator:play(clipId) else nil,
 		token = dodgeToken,
 	}
 	setState("Dodge")
-	actionEndsAt = t + Combat.dodgeDuration
 	dodgeReadyAt = t + Combat.dodgeCooldown
-	CameraController.fovKick("Dash")
-	if character ~= nil then
-		-- The speed lines on this screen and the dodge whoosh for anyone near.
-		Impact.dodge(character :: Model, true)
+	if asleep then
+		actionEndsAt = nil
+		sleptDodge = { pressedAt = t, token = dodgeToken }
+	else
+		actionEndsAt = t + Combat.dodgeDuration
+		showDodge()
 	end
 	fire("DodgeRequest", { direction = { world.X, world.Y, world.Z }, clientTime = serverNow() })
 end
@@ -806,6 +830,31 @@ end
 
 -- ------------------------------------------------------------------ per-frame
 
+-- The wake's step for a dodge pressed while the rig slept (D-141), after the rig's step: the clip
+-- plays from its start (the next step moves it, so the wake's long step carries none of it) with
+-- its kick and cue, and the dodge lasts its whole length from here; a press the stall skipped
+-- ends it unseen. A dodge the server refused, or a respawn, in the dark has left nothing to show.
+local function wakeSleptDodge(t: number)
+	local slept = sleptDodge
+	if slept == nil then
+		return
+	end
+	sleptDodge = nil
+	local current = predicted
+	if current == nil or current.token ~= slept.token then
+		return
+	end
+	if ActionLogic.wokenDodge(slept.pressedAt, t, ChoreoData.stall.jumpSeconds) == "Drop" then
+		endAction()
+		return
+	end
+	if current.clipId ~= "" then
+		current.handle = animator:play(current.clipId)
+	end
+	actionEndsAt = t + Combat.dodgeDuration
+	showDodge()
+end
+
 local function step(dt: number)
 	local model, hum, rootPart = character, humanoid, root
 	if model == nil or hum == nil or rootPart == nil or animator == nil then
@@ -928,6 +977,7 @@ local function step(dt: number)
 			rootPart.CFrame = rootPart.CFrame + aimRotation(rootPart):VectorToWorldSpace(delta)
 		end
 	end
+	wakeSleptDodge(t)
 	recordYaw(rootPart, t)
 end
 
@@ -945,6 +995,8 @@ local function clearCharacter()
 		unhookRigStep = nil
 	end
 	rigSteppedAt = nil
+	heartbeatsSinceRigStep = 0
+	sleptDodge = nil
 	Siblings.call(Choreo, "setLocalModel", nil)
 	character, humanoid, root, animator, locomotion = nil, nil, nil, nil, nil
 	predicted = nil
@@ -1039,8 +1091,10 @@ function CharacterController.start()
 	-- The yaw history is kept on Heartbeat too, which runs while the display sleeps (RenderStepped
 	-- does not): a turn made outside the render step (the dev aim hook's face, the engine's own) is
 	-- timed when it happens, not taken for a turn made just before the next swing (D-112). The snap's
-	-- whip steps here too, so it ends on time while nothing renders.
+	-- whip steps here too, so it ends on time while nothing renders. A second Heartbeat with no rig
+	-- step tells a dodge the display sleeps (D-141).
 	RunService.Heartbeat:Connect(function()
+		heartbeatsSinceRigStep += 1
 		local rootPart = root
 		if rootPart ~= nil then
 			local t = now()

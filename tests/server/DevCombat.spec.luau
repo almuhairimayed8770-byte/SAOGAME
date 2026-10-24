@@ -3,9 +3,10 @@
 	The Studio combat trace hook (src/server/dev/DevCombat.server.luau, D-114, D-120, D-121), loaded
 	the way Studio runs it: a fresh copy of the Script with a fake CombatService (its traceSink field
 	and beginBasic / beginArt), a fake EntityService (setHp and heal as the real one clamps them), a
-	fake EnemyService (the hold), a fake RunService and Workspace for the gate, and a fake clock
-	behind task.wait and os.clock. The fake CombatService calls the sink from its clock
-	the way CombatService.tick does from Heartbeat.
+	fake EnemyService (the hold), a fake AntiCheatService (serverMoved, D-143), a fake RunService
+	and Workspace for the gate, and a fake clock behind task.wait and os.clock. The fake
+	CombatService calls the sink from its clock the way CombatService.tick does from Heartbeat. The
+	player's character model records each PivotTo, in one ordered list with serverMoved.
 ]]
 
 local luau = require("@lune/luau")
@@ -83,6 +84,10 @@ type World = {
 	sss: any,
 	invoke: (command: any, args: any) -> any,
 	plan: { windows: number, hits: number, reject: string? },
+	-- "place": the player's PivotTo and AntiCheatService.serverMoved calls, in the order made.
+	moves: { { kind: string, player: any?, seconds: number?, cframe: CFrame? } },
+	anticheat: { watched: boolean },
+	player: any,
 }
 
 type Options = { studio: boolean?, capture: any }
@@ -100,7 +105,15 @@ local function load(options: Options): World
 		state = "Idle",
 		player = player,
 		artSlots = nil,
-		model = { PrimaryPart = { Position = Vector3.new(0, 3, 0), CFrame = CFrame.new(0, 3, 0) } },
+		model = {
+			PrimaryPart = { Position = Vector3.new(0, 3, 0), CFrame = CFrame.new(0, 3, 0) },
+			Parent = { Name = "Workspace" },
+			PivotTo = function(self: any, cframe: CFrame)
+				table.insert(world.moves, { kind = "pivot", cframe = cframe })
+				self.PrimaryPart.CFrame = cframe
+				self.PrimaryPart.Position = cframe.Position
+			end,
+		},
 	}
 	local enemies = {
 		{
@@ -241,7 +254,18 @@ local function load(options: Options): World
 		ReplicatedStorage = Harness.game():GetService("ReplicatedStorage"),
 		ServerScriptService = sss,
 	}
-	local fakes: { [string]: any } = { CombatService = combat, EntityService = entities, EnemyService = enemyService }
+	local antiCheat = {
+		serverMoved = function(who: any, seconds: number): boolean
+			table.insert(world.moves, { kind = "serverMoved", player = who, seconds = seconds })
+			return world.anticheat.watched
+		end,
+	}
+	local fakes: { [string]: any } = {
+		CombatService = combat,
+		EntityService = entities,
+		EnemyService = enemyService,
+		AntiCheatService = antiCheat,
+	}
 	local created: { any } = {}
 	local required: { [string]: boolean } = {}
 	local printed: { string } = {}
@@ -311,6 +335,9 @@ local function load(options: Options): World
 			return created[1].OnInvoke(command, args)
 		end,
 		plan = { windows = 1, hits = 1, reject = nil },
+		moves = {},
+		anticheat = { watched = true },
+		player = player,
 	}
 	luau.load(Harness.readFile(FILE), { debugName = FILE, environment = env :: any })()
 	return world
@@ -640,5 +667,141 @@ describe("DevCombat sethp and heal (D-121)", function()
 		world.invoke("heal", nil)
 		expect(world.combat.traceSink).toBeNil()
 		expect(#world.calls).toBe(0)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- "place": the safe dev teleport (D-143)
+-- ------------------------------------------------------------------------------------------
+
+local PLACE = Dev.place
+
+-- The yaw of a CFrame's flat look (0 looks along -Z, + = left).
+local function yawOf(cframe: CFrame): number
+	local look = cframe.LookVector
+	return math.deg(math.atan2(-look.X, -look.Z))
+end
+
+describe("DevCombat place (D-143)", function()
+	it("tells the anti-cheat first, then pivots the first player's character to the point and facing", function()
+		local world = load({ studio = true, capture = true })
+		local reply = world.invoke("place", { position = { 10, 4, -20 }, facing = 90 })
+		expect(reply.ok).toBe(true)
+		expect(reply.entityId).toBe(1)
+		expect(reply.from).toEqual({ 0, 3, 0 })
+		expect(reply.to).toEqual({ 10, 4, -20 })
+		expect(reply.facing).toBe(90)
+		expect(reply.settleSeconds).toBe(PLACE.settleSeconds)
+		expect(reply.anticheat).toBe(true)
+		expect(#world.moves).toBe(2)
+		expect(world.moves[1].kind).toBe("serverMoved")
+		expect(world.moves[1].player).toBe(world.player)
+		expect(world.moves[1].seconds).toBe(PLACE.settleSeconds)
+		expect(world.moves[2].kind).toBe("pivot")
+		local cframe = world.moves[2].cframe :: CFrame
+		expect((cframe.Position - Vector3.new(10, 4, -20)).Magnitude < 1e-4).toBe(true)
+		expect(yawOf(cframe)).toBeCloseTo(90, 1e-3)
+		-- It sets the fight up and nothing else: no swing, no sink.
+		expect(#world.calls).toBe(0)
+		expect(world.combat.traceSink).toBeNil()
+	end)
+
+	it("keeps the root's own facing when none is given, and takes a Vector3", function()
+		local world = load({ studio = true, capture = true })
+		world.playerRecord.model.PrimaryPart.CFrame = CFrame.new(0, 3, 0) * CFrame.Angles(0, math.rad(-45), 0)
+		local reply = world.invoke("place", { position = Vector3.new(1, 3, 1) })
+		expect(reply.ok).toBe(true)
+		expect(reply.facing).toBeCloseTo(-45, 1e-2)
+		expect(yawOf(world.moves[2].cframe :: CFrame)).toBeCloseTo(-45, 1e-3)
+	end)
+
+	it("picks the player by entity id, Name or UserId", function()
+		for _, args in
+			{
+				{ entityId = 1, position = { 0, 3, 5 } },
+				{ player = "Player1", position = { 0, 3, 5 } },
+				{ player = 1, position = { 0, 3, 5 } },
+			}
+		do
+			local world = load({ studio = true, capture = true })
+			local reply = world.invoke("place", args)
+			expect(reply.ok).toBe(true)
+			expect(reply.entityId).toBe(1)
+			expect(#world.moves).toBe(2)
+		end
+	end)
+
+	it("says when the anti-cheat does not watch the player (it still moves them)", function()
+		local world = load({ studio = true, capture = true })
+		world.anticheat.watched = false
+		local reply = world.invoke("place", { position = { 0, 3, 5 } })
+		expect(reply.ok).toBe(true)
+		expect(reply.anticheat).toBe(false)
+		expect(world.moves[2].kind).toBe("pivot")
+	end)
+
+	it("refuses bad arguments and moves nobody: position, facing, who, and a dead or rootless player", function()
+		local far = PLACE.maxCoordinate + 1
+		local bad: { { [string]: any } } = {
+			{},
+			{ position = "0, 3, 0" },
+			{ position = { 0, 3 } },
+			{ position = { 0, "3", 0 } },
+			{ position = { 0, 0 / 0, 0 } },
+			{ position = { math.huge, 3, 0 } },
+			{ position = { far, 3, 0 } },
+			{ position = Vector3.new(0, -far, 0) },
+			{ position = { 0, 3, 0 }, facing = "north" },
+			{ position = { 0, 3, 0 }, facing = 0 / 0 },
+			{ position = { 0, 3, 0 }, entityId = 11 },
+			{ position = { 0, 3, 0 }, entityId = 99 },
+			{ position = { 0, 3, 0 }, entityId = "1" },
+			{ position = { 0, 3, 0 }, player = "Nobody" },
+			{ position = { 0, 3, 0 }, player = { 1 } },
+			{ position = { 0, 3, 0 }, player = "Player1", entityId = 1 },
+		}
+		for _, args in bad do
+			local world = load({ studio = true, capture = true })
+			local reply = world.invoke("place", args)
+			expect(reply.ok).toBe(false)
+			expect(typeof(reply.error)).toBe("string")
+			expect(#world.moves).toBe(0)
+		end
+		local world = load({ studio = true, capture = true })
+		expect(world.invoke("place", nil).ok).toBe(false)
+		world.playerRecord.state = "Dead"
+		expect(world.invoke("place", { position = { 0, 3, 0 } }).ok).toBe(false)
+		world.playerRecord.state = "Idle"
+		world.playerRecord.model.Parent = nil
+		expect(world.invoke("place", { position = { 0, 3, 0 } }).ok).toBe(false)
+		expect(#world.moves).toBe(0)
+	end)
+
+	it("exists only where DevCombat does, and only behind the server BindableFunction", function()
+		for _, options in { { studio = false, capture = true }, { studio = true, capture = nil } } do
+			local world = load(options)
+			expect(#world.created).toBe(0)
+			expect(world.required.AntiCheatService).toBeNil()
+		end
+		local world = load({ studio = true, capture = true })
+		expect(#world.created).toBe(1)
+		expect(world.created[1].ClassName).toBe("BindableFunction")
+		expect(world.created[1].Parent).toBe(world.sss)
+		-- No remote and no Net handler leads to it: the hook makes none and names none.
+		local source = Harness.readFile(FILE)
+		for _, word in { "RemoteEvent", "RemoteFunction", "OnServerEvent", "OnServerInvoke", "Net." } do
+			expect(source:find(word, 1, true)).toBeNil()
+		end
+	end)
+
+	it("help lists place with its arguments", function()
+		local world = load({ studio = true, capture = true })
+		local reply = world.invoke("help", nil)
+		expect(table.find(reply.commands, "place")).never.toBeNil()
+		for _, name in reply.commands do
+			expect(typeof(reply.usage[name])).toBe("string")
+		end
+		expect(reply.usage.place:find("position", 1, true)).never.toBeNil()
+		expect(reply.usage.place:find("facing", 1, true)).never.toBeNil()
 	end)
 end)
