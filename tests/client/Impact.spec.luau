@@ -645,6 +645,181 @@ describe("Impact.hit, after the impact frames", function()
 	end)
 end)
 
+-- Measured in Studio (build ea7a8e8, the display asleep: RenderStepped 0/s, Heartbeat 60/s): a
+-- 1 HP boar killed by a basic swing during the stall. The impact picture was dropped and the shards
+-- were gone, but about a second after the wake a capture showed the white glint star, and every
+-- pooled glint stayed enabled about 3 s after the wake. The real chain: the director holds the 3D
+-- accents behind the undrawn picture, ImpactFrames' Heartbeat watchdog drops it at its hit-stop,
+-- the director lets the accents go, still inside the stall; each accent then waited for a render
+-- step to end it. Here the real overlay, glint, crescent and speed lines run on a hand clock with
+-- Heartbeat beating and no render step at all.
+describe("Impact across a render stall (the real accents)", function()
+	it("leaves no accent of a hit taken while nothing rendered on for the frame that comes back", function()
+		local ImpactFrames = Harness.load("src/client/fx/ImpactFrames")
+		local FlashBudget = Harness.load("src/client/fx/FlashBudget")
+		local Glint = Harness.load("src/client/fx/Glint")
+		local SlashArc = Harness.load("src/client/fx/SlashArc")
+		local SpeedLines = Harness.load("src/client/fx/SpeedLines")
+		local Quality = Harness.load("src/client/fx/Quality")
+		local F = combat.hitStopFrameSeconds
+		local world = newWorld()
+		local heartbeats: { (dt: number) -> () } = {}
+		local renders: { (dt: number) -> () } = {}
+		local timers: { { at: number, fn: () -> () } } = {}
+		local function connect(list: { (dt: number) -> () }): (fn: (dt: number) -> ()) -> () -> ()
+			return function(fn: (dt: number) -> ()): () -> ()
+				table.insert(list, fn)
+				return function()
+					local index = table.find(list, fn)
+					if index ~= nil then
+						table.remove(list, index)
+					end
+				end
+			end
+		end
+		local clock = function(): number
+			return world.clock
+		end
+		ImpactFrames.bind({
+			now = clock,
+			onRender = connect(renders),
+			onHeartbeat = connect(heartbeats),
+			playerGui = function()
+				return Instance.new("Folder")
+			end,
+			camera = function()
+				return nil
+			end,
+			project = function()
+				return nil
+			end,
+			aspect = function()
+				return 16 / 9
+			end,
+			quality = function()
+				return "High"
+			end,
+			random = Random.new(5),
+		})
+		local accentDeps: any = {
+			now = clock,
+			onStep = connect(renders),
+			onWatch = connect(heartbeats),
+			viewport = function(): Vector2?
+				return Vector2.new(1920, 1080)
+			end,
+		}
+		local tierBefore = Quality.get()
+		Quality.set("High")
+		for _, module in { Glint, SlashArc, SpeedLines } do
+			module.bind(accentDeps)
+			module.reset()
+		end
+		FlashBudget.reset()
+		world.deps.impactFrames = ImpactFrames
+		world.deps.glint = Glint
+		world.deps.slashArc = SlashArc
+		world.deps.speedLines = SpeedLines
+		world.deps.delay = function(seconds: number, fn: () -> ())
+			table.insert(timers, { at = world.clock + seconds, fn = fn })
+		end
+		bind(world)
+		-- One 60 fps engine frame with nothing rendered: the clock, Heartbeat, then due timers.
+		local function beat()
+			world.clock += F
+			for _, fn in table.clone(heartbeats) do
+				fn(F)
+			end
+			for index = #timers, 1, -1 do
+				local timer = timers[index]
+				if timer.at <= world.clock + 1e-9 then
+					table.remove(timers, index)
+					timer.fn()
+				end
+			end
+		end
+		-- Every accent instance still switched on (what a frame drawn now would show).
+		local function lit(): number
+			local count = 0
+			for _, slot in Glint.slots() do
+				if (slot.gui :: BillboardGui).Enabled then
+					count += 1
+				end
+			end
+			for _, arc in SlashArc.arcs() do
+				for _, beam in arc.outer do
+					count += if beam.Enabled then 1 else 0
+				end
+				for _, beam in arc.inner do
+					count += if beam.Enabled then 1 else 0
+				end
+			end
+			for _, line in SlashArc.lines() do
+				for _, beam in line.beams do
+					count += if beam.Enabled then 1 else 0
+				end
+			end
+			if (SpeedLines.view().gui :: ScreenGui).Enabled then
+				count += 1
+			end
+			return count
+		end
+		local ok, err = pcall(function()
+			world.swing = Vector3.new(1, 0, 0)
+			local gap = 0
+			-- The kill: its picture waits for a first drawn frame, gives up at its hit-stop, and the
+			-- glint, the crescent and the slash line are let go inside the stall.
+			Impact.hit(hitInfo(world, { tier = "Kill", killed = true }))
+			local released: number? = nil
+			local longest = math.max(Glint.seconds("Large"), SlashArc.seconds("Large"), SlashArc.lineSeconds("Large"))
+			for _ = 1, 60 do
+				beat()
+				gap += F
+				if released == nil and lit() > 0 then
+					released = gap
+				end
+			end
+			expect(released).never.toBeNil()
+			-- Each accent ended at its own length after it was let go, frame by frame on Heartbeat.
+			expect(lit()).toBe(0)
+			-- Then a blow a second and a dodge while the display sleeps on (more than the pool's cap).
+			for second = 1, 53 do
+				Impact.hit(hitInfo(world, { tier = "Normal" }))
+				if second % 10 == 0 then
+					Impact.dodge(world.attacker, true)
+				end
+				for _ = 1, 60 do
+					beat()
+					gap += F
+				end
+				expect(lit()).toBe(0)
+			end
+			-- The display wakes: before any render step runs, nothing of the stall is switched on,
+			-- and nothing waits for that frame.
+			expect(lit()).toBe(0)
+			expect(ImpactFrames.isShowing()).toBe(false)
+			expect(#renders).toBe(0)
+			expect(#heartbeats).toBe(0)
+			expect(Glint.activeCount()).toBe(0)
+			expect(SlashArc.activeCount()).toBe(0)
+			expect(SlashArc.activeLines()).toBe(0)
+			expect(SpeedLines.isShowing()).toBe(false)
+			expect(gap).toBeGreaterThan(54 - F)
+			expect(longest).toBeGreaterThan(0)
+		end)
+		for _, module in { Glint, SlashArc, SpeedLines } do
+			module.reset()
+			module.bind(nil)
+		end
+		Quality.set(tierBefore)
+		ImpactFrames.bind(nil)
+		FlashBudget.reset()
+		if not ok then
+			error(err, 0)
+		end
+	end)
+end)
+
 describe("Impact swing tangent", function()
 	it("uses the blade's swing direction when Trails knows it", function()
 		local world = bind(newWorld())

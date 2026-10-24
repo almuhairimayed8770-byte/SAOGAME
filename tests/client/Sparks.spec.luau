@@ -3,6 +3,7 @@
 -- block, moved to the clash point and emitting the quality tier's share of the particles.
 -- Emit itself is engine-only, so the burst's count is read from the return value.
 local Sparks = Harness.load("src/client/fx/Sparks")
+local Bursts = Harness.load("src/client/fx/Bursts")
 local Quality = Harness.load("src/client/fx/Quality")
 local fx = Harness.load("src/shared/data/fx")
 local palette = Harness.load("src/shared/data/palette")
@@ -87,5 +88,55 @@ describe("Sparks", function()
 		local sizes = emitter.Size.Keypoints
 		expect(sizes[1].Value).toBeCloseTo(spark.size, 1e-4)
 		expect(sizes[#sizes].Value).toBeCloseTo(0, 1e-6)
+	end)
+	-- The display asleep (RenderStepped 0/s, Heartbeat 60/s): the director lets the parry's sparks
+	-- go once the inverted frame gives up its wait, inside the stall. Particles fly only on rendered
+	-- frames, so the burst is cleared on Heartbeat at its longest spark's life and never flies late.
+	it("clears a parry burst on Heartbeat at its longest spark's life (a render stall)", function()
+		local clock = 0
+		local watch: ((number) -> ())? = nil
+		local cleared: { { emitter: any, at: number } } = {}
+		local emitted = 0
+		Bursts.bind({
+			now = function(): number
+				return clock
+			end,
+			onHeartbeat = function(fn: (number) -> ()): () -> ()
+				watch = fn
+				return function()
+					if watch == fn then
+						watch = nil
+					end
+				end
+			end,
+			emit = function(_emitter: any, count: number)
+				emitted += count
+			end,
+			clear = function(emitter: any)
+				table.insert(cleared, { emitter = emitter, at = clock })
+			end,
+		})
+		local ok, err = pcall(function()
+			atTier("High", function()
+				local count = Sparks.parry(Vector3.new(1, 2, 3))
+				expect(emitted).toBe(count)
+				expect(watch).never.toBeNil()
+				local F = 1 / 60
+				while watch ~= nil and clock < 5 do
+					clock += F
+					local beat = watch :: (number) -> ()
+					beat(F)
+				end
+				expect(#cleared).toBe(1)
+				expect(cleared[1].emitter).toBe(Sparks.emitter())
+				expect(cleared[1].at).toBeGreaterThanOrEqual(spark.lifetime.max - 1e-9)
+				expect(cleared[1].at).toBeLessThanOrEqual(spark.lifetime.max + F + 1e-9)
+			end)
+		end)
+		Bursts.reset()
+		Bursts.bind(nil)
+		if not ok then
+			error(err, 0)
+		end
 	end)
 end)

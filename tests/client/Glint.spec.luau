@@ -14,10 +14,11 @@ local glint = accents.glint
 
 local clock = 0
 local stepFn: ((number) -> ())? = nil
+local watchFn: ((number) -> ())? = nil
 local connects = 0
 local disconnects = 0
 
--- A fresh fake clock and step; every glint from an earlier test is hidden.
+-- A fresh fake clock, render step and Heartbeat watchdog; every glint from an earlier test is hidden.
 local function fresh()
 	Glint.bind({
 		now = function()
@@ -33,13 +34,34 @@ local function fresh()
 				end
 			end
 		end,
-	})
+		onWatch = function(fn: (number) -> ()): () -> ()
+			watchFn = fn
+			return function()
+				if watchFn == fn then
+					watchFn = nil
+				end
+			end
+		end,
+	} :: any)
 	Glint.reset()
 	-- Counted after the bind: letting the last test's loop go is not this test's disconnect.
 	clock = 0
 	stepFn = nil
+	watchFn = nil
 	connects = 0
 	disconnects = 0
+end
+
+-- Advances the fake clock `count` engine frames with nothing rendered (the display asleep):
+-- Heartbeat runs, the render step does not.
+local function beats(count: number)
+	for _ = 1, count do
+		clock += F
+		local fn = watchFn
+		if fn ~= nil then
+			fn(F)
+		end
+	end
 end
 
 -- Advances the fake clock `count` frames, running the bound step once per frame.
@@ -302,6 +324,63 @@ describe("Glint", function()
 			end
 		)
 	end
+
+	-- The display asleep (measured in Studio: RenderStepped 0/s, Heartbeat 60/s). A glint asked
+	-- for then (the director lets its accents go once an undrawn impact picture gives up its wait)
+	-- must not stay enabled until a render step comes: a frame presented or captured before the
+	-- first render step after the stall showed it, and every one asked for during the stall stayed
+	-- enabled seconds after the wake. The Heartbeat watchdog ends each at its own length.
+	it("ends a glint on Heartbeat at its own length while no frame renders", function()
+		atTier("High", function()
+			fresh()
+			Glint.play(Vector3.zero, "Large")
+			local view = Glint.slots()[1]
+			local playedSize = view.star.Size
+			expect(watchFn).never.toBeNil()
+			beats(1)
+			-- Heartbeat only ends what is over; the pose is the render step's (nothing written).
+			expect(view.star.Size).toBe(playedSize)
+			expect(Glint.activeCount()).toBe(1)
+			local total = Glint.seconds("Large")
+			local count = 1
+			while Glint.activeCount() > 0 and count < 600 do
+				beats(1)
+				count += 1
+			end
+			expect(Glint.activeCount()).toBe(0)
+			expect(count * F).toBeLessThanOrEqual(total + F + 1e-9)
+			expect(count * F).toBeGreaterThanOrEqual(total - 1e-9)
+			for _, slot in Glint.slots() do
+				expect((slot.gui :: BillboardGui).Enabled).toBe(false)
+			end
+			-- Both loops let go: nothing runs while no glint shows.
+			expect(watchFn).toBeNil()
+			expect(stepFn).toBeNil()
+			expect(disconnects).toBe(1)
+		end)
+	end)
+
+	it("a stall full of glints leaves none enabled for the frame that comes back", function()
+		atTier("High", function()
+			fresh()
+			-- A hit a second for 54 s while nothing renders (more than the pool's cap).
+			local cap = accents.quality.High.glints
+			for _ = 1, 54 do
+				Glint.play(Vector3.new(0, 3, 0), "Large")
+				expect(Glint.activeCount()).toBe(1)
+				beats(60)
+			end
+			expect(Glint.activeCount()).toBe(0)
+			local enabled = 0
+			for _, slot in Glint.slots() do
+				if (slot.gui :: BillboardGui).Enabled then
+					enabled += 1
+				end
+			end
+			expect(enabled).toBe(0)
+			expect(#Glint.slots()).toBeLessThanOrEqual(math.max(cap, 1))
+		end)
+	end)
 
 	it("caps concurrent glints at the tier's count and reuses the oldest past it", function()
 		for _, tier in { "High", "Low" } do

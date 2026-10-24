@@ -490,6 +490,19 @@ the sweep.
 - **Mixer:** a fallback handle whose targetWeight is 0 (another Base clip active) advances into a scratch list cleared every step, so its crossed events never reach Choreo's events signal. Root motion and the clock are unchanged.
 - **Clips validator:** its choreo cross-check also owns the idle-phase spread (validator constants PHASE_RUN 8 and PHASE_SHARE 3) and the rule that every choreo.rigs entry with a walk has a looping idle and walk.
 
+### After the controlled fight (D-125 to D-131)
+
+- src/client/fx/AccentStep.luau: `deps.onWatch` (Heartbeat) sits beside `deps.onStep` (render), and `AccentStep.connect(deps, render, watch)` binds both. Glint, SlashArc and SpeedLines draw and fade on the render step and end what has run its length on the watch, so no accent outlives a render stall (D-125, D-117).
+- src/client/fx/Bursts.luau (new): one-shot ParticleEmitter bursts. `Bursts.emit(emitter, count, lifetime)` emits and Clear()s on Heartbeat once the longest particle is gone. `pending`, `step`, `reset` and `bind(overrides)` are seams for specs. Used by Sparks.parry and Shatter's flash (D-125).
+- src/client/controllers/AimLogic.luau: snap turn helpers `snapShown`, `newSnap`, `snapStep`, `snapLeft` and `snapSeconds`. `Config` gains `snapTurnSeconds` and `snapTurnEasing` (D-126).
+- src/client/controllers/CharacterController.luau: a swing or release faces the whole snap at once, and the body shows it over aim.snapTurnSeconds (render step and Heartbeat). `aimRotation` (the root plus the rest of the turn) is what requests, dodges, guard facing and root motion read. New `lastFacing()` and `setCaptureTimeScale(scale): boolean` (Studio capture places only). It passes Locomotion `clockScale` = the capture scale (D-126, D-127). Replace the D-112 wording "a swing turns the rest of the way at once" with "faces the rest of the way at once; the body whips round over aim.snapTurnSeconds".
+- src/client/choreo/Locomotion.luau: State gains `clockScale: number?`, the clock the root itself moves on (the local body in a slowed capture; nil = real time). The blend reads speed and yaw rate at 1x (divided by clockScale); the pace still divides the real speed by the mixer's scale. In stepGait, walks advance by axis·move, and Run and Sprint by self.runAlong, set each update from LocomotionState.runAlong (D-127, D-129).
+- src/client/choreo/LocomotionState.luau: moveWeights computes the cadence shares, then a held-facing pass (D-129) that gives Run's facing-push share to the side walk while the body is held off its move. Exposes LocomotionState.runAlong(input).
+- src/client/dev/Capture.client.luau: the local character's time scale goes through CharacterController.setCaptureTimeScale, which in Studio also moves the body at that scale (D-127).
+- src/client/dev/DevAim.client.luau: swing reports yawAtSend from the facing the request carried (CharacterController.lastFacing); the body's turn shows after the send (D-126).
+- tools/validators/combat.luau: the snap whip rules (D-126). tools/validators/stride.luau: the gait pacing data rules (D-131).
+- tests/choreo/GroundClearance.spec.luau also caps Sheathe's tip speed at choreo.sheath.sheatheTipSpeed (D-130).
+
 ## Data tables (src/shared/data)
 
 | File | Holds |

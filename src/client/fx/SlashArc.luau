@@ -22,7 +22,9 @@
 	Position on a host with no turn, so a frame of it builds no CFrame either.
 
 	Neither is a full-screen flash. At most the tier's `arcs` crescents and `lines` lines play at
-	once; past that the oldest is reused. Every instance is pooled.
+	once; past that the oldest is reused. Every instance is pooled. A Heartbeat watchdog
+	(AccentStep onWatch) turns each off at its length while no frame renders, so one asked for
+	while the display sleeps is never left on for the frame that comes back.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -464,7 +466,9 @@ local function linePoseInto(size: string, elapsed: number, into: LinePose): Line
 	return into
 end
 
-local function step()
+-- `rendering`: the render step wipes the crescents and lays the lines; the watchdog (no frame
+-- drawn) only turns off those past their length.
+local function step(rendering: boolean)
 	local now = deps.now()
 	local any = false
 	for _, arc in arcs do
@@ -477,7 +481,9 @@ local function step()
 			continue
 		end
 		any = true
-		setArcTransparency(arc, outerFront, innerFront)
+		if rendering then
+			setArcTransparency(arc, outerFront, innerFront)
+		end
 	end
 	for _, line in lines do
 		if not line.active then
@@ -489,7 +495,9 @@ local function step()
 			continue
 		end
 		any = true
-		layLine(line, pose)
+		if rendering then
+			layLine(line, pose)
+		end
 	end
 	if not any and stopLoop ~= nil then
 		local stop = stopLoop :: () -> ()
@@ -500,8 +508,10 @@ end
 
 local function ensureLoop()
 	if stopLoop == nil then
-		stopLoop = deps.onStep(function()
-			step()
+		stopLoop = AccentStep.connect(deps, function()
+			step(true)
+		end, function()
+			step(false)
 		end)
 	end
 end
@@ -773,7 +783,7 @@ end
 
 --- Advances every crescent and line to the clock's now (the step loop calls it; specs may too).
 function SlashArc.step()
-	step()
+	step(true)
 end
 
 --- Replaces the clock or the frame step (specs); stops the running loop.

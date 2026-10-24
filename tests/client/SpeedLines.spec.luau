@@ -17,6 +17,7 @@ local speed = accents.speedLines
 
 local clock = 0
 local stepFn: ((number) -> ())? = nil
+local watchFn: ((number) -> ())? = nil
 local connects = 0
 local disconnects = 0
 local screen: Vector2? = Vector2.new(1920, 1080)
@@ -36,16 +37,37 @@ local function fresh(viewport: Vector2?)
 				end
 			end
 		end,
+		onWatch = function(fn: (number) -> ()): () -> ()
+			watchFn = fn
+			return function()
+				if watchFn == fn then
+					watchFn = nil
+				end
+			end
+		end,
 		viewport = function(): Vector2?
 			return screen
 		end,
-	})
+	} :: any)
 	SpeedLines.reset()
 	clock = 0
 	stepFn = nil
+	watchFn = nil
 	connects = 0
 	disconnects = 0
 	screen = viewport
+end
+
+-- Advances the fake clock `count` engine frames with nothing rendered (the display asleep):
+-- Heartbeat runs, the render step does not.
+local function beats(count: number)
+	for _ = 1, count do
+		clock += F
+		local fn = watchFn
+		if fn ~= nil then
+			fn(F)
+		end
+	end
 end
 
 local function frames(count: number)
@@ -297,6 +319,33 @@ describe("SpeedLines", function()
 			end
 		)
 	end
+
+	-- The display asleep (measured: RenderStepped 0/s, Heartbeat 60/s): a dodge while no frame
+	-- renders. The Heartbeat watchdog hides the lines at the kind's length, so the screen that
+	-- comes back (or a capture before the next render step) never shows them.
+	it("hides the lines on Heartbeat at the kind's length while no frame renders", function()
+		atTier("High", function()
+			fresh(Vector2.new(1920, 1080))
+			SpeedLines.play("Dodge")
+			expect(watchFn).never.toBeNil()
+			local laid = visibleLines()[1].Size
+			beats(1)
+			-- Heartbeat only ends what is over; the rush and the fade are the render step's.
+			expect(visibleLines()[1].Size).toBe(laid)
+			local count = 1
+			while SpeedLines.isShowing() and count < 600 do
+				beats(1)
+				count += 1
+			end
+			expect(SpeedLines.isShowing()).toBe(false)
+			expect(count * F).toBeLessThanOrEqual(speed.kinds.Dodge.seconds + F + 1e-9)
+			expect((SpeedLines.view().gui :: ScreenGui).Enabled).toBe(false)
+			expect(#visibleLines()).toBe(0)
+			expect(watchFn).toBeNil()
+			expect(stepFn).toBeNil()
+			expect(disconnects).toBe(1)
+		end)
+	end)
 
 	it("covers a small share of the screen: thin lines, never a flash", function()
 		atTier("High", function()

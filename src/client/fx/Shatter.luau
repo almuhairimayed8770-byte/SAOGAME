@@ -4,7 +4,8 @@
 
 	The caller (Replication) has already frozen the rig for combat.deathFreeze with the audio
 	ducked. `play(model, kind)` then hides the rig's parts, fires a single white ParticleEmitter
-	burst, takes 40 to 80 pooled wedge shards (300 for bosses) from ReplicatedStorage, lays them
+	burst (through Bursts, cleared on Heartbeat at its lifetime so a death while nothing renders
+	never flashes when rendering comes back), takes 40 to 80 pooled wedge shards (300 for bosses) from ReplicatedStorage, lays them
 	over the limbs with ShatterMath and animates them on the client with CFrames (no physics):
 	outward and upward drift, slow rotation, a 6-stud rise over 0.8 s (3 s for bosses), shrinking
 	and fading to transparent, then every shard goes back to the pool. The shatter cue plays by the
@@ -25,6 +26,7 @@ local Signal = require(Shared.util.Signal)
 local Engine = require(script.Parent.Engine)
 local Quality = require(script.Parent.Quality)
 local ShatterMath = require(script.Parent.ShatterMath)
+local Bursts = require(script.Parent.Bursts)
 local OutlineManager = require(script.Parent.OutlineManager)
 local Trails = require(script.Parent.Trails)
 local Telegraphs = require(script.Parent.Telegraphs)
@@ -175,11 +177,8 @@ local function burst(center: Vector3, boss: boolean)
 	emitter.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, size), NumberSequenceKeypoint.new(1, 0) })
 	emitter.Lifetime = NumberRange.new(flash.lifetime)
 	emitter.Speed = NumberRange.new(flash.speed)
-	if count > 0 then
-		pcall(function()
-			emitter:Emit(count)
-		end)
-	end
+	-- Cleared on Heartbeat at its lifetime: a death while nothing renders never flashes late.
+	Bursts.emit(emitter, count, flash.lifetime)
 end
 
 local function step()

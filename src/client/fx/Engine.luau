@@ -131,7 +131,7 @@ end
 --- A named Folder under `parent` for pooled parts, created once; detached under Lune.
 function Engine.folder(parent: Instance, name: string): Instance
 	local key = tostring(parent) .. "/" .. name
-	local existing = folders[key]
+	local existing: Instance? = folders[key]
 	if existing ~= nil then
 		return existing
 	end

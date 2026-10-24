@@ -38,8 +38,12 @@ local Dev = {
 		default = 1,
 		remoteName = "DevTimeScale", -- RemoteEvent under ReplicatedStorage, created by the dev server script
 		remotePerSecond = 4, -- the server ignores faster requests
-		-- Only the Choreo animators slow down: the reel's impact frames, accents, risers and every
-		-- sound keep real time, so a slowed recording judges poses, not hit sync.
+		-- The Choreo animators slow down, and in Studio so does the local body's own movement (its
+		-- walk, the two-step stop, the lock turn, the snap's whip: CharacterController
+		-- .setCaptureTimeScale; never in live play), so its slowed feet keep their ground and its
+		-- blend stays the 1x one (a slowed run shows Run); the reel's impact frames, accents,
+		-- risers and every sound keep real time, so a slowed recording judges poses, not hit sync.
+		-- Every step is above 0 and at most 1 (tools/validators/dev.luau): never faster than play.
 		slowNote = "animation only: hit FX and sounds run at 1x",
 	},
 

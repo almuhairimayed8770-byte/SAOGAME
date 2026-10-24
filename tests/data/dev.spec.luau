@@ -246,3 +246,28 @@ describe("dev.luau aim and trace", function()
 		end)
 	end
 end)
+
+describe("dev.luau timeScale steps", function()
+	-- The capture slows the local body with these (CharacterController.setCaptureTimeScale), so a
+	-- step past 1x would move it faster than the anti-cheat's cap allows.
+	it("every step is above 0 and at most 1, and the default is one of them", function()
+		for _, bad in { 0, -0.5, 1.5, 0 / 0, "0.5" } do
+			local problems = runValidator(function(dev: any)
+				dev.timeScale.steps = { 1, bad }
+			end)
+			expect(hasProblem(problems, "timeScale.steps")).toBe(true)
+		end
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.timeScale.steps = {}
+			end),
+			"timeScale.steps"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.timeScale.default = 0.75
+			end),
+			"timeScale.default"
+		)).toBe(true)
+	end)
+end)

@@ -102,6 +102,10 @@ export type State = {
 	turning: number, -- signed degrees from the facing to the desired facing (+ = left)
 	fallHeight: number?, -- studs fallen, on the landing frame
 	verticalVelocity: number?,
+	-- The clock the root itself moves on, when it is slowed with the clips (the local body in a
+	-- dev capture, CharacterController.setCaptureTimeScale; nil = real time, as for every remote
+	-- rig): the blend reads the root's speed and turn at 1x, dividing by it.
+	clockScale: number?,
 }
 
 export type Raycast = (origin: Vector3, direction: Vector3) -> Vector3?
@@ -423,7 +427,7 @@ local function stepGait(self: any, dt: number)
 			baseShown += shown
 			local gait = gaits[name]
 			if gait ~= nil and shown > 0 then
-				local along = if gait.walk then gait.forward * forward + gait.right * right else 1
+				local along = if gait.walk then gait.forward * forward + gait.right * right else self.runAlong
 				stride += shown * gait.stride * along
 				natural += shown * gait.duration
 				gaitShown += shown
@@ -514,6 +518,8 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		speed = 0, -- the root's horizontal speed from the last update
 		travelForward = 1, -- the last move direction in the character's frame
 		travelRight = 0,
+		-- How far along the move a stud of Run's or Sprint's stride carries (LocomotionState.runAlong)
+		runAlong = 1,
 		gaitPhase = Stride.startPhase, -- the shared gait phase: 0..1 of a cycle, 0 at every left Footstep
 		gaitPace = nil :: number?, -- cycles per second the phase last advanced at
 		shownNow = {} :: { [string]: number }, -- each Base clip's shown weight at this step's start
@@ -630,6 +636,10 @@ end
 function Locomotion.update(self: any, dt: number, state: State): LocomotionState.Output
 	local animator = self.animator
 	local root: BasePart? = self.character.PrimaryPart or self.character:FindFirstChild("HumanoidRootPart") :: any
+	-- A root slowed with its clips is read at 1x (State.clockScale): a slowed capture's run blends
+	-- the run, not the walk its slowed speed would pick. The pace keeps the root's real speed.
+	local clock = state.clockScale or 1
+	local blendSpeed = if clock > 0 then math.max(0, state.speed) / clock else math.max(0, state.speed)
 	local forward, right = 0, 0
 	local yawRate = 0
 	if root ~= nil then
@@ -641,8 +651,8 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 			right = move:Dot(cframe.RightVector)
 		end
 		local yaw = yawOf(cframe)
-		if self.lastYaw ~= nil and dt > 0 then
-			yawRate = wrapDegrees(yaw - self.lastYaw) / dt
+		if self.lastYaw ~= nil and dt > 0 and clock > 0 then
+			yawRate = wrapDegrees(yaw - self.lastYaw) / dt / clock
 		end
 		self.lastYaw = yaw
 	end
@@ -652,15 +662,15 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 	self.speed = math.max(0, state.speed)
 	if forward ~= 0 or right ~= 0 then
 		self.travelForward, self.travelRight = forward, right
-	elseif state.speed > Config.idleSpeedThreshold then
+	elseif blendSpeed > Config.idleSpeedThreshold then
 		-- Moving with no stick (a coast, a shove): the blend keeps the last move direction.
 		forward, right = self.travelForward, self.travelRight
 	end
 
-	local output = self.state:update(dt, {
+	local input: LocomotionState.Input = {
 		forward = forward,
 		right = right,
-		speed = state.speed,
+		speed = blendSpeed,
 		sprinting = state.sprinting,
 		grounded = state.grounded,
 		drawn = self.drawn,
@@ -668,7 +678,9 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 		yawRate = yawRate,
 		verticalVelocity = state.verticalVelocity or 0,
 		fallHeight = state.fallHeight,
-	})
+	}
+	local output = self.state:update(dt, input)
+	self.runAlong = LocomotionState.runAlong(input)
 
 	for name, weight in output.weights do
 		animator:setWeight(self.handles[name], weight)
@@ -735,7 +747,7 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 	)
 
 	if self.footIK and root ~= nil then
-		local weight = LocomotionState.footIKWeight(state.speed, state.grounded) * ChoreoData.additiveWeights.footIK
+		local weight = LocomotionState.footIKWeight(blendSpeed, state.grounded) * ChoreoData.additiveWeights.footIK
 		if weight > 0 then
 			local leftDelta, rightDelta = footDeltas(self, root)
 			animator:setProcedural("footIK", LocomotionState.footIK(leftDelta, rightDelta, weight))

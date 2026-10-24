@@ -357,6 +357,40 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   in unison (D-123). A same-sound gap between different enemies was left out on purpose (D-124).
 - Checks: 1862 specs in 108 files, 30 validators, offline lint and the hit matrix pass; no new strict type messages.
 
+## Controlled fight on the owner's PC (2026-10-24, ea7a8e8)
+
+- Pass, item 108(a), the kill: one swing at a 1 HP boar gave Black 2 frames (figures hidden), Dark 2 (white figures),
+  Ink 2 (strokes); FOV 60 to 55 and back by 13 frames with a 60.8 overshoot; Ring, Kill, the hit-stop tick, Crack,
+  RingTail, Flesh and the death vocal all start on the hit frame; a quiet 0.68 s, then the shatter (65 shards, Crack,
+  Slam, Chime, SubDrop); nothing played twice; the respawn comes back held.
+- Pass: sheathing after lock-off (the sword sheathes 6 s after the last swing; the tip moved 2.7 studs in one frame
+  just before the swap, smoothed by D-130); lock facing (item 99: turned in 0.27 s, at most 1.6 degrees off while
+  strafing and backing off); lock and swing at once (101); the parry by timing (a guard 0.10 s before the kobold's
+  hit parried 3 of 4 times and blocked once; 0.16 s before broke the guard every time); the lock across a natural
+  death (107d); the idle phase (neighbours out of step, roars 0.3 s apart, never doubled); a kill at 15 fps (each
+  look one rendered frame, figures frozen); Reduce flashing with sleeps between hits (no dim after any wake).
+- Fail, fixed below: the strafe feet slid 0.4 to 0.9 studs a stance (103); the 35 degree snap jumped 23 degrees in
+  one frame (102; the 12 degrees it stopped short is the soft assist picking the nearer boar); a white glint star
+  showed about 1 s after waking from a kill during a display sleep, and the glints stayed on 3 s (107e).
+- Seen: a 0.22 s render hitch about 2 s after each wake (likely the engine's own); Humanoid:MoveTo did not move the
+  character in a slowed run; the item 98 console error is still there.
+
+## Fixes from the controlled fight (2026-10-24, D-125 to D-131)
+
+- Every accent and one-shot particle burst also ends on Heartbeat, so nothing from a hit during a display sleep shows
+  on waking (D-125).
+- The swing snap turns the body over 0.08 s (5 frames at 60 fps, eased out) while the request still carries the whole
+  turn, so hits are unchanged (D-126).
+- In Studio, the Capture time scale also slows the local body, so slowed captures keep the feet planted (D-127).
+- The lock-on strafe clips are re-keyed as a quick guarded side-step (chassé) paced to walk speed, and the gait blend
+  stops pushing Run's feet across a strafe: a square strafe at walk speed now slides under 0.1 studs (D-128, D-129).
+  The Sheathe flip is retimed so the tip never jumps (D-130). A stride validator checks every walk can reach walk
+  speed (D-131).
+- Checks: 1905 specs in 110 files, 31 validators, offline lint, the hit matrix (unchanged) and the animation review
+  pass; no new strict type messages.
+- Open: Choreo replays a display sleep's gap in one step on waking (stale whoosh or footstep sounds, a small jump);
+  light stick tilts on locked diagonals can tap the trailing foot; Draw still whips 3.4 studs in one frame (item 119).
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and

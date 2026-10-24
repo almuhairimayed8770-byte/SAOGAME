@@ -33,6 +33,18 @@
 	lock's own turn is still sweeping the body round carries the nearest facing the server accepts
 	(AimLogic.sendOffset), so the swing comes out instead of being refused.
 
+	The snap's whip (item 102): the request faces the whole snap the instant it goes, but the body
+	shows it over aim.snapTurnSeconds on aim.snapTurnEasing, stepped by time on the render step and
+	on Heartbeat (which runs while the display sleeps), so it never pops a whole snap in one frame.
+	Until it is over, everything that reads where the body aims (a new request, a dodge, a guard's
+	facing, the clip's root motion) reads the facing the request carried, and the lock turn waits.
+
+	Capture slow motion (dev.luau timeScale, D-111): in Studio in a capture place Capture.client hands the
+	controller its time scale (setCaptureTimeScale) and the local body moves on that clock: the
+	Humanoid's speed, the two-step stop, the lock turn and the snap's whip all run at the scale the
+	clips do, so a slowed recording shows feet that keep their ground. Anywhere else (live play of
+	the published Playground too) it stays 1.
+
 	Every decision is in ActionLogic and AimLogic (tested); this file is the engine glue around them.
 ]]
 
@@ -49,6 +61,7 @@ local InputData = require(Shared.data.input)
 local Playground = require(Shared.data.playground)
 local World = require(Shared.data.world)
 local Arts = require(Shared.data.arts)
+local Dev = require(Shared.data.dev)
 local Types = require(Shared.types)
 local Net = require(Shared.net.Net)
 local TrailingSend = require(Shared.net.TrailingSend)
@@ -110,7 +123,15 @@ local locomotion: any = nil
 
 local state: ActionLogic.LocalState = "Idle"
 local sprinting = false
-local timeScale = 1
+-- The capture's time scale (dev.luau timeScale; 1 in play): the clips' clock and, in a capture
+-- place, the body's own movement run at it (setCaptureTimeScale).
+local captureScale = 1
+-- The scale last handed the animator: 0 while the Art stance or a release holds the clip frozen.
+local appliedScale = 1
+-- The snap the body is still whipping round to (item 102), or nil.
+local snap: AimLogic.Snap? = nil
+-- The facing the last ArtRequest or BasicAttackRequest carried (DevAim reports it).
+local lastFacing: { number }? = nil
 local lastPredictAt: number? = nil
 local lastParryAt: number? = nil
 local lastWalkSpeed: number? = nil
@@ -161,8 +182,19 @@ local function setState(newState: ActionLogic.LocalState)
 	CharacterController.stateChanged:Fire(newState)
 end
 
+-- The root's rotation with the rest of a showing snap on it: where the last request faced the body
+-- (before its sendOffset), which every new aim, request, dodge and root motion step reads.
+local function aimRotation(rootPart: BasePart): CFrame
+	local rotation = rootPart.CFrame.Rotation
+	local current = snap
+	if current == nil then
+		return rotation
+	end
+	return CFrame.Angles(0, math.rad(AimLogic.snapLeft(current)), 0) * rotation
+end
+
 local function facingTable(): { number }
-	local look = if root ~= nil then root.CFrame.LookVector else Vector3.zAxis * -1
+	local look = if root ~= nil then aimRotation(root).LookVector else Vector3.zAxis * -1
 	return { look.X, look.Y, look.Z }
 end
 
@@ -198,9 +230,21 @@ local function recordYaw(rootPart: BasePart, t: number)
 	AimLogic.record(yawHistory, t, AimLogic.yawOf(look.X, look.Z), Combat.lagAllowance)
 end
 
--- Degrees (+ = left) from the root's look to the lock, or nil (no lock, or standing on it).
-local function lockBearing(rootPart: BasePart, lockAt: Vector3): number?
-	local frame = rootPart.CFrame
+-- Shows the next part of a showing snap at time `t` (the render step and Heartbeat, so it ends on
+-- time while the display sleeps too); forgets the snap once the body shows all of it.
+local function stepSnap(rootPart: BasePart, t: number)
+	local current = snap
+	if current == nil then
+		return
+	end
+	yawRoot(rootPart, AimLogic.snapStep(current, t, AIM.snapTurnEasing))
+	if AimLogic.snapLeft(current) == 0 then
+		snap = nil
+	end
+end
+
+-- Degrees (+ = left) from a frame's look to the lock, or nil (no lock, or standing on it).
+local function lockBearing(frame: CFrame, lockAt: Vector3): number?
 	local look, origin = frame.LookVector, frame.Position
 	return AimLogic.bearingTo(look.X, look.Z, origin.X, origin.Z, lockAt.X, lockAt.Z, AIM.minFaceDistance)
 end
@@ -208,37 +252,52 @@ end
 -- The snap a basic swing or an Art release makes before it reads its facing: the rest of the way
 -- to the lock, or with no lock to the soft assist's pick, by at most aim.snapDegrees and never out
 -- of what the server can accept from a root it saw up to combat.lagAllowance ago. Returns the
--- facing the request carries: the body's look, or mid-turn the nearest look to it the server can
--- accept (AimLogic.sendOffset).
+-- facing the request carries: the snapped look, or mid-turn the nearest look to it the server can
+-- accept (AimLogic.sendOffset). The body shows the snap as a whip over aim.snapTurnSeconds (item
+-- 102); a whip still showing from the last request is counted as done here and carries on.
 local function aimForRequest(): { number }
 	local rootPart = root
 	if rootPart == nil then
 		return facingTable()
 	end
 	local t = now()
+	-- What the server may have seen: the body as it shows now, and where the last request faced it.
 	recordYaw(rootPart, t)
+	local rotation = aimRotation(rootPart)
+	local left = if snap ~= nil then AimLogic.snapLeft(snap) else 0
+	local aimLook = rotation.LookVector
+	local aimYaw = AimLogic.yawOf(aimLook.X, aimLook.Z)
+	if left ~= 0 then
+		AimLogic.record(yawHistory, t, aimYaw, Combat.lagAllowance)
+	end
+	local frame = CFrame.new(rootPart.Position) * rotation
 	local delta: number? = nil
 	local lockAt = lockPosition()
 	if lockAt ~= nil then
-		delta = lockBearing(rootPart, lockAt)
+		delta = lockBearing(frame, lockAt)
 	else
-		local frame = rootPart.CFrame
-		local candidates = Siblings.call(TargetController, "assistCandidates", frame.Position, frame.LookVector)
+		local candidates = Siblings.call(TargetController, "assistCandidates", frame.Position, aimLook)
 		local pick = if candidates ~= nil then AimLogic.assistPick(candidates, AIM) else nil
 		delta = if pick ~= nil then pick.bearing else nil
 	end
+	local turn = 0
 	if delta ~= nil then
 		local lo, hi = AimLogic.range(yawHistory)
-		local turn = AimLogic.requestTurn(delta, lo, hi, AIM)
+		turn = AimLogic.requestTurn(delta, lo, hi, AIM)
 		if turn ~= 0 then
-			yawRoot(rootPart, turn)
-			recordYaw(rootPart, t)
+			-- The request faces the whole snap now: the server sweeps there (D-113) and may see the
+			-- root anywhere along the whip, between the two yaws the history now holds.
+			AimLogic.record(yawHistory, t, aimYaw + turn, Combat.lagAllowance)
 		end
 	end
+	local whole = left + turn
+	snap = if whole ~= 0 then AimLogic.newSnap(whole, t, AimLogic.snapSeconds(AIM, captureScale)) else nil
 	local lo, hi = AimLogic.range(yawHistory)
 	local offset = AimLogic.sendOffset(lo, hi, AIM)
-	local look = (CFrame.Angles(0, math.rad(offset), 0) * rootPart.CFrame.Rotation).LookVector
-	return { look.X, look.Y, look.Z }
+	local look = (CFrame.Angles(0, math.rad(turn + offset), 0) * rotation).LookVector
+	local facing = { look.X, look.Y, look.Z }
+	lastFacing = facing
+	return facing
 end
 
 -- GuardRequest goes through TrailingSend: never faster than its rate limit, and the last raise or
@@ -283,6 +342,7 @@ local function playerClip(name: string): string?
 end
 
 local function setTimeScale(scale: number)
+	appliedScale = scale
 	if animator ~= nil then
 		animator:setTimeScale(scale)
 	end
@@ -320,7 +380,7 @@ local function clearHold()
 	end
 	local current = hold :: Hold
 	hold = nil
-	setTimeScale(timeScale)
+	setTimeScale(captureScale)
 	stopClip(current.handle)
 	-- The wind-up contour ends with the hold, however it ended.
 	Impact.cancelActivation(character)
@@ -406,7 +466,7 @@ function CharacterController.releaseArt(slot: number, heldSeconds: number)
 	fire("ArtRequest", { artId = current.art.id, facing = aimForRequest(), clientTime = serverNow() })
 	task.delay(plan.freezeClipTime, function()
 		if predicted ~= nil and (predicted :: Predicted).token == launchToken then
-			setTimeScale(timeScale)
+			setTimeScale(captureScale)
 		end
 	end)
 end
@@ -500,13 +560,15 @@ function CharacterController.dodge()
 		sendGuard(false)
 	end
 	local rootPart = root :: BasePart
+	-- Relative to where the body aims: a snap's whip still showing turns it to the last request's facing.
+	local rotation = aimRotation(rootPart)
 	-- The stick, not the Humanoid: the two-step stop keeps moving the Humanoid along the last move
 	-- after the stick lets go, and a dodge with no input steps back.
 	local stick = if stopCarry.active then Vector3.zero else (humanoid :: Humanoid).MoveDirection
-	local moveLocal = rootPart.CFrame:VectorToObjectSpace(stick)
+	local moveLocal = rotation:VectorToObjectSpace(stick)
 	local direction = ActionLogic.dodgeDirection(moveLocal.X, moveLocal.Z, InputData.dodge.inputDeadzone)
-	local look = rootPart.CFrame.LookVector
-	local right = rootPart.CFrame.RightVector
+	local look = rotation.LookVector
+	local right = rotation.RightVector
 	local world = if direction == "Forward"
 		then look
 		elseif direction == "Back" then -look
@@ -541,6 +603,35 @@ function CharacterController.state(): ActionLogic.LocalState
 	return state
 end
 
+--- The facing ({x, y, z}) the last ArtRequest or BasicAttackRequest carried, or nil before the
+--- first. Each request gets a new table. The body whips round to it over aim.snapTurnSeconds, so
+--- right after the send the root may still look elsewhere (DevAim reports this one).
+function CharacterController.lastFacing(): { number }?
+	return lastFacing
+end
+
+--- Dev capture slow motion (Capture.client, dev.luau timeScale, D-111): runs the local body on the
+--- capture's clock, one of dev.luau timeScale.steps, so a slowed recording shows the body moving
+--- at the pace its slowed clips step (the walk and strafe, the two-step stop, the lock turn, the
+--- snap's whip), and hands the animator the scale unless the Art stance or a release holds the
+--- clip frozen (that scale comes back when it lets go). Only in Studio in a capture place (workspace
+--- DevCapture; the published Playground carries it too, and live play never slows): anywhere
+--- else, or at a scale the capture does not offer, it refuses and returns false. Never faster than
+--- 1x, so no anti-cheat speed check can see it.
+function CharacterController.setCaptureTimeScale(scale: number): boolean
+	if not RunService:IsStudio() or workspace:GetAttribute(Dev.attributes.capture) ~= true then
+		return false
+	end
+	if table.find(Dev.timeScale.steps, scale) == nil or scale <= 0 or scale > 1 then
+		return false
+	end
+	captureScale = scale
+	if appliedScale ~= 0 then
+		setTimeScale(scale)
+	end
+	return true
+end
+
 -- ------------------------------------------------------------------ server reconciliation
 
 local function endAction()
@@ -558,7 +649,7 @@ local function onRejected(action: string)
 	end
 	local current = predicted :: Predicted
 	predicted = nil
-	setTimeScale(timeScale)
+	setTimeScale(captureScale)
 	stopClip(current.handle)
 	if character ~= nil and expected == "Art" then
 		Trails.activationLight(character, false, trailToken())
@@ -584,7 +675,7 @@ local function onServerState(serverState: string)
 		stopClip((predicted :: Predicted).handle)
 		predicted = nil
 	end
-	setTimeScale(timeScale)
+	setTimeScale(captureScale)
 	actionEndsAt = nil
 	if verb == "Die" then
 		setState("Dead")
@@ -667,6 +758,8 @@ local function step(dt: number)
 	then
 		endAction()
 	end
+	-- The snap's whip (item 102); the lock turn below waits until the body shows all of it.
+	stepSnap(rootPart, t)
 
 	local locked = ActionLogic.movementLocked(state)
 	-- A held lock turns a free body to face it (D-112); a sprint (the sprint key with the stick
@@ -683,10 +776,11 @@ local function step(dt: number)
 		hum.AutoRotate = autoRotate
 		lastAutoRotate = autoRotate
 	end
-	if faceLock and lockAt ~= nil then
-		local delta = lockBearing(rootPart, lockAt)
+	if faceLock and lockAt ~= nil and snap == nil then
+		local delta = lockBearing(rootPart.CFrame, lockAt)
 		if delta ~= nil then
-			yawRoot(rootPart, AimLogic.turnStep(delta, AIM.lockTurnRate, dt))
+			-- On the capture's clock (1 in play).
+			yawRoot(rootPart, AimLogic.turnStep(delta, AIM.lockTurnRate, dt * captureScale))
 		end
 	end
 
@@ -711,19 +805,21 @@ local function step(dt: number)
 		locomotion:stopGait(stopGait)
 		gait = stopGait
 	end
+	-- The carry and the Humanoid's speed run on the capture's clock (1 in play): the carry in 1x
+	-- terms, its speed slowed back down for the Humanoid.
 	local carrySpeed = ActionLogic.stopCarryStep(
 		stopCarry,
 		moveDir.X,
 		moveDir.Z,
-		speed,
+		speed / captureScale,
 		walkSpeed,
 		grounded,
 		state,
-		dt,
+		dt * captureScale,
 		STOP_CARRY,
 		gait
 	)
-	local targetSpeed = if carrySpeed > 0 then carrySpeed else walkSpeed
+	local targetSpeed = (if carrySpeed > 0 then carrySpeed else walkSpeed) * captureScale
 	if targetSpeed ~= lastWalkSpeed then
 		hum.WalkSpeed = targetSpeed
 		lastWalkSpeed = targetSpeed
@@ -743,10 +839,13 @@ local function step(dt: number)
 	-- Facing a lock, the body turns itself: the stick's angle is a strafe, not a turn.
 	local turning = if locked or faceLock then 0 else ActionLogic.turnAngle(look.X, look.Z, moveDir.X, moveDir.Z)
 
+	-- Locomotion hears the root's own speed: it paces the clips on the mixer's scaled clock itself,
+	-- and reads the speed at 1x for the blend from the clock the body moves on (the capture's).
 	if locomotion ~= nil and state ~= "Dead" then
 		locomotion:update(dt, {
 			moveDir = moveDir,
 			speed = speed,
+			clockScale = captureScale,
 			sprinting = sprinting and not locked and not faceLock,
 			grounded = grounded,
 			drawn = drawn,
@@ -759,7 +858,9 @@ local function step(dt: number)
 	if ActionLogic.rootMotionActive(state) then
 		local delta = animator:currentRootMotionDelta()
 		if typeof(delta) == "Vector3" and delta.Magnitude > 0 then
-			rootPart.CFrame = rootPart.CFrame * CFrame.new(delta)
+			-- Along the facing the request carried: a whip still showing has the rest of its turn to
+			-- come (with none, this is the root's own space).
+			rootPart.CFrame = rootPart.CFrame + aimRotation(rootPart):VectorToWorldSpace(delta)
 		end
 	end
 	recordYaw(rootPart, t)
@@ -781,6 +882,7 @@ local function clearCharacter()
 	lastWalkSpeed = nil
 	lastAutoRotate = nil
 	yawHistory = AimLogic.newHistory()
+	snap = nil
 	lastPredictAt = nil
 	fallTracker = { airborneSince = nil, peakY = 0 }
 	stopCarry = ActionLogic.newStopCarry()
@@ -803,6 +905,11 @@ local function onCharacter(model: Model)
 		{ walk = hum.WalkSpeed, run = hum.WalkSpeed, sprint = Combat.maxSpeedStudsPerSecond }
 	)
 	animator = Choreo.get(model)
+	-- A new animator runs at 1x; in a slowed capture the body comes back on the capture's clock.
+	appliedScale = 1
+	if captureScale ~= 1 then
+		setTimeScale(captureScale)
+	end
 	-- The local rig is always stepped at full rate (root motion is read every RenderStepped).
 	Siblings.call(Choreo, "setLocalModel", model)
 	locomotion = Locomotion.new(animator, model)
@@ -858,11 +965,14 @@ function CharacterController.start()
 	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Character.Value + 1, step)
 	-- The yaw history is kept on Heartbeat too, which runs while the display sleeps (RenderStepped
 	-- does not): a turn made outside the render step (the dev aim hook's face, the engine's own) is
-	-- timed when it happens, not taken for a turn made just before the next swing (D-112).
+	-- timed when it happens, not taken for a turn made just before the next swing (D-112). The snap's
+	-- whip steps here too, so it ends on time while nothing renders.
 	RunService.Heartbeat:Connect(function()
 		local rootPart = root
 		if rootPart ~= nil then
-			recordYaw(rootPart, now())
+			local t = now()
+			stepSnap(rootPart, t)
+			recordYaw(rootPart, t)
 		end
 	end)
 end

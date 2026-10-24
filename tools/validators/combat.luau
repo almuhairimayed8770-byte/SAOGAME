@@ -36,6 +36,14 @@
 	facing may be from the root the server has seen. A swing turns the body by up to the snap the
 	instant it is sent, and the server may still be catching up on a turn before it, so a bigger sum
 	would get honest swings rejected (and their clips cancelled).
+
+	The snap's whip (item 102): the body shows the snap over aim.snapTurnSeconds on
+	aim.snapTurnEasing. The seconds are positive and end by the time the earliest player clip's
+	first hit window opens after its request (a basic swing from its first frame, an Art from its
+	activation hold, where the release comes), so the blade arrives with the body facing its target.
+	The curve is one src/shared/util/Easing.luau has, runs from 0 to 1 without leaving that range or
+	turning back, and no 60 fps frame (hitStopFrameSeconds) of the whip shows more than
+	MAX_SNAP_FRAME_SHARE of the turn: the one-frame pop the whip is there to replace.
 ]]
 
 type Context = {
@@ -51,6 +59,11 @@ local MAX_STEP_IN_RADII = 2
 local MAX_SPEED_MARGIN = 1.25
 -- The widest a cone around the body can be.
 local FULL_TURN_DEGREES = 360
+-- The most of a snap one 60 fps frame of its whip may show (item 102): past half, the eye reads the
+-- jump, not the turn.
+local MAX_SNAP_FRAME_SHARE = 0.5
+-- Samples of the whip's curve checked for an overshoot or a turn back.
+local EASING_SAMPLES = 200
 
 local PLAYER_CLIPS = "src/shared/clips/player"
 
@@ -99,6 +112,100 @@ local function fastestRootMotion(ClipSampler: any, clip: any, minimum: number, h
 		span += 1
 	end
 	return fastest
+end
+
+-- The earliest a player clip's first hit window opens after the request that starts it, and that
+-- clip's id: a basic swing sends with its clip's first frame; an Art sends at the release, which
+-- comes at its activation hold or before (the clip then waits there), so its window is counted from
+-- the hold. nil when no player clip has a window.
+local function firstWindowAfterRequest(ctx: Context): (number?, string)
+	local ids: { string } = {}
+	for _, file in ctx.listFiles(PLAYER_CLIPS, "%.luau$") do
+		local id = file:match("^src/shared/clips/(.-)%.luau$")
+		if id ~= nil then
+			table.insert(ids, id)
+		end
+	end
+	table.sort(ids)
+	local earliest: number?, earliestId = nil, ""
+	for _, id in ids do
+		local ok, clip = pcall(ctx.load, "src/shared/clips/" .. id)
+		if not ok or typeof(clip) ~= "table" or typeof(clip.events) ~= "table" then
+			continue -- the clips validator reports a clip that does not load
+		end
+		local hold, window = 0, math.huge
+		for _, event in clip.events do
+			if typeof(event) == "table" and isNumber(event.time) then
+				if event.kind == "ActivationHold" then
+					hold = math.max(hold, event.time)
+				elseif event.kind == "HitWindowOpen" then
+					window = math.min(window, event.time)
+				end
+			end
+		end
+		if window < math.huge then
+			local after = window - (if hold <= window then hold else 0)
+			if earliest == nil or after < earliest then
+				earliest, earliestId = after, id
+			end
+		end
+	end
+	return earliest, earliestId
+end
+
+-- The whip's curve: one Easing has, running from 0 to 1 and never outside it or back (an overshoot
+-- swings the body past its target and back), and spreading the turn: no frame of `frame` seconds
+-- shows more than MAX_SNAP_FRAME_SHARE of it, the one-frame pop the whip replaces.
+local function checkSnapEasing(ctx: Context, name: any, seconds: number, frame: any, problem: (string) -> ())
+	if typeof(name) ~= "string" then
+		problem(("aim.snapTurnEasing must be the name of an easing (got %s)"):format(tostring(name)))
+		return
+	end
+	local Easing = ctx.load("src/shared/util/Easing")
+	if typeof((Easing :: any)[name]) ~= "function" then
+		problem(("aim.snapTurnEasing '%s' is not an easing (src/shared/util/Easing.luau)"):format(name))
+		return
+	end
+	local function at(t: number): number
+		return Easing.evaluate(name, t)
+	end
+	local previous = at(0)
+	local sound = math.abs(previous) <= 1e-9 and math.abs(at(1) - 1) <= 1e-9
+	for step = 1, EASING_SAMPLES do
+		local value = at(step / EASING_SAMPLES)
+		if value < -1e-9 or value > 1 + 1e-9 or value < previous - 1e-9 then
+			sound = false
+		end
+		previous = value
+	end
+	if not sound then
+		problem(
+			("aim.snapTurnEasing '%s' leaves 0..1 or turns back on the way: the body would swing past its target"):format(
+				name
+			)
+		)
+	end
+	if not isNumber(frame) or frame <= 0 then
+		return -- the hit-stop checks report a bad frame length
+	end
+	local easing: string, frameSeconds: number = name, frame
+	local frames = math.max(math.ceil(seconds / frameSeconds - 1e-9), 1)
+	local most = 0
+	for index = 1, frames do
+		local share = at(math.min(index * frameSeconds / seconds, 1)) - at((index - 1) * frameSeconds / seconds)
+		most = math.max(most, share)
+	end
+	if most > MAX_SNAP_FRAME_SHARE + 1e-9 then
+		problem(
+			("aim.snapTurnEasing '%s' over aim.snapTurnSeconds %s shows %d%% of the turn in one frame (%.4f s): more than %d%% reads as a pop, not a turn"):format(
+				easing,
+				tostring(seconds),
+				math.floor(most * 100 + 0.5),
+				frameSeconds,
+				math.floor(MAX_SNAP_FRAME_SHARE * 100 + 0.5)
+			)
+		)
+	end
 end
 
 return function(ctx: Context): { string }
@@ -178,6 +285,21 @@ return function(ctx: Context): { string }
 					tostring(combat.facingTolerance)
 				)
 			)
+		end
+		-- The snap's whip (item 102): the body shows the snap over snapTurnSeconds on snapTurnEasing.
+		if aimPositive("snapTurnSeconds") then
+			local seconds = aim.snapTurnSeconds
+			local earliest, earliestClip = firstWindowAfterRequest(ctx)
+			if earliest ~= nil and seconds > earliest + 1e-9 then
+				problem(
+					("aim.snapTurnSeconds %s is still turning when %s's first hit window opens, %.3f s after the request: the blade would land before the body faces its target"):format(
+						tostring(seconds),
+						earliestClip,
+						earliest
+					)
+				)
+			end
+			checkSnapEasing(ctx, aim.snapTurnEasing, seconds, combat.hitStopFrameSeconds, problem)
 		end
 		if snapOk and marginOk and toleranceOk then
 			local acceptance = math.deg(math.acos(1 - combat.facingTolerance))

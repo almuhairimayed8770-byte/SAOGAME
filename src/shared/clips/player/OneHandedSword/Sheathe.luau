@@ -6,8 +6,12 @@
 	with the arm relaxed, the sword still in the hand with its point forward, the hand a little out
 	from the side so the guard clears a run's rising thigh. The hand sinks (anticipation), swings
 	the blade up in front and over the right shoulder, the point drops behind the head into the
-	scabbard's mouth with the arm high (an edge out through the wall for 5 ms, 0.361 to 0.365 s,
-	under two frames at 240 Hz), and the blade slides home along the sheath line, speeding up and
+	scabbard's mouth with the arm high. The three moves of the swing (0.08, 0.18, 0.275, 0.37 s)
+	each get time in step with how far the tip travels (about 6 studs each), so none peaks past
+	107 studs a second, 1.8 a 60 Hz frame (choreo.luau sheath.sheatheTipSpeed); the flip from over
+	the shoulder into the mouth is no longer packed into 0.06 s. An edge
+	goes out through the scabbard's wall for 7 ms (0.355 to 0.363 s, under two frames at 240 Hz,
+	at most 0.13 studs), and the blade slides home along the sheath line, speeding up and
 	then slowing into the seat at 0.42 s (WeaponSheathe: the Weapon key there lines the blade up
 	with the back mount exactly). The middle key is Draw's, solved so that both moves keep the blade
 	inside the scabbard's walls and the guard off the head; the wrist turns about the grip on the
@@ -53,7 +57,7 @@ local clip: Types.ClipDef = {
 		{
 			-- anticipation: the hand sinks a little, still out from the thigh, and the wrist tips
 			-- the point up
-			time = 0.1,
+			time = 0.08,
 			easing = "SineInOut",
 			joints = {
 				RightShoulder = rot(10, 0, 12),
@@ -64,7 +68,7 @@ local clip: Types.ClipDef = {
 		},
 		{
 			-- the blade swings up in front and stands straight up
-			time = 0.24,
+			time = 0.18,
 			easing = "SineInOut",
 			joints = {
 				Neck = rot(0, 6, 2),
@@ -76,7 +80,7 @@ local clip: Types.ClipDef = {
 		},
 		{
 			-- over the shoulder: the hand high, the point dropping behind the head
-			time = 0.31,
+			time = 0.275,
 			easing = "SineInOut",
 			joints = {
 				Neck = rot(-3, 9, 4),

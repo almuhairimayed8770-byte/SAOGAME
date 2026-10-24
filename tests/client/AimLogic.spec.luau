@@ -230,3 +230,75 @@ describe("AimLogic.moveSpeed", function()
 		expect(AimLogic.moveSpeed(0, true, 8)).toBe(0) -- a locked state stays still
 	end)
 end)
+
+describe("AimLogic: the snap's whip (item 102)", function()
+	local Easing = Harness.load("src/shared/util/Easing")
+	local FRAME = combat.hitStopFrameSeconds
+
+	it("shows a snap on the curve over its seconds and the whole turn from then on", function()
+		local seconds = aim.snapTurnSeconds
+		local easing = aim.snapTurnEasing
+		expect(AimLogic.snapShown(35, 0, seconds, easing)).toBe(0)
+		expect(AimLogic.snapShown(35, seconds / 2, seconds, easing)).toBeCloseTo(
+			35 * Easing.evaluate(easing, 0.5),
+			1e-9
+		)
+		expect(AimLogic.snapShown(-35, seconds / 2, seconds, easing)).toBeCloseTo(
+			-35 * Easing.evaluate(easing, 0.5),
+			1e-9
+		)
+		expect(AimLogic.snapShown(35, seconds, seconds, easing)).toBe(35)
+		expect(AimLogic.snapShown(35, 5, seconds, easing)).toBe(35)
+		-- No time to show it in: the whole turn at once.
+		expect(AimLogic.snapShown(35, 0, 0, easing)).toBe(35)
+		expect(AimLogic.snapShown(0, seconds / 2, seconds, easing)).toBe(0)
+	end)
+
+	it("hands the turn out frame by frame; the steps add up to the turn and none is most of it", function()
+		local snap = AimLogic.newSnap(35, 10, aim.snapTurnSeconds)
+		expect(AimLogic.snapLeft(snap)).toBe(35)
+		local total, biggest, frames = 0, 0, 0
+		local t = 10
+		while AimLogic.snapLeft(snap) ~= 0 and frames < 100 do
+			t += FRAME
+			local step = AimLogic.snapStep(snap, t, aim.snapTurnEasing)
+			expect(step > 0).toBe(true)
+			total += step
+			biggest = math.max(biggest, step)
+			frames += 1
+		end
+		expect(total).toBeCloseTo(35, 1e-9)
+		expect(frames).toBe(math.ceil(aim.snapTurnSeconds / FRAME - 1e-9))
+		expect(biggest < 35 / 2).toBe(true)
+		-- Over: nothing more to hand out.
+		expect(AimLogic.snapStep(snap, t + 1, aim.snapTurnEasing)).toBe(0)
+		-- A step taken twice at the same moment hands out nothing the second time.
+		local again = AimLogic.newSnap(-20, 0, aim.snapTurnSeconds)
+		local once = AimLogic.snapStep(again, FRAME, aim.snapTurnEasing)
+		expect(once < 0).toBe(true)
+		expect(AimLogic.snapStep(again, FRAME, aim.snapTurnEasing)).toBe(0)
+		expect(AimLogic.snapLeft(again)).toBeCloseTo(-20 - once, 1e-12)
+	end)
+
+	it("stretches the whip with a slowed capture, the way the clips stretch", function()
+		expect(AimLogic.snapSeconds(aim, 1)).toBe(aim.snapTurnSeconds)
+		expect(AimLogic.snapSeconds(aim, 0.25)).toBeCloseTo(aim.snapTurnSeconds * 4, 1e-12)
+		-- A scale that would stop or reverse time changes nothing.
+		expect(AimLogic.snapSeconds(aim, 0)).toBe(aim.snapTurnSeconds)
+		expect(AimLogic.snapSeconds(aim, -1)).toBe(aim.snapTurnSeconds)
+	end)
+end)
+
+describe("AimLogic.assistPick: the two-boar case behind item 102's 12 degrees", function()
+	-- Unlocked, one boar 35 degrees off at 4 studs: 4 + rad(35) x 6 = 7.67. A second boar 23
+	-- degrees off scores d + rad(23) x 6 = d + 2.41, so it wins inside 5.26 studs and the snap
+	-- faces it, which leaves the body 12 degrees off the first. That is the ranking at work.
+	it("a second boar 23 degrees off and nearer than 5.26 studs is the pick", function()
+		local first = { id = 1, distance = 4, bearing = 35 }
+		local near = AimLogic.assistPick({ first, { id = 2, distance = 5.2, bearing = 23 } }, aim)
+		expect((near :: any).id).toBe(2)
+		expect(35 - (near :: any).bearing).toBe(12)
+		local far = AimLogic.assistPick({ first, { id = 2, distance = 5.3, bearing = 23 } }, aim)
+		expect((far :: any).id).toBe(1)
+	end)
+end)

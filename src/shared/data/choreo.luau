@@ -119,14 +119,14 @@ local Choreo = {
 			groundSpeed = {
 				WalkForward = 3.49,
 				WalkBack = 3,
-				WalkLeft = 1.46,
-				WalkRight = 1.46,
+				WalkLeft = 3.2,
+				WalkRight = 3.2,
 				Run = 15.55,
 				Sprint = 23.31,
 				WalkForwardDrawn = 3.47,
 				WalkBackDrawn = 2.99,
-				WalkLeftDrawn = 0.69,
-				WalkRightDrawn = 0.69,
+				WalkLeftDrawn = 3.2,
+				WalkRightDrawn = 3.2,
 				RunDrawn = 14.37,
 				SprintDrawn = 20.73,
 			},
@@ -162,14 +162,14 @@ local Choreo = {
 				IdleDrawn = { left = { 0.14, -0.662 }, right = { -0.726, 0.659 } },
 				WalkForward = { left = { 0.791, -0.423 }, right = { 0.791, 0.423 } },
 				WalkBack = { left = { -0.777, -0.419 }, right = { -0.778, 0.419 } },
-				WalkLeft = { left = { 0, -1.187 }, right = { 0.001, 0.428 } },
-				WalkRight = { left = { 0.001, -0.428 }, right = { 0, 1.187 } },
+				WalkLeft = { left = { -0.001, -1.079 }, right = { 0.001, 0.17 } },
+				WalkRight = { left = { 0.001, -0.17 }, right = { -0.001, 1.079 } },
 				Run = { left = { 0.091, -0.362 }, right = { 0.09, 0.362 } },
 				Sprint = { left = { 0.1, -0.319 }, right = { 0.1, 0.319 } },
 				WalkForwardDrawn = { left = { 0.512, -0.599 }, right = { 0.512, 0.599 } },
 				WalkBackDrawn = { left = { -0.779, -0.419 }, right = { -0.779, 0.419 } },
-				WalkLeftDrawn = { left = { -0.079, -1.088 }, right = { -0.319, -0.037 } },
-				WalkRightDrawn = { left = { -0.319, 0.037 }, right = { -0.08, 1.088 } },
+				WalkLeftDrawn = { left = { -0.001, -1.079 }, right = { 0.001, 0.17 } },
+				WalkRightDrawn = { left = { 0.001, -0.17 }, right = { -0.001, 1.079 } },
 				RunDrawn = { left = { 0.738, -0.637 }, right = { 0.738, 0.637 } },
 				SprintDrawn = { left = { 0.873, -0.678 }, right = { 0.873, 0.678 } },
 			} :: { [string]: { left: { number }, right: { number } } },
@@ -246,6 +246,12 @@ local Choreo = {
 		-- attribute can land up to three 60 Hz frames before the unreliable ActionStarted of the
 		-- attack that set it, which then draw-cuts with no Draw flashing in first.
 		remoteDrawDelay = 0.06,
+		-- Fastest the blade's tip may move while Sheathe swings it up, over the shoulder and down
+		-- into the sheath (studs a second, at dev.luau groundClearance.sampleHz, the sword posed
+		-- where ReviewMarkers.mountAt puts it): two studs in a 60 Hz frame, so the flip reads as a
+		-- quick push, not a jump. Studio saw 2.74 studs in one frame after the blade had all but
+		-- stopped over the shoulder.
+		sheatheTipSpeed = 120,
 	},
 }
 

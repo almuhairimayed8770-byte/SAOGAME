@@ -5,6 +5,8 @@
 -- Boss kind is the boss shatter, every other kind the normal one). The pool's Play is recorded
 -- through its seams; every asset has loaded and nothing is scheduled.
 local Shatter = Harness.load("src/client/fx/Shatter")
+local Bursts = Harness.load("src/client/fx/Bursts")
+local fx = Harness.load("src/shared/data/fx")
 local SfxPool = Harness.load("src/client/audio/SfxPool")
 local sfx = Harness.load("src/shared/data/sfx")
 
@@ -126,6 +128,58 @@ describe("Shatter.play: the cue follows the caller's weight", function()
 				expect(Shatter.liveCount()).toBeGreaterThan(before)
 				expect((model:FindFirstChild("UpperTorso") :: BasePart).LocalTransparencyModifier).toBe(1)
 			end)
+		end
+	end)
+end)
+
+-- Measured in Studio: a kill while the display slept. The shards (Heartbeat) were gone before the
+-- wake; the white flash is a particle burst, and particles fly only on rendered frames. It is
+-- cleared on Heartbeat at its lifetime, so the frame that comes back never shows it.
+describe("Shatter's white flash across a render stall", function()
+	it("clears the flash burst on Heartbeat at its lifetime", function()
+		local clock = 0
+		local watch: ((number) -> ())? = nil
+		local cleared: { number } = {}
+		local emitted = 0
+		Bursts.bind({
+			now = function(): number
+				return clock
+			end,
+			onHeartbeat = function(fn: (number) -> ()): () -> ()
+				watch = fn
+				return function()
+					if watch == fn then
+						watch = nil
+					end
+				end
+			end,
+			emit = function(_emitter: any, count: number)
+				emitted += count
+			end,
+			clear = function(_emitter: any)
+				table.insert(cleared, clock)
+			end,
+		})
+		local ok, err = pcall(function()
+			recording(function(_plays)
+				Shatter.play(rig(), "Beast")
+				expect(emitted).toBeGreaterThan(0)
+				expect(watch).never.toBeNil()
+				local F = 1 / 60
+				while watch ~= nil and clock < 5 do
+					clock += F
+					local beat = watch :: (number) -> ()
+					beat(F)
+				end
+				expect(#cleared).toBe(1)
+				expect(cleared[1]).toBeGreaterThanOrEqual(fx.shatter.flash.lifetime - 1e-9)
+				expect(cleared[1]).toBeLessThanOrEqual(fx.shatter.flash.lifetime + F + 1e-9)
+			end)
+		end)
+		Bursts.reset()
+		Bursts.bind(nil)
+		if not ok then
+			error(err, 0)
 		end
 	end)
 end)

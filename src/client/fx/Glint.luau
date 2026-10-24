@@ -17,6 +17,10 @@
 	and 0 skips the copies; at most the tier's `glints` play at once and past that the oldest is
 	reused. Every instance is pooled; nothing is created after the pool is full. A frame that
 	leaves the star's size where it was (the hold) writes no size, so it builds nothing.
+
+	Render stalls: the pose runs on the render step, and a Heartbeat watchdog (AccentStep onWatch)
+	ends each glint at its own length while no frame renders, so one asked for while the display
+	sleeps is never left enabled for the frame that comes back.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -298,7 +302,9 @@ local function hide(slot: Slot)
 	end
 end
 
-local function step()
+-- `rendering`: the render step poses every glint; the watchdog (no frame drawn) only ends those
+-- past their length.
+local function step(rendering: boolean)
 	local now = deps.now()
 	local any = false
 	for _, slot in slots do
@@ -311,7 +317,9 @@ local function step()
 			continue
 		end
 		any = true
-		applyPose(slot, pose)
+		if rendering then
+			applyPose(slot, pose)
+		end
 	end
 	if not any and stopLoop ~= nil then
 		local stop = stopLoop :: () -> ()
@@ -322,8 +330,10 @@ end
 
 local function ensureLoop()
 	if stopLoop == nil then
-		stopLoop = deps.onStep(function()
-			step()
+		stopLoop = AccentStep.connect(deps, function()
+			step(true)
+		end, function()
+			step(false)
 		end)
 	end
 end
@@ -441,7 +451,7 @@ end
 
 --- Advances every glint to the clock's now (the step loop calls it; specs may too).
 function Glint.step()
-	step()
+	step(true)
 end
 
 --- Replaces the clock, the frame step or the viewport (specs); stops the running loop.

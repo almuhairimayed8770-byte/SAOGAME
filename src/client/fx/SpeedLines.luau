@@ -11,7 +11,8 @@
 	inside the kind's seconds (a Dodge is the dodge's 0.25 s). The count is the kind's count times
 	the quality tier's speedLineScale. The lines are thin and change no screen-wide brightness, so
 	they are never a flash and never ask the flash budget. A line whose whole pixels did not move
-	since the last frame is not written again, so the hold builds nothing.
+	since the last frame is not written again, so the hold builds nothing. A Heartbeat watchdog
+	(AccentStep onWatch) hides them at the kind's length while no frame renders.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -258,7 +259,9 @@ local function stop()
 	end
 end
 
-local function step()
+-- `rendering`: the render step lays the lines; the watchdog (no frame drawn) only hides them once
+-- the kind's length is over.
+local function step(rendering: boolean)
 	if not active then
 		stop()
 		return
@@ -268,7 +271,9 @@ local function step()
 		stop()
 		return
 	end
-	lay(pose)
+	if rendering then
+		lay(pose)
+	end
 end
 
 --- Plays screen-edge speed lines on the local screen; `kind` is a key of accents.speedLines.kinds.
@@ -301,8 +306,10 @@ function SpeedLines.play(kind: string)
 	lay(poseInto(name, 0, poseScratch))
 	screen.Enabled = true
 	if stopLoop == nil then
-		stopLoop = deps.onStep(function()
-			step()
+		stopLoop = AccentStep.connect(deps, function()
+			step(true)
+		end, function()
+			step(false)
 		end)
 	end
 end
@@ -325,7 +332,7 @@ end
 
 --- Advances the lines to the clock's now (the step loop calls it; specs may too).
 function SpeedLines.step()
-	step()
+	step(true)
 end
 
 --- Replaces the clock, the frame step or the viewport (specs); stops the running loop.

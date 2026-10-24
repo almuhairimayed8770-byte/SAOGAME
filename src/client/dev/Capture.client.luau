@@ -9,7 +9,10 @@
 
 	A time-scale toggle (1x / 0.5x / 0.25x) slows every Choreo animator on this client and asks the
 	server (dev remote, dev places only) to publish the scale as a workspace attribute for anything
-	else that wants to honour it. Hit FX and sounds keep running at 1x, so a slowed shot reviews
+	else that wants to honour it. The local character goes through
+	CharacterController.setCaptureTimeScale, which also moves the body on that clock (its walk, the
+	two-step stop, the lock turn, the snap's whip) so the slowed feet keep their ground, and keeps a
+	frozen Art stance frozen. Hit FX and sounds keep running at 1x, so a slowed shot reviews
 	animation only; the panel says so next to the scale (Dev.timeScaleLabel). No gameplay logic
 	lives here.
 ]]
@@ -32,6 +35,7 @@ local El = require(Client.ui.lib.El)
 local Siblings = require(Client.controllers.Siblings)
 
 local Choreo, hasChoreo = Siblings.load(Client, "choreo.Choreo")
+local CharacterController = Siblings.load(Client, "controllers.CharacterController")
 
 local Capture = Dev.capture
 local PanelData = Capture.panel
@@ -246,11 +250,15 @@ end
 
 local function applyTimeScale()
 	local scale = Steps[timeScaleIndex]
-	for _, model in CollectionService:GetTagged(Capture.entityTag) do
-		applyTimeScaleTo(model, scale)
-	end
 	local character = player.Character
-	if character ~= nil then
+	-- The local body: the controller takes it (and moves the body at the scale) when it can.
+	local taken = Siblings.call(CharacterController, "setCaptureTimeScale", scale) == true
+	for _, model in CollectionService:GetTagged(Capture.entityTag) do
+		if not (taken and model == character) then
+			applyTimeScaleTo(model, scale)
+		end
+	end
+	if character ~= nil and not taken then
 		applyTimeScaleTo(character, scale)
 	end
 end

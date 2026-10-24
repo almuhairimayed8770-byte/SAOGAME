@@ -75,6 +75,8 @@ type World = {
 	localRecord: any,
 	lock: any,
 	clientState: string,
+	-- What CharacterController.lastFacing returns: the facing the last request carried.
+	lastFacing: { number }?,
 	lockOnCalls: { any },
 	fired: { string },
 	input: any,
@@ -193,6 +195,9 @@ local function load(options: Options): World
 		state = function(): string
 			return world.clientState
 		end,
+		lastFacing = function(): { number }?
+			return world.lastFacing
+		end,
 	}
 
 	local services: { [string]: any } = {
@@ -267,6 +272,7 @@ local function load(options: Options): World
 		localRecord = localRecord,
 		lock = nil,
 		clientState = "Idle",
+		lastFacing = nil,
 		lockOnCalls = {},
 		fired = {},
 		input = input,
@@ -530,6 +536,31 @@ describe("DevAim commands", function()
 			hp -= 4
 		end
 		expect(reply.landed).toBe(3)
+	end)
+
+	it("swing reports the yaw of the facing the request carried, which the body whips round to after", function()
+		local world = load({ studio = true, capture = true })
+		serveSwings(world, 4, nil)
+		-- The boar straight behind is 30 degrees off the body.
+		world.turnRoot(150)
+		-- The game's snap (item 102): the request faces 18 degrees further round at once; the body
+		-- shows it over the next frames, so at the send it has not turned yet.
+		world.input.basicAttack:Connect(function()
+			local look = CFrame.Angles(0, math.rad(168), 0).LookVector
+			world.lastFacing = { look.X, look.Y, look.Z }
+		end)
+		local reply = world.invoke("swing", { kind = "basic" })
+		local swing = reply.swings[1]
+		expect(math.abs(swing.yawBefore)).toBeCloseTo(30, 0.01)
+		expect(math.abs(swing.yawAtSend)).toBeCloseTo(12, 0.01)
+		-- A swing that sends nothing new reports the body's own look.
+		local quiet = load({ studio = true, capture = true })
+		serveSwings(quiet, 4, nil)
+		quiet.turnRoot(150)
+		local look = CFrame.Angles(0, math.rad(168), 0).LookVector
+		quiet.lastFacing = { look.X, look.Y, look.Z }
+		local unchanged = quiet.invoke("swing", { kind = "basic" }).swings[1]
+		expect(math.abs(unchanged.yawAtSend)).toBeCloseTo(30, 0.01)
 	end)
 
 	it("swing reports a rejection and no HP change", function()

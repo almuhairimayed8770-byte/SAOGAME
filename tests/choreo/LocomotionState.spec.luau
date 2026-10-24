@@ -515,6 +515,65 @@ describe("LocomotionState.update", function()
 		expect(circling.weights.Run).toBe(0)
 	end)
 
+	it("a move the body is held off (lock-on strafe): Run's feet carry only its part along the facing", function()
+		local gaits = LocomotionState.gaits()
+		-- Studs a cycle the blend's planted foot travels across the move (forward, right): each
+		-- gait clip's foot goes along its own axis by its stride.
+		local function across(weights: { [string]: number }, forward: number, right: number): number
+			local total = 0
+			for name, gait in gaits do
+				total += (weights[name] or 0) * gait.stride * (gait.right * forward - gait.forward * right)
+			end
+			return total
+		end
+		for _, drawn in { false, true } do
+			local run = LocomotionState.clipFor("Run", drawn)
+			-- A strafe a little off square (the lock turn lags the target): the side walk carries it.
+			for _, degrees in { 88, 92, 268, 272 } do
+				local radians = math.rad(degrees)
+				local out = LocomotionState.new():update(
+					FRAME,
+					input({
+						forward = math.cos(radians),
+						right = math.sin(radians),
+						speed = Config.walkSpeed,
+						drawn = drawn,
+					})
+				)
+				expect(out.weights[run]).toBeLessThan(0.05)
+				expect(sum(out.weights)).toBeCloseTo(1, 1e-6)
+			end
+			-- Every way into the forward half at walkSpeed: the planted foot goes straight back.
+			for degrees = 5, 85, 10 do
+				for _, side in { 1, -1 } do
+					local radians = math.rad(degrees)
+					local forward, right = math.cos(radians), side * math.sin(radians)
+					local out = LocomotionState.new():update(
+						FRAME,
+						input({ forward = forward, right = right, speed = Config.walkSpeed, drawn = drawn })
+					)
+					expect(math.abs(across(out.weights, forward, right))).toBeLessThan(1e-6)
+					expect(sum(out.weights)).toBeCloseTo(1, 1e-6)
+				end
+			end
+		end
+		-- A body turning to its move (the controller gives the angle) runs into it as before.
+		local radians = math.rad(30)
+		local turning = LocomotionState.new():update(
+			FRAME,
+			input({ forward = math.cos(radians), right = math.sin(radians), speed = Config.runSpeed, turning = -30 })
+		)
+		expect(turning.weights.Run).toBeGreaterThan(0.9)
+		-- By run speed a body held a few degrees off its move (a remote rig's facing lagging its
+		-- velocity) runs too: the side walks only take the sideways part at walking speeds.
+		radians = math.rad(5)
+		local drifting = LocomotionState.new():update(
+			FRAME,
+			input({ forward = math.cos(radians), right = math.sin(radians), speed = Config.runSpeed })
+		)
+		expect(drifting.weights.Run).toBeGreaterThan(0.9)
+	end)
+
 	it("leans into turns while moving and never past the data maximum", function()
 		local state = LocomotionState.new()
 		local out

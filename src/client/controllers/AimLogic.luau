@@ -6,10 +6,10 @@
 	While a lock is held and the body is free (Idle, Guard, the held Art stance; not while the stick
 	sprints, unless aim.lockFaceWhileSprinting), the body faces the target: it turns toward it at
 	aim.lockTurnRate (turnStep) and the stick strafes at walk speed (moveSpeed). A basic swing or an
-	Art release turns the rest of the way at once, but by at most aim.snapDegrees (requestTurn); with
+	Art release faces the rest of the way at once, but by at most aim.snapDegrees (requestTurn); with
 	no lock the same snap aims at the best enemy in the assist cone around the body's look
 	(assistPick, ranked by TargetRanking). The clip carries the body from there: no turning in Art,
-	Basic, PostMotion, Dodge, Stagger, GuardBroken or Dead.
+	Basic, PostMotion, Dodge, Stagger, GuardBroken or Dead, past the snap's own whip (below).
 
 	The server sweeps where the request faces and accepts a facing within deg(acos(1 -
 	facingTolerance)) of the root it has seen (D-113), and that root is some way behind this client's.
@@ -19,9 +19,17 @@
 	(sendOffset) faces back toward where the body was a lag window ago, by just enough for the server
 	to accept it: the swing comes out, swept between the two, rather than being refused.
 
+	The snap's whip (item 102): the request faces the whole snap at once, but the body shows it over
+	aim.snapTurnSeconds on aim.snapTurnEasing (newSnap, snapStep, snapLeft), a fast start that
+	settles into the facing, so it reads as a turn and not a one-frame pop. A slowed capture
+	stretches it with the clips (snapSeconds).
+
 	Angles are degrees, signed positive to the left: the sign of a CFrame.Angles(0, yaw, 0) turn.
 ]]
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Easing = require(ReplicatedStorage.Shared.util.Easing)
 local ActionLogic = require(script.Parent.ActionLogic)
 local TargetRanking = require(script.Parent.TargetRanking)
 
@@ -29,6 +37,8 @@ export type Config = {
 	lockTurnRate: number,
 	lockFaceWhileSprinting: boolean,
 	snapDegrees: number,
+	snapTurnSeconds: number,
+	snapTurnEasing: string,
 	replicationMarginDegrees: number,
 	assistRange: number,
 	assistConeDegrees: number,
@@ -38,6 +48,10 @@ export type Config = {
 
 -- An enemy as the assist sees it: flat studs from the body and the signed bearing from its look.
 export type Bearing = { id: number, distance: number, bearing: number }
+
+-- A snap the body is still showing: `turn` degrees (+ = left) from where it stood when the request
+-- went at `startedAt`, over `seconds`, of which `applied` are already on the root.
+export type Snap = { turn: number, applied: number, startedAt: number, seconds: number }
 
 -- The root's yaw over the last lag window, unwrapped (a turn through the back keeps counting).
 export type YawHistory = {
@@ -113,7 +127,7 @@ function AimLogic.snap(delta: number, most: number): number
 	return math.clamp(delta, -most, most)
 end
 
---- How far a swing or a release turns the body at once toward a target `delta` degrees away: by at
+--- How far a swing or a release turns the body toward a target `delta` degrees away: by at
 --- most config.snapDegrees, toward the target only, and no farther than snapDegrees +
 --- replicationMarginDegrees from any yaw the body held in the lag window (`lo` and `hi`, the window's
 --- lowest and highest yaw from the current one, so lo <= 0 <= hi), which the server may still hold.
@@ -141,6 +155,47 @@ function AimLogic.sendOffset(lo: number, hi: number, config: Config): number
 		return (lo + hi) / 2
 	end
 	return math.clamp(0, low, high)
+end
+
+--- How much of a `turn` (degrees) the body shows `elapsed` seconds into its whip of `seconds` on
+--- the `easing` curve: none at the start, the whole turn from `seconds` on (at once when `seconds`
+--- is 0 or less).
+function AimLogic.snapShown(turn: number, elapsed: number, seconds: number, easing: string): number
+	if seconds <= 0 or elapsed >= seconds then
+		return turn
+	end
+	if elapsed <= 0 then
+		return 0
+	end
+	return turn * Easing.evaluate(easing, elapsed / seconds)
+end
+
+--- A whip of `turn` degrees starting at `startedAt`, over `seconds`.
+function AimLogic.newSnap(turn: number, startedAt: number, seconds: number): Snap
+	return { turn = turn, applied = 0, startedAt = startedAt, seconds = seconds }
+end
+
+--- The degrees to turn the root now, at time `t`, to show the snap on its curve; records them as
+--- applied. Taken twice at the same moment, the second hands out nothing.
+function AimLogic.snapStep(snap: Snap, t: number, easing: string): number
+	local shown = AimLogic.snapShown(snap.turn, t - snap.startedAt, snap.seconds, easing)
+	local step = shown - snap.applied
+	snap.applied = shown
+	return step
+end
+
+--- The degrees of the snap the body has still to show (0 once it is over).
+function AimLogic.snapLeft(snap: Snap): number
+	return snap.turn - snap.applied
+end
+
+--- How long the whip takes at a capture's time scale (dev.luau timeScale, 1 in play): the clips
+--- run `scale` times as fast, and so does the whip. A scale of 0 or less changes nothing.
+function AimLogic.snapSeconds(config: Config, scale: number): number
+	if scale <= 0 then
+		return config.snapTurnSeconds
+	end
+	return config.snapTurnSeconds / scale
 end
 
 --- An empty yaw history.

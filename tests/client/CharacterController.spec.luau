@@ -41,6 +41,14 @@ type Rig = {
 	setEnemies: (enemies: { { id: number, position: Vector3 } }) -> (),
 	-- The last input the controller handed Locomotion.update.
 	locomotionInput: () -> any,
+	-- Every scale the controller handed the animator's setTimeScale, in order (options.animator).
+	timeScales: { number },
+	-- The root motion the animator hands out each frame (options.animator), in the root's space.
+	setRootMotion: (delta: Vector3) -> (),
+	-- The server refuses the local action (Replication.rejected).
+	reject: (action: string) -> (),
+	-- The character goes and comes back (CharacterRemoving, then CharacterAdded with the same model).
+	respawn: () -> (),
 }
 
 type Options = {
@@ -50,6 +58,12 @@ type Options = {
 	stopGait: number?,
 	-- Hand the controller a recording fx.Impact sibling instead of a stub.
 	impact: boolean?,
+	-- Hand the controller a Choreo whose animator records setTimeScale and hands out root motion.
+	animator: boolean?,
+	-- The place is a capture place (workspace DevCapture attribute, dev.luau attributes.capture).
+	capture: boolean?,
+	-- false: the place runs on a live server, not in Studio (RunService:IsStudio()); default Studio.
+	studio: boolean?,
 }
 
 local IMPACT_CALLS = { "guardRaise", "dodge", "release", "cancelActivation", "activation" }
@@ -129,6 +143,26 @@ local function load(options: Options?): Rig
 			}
 		end,
 	}
+	local timeScales: { number } = {}
+	local rootMotion = Vector3.zero
+	local animator = {
+		play = function(_self: any, clipId: string): any
+			return { clipId = clipId }
+		end,
+		stop = function() end,
+		setTimeScale = function(_self: any, scale: number)
+			table.insert(timeScales, scale)
+		end,
+		currentRootMotionDelta = function(_self: any): Vector3
+			return rootMotion
+		end,
+	}
+	local choreo = {
+		get = function(): any
+			return animator
+		end,
+		setLocalModel = function() end,
+	}
 	local impact: { [string]: any } = {}
 	for _, name in IMPACT_CALLS do
 		impact[name] = function(...: any)
@@ -185,6 +219,9 @@ local function load(options: Options?): Rig
 				if path == "fx.Impact" and opts.impact then
 					return impact, true
 				end
+				if path == "choreo.Choreo" and opts.animator then
+					return choreo, true
+				end
 				if path == "controllers.TargetController" then
 					return targetController, true
 				end
@@ -195,16 +232,18 @@ local function load(options: Options?): Rig
 		},
 	}
 	local heartbeat = Signal.new()
+	local localPlayer = { CharacterAdded = Signal.new(), CharacterRemoving = Signal.new(), Character = model }
 	local services: { [string]: any } = {
 		RunService = {
 			BindToRenderStep = function(_self: any, _name: string, _priority: number, fn: (dt: number) -> ())
 				step = fn
 			end,
 			Heartbeat = heartbeat,
+			IsStudio = function(_self: any): boolean
+				return opts.studio ~= false
+			end,
 		},
-		Players = {
-			LocalPlayer = { CharacterAdded = Signal.new(), CharacterRemoving = Signal.new(), Character = model },
-		},
+		Players = { LocalPlayer = localPlayer },
 		ReplicatedStorage = Harness.game():GetService("ReplicatedStorage"),
 	}
 	local env = Harness.environment()
@@ -217,9 +256,13 @@ local function load(options: Options?): Rig
 			return services[name]
 		end,
 	}
+	local attributes: { [string]: any } = { DevCapture = opts.capture }
 	env.workspace = {
 		GetServerTimeNow = function(): number
 			return clock
+		end,
+		GetAttribute = function(_self: any, name: string): any
+			return attributes[name]
 		end,
 	}
 	env.os = {
@@ -252,6 +295,17 @@ local function load(options: Options?): Rig
 		end,
 		locomotionInput = function(): any
 			return lastInput
+		end,
+		timeScales = timeScales,
+		setRootMotion = function(delta: Vector3)
+			rootMotion = delta
+		end,
+		reject = function(action: string)
+			fakes.Replication.rejected:Fire(action)
+		end,
+		respawn = function()
+			localPlayer.CharacterRemoving:Fire()
+			localPlayer.CharacterAdded:Fire(model)
 		end,
 		heartbeat = function()
 			clock += FRAME
@@ -621,6 +675,13 @@ end
 
 local STILL = Vector3.zero
 
+-- Frames enough for a snap's whip (aim.snapTurnSeconds) to finish showing on the body.
+local function settle(rig: Rig)
+	for _ = 1, math.ceil(AIM.snapTurnSeconds / FRAME) + 1 do
+		rig.frame(STILL)
+	end
+end
+
 describe("CharacterController aim: the body faces a held lock (D-112)", function()
 	it("a body walked away from the target turns back to it at lockTurnRate once it is locked", function()
 		local rig = load()
@@ -760,14 +821,16 @@ describe("CharacterController aim: a swing turns the rest of the way, at most ai
 		rig.setLock(boar) -- no frame in between: the body has not turned yet
 		rig.controller.basicAttack()
 		expect(rig.controller.state()).toBe("Basic")
-		expect(bearingOf(rig, boar)).toBeCloseTo(0, 1e-4)
 		expect(sentYaw(rig, "BasicAttackRequest")).toBeCloseTo(30, 1e-4)
+		settle(rig)
+		expect(bearingOf(rig, boar)).toBeCloseTo(0, 1e-4)
 	end)
 
 	it("with the lock 120 degrees off the swing turns 40 and no more", function()
 		local rig = standing()
 		rig.setLock(pointAt(rig, 120, 5))
 		rig.controller.basicAttack()
+		settle(rig)
 		expect(yawOf(rig)).toBeCloseTo(AIM.snapDegrees, 1e-4)
 		expect(sentYaw(rig, "BasicAttackRequest")).toBeCloseTo(AIM.snapDegrees, 1e-4)
 		local right = standing()
@@ -829,6 +892,7 @@ describe("CharacterController aim: a swing turns the rest of the way, at most ai
 		rig.controller.releaseArt(1, 12 * FRAME)
 		expect(rig.controller.state()).toBe("Art")
 		expect(sentYaw(rig, "ArtRequest")).toBeCloseTo(-25, 1e-4)
+		settle(rig)
 		expect(bearingOf(rig, boar)).toBeCloseTo(0, 1e-4)
 	end)
 
@@ -893,5 +957,312 @@ describe("CharacterController aim: a swing turns the rest of the way, at most ai
 		rig.setLock(pointAt(rig, -20, 6))
 		rig.controller.basicAttack()
 		expect(sentYaw(rig, "BasicAttackRequest")).toBeCloseTo(-20, 1e-4)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- The snap's whip (item 102): the request faces the whole snap at once; the body shows it over
+-- aim.snapTurnSeconds on aim.snapTurnEasing instead of in one frame
+-- ------------------------------------------------------------------------------------------
+
+local Easing = Harness.load("src/shared/util/Easing")
+
+-- Frames in which a whip of aim.snapTurnSeconds turns the body, `scale` the capture's time scale.
+local function whipFrames(scale: number): number
+	return math.ceil(AIM.snapTurnSeconds / scale / FRAME - 1e-9)
+end
+
+describe("CharacterController aim: the snap shows as a whip, not a pop (item 102)", function()
+	local function standing(options: Options?): Rig
+		local rig = load(options)
+		for _ = 1, 30 do
+			rig.frame(STILL)
+		end
+		return rig
+	end
+
+	-- Runs frames until the whip is over; returns the yaw step of every frame.
+	local function whip(rig: Rig, frames: number): { number }
+		local steps = {}
+		local previous = yawOf(rig)
+		for _ = 1, frames do
+			rig.frame(STILL)
+			local now = yawOf(rig)
+			table.insert(steps, wrapped(now - previous))
+			previous = now
+		end
+		return steps
+	end
+
+	it("sends the whole snap at once; the body whips round over a few frames, never most of it in one", function()
+		-- The Studio case: unlocked, the boar 35 degrees off at 4 studs, one basic swing.
+		local rig = standing()
+		rig.setEnemies({ { id = 4, position = pointAt(rig, 35, 4) } })
+		rig.controller.basicAttack()
+		expect(rig.controller.state()).toBe("Basic")
+		-- The server sweeps where the request faces (D-113): the whole snap, now.
+		expect(sentYaw(rig, "BasicAttackRequest")).toBeCloseTo(35, 1e-4)
+		-- The body shows none of it before the next frame...
+		expect(yawOf(rig)).toBeCloseTo(0, 1e-4)
+		local steps = whip(rig, whipFrames(1) + 3)
+		-- ...then turns on every frame of the whip, never back, and holds once it is over.
+		local turning, biggest = 0, 0
+		for index, step in steps do
+			expect(step >= -1e-4).toBe(true)
+			if step > 1e-4 then
+				turning += 1
+				expect(index <= whipFrames(1)).toBe(true)
+			end
+			biggest = math.max(biggest, step)
+		end
+		expect(turning).toBe(whipFrames(1))
+		expect(turning >= 3).toBe(true)
+		expect(biggest < 35 / 2).toBe(true)
+		-- The first frame shows the curve one frame in.
+		expect(steps[1]).toBeCloseTo(35 * Easing.evaluate(AIM.snapTurnEasing, FRAME / AIM.snapTurnSeconds), 1e-3)
+		expect(yawOf(rig)).toBeCloseTo(35, 1e-3)
+	end)
+
+	it("with the display asleep the whip still ends on time, on Heartbeat", function()
+		-- Studio with its display asleep: Heartbeat 60 a second, RenderStepped never (D-117).
+		local rig = standing()
+		rig.setEnemies({ { id = 4, position = pointAt(rig, 35, 4) } })
+		rig.controller.basicAttack()
+		for _ = 1, whipFrames(1) do
+			rig.heartbeat()
+		end
+		expect(yawOf(rig)).toBeCloseTo(35, 1e-3)
+	end)
+
+	it("the clip's root motion carries the body along the facing the request carried, mid-whip too", function()
+		local rig = standing({ animator = true })
+		rig.setEnemies({ { id = 4, position = pointAt(rig, 35, 4) } })
+		local start = rig.root.Position
+		rig.controller.basicAttack()
+		rig.setRootMotion(Vector3.new(0, 0, -0.1)) -- a tenth of a stud forward a frame
+		whip(rig, whipFrames(1))
+		local moved = rig.root.Position - start
+		expect(moved.Magnitude).toBeCloseTo(0.1 * whipFrames(1), 1e-3)
+		expect(AimLogic.yawOf(moved.X, moved.Z)).toBeCloseTo(35, 1e-3)
+	end)
+
+	it("a request mid-whip faces from where the last one left the body, and the whip carries on", function()
+		local rig = standing()
+		local boar = pointAt(rig, 35, 5)
+		rig.setLock(boar)
+		rig.controller.basicAttack()
+		rig.frame(STILL)
+		local first = yawOf(rig)
+		expect(first > 1 and first < 35 / 2).toBe(true)
+		-- An Art may start from a basic swing: its stance waits for the whip, not the lock turn.
+		rig.controller.beginArt(1)
+		expect(rig.controller.state()).toBe("Holding")
+		rig.frame(STILL)
+		local before = yawOf(rig)
+		rig.controller.releaseArt(1, FRAME)
+		expect(sentYaw(rig, "ArtRequest")).toBeCloseTo(35, 1e-3)
+		-- No pop at the release: the rest of the turn keeps whipping.
+		expect(yawOf(rig)).toBeCloseTo(before, 1e-4)
+		local steps = whip(rig, whipFrames(1) + 3)
+		for _, step in steps do
+			expect(step >= -1e-4 and step <= first + 1e-3).toBe(true)
+		end
+		expect(bearingOf(rig, boar)).toBeCloseTo(0, 1e-3)
+	end)
+
+	it("a swing refused mid-whip ends on the lock without overshooting it", function()
+		local rig = standing()
+		local boar = pointAt(rig, 35, 5)
+		rig.setLock(boar)
+		rig.controller.basicAttack()
+		rig.frame(STILL)
+		rig.reject("BasicAttack")
+		expect(rig.controller.state()).toBe("Idle")
+		local most = yawOf(rig)
+		for _ = 1, 20 do
+			rig.frame(STILL)
+			most = math.max(most, yawOf(rig))
+		end
+		expect(most <= 35 + 1e-3).toBe(true)
+		expect(bearingOf(rig, boar)).toBeCloseTo(0, 1e-3)
+	end)
+
+	it("a dodge mid-whip steps relative to the facing the swing carried", function()
+		local rig = standing()
+		rig.setLock(pointAt(rig, 35, 5))
+		rig.controller.basicAttack()
+		rig.frame(STILL)
+		rig.controller.dodge() -- no stick: back
+		local direction = lastDodge(rig) :: Vector3
+		expect(direction).never.toBeNil()
+		expect(AimLogic.yawOf(-direction.X, -direction.Z)).toBeCloseTo(35, 1e-3)
+	end)
+
+	it("a respawn mid-whip drops the rest of the turn", function()
+		local rig = standing()
+		rig.setLock(pointAt(rig, 35, 5))
+		rig.controller.basicAttack()
+		rig.frame(STILL)
+		local shown = yawOf(rig)
+		rig.setLock(nil)
+		rig.respawn()
+		for _ = 1, whipFrames(1) + 3 do
+			rig.frame(STILL)
+		end
+		expect(yawOf(rig)).toBeCloseTo(shown, 1e-4)
+	end)
+
+	it("hands DevAim the facing the last request carried", function()
+		local rig = standing()
+		expect(rig.controller.lastFacing()).toBeNil()
+		rig.setEnemies({ { id = 4, position = pointAt(rig, 35, 4) } })
+		rig.controller.basicAttack()
+		local facing = rig.controller.lastFacing()
+		expect(facing).never.toBeNil()
+		expect(AimLogic.yawOf(facing[1], facing[3])).toBeCloseTo(35, 1e-4)
+		expect(sentYaw(rig, "BasicAttackRequest")).toBeCloseTo(35, 1e-4)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- Capture slow motion (dev.luau timeScale): the local body moves on the capture's clock
+-- ------------------------------------------------------------------------------------------
+
+describe("CharacterController in a slowed capture", function()
+	local RUN = ChoreoData.locomotion.runSpeed
+
+	local function last(list: { number }): number?
+		return list[#list]
+	end
+
+	it("walks the body at the capture's scale, so the slowed walk's feet keep their ground", function()
+		local rig = load({ capture = true })
+		rig.frame(STILL)
+		expect(rig.controller.setCaptureTimeScale(0.25)).toBe(true)
+		local start = rig.root.Position
+		for _ = 1, 30 do
+			rig.frame(FORWARD)
+			expect(rig.humanoid.WalkSpeed).toBeCloseTo(RUN * 0.25, 1e-9)
+		end
+		expect((rig.root.Position - start).Magnitude).toBeCloseTo(30 * FRAME * RUN * 0.25, 1e-6)
+		-- Locomotion hears the root's own speed: it paces the slowed clips from it (their clock
+		-- runs at the same scale), so the walk plants its feet.
+		expect(rig.locomotionInput().speed).toBeCloseTo(RUN * 0.25, 1e-6)
+		-- ... and the clock it moves on, so the blend reads that speed at 1x: the run, not a walk.
+		expect(rig.locomotionInput().clockScale).toBe(0.25)
+		expect(rig.controller.setCaptureTimeScale(1)).toBe(true)
+		rig.frame(FORWARD)
+		expect(rig.humanoid.WalkSpeed).toBe(RUN)
+		expect(rig.locomotionInput().clockScale).toBe(1)
+	end)
+
+	it("outside a capture place, or at a scale the capture does not offer, nothing slows", function()
+		local live = load()
+		live.frame(STILL)
+		expect(live.controller.setCaptureTimeScale(0.25)).toBe(false)
+		for _ = 1, 5 do
+			live.frame(FORWARD)
+		end
+		expect(live.humanoid.WalkSpeed).toBe(RUN)
+		local capture = load({ capture = true })
+		capture.frame(STILL)
+		for _, bad in { 0.3, 2, 0, -1, 0 / 0 } do
+			expect(capture.controller.setCaptureTimeScale(bad)).toBe(false)
+		end
+		for _ = 1, 5 do
+			capture.frame(FORWARD)
+		end
+		expect(capture.humanoid.WalkSpeed).toBe(RUN)
+	end)
+
+	it("a capture place played live (the published Playground, not Studio) never slows the body", function()
+		-- STUDIO_TASKS 19 publishes places/Playground.rbxl, whose Workspace carries DevCapture, as
+		-- the start place: Capture.client runs there too, but the body is a dev-only path.
+		local live = load({ capture = true, studio = false, animator = true })
+		live.frame(STILL)
+		local scales = #live.timeScales
+		expect(live.controller.setCaptureTimeScale(0.25)).toBe(false)
+		for _ = 1, 5 do
+			live.frame(FORWARD)
+		end
+		expect(live.humanoid.WalkSpeed).toBe(RUN)
+		-- Refused, it leaves the animator alone too (Capture.client then slows the clips itself).
+		expect(#live.timeScales).toBe(scales)
+	end)
+
+	it("turns to the lock and whips a snap on the capture's clock; the request still faces at once", function()
+		local rig = load({ capture = true })
+		for _ = 1, 30 do
+			rig.frame(STILL)
+		end
+		expect(rig.controller.setCaptureTimeScale(0.25)).toBe(true)
+		rig.setLock(pointAt(rig, 120, 5))
+		rig.frame(STILL)
+		expect(yawOf(rig)).toBeCloseTo(AIM.lockTurnRate * FRAME * 0.25, 1e-4)
+
+		local swing = load({ capture = true })
+		for _ = 1, 30 do
+			swing.frame(STILL)
+		end
+		swing.controller.setCaptureTimeScale(0.25)
+		swing.setEnemies({ { id = 4, position = pointAt(swing, 35, 4) } })
+		swing.controller.basicAttack()
+		expect(sentYaw(swing, "BasicAttackRequest")).toBeCloseTo(35, 1e-4)
+		local turning = 0
+		local previous = yawOf(swing)
+		for _ = 1, whipFrames(0.25) + 3 do
+			swing.frame(STILL)
+			if yawOf(swing) - previous > 1e-4 then
+				turning += 1
+			end
+			previous = yawOf(swing)
+		end
+		expect(turning).toBe(whipFrames(0.25))
+		expect(yawOf(swing)).toBeCloseTo(35, 1e-3)
+	end)
+
+	it("runs the two-step stop on the capture's clock, never faster than the slowed body", function()
+		local function carry(scale: number): (number, number)
+			local rig = load({ capture = true })
+			rig.frame(STILL)
+			rig.controller.setCaptureTimeScale(scale)
+			for _ = 1, 20 do
+				rig.frame(FORWARD)
+			end
+			local frames, fastest = 0, 0
+			for _ = 1, 400 do
+				rig.frame(STILL)
+				if rig.humanoid.MoveDirection.Magnitude > 0 then
+					frames += 1
+					fastest = math.max(fastest, rig.humanoid.WalkSpeed)
+				end
+			end
+			return frames, fastest
+		end
+		local full, fullFastest = carry(1)
+		local slow, slowFastest = carry(0.25)
+		expect(full > 0).toBe(true)
+		expect(fullFastest <= RUN + 1e-9).toBe(true)
+		expect(slow >= 4 * full - 4).toBe(true)
+		expect(slow <= 4 * full + 4).toBe(true)
+		expect(slowFastest <= RUN * 0.25 + 1e-9).toBe(true)
+	end)
+
+	it("keeps a frozen Art stance frozen, and a hold let go returns to the capture's scale", function()
+		local rig = load({ capture = true, animator = true })
+		rig.frame(STILL)
+		expect(rig.controller.setCaptureTimeScale(0.25)).toBe(true)
+		expect(last(rig.timeScales)).toBe(0.25)
+		rig.controller.beginArt(1)
+		rig.controller.freezeHold()
+		expect(last(rig.timeScales)).toBe(0)
+		-- The capture panel cycles (or re-applies) the scale while the stance glows.
+		rig.controller.setCaptureTimeScale(0.5)
+		expect(last(rig.timeScales)).toBe(0)
+		rig.controller.cancelArt(1)
+		expect(last(rig.timeScales)).toBe(0.5)
+		-- A respawned body comes back on the capture's clock.
+		rig.respawn()
+		expect(last(rig.timeScales)).toBe(0.5)
 	end)
 end)

@@ -152,7 +152,7 @@ local Combat = {
 
 	-- Aim (D-112). While a lock is held and the body is free (Idle, Guard, the held Art stance), the
 	-- body turns to face the target instead of the stick, and the stick strafes at walk speed. A
-	-- basic swing or an Art release turns the rest of the way at once, but never more than
+	-- basic swing or an Art release faces the rest of the way at once, but never more than
 	-- snapDegrees (a bigger unanimated turn reads as a pop, section 10); with no lock the same snap
 	-- aims at the best enemy in the assist cone. The server sweeps where the request faces and
 	-- accepts a facing within acos(1 - facingTolerance) (49.46 degrees) of the root it has seen, so
@@ -162,6 +162,15 @@ local Combat = {
 		lockTurnRate = 720, -- degrees a second the body turns toward the lock (180 in 0.25 s)
 		lockFaceWhileSprinting = false, -- sprinting hands the facing back to the stick
 		snapDegrees = 40, -- the most a swing or a release turns the body at once
+		-- The snap as the body shows it (item 102): the request faces the whole snap the instant it
+		-- is sent, but the body whips round to it over snapTurnSeconds on snapTurnEasing, a fast
+		-- start that settles into the facing, so a 35-degree snap reads as a turn over five frames
+		-- instead of a one-frame pop. It ends before the earliest player hit window opens (Basic1-3
+		-- at 0.1 s), so the blade comes round facing its target, and no 60 fps frame shows more
+		-- than half of it (tools/validators/combat.luau). A slowed capture stretches it with the
+		-- clips (dev.luau timeScale).
+		snapTurnSeconds = 0.08,
+		snapTurnEasing = "QuadOut",
 		replicationMarginDegrees = 9, -- turn the server may still be behind on when a request lands
 		assistRange = 10.5, -- studs, flat, root to root: the farthest real-fight placement (10.1) and a little
 		assistConeDegrees = 90, -- the whole assist cone around the body's look (45 each side)

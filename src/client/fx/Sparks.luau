@@ -5,7 +5,9 @@
 	One pooled ParticleEmitter on an anchored, invisible, non-colliding part in a workspace folder.
 	`parry(position)` moves that part to the clash point and emits fx.parrySpark.particles scaled by
 	the quality tier's particleScale. The sparks fly in world space (LockedToPart off), so the one
-	emitter serves back-to-back parries at different points and nothing is created per burst.
+	emitter serves back-to-back parries at different points and nothing is created per burst. The
+	burst goes through Bursts, which clears it on Heartbeat at the longest spark's life, so a parry
+	while nothing renders (the display asleep) never flies when rendering comes back.
 	Every number lives in fx.luau's parrySpark block; the ring itself is SfxPool's guard.Parry,
 	which Replication plays beside the burst.
 ]]
@@ -17,6 +19,7 @@ local Fx = require(Shared.data.fx)
 local Palette = require(Shared.data.palette)
 local Engine = require(script.Parent.Engine)
 local Quality = require(script.Parent.Quality)
+local Bursts = require(script.Parent.Bursts)
 
 local Sparks = {}
 
@@ -77,12 +80,8 @@ function Sparks.parry(position: Vector3): number
 	local part, particles = ensureEmitter()
 	local count = Sparks.count(Quality.params().particleScale)
 	part.CFrame = CFrame.new(position)
-	if count > 0 then
-		-- Emit is engine-only; under Lune the call is skipped and the count still reports.
-		pcall(function()
-			particles:Emit(count)
-		end)
-	end
+	-- Emit is engine-only; under Lune the call is skipped and the count still reports.
+	Bursts.emit(particles, count, Fx.parrySpark.lifetime.max)
 	return count
 end
 

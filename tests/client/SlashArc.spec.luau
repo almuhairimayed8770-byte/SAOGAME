@@ -18,6 +18,7 @@ local slashLine = accents.slashLine
 
 local clock = 0
 local stepFn: ((number) -> ())? = nil
+local watchFn: ((number) -> ())? = nil
 local connects = 0
 local disconnects = 0
 
@@ -36,12 +37,33 @@ local function fresh()
 				end
 			end
 		end,
-	})
+		onWatch = function(fn: (number) -> ()): () -> ()
+			watchFn = fn
+			return function()
+				if watchFn == fn then
+					watchFn = nil
+				end
+			end
+		end,
+	} :: any)
 	SlashArc.reset()
 	clock = 0
 	stepFn = nil
+	watchFn = nil
 	connects = 0
 	disconnects = 0
+end
+
+-- Advances the fake clock `count` engine frames with nothing rendered (the display asleep):
+-- Heartbeat runs, the render step does not.
+local function beats(count: number)
+	for _ = 1, count do
+		clock += F
+		local fn = watchFn
+		if fn ~= nil then
+			fn(F)
+		end
+	end
 end
 
 local function frames(count: number)
@@ -369,6 +391,52 @@ describe("SlashArc crescent", function()
 			end
 		)
 	end
+
+	-- The display asleep (measured: RenderStepped 0/s, Heartbeat 60/s). A kill's crescent and line
+	-- are let go while no frame renders; the Heartbeat watchdog turns their beams off at their own
+	-- length, so none is left on for a frame presented or captured before the next render step.
+	it("turns a crescent and a slash line off on Heartbeat at their length while no frame renders", function()
+		atTier("High", function()
+			fresh()
+			SlashArc.play(HIT, TANGENT, NORMAL, "TrailJade", "Large")
+			SlashArc.line(HIT, TANGENT, "Large")
+			local view = activeArcs()[1]
+			local lineView = activeLines()[1]
+			local laidWidth = lineView.beams[1].Width0
+			expect(watchFn).never.toBeNil()
+			beats(1)
+			-- Heartbeat only ends what is over; the wipe and the line's pose are the render step's.
+			expect(lineView.beams[1].Width0).toBe(laidWidth)
+			local arcEnds = SlashArc.seconds("Large")
+			local lineEnds = SlashArc.lineSeconds("Large")
+			local count = 1
+			local arcOffAt: number? = nil
+			local lineOffAt: number? = nil
+			while (SlashArc.activeCount() + SlashArc.activeLines()) > 0 and count < 600 do
+				beats(1)
+				count += 1
+				if arcOffAt == nil and SlashArc.activeCount() == 0 then
+					arcOffAt = count * F
+				end
+				if lineOffAt == nil and SlashArc.activeLines() == 0 then
+					lineOffAt = count * F
+				end
+			end
+			expect(arcOffAt).never.toBeNil()
+			expect(lineOffAt).never.toBeNil()
+			expect(arcOffAt :: number).toBeLessThanOrEqual(arcEnds + F + 1e-9)
+			expect(lineOffAt :: number).toBeLessThanOrEqual(lineEnds + F + 1e-9)
+			for _, beam in { view.outer[1], view.outer[2], view.inner[1], view.inner[2] } do
+				expect(beam.Enabled).toBe(false)
+			end
+			for _, beam in lineView.beams do
+				expect(beam.Enabled).toBe(false)
+			end
+			expect(watchFn).toBeNil()
+			expect(stepFn).toBeNil()
+			expect(disconnects).toBe(1)
+		end)
+	end)
 
 	it("shows the wipe at its snapped step: at most half a step off, and every wipe frame moves it", function()
 		atTier("High", function()

@@ -24,8 +24,11 @@
 		                               artReleased(slot, held) after aim.artHoldSeconds, `count` times:
 		                               basics aim.swingGapSeconds apart (the chain carries on), each
 		                               Art once the last one's run is over. Per swing: the target, the
-		                               body's yaw off it before and at the send, its HP before and after,
-		                               the hits this client dealt, any rejection, the server states seen
+		                               body's yaw off it before the send and the yaw off it of the
+		                               facing the request carried (yawAtSend: the body whips round to
+		                               it over combat.luau aim.snapTurnSeconds after the send), its HP
+		                               before and after, the hits this client dealt, any rejection,
+		                               the server states seen
 		"guard" { held }               fires InputController.guardChanged(held)
 		"dodge"                        fires InputController.dodge
 
@@ -115,6 +118,16 @@ end
 local function yawTo(root: BasePart, record: Record?): number?
 	local yaw = bearingTo(root, record)
 	return yaw
+end
+
+-- Degrees (+ = left) from a facing ({x, y, z}, as a request carries it) at the body to the record.
+local function facingYawTo(root: BasePart, facing: { number }, record: Record?): number?
+	local position = positionOf(record)
+	if position == nil then
+		return nil
+	end
+	local origin = root.Position
+	return DevAimLogic.yawOff(facing[1], facing[3], position.X - origin.X, position.Z - origin.Z)
 end
 
 local function enemies(): { Record }
@@ -367,6 +380,7 @@ local function swingOnce(plan: DevAimLogic.SwingPlan, index: number, id: number?
 	local yawBefore, distance = bearingTo(root, target)
 	local hpBefore = if target ~= nil then target.hp else nil
 	local stateBefore = CharacterController.state()
+	local facingBefore = CharacterController.lastFacing()
 	local collector = collect()
 	local sentAt: number
 	if plan.kind == "basic" then
@@ -379,10 +393,14 @@ local function swingOnce(plan: DevAimLogic.SwingPlan, index: number, id: number?
 		InputController.artReleased:Fire(plan.slot, now() - pressedAt)
 		sentAt = now()
 	end
-	-- The request has gone (the controller sends inside the signal): the body's facing now is the
-	-- facing it carried.
+	-- The request has gone (the controller sends inside the signal) with a new facing table: the
+	-- facing it carried, which the body only shows once its whip is over (item 102). With no new
+	-- request, the body's own look.
 	local atSend = rootPart() or root
-	local yawAtSend = yawTo(atSend, target)
+	local sent = CharacterController.lastFacing()
+	local yawAtSend = if sent ~= nil and sent ~= facingBefore
+		then facingYawTo(atSend, sent, target)
+		else yawTo(atSend, target)
 	local clientState = CharacterController.state()
 	if plan.kind == "basic" then
 		waitUntil(function(): boolean

@@ -20,6 +20,10 @@
 	- aim.runTimeoutSeconds and trace.runTimeoutSeconds outlast the longest loadout Art;
 	- aim.maxSwings covers one whole basic chain; trace.keepEvents holds every window of the
 	  longest swing command.
+
+	The capture's timeScale.steps are each above 0 and at most 1, and timeScale.default is one of
+	them: the capture slows the local body with them (CharacterController.setCaptureTimeScale), so
+	a step past 1x would move it faster than the anti-cheat's sprint cap.
 ]]
 
 type Context = {
@@ -58,6 +62,26 @@ return function(ctx: Context): { string }
 	local weapons = ctx.load("src/shared/data/weapons")
 	local playground = ctx.load("src/shared/data/playground")
 	local sampler = ctx.load("src/shared/choreo/ClipSampler")
+
+	-- The capture's slow-motion steps (D-111).
+	local timeScale = dev.timeScale
+	if typeof(timeScale) ~= "table" or typeof(timeScale.steps) ~= "table" or #timeScale.steps == 0 then
+		problem("timeScale.steps must be a list of at least one scale")
+	else
+		for index, step in timeScale.steps do
+			if not isNumber(step) or step <= 0 or step > 1 then
+				problem(
+					("timeScale.steps[%d] must be a number above 0 and at most 1 (got %s): the capture slows the local body with it, and past 1x it would outrun the anti-cheat's cap"):format(
+						index,
+						tostring(step)
+					)
+				)
+			end
+		end
+		if table.find(timeScale.steps, timeScale.default) == nil then
+			problem(("timeScale.default (%s) must be one of timeScale.steps"):format(tostring(timeScale.default)))
+		end
+	end
 
 	local aim = dev.aim
 	local trace = dev.trace

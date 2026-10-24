@@ -767,9 +767,10 @@ describe("paced to the root's speed (Locomotion and the animator at measureHz)",
 		local cases = {
 			{ name = "WalkForward", direction = shape.forward, speeds = { 1, 2, 3 } },
 			{ name = "WalkRight", direction = shape.right, speeds = { 1, 2, 3, 4 } },
-			{ name = "WalkLeft", direction = -shape.right, speeds = { 2, 4 } },
+			{ name = "WalkLeft", direction = -shape.right, speeds = { 2, Config.walkSpeed } },
 			{ name = "WalkForwardDrawn", direction = shape.forward, speeds = { 1, 3 } },
-			{ name = "WalkRightDrawn", direction = shape.right, speeds = { 0.5, 2 } },
+			{ name = "WalkRightDrawn", direction = shape.right, speeds = { 1, Config.walkSpeed } },
+			{ name = "WalkLeftDrawn", direction = -shape.right, speeds = { 3, 6 } },
 			{ name = "Run", direction = shape.forward, speeds = { Stride.groundSpeed.Run, Config.runSpeed + 2 } },
 			{ name = "RunDrawn", direction = shape.forward, speeds = { Stride.groundSpeed.RunDrawn, Config.runSpeed } },
 			{ name = "Sprint", direction = shape.forward, speeds = { Config.sprintSpeed, 26 }, sprinting = true },
@@ -827,6 +828,26 @@ describe("paced to the root's speed (Locomotion and the animator at measureHz)",
 					local result = simulate(steady(direction, speed, drawn))
 					checkPlants(problems, label, result, owned(result) + Stride.slideBar, nil)
 				end
+			end
+		end
+		expect(table.concat(problems, "; ")).toBe("")
+	end)
+
+	it("a lock-on strafe at walkSpeed, square and a little off, both sets: plants as the forward walk's", function()
+		-- The facing held to a lock (D-112: turning 0, a slow yaw) while the stick strafes at the
+		-- walk speed the lock holds the body to. The lock turn lags a moving target, so the move
+		-- is a few degrees off square as often as on it.
+		local shape = body()
+		local problems = {}
+		for _, drawn in { false, true } do
+			local walk = simulate(steady(shape.forward, Config.walkSpeed, drawn))
+			for _, degrees in { 88, 90, 92, 268, 270, 272 } do
+				local radians = math.rad(degrees)
+				local direction = (shape.forward * math.cos(radians) + shape.right * math.sin(radians)).Unit
+				local label = ("strafe %d %s at %.1f"):format(degrees, drawnLabel(drawn), Config.walkSpeed)
+				local result = simulate(steady(direction, Config.walkSpeed, drawn))
+				local _, drag = owned(result)
+				checkPlants(problems, label, result, walk.slide, drag + Stride.slideBar)
 			end
 		end
 		expect(table.concat(problems, "; ")).toBe("")

@@ -1902,6 +1902,36 @@ describe("ground clearance: every player clip", function()
 		end
 	end)
 
+	it("swings the blade into the sheath without a jump: Sheathe's tip under sheath.sheatheTipSpeed", function()
+		local current = body()
+		local clip = Harness.load(clipsDirectory .. "/" .. ChoreoData.sheath.clips.sheathe)
+		local base = baseFor(clip)
+		local blade = current.trailEnd.Parent.Name
+		local step = 1 / Config.sampleHz
+		local previous: any = nil
+		local worst, worstAt = 0, 0
+		for index = 0, math.floor(clip.duration * Config.sampleHz + 1e-6) do
+			local time = index * step
+			local solved =
+				solveAt(current, current.avatar.base, offsetsAt(clip, base, time), ReviewMarkers.mountAt(clip, time))
+			local tip = (solved[blade] * current.trailEnd.CFrame).Position
+			if previous ~= nil and (tip - previous).Magnitude / step > worst then
+				worst, worstAt = (tip - previous).Magnitude / step, time
+			end
+			previous = tip
+		end
+		expect(worst).toBeGreaterThan(0)
+		if worst > ChoreoData.sheath.sheatheTipSpeed then
+			error(
+				("Sheathe moves the blade's tip %.1f studs a second at %.4f s (limit %.0f)"):format(
+					worst,
+					worstAt,
+					ChoreoData.sheath.sheatheTipSpeed
+				)
+			)
+		end
+	end)
+
 	it("slides the blade along its sheath, inside the scabbard's walls, as it comes out and goes home", function()
 		local found = roles()
 		local breathe = Harness.load("src/shared/clips/" .. ChoreoData.rigs.PlayerR15.breathing)

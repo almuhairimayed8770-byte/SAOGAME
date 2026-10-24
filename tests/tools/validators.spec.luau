@@ -1666,6 +1666,82 @@ describe("combat validator: the aim snap fits the server's facing acceptance", f
 	end)
 end)
 
+describe("combat validator: the snap's visible turn (item 102)", function()
+	local function runCombat(aimFields: { [string]: any }): { string }
+		local real = Harness.load("src/shared/data/combat")
+		local copy = table.clone(real)
+		copy.aim = table.clone(real.aim)
+		for key, value in aimFields do
+			copy.aim[key] = value
+		end
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/combat" then
+				return copy
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/combat")(context)
+	end
+
+	it("passes the real whip: a few frames, done before the first swing's blade can land", function()
+		local real = Harness.load("src/shared/data/combat")
+		expect(typeof(real.aim.snapTurnSeconds)).toBe("number")
+		expect(typeof(real.aim.snapTurnEasing)).toBe("string")
+		expect(runCombat({})).toEqual({})
+	end)
+
+	it("wants a positive number of seconds", function()
+		for _, bad in { 0, -0.05, 0 / 0, math.huge, "0.08" } do
+			local problems = runCombat({ snapTurnSeconds = bad })
+			expect(hasProblem(problems, "aim.snapTurnSeconds must be a positive number")).toBe(true)
+		end
+	end)
+
+	it("a turn still going when a player swing's first hit window opens is a problem", function()
+		-- The basic swings open at 0.1 s; the Arts at 0.333 and 0.35, 0.18 s past their activation hold,
+		-- where the release (and its snap) comes.
+		local slow = runCombat({ snapTurnSeconds = 0.12 })
+		expect(#slow).toBe(1)
+		expect(hasProblem(slow, "aim.snapTurnSeconds 0.12 is still turning")).toBe(true)
+		expect(hasProblem(slow, "Basic1")).toBe(true)
+		expect(hasProblem(slow, "0.100 s")).toBe(true)
+		local slower = runCombat({ snapTurnSeconds = 0.19 })
+		expect(#slower).toBe(1)
+		expect(hasProblem(slower, "aim.snapTurnSeconds 0.19 is still turning")).toBe(true)
+		-- At the earliest window itself the body faces the target as the blade comes: fine.
+		expect(runCombat({ snapTurnSeconds = 0.1 })).toEqual({})
+	end)
+
+	it("wants an easing that exists, runs 0 to 1 without overshooting, and spreads the turn", function()
+		expect(hasProblem(runCombat({ snapTurnEasing = "Wobble" }), "aim.snapTurnEasing 'Wobble' is not an easing")).toBe(
+			true
+		)
+		expect(hasProblem(runCombat({ snapTurnEasing = 5 }), "aim.snapTurnEasing")).toBe(true)
+		-- An overshoot swings the body past the target and back: a wobble, not a whip.
+		for _, name in { "BackOut", "Spring" } do
+			local problems = runCombat({ snapTurnEasing = name })
+			expect(hasProblem(problems, ("aim.snapTurnEasing '%s' leaves 0..1"):format(name))).toBe(true)
+		end
+		-- Hold shows the whole turn on its last frame: the pop item 102 measured.
+		local hold = runCombat({ snapTurnEasing = "Hold" })
+		expect(#hold).toBe(1)
+		expect(
+			hasProblem(
+				hold,
+				"aim.snapTurnEasing 'Hold' over aim.snapTurnSeconds 0.08 shows 100% of the turn in one frame"
+			)
+		).toBe(true)
+		-- ExpoOut over 0.08 s puts three quarters of the turn in the first frame.
+		expect(hasProblem(runCombat({ snapTurnEasing = "ExpoOut" }), "shows 76% of the turn in one frame")).toBe(true)
+		-- A turn shorter than a frame is the pop again, whatever the curve.
+		expect(hasProblem(runCombat({ snapTurnSeconds = 0.01 }), "shows 100% of the turn in one frame")).toBe(true)
+		for _, name in { "QuadOut", "Linear", "SineInOut", "QuadIn" } do
+			expect(runCombat({ snapTurnEasing = name })).toEqual({})
+		end
+	end)
+end)
+
 -- ------------------------------------------------------------------------------------------
 -- Content: no placeholder id reaches an engine property; Clouds sits under Workspace.Terrain
 -- ------------------------------------------------------------------------------------------

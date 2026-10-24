@@ -921,6 +921,44 @@ describe("Locomotion: the gait clock", function()
 		Choreo.release(model)
 	end)
 
+	it("a root slowed with its clips (clockScale: a slowed capture's own body) blends its 1x gait", function()
+		-- At 1x: a run, and a turn the blend sees as one (stride.turnYawRate) once the yaw moves.
+		local reference, _, runAt1x, referenceModel = walker()
+		runAt1x(FORWARD, Config.runSpeed, 1)
+		local run = reference.handles.Run.weight
+		local full = advance(reference, runAt1x, FORWARD, Config.runSpeed)
+		expect(run).toBeGreaterThan(0.9)
+		-- The local body in a 0.25x capture moves a quarter as fast on a quarter-speed clock: the
+		-- same run, not the walk a quarter of the speed would pick, its phase stepping a quarter as far.
+		local locomotion, animator, walk, model = walker()
+		animator.mixer:setTimeScale(0.25)
+		local slowed = { clockScale = 0.25 }
+		walk(FORWARD, Config.runSpeed * 0.25, 1, slowed)
+		expect(locomotion.handles.Run.weight).toBeCloseTo(run, 1e-6)
+		expect(locomotion.handles.WalkForward.weight).toBeCloseTo(reference.handles.WalkForward.weight, 1e-6)
+		local before = locomotion.gaitPhase
+		walk(FORWARD, Config.runSpeed * 0.25, FRAME, slowed)
+		expect((locomotion.gaitPhase - before) % 1).toBeCloseTo(full * 0.25, 1e-9)
+		-- Its turn too: a quarter of a turn the blend sees as one (past stride.turnYawRate at 1x)
+		-- still counts, so Run keeps its whole stride (runAlong 1) on a move off the facing.
+		local root = (model :: any).HumanoidRootPart
+		local degreesPerFrame = Config.stride.turnYawRate * 1.5 * 0.25 * FRAME
+		for _ = 1, 3 do
+			root.CFrame = root.CFrame * CFrame.Angles(0, math.rad(degreesPerFrame), 0)
+			walk(Vector3.new(1, 0, -1).Unit, Config.walkSpeed * 0.25, FRAME, slowed)
+		end
+		expect(locomotion.runAlong).toBe(1)
+		-- Without clockScale (a remote rig: its root runs on real time) the speed is read as given.
+		local remote, remoteAnimator, remoteWalk, remoteModel = walker()
+		remoteAnimator.mixer:setTimeScale(0.25)
+		remoteWalk(FORWARD, Config.runSpeed * 0.25, 1)
+		expect(remote.handles.Run.weight).toBeLessThan(0.5)
+		for _, pair in { { reference, referenceModel }, { locomotion, model }, { remote, remoteModel } } do
+			pair[1]:destroy()
+			Choreo.release(pair[2])
+		end
+	end)
+
 	it("plays a walk no faster than stride.rateCeiling past its ground speed", function()
 		local locomotion, _, walk, model = walker()
 		-- Straight back the walk carries every speed (no Run behind the facing).
