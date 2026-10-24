@@ -59,11 +59,14 @@ local function world(
 		facing = function()
 			return w.facing
 		end,
-		moveTo = function(position, speed)
+		moveTo = function(position, speed, direct)
 			w.goal = position
 			w.speed = speed
 			w.moving = true
-			table.insert(w.goals, { time = w.time, goal = position, speed = speed })
+			table.insert(
+				w.goals,
+				{ time = w.time, goal = position, speed = speed, direct = direct, phase = w.brain:getPhase() }
+			)
 		end,
 		stop = function()
 			w.moving = false
@@ -260,6 +263,26 @@ describe("Charger", function()
 			expect(w.strikes[#w.strikes].options.span.to).toBeCloseTo(speed * CHARGE.strike + FRONT, 1e-6)
 		end
 	)
+
+	it("the rush moves straight at the run's end, never along a path; the chase walks as usual (D-183)", function()
+		local w = world()
+		w.players = { player(1, 0, -20) }
+		expect(w.stepUntil(function()
+			return w.phase() == "Recover"
+		end, 4)).toBe(true)
+		local rushMoves, chaseMoves = 0, 0
+		for _, goal in w.goals do
+			if goal.phase == "Strike" then
+				rushMoves += 1
+				expect(goal.direct).toBe(true)
+			else
+				chaseMoves += 1
+				expect(goal.direct).never.toBe(true)
+			end
+		end
+		expect(rushMoves).toBeGreaterThan(0)
+		expect(chaseMoves).toBeGreaterThan(0)
+	end)
 
 	it("a jammed body strikes on the same timeline: the stretches follow the clock, not the body (D-166)", function()
 		local function run(blocked: boolean)

@@ -525,6 +525,29 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - **Checks:** 2310 specs in 131 files pass. Validators, stylua, offline lint, the hit matrix, animation review and gaitgen are clean. luau-lsp shows no new kind of message.
 - **Open:** Studio items 150 to 169, the Ceiling CastShadow place-file change (item 168), and the open issues listed with D-171 and D-181.
 
+## Strikes on the frame, smooth turns and the ceiling shadow (2026-10-24, D-183 to D-192)
+
+- **Server (D-183 to D-186):**
+  - A boar that stood still before its rush no longer runs backward or jams. Each movement starts its own stuck clock, and a strike's own movement goes straight.
+  - Enemy attack edges resolve on the first server frame at or after their beat: within one frame, never early.
+  - Enemy bodies turn a little every server frame instead of in 8° steps per AI tick.
+  - The Playground Ceiling casts no shadow.
+- **Clients (D-187 to D-189):**
+  - A dead enemy's plate leaves on the same frame as its body.
+  - An enemy clip a little ahead of the server no longer ends its beat a frame early, so the boar's launch snap starts with its run.
+  - The launch head step stays as a deliberate burst.
+- **Verification fixes (D-190 to D-192):**
+  - A jammed rush stops where it jammed. A stopped rush turns solid only after 0.5 s clear of everyone, longer than the clients' 0.3 s draw lag, so no player is carried or lifted onto a boar.
+  - A render stall across the shatter's time no longer takes the plate a frame before the body.
+  - Players are not meant to stand on enemies. A deliberate jump-on is a follow-up (item 180).
+- **Checks:** 2378 specs in 133 files pass. Validators, stylua, offline lint, the hit matrix, animation review and gaitgen are clean. The Playground builds with the Ceiling's CastShadow false. luau-lsp shows no new messages in src or tools.
+- **Open:**
+  - Studio items 170 to 180; item 173 closes 138 and 168.
+  - A path landing about 0.5 s late can still give a walking body one step back.
+  - After a jam, hits keep resolving on the line's clock past the stopped body.
+  - The plate trails the drawn body during a rush.
+  - The frame pass costs about 22% more server time per step.
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and

@@ -294,6 +294,8 @@ type Frame = {
 	reach: number, -- the snout's reach down the line
 	hidden: number, -- the root part's LocalTransparencyModifier
 	pause: number, -- the rig's hit-stop left
+	head: Vector3, -- the drawn head
+	pose: Vector3, -- the head in the drawn body's own space: the clip's pose alone
 }
 
 type Options = {
@@ -305,6 +307,7 @@ type Options = {
 	events: { { at: number, name: string, payload: any } }?, -- seconds after the launch (server)
 	hitAt: number?, -- the local blade touches the boar this many seconds after the launch
 	frames: number?,
+	phase: number?, -- where the launch falls in its frame (0 to 1, default 0)
 }
 
 local WIND_UP_START = 10
@@ -325,7 +328,7 @@ end
 type Run = { frames: { Frame }, front: number, model: Model, root: BasePart, calls: { any } }
 
 local function rush(options: Options): Run
-	clock = WIND_UP_START - 0.2
+	clock = WIND_UP_START - 0.2 + (options.phase or 0) * FRAME
 	local model = RigBuilder.build("Boar")
 	local front = EnemyService.bodyExtents(model)
 	local root = model.PrimaryPart :: BasePart
@@ -476,14 +479,17 @@ local function rush(options: Options): Run
 		animator:step(FRAME)
 		local offset: CFrame? = (animator :: any).bodyOffset
 		local drawn = root.CFrame * (offset or CFrame.identity)
+		local solved = solve(model, root.CFrame)
 		table.insert(frames, {
 			t = clock - LAUNCH,
 			offset = offset ~= nil,
 			drawn = drawn.Position,
 			along = (drawn.Position - ORIGIN):Dot(DIRECTION),
-			reach = reachOf(model, solve(model, root.CFrame), ORIGIN, DIRECTION),
+			reach = reachOf(model, solved, ORIGIN, DIRECTION),
 			hidden = root.LocalTransparencyModifier,
 			pause = animator:pauseRemaining(),
+			head = solved.Head.Position,
+			pose = drawn:PointToObjectSpace(solved.Head.Position),
 		})
 	end
 	return { frames = frames, front = front, model = model, root = root, calls = calls }
@@ -840,4 +846,76 @@ describe("an enemy that does not rush is drawn on its root", function()
 			end
 		end
 	end)
+end)
+
+describe("the launch: the head's burst is the Charge clip's strike snap on the body's frame (D-188, D-189)", function()
+	-- Studio at c73cfa8: the drawn head stepped about 1 stud on the first frame after the launch, the
+	-- run's own travel 0.47. The head's move is the drawn body's travel plus its pose in the body's
+	-- own space (the clip alone). The crouch only creeps; the launch key (0.60 to 0.65 s, ExpoOut,
+	-- the strike snap of D-153) lifts the head out of the crouch onto the run, about 2.5 studs of
+	-- path. At c73cfa8 a telegraph heard 0.1 to 0.2 s late left the clip a frame ahead of the server
+	-- from its mark on (the Mixer's last kept step ran at maxRate while the clip was ahead, D-188):
+	-- the snap began a frame before the body moved.
+	local CREEP = 0.15 -- the most the crouch's pose moves the head in a frame (measured 0.07)
+	local SNAP_SHARE = 0.6 -- D-153 shows 57% of a 3-frame snap in its first frame; the head's path curves
+	local SNAP_SECONDS = 0.05 -- the Charge clip's launch key, 0.60 to 0.65
+	local HOLD_END = 0.1 -- its hold on the launch pose, to 0.70
+	for _, latency in { 0, 0.2 } do
+		for _, phase in { 0, 0.25, 0.5, 0.75, 0.9 } do
+			it(
+				("starts on the frame the body starts running, spread over its frames, then the head runs with the body (latency %.1f s, launch %.2f into its frame)"):format(
+					latency,
+					phase
+				),
+				function()
+					local run = rush({ latency = latency, lag = 0.25, phase = phase, frames = 70 })
+					local frames = run.frames
+					local launch: number? = nil
+					for index, frame in frames do
+						if frame.t > 1e-9 then
+							launch = index
+							break
+						end
+					end
+					expect(launch).never.toBeNil()
+					local first = launch :: number
+					local function travel(index: number): number
+						return (frames[index].drawn - frames[index - 1].drawn).Magnitude
+					end
+					local function pose(index: number): number
+						return (frames[index].pose - frames[index - 1].pose).Magnitude
+					end
+					-- The crouch: the body stands, the pose only creeps.
+					for index = 2, first - 1 do
+						if frames[index].t > -CHARGE.windUp / 2 then
+							expect(travel(index) <= EPSILON).toBe(true)
+							expect(pose(index) < CREEP).toBe(true)
+						end
+					end
+					-- The launch frame: the body starts down the line and the snap starts with it.
+					expect(travel(first) > EPSILON).toBe(true)
+					expect(travel(first) <= FRAME_TRAVEL + EPSILON).toBe(true)
+					expect(pose(first) > CREEP).toBe(true)
+					-- The snap: over the frames its key spans, no frame shows much more than D-153's share.
+					local path, most = 0, 0
+					local index = first
+					while index <= #frames and frames[index - 1].t < SNAP_SECONDS do
+						path += pose(index)
+						most = math.max(most, pose(index))
+						index += 1
+					end
+					expect(path > 2).toBe(true)
+					expect(most <= SNAP_SHARE * path).toBe(true)
+					-- The hold: the head runs with the body, one frame of travel a frame.
+					for later = index, #frames do
+						if frames[later].t > HOLD_END + 1e-9 then
+							break
+						end
+						local head = (frames[later].head - frames[later - 1].head).Magnitude
+						expect(math.abs(head - FRAME_TRAVEL) <= 0.02).toBe(true)
+					end
+				end
+			)
+		end
+	end
 end)

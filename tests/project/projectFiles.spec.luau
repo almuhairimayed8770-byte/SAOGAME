@@ -10,6 +10,10 @@
 	instance must exist under Terrain node", 2026-10-23 Play test), so the server builds the sky's
 	Clouds there at start from lighting.luau (PlaygroundBuilder.buildSkyClouds). What a place's
 	Lighting holds is the sky, the atmosphere and the post effects.
+
+	Nothing overhead casts a shadow (D-186): the Playground's Ceiling is a 900-stud disc 350 studs up,
+	and with CastShadow on it put the whole field in its shadow (Studio, 2026-10-24). Any part a place
+	hangs that high is sky dressing, not something the sun should be blocked by.
 ]]
 
 local fs = require("@lune/fs")
@@ -58,6 +62,27 @@ local function eachNode(node: any, path: string, visit: (path: string, className
 			eachNode(child, childPath, visit)
 		end
 	end
+end
+
+-- Parts hung at least this high are overhead dressing (the Playground's Ceiling sits at 350).
+local OVERHEAD_STUDS = 100
+local PART_CLASSES = { Part = true, MeshPart = true, WedgePart = true, CornerWedgePart = true, TrussPart = true }
+
+-- A part node's center height from its CFrame or Position property, or nil.
+local function heightOf(node: any): number?
+	local properties = node["$properties"]
+	if properties == nil then
+		return nil
+	end
+	local cframe = properties.CFrame
+	if typeof(cframe) == "table" and typeof(cframe.CFrame) == "table" and typeof(cframe.CFrame.position) == "table" then
+		return cframe.CFrame.position[2]
+	end
+	local position = properties.Position
+	if typeof(position) == "table" then
+		return position[2]
+	end
+	return nil
 end
 
 local function httpEnabled(project: any): any
@@ -143,6 +168,28 @@ describe("project files", function()
 			expect(playground[name]).toBeTruthy()
 		end
 	end)
+
+	it(
+		"hangs nothing overhead that casts a shadow: the Playground's Ceiling leaves the field in the sun (D-186)",
+		function()
+			local ceiling = readProject("places/Playground.project.json").tree.Workspace.Playground.Ceiling
+			expect(ceiling).toBeTruthy()
+			expect(ceiling["$properties"].CastShadow).toBe(false)
+			local shading = {}
+			for _, path in allProjects() do
+				eachNode(readProject(path).tree, "game", function(nodePath: string, className: string, node: any)
+					if not PART_CLASSES[className] then
+						return
+					end
+					local height = heightOf(node)
+					if height ~= nil and height >= OVERHEAD_STUDS and node["$properties"].CastShadow ~= false then
+						table.insert(shading, ("%s: %s at y %s"):format(path, nodePath, tostring(height)))
+					end
+				end)
+			end
+			expect(shading).toEqual({})
+		end
+	)
 
 	it("never turns the engine's name or health bar back on from StarterPlayer (D-178)", function()
 		-- The server unlabels every character (CharacterReady.unlabel) and every rig (RigBuilder);

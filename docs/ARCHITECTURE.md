@@ -653,6 +653,31 @@ the sweep.
 - **client/camera/CameraMath.leash(focus, trailing, forward, closer, further, side?)**: clamps the lag along the view to [-further, closer] and, when side is given, across it to ±side.
 - **shared/data/camera.luau**: follow.leash = { closer 0.75, further 2.5, side 1.0 }.
 
+### Strikes on the frame, smooth turns and the ceiling shadow (D-183 to D-192)
+
+- **server/services/EnemyService**:
+  - `step(dt)` runs the whole 20 Hz ticks (at most maxTicksPerFrame), then the frame pass. For each awake entry it calls `Brain.frame()`, and the mover takes any goal handed over in that frame (D-184).
+  - Mover fields: `direct` (the current move kind) and `pending` (a goal handed over since the last mover update).
+  - The stuck clock restarts per movement: on a start from standing, or on a switch between direct and path-aware, which also drops a path in flight.
+  - A late path skips a first waypoint within waypointReach of where the body asked from (D-183).
+  - Entry gains `clearSince`. `rushEnded` starts the rejoin wait for every reason, a jam included.
+  - `rejoin(entry, now)` runs on each tick. It sets the Enemies group once `bodyClear` has held for ai.collision.rejoinClearSeconds in a row; an overlap restarts the count (D-190).
+- **server/ai/Brain**:
+  - `frame()` runs on every server frame: the timed attack edges (`beat`) and the body turn (`advanceTurn`). `tick` keeps perception and decisions.
+  - `beat(now, dt)`: the wind-up's end becomes the strike, then the strike's resolve. The tick and the frame both call it, so an edge resolves exactly once (D-184).
+  - `advanceTurn(at)`: the per-frame yaw toward `turnGoal` at the phase's rate, capped after a hitch. `turnToward` only records the goal (D-185).
+  - `moveDirect(position, speed)`: a strike's own move, straight and never pathfound. `moveToward` stays path-aware (D-183).
+- **server/ai/Charger**:
+  - `bodyStartedAt` is the server frame the body launched on.
+  - A jam reports `rushEnded("Jammed")` and stops the body with `context.stop()`. The line keeps resolving on the clock to the run's end (D-190).
+- **shared/data/ai.luau** `collision`: `clientDrawLagSeconds` (engine fact, 0.3) and `rejoinClearSeconds` (0.5). tools/validators/ai.luau checks rejoinClearSeconds > clientDrawLagSeconds, and every Charger rush's recovery > rejoinClearSeconds.
+- **client/fx/Shatter.expect(model, seconds)** and **client/ui/Nameplates.expect(model, seconds)**:
+  - Replication's EntityDied calls Shatter.expect where it schedules the shatter. The plate's fallback then waits ui.nameplates.shatterGraceSeconds past the shatter's time.
+  - Shatter's hideRig, through Nameplates.hide, takes the plate on the body's frame (D-187).
+  - An overdue plate goes on the Heartbeat after the first one that saw it overdue (`Plate.overdueBeat`, D-191).
+- **client/choreo/Mixer.beatStep**: a kept beat's last step evens the whole balance: maxRate when the clip is behind, minRate when it is ahead (D-188).
+- **places/Playground.project.json**: the Ceiling has CastShadow false. tests/project fails any part at or above 100 studs that casts a shadow (D-186).
+
 ## Data tables (src/shared/data)
 
 | File | Holds |

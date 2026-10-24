@@ -170,6 +170,11 @@ local UI = {
 		poolSize = 40,
 		lightInfluence = 0,
 		folderName = "SkyspireNameplates", -- the PlayerGui folder the pooled plates live in
+		-- Seconds a dead rig's plate waits past its scheduled shatter's time before it goes without
+		-- that shatter's hide (D-187): the shatter's own hide takes it on the body's frame; this
+		-- fallback only drops a plate whose shatter never ran, so it must outlast a delay resumed a
+		-- frame late at the lowest frame rate.
+		shatterGraceSeconds = 0.25,
 	},
 
 	systemLine = {

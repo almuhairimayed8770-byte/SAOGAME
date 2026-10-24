@@ -56,7 +56,8 @@ local AI = {
 	pathfindPastStuds = Enemies.rules.pathfindBeyondStuds,
 
 	-- The tick loop: the heartbeat accumulates dt and runs whole ticks; after a hitch at most this
-	-- many ticks run in one frame and the rest of the backlog is dropped.
+	-- many ticks run in one frame and the rest of the backlog is dropped. The frame pass's body turn
+	-- (D-185) turns at most as far as these ticks would have in one frame.
 	maxTicksPerFrame = 4,
 	sleepCheckInterval = 0.5, -- seconds between awake / asleep re-evaluations
 	flatEpsilon = 0.001, -- a ground-plane vector shorter than this has no direction
@@ -135,15 +136,24 @@ local AI = {
 
 	-- Collision groups (D-167), registered on the server through PhysicsService. Player characters
 	-- join `players` when they are ready (CharacterReady), enemies `enemies` at spawn. A rushing
-	-- enemy is `rushing` from its launch until its body is clear of every player and enemy after the
-	-- rush stops: it collides with the world (Default) only, so a rush runs through the players it
-	-- hits and through its packmates instead of jamming on them. Every other pair keeps colliding:
-	-- players with players, players with walking enemies, enemies with enemies (a pack never melts
-	-- into one body).
+	-- enemy is `rushing` from its launch until its body has stayed clear of every player and enemy
+	-- for rejoinClearSeconds after the rush stops: it collides with the world (Default) only, so a
+	-- rush runs through the players it hits and through its packmates instead of jamming on them.
+	-- Every other pair keeps colliding: players with players, players with walking enemies, enemies
+	-- with enemies (a pack never melts into one body).
 	collision = {
 		players = "SkyspirePlayers",
 		enemies = "SkyspireEnemies",
 		rushing = "SkyspireRushing",
+		-- Engine fact: every client draws a server-owned body up to this late (physics replication),
+		-- while a part's collision group reaches it sooner.
+		clientDrawLagSeconds = 0.3,
+		-- A stopped rush turns solid again only once its root has stayed clear of every player and
+		-- enemy for this long (D-190): longer than clientDrawLagSeconds, so no client still shows it
+		-- inside someone when it collides again (the engine would push that player out at the rush's
+		-- speed, onto the boar's back), and shorter than every rush's recovery, so a clean rush is
+		-- solid before it moves off (the ai validator checks both).
+		rejoinClearSeconds = 0.5,
 		-- Pairs that pass through each other; every other pair collides.
 		apart = {
 			{ "SkyspireRushing", "SkyspirePlayers" },

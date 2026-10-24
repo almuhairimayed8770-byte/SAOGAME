@@ -14,8 +14,10 @@
 	each character in the players group once it is built (joinPlayers, which also catches parts
 	added later: accessories, the weapon), EnemyService puts each enemy in the enemies group at spawn
 	and switches it to rushing for its rush. A stopped rush rejoins the enemies group only once its
-	root overlaps no player and no enemy (clear), so the engine never has to push two bodies apart;
-	that push is what lifted one boar onto another.
+	root has overlapped no player and no enemy (clear) for ai.collision.rejoinClearSeconds in a row
+	(EnemyService, D-190), so the engine never has to push two bodies apart, not even on a client
+	that still draws the body where it was; that push is what lifted one boar onto another, and a
+	player onto a boar's back.
 
 	Queries are unaffected: a RaycastParams / OverlapParams query runs as the Default group, which
 	collides with all three, so blades, spherecasts and overlap tests see every fighter as before.

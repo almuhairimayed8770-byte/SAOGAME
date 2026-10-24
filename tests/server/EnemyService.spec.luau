@@ -1159,3 +1159,272 @@ describe("EnemyService hit-stop (D-168)", function()
 		expect(EnemyService.pauseForHit(id, 0.05)).toBe(0)
 	end)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- The stuck clock starts with each movement; a strike's own movement goes straight (D-183)
+-- ------------------------------------------------------------------------------------------
+
+-- A route over open ground the way PathfindingService returns it: it starts where the body stood
+-- when it asked, with a waypoint every 4 studs to the goal.
+local function straightRoute(from: Vector3, to: Vector3): { Vector3 }
+	local waypoints = { from }
+	local delta = to - from
+	for index = 1, math.floor(delta.Magnitude / 4) do
+		table.insert(waypoints, from + delta.Unit * (index * 4))
+	end
+	table.insert(waypoints, to)
+	return waypoints
+end
+
+-- The engine's own order, one AI tick per frame: physics moves the bodies, then the Heartbeat
+-- runs the service on where they stand (the shared `advance` runs physics after the step, which
+-- leaves a step of motion the mover never saw). Path computations land `delay` seconds after they
+-- were asked for (PathfindingService computes off the tick: in Studio a path took about 0.15 s).
+local lateQueue: { any } = {}
+local lateDelay = 0
+local function deferPaths(delay: number)
+	lateQueue = {}
+	lateDelay = delay
+	deferredPaths = {}
+end
+
+local function engineTick()
+	clock.t += TICK
+	physics(TICK)
+	local due = {}
+	for index = #lateQueue, 1, -1 do
+		if lateQueue[index].at <= clock.t + 1e-9 then
+			table.insert(due, 1, table.remove(lateQueue, index))
+		end
+	end
+	for _, job in due do
+		job.fn()
+	end
+	EnemyService.step(TICK)
+	EntityService.tick(TICK)
+	local queue = deferredPaths
+	if queue ~= nil then
+		for _, fn in queue do
+			table.insert(lateQueue, { at = clock.t + lateDelay, fn = fn })
+		end
+		table.clear(queue)
+	end
+end
+
+local function advanceLate(seconds: number)
+	for _ = 1, math.max(1, math.floor(seconds / TICK + 0.5)) do
+		engineTick()
+	end
+end
+
+local function untilLate(predicate: () -> boolean, maxSeconds: number): boolean
+	for _ = 1, math.ceil(maxSeconds / TICK) do
+		if predicate() then
+			return true
+		end
+		engineTick()
+	end
+	return predicate()
+end
+
+describe("EnemyService mover: each movement starts its own stuck clock (D-183)", function()
+	it("a boar held, then released lined up, rushes straight down its line: no path, no step back", function()
+		-- Studio a2: the body stood still longer than stuckSeconds, so the rush's first update read
+		-- it as stuck, asked for a path, and walked back to the path's start once the path landed.
+		for _, delay in { TICK, TICK * 3 } do
+			fresh()
+			pathResult = straightRoute
+			deferPaths(delay)
+			local id, model = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+			local body = bodyOf(model)
+			local brain = EnemyService.brainOf(id)
+			-- It wheels toward a player behind it first, so its mover has moved before the hold.
+			putPlayer(1, Vector3.new(0, 3, 25))
+			advanceLate(1.5)
+			expect(phaseOf(id)).toBe("Chase")
+			EnemyService.setHeld(id, true)
+			advanceLate(AI.movement.stuckSeconds + 0.5)
+			-- Released with the player straight down its line: it crouches at once.
+			putPlayer(1, body.position + brain:getFacing() * 20)
+			EnemyService.setHeld(id, false)
+			local guard = 0
+			while phaseOf(id) ~= "WindUp" and guard < 40 do
+				advanceLate(TICK)
+				guard += 1
+			end
+			expect(phaseOf(id)).toBe("WindUp")
+			local moves = #body.moveTos
+			local calls = #pathCalls
+			while phaseOf(id) == "WindUp" do
+				advanceLate(TICK)
+			end
+			expect(phaseOf(id)).toBe("Strike")
+			local rush = brain.memory.rush
+			local last = (body.position - rush.origin):Dot(rush.direction)
+			while phaseOf(id) == "Strike" do
+				advanceLate(TICK)
+				local progress = (body.position - rush.origin):Dot(rush.direction)
+				expect(progress).toBeGreaterThanOrEqual(last - 1e-6) -- never a step back down the line
+				last = progress
+			end
+			advanceLate(TICK * 6) -- anything still computing lands
+			expect(#pathCalls).toBe(calls) -- the rush never asked for a path
+			expect(#body.moveTos).toBeGreaterThan(moves)
+			for index = moves + 1, #body.moveTos do
+				local move = body.moveTos[index]
+				if move.time > clock.t - TICK * 7 then
+					break -- the skid and after
+				end
+				-- Every MoveTo of the rush is the run's end, reach + overshoot down the line.
+				expect((move.position - (rush.origin + rush.direction * rush.length)).Magnitude).toBeLessThan(1e-6)
+			end
+			expect(#sentOf("RushEnded")).toBe(0) -- it ran its line: no jam
+		end
+	end)
+
+	it("every walk after a stand starts its own stuck clock: the chase, the wheel and a body really blocked", function()
+		-- Each one moves first (so its mover has a progress clock), is held (the dev hold) for longer
+		-- than stuckSeconds, and is released with its player where it will walk on, not attack: the
+		-- Brute walks up, the Charger runs at a player beyond its charge band (straight ahead, or behind
+		-- it so it wheels round first).
+		local beyondBand = AI.archetypes.Charger.maxChargeDistance + 6
+		local cases = {
+			{
+				defId = "KoboldAxeman",
+				away = Vector3.new(0, 3, -24),
+				release = function(_body: any, _brain: any): Vector3
+					return Vector3.new(0, 0, -24)
+				end,
+			},
+			{
+				defId = "FrenzyBoar",
+				away = Vector3.new(0, 3, 25),
+				release = function(_body: any, brain: any): Vector3
+					return brain:getFacing() * beyondBand
+				end,
+			},
+			{
+				defId = "FrenzyBoar",
+				away = Vector3.new(0, 3, 25),
+				release = function(_body: any, brain: any): Vector3
+					return -brain:getFacing() * beyondBand
+				end,
+			},
+		}
+		for _, case in cases do
+			for _, blocked in { false, true } do
+				fresh()
+				pathResult = straightRoute
+				local id, model = spawnAt(case.defId, Vector3.new(0, 3, 0))
+				local body = bodyOf(model)
+				putPlayer(1, case.away)
+				advanceLate(1.2)
+				expect(phaseOf(id)).toBe("Chase")
+				EnemyService.setHeld(id, true)
+				advanceLate(AI.movement.stuckSeconds + 0.5)
+				putPlayer(1, body.position + case.release(body, EnemyService.brainOf(id)))
+				physicsEnabled = not blocked -- blocked: a wall stops every step from here on
+				local moves = #body.moveTos
+				local calls = #pathCalls
+				EnemyService.setHeld(id, false)
+				expect(untilLate(function()
+					return #body.moveTos > moves
+				end, 2)).toBe(true)
+				local triedFrom = body.moveTos[moves + 1].time
+				expect(untilLate(function()
+					return #pathCalls > calls
+				end, AI.movement.stuckSeconds + 0.5)).toBe(blocked)
+				if blocked then
+					-- Real stuck detection still works: the path comes after stuckSeconds of trying, not
+					-- at the first step of the new walk.
+					local askedAfter = pathCalls[calls + 1].time - triedFrom
+					expect(askedAfter).toBeGreaterThanOrEqual(AI.movement.stuckSeconds - 1e-6)
+					expect(askedAfter).toBeLessThanOrEqual(AI.movement.stuckSeconds + TICK * 2 + 1e-6)
+				end
+			end
+		end
+	end)
+
+	it("a path that lands after the body moved on never walks it back to where it asked from", function()
+		fresh()
+		pathResult = straightRoute
+		deferPaths(TICK * 8)
+		local id, model = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		local body = bodyOf(model)
+		putPlayer(1, Vector3.new(0, 3, -24))
+		physicsEnabled = false
+		expect(untilLate(function()
+			return phaseOf(id) == "Chase" and body.goal ~= nil
+		end, 2)).toBe(true)
+		-- Stuck against something for stuckSeconds: it asks for a path, then slides free while the
+		-- path computes and walks on toward the player.
+		expect(untilLate(function()
+			return #lateQueue > 0
+		end, AI.movement.stuckSeconds + 1)).toBe(true)
+		physicsEnabled = true
+		local moves = #body.moveTos
+		advanceLate(TICK * 12)
+		expect(#pathCalls).toBe(1)
+		local start = pathCalls[1].from
+		for index = moves + 1, #body.moveTos do
+			expect((body.moveTos[index].position - start).Magnitude).toBeGreaterThan(1e-3)
+		end
+		expect(body.position.Z).toBeLessThan(start.Z - AI.movement.waypointReach)
+	end)
+
+	it("a strike's own move goes straight however far or blocked; the walk after starts afresh", function()
+		-- An idle kobold (its player beyond aggro, inside the sleep radius) keeps whatever goal it is
+		-- handed, so the mover is driven through the brain's own calls.
+		fresh()
+		pathResult = straightRoute
+		deferPaths(TICK * 4)
+		local id, model = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		local body = bodyOf(model)
+		local brain = EnemyService.brainOf(id)
+		putPlayer(1, Vector3.new(0, 3, 120))
+		advanceLate(0.5)
+		expect(phaseOf(id)).toBe("Idle")
+		physicsEnabled = false -- a wall in front from here on
+
+		-- A walk to a point close by: stuck after stuckSeconds, it asks for a path (still computing).
+		local near = body.position + Vector3.new(0, 0, -20)
+		brain:moveToward(near, 10)
+		expect(untilLate(function()
+			return #pathCalls > 0
+		end, AI.movement.stuckSeconds + 0.5)).toBe(true)
+		-- A lunge before the path lands: straight at a point past the pathfinding range, never a path,
+		-- however long the body stays blocked.
+		local far = body.position + Vector3.new(0, 0, -(AI.pathfindPastStuds + 10))
+		local calls = #pathCalls
+		local moves = #body.moveTos
+		brain:moveDirect(far, 20)
+		EnemyService.step(0) -- the frame pass hands it to the mover in this frame
+		expect(#body.moveTos).toBe(moves + 1)
+		expect((body.moveTos[#body.moveTos].position - far).Magnitude).toBeLessThan(1e-6)
+		advanceLate(AI.movement.stuckSeconds + 0.5) -- the walk's path lands meanwhile
+		expect(#pathCalls).toBe(calls)
+		for index = moves + 1, #body.moveTos do
+			expect((body.moveTos[index].position - far).Magnitude).toBeLessThan(1e-6)
+		end
+
+		-- The walk again, still blocked: its own clock (no path for stuckSeconds) and nothing from the
+		-- path the old walk asked for.
+		moves = #body.moveTos
+		brain:moveToward(near, 10)
+		EnemyService.step(0)
+		local walkedAt = clock.t
+		expect((body.moveTos[moves + 1].position - near).Magnitude).toBeLessThan(1e-6)
+		expect(untilLate(function()
+			return #pathCalls > calls
+		end, AI.movement.stuckSeconds + 0.5)).toBe(true)
+		-- The path computes off the tick: it was asked for lateDelay before it ran.
+		local landed = pathCalls[calls + 1].time
+		expect(landed - lateDelay - walkedAt).toBeGreaterThanOrEqual(AI.movement.stuckSeconds - 1e-6)
+		-- Until its own path lands, the walk heads straight for its goal: no waypoint of the old one.
+		for index = moves + 1, #body.moveTos do
+			if body.moveTos[index].time < landed then
+				expect((body.moveTos[index].position - near).Magnitude).toBeLessThan(1e-6)
+			end
+		end
+	end)
+end)

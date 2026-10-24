@@ -140,6 +140,42 @@ describe("Mixer keepBeat / shiftBeat (D-172)", function()
 		expect(handle.time - last).toBeCloseTo(FRAME * ChoreoData.enemy.beat.minRate, 1e-9)
 	end)
 
+	it(
+		"a clip a little ahead lands on the server's time on the step its mark falls in, not a frame ahead (D-188)",
+		function()
+			-- What a telegraph heard 0.2 s late leaves: played 0.4 s before the mark, its first step a
+			-- whole frame ahead (Choreo keepBeat's sinceStep). Evened at one rate, it is still about
+			-- 0.0007 s ahead on the step the mark falls in: that step must give it back, not run at
+			-- maxRate (Studio at c73cfa8: the Boar's launch snap a frame ahead of its body's travel).
+			for _, phase in { 0, 0.25, 0.5, 0.75 } do
+				local mixer = Mixer.new()
+				local handle = mixer:play(CLIP)
+				local start = MARK - 0.4 + phase * FRAME
+				handle.time = start
+				mixer:keepBeat(handle, MARK, -FRAME)
+				local elapsed = 0
+				local server = start - FRAME -- the server's clip time: the clip starts a frame ahead of it
+				local crossed = false
+				for _ = 1, 40 do
+					local before = handle.time
+					mixer:step(FRAME)
+					elapsed += FRAME
+					local serverNow = server + elapsed
+					-- Never further ahead of the server than it started.
+					expect(handle.time - serverNow <= FRAME + 1e-6).toBe(true)
+					if before < MARK and handle.time >= MARK then
+						crossed = true
+						expect(math.abs(handle.time - serverNow) <= ChoreoData.pauseEpsilon + 1e-6).toBe(true)
+					elseif before >= MARK then
+						-- Past the mark the strike is its own, on the server's time.
+						expect(math.abs(handle.time - serverNow) <= ChoreoData.pauseEpsilon + 1e-6).toBe(true)
+					end
+				end
+				expect(crossed).toBe(true)
+			end
+		end
+	)
+
 	it("keeps nothing past the mark, and a handle keeping no beat steps as before", function()
 		local mixer = Mixer.new()
 		local handle = mixer:play(CLIP)

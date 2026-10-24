@@ -379,24 +379,27 @@ describe("Rush messages (D-169)", function()
 		end
 	)
 
-	it("a body that falls behind the clock is reported Jammed once, and the rush runs on to its skid", function()
-		local boarId, launchAt = launched()
-		jammed = true
-		while phaseOf(boarId) == "Strike" do
-			tick()
+	it(
+		"a body that falls behind the clock is reported Jammed once, and the strike runs its time to the skid",
+		function()
+			local boarId, launchAt = launched()
+			jammed = true
+			while phaseOf(boarId) == "Strike" do
+				tick()
+			end
+			local ended = payloadsOf("RushEnded")
+			expect(#ended).toBe(1)
+			expect(ended[1].reason).toBe("Jammed")
+			expect(ended[1].entityId).toBe(boarId)
+			expect(ended[1].launchedAt).toBeCloseTo(launchAt, 1e-9)
+			-- Reported once the clock ran jamLagStuds ahead of the body, not before.
+			local lag = AI.archetypes.Charger.jamLagStuds
+			local after = ended[1].serverTime - launchAt
+			expect(SPEED * after).toBeGreaterThan(lag + ended[1].distance)
+			expect(SPEED * (after - TICK)).toBeLessThanOrEqual(lag + ended[1].distance + 1e-6)
+			expect(phaseOf(boarId)).toBe("Recover")
 		end
-		local ended = payloadsOf("RushEnded")
-		expect(#ended).toBe(1)
-		expect(ended[1].reason).toBe("Jammed")
-		expect(ended[1].entityId).toBe(boarId)
-		expect(ended[1].launchedAt).toBeCloseTo(launchAt, 1e-9)
-		-- Reported once the clock ran jamLagStuds ahead of the body, not before.
-		local lag = AI.archetypes.Charger.jamLagStuds
-		local after = ended[1].serverTime - launchAt
-		expect(SPEED * after).toBeGreaterThan(lag + ended[1].distance)
-		expect(SPEED * (after - TICK)).toBeLessThanOrEqual(lag + ended[1].distance + 1e-6)
-		expect(phaseOf(boarId)).toBe("Recover")
-	end)
+	)
 
 	it("a stagger mid-rush ends it Interrupted where the body stands", function()
 		local boarId, launchAt, crouch = launched()
@@ -442,6 +445,19 @@ end)
 
 describe("Rush collision groups (D-167)", function()
 	local GROUPS = AI.collision
+	-- Ticks a stopped rush waits once its body is clear (D-190): it rejoins on the tick that has
+	-- seen it clear for rejoinClearSeconds, counted from the first clear tick.
+	local WAIT_TICKS = math.ceil(GROUPS.rejoinClearSeconds / TICK - 1e-6)
+
+	-- Ticks until the model leaves the rushing group (at most `limit` ticks); returns the ticks run.
+	local function ticksUntilSolid(model: any, limit: number): number
+		local count = 0
+		while groups[model] == GROUPS.rushing and count < limit do
+			tick()
+			count += 1
+		end
+		return count
+	end
 
 	it("an enemy joins the enemies group at spawn; its rush runs in the rushing group and rejoins after it", function()
 		local boarId = launched()
@@ -454,7 +470,8 @@ describe("Rush collision groups (D-167)", function()
 				expect(groups[model]).toBe(GROUPS.rushing)
 			end
 		end
-		tick()
+		-- The first clear tick starts the wait; the body rejoins rejoinClearSeconds after it.
+		expect(ticksUntilSolid(model, 40)).toBe(WAIT_TICKS + 1)
 		expect(groups[model]).toBe(GROUPS.enemies)
 	end)
 
@@ -470,29 +487,53 @@ describe("Rush collision groups (D-167)", function()
 			expect(groups[model]).toBe(GROUPS.rushing)
 		end
 		bodyIsClear = true
-		tick()
+		expect(ticksUntilSolid(model, 40)).toBe(WAIT_TICKS + 1)
 		expect(groups[model]).toBe(GROUPS.enemies)
 	end)
 
-	it("a jammed rush keeps the rushing group until its time runs; an interrupted one rejoins once clear", function()
+	it("an overlap during the wait starts it over", function()
+		local boarId = launched()
+		local model = EnemyService.modelOf(boarId)
+		while phaseOf(boarId) == "Strike" do
+			tick()
+		end
+		for _ = 1, WAIT_TICKS - 1 do
+			tick()
+		end
+		expect(groups[model]).toBe(GROUPS.rushing)
+		bodyIsClear = false
+		tick()
+		bodyIsClear = true
+		expect(ticksUntilSolid(model, 40)).toBe(WAIT_TICKS + 1)
+	end)
+
+	it("a jammed rush stops and rejoins once clear for the wait; an interrupted one likewise", function()
 		local boarId = launched()
 		local model = EnemyService.modelOf(boarId)
 		jammed = true
 		bodyIsClear = true
-		while phaseOf(boarId) == "Strike" do
+		local jammedAt: number? = nil
+		while groups[model] == GROUPS.rushing and phaseOf(boarId) == "Strike" do
 			tick()
-			if phaseOf(boarId) == "Strike" then
-				expect(groups[model]).toBe(GROUPS.rushing)
+			if jammedAt == nil and #payloadsOf("RushEnded") == 1 then
+				jammedAt = clock.t
+				expect(bodies[model].goal).toBeNil() -- the jam stopped the body (D-190)
 			end
 		end
-		expect(#payloadsOf("RushEnded")).toBe(1) -- the jam was told; the group waited for the end
+		expect(jammedAt).never.toBeNil()
+		expect(#payloadsOf("RushEnded")).toBe(1) -- the jam was told once
+		if groups[model] == GROUPS.rushing then
+			ticksUntilSolid(model, 40)
+		end
+		expect(groups[model]).toBe(GROUPS.enemies)
+		expect(clock.t - (jammedAt :: number)).toBeGreaterThan(GROUPS.rejoinClearSeconds - 1e-6)
 
 		local staggeredId = launched()
 		local staggered = EnemyService.modelOf(staggeredId)
 		tick()
 		EntityService.setState(staggeredId, "Stagger", 0.5)
 		expect(groups[staggered]).toBe(GROUPS.rushing)
-		tick()
+		expect(ticksUntilSolid(staggered, 40)).toBe(WAIT_TICKS + 1)
 		expect(groups[staggered]).toBe(GROUPS.enemies)
 	end)
 end)

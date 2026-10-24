@@ -11,9 +11,10 @@
 	(the leash), Interrupted (stagger, break, guard break) and Dead. The attack timeline follows the
 	attack def exactly: the telegraph and ActionStarted fire at WindUp start; the strike resolves
 	`attack.strike` seconds after the wind-up ends (the clip's hit window); the recovery holds for
-	`attack.recovery`. The brain owns its yaw: every tick it turns toward what the archetype wants
-	at the archetype's turn rate for the current phase and hands the result to `context.face`, so
-	the Charger's slow turn and the Brute's slow tracking are real, testable numbers.
+	`attack.recovery`. The brain owns its yaw: every tick it aims at what the archetype wants at the
+	archetype's turn rate for the current phase, the frame pass turns it there (D-185) and hands the
+	result to `context.face`, so the Charger's slow turn and the Brute's slow tracking are real,
+	testable numbers.
 
 	An archetype module (Charger, Brute) supplies the hooks: how to chase, which attacks are
 	usable, what the body does during the wind-up, the strike and the recovery.
@@ -28,6 +29,18 @@
 	clients freeze its clip for (pauseAttack), capped per attack by ai.hitStop.maxPausePerAttack.
 	The wind-up, the strike beat, the cooldown and the entity's Art state all move by the same
 	amount; a rush that has launched is never paused.
+
+	Two clocks (D-184, D-185). Perception and decisions (targets, the chase, which attack, where to
+	walk, which way to turn and how fast) run on the AI tick. The frame pass (frame, every server
+	Heartbeat after the ticks) resolves what is timed: the wind-up's end, the strike's resolve, a
+	contact strike's stretches and its run, each on the first server frame at or after its beat, and
+	it turns the body. A tick's turnToward sets where the body turns and how fast for the phase; the
+	frame pass, last thing each frame, turns the facing by that rate * the frame's seconds and
+	publishes it. So the body turns smoothly at the phase's rate, and the facing never changes between
+	two frame passes: every decision and every resolve in a frame (the telegraph's line, the strike's
+	facing, the rush's direction) reads the facing the body already shows (the rigid align put the
+	root on it in the physics step before). A brain that never gets a frame (the Lune specs that only
+	tick) turns per tick as before.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -49,7 +62,7 @@ export type Rush = {
 	-- The launch beat: the wind-up's own end (the strike phase's start), which the clients predict
 	-- and draw the rush from. The line resolves on this clock (RushStarted carries it).
 	startedAt: number,
-	bodyStartedAt: number, -- the AI tick the body started running (up to a tick after startedAt)
+	bodyStartedAt: number, -- the server frame the body started running (up to a frame after startedAt)
 	origin: Vector3, -- the crouch point (where the root stood)
 	direction: Vector3, -- horizontal unit vector along the line
 	speed: number, -- studs per second
@@ -76,7 +89,9 @@ export type Context = {
 	players: () -> { PlayerSnapshot }, -- alive player fighters
 	position: () -> Vector3,
 	facing: () -> Vector3, -- the body's facing when the brain is created
-	moveTo: (position: Vector3, speed: number) -> (),
+	-- `direct`: a strike's own movement (the rush, any lunge) goes straight at the point, never along
+	-- a path (D-183). Nil or false: the mover may pathfind past a wall or a long way.
+	moveTo: (position: Vector3, speed: number, direct: boolean?) -> (),
 	stop: () -> (),
 	face: (direction: Vector3) -> (),
 	telegraph: (attack: Types.EnemyAttackDef, origin: Vector3, facing: Vector3, shape: Types.TelegraphShape?) -> (),
@@ -124,6 +139,12 @@ type Fields = {
 	memory: { [string]: any },
 	attackPaused: number, -- seconds this attack's timeline has been paused by hit-stop (D-168)
 	pauseEndsAt: number, -- when the latest hit-stop freeze on this attack ends
+	-- The frame-rate turn (D-185): where the facing turns, how fast (degrees per second, the phase's
+	-- rate) and up to when it has turned. Nil goal: it holds.
+	turnGoal: Vector3?,
+	turnRate: number,
+	turnedAt: number,
+	framed: boolean, -- the frame pass runs this brain: turns spread over frames
 }
 
 export type Brain = typeof(setmetatable({} :: Fields, Brain))
@@ -233,6 +254,10 @@ function Brain.new(context: Context, archetype: Archetype): Brain
 		memory = {},
 		attackPaused = 0,
 		pauseEndsAt = -math.huge,
+		turnGoal = nil,
+		turnRate = 0,
+		turnedAt = now,
+		framed = false,
 	}
 	return setmetatable(self, Brain)
 end
@@ -295,12 +320,58 @@ function Brain.angleTo(self: Brain, direction: Vector3): number
 	return math.abs(Brain.signedAngle(self.facingDir, flat))
 end
 
---- Turns the facing toward `direction` by at most `rateDegreesPerSecond * dt` and publishes it.
---- Returns the unsigned angle still remaining.
+-- Turns the facing toward `goal` by at most `maxStep` degrees and publishes it when it moved.
+-- Returns the unsigned angle still remaining.
+local function stepFacing(self: Brain, goal: Vector3, maxStep: number): number
+	local angle = Brain.signedAngle(self.facingDir, goal)
+	local step = math.clamp(angle, -maxStep, maxStep)
+	if step ~= 0 then
+		local turned = Brain.horizontal(Brain.rotateY(self.facingDir, step))
+		if turned ~= nil then
+			self.facingDir = turned
+			self.context.face(self.facingDir)
+		end
+	end
+	return math.abs(angle - step)
+end
+
+--- The frame-rate turn (D-185): turns the facing toward the tick's turn goal at its rate for the
+--- time since the last frame pass, up to `at`, and publishes it. Only the frame pass calls it, after
+--- the frame's ticks and edges. A hit-stop freeze on the attack holds the wind-up's turn until the
+--- freeze ends (the clip is frozen), and a hitch turns at most as far as the ticks it would have run
+--- (ai.maxTicksPerFrame).
+function Brain.advanceTurn(self: Brain, at: number)
+	local from = self.turnedAt
+	if at <= from then
+		return
+	end
+	self.turnedAt = at
+	local goal = self.turnGoal
+	if goal == nil or self.turnRate <= 0 then
+		return
+	end
+	if self.phase == "WindUp" or self.phase == "Strike" then
+		from = math.max(from, math.min(self.pauseEndsAt, at))
+	end
+	local seconds = math.min(at - from, AI.maxTicksPerFrame * AI.tickSeconds())
+	if seconds > 0 then
+		stepFacing(self, goal, self.turnRate * seconds)
+	end
+end
+
+--- Turns the facing toward `direction` at `rateDegreesPerSecond`. Ticked alone (no frame pass) it
+--- turns by at most rate * dt at once and publishes it. Under the frame pass (D-185) it sets the turn
+--- the frame pass carries out, at this rate, from the last frame pass on; the facing itself holds
+--- until then. Returns the unsigned angle still remaining.
 function Brain.turnToward(self: Brain, direction: Vector3, rateDegreesPerSecond: number, dt: number): number
 	local flat = Brain.horizontal(direction)
 	if flat == nil then
 		return 0
+	end
+	if self.framed then
+		self.turnGoal = flat
+		self.turnRate = rateDegreesPerSecond
+		return math.abs(Brain.signedAngle(self.facingDir, flat))
 	end
 	local angle = Brain.signedAngle(self.facingDir, flat)
 	local maxStep = rateDegreesPerSecond * dt
@@ -323,6 +394,12 @@ end
 --- Walks toward a point.
 function Brain.moveToward(self: Brain, position: Vector3, speed: number)
 	self.context.moveTo(position, speed)
+end
+
+--- A strike's own movement (the rush, any lunge): straight at the point, never along a path or a
+--- waypoint behind the body (D-183).
+function Brain.moveDirect(self: Brain, position: Vector3, speed: number)
+	self.context.moveTo(position, speed, true)
 end
 
 --- Studs the body reaches ahead of and behind its root along its facing (0, 0 when unknown).
@@ -481,7 +558,13 @@ end
 -- Phase transitions
 -- ---------------------------------------------------------------------------------------------
 
+-- A new phase turns at its own rate: the old turn goal ends with the old phase (the chase keeps the
+-- alert's or the recovery's goal until its own first tick sets one). Under the frame pass the facing
+-- stays where the body shows it, so a wind-up starts on the line the body already points along.
 function Brain.enter(self: Brain, phase: Phase, now: number)
+	if phase ~= "Chase" then
+		self.turnGoal = nil
+	end
 	self.phase = phase
 	self.phaseStart = now
 end
@@ -637,6 +720,7 @@ function Brain.die(self: Brain)
 	self.attack = nil
 	self.targetId = nil
 	self.lastTarget = nil
+	self.turnGoal = nil
 	self.context.stop()
 	self.phase = "Dead"
 end
@@ -650,6 +734,7 @@ function Brain.sleep(self: Brain)
 	self:cancelAttack("Stopped")
 	self.targetId = nil
 	self.lastTarget = nil
+	self.turnGoal = nil
 	if self.phase ~= "Interrupted" then
 		self:enterIdle(self.context.now())
 	else
@@ -664,6 +749,7 @@ function Brain.wake(self: Brain)
 	end
 	self.awake = true
 	self.phaseStart = self.context.now()
+	self.turnedAt = self.phaseStart
 end
 
 function Brain.tickInterrupted(self: Brain, now: number, record: any)
@@ -709,6 +795,85 @@ function Brain.tickReturn(self: Brain, now: number, dt: number)
 		self:turnToward(direction, self.tuning.turnRate, dt)
 	end
 	context.moveTo(home, self.def.moveSpeed * AI.leash.returnSpeedMultiplier)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Timed edges: the wind-up's end and the strike (D-182, D-184)
+-- ---------------------------------------------------------------------------------------------
+
+-- The strike phase up to `now`: the single resolve at attack.strike (a contact strike resolves in
+-- stretches inside onStrike instead), then the archetype's strike hook, then the recovery once both
+-- say it is over. `dt` is the tick's seconds, or 0 from a frame.
+function Brain.advanceStrike(self: Brain, now: number, dt: number)
+	local attack = self.attack
+	if attack == nil then
+		return
+	end
+	local elapsed = now - self.phaseStart
+	if not self.struck and elapsed >= attack.strike then
+		self.struck = true
+		local contact = self.archetype.contactStrike
+		if contact == nil or not contact(self) then
+			local origin, facing = self.archetype.strikeFrame(self)
+			self.context.strike(attack, origin, facing)
+			-- The strike resolves synchronously: a parry staggers this enemy through EntityService and
+			-- interrupt() has already run, so the strike hook must not move the body again.
+			if self.phase ~= "Strike" then
+				return
+			end
+		end
+	end
+	local over = self.archetype.onStrike(self, dt, elapsed)
+	-- A contact strike resolves inside onStrike, and a parry there interrupts this brain the same way.
+	if self.phase ~= "Strike" then
+		return
+	end
+	if self.struck and over then
+		self:enterRecover(now)
+	end
+end
+
+--- Resolves the attack's timed edges due by `now`: the wind-up's end (the strike phase starts on the
+--- wind-up's own beat, never on the pass that noticed it, D-182) and then the strike phase (its
+--- resolve, a contact strike's stretches and run). Never early: each edge waits for its beat, and
+--- the hit-stop pauses (pauseAttack) move every beat. The tick and the frame pass both call it; an
+--- edge already passed is not resolved twice.
+function Brain.beat(self: Brain, now: number, dt: number)
+	if self.phase == "WindUp" then
+		local attack = self.attack
+		if attack == nil or now - self.phaseStart < attack.windUp then
+			return
+		end
+		self:enterStrike(self.phaseStart + attack.windUp, self.lastTarget)
+	end
+	if self.phase == "Strike" then
+		-- A strike phase that began inside this pass has run only since its beat.
+		self:advanceStrike(now, math.clamp(now - self.phaseStart, 0, dt))
+	end
+end
+
+--- The frame pass (D-184, D-185): EnemyService calls it on every server frame (Heartbeat) after the
+--- frame's AI ticks, while the brain is awake. It resolves the attack edges on the first frame at or
+--- after their beats and turns the body at the phase's rate for the frame's time. A brain asleep,
+--- held (asleep) or dead does nothing; an interrupting state on the record stops the attack here
+--- just as the tick does, and a parry during a strike resolved here interrupts it the same way.
+function Brain.frame(self: Brain)
+	if not self.awake or self.phase == "Dead" then
+		return
+	end
+	self.framed = true
+	local now = self.context.now()
+	local record = self.context.getRecord()
+	if record == nil or record.state == "Dead" then
+		return -- the tick takes it from here (die)
+	end
+	if self.phase ~= "Interrupted" and INTERRUPTING[record.state] then
+		self:interrupt(record.state, nil)
+	end
+	if self.phase == "WindUp" or self.phase == "Strike" then
+		self:beat(now, 0)
+	end
+	self:advanceTurn(now)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -783,40 +948,14 @@ function Brain.tick(self: Brain, dt: number)
 		if not self:frozen() then
 			self.archetype.onWindUp(self, dt, target)
 		end
-		if now - self.phaseStart >= attack.windUp then
-			-- The strike phase starts on the wind-up's own beat, not on this tick (up to a tick after
-			-- it): the strike then resolves on the first tick at or after the beat the clients draw
-			-- (D-182).
-			self:enterStrike(self.phaseStart + attack.windUp, target)
-		end
+		-- The wind-up's end and the strike are timed edges: the same pass the frames run (D-184).
+		self:beat(now, dt)
 	elseif phase == "Strike" then
-		local attack = self.attack
-		if attack == nil then
+		if self.attack == nil then
 			self:enterIdle(now)
 			return
 		end
-		local elapsed = now - self.phaseStart
-		if not self.struck and elapsed >= attack.strike then
-			self.struck = true
-			local contact = self.archetype.contactStrike
-			if contact == nil or not contact(self) then
-				local origin, facing = self.archetype.strikeFrame(self)
-				context.strike(attack, origin, facing)
-				-- The strike resolves synchronously: a parry staggers this enemy through EntityService and
-				-- interrupt() has already run, so the strike hook must not move the body again.
-				if self.phase ~= "Strike" then
-					return
-				end
-			end
-		end
-		local over = self.archetype.onStrike(self, dt, elapsed)
-		-- A contact strike resolves inside onStrike, and a parry there interrupts this brain the same way.
-		if self.phase ~= "Strike" then
-			return
-		end
-		if self.struck and over then
-			self:enterRecover(now)
-		end
+		self:beat(now, dt)
 	elseif phase == "Recover" then
 		local attack = self.attack
 		if attack == nil then

@@ -12,6 +12,17 @@
 	sleep. The brain owns its yaw and publishes it through an AlignOrientation on the root, so a
 	Charger really does turn slowly.
 
+	After the frame's ticks, the frame pass runs every awake brain once per Heartbeat (D-184, D-185):
+	the attack's timed edges (the wind-up's end, the strike, a rush's stretches and run) resolve on
+	the first server frame at or after their beat, and the body turns by the phase's rate times the
+	frame's seconds, so it turns smoothly instead of in 20 Hz steps. A movement the frame pass asks
+	for (the rush's launch) reaches the mover in the same frame.
+
+	The mover's stuck clock (D-183) starts with each movement: a stop, a switch to or from a direct
+	move and a release from hold all restart it, so time spent standing never reads as time stuck.
+	A strike's own movement (the rush) is direct: straight MoveTo, never a path. A path that lands
+	after the body moved on never sends it back to the waypoint it asked from (where it stood).
+
 	Hold (D-120): setHeld(id, true) puts one enemy's brain to sleep and stops its mover, and the
 	sleep check never wakes it while it is held; setHoldNew(true) makes every enemy spawned after
 	it (PlaygroundService respawns included) start held. A held enemy's HP never regenerates
@@ -99,9 +110,17 @@ type Mover = {
 	pathFailedAt: number?,
 	computing: boolean,
 	pathGeneration: number, -- bumped by every request and every stop; a late result for an old goal is dropped
+	-- The stuck clock (D-183): when and where the body last made progress. Nil position: the clock
+	-- starts on the next update. Every new movement restarts it (one that starts from standing, after
+	-- a stop, a hold or a sleep, and a switch to or from a direct move), so time spent standing never
+	-- counts as time stuck.
 	lastProgressAt: number,
 	lastProgressPosition: Vector3?,
 	stuck: boolean,
+	-- A strike's own movement (the rush, any lunge): straight MoveTo, never a path (D-183).
+	direct: boolean,
+	-- A request arrived since the last update: the frame pass applies it in the same frame.
+	pending: boolean,
 }
 
 export type Entry = {
@@ -118,6 +137,7 @@ export type Entry = {
 	back: number, -- studs it reaches behind its root
 	rushEndSent: boolean, -- this rush already told the clients it stopped early (D-169)
 	rejoinPending: boolean, -- a stopped rush waits for a clear body to rejoin the enemies group (D-167)
+	clearSince: number?, -- since when a waiting body has been clear of every player and enemy (D-190)
 }
 
 local FORWARD = -Vector3.zAxis
@@ -150,6 +170,7 @@ local signalConnections: { Connection } = {}
 local started = false
 local warnedNoCombat = false
 local holdNew = false
+local frameList: { Entry } = {} -- the frame pass's snapshot, reused every frame (no garbage per frame)
 
 local function dependencies(): Deps
 	if deps == nil then
@@ -193,24 +214,47 @@ local function newMover(model: Model, speed: number): Mover
 		lastProgressAt = -math.huge,
 		lastProgressPosition = nil,
 		stuck = false,
+		direct = false,
+		pending = false,
 	}
 end
 
-local function moverRequest(mover: Mover, goal: Vector3, speed: number)
+-- Starts the stuck clock afresh: the next update measures progress from where the body stands then.
+local function restartClock(mover: Mover)
+	mover.lastProgressPosition = nil
+	mover.stuck = false
+end
+
+-- Forgets the path and drops a result still computing (it was asked for another movement).
+local function dropPath(mover: Mover)
+	mover.path = nil
+	mover.pathGeneration += 1
+	mover.computing = false
+end
+
+-- `direct`: a strike's own movement, straight at the goal and never along a path (D-183).
+local function moverRequest(mover: Mover, goal: Vector3, speed: number, direct: boolean?)
+	local isDirect = direct == true
+	if isDirect ~= mover.direct then
+		-- A different kind of movement is a new movement: its own clock, and no path from the old one.
+		mover.direct = isDirect
+		restartClock(mover)
+		dropPath(mover)
+	end
 	mover.goal = goal
 	mover.speed = speed
+	mover.pending = true
 end
 
 local function moverStop(mover: Mover)
 	mover.goal = nil
+	mover.pending = false
+	mover.direct = false
 	if mover.moving then
 		mover.moving = false
 		mover.issuedGoal = nil
-		mover.path = nil
-		mover.stuck = false
 		-- A path still computing is for a goal that no longer exists; its result is dropped.
-		mover.pathGeneration += 1
-		mover.computing = false
+		dropPath(mover)
 		dependencies().engine.stop(mover.model)
 	end
 end
@@ -243,7 +287,11 @@ local function requestPath(mover: Mover, from: Vector3, to: Vector3, now: number
 		mover.pathComputedAt = d.serverTime()
 		if waypoints ~= nil and #waypoints > 0 then
 			mover.path = waypoints
-			mover.pathIndex = 1
+			-- The first waypoint is where the body stood when it asked; a path that lands after the body
+			-- moved on must never walk it back there (D-183).
+			local startsHere = #waypoints >= 2
+				and Brain.horizontalDistance(waypoints[1], from) <= AI.movement.waypointReach
+			mover.pathIndex = if startsHere then 2 else 1
 			mover.pathFailedAt = nil
 		else
 			mover.path = nil
@@ -257,8 +305,10 @@ local function requestPath(mover: Mover, from: Vector3, to: Vector3, now: number
 	end
 end
 
--- Applies the tick's request: direct MoveTo inside pathfindPastStuds, a path beyond it or when stuck.
+-- Applies the tick's request: direct MoveTo inside pathfindPastStuds, a path beyond it or when stuck;
+-- a strike's own movement (direct) always goes straight.
 local function moverUpdate(mover: Mover, now: number)
+	mover.pending = false
 	local goal = mover.goal
 	if goal == nil then
 		moverStop(mover)
@@ -266,10 +316,19 @@ local function moverUpdate(mover: Mover, now: number)
 	end
 	local engine = dependencies().engine
 	local movement = AI.movement
+	if not mover.moving then
+		-- A new movement from standing (after a stop, a hold or a sleep): standing is not being stuck,
+		-- so its clock starts now (D-183).
+		restartClock(mover)
+	end
 	mover.moving = true
 	if mover.walkSpeed ~= mover.speed then
 		engine.setWalkSpeed(mover.model, mover.speed)
 		mover.walkSpeed = mover.speed
+	end
+	if mover.direct then
+		issue(mover, goal, now)
+		return
 	end
 
 	local position = engine.position(mover.model)
@@ -387,6 +446,7 @@ local function rushStarted(entry: Entry, rush: Brain.Rush)
 	local d = dependencies()
 	entry.rushEndSent = false
 	entry.rejoinPending = false
+	entry.clearSince = nil
 	setGroup(entry.model, AI.collision.rushing)
 	d.fireAll("RushStarted", {
 		entityId = entry.id,
@@ -399,8 +459,8 @@ local function rushStarted(entry: Entry, rush: Brain.Rush)
 	})
 end
 
--- A rush stopped: an early stop is told once ("Jammed" keeps running, so it keeps its group); every
--- stop but a jam waits to rejoin the enemies group until the body is clear (tickAll).
+-- A rush stopped: an early stop is told once; every stop (a jam stops the body too, D-190) waits to
+-- rejoin the enemies group until the body has stayed clear long enough (rejoin, from tickAll).
 local function rushEnded(entry: Entry, rush: Brain.Rush, reason: Brain.RushEnd, distance: number)
 	local d = dependencies()
 	if reason ~= "Done" and not entry.rushEndSent then
@@ -413,20 +473,32 @@ local function rushEnded(entry: Entry, rush: Brain.Rush, reason: Brain.RushEnd, 
 			reason = reason,
 		})
 	end
-	if reason ~= "Jammed" then
+	if not entry.rejoinPending then
 		entry.rejoinPending = true
+		entry.clearSince = nil
 	end
 end
 
--- A stopped rush's body rejoins the enemies group once it overlaps no player and no enemy, so the
--- engine never has to push two bodies apart (that push is what lifted one boar onto another).
-local function rejoin(entry: Entry)
+-- A stopped rush's body rejoins the enemies group once its root has overlapped no player and no
+-- enemy for ai.collision.rejoinClearSeconds in a row, so the engine never has to push two bodies
+-- apart (that push is what lifted one boar onto another). The wait outlasts the time every client
+-- draws a server body late (D-190): a body that turned solid the moment the server saw it clear was
+-- still drawn inside the player it had just run through, still moving, and the engine pushed that
+-- player out at the rush's speed, up onto its back.
+local function rejoin(entry: Entry, now: number)
 	if not entry.rejoinPending then
 		return
 	end
 	local clear = dependencies().engine.bodyClear
-	if clear == nil or clear(entry.model) then
+	if clear ~= nil and not clear(entry.model) then
+		entry.clearSince = nil
+		return
+	end
+	local since: number = entry.clearSince or now
+	entry.clearSince = since
+	if now - since >= AI.collision.rejoinClearSeconds then
 		entry.rejoinPending = false
+		entry.clearSince = nil
 		setGroup(entry.model, AI.collision.enemies)
 	end
 end
@@ -453,8 +525,8 @@ local function makeContext(entry: Entry): Brain.Context
 		facing = function()
 			return d.engine.facing(model)
 		end,
-		moveTo = function(position, speed)
-			moverRequest(mover, position, speed)
+		moveTo = function(position, speed, direct)
+			moverRequest(mover, position, speed, direct)
 		end,
 		stop = function()
 			moverStop(mover)
@@ -615,6 +687,7 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 		back = back,
 		rushEndSent = false,
 		rejoinPending = false,
+		clearSince = nil,
 		brain = nil :: any,
 	}
 	entry.brain = Brain.new(makeContext(entry), archetypeFor(def))
@@ -787,6 +860,18 @@ local function refreshSleep(now: number)
 	end
 end
 
+-- One brain's tick and one brain's frame pass, each run under pcall so a failing brain never stops
+-- the others (each returns a value so pcall's two results keep their types).
+local function runTick(brain: Brain.Brain, step: number): boolean
+	brain:tick(step)
+	return true
+end
+
+local function runFrame(brain: Brain.Brain): boolean
+	brain:frame()
+	return true
+end
+
 local function tickAll(step: number)
 	local d = dependencies()
 	local now = d.serverTime()
@@ -800,11 +885,11 @@ local function tickAll(step: number)
 		if entries[entry.id] ~= entry then
 			continue
 		end
-		rejoin(entry) -- asleep or held too: a stopped rush still waits for a clear body
+		rejoin(entry, now) -- asleep or held too: a stopped rush still waits for a clear body
 		if not entry.awake then
 			continue
 		end
-		local ok, err = pcall(entry.brain.tick, entry.brain, step)
+		local ok, err = pcall(runTick, entry.brain, step)
 		if not ok then
 			warn(("[EnemyService] brain of entity %d (%s) failed: %s"):format(entry.id, entry.defId, tostring(err)))
 		end
@@ -812,9 +897,39 @@ local function tickAll(step: number)
 	end
 end
 
---- Advances the service by a frame's dt: whole AI ticks run at ai.tickHz; after a hitch at most
---- ai.maxTicksPerFrame run and the rest of the backlog is dropped. Heartbeat calls it; tests and
---- the smoke script call it by hand.
+-- The frame pass (D-184, D-185): every awake brain resolves the attack edges due by now (the
+-- wind-up's end, the strike, a rush's stretches and run) and turns its body for the frame; a
+-- movement it asked for on the way (the rush's launch) reaches the mover in the same frame. Asleep,
+-- held and dead enemies are skipped.
+local function frameAll()
+	local d = dependencies()
+	local now = d.serverTime()
+	table.clear(frameList) -- a pass that errored out last frame left its snapshot behind
+	for _, entry in entries do
+		if entry.awake then
+			table.insert(frameList, entry)
+		end
+	end
+	for _, entry in frameList do
+		if entries[entry.id] ~= entry or not entry.awake then
+			continue -- a strike earlier in this pass killed or put it to sleep
+		end
+		local ok, err = pcall(runFrame, entry.brain)
+		if not ok then
+			warn(("[EnemyService] frame of entity %d (%s) failed: %s"):format(entry.id, entry.defId, tostring(err)))
+		end
+		if entry.mover.pending then
+			moverUpdate(entry.mover, now)
+		end
+	end
+	table.clear(frameList)
+end
+
+--- Advances the service by a frame's dt: whole AI ticks run at ai.tickHz (perception, decisions,
+--- movement); after a hitch at most ai.maxTicksPerFrame run and the rest of the backlog is dropped.
+--- Then the frame pass runs every awake brain once: the attack edges on their beats at the server's
+--- frame precision and the body turns (D-184, D-185). Heartbeat calls it; tests and the smoke script
+--- call it by hand.
 function EnemyService.step(dt: number)
 	accumulator += dt
 	local stepSeconds = AI.tickSeconds()
@@ -827,6 +942,7 @@ function EnemyService.step(dt: number)
 	if accumulator >= stepSeconds then
 		accumulator = 0
 	end
+	frameAll()
 end
 
 -- ---------------------------------------------------------------------------------------------

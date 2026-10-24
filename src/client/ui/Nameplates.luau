@@ -13,6 +13,14 @@
 	never carry the engine's own name label (RigBuilder: DisplayDistanceType None), so the plate
 	is the only name over an enemy.
 
+	A shatter that is coming owns the plate (D-187): the death reaction scheduled it on the
+	engine's task clock, which resumes a delay on a frame's start, not on the Heartbeat this
+	module checks its own times on, so the same sum on two clocks took the plate a frame before
+	the body (measured in Studio: plate at 0.834 s, body at 0.852 s). `expect(model, seconds)`
+	(Shatter.expect, called where the shatter is scheduled) moves that plate's fallback to the
+	shatter's time plus ui.nameplates.shatterGraceSeconds, so only the shatter's own hide takes
+	it on time and the fallback is left for a rig whose shatter never runs on this client.
+
 	Respawns (D-177): the engine empties the PlayerGui when the local character respawns, keeping
 	only the LayerCollectors whose ResetOnSpawn is false, so the plates' folder goes with it
 	(measured in Studio after LoadCharacter: PlayerGui.SkyspireNameplates gone, no plates). Every
@@ -50,6 +58,11 @@ type Plate = {
 	gone: boolean,
 	-- When the record turned Dead, the Engine.now() the shatter is due (the fallback).
 	dueAt: number?,
+	-- A shatter is scheduled for this rig: the Engine.now() past which the plate goes even if that
+	-- shatter never hid it (its time plus the grace). Overrides dueAt.
+	expected: number?,
+	-- The Heartbeat that first found `expected` passed; the plate goes on a later one (D-191).
+	overdueBeat: number?,
 }
 
 local Nameplates = {}
@@ -62,6 +75,7 @@ local pool: { [string]: { Plate } } = { Player = {}, Enemy = {} }
 local localId: number? = nil
 local stopLoop: (() -> ())? = nil
 local sinceUpdate = 0
+local beats = 0 -- Heartbeats run (the frame count expireDue waits on)
 local hover: ((plate: Plate) -> boolean)? = nil
 local started = false
 local folder: Instance? = nil
@@ -202,6 +216,8 @@ local function newPlate(kind: "Player" | "Enemy"): Plate
 		alpha = 1,
 		gone = false,
 		dueAt = nil,
+		expected = nil,
+		overdueBeat = nil,
 	}
 end
 
@@ -221,6 +237,8 @@ local function release(plate: Plate)
 	plate.record = nil
 	plate.gone = false
 	plate.dueAt = nil
+	plate.expected = nil
+	plate.overdueBeat = nil
 	table.insert(pool[plate.kind], plate)
 end
 
@@ -234,18 +252,48 @@ local function warmPool()
 	end
 end
 
--- Whether a plate shows: not taken by the shatter, and not past the time its shatter was due.
+-- Whether a plate shows: not taken by the shatter, and not past the time it goes without one. A
+-- plate waiting for a scheduled shatter is taken by that shatter or by expireDue, never by a check
+-- of the time alone.
 local function shows(plate: Plate): boolean
+	if plate.gone then
+		return false
+	end
+	if plate.expected ~= nil then
+		return true
+	end
 	local due = plate.dueAt
-	return not plate.gone and (due == nil or Engine.now() < due)
+	return due == nil or Engine.now() < due
 end
 
--- Plates whose shatter came due without a hide: gone now.
+local function drop(plate: Plate)
+	plate.gone = true
+	plate.gui.Enabled = false
+end
+
+-- Plates whose fallback came due without a hide: gone now. A plate waiting for a scheduled shatter
+-- goes on the Heartbeat after the first one that found its grace over (D-191): a frame that stalls
+-- across the shatter's time ends with the clock past the grace while the engine has not yet
+-- resumed the shatter's delay (it does so at the next frame's start), and the plate must not leave
+-- a frame before the body.
 local function expireDue()
+	local now = Engine.now()
 	for _, plate in plates do
-		if not plate.gone and plate.dueAt ~= nil and not shows(plate) then
-			plate.gone = true
-			plate.gui.Enabled = false
+		if plate.gone then
+			continue
+		end
+		local expected = plate.expected
+		if expected ~= nil then
+			if now >= expected then
+				local seen = plate.overdueBeat
+				if seen == nil then
+					plate.overdueBeat = beats
+				elseif beats > seen then
+					drop(plate)
+				end
+			end
+		elseif plate.dueAt ~= nil and not shows(plate) then
+			drop(plate)
 		end
 	end
 end
@@ -290,12 +338,17 @@ function Nameplates.refresh(record: any)
 	end
 	plate.name.Text = record.name or ""
 	-- A dead rig keeps its plate through the freeze (the HP bar empty) and loses it with the
-	-- shatter; a record that is no longer Dead (a revive) holds no shatter time.
+	-- shatter; a record that is no longer Dead (a revive) holds no shatter time. A scheduled
+	-- shatter (expect) may come before the Dead state reaches this client: it holds until a revive.
 	if record.state == "Dead" then
 		if plate.dueAt == nil then
 			plate.dueAt = Engine.now() + Moments.deathDuckDelay() + Combat.deathFreeze
 		end
 	else
+		if plate.dueAt ~= nil then
+			plate.expected = nil
+			plate.overdueBeat = nil
+		end
 		plate.dueAt = nil
 	end
 	plate.gui.Enabled = shows(plate)
@@ -349,6 +402,8 @@ local function keepFolder(): boolean
 		fresh.record = record
 		fresh.gone = old.gone
 		fresh.dueAt = old.dueAt
+		fresh.expected = old.expected
+		fresh.overdueBeat = old.overdueBeat
 		fresh.alpha = old.alpha
 		plates[id] = fresh
 		if record ~= nil then
@@ -382,6 +437,8 @@ function Nameplates.attach(record: any)
 	adorn(plate, record)
 	plate.gone = false
 	plate.dueAt = nil
+	plate.expected = nil
+	plate.overdueBeat = nil
 	plate.gui.Enabled = true
 	Nameplates.refresh(record)
 	applyAlpha(plate, 1, kind == "Enemy")
@@ -405,6 +462,20 @@ function Nameplates.hide(model: Instance)
 		if record ~= nil and record.model == model then
 			plate.gone = true
 			plate.gui.Enabled = false
+		end
+	end
+end
+
+--- A shatter is scheduled for `model` in `seconds` (Shatter.expect, from the death reaction): its
+--- plate waits for that shatter's hide, and goes on its own only ui.nameplates.shatterGraceSeconds
+--- past the shatter's time, so a fallback never takes it before a shatter that is coming (D-187).
+function Nameplates.expect(model: Instance, seconds: number)
+	local at = Engine.now() + seconds + UI.nameplates.shatterGraceSeconds
+	for _, plate in plates do
+		local record = plate.record
+		if record ~= nil and record.model == model then
+			plate.expected = at
+			plate.overdueBeat = nil
 		end
 	end
 end
@@ -489,6 +560,7 @@ end
 -- next frame at the latest), a plate whose shatter came due goes on that frame, not at the
 -- tier's rate, and the fade and hover at the tier's rate.
 local function heartbeat(dt: number)
+	beats += 1
 	keepFolder()
 	expireDue()
 	sinceUpdate += dt

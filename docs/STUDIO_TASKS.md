@@ -720,3 +720,31 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
    (c) Against a boar, log RushStarted.serverTime minus (Telegraph serverTime + windUp + pauses): it is 0.
    (d) With Incoming Replication Lag 0.2, stand 7, 10 and 14 studs down a boar's line. HP drops within 3 frames of the drawn tusk contact and never before it.
    (e) In the open the boar still runs its full 22 studs and never reports Jammed.
+
+## X. Strikes on the frame, smooth turns and the ceiling shadow (D-183 to D-192)
+
+170. [ ] **Hold and release a lined-up boar (D-183).** In Playground with the dev hold, hold a boar about 15 studs from you, lined up, for 3 s or more, then release it.
+   (a) It rushes straight down its telegraph line: no step back, no Jammed end.
+   (b) Repeat the a1 setup three times (hold, stand 14 studs in front, release, step to 12 studs at the wind-up): no Jammed end.
+   (c) Repeat with the boar held on a slope and next to a pillar.
+171. [ ] **HP drop on the beat (D-184).**
+   (a) Stand in a kobold's Overhead with 0, 1 and 3 hits landed during its wind-up. Your HP drops on the frame the telegraph ends, never before it.
+   (b) Let a boar rush you from 7, 10 and 14 studs: the HP drop comes at snout contact.
+   (c) If you can, repeat with the server capped at 30 fps.
+172. [ ] **Smooth turns (D-185).** Watch a kobold chase and a boar wheel around you. The body turn looks smooth, with no 8° snaps. The boar's crouch line leaves from its snout, with no turn after the line appears.
+173. [ ] **No ceiling shadow (D-186; closes items 138 and 168).** Build the Playground from the place file.
+   (a) At midday and at a low sun, the field and the players are lit and characters cast normal shadows.
+   (b) Replay the B 9.13 path: the band is gone. Mark items 138 and 168 done.
+174. [ ] **Archetype smoke with the frame pass (D-184).** Run `tools/smoke.sh archetypes` in Studio and confirm it passes.
+175. [ ] **Plate and body on the same frame (D-187).** Kill a boar and a kobold with a basic swing and with an Art's final cut. On a second client, watch a remote player's kill. Step the capture frame by frame: the plate and the body's parts go on the same rendered frame (at c73cfa8: plate 0.834 s, body 0.852 s).
+176. [ ] **Launch head lift (D-188, D-189).** Watch a boar's launch from the side at 0.25x, with Incoming Replication Lag 0, then 0.1 to 0.2 s.
+   (a) The head lift (about 1 stud on the first frame, about 2.5 studs over 3 to 4 frames) starts on the frame the body starts running, never a frame before.
+   (b) Note whether it reads as a burst or a pop.
+177. [ ] **Plate during a rush (optional).** During a boar's rush, and a death mid-rush, note where the plate sits against the drawn body. It follows the root, up to about 7 studs behind at 0.25 s root lag.
+178. [ ] **A jammed rush never carries you (D-190).** Add a temporary server log, per Heartbeat, of the boar root's CollisionGroup and velocity, and a client log of your root's position.
+   (a) Run the a1 setup three times. Then run three rushes with a pillar or wall a few studs down the boar's line so it jams (as in item 158 (e)). Stand still on the line each time.
+   (b) Pass: a jammed boar stops where it jammed, and you are never pushed or lifted. Its root returns to SkyspireEnemies about 0.5 s after it stops, and never while it overlaps you.
+   (c) Stand at the end of a clean run's line (about 22 studs) so the boar stops on you. It stays SkyspireRushing until you step off, then turns solid about 0.5 s later. You are never lifted.
+   (d) Repeat (a) with Incoming Replication Lag 0.2.
+179. [ ] **Plate across a render stall at the shatter (D-191).** Kill a boar. During its 0.67 s freeze, drag the Studio window for about 0.5 s, then for about 1 s, so the stall spans the shatter. Pass: when frames resume, the plate and the shards go on the same frame; the plate never vanishes while the body still stands.
+180. [ ] **Jumping onto an enemy (D-192).** Jump onto a standing boar's back and onto a kobold. Report whether you can stand there, for how long, and whether the enemy's movement carries you. This decides whether the slide-off follow-up is needed.

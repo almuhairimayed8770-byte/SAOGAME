@@ -1987,7 +1987,7 @@ describe("choreo validator: the render-stall jump", function()
 end)
 
 -- ------------------------------------------------------------------------------------------
--- AI: the rush's jam lag, the hit-stop pause cap and the fighter collision groups (D-167..D-169)
+-- AI: the rush's jam lag, the hit-stop pause cap and the fighter collision groups (D-167..D-169, D-190)
 -- ------------------------------------------------------------------------------------------
 
 describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", function()
@@ -2061,6 +2061,33 @@ describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", fun
 				table.insert(copy.collision.apart, { copy.collision.rushing, "Walls" })
 			end),
 			"collision.apart names Walls, which is not a fighter group"
+		)).toBe(true)
+	end)
+
+	it("a stopped rush waits longer than the clients' draw lag and less than its recovery (D-190)", function()
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.collision.rejoinClearSeconds = copy.collision.clientDrawLagSeconds
+			end),
+			"must exceed clientDrawLagSeconds"
+		)).toBe(true)
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.collision.rejoinClearSeconds = 5
+			end),
+			"FrenzyBoar.Charge: recovery 1.2 must exceed collision.rejoinClearSeconds 5"
+		)).toBe(true)
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.collision.rejoinClearSeconds = nil
+			end),
+			"collision.rejoinClearSeconds must be a number"
+		)).toBe(true)
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.collision.clientDrawLagSeconds = 0
+			end),
+			"collision.clientDrawLagSeconds must be positive"
 		)).toBe(true)
 	end)
 end)

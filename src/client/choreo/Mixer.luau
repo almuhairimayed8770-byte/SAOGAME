@@ -672,7 +672,9 @@ local function beatStep(handle: Handle, beat: Beat, held: number, clipDt: number
 	-- Real seconds to the mark at the clip's own rate, and the server's (it is `owed` nearer).
 	local remaining = math.max(0, beat.untilTime - handle.time) / handle.speed
 	local left = remaining - owed
-	local rate = if left > clipDt then remaining / left else BEAT.maxRate
+	-- The server's mark falls inside this step: the whole balance is evened now, faster when the
+	-- clip is behind and slower when it is ahead (never a frame further ahead: D-188).
+	local rate = if left > clipDt then remaining / left elseif owed > 0 then BEAT.maxRate else BEAT.minRate
 	rate = math.clamp(rate, BEAT.minRate, BEAT.maxRate)
 	local gain = clipDt * (rate - 1)
 	if (owed > 0 and gain > owed) or (owed < 0 and gain < owed) then

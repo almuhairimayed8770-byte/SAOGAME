@@ -339,3 +339,161 @@ describe("Enemy bodies turn with the brain", function()
 		expect(Vector3.new(strike.facing.X, 0, strike.facing.Z).Unit:Dot(lookOf(model))).toBeGreaterThan(0.9999)
 	end)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- Server frames: the body turns every frame and the attack's edges land on their frame
+-- ------------------------------------------------------------------------------------------
+
+-- One server frame in the engine's order: physics moves the bodies and settles the roots on the
+-- align, then the Heartbeat runs the service (its ticks, then its frame pass).
+local function serverFrame(dt: number)
+	clock.t += dt
+	physics(dt)
+	EnemyService.step(dt)
+	EntityService.tick(dt)
+end
+
+local function sentOf(remote: string): { any }
+	local list = {}
+	for _, entry in sent do
+		if entry.remote == remote then
+			table.insert(list, entry.payload)
+		end
+	end
+	return list
+end
+
+describe("Enemy bodies at server frame rate (D-184, D-185)", function()
+	it("the kobold and the boar turn their bodies a frame's worth on every frame of a turn", function()
+		for _, case in
+			{ { defId = "KoboldAxeman", rate = BRUTE.turnRate }, { defId = "FrenzyBoar", rate = CHARGER.turnRate } }
+		do
+			for _, fps in { 60, 30 } do
+				fresh()
+				local id = EnemyService.spawn(case.defId, CFrame.new(0, 3, 0))
+				local model = EnemyService.modelOf(id)
+				players = { { id = 1, position = Vector3.new(-14, 3, 10) } }
+				local frame = 1 / fps
+				local previous = lookOf(model)
+				local turning, moved, maxStep = 0, 0, 0
+				for _ = 1, math.ceil(1.2 * fps) do
+					local brain = EnemyService.brainOf(id)
+					-- Still well off the player at the start of the frame: this frame turns.
+					local offTarget = phaseOf(id) == "Chase"
+						and brain:angleTo(players[1].position - bodies[model].position) > 5
+					serverFrame(frame)
+					local look = lookOf(model)
+					local step = turned(previous, look)
+					previous = look
+					maxStep = math.max(maxStep, step)
+					if offTarget then
+						turning += 1
+						if step > 1e-4 then
+							moved += 1
+						end
+					end
+				end
+				expect(turning).toBeGreaterThan(10)
+				expect(moved).toBeGreaterThanOrEqual(turning - 2)
+				expect(maxStep).toBeLessThanOrEqual(case.rate * frame + 1e-3)
+			end
+		end
+	end)
+
+	it("a wheeling boar crouches on the line its body already shows: no last-frame turn under the telegraph", function()
+		for _, fps in { 60, 30 } do
+			fresh()
+			local id = EnemyService.spawn("FrenzyBoar", CFrame.new(0, 3, 0))
+			local model = EnemyService.modelOf(id)
+			players = { { id = 1, position = Vector3.new(-24, 3, 14) } }
+			local guard = 0
+			while #sentOf("Telegraph") == 0 and guard < 4 * fps do
+				serverFrame(1 / fps)
+				guard += 1
+			end
+			expect(phaseOf(id)).toBe("WindUp")
+			local telegraph = sentOf("Telegraph")[1]
+			local drawn = Vector3.new(telegraph.facing[1], 0, telegraph.facing[3]).Unit
+			-- On the telegraph's own frame the root already points down the drawn line.
+			expect(turned(drawn, lookOf(model))).toBeLessThan(1e-3)
+			expect(turned(drawn, EnemyService.brainOf(id):getFacing())).toBeLessThan(1e-3)
+		end
+	end)
+
+	it("the kobold's cone resolves on the first server frame at or after its beat, along the body", function()
+		for _, seed in { 1, 2, 3 } do
+			fresh()
+			local id = EnemyService.spawn("KoboldAxeman", CFrame.new(0, 3, 0))
+			local model = EnemyService.modelOf(id)
+			players = { { id = 1, position = Vector3.new(2, 3, -6) } }
+			local random = Random.new(seed)
+			local frames: { number } = {}
+			local guard = 0
+			while #strikes == 0 and guard < 400 do
+				serverFrame(1 / 60 + (random:NextNumber() * 2 - 1) * 0.002)
+				table.insert(frames, clock.t)
+				guard += 1
+			end
+			expect(#strikes).toBe(1)
+			local telegraph = sentOf("Telegraph")[1]
+			local beat = telegraph.serverTime + OVERHEAD.windUp + OVERHEAD.strike
+			local first = nil
+			for _, at in frames do
+				if at >= beat - 1e-9 then
+					first = at
+					break
+				end
+			end
+			expect(strikes[1].time).toBe(first)
+			-- On the strike's own frame the root already points along the cone's facing.
+			local facing = strikes[1].facing
+			expect(turned(Vector3.new(facing.X, 0, facing.Z).Unit, lookOf(model))).toBeLessThan(1e-3)
+		end
+	end)
+
+	it("the boar's rush leaves on the first server frame at or after the wind-up's end, its MoveTo with it", function()
+		fresh()
+		local id = EnemyService.spawn("FrenzyBoar", CFrame.new(0, 3, 0))
+		local model = EnemyService.modelOf(id)
+		local body = bodies[model]
+		players = { { id = 1, position = Vector3.new(0, 3, -20) } }
+		local guard = 0
+		while #sentOf("RushStarted") == 0 and guard < 400 do
+			serverFrame(1 / 60)
+			guard += 1
+		end
+		local started = sentOf("RushStarted")[1]
+		local telegraph = sentOf("Telegraph")[1]
+		local beat = telegraph.serverTime + Enemies.byId("FrenzyBoar").attacks[1].windUp
+		expect(started.serverTime).toBeCloseTo(beat, 1e-9)
+		expect(clock.t - beat).toBeGreaterThanOrEqual(-1e-9)
+		expect(clock.t - beat).toBeLessThan(1 / 60 + 1e-9)
+		expect(strikes[1].time).toBe(clock.t)
+		-- The body has its goal on the launch frame: the next physics step already runs it.
+		expect(body.goal).never.toBeNil()
+		local before = body.position
+		serverFrame(1 / 60)
+		expect((body.position - before):Dot(lookOf(model))).toBeGreaterThan(0)
+	end)
+
+	it("a held enemy does nothing on its frames: no strike past its beat, no turn", function()
+		fresh()
+		local id = EnemyService.spawn("KoboldAxeman", CFrame.new(0, 3, 0))
+		local model = EnemyService.modelOf(id)
+		players = { { id = 1, position = Vector3.new(0, 3, -4) } }
+		local guard = 0
+		while phaseOf(id) ~= "WindUp" and guard < 400 do
+			serverFrame(1 / 60)
+			guard += 1
+		end
+		EnemyService.setHeld(id, true)
+		players[1].position = Vector3.new(6, 3, 0)
+		serverFrame(1 / 60)
+		local look = lookOf(model)
+		for _ = 1, 120 do
+			serverFrame(1 / 60)
+			expect(turned(look, lookOf(model))).toBeLessThan(1e-4)
+		end
+		expect(#strikes).toBe(0)
+	end)
+end)

@@ -1286,6 +1286,14 @@ function handlers.EntityDied(payload: any)
 		then named
 		elseif boss then Sfx.shatterCues.boss
 		else Sfx.shatterCues.normal
+	if record ~= nil then
+		-- What goes with the body (its plate) waits for this shatter's hide, on the clock it is
+		-- scheduled on, not on a timer of its own that runs a frame ahead of it (D-187).
+		local expect = method(d.shatter, "expect")
+		if expect ~= nil then
+			expect(record.model, lead + Combat.deathFreeze)
+		end
+	end
 	d.schedule(lead + Combat.deathFreeze, function()
 		-- The silence ends as the newest death's shatter cracks: a duck of 0 dB restores full volume
 		-- and makes any pending restore stale. An older death's shatter inside a newer silence stays

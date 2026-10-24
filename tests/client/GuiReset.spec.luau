@@ -127,6 +127,37 @@ describe("Nameplates across a respawn", function()
 		end
 	end)
 
+	it("keeps a dead rig's plate waiting for its scheduled shatter across the reset (D-187)", function()
+		local Nameplates = fresh("src/client/ui/Nameplates")
+		local dead = record("Enemy")
+		Nameplates.attach(dead)
+		local death = Moments.deathDuckDelay() + Combat.deathFreeze
+		Nameplates.expect(dead.model, death)
+		dead.state = "Dead"
+		dead.hp = 0
+		Nameplates.refresh(dead)
+		local expected = Nameplates.plateOf(dead.id).expected
+		expect(expected).never.toBeNil()
+
+		respawn(playerGui)
+		Nameplates.update()
+		local plate = Nameplates.plateOf(dead.id)
+		expect(plate.gui.Parent).toBe(folderIn(playerGui))
+		expect(plate.expected).toBe(expected)
+		-- Past the death's own fallback the coming shatter still owns the plate.
+		clock += death + 0.01
+		Nameplates.update()
+		expect(plate.gui.Enabled).toBe(true)
+		-- A shatter that never came: the plate goes once the grace is over, on the Heartbeat after
+		-- the first that found it over (the shatter's delay gets that frame, D-191).
+		clock += UI.nameplates.shatterGraceSeconds
+		Nameplates.step(1 / 60)
+		expect(plate.gui.Enabled).toBe(true)
+		Nameplates.step(1 / 60)
+		expect(plate.gui.Enabled).toBe(false)
+		Nameplates.detach(dead)
+	end)
+
 	it("hands a rig spawned on the respawn frame a live plate before any update", function()
 		local Nameplates = fresh("src/client/ui/Nameplates")
 		local first = record("Enemy")

@@ -16,22 +16,28 @@
 
 	The rush hits on contact (D-166): the line is the one the telegraph drew (from the crouch point,
 	its reach and width), and it resolves in stretches on the server's clock, not the body's. At the
-	launch the body's own length resolves (from its back to its snout, bodyExtents); every tick
-	after it resolves the stretch the body swept since the last one, from where its back was to where
-	its snout is now (speed * elapsed + front), so each target is hit the tick the snout reaches it,
-	once, and the whole line has been swept by `attack.strike`, never later. That clock starts on the
-	launch beat (the wind-up's own end, which the clients predict from the telegraph), not on the AI
-	tick up to a tick later that starts the body (D-182); the body's run, its jam check and its end,
-	counts from that tick (Rush.bodyStartedAt). A target the line never reaches (beyond its end,
-	beside it, or stepping in behind the body that already passed) is never hit, and a body jammed
-	against something still hits on the clock. Dodge, guard and parry are
-	judged per target at its own contact (CombatService.enemyStrike's options).
+	launch the body's own length resolves (from its back to its snout, bodyExtents); every server
+	frame after it (the frame pass, D-184) resolves the stretch the body swept since the last one, from
+	where its back was to where its snout is now (speed * elapsed + front), so each target is hit on
+	the first frame the snout reaches it, once, and the whole line has been swept by `attack.strike`,
+	never later. That clock starts on the launch beat (the wind-up's own end, which the clients
+	predict from the telegraph), not on the frame up to a frame later that starts the body (D-182);
+	the body's run, its jam check and its end, counts from that frame (Rush.bodyStartedAt). A target
+	the line never reaches (beyond its end, beside it, or stepping in behind the body that already
+	passed) is never hit, and a body jammed against something still hits on the clock. Dodge, guard
+	and parry are judged per target at its own contact (CombatService.enemyStrike's options).
+
+	The run is the strike's own movement (D-183): it goes straight at the line's end (moveDirect),
+	never along a path, so a body that stood still before the launch never walks back to where a
+	late path began.
 
 	The launch and an early stop go to EnemyService (rushStarted / rushEnded, D-169): it switches the
 	body's collision group so the rush passes through players and other enemies (D-167), and tells
 	the clients so they draw the rush on the server's timeline. A body that falls more than
 	jamLagStuds behind that timeline reports "Jammed" (the clients stop drawing it ahead of the
-	body); an interrupt, a death or a sleep reports why it stopped.
+	body) and stops where it is (D-190); an interrupt, a death or a sleep reports why it stopped.
+	EnemyService puts every stopped body back in the enemies group only once it has stayed clear of
+	every player and enemy for longer than the clients draw it late.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -188,7 +194,7 @@ function Charger.onStrikeStart(brain: Brain.Brain, _target: Brain.Target?)
 	memory.rushJammed = false
 	memory.rushSwept = nil
 	memory.rushHit = {}
-	brain:moveToward(rush.origin + rush.direction * length, speed)
+	brain:moveDirect(rush.origin + rush.direction * length, speed)
 	brain:rushStarted(rush)
 	sweep(brain, rush, rush.bodyStartedAt - rush.startedAt)
 end
@@ -203,12 +209,12 @@ function Charger.strikeFrame(brain: Brain.Brain): (Vector3, Vector3)
 	return brain:position(), brain:getFacing()
 end
 
---- Keeps the rush going and resolves what the body swept this tick; it is over when its time has
---- run (a body blocked by a wall simply pushes until then, so the overshoot never ends early and
---- the skid starts on the clip's beat). The line resolves on the launch beat's clock (startedAt,
---- what the clients draw); the body's own run (its jam check and its end) on the tick it started
---- (bodyStartedAt), so a launch noticed up to a tick late neither cuts the run short nor reads as
---- a jam.
+--- Keeps the rush going and resolves what the body swept since the last pass (every server frame,
+--- D-184); it is over when its time has run, so the skid starts on the clip's beat. A body that fell
+--- jamLagStuds behind the clock (a wall, a ledge) stops there and waits out the time (D-190). The line resolves on the
+--- launch beat's clock (startedAt, what the clients draw); the body's own run (its jam check and its
+--- end) on the frame it started (bodyStartedAt), so a launch noticed up to a frame late neither cuts
+--- the run short nor reads as a jam.
 function Charger.onStrike(brain: Brain.Brain, _dt: number, _phaseElapsed: number): boolean
 	local memory = brain.memory
 	local rush: Brain.Rush? = memory.rush
@@ -228,10 +234,16 @@ function Charger.onStrike(brain: Brain.Brain, _dt: number, _phaseElapsed: number
 		return true
 	end
 	if memory.rushJammed ~= true and rush.speed * ran - progress > tuning.jamLagStuds then
-		memory.rushJammed = true -- the hits stay on the clock; the clients stop drawing it ahead
+		-- The hits stay on the clock and the clients stop drawing it ahead; the body stops where it
+		-- jammed (D-190): sent on, it ran past its clock's end still at full speed, and turned solid
+		-- in the middle of the player it had just run through.
+		memory.rushJammed = true
 		brain:rushEnded(rush, "Jammed", progress)
+		brain.context.stop()
 	end
-	brain:moveToward(rush.origin + rush.direction * rush.length, rush.speed)
+	if memory.rushJammed ~= true then
+		brain:moveDirect(rush.origin + rush.direction * rush.length, rush.speed)
+	end
 	return false
 end
 

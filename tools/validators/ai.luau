@@ -5,7 +5,8 @@
 	costs that PathfindingService accepts (positive numbers keyed by material name), and attack
 	weights that name attacks which exist in enemies.luau. The hit-stop pause cap holds at least
 	one Final hit-stop (D-168), and the fighter collision groups are three distinct names other than
-	Default whose `apart` pairs name only them and let a rush pass the players (D-167).
+	Default whose `apart` pairs name only them and let a rush pass the players (D-167); a stopped
+	rush turns solid after longer than the clients' draw lag and before its recovery ends (D-190).
 ]]
 
 type Context = {
@@ -251,6 +252,37 @@ local function validate(ctx: Context): { string }
 		end
 		if not passesPlayers then
 			problem("collision.apart must let the rushing group pass the players group")
+		end
+		-- D-190: a stopped rush turns solid only once no client still draws it where it was, and
+		-- before its recovery ends (it moves off then).
+		local lag = collision.clientDrawLagSeconds
+		local rejoinClear = collision.rejoinClearSeconds
+		positiveNumber(lag, "collision.clientDrawLagSeconds")
+		positiveNumber(rejoinClear, "collision.rejoinClearSeconds")
+		if typeof(lag) == "number" and typeof(rejoinClear) == "number" then
+			if rejoinClear <= lag then
+				problem(
+					("collision.rejoinClearSeconds %s must exceed clientDrawLagSeconds %s"):format(
+						tostring(rejoinClear),
+						tostring(lag)
+					)
+				)
+			end
+			for _, def in Enemies.list() do
+				for _, attack in def.attacks do
+					local rush = def.archetype == "Charger" and (attack.arc == 0 or attack.groundShape == "Line")
+					if rush and attack.recovery <= rejoinClear then
+						problem(
+							("%s.%s: recovery %s must exceed collision.rejoinClearSeconds %s"):format(
+								def.id,
+								attack.id,
+								tostring(attack.recovery),
+								tostring(rejoinClear)
+							)
+						)
+					end
+				end
+			end
 		end
 	end
 

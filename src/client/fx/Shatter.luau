@@ -165,7 +165,7 @@ local function hideRig(model: Instance)
 	Trails.detach(model)
 	Telegraphs.hide(model)
 	-- The name goes with the polygon burst (D-147); the plate's own timer stays as the fallback
-	-- for a rig that never shatters here.
+	-- for a rig that never shatters here, held past a shatter that is coming (expect, D-187).
 	Nameplates.hide(model)
 end
 
@@ -250,6 +250,13 @@ function Shatter.start()
 			table.insert(pool, newShard())
 		end
 	end)
+end
+
+--- The death reaction scheduled `model`'s shatter `seconds` from now: everything that goes with
+--- the body (the plate) waits for this shatter's hide rather than its own timer, which runs on
+--- another clock and could take it a frame before the body (D-187).
+function Shatter.expect(model: Instance, seconds: number)
+	Nameplates.expect(model, seconds)
 end
 
 --- Hides the frozen rig and plays the shatter for its kind ("Beast" | "Construct" | "Plant" | "Humanoid" | "Boss") at the caller's weight or sfx.shatterCues cue name ("normal" by default; a Boss kind is always "boss").

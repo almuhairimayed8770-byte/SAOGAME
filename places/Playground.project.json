@@ -79,6 +79,7 @@
 						},
 						"Material": "Slate",
 						"Color": [0.42, 0.4, 0.38],
+						"CastShadow": false,
 						"TopSurface": "Smooth",
 						"BottomSurface": "Smooth"
 					}
