@@ -204,6 +204,10 @@ describe("LocomotionState.plantedAlong and settlePoints", function()
 	end)
 
 	it("settles where the walk's planted foot is over its Idle spot, for every direction and set", function()
+		-- A foot that gets over its Idle spot only within stopHandOverCycles of the other foot's
+		-- Footstep goes on to the other foot's settle point half a cycle on (that foot would come
+		-- down mid hand-over and skate to its own spot); the other foot's own point is not late.
+		local late = 0
 		for _, drawn in { false, true } do
 			local rest = LocomotionState.idleFeet(LocomotionState.clipFor("Idle", drawn))
 			for degrees = 0, 315, 45 do
@@ -213,32 +217,42 @@ describe("LocomotionState.plantedAlong and settlePoints", function()
 				expect(leftStep).toBe(0)
 				expect(math.abs(rightStep - 0.5)).toBeLessThan(0.01)
 				local weights = LocomotionState.walkWeights(forward, right, drawn)
-				for _, check in
-					{
-						{ leftStep + leftAfter, rest.leftFoot, leftAfter },
-						{ rightStep + rightAfter, rest.rightFoot, rightAfter },
-					}
-				do
-					local phase, foot, since = check[1], check[2], check[3]
+				local feet = {
+					{ step = leftStep, after = leftAfter, rest = rest.leftFoot, toOther = rightStep - leftStep },
+					{ step = rightStep, after = rightAfter, rest = rest.rightFoot, toOther = 1 - rightStep },
+				}
+				for index, foot in feet do
+					local other = feet[3 - index]
+					if foot.after > foot.toOther - Config.stopHandOverCycles + 1e-9 then
+						late += 1
+						expect(foot.after).toBeCloseTo(foot.toOther + other.after, 1e-9)
+						expect(other.after <= other.toOther - Config.stopHandOverCycles + 1e-9).toBe(true)
+						continue
+					end
 					local planted = 0
 					for walk, share in weights do
 						planted += share * LocomotionState.plantedAlong(
 							LocomotionState.clipFor(walk, drawn),
-							phase,
+							foot.step + foot.after,
 							forward,
 							right
 						)
 					end
-					local spot = foot.forward * forward + foot.right * right
+					local spot = foot.rest.forward * forward + foot.rest.right * right
 					-- Within half a cycle of its Footstep the walk reaches it, or the point is held at
 					-- an end of that half (the spot is behind the touchdown, or a side walk's stride
 					-- is too short to reach it).
 					if math.abs(planted - spot) > 1e-6 then
-						expect(since == 0 or since == 0.5).toBe(true)
+						expect(foot.after == 0 or foot.after == 0.5).toBe(true)
 					end
 				end
 			end
 		end
+		-- The drawn forward walk's right foot reaches the fighting stance's back spot only as the
+		-- left heel lands: that stop goes on to the left foot's point.
+		local _, leftAfter, rightStep, rightAfter = LocomotionState.settlePoints(1, 0, true)
+		expect(rightAfter).toBeCloseTo(1 - rightStep + leftAfter, 1e-9)
+		expect(late > 0).toBe(true)
 	end)
 end)
 

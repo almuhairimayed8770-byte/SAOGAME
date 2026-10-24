@@ -30,6 +30,13 @@
 	riser on the first damage frame while that frame is ahead. A TrailOn's
 	`data.kind` ("Art" | "Basic") picks the trail kind for the rest of that clip's trail events.
 
+	A render stall is the other way round (D-132): RenderStepped stops while the display sleeps,
+	and the step that comes back with the whole gap jumps every clip past what happened in it.
+	The events it crossed arrive marked as jumped, and only their closing half runs: a trail or
+	smear goes off, the activation light goes out, the post-motion ends the clip's trail. Nothing
+	starts: no clip sound or voice, footstep, chime, riser, FOV kick, trail or smear. Listeners of
+	`clipEvent` still hear every one, marked (the local Art hold's freeze is state, not a show).
+
 	Every tracked rig this client does not own (other players, enemies) gets a locomotion driver
 	(Locomotion.attach) when it is watched, so it walks instead of sliding on its idle pose; an
 	enemy's idle and walk start at its own id's phase (Locomotion.idlePhase, D-123). The
@@ -124,8 +131,9 @@ Replication.SOUNDS = SOUNDS
 
 --- Fires (action, reason, clientTime) when the server rejects one of the local player's requests.
 Replication.rejected = Signal.new() :: Signal.Signal<string, string, number?>
---- Fires (record, clipId, event) for every clip event on every tracked rig.
-Replication.clipEvent = Signal.new() :: Signal.Signal<any, string, any>
+--- Fires (record, clipId, event, jumped) for every clip event on every tracked rig; jumped is true
+--- for an event a render stall's gap crossed (D-132).
+Replication.clipEvent = Signal.new() :: Signal.Signal<any, string, any, boolean>
 --- Fires (record, state, duration?, direction?) on every StateChanged.
 Replication.stateChanged = Signal.new() :: Signal.Signal<any, string, number?, string?>
 --- Fires the raw HitConfirmed payload after the reactions ran (the character controller tracks parries).
@@ -645,13 +653,18 @@ local function resolveTrailKind(record: any, clipId: string, event: any): string
 end
 
 --- Routes one clip event on a rig to the FX and audio packages (trails, smear, activation light,
---- footsteps, clip sounds).
-function Replication.routeClipEvent(record: any, clipId: string, event: any)
+--- footsteps, clip sounds). `jumped`: a render stall's gap crossed it (D-132); only what it closes runs.
+function Replication.routeClipEvent(record: any, clipId: string, event: any, jumped: boolean?)
 	local d = dependencies()
 	local model = record.model
 	local kind = event.kind
+	local starts = jumped ~= true
 	if kind == "HitWindowOpen" or kind == "TrailOn" then
-		d.trails.setActive(model, true, resolveTrailKind(record, clipId, event))
+		-- A jumped one still names the clip's trail kind for the events after it.
+		local trailKind = resolveTrailKind(record, clipId, event)
+		if starts then
+			d.trails.setActive(model, true, trailKind)
+		end
 		if kind == "HitWindowOpen" then
 			d.trails.activationLight(model, false, d.trailToken(record))
 		end
@@ -660,39 +673,45 @@ function Replication.routeClipEvent(record: any, clipId: string, event: any)
 	elseif kind == "SmearOn" then
 		-- The smear frames run the trail at full width (section 10 beat 3) on top of any Art or
 		-- Basic kind; Trails keeps the trail lit while any kind is on.
-		d.smear.apply(model, true, if event.data ~= nil then event.data.axis else nil)
-		d.trails.setActive(model, true, "Smear")
+		if starts then
+			d.smear.apply(model, true, if event.data ~= nil then event.data.axis else nil)
+			d.trails.setActive(model, true, "Smear")
+		end
 	elseif kind == "SmearOff" then
 		d.smear.apply(model, false, if event.data ~= nil then event.data.axis else nil)
 		d.trails.setActive(model, false, "Smear")
-	elseif kind == "Sfx" or kind == "Voice" then
-		-- data.name is a sfx.luau "family.Name"; SfxPool resolves it and skips placeholders.
-		local data = event.data
-		if typeof(data) == "table" and typeof(data.name) == "string" then
-			d.sfx.play(data.name, d.positionOf(model))
-		end
-	elseif kind == "ActivationHold" then
-		local token = d.trailToken(record)
-		local isLocal = record.id == d.localId()
-		d.trails.activationLight(model, true, token)
-		d.sfx.play("artChime." .. token, d.positionOf(model))
-		if isLocal then
-			d.camera.fovKick()
-		end
-		-- The riser into the first damage frame (remote), the wind-up contour (local).
-		local entry = clipSpeeds[record.id]
-		local speed = if entry ~= nil and entry.clipId == clipId then entry.speed else nil
-		d.impact.activation(model, clipId, token, isLocal, speed)
 	elseif kind == "PostMotionStart" then
 		d.trails.activationLight(model, false, d.trailToken(record))
 		d.trails.setActive(model, false, resolveTrailKind(record, clipId, event))
 		trailKinds[record.id] = nil
-	elseif kind == "Footstep" then
-		-- SfxPool resolves the surface from the event or the Humanoid's floor, and the weight
-		-- from the armor attribute.
-		d.sfx.footstep(model, if event.data ~= nil then event.data.surface else nil)
+	elseif starts then
+		-- The one-shots. A clip sound or voice, an Art's activation (light, chime, kick, riser) or a
+		-- footstep that a render stall's gap jumped over is over: nothing replays.
+		if kind == "Sfx" or kind == "Voice" then
+			-- data.name is a sfx.luau "family.Name"; SfxPool resolves it and skips placeholders.
+			local data = event.data
+			if typeof(data) == "table" and typeof(data.name) == "string" then
+				d.sfx.play(data.name, d.positionOf(model))
+			end
+		elseif kind == "ActivationHold" then
+			local token = d.trailToken(record)
+			local isLocal = record.id == d.localId()
+			d.trails.activationLight(model, true, token)
+			d.sfx.play("artChime." .. token, d.positionOf(model))
+			if isLocal then
+				d.camera.fovKick()
+			end
+			-- The riser into the first damage frame (remote), the wind-up contour (local).
+			local entry = clipSpeeds[record.id]
+			local speed = if entry ~= nil and entry.clipId == clipId then entry.speed else nil
+			d.impact.activation(model, clipId, token, isLocal, speed)
+		elseif kind == "Footstep" then
+			-- SfxPool resolves the surface from the event or the Humanoid's floor, and the weight
+			-- from the armor attribute.
+			d.sfx.footstep(model, if event.data ~= nil then event.data.surface else nil)
+		end
 	end
-	Replication.clipEvent:Fire(record, clipId, event)
+	Replication.clipEvent:Fire(record, clipId, event, not starts)
 end
 
 -- True for the local player's own rig, whose locomotion the character controller drives. The id
@@ -788,8 +807,8 @@ function Replication.watch(record: any)
 	local events = if typeof(animator) == "table" then animator.events else nil
 	local connection = nil
 	if typeof(events) == "table" and typeof(events.Connect) == "function" then
-		connection = events:Connect(function(clipId: string, event: any)
-			Replication.routeClipEvent(record, clipId, event)
+		connection = events:Connect(function(clipId: string, event: any, jumped: boolean?)
+			Replication.routeClipEvent(record, clipId, event, jumped)
 		end)
 	end
 	watched[record.id] = connection or { Disconnect = function() end }

@@ -27,6 +27,19 @@ local Choreo = {
 	maxSpeed = 4,
 	freezeClipSuffix = "DeathFreeze", -- a clip named this freezes every other clock for its duration
 
+	-- Render stalls (D-132). RenderStepped stops while the display sleeps or the window is
+	-- minimised (Heartbeat, the server and the remotes go on), and its first dt after waking is the
+	-- whole gap: 5.4 to 188 s measured. A step longer than jumpSeconds is a jump: the clocks still
+	-- take the whole gap (a hit-stop asked for in it ends inside it), but no root motion moves the
+	-- body, and the events the gap crossed reach the listeners marked as jumped, so Replication
+	-- closes what they close (trail and smear off, the light out, the post-motion) and starts
+	-- nothing (no sound, footstep, chime, riser, FOV kick, trail or smear). A far rig steps on
+	-- Heartbeat every 1 / farHz; tools/validators/choreo.luau keeps jumpSeconds at least twice the
+	-- slowest of those steps and at most the camera's stall settleSeconds.
+	stall = {
+		jumpSeconds = 0.5,
+	},
+
 	-- Smear (section 10 beat 3)
 	smearScale = 1.6,
 	smearFrames = 2,
@@ -110,6 +123,10 @@ local Choreo = {
 		stopStepsSeconds = 1.2,
 		stopMinCycles = 0.2,
 		stopEndSpeed = 3,
+		-- A settle point this many cycles or fewer before the other foot's Footstep would hand that
+		-- foot over to Idle as it comes down (a skate to its Idle spot): the stop goes on to the
+		-- other foot's settle point half a cycle on instead (LocomotionState.settlePoints).
+		stopHandOverCycles = 0.15,
 		stopSpeedDrop = 6, -- speed lost in one update that counts as "stopping"
 		-- Foot plant. groundSpeed: studs per second a gait clip's planted foot moves back under the
 		-- root at rate 1, from each Footstep to lift-off, measured on the hit matrix's player at
@@ -117,18 +134,18 @@ local Choreo = {
 		-- the root's speed from these.
 		stride = {
 			groundSpeed = {
-				WalkForward = 3.49,
+				WalkForward = 3.5,
 				WalkBack = 3,
 				WalkLeft = 3.2,
 				WalkRight = 3.2,
 				Run = 15.55,
 				Sprint = 23.31,
-				WalkForwardDrawn = 3.47,
+				WalkForwardDrawn = 3.5,
 				WalkBackDrawn = 2.99,
 				WalkLeftDrawn = 3.2,
 				WalkRightDrawn = 3.2,
-				RunDrawn = 14.37,
-				SprintDrawn = 20.73,
+				RunDrawn = 15.55,
+				SprintDrawn = 23.19,
 			},
 			groundSpeedTolerance = 0.05, -- studs per second the measurement may drift from groundSpeed
 			measureHz = 240,
@@ -160,18 +177,18 @@ local Choreo = {
 			touchdown = {
 				Idle = { left = { -0.039, -0.564 }, right = { -0.17, 0.564 } },
 				IdleDrawn = { left = { 0.14, -0.662 }, right = { -0.726, 0.659 } },
-				WalkForward = { left = { 0.791, -0.423 }, right = { 0.791, 0.423 } },
+				WalkForward = { left = { 0.756, -0.421 }, right = { 0.756, 0.421 } },
 				WalkBack = { left = { -0.777, -0.419 }, right = { -0.778, 0.419 } },
 				WalkLeft = { left = { -0.001, -1.079 }, right = { 0.001, 0.17 } },
 				WalkRight = { left = { 0.001, -0.17 }, right = { -0.001, 1.079 } },
 				Run = { left = { 0.091, -0.362 }, right = { 0.09, 0.362 } },
 				Sprint = { left = { 0.1, -0.319 }, right = { 0.1, 0.319 } },
-				WalkForwardDrawn = { left = { 0.512, -0.599 }, right = { 0.512, 0.599 } },
+				WalkForwardDrawn = { left = { 0.757, -0.418 }, right = { 0.757, 0.418 } },
 				WalkBackDrawn = { left = { -0.779, -0.419 }, right = { -0.779, 0.419 } },
 				WalkLeftDrawn = { left = { -0.001, -1.079 }, right = { 0.001, 0.17 } },
 				WalkRightDrawn = { left = { 0.001, -0.17 }, right = { -0.001, 1.079 } },
-				RunDrawn = { left = { 0.738, -0.637 }, right = { 0.738, 0.637 } },
-				SprintDrawn = { left = { 0.873, -0.678 }, right = { 0.873, 0.678 } },
+				RunDrawn = { left = { 0.092, -0.359 }, right = { 0.092, 0.359 } },
+				SprintDrawn = { left = { 0.1, -0.32 }, right = { 0.1, 0.32 } },
 			} :: { [string]: { left: { number }, right: { number } } },
 			touchdownTolerance = 0.01, -- studs the measurement may drift from touchdown
 		},

@@ -1905,3 +1905,83 @@ describe("content validator", function()
 		})
 	end)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- Choreo's render-stall jump (D-132): data/choreo.luau stall.jumpSeconds
+-- ------------------------------------------------------------------------------------------
+
+describe("choreo validator: the render-stall jump", function()
+	-- The real choreo (and camera) tables with `stall` and quality rows replaced.
+	local function runChoreo(stall: any, quality: { [string]: any }?, cameraStall: any?): { string }
+		local real = Harness.load("src/shared/data/choreo")
+		local copy = table.clone(real)
+		copy.stall = stall
+		if quality ~= nil then
+			copy.quality = table.clone(real.quality)
+			for tier, row in quality do
+				copy.quality[tier] = row
+			end
+		end
+		local camera = Harness.load("src/shared/data/camera")
+		if cameraStall ~= nil then
+			camera = table.clone(camera)
+			camera.stall = cameraStall
+		end
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/choreo" then
+				return copy
+			elseif path == "src/shared/data/camera" then
+				return camera
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/choreo")(context)
+	end
+
+	it("passes the real table", function()
+		local real = Harness.load("src/shared/data/choreo")
+		expect(typeof(real.stall)).toBe("table")
+		expect(runChoreo(real.stall)).toEqual({})
+	end)
+
+	it("wants a stall block with a positive, finite jumpSeconds", function()
+		expect(hasProblem(runChoreo(nil), "stall is missing")).toBe(true)
+		for _, bad in { 0, -0.5, 0 / 0, math.huge, "0.5" } do
+			local problems = runChoreo({ jumpSeconds = bad })
+			expect(hasProblem(problems, "stall.jumpSeconds must be a positive number")).toBe(true)
+		end
+	end)
+
+	it("keeps a far rig's Heartbeat step (and a hitch as long) under the jump", function()
+		-- A far rig steps every 1/farHz on Heartbeat, which never stalls with the display: only a
+		-- Heartbeat hitch of a whole step on top may be a jump. Low's 4 Hz wants 0.5 s.
+		local problems = runChoreo(
+			{ jumpSeconds = 0.4 },
+			{ Low = { nearRadius = 30, maxFullRateRigs = 6, distantHz = 12, farHz = 4 } }
+		)
+		expect(hasProblem(problems, "stall.jumpSeconds 0.40 is under 2 / quality.Low.farHz (0.50)")).toBe(true)
+		expect(
+			runChoreo(
+				{ jumpSeconds = 0.4 },
+				{ Low = { nearRadius = 30, maxFullRateRigs = 6, distantHz = 12, farHz = 5 } }
+			)
+		).toEqual({})
+		-- A distant rate slower than the far one is held to the same rule.
+		expect(
+			hasProblem(
+				runChoreo(
+					{ jumpSeconds = 0.5 },
+					{ Medium = { nearRadius = 50, maxFullRateRigs = 12, distantHz = 3, farHz = 6 } }
+				),
+				"quality.Medium.distantHz"
+			)
+		).toBe(true)
+	end)
+
+	it("is a stall wherever the camera snaps one: at most camera.stall.settleSeconds", function()
+		local problems = runChoreo({ jumpSeconds = 2.5 })
+		expect(hasProblem(problems, "stall.jumpSeconds 2.50 is over camera.stall.settleSeconds (2.00)")).toBe(true)
+		expect(runChoreo({ jumpSeconds = 2.5 }, nil, { maxStepSeconds = 1 / 30, settleSeconds = 3 })).toEqual({})
+	end)
+end)

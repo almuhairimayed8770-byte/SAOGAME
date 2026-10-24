@@ -120,4 +120,13 @@ describe("stride validator", function()
 			"rateFloor"
 		)).toBe(true)
 	end)
+
+	it("flags a stop hand-over margin that is missing or leaves no settle point in a half cycle", function()
+		for _, value in { nil :: number?, 0, 0.5, -0.1 } do
+			local problems = run(function(choreo: any)
+				choreo.locomotion.stopHandOverCycles = value
+			end)
+			expect(hasProblem(problems, "stopHandOverCycles")).toBe(true)
+		end
+	end)
 end)

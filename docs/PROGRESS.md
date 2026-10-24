@@ -391,6 +391,38 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - Open: Choreo replays a display sleep's gap in one step on waking (stale whoosh or footstep sounds, a small jump);
   light stick tilts on locked diagonals can tap the trailing foot; Draw still whips 3.4 studs in one frame (item 119).
 
+## Controlled-fight fixes on the owner's PC (2026-10-24, 6437d91)
+
+- Pass: no glint or particle burst after a wake from a kill during a display sleep (109); the swing snap at 1x turns
+  over 5 rendered frames (largest step 15.6 degrees) and over 18 at 0.25x (largest 4.2) (110); the lock-on strafe at
+  1x, drawn, slides 0.05 to 0.14 a stance at the median, worst 0.24 (115); Sheathe's largest tip step is 1.94 studs,
+  down from 2.74 (116); reversals while locked plant within 0.05 to 0.25 (117); slowed capture moves the body at the
+  slowed speed (4.00 run, 6.00 sprint).
+- Fail, fixed below: stale sounds replayed on waking (the Art chime +0.17 s, a whoosh +0.32 s, footsteps) and the
+  root moved 0.21 studs on the first frame (109); a locked forward walk, drawn, slid 1.75 to 1.83 a stance at 1x
+  (117) and a slowed run slid up to 2.7 (112, 114).
+- Seen: the snap settles about 5.6 degrees past the target's box centre (it aims at the target's root part); Draw's
+  tip moves 3.34 studs in one frame at 0.57 s (119, needs eyes); an injected Q key arrives as already handled by the
+  game and never starts an Art, so item 113 needs the owner's own key press.
+
+## Wake replay and drawn feet (2026-10-24, D-132 to D-137)
+
+- Waking from a display sleep now shows the present: a step longer than 0.5 s is a jump, the clips jump to where
+  they would be, the root does not move, and the events the gap crossed only close what they opened (no stale sound,
+  footstep, trail or kick). A swing or dodge started by the waking key press, or a remote's action just before the
+  wake, still plays from its own start (D-132).
+- The drawn forward walk, run and sprint now share the sheathed legs, and the forward walk is re-keyed with a brisker
+  toe-off: a locked drawn walk at 1x slides 0.02 to 0.04 a stance (was 1.35), a 0.25x run 0.15 (was 2.59) (D-133 to
+  D-135). The two-step stop takes an extra half step when the stance spot is reached too late (D-136). Slowed
+  captures are measured with a scale-aware planted test (D-137, item 124).
+- Checks: 1939 specs in 110 files, 32 validators, offline lint, the hit matrix and the animation review (64 clips)
+  pass; no new strict type messages.
+- Open: an Art held across a display sleep stays frozen at its start until release, then plays about 0.25 s late; the
+  walk/Run blend between 4 and 6 studs/s (half stick) slides 0.33 to 0.57 a stance (item 128); a body deflected along
+  a boar's flank slides about 1.1 (item 126); a locked walk straight through the target pivots one stance; any client
+  hitch over 0.5 s drops that span's one-shots and root motion by design. The gait clip generator still lives outside
+  the repo; commit it under tools/ once it is --!strict.
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and

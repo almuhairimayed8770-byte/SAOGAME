@@ -14,7 +14,8 @@
 	   slope of the planted corner's travel over each plant, the root standing still; and
 	   stride.touchdown, where each clip has each foot at its Footstep (an Idle at its start).
 	2. The stride data is self-consistent (rates, floors, bars, the stop's numbers).
-	3. The clean clips (CLEAN: the back walks) plant and swing under slideBar at that speed.
+	3. The clean clips (CLEAN: every walk) plant and swing under slideBar at that speed, and every
+	   gait clip plants and swings within transientBar: a swing meets the field only at its plant.
 	4. Paced: the real Locomotion and Choreo animator on a Lune rig whose root moves at a set
 	   speed, the mixer's offsets posing the body every frame. A clip paced to its own ground
 	   speed slides at any pace as it does at rate 1, so a steady case may slide, and drag, no
@@ -87,10 +88,19 @@ local LEG_PARTS = {
 	RightFoot = true,
 }
 
--- Gait clips that plant and swing under slideBar on their own. The others still carry authored
--- slide (a swing that dips into the field, a stance foot that speeds up and slows down); pacing
--- adds no more than slideBar to it.
-local CLEAN = { "WalkBack", "WalkBackDrawn" }
+-- Gait clips that plant and swing under slideBar on their own: every walk. Run and Sprint still
+-- carry a little authored slide (a stance foot that speeds up and slows down, a toe that touches
+-- before its Footstep), never more than transientBar; pacing adds no more than slideBar to it.
+local CLEAN = {
+	"WalkForward",
+	"WalkBack",
+	"WalkLeft",
+	"WalkRight",
+	"WalkForwardDrawn",
+	"WalkBackDrawn",
+	"WalkLeftDrawn",
+	"WalkRightDrawn",
+}
 
 type Body = {
 	model: any,
@@ -747,6 +757,20 @@ describe("gait clips on the posed body", function()
 		end
 		expect(table.concat(problems, "; ")).toBe("")
 	end)
+
+	it("every gait clip plants and swings within transientBar at its ground speed", function()
+		-- Pacing keeps a clip's own slide at any speed and time scale (D-127), so a swing that
+		-- scrapes the field before its Footstep shows at every step: a slowed capture and the
+		-- lock-on forward walk read it as a skate.
+		local problems = {}
+		for _, name in GAIT_NAMES do
+			local result = own(name)
+			if result.plant > Stride.transientBar or result.drag > Stride.transientBar then
+				table.insert(problems, ("%s slides %.3f, drags %.3f"):format(name, result.plant, result.drag))
+			end
+		end
+		expect(table.concat(problems, "; ")).toBe("")
+	end)
 end)
 
 describe("paced to the root's speed (Locomotion and the animator at measureHz)", function()
@@ -848,6 +872,24 @@ describe("paced to the root's speed (Locomotion and the animator at measureHz)",
 				local result = simulate(steady(direction, Config.walkSpeed, drawn))
 				local _, drag = owned(result)
 				checkPlants(problems, label, result, walk.slide, drag + Stride.slideBar)
+			end
+		end
+		expect(table.concat(problems, "; ")).toBe("")
+	end)
+
+	it("a lock-on forward walk at walkSpeed, square and a little off, both sets: within transientBar", function()
+		-- The lock holds the body to walkSpeed with the facing on the target (D-112), so the
+		-- forward walk blends with Run by cadence, and a stick a few degrees off the facing adds a
+		-- side walk's share (D-129). Every plant and swing holds the ground.
+		local shape = body()
+		local problems = {}
+		for _, drawn in { false, true } do
+			for _, degrees in { 0, 3, 8, 352, 357 } do
+				local radians = math.rad(degrees)
+				local direction = (shape.forward * math.cos(radians) + shape.right * math.sin(radians)).Unit
+				local label = ("forward %d %s at %.1f"):format(degrees, drawnLabel(drawn), Config.walkSpeed)
+				local result = simulate(steady(direction, Config.walkSpeed, drawn))
+				checkPlants(problems, label, result, Stride.transientBar, Stride.transientBar)
 			end
 		end
 		expect(table.concat(problems, "; ")).toBe("")

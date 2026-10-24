@@ -353,7 +353,9 @@ end
 --- Where the set's walk for a move direction has its planted foot over the spot the set's Idle
 --- stands it on: for the left foot, then the right, the shared phase of its Footstep and the cycles
 --- after it. A stop that ends there hands the feet over to Idle with the least slide (the two-step
---- stop). No allocation.
+--- stop). A foot that gets there only within stopHandOverCycles of the other foot's Footstep would
+--- leave that foot coming down mid hand-over and skating to its own Idle spot, so its stop goes on
+--- to the other foot's settle point half a cycle on (an after past half a cycle). No allocation.
 function LocomotionState.settlePoints(forward: number, right: number, drawn: boolean): (number, number, number, number)
 	local length = math.sqrt(forward * forward + right * right)
 	if length < 1e-6 then
@@ -368,6 +370,13 @@ function LocomotionState.settlePoints(forward: number, right: number, drawn: boo
 	local leftAfter = settleAfter(one, one.leftFoot, a, two, two.leftFoot, b, rest.leftFoot, forward, right)
 	local rightStep = a * ((one.rightFoot.at - one.offset) % 1) + b * ((two.rightFoot.at - two.offset) % 1)
 	local rightAfter = settleAfter(one, one.rightFoot, a, two, two.rightFoot, b, rest.rightFoot, forward, right)
+	local leftLate = leftAfter > rightStep - Config.stopHandOverCycles
+	local rightLate = rightAfter > 1 - rightStep - Config.stopHandOverCycles
+	if leftLate and not rightLate then
+		leftAfter = rightStep + rightAfter
+	elseif rightLate and not leftLate then
+		rightAfter = 1 - rightStep + leftAfter
+	end
 	return 0, leftAfter, rightStep, rightAfter
 end
 

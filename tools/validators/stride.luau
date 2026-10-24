@@ -5,7 +5,9 @@
 	touchdown; the pace range holds a clip's own rate (rateFloor < 1 < rateCeiling); and every walk
 	clip, played at rateCeiling, keeps its planted foot under a root moving at locomotion.walkSpeed.
 	The lock-on strafe and backpedal move at that speed on one walk clip alone (D-112), so a walk
-	whose ground speed times rateCeiling falls short of it slides at every step.
+	whose ground speed times rateCeiling falls short of it slides at every step. The two-step stop's
+	locomotion.stopHandOverCycles sits inside half a cycle, so a settle point can fall before the
+	other foot's Footstep.
 	tests/choreo/Stride.spec.luau re-measures the ground speeds and touchdowns from the clips.
 ]]
 
@@ -29,6 +31,11 @@ return function(ctx: any): { string }
 
 	check(stride.rateFloor > 0 and stride.rateFloor < 1, "rateFloor must sit between 0 and a clip's own rate 1")
 	check(stride.rateCeiling > 1, "rateCeiling must be above a clip's own rate 1")
+	local handOver = locomotion.stopHandOverCycles
+	check(
+		typeof(handOver) == "number" and handOver > 0 and handOver < 0.5,
+		"stopHandOverCycles must be a number of cycles between 0 and half a cycle (a settle point must fit before the other foot's Footstep)"
+	)
 
 	for _, set in SETS do
 		for _, gait in GAITS do

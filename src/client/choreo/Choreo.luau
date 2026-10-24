@@ -11,9 +11,9 @@
 
 		local animator = Choreo.get(model)            -- posed the same frame (no T-pose, ever)
 		local handle = animator:play("player/OneHandedSword/Horizontal", { serverTime = t })
-		animator.events:Connect(function(clipId, event) ... end)
+		animator.events:Connect(function(clipId, event, jumped) ... end)
 		animator:hitStop(frames)                      -- the rig holds; camera/FX read isPaused()
-		animator:currentRootMotionDelta()             -- Vector3, rig-local studs since last frame
+		animator:currentRootMotionDelta()             -- Vector3, rig-local studs since last frame (zero once stale)
 		animator:joint("Weapon")                      -- the joint Choreo writes for that name
 		animator:pin("Weapon", true)                  -- the joint rests at identity, whatever is keyed
 		Choreo.hitStopAll(models, "Final")
@@ -24,6 +24,21 @@
 	so a still rig is silent and a blend of walks steps once. FullBody clips that cover more of the
 	limbs than they leave to the walk (a dodge, a landing, a jump, a fall, an Art) silence it: the
 	feet are theirs, and only their own steps sound, so nothing steps in the air.
+
+	Render stalls (D-132): RenderStepped stops while the display sleeps or the window is minimised,
+	and its first dt after waking is the whole gap. A step longer than data/choreo.luau
+	stall.jumpSeconds is a jump (Mixer): the clips take the gap, the root none of it, and every
+	event the gap crossed fires with `jumped` true, so listeners close what it closes (Replication
+	starts no sound, trail, smear, light or kick for it; Locomotion still moves the sword on a
+	WeaponDraw or WeaponSheathe; the Art hold still freezes). Every other event fires with false.
+	A long step covers the clock's time since the rig's last step (engine.now), whatever dt it was
+	handed: a wake that reports one frame is a jump too, a rig that kept stepping on Heartbeat
+	through the stall and is full rate after the wake's re-rank does not take the gap again, and a
+	rig the re-rank made distant jumps on its first Heartbeat step. A clip played inside the gap
+	(the key press that woke the display, a remote's action just before the wake) is the present:
+	the wake moves it only by its own age (Mixer sinceStep), so what is still ahead of it plays as
+	ever. A root delta older than jumpSeconds reads as zero, so a reader that steps before the
+	wake step does not move the body by the last frame before the stall.
 
 	Update rates: the local character and the nearest rigs step on RenderStepped; the rest step
 	on Heartbeat at the quality tier's distant / far rate (data/choreo.luau quality). A clip id
@@ -74,7 +89,8 @@ export type Handle = Mixer.Handle
 export type Animator = {
 	model: Model,
 	rigId: string,
-	events: Signal.Signal<string, Types.ClipEvent>,
+	-- (clipId, event, jumped): jumped is true for an event a render stall's gap crossed (D-132).
+	events: Signal.Signal<string, Types.ClipEvent, boolean>,
 	finished: Signal.Signal<Handle>,
 	play: (self: Animator, clipId: string, opts: PlayOptions?) -> Handle,
 	stop: (self: Animator, target: Handle | string, blendOut: number?) -> (),
@@ -351,7 +367,7 @@ local function playRbx(self: any, clipId: string, options: PlayOptions): Handle
 	for _, kind in EVENT_KINDS do
 		pcall(function()
 			track:GetMarkerReachedSignal(kind):Connect(function(value: string?)
-				self.events:Fire(clipId, { time = track.TimePosition, kind = kind, data = { value = value } })
+				self.events:Fire(clipId, { time = track.TimePosition, kind = kind, data = { value = value } }, false)
 			end)
 		end)
 	end
@@ -386,10 +402,13 @@ function AnimatorClass.play(self: any, clipId: string, opts: PlayOptions?): Hand
 		weight = options.weight,
 		coexist = options.coexist,
 	}
+	local now = engine.now()
 	if options.serverTime ~= nil then
 		mixerOptions.serverTime = options.serverTime
-		mixerOptions.now = engine.now()
+		mixerOptions.now = now
 	end
+	-- Played inside a render stall's gap, the clip is the present: the wake moves it by its own age.
+	mixerOptions.sinceStep = math.max(0, now - self.rootDeltaAt)
 	return self.mixer:play(clip, mixerOptions)
 end
 
@@ -449,6 +468,11 @@ function AnimatorClass.isPlaying(self: any, clipId: string): boolean
 end
 
 function AnimatorClass.currentRootMotionDelta(self: any): Vector3
+	-- A delta older than a render stall (D-132) belongs to the frame before the stall: a reader whose
+	-- step runs before this rig's wake step must not move the root by it.
+	if engine.now() - self.rootDeltaAt > ChoreoData.stall.jumpSeconds then
+		return Vector3.zero
+	end
 	return self.rootDelta
 end
 
@@ -592,6 +616,17 @@ function AnimatorClass.step(self: any, dt: number)
 	if self.motorsDirty then
 		rebuildMotors(self)
 	end
+	-- A render stall (D-132): a long step covers the time since this rig's last step on the clock.
+	-- The clock saw the gap even if the engine's dt did not (an engine that hands back one frame
+	-- after a stall would otherwise resume every clip where it stopped), and a rig that kept
+	-- stepping on Heartbeat through the stall (ranked full rate only at the wake) does not take the
+	-- gap a second time.
+	local now = engine.now()
+	local wall = math.max(0, now - self.rootDeltaAt)
+	local jumpSeconds = ChoreoData.stall.jumpSeconds
+	if (wall > jumpSeconds and wall > dt) or (dt > jumpSeconds and wall < dt) then
+		dt = wall
+	end
 	local hooks: { (dt: number) -> () } = self.stepHooks
 	for index = #hooks, 1, -1 do
 		local hook = hooks[index]
@@ -602,6 +637,7 @@ function AnimatorClass.step(self: any, dt: number)
 	local result = self.mixer:step(dt)
 	local delta = result.rootDelta
 	self.rootDelta = Vector3.new(delta[1], delta[2], delta[3])
+	self.rootDeltaAt = now
 	applyOffsets(self, result.offsets)
 	local stepSource: Handle? = nil
 	local sourceKnown = false
@@ -615,7 +651,7 @@ function AnimatorClass.step(self: any, dt: number)
 				continue
 			end
 		end
-		self.events:Fire(fired.clipId, fired.event)
+		self.events:Fire(fired.clipId, fired.event, fired.jumped)
 	end
 	for _, handle in result.finished do
 		self.finished:Fire(handle)
@@ -654,7 +690,7 @@ local function newAnimator(model: Model): any
 		model = model,
 		rigId = rigId,
 		mixer = Mixer.new(),
-		events = Signal.new() :: Signal.Signal<string, Types.ClipEvent>,
+		events = Signal.new() :: Signal.Signal<string, Types.ClipEvent, boolean>,
 		finished = Signal.new() :: Signal.Signal<Handle>,
 		motors = {} :: { [string]: Joints.Joint },
 		motorsDirty = true,
@@ -665,6 +701,7 @@ local function newAnimator(model: Model): any
 		engineAnimated = false, -- an engine Animator resets the rig each frame (D-053)
 		stepHooks = {} :: { (dt: number) -> () },
 		rootDelta = Vector3.zero,
+		rootDeltaAt = engine.now(), -- engine.now() of the last step (the one that wrote rootDelta)
 		rbxTracks = {} :: { [any]: AnimationTrack },
 		rbxAnimations = {} :: { [string]: Animation },
 		rbxActive = false,

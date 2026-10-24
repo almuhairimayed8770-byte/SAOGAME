@@ -478,6 +478,239 @@ describe("Choreo", function()
 		clock = 0
 	end)
 
+	it("a RenderStepped that comes back with a whole stall's gap is a jump: marked events, no root motion", function()
+		-- Measured in Studio: with the display asleep RenderStepped runs 0 times a second and its first
+		-- dt after waking is the whole gap (5.4 to 188 s). An Art and a kill's hit-stop asked for while
+		-- it slept replayed from the Art's start after the wake (D-132). The clock runs on through it.
+		clock = 100
+		camera = Vector3.zero
+		local model = buildRig("PlayerR15", Vector3.zero)
+		local animator = Choreo.get(model)
+		clock += FRAME
+		renderStepped:Fire(FRAME)
+		local fired = {}
+		animator.events:Connect(function(clipId, event, jumped)
+			table.insert(fired, { clipId = clipId, kind = event.kind, jumped = jumped })
+		end)
+		animator:play(HORIZONTAL, { blendIn = 0 })
+		Choreo.hitStopAll({ model }, "Kill")
+		clock += 56
+		renderStepped:Fire(56)
+		local crossed = 0
+		for _, event in fired do
+			if event.clipId == HORIZONTAL then
+				crossed += 1
+			end
+			expect(event.jumped).toBe(true)
+		end
+		expect(crossed > 0).toBe(true)
+		expect(animator:currentRootMotionDelta()).toBe(Vector3.zero)
+		expect(animator:isPlaying(HORIZONTAL)).toBe(false)
+		table.clear(fired)
+		for _ = 1, 60 do
+			clock += FRAME
+			renderStepped:Fire(FRAME)
+			expect(animator:currentRootMotionDelta()).toBe(Vector3.zero)
+		end
+		for _, event in fired do
+			expect(event.clipId).never.toBe(HORIZONTAL)
+		end
+		-- A plain frame's events are not a jump.
+		table.clear(fired)
+		animator:play(HORIZONTAL, { blendIn = 0, startTime = HIT_OPEN_TIME - FRAME * 0.5 })
+		clock += FRAME
+		renderStepped:Fire(FRAME)
+		expect(#fired > 0).toBe(true)
+		for _, event in fired do
+			expect(event.jumped).toBe(false)
+		end
+		Choreo.release(model)
+		clock = 0
+	end)
+
+	it("the root delta of the last frame before a stall is not read as the wake frame's", function()
+		-- The controller reads the delta on its own render step, which can run before Choreo's on
+		-- the wake frame: it must not move the root by a frame of a lunge the stall left behind.
+		clock = 100
+		local model = buildRig("PlayerR15", Vector3.zero)
+		local animator = Choreo.get(model)
+		-- Inside the Horizontal's step forward (its root moves from 0.35 s to 0.4 s).
+		animator:play(HORIZONTAL, { blendIn = 0, startTime = 0.355 })
+		for _ = 1, 2 do
+			clock += FRAME
+			animator:step(FRAME)
+		end
+		local moving = animator:currentRootMotionDelta()
+		expect(moving.Magnitude > 0).toBe(true)
+		-- Read again within a frame: the same delta.
+		expect(animator:currentRootMotionDelta()).toBe(moving)
+		clock += 56
+		expect(animator:currentRootMotionDelta()).toBe(Vector3.zero)
+		Choreo.release(model)
+		clock = 0
+	end)
+
+	it("a wake whose RenderStepped dt is one frame is still a jump: the clock saw the gap", function()
+		-- Studio returned the whole gap as dt, but nothing promises it: a first dt of one frame would
+		-- resume every clip where the stall left it and replay it after the wake.
+		clock = 100
+		camera = Vector3.zero
+		local model = buildRig("PlayerR15", Vector3.zero)
+		local animator = Choreo.get(model)
+		clock += FRAME
+		renderStepped:Fire(FRAME)
+		local fired = {}
+		animator.events:Connect(function(clipId, event, jumped)
+			table.insert(fired, { clipId = clipId, kind = event.kind, jumped = jumped })
+		end)
+		animator:play(HORIZONTAL, { blendIn = 0 })
+		Choreo.hitStopAll({ model }, "Kill")
+		clock += 56
+		renderStepped:Fire(FRAME)
+		local crossed = 0
+		for _, event in fired do
+			if event.clipId == HORIZONTAL then
+				crossed += 1
+				expect(event.jumped).toBe(true)
+			end
+		end
+		expect(crossed > 0).toBe(true)
+		expect(animator:currentRootMotionDelta()).toBe(Vector3.zero)
+		expect(animator:isPlaying(HORIZONTAL)).toBe(false)
+		table.clear(fired)
+		for _ = 1, 60 do
+			clock += FRAME
+			renderStepped:Fire(FRAME)
+		end
+		for _, event in fired do
+			expect(event.clipId).never.toBe(HORIZONTAL)
+		end
+		Choreo.release(model)
+		clock = 0
+	end)
+
+	it("a clip played while the display slept shows at its own age at the wake, and plays on", function()
+		-- The key press that wakes the display (or a remote's ActionStarted just before the wake)
+		-- starts its clip inside the gap: the wake shows it 0.1 s in, not jumped to its end.
+		clock = 100
+		camera = Vector3.zero
+		local model = buildRig("PlayerR15", Vector3.zero)
+		local animator = Choreo.get(model)
+		clock += FRAME
+		renderStepped:Fire(FRAME)
+		local fired = {}
+		animator.events:Connect(function(clipId, event, jumped)
+			if clipId == HORIZONTAL then
+				table.insert(fired, { kind = event.kind, jumped = jumped })
+			end
+		end)
+		clock += 55.9
+		local handle = animator:play(HORIZONTAL, { blendIn = 0 })
+		clock += 0.1
+		renderStepped:Fire(56)
+		expect(handle.time).toBeCloseTo(0.1, 1e-6)
+		expect(animator:isPlaying(HORIZONTAL)).toBe(true)
+		for _ = 1, 90 do
+			clock += FRAME
+			renderStepped:Fire(FRAME)
+		end
+		-- Every event of the clip fired once, unmarked: its first 0.1 s as an ordinary step of the
+		-- wake, the rest after it.
+		local expected = {}
+		for _, event in ClipLibrary.get(HORIZONTAL).events do
+			table.insert(expected, event.kind)
+		end
+		local kinds = {}
+		for _, event in fired do
+			expect(event.jumped).toBe(false)
+			table.insert(kinds, event.kind)
+		end
+		expect(kinds).toEqual(expected)
+		Choreo.release(model)
+		clock = 0
+	end)
+
+	it("a rig stepped on Heartbeat through a stall and near at the wake does not take the gap again", function()
+		-- A remote fighter that walked up while the display slept kept stepping on Heartbeat at the
+		-- distant rate; the wake's re-rank makes it full rate and RenderStepped hands it the whole gap.
+		-- Its swing, started 0.1 s before the wake, plays on from there instead of jumping to its end.
+		clock = 100
+		camera = Vector3.zero
+		local model = buildRig("PlayerR15", Vector3.new(ChoreoData.quality.High.nearRadius * 10, 0, 0))
+		local animator = Choreo.get(model)
+		local fired = {}
+		animator.events:Connect(function(clipId, event, jumped)
+			if clipId == HORIZONTAL then
+				table.insert(fired, { kind = event.kind, jumped = jumped })
+			end
+		end)
+		local gap = 5.4
+		local handle = nil
+		for frame = 1, math.floor(gap / FRAME + 0.5) do
+			clock += FRAME
+			heartbeat:Fire(FRAME)
+			if handle == nil and frame * FRAME >= gap - 0.1 then
+				model.PrimaryPart.Position = Vector3.zero
+				handle = animator:play(HORIZONTAL, { blendIn = 0 })
+			end
+		end
+		renderStepped:Fire(gap)
+		expect(animator:isPlaying(HORIZONTAL)).toBe(true)
+		expect(handle.time < 0.2).toBe(true)
+		for _ = 1, 90 do
+			clock += FRAME
+			renderStepped:Fire(FRAME)
+		end
+		local expected = {}
+		for _, event in ClipLibrary.get(HORIZONTAL).events do
+			table.insert(expected, event.kind)
+		end
+		local kinds = {}
+		for _, event in fired do
+			expect(event.jumped).toBe(false)
+			table.insert(kinds, event.kind)
+		end
+		expect(kinds).toEqual(expected)
+		Choreo.release(model)
+		clock = 0
+	end)
+
+	it("a near rig that is distant at the wake still jumps the gap on its first Heartbeat step", function()
+		-- The reverse: full rate before the stall (not stepped while RenderStepped slept), ranked
+		-- distant at the wake, so its next step comes from Heartbeat with a few frames' dt.
+		clock = 100
+		camera = Vector3.zero
+		local model = buildRig("PlayerR15", Vector3.zero)
+		local animator = Choreo.get(model)
+		clock += FRAME
+		renderStepped:Fire(FRAME)
+		local fired = {}
+		animator.events:Connect(function(clipId, event, jumped)
+			if clipId == HORIZONTAL then
+				table.insert(fired, { kind = event.kind, jumped = jumped })
+			end
+		end)
+		animator:play(HORIZONTAL, { blendIn = 0 })
+		local gap = 5.4
+		for _ = 1, math.floor(gap / FRAME + 0.5) do
+			clock += FRAME
+			heartbeat:Fire(FRAME)
+		end
+		model.PrimaryPart.Position = Vector3.new(ChoreoData.quality.High.nearRadius * 10, 0, 0)
+		renderStepped:Fire(gap)
+		for _ = 1, 10 do
+			clock += FRAME
+			heartbeat:Fire(FRAME)
+		end
+		expect(animator:isPlaying(HORIZONTAL)).toBe(false)
+		expect(#fired > 0).toBe(true)
+		for _, event in fired do
+			expect(event.jumped).toBe(true)
+		end
+		Choreo.release(model)
+		clock = 0
+	end)
+
 	it("hitStopAll holds every listed rig for the tier's frame count, then motion resumes", function()
 		local player = buildRig("PlayerR15")
 		local boar = buildRig("Boar")

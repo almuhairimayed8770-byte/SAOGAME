@@ -981,6 +981,64 @@ describe("Replication", function()
 		expect(#t.find("camera", "fovKick")).toBe(1)
 	end)
 
+	it("an event a jump crossed (a render stall's gap, D-132) closes what it closes and starts nothing", function()
+		local t = setup()
+		local me = t.records[1]
+		local seen = {}
+		Replication.clipEvent:Connect(function(record, _clipId, event, jumped)
+			table.insert(seen, { record = record, kind = event.kind, jumped = jumped })
+		end)
+		local art = "player/OneHandedSword/Horizontal"
+		local crossed = {
+			{ time = 0.15, kind = "ActivationHold", data = { hold = 0.1 } },
+			{ time = 0.29, kind = "Sfx", data = { name = "whoosh.Medium" } },
+			{ time = 0.3, kind = "Voice", data = { name = "enemy.ChargerWindUp" } },
+			{ time = 0.35, kind = "TrailOn", data = { kind = "Art" } },
+			{ time = 0.35, kind = "SmearOn", data = { axis = "X" } },
+			{ time = 0.35, kind = "HitWindowOpen", data = { hit = 1 } },
+			{ time = 0.36, kind = "Footstep" },
+			{ time = 0.3833, kind = "SmearOff", data = { axis = "X" } },
+			{ time = 0.48, kind = "HitWindowClose", data = { hit = 1 } },
+			{ time = 0.52, kind = "TrailOff" },
+			{ time = 0.6, kind = "PostMotionStart" },
+		}
+		for _, event in crossed do
+			Replication.routeClipEvent(me, art, event, true)
+		end
+		-- No sound, chime, riser, FOV kick, footstep, smear or trail starts.
+		expect(#t.find("sfx", "play")).toBe(0)
+		expect(#t.find("sfx", "footstep")).toBe(0)
+		expect(#t.find("camera", "fovKick")).toBe(0)
+		expect(#t.find("impact", "activation")).toBe(0)
+		for _, call in t.find("trails", "setActive") do
+			expect(call.args[2]).toBe(false)
+		end
+		for _, call in t.find("trails", "activationLight") do
+			expect(call.args[2]).toBe(false)
+		end
+		for _, call in t.find("smear", "apply") do
+			expect(call.args[2]).toBe(false)
+		end
+		-- What closes still closes: the smear, the window's and the trail's Art kind, the light.
+		expect(#t.find("smear", "apply")).toBe(1)
+		local offs = {}
+		for _, call in t.find("trails", "setActive") do
+			table.insert(offs, call.args[3])
+		end
+		expect(offs).toEqual({ "Smear", "Art", "Art", "Art" })
+		expect(#t.find("trails", "activationLight")).toBe(2)
+		-- Every event still reaches clipEvent listeners (the Art hold's freeze is state), marked.
+		expect(#seen).toBe(#crossed)
+		for _, entry in seen do
+			expect(entry.record).toBe(me)
+			expect(entry.jumped).toBe(true)
+		end
+		-- An unmarked event is a plain one: it starts as ever, and listeners see jumped = false.
+		Replication.routeClipEvent(me, art, { time = 0.15, kind = "ActivationHold" })
+		expect(#t.find("camera", "fovKick")).toBe(1)
+		expect(seen[#seen].jumped).toBe(false)
+	end)
+
 	it("a TrailOn's data.kind picks the trail kind for the rest of that clip's trail events", function()
 		local t = setup()
 		local boar = t.records[7]
@@ -1790,8 +1848,10 @@ end)
 -- Humanoid standing still on the ground for the default tracker, and foot IK off (no raycast in
 -- Lune). Everything else is a recorder (each call stamped with the spec clock in `at`), and
 -- Replication reads the spec clock. A handler that throws inside a Signal only warns, so every
--- test here checks `live.handlerErrors()` too.
-local function liveRemote()
+-- test here checks `live.handlerErrors()` too. `liveOptions.isLocal` makes the rig the local
+-- player's own (no locomotion driver: the character controller owns that one).
+local function liveRemote(liveOptions: { isLocal: boolean? }?)
+	local isLocal = liveOptions ~= nil and liveOptions.isLocal == true
 	local function frameSignal()
 		return {
 			Connect = function()
@@ -1886,7 +1946,7 @@ local function liveRemote()
 			end,
 		},
 		localId = function()
-			return 1
+			return if isLocal then 2 else 1
 		end,
 		locomotion = {
 			attach = function(animator, rig, options)
@@ -1949,6 +2009,10 @@ local function liveRemote()
 				break
 			end
 		end
+	end
+	-- Time passing with no frame rendered (a render stall): the clock moves, nothing steps.
+	function live.advance(seconds: number)
+		clock += seconds
 	end
 	function live.inHand(): boolean
 		return weapon ~= nil and weapon.Part0 == parts.RightHand
@@ -2046,4 +2110,215 @@ describe("Replication on a remote player's rig", function()
 		expect(live.handlerErrors()).toEqual({})
 		live.release()
 	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- Render stalls (D-132). Measured in Studio on 6437d91: with the display asleep RenderStepped runs
+-- 0 times a second while Heartbeat runs 60, and the first RenderStepped dt after waking is the
+-- whole gap. After a kill and Art swings made while it slept, the wake played the art chime at
+-- +0.17 s, a whoosh at +0.32 s and footsteps, and moved the root: the clips replayed.
+-- ------------------------------------------------------------------------------------------
+
+describe("Replication across a render stall", function()
+	local horizontal = ChoreoData.locomotion.clipPrefix .. "Horizontal"
+	local ClipLibraryForSpec = Harness.load("src/client/choreo/ClipLibrary")
+
+	-- Every start a recorder took so far, counted by name: a sound, a footstep, a cue, the FOV kick,
+	-- an activation riser, a trail kind, the activation light or the smear turned on.
+	local function starts(live: any): { [string]: number }
+		local counts: { [string]: number } = {}
+		local function add(key: string)
+			counts[key] = (counts[key] or 0) + 1
+		end
+		for _, fn in { "play", "playLate", "footstep", "cue" } do
+			for _, call in live.calls("sfx", fn) do
+				add("sfx." .. fn .. " " .. tostring(call.args[1]))
+			end
+		end
+		for _ in live.calls("camera", "fovKick") do
+			add("camera.fovKick")
+		end
+		for _ in live.calls("impact", "activation") do
+			add("impact.activation")
+		end
+		for _, call in live.calls("trails", "setActive") do
+			if call.args[2] == true then
+				add("trails.on " .. tostring(call.args[3]))
+			end
+		end
+		for _, call in live.calls("trails", "activationLight") do
+			if call.args[2] == true then
+				add("trails.light")
+			end
+		end
+		for _, call in live.calls("smear", "apply") do
+			if call.args[2] == true then
+				add("smear.on")
+			end
+		end
+		return counts
+	end
+
+	-- What started between two counts, as sorted "name x count" lines.
+	local function since(before: { [string]: number }, after: { [string]: number }): { string }
+		local lines = {}
+		for key, total in after do
+			local added = total - (before[key] or 0)
+			if added > 0 then
+				table.insert(lines, ("%s x%d"):format(key, added))
+			end
+		end
+		table.sort(lines)
+		return lines
+	end
+
+	-- Four Horizontals swung while nothing renders (the local controller plays each at once; a remote
+	-- rig's arrive as ActionStarted), then, with `kill`, the kill's HitConfirmed. Then the wake: one
+	-- step of `wakeDt` (the whole gap by default; one frame for an engine that does not report the
+	-- gap) and two seconds at 60 Hz. Returns what started after the wake and the root motion the
+	-- animator reported from the wake on.
+	local function sleepThenWake(
+		isLocal: boolean,
+		kill: boolean,
+		gap: number,
+		wakeDt: number?
+	): ({ string }, number, any)
+		local live = liveRemote({ isLocal = isLocal })
+		for _ = 1, 60 do
+			live.step()
+		end
+		local clockBefore = live.now()
+		for _ = 1, 4 do
+			if isLocal then
+				live.animator:play(horizontal) -- CharacterController.beginArt
+			else
+				Replication.dispatch(
+					"ActionStarted",
+					{ entityId = 2, clipId = horizontal, serverTime = live.now() - 0.05, facing = { 0, 0, -1 } }
+				)
+			end
+			live.advance(gap / 5)
+		end
+		if kill then
+			Replication.dispatch("HitConfirmed", {
+				attackerId = 2,
+				targetId = 7,
+				hitStop = "Kill",
+				damage = 10,
+				killed = true,
+				artId = "OneHandedSword.Horizontal",
+				position = { 0, 0, -3 },
+			})
+		end
+		live.advance(gap / 5)
+		expect(live.now() - clockBefore).toBeCloseTo(gap, 1e-9)
+		local before = starts(live)
+		local root = 0
+		live.animator:step(wakeDt or gap)
+		root += live.animator:currentRootMotionDelta().Magnitude
+		for _ = 1, 120 do
+			live.step()
+			root += live.animator:currentRootMotionDelta().Magnitude
+		end
+		local started = since(before, starts(live))
+		expect(live.handlerErrors()).toEqual({})
+		return started, root, live
+	end
+
+	for _, case in
+		{
+			{ name = "the local fighter, a kill's hit-stop asked for in the stall", isLocal = true, kill = true },
+			{ name = "the local fighter, no hit-stop pending", isLocal = true, kill = false },
+			{ name = "a remote player, a kill's hit-stop asked for in the stall", isLocal = false, kill = true },
+			{ name = "a remote player, no hit-stop pending", isLocal = false, kill = false },
+		}
+	do
+		it(case.name .. ": nothing replays at the wake and the root stays put", function()
+			for _, gap in { 5.4, 56 } do
+				-- The wake's dt is the whole gap (as measured) or, on an engine that resets it, one frame.
+				for _, wakeDt in { gap, 1 / 60 } do
+					local started, root, live = sleepThenWake(case.isLocal, case.kill, gap, wakeDt)
+					expect(table.concat(started, ", ")).toBe("")
+					expect(root).toBe(0)
+					-- What the gap crossed still closed: the Art's trail is off, its light out.
+					local offs = 0
+					for _, call in live.calls("trails", "setActive") do
+						if call.args[2] == false and call.args[3] == "Art" then
+							offs += 1
+						end
+					end
+					expect(offs > 0).toBe(true)
+					expect(live.animator:isPlaying(horizontal)).toBe(false)
+					live.release()
+				end
+			end
+		end)
+	end
+
+	-- An action that starts just before the wake (the key press that wakes the display, or a
+	-- remote's ActionStarted arriving then) is the present: the wake shows it at its age and what is
+	-- still ahead of it plays, once, after the wake.
+	for _, case in
+		{
+			{ name = "the local fighter's Art", isLocal = true, clip = "Horizontal" },
+			{ name = "a remote player's Art", isLocal = false, clip = "Horizontal" },
+			{ name = "the local fighter's dodge", isLocal = true, clip = "DodgeForward" },
+			{ name = "a remote player's basic swing", isLocal = false, clip = "Basic1" },
+		}
+	do
+		it(case.name .. " started 0.1 s before the wake plays on from there", function()
+			local clipId = ChoreoData.locomotion.clipPrefix .. case.clip
+			local clipEvents = ClipLibraryForSpec.get(clipId).events
+			for _, gap in { 5.4, 56 } do
+				for _, wakeDt in { gap, 1 / 60 } do
+					local live = liveRemote({ isLocal = case.isLocal })
+					for _ = 1, 60 do
+						live.step()
+					end
+					live.advance(gap - 0.1)
+					if case.isLocal then
+						live.animator:play(clipId)
+					else
+						Replication.dispatch(
+							"ActionStarted",
+							{ entityId = 2, clipId = clipId, serverTime = live.now(), facing = { 0, 0, -1 } }
+						)
+					end
+					live.advance(0.1)
+					local seen = {}
+					local connection = Replication.clipEvent:Connect(function(_record, eventClipId, event, jumped)
+						if eventClipId == clipId then
+							table.insert(seen, { kind = event.kind, jumped = jumped })
+						end
+					end)
+					local root = 0
+					live.animator:step(wakeDt)
+					root += live.animator:currentRootMotionDelta().Magnitude
+					expect(live.animator:isPlaying(clipId)).toBe(true)
+					for _ = 1, 120 do
+						live.step()
+						root += live.animator:currentRootMotionDelta().Magnitude
+					end
+					connection:Disconnect()
+					-- Every event of the clip, once, none of them marked as a jump.
+					local kinds = {}
+					for _, entry in seen do
+						expect(entry.jumped).toBe(false)
+						table.insert(kinds, entry.kind)
+					end
+					local expected = {}
+					for _, event in clipEvents do
+						table.insert(expected, event.kind)
+					end
+					expect(kinds).toEqual(expected)
+					-- The dodge still carries the body (its root motion is the dodge).
+					if case.clip == "DodgeForward" then
+						expect(root > 1).toBe(true)
+					end
+					expect(live.handlerErrors()).toEqual({})
+					live.release()
+				end
+			end
+		end)
+	end
 end)

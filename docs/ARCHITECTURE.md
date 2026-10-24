@@ -462,7 +462,7 @@ the sweep.
   `peekLocalId`, `isLocal` and `localRecord`.
 - Glint, SlashArc, SpeedLines and Smear are timed from deps.now() at play, so the first render step after a stall
   hides them. FrameClock, Trails, OutlineManager, SwitchRing, Shatter, Digits, Telegraphs, Hud, Nameplates,
-  SystemLine and SfxPool run on Heartbeat, Engine.now or the wall clock. Choreo still steps on RenderStepped (open).
+  SystemLine and SfxPool run on Heartbeat, Engine.now or the wall clock. Choreo still steps on RenderStepped; a render stall's gap is handled as a jump (D-132).
 
 ### Controlled fights and idle phase (D-120 to D-124)
 
@@ -503,6 +503,17 @@ the sweep.
 - tools/validators/combat.luau: the snap whip rules (D-126). tools/validators/stride.luau: the gait pacing data rules (D-131).
 - tests/choreo/GroundClearance.spec.luau also caps Sheathe's tip speed at choreo.sheath.sheatheTipSpeed (D-130).
 
+### After the wake and feet round (D-132 to D-137)
+
+- src/client/choreo/Mixer.luau: the `step(dt)` result carries `jumped` (dt > choreo.stall.jumpSeconds), and each FiredEvent carries `jumped`. A jump advances the clocks by the gap (minus a shorter pending pause), zeroes the root delta, and still collects the crossed events. PlayOptions.sinceStep (seconds between the mixer's last step and the play) makes a clip played inside the gap move only by its own age on the jump step; it is ignored on any other step (D-132).
+- src/client/choreo/Choreo.luau: `animator.events` fires (clipId, event, jumped); rbx markers and ordinary steps pass false. When either dt or the clock's time since the rig's last step is longer than stall.jumpSeconds, `step(dt)` uses the clock's time (engine.now). `play` passes sinceStep from the same clock. `currentRootMotionDelta()` returns Vector3.zero when the last step is older than stall.jumpSeconds (D-132).
+- src/client/controllers/Replication.luau: `routeClipEvent(record, clipId, event, jumped?)`. A jumped event only closes (trail/smear off, activation light off, post-motion) and starts no sound, voice, footstep, chime, FOV kick, impact activation, trail or smear; `Replication.clipEvent` fires (record, clipId, event, jumped) (D-132).
+- src/client/choreo/LocomotionState.luau: settlePoints reroutes a late settle point (within locomotion.stopHandOverCycles of the other foot's Footstep) to the other foot's point half a cycle later, so StopGait leftAfter/rightAfter may exceed 0.5; ActionLogic.stopCarryStep sums them with the cycles to each Footstep (D-136).
+- The drawn forward gait clips (WalkForwardDrawn, RunDrawn, SprintDrawn) are leg twins of the sheathed ones (same plans, key times and Footsteps); a change to one set's legs is a change to both (D-134, D-135).
+- tests/choreo/Stride.spec.luau guards each clip's authored slide: every walk under slideBar, every gait clip under transientBar, and a lock-on forward walk at walkSpeed (the walk/Run cadence blend) within transientBar (D-133).
+- The capture path: setCaptureTimeScale → WalkSpeed × scale + animator:setTimeScale (mixer:timeScale, which Locomotion.stepGait divides the root speed by) + Locomotion clockScale. Locomotion paces from |AssemblyLinearVelocity| with the direction from MoveDirection (D-127, D-137).
+- tools/validators/choreo.luau (new): stall.jumpSeconds is at least 2/rate for every tier's distantHz and farHz and at most camera.stall.settleSeconds. tools/validators/stride.luau keeps locomotion.stopHandOverCycles inside (0, 0.5). The validator count is now 32.
+
 ## Data tables (src/shared/data)
 
 | File | Holds |
@@ -525,7 +536,7 @@ the sweep.
 | `lighting.luau` | section 11 lighting values per floor |
 | `sfx.luau` | every sound by `family.Name` (D-080): entries `{ id, placeholder, volume, pitchRange?, spatial, note?, startAt?, stopAt?, fadeOut?, loop?, length?, title?, creator?, peakAt? }` (times in asset seconds before PlaybackSpeed; `Sfx.isReal`, `Sfx.region`, `Sfx.peakLead`, `Sfx.gainOf`, `Sfx.vocalName`); `cues` (layers of `{ name, delay, gainDb, pitch? }`), `contours` (EQ and reverb steps per group), `effects`, `engine` (playbackSpeed, soundVolume), `limits` (cueLayers, hitCueMinLayers, cueDelaySeconds, layerGainDb, maxPlayVolume, loopMinSeconds, contourSeconds, subLayers, bassBackDb, sharedAssetSemitones), `playback` (openEndSeconds, sameFrameSeconds), `preload`, `shatterCues` (normal, heavy, boss), `mix`, `music` |
 | `assets.luau` | asset ids by name; missing ids are reported |
-| `choreo.luau` | animation tunables: blend times and the blend easing, smear scale, idle cycle, locomotion speeds and clip names, `locomotion.stride` (ground speeds, touchdowns, pacing bounds and check bars, D-054), the stop (`stopStepsSeconds`, `stopMinCycles`, `stopEndSpeed`, D-059), `locomotion.lean.upright` (D-058), `priority.Sheath` and the `sheath` table (clips, draw-cuts, predictSeconds, sheatheDelay, stopBlend, remoteDrawDelay) |
+| `choreo.luau` | animation tunables: blend times and the blend easing, smear scale, idle cycle, locomotion speeds and clip names, `locomotion.stride` (ground speeds, touchdowns, pacing bounds and check bars, D-054), the stop (`stopStepsSeconds`, `stopMinCycles`, `stopEndSpeed`, D-059), `locomotion.lean.upright` (D-058), `locomotion.stopHandOverCycles` (D-136), `stall.jumpSeconds` (D-132), `priority.Sheath` and the `sheath` table (clips, draw-cuts, predictSeconds, sheatheDelay, stopBlend, remoteDrawDelay) |
 | `camera.luau` | section 10 camera numbers and the `punch` rows (Final, Kill; D-072) |
 | `fx.luau` | budgets, shard counts, trail lifetimes, telegraph sizes, the parry spark burst, quality tiers; `audio` (dedupe, `maxSoundLength`, the heartbeat loop and ramp, `materialSurface`, `ambience`: bed, rim wind, ramp, sample rate, rim band and floor, D-095) |
 | `playground.luau` | the Playground: field radius, rim, pillars, clouds, spawn tables, loadout |

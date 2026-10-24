@@ -572,3 +572,249 @@ describe("Mixer", function()
 		expect(mixer:step(FRAME).offsets.Waist).toBeNil()
 	end)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- Render stalls (D-132): RenderStepped stops while the display sleeps and its first dt after
+-- waking is the whole gap. A step longer than choreo.stall.jumpSeconds is a jump.
+-- ------------------------------------------------------------------------------------------
+
+describe("Mixer across a render stall", function()
+	-- Read per test, so a table without the stall block fails each test on its own.
+	local function jumpSeconds(): number
+		return ChoreoData.stall.jumpSeconds
+	end
+
+	-- An Art-shaped one-shot: a 1-stud lunge over its first 0.5 s, a chime, a whoosh, a trail.
+	local function lunge(id: string?)
+		return clip(id or "art", {
+			keys = {
+				{ time = 0, easing = "Hold", joints = { Neck = { rot = { 0, 0, 0 } } }, root = { pos = { 0, 0, 0 } } },
+				{
+					time = 0.5,
+					easing = "Linear",
+					joints = { Neck = { rot = { 0, 50, 0 } } },
+					root = { pos = { 0, 0, -1 } },
+				},
+				{
+					time = 1,
+					easing = "Hold",
+					joints = { Neck = { rot = { 0, 100, 0 } } },
+					root = { pos = { 0, 0, -1 } },
+				},
+			},
+			events = {
+				{ time = 0.15, kind = "ActivationHold" },
+				{ time = 0.3, kind = "Sfx", data = { name = "whoosh.Medium" } },
+				{ time = 0.35, kind = "TrailOn" },
+				{ time = 0.5, kind = "TrailOff" },
+				{ time = 0.6, kind = "PostMotionStart" },
+			},
+			blendOut = 0.2,
+		})
+	end
+
+	it("the threshold is data, longer than a 60, 30 or 15 fps frame", function()
+		expect(typeof(jumpSeconds())).toBe("number")
+		expect(jumpSeconds() > 4 * FRAME).toBe(true)
+	end)
+
+	it("a step longer than jumpSeconds is a jump: the clocks take the whole gap, the root none of it", function()
+		local mixer = Mixer.new()
+		local handle = mixer:play(lunge())
+		mixer:step(0.1)
+		local result = mixer:step(56)
+		expect(result.jumped).toBe(true)
+		expect(result.rootDelta).toEqual({ 0, 0, 0 })
+		-- The clip is over: it ended, reported finished, and holds its last key while it blends out.
+		expect(handle.ended).toBe(true)
+		expect(#result.finished).toBe(1)
+		expect(result.offsets.Neck.rot[2]).toBeCloseTo(100)
+		-- The events the gap crossed still reach the router, marked by the jump (it decides).
+		local kinds = {}
+		for _, fired in result.events do
+			table.insert(kinds, fired.event.kind)
+		end
+		expect(kinds).toEqual({ "ActivationHold", "Sfx", "TrailOn", "TrailOff", "PostMotionStart" })
+		-- Nothing of the clip is left to play out after the wake.
+		for _ = 1, 30 do
+			local after = mixer:step(FRAME)
+			expect(#after.events).toBe(0)
+			expect(after.rootDelta[3]).toBe(0)
+			expect(after.jumped).toBe(false)
+		end
+	end)
+
+	it("a step of jumpSeconds or less is a plain step: root motion and events as ever", function()
+		local mixer = Mixer.new()
+		mixer:play(lunge())
+		local step = jumpSeconds()
+		local result = mixer:step(step)
+		expect(result.jumped).toBe(false)
+		expect(result.rootDelta[3]).toBeCloseTo(-math.min(step, 0.5) * 2, 1e-6)
+	end)
+
+	it("a jump inside a clip keeps the root where it was and continues from the new clip time", function()
+		local mixer = Mixer.new()
+		local handle = mixer:play(clip("long", {
+			duration = 4,
+			keys = {
+				{ time = 0, easing = "Hold", joints = {}, root = { pos = { 0, 0, 0 } } },
+				{ time = 4, easing = "Linear", joints = {}, root = { pos = { 0, 0, -4 } } },
+			},
+		}))
+		mixer:step(0.5)
+		expect(mixer:step(1).rootDelta).toEqual({ 0, 0, 0 })
+		expect(handle.time).toBeCloseTo(1.5, 1e-6)
+		-- The next frame moves one frame's worth from where the clip now is, not the skipped second.
+		expect(mixer:step(FRAME).rootDelta[3]).toBeCloseTo(-FRAME, 1e-6)
+	end)
+
+	it("a hit-stop asked for during the stall ends inside the gap: the rest of it moves the clocks", function()
+		-- The measured wake (item 2026-10-24): a kill's 10-frame hit-stop landed on the rig while the
+		-- display slept, so the wake step was all pause and the Art then replayed from its start.
+		local mixer = Mixer.new()
+		local handle = mixer:play(lunge())
+		mixer:hitStop(10)
+		local result = mixer:step(56)
+		expect(result.jumped).toBe(true)
+		expect(result.paused).toBe(false)
+		expect(mixer:pauseRemaining()).toBe(0)
+		expect(handle.ended).toBe(true)
+		expect(result.rootDelta).toEqual({ 0, 0, 0 })
+		local replayed = 0
+		for _ = 1, 60 do
+			local after = mixer:step(FRAME)
+			replayed += #after.events
+			expect(after.rootDelta[3]).toBe(0)
+		end
+		expect(replayed).toBe(0)
+	end)
+
+	it("a pause longer than the gap still holds: the jump moves nothing it would not have", function()
+		local mixer = Mixer.new()
+		local handle = mixer:play(lunge())
+		mixer:step(0.1)
+		local gap = jumpSeconds() + 0.1
+		local frames = math.ceil((gap + 0.4) * 60)
+		mixer:hitStop(frames)
+		local result = mixer:step(gap)
+		expect(result.jumped).toBe(true)
+		expect(result.paused).toBe(true)
+		expect(handle.time).toBeCloseTo(0.1, 1e-6)
+		expect(#result.events).toBe(0)
+		expect(mixer:pauseRemaining()).toBeCloseTo(frames * FRAME - gap, 1e-6)
+	end)
+
+	it("a frozen clock (time scale 0: a held Art stance) stays frozen through a jump", function()
+		local mixer = Mixer.new()
+		local handle = mixer:play(lunge())
+		mixer:step(0.1)
+		mixer:setTimeScale(0)
+		local result = mixer:step(56)
+		expect(result.jumped).toBe(true)
+		expect(handle.time).toBeCloseTo(0.1, 1e-6)
+		expect(#result.events).toBe(0)
+	end)
+
+	it("a death tremor (ignores the pause) still runs the whole gap and ends", function()
+		local mixer = Mixer.new()
+		mixer:play(lunge())
+		local freeze = mixer:play(clip("enemy/Boar/DeathFreeze", { layer = "Additive", duration = 0.5 }))
+		mixer:setTimeScale(0)
+		local result = mixer:step(56)
+		expect(result.jumped).toBe(true)
+		expect(freeze.ended).toBe(true)
+	end)
+
+	-- The crossed events of one step as { kind, jumped } pairs.
+	local function crossed(result: any): { { any } }
+		local list = {}
+		for _, fired in result.events do
+			table.insert(list, { fired.event.kind, fired.jumped })
+		end
+		return list
+	end
+
+	it("every event a jump crossed carries the mark, and a plain step's carry none", function()
+		local mixer = Mixer.new()
+		mixer:play(lunge())
+		expect(crossed(mixer:step(0.2))).toEqual({ { "ActivationHold", false } })
+		expect(crossed(mixer:step(56))).toEqual({
+			{ "Sfx", true },
+			{ "TrailOn", true },
+			{ "TrailOff", true },
+			{ "PostMotionStart", true },
+		})
+	end)
+
+	it("a clip played just before the wake moves only by its own age: the present plays on", function()
+		-- A key press that wakes the display, or a remote's action that arrives just before it, starts
+		-- a clip inside the gap: the wake step must show it where it is now, not jump it to its end.
+		local mixer = Mixer.new()
+		mixer:step(FRAME)
+		local gap = 56
+		local handle = mixer:play(lunge(), { sinceStep = gap - 0.2 })
+		local result = mixer:step(gap)
+		expect(result.jumped).toBe(true)
+		expect(handle.time).toBeCloseTo(0.2, 1e-6)
+		expect(handle.ended).toBe(false)
+		-- Its own 0.2 s is an ordinary step: the chime fires unmarked and the lunge moves the root.
+		expect(crossed(result)).toEqual({ { "ActivationHold", false } })
+		expect(result.rootDelta[3]).toBeCloseTo(-0.4, 1e-6)
+		-- The rest of the clip plays after the wake, as ever.
+		local later = {}
+		local root = 0
+		for _ = 1, 60 do
+			local after = mixer:step(FRAME)
+			root += after.rootDelta[3]
+			for _, pair in crossed(after) do
+				table.insert(later, pair)
+			end
+		end
+		expect(later).toEqual({
+			{ "Sfx", false },
+			{ "TrailOn", false },
+			{ "TrailOff", false },
+			{ "PostMotionStart", false },
+		})
+		expect(root).toBeCloseTo(-0.6, 1e-6)
+	end)
+
+	it("a clip played early in the gap jumps by its own age: marked, no root, the rest plays on", function()
+		local mixer = Mixer.new()
+		mixer:step(FRAME)
+		local gap = 56
+		local handle = mixer:play(
+			clip("long", {
+				duration = 4,
+				keys = {
+					{ time = 0, easing = "Hold", joints = {}, root = { pos = { 0, 0, 0 } } },
+					{ time = 4, easing = "Linear", joints = {}, root = { pos = { 0, 0, -4 } } },
+				},
+				events = {
+					{ time = 1, kind = "Sfx", data = { name = "whoosh.Medium" } },
+					{ time = 3, kind = "Sfx", data = { name = "whoosh.Medium" } },
+				},
+			}),
+			{ sinceStep = gap - 2 }
+		)
+		local result = mixer:step(gap)
+		expect(handle.time).toBeCloseTo(2, 1e-6)
+		expect(crossed(result)).toEqual({ { "Sfx", true } })
+		expect(result.rootDelta).toEqual({ 0, 0, 0 })
+		local later = {}
+		for _ = 1, 90 do
+			for _, pair in crossed(mixer:step(FRAME)) do
+				table.insert(later, pair)
+			end
+		end
+		expect(later).toEqual({ { "Sfx", false } })
+	end)
+
+	it("sinceStep only matters on a jump: an ordinary step advances a new clip by the whole step", function()
+		local mixer = Mixer.new()
+		local handle = mixer:play(lunge(), { sinceStep = 0.01 })
+		mixer:step(FRAME)
+		expect(handle.time).toBeCloseTo(FRAME, 1e-9)
+	end)
+end)

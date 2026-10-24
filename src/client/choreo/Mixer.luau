@@ -29,6 +29,17 @@
 	Root motion is a gameplay displacement, not a visual: it is never attenuated by a clip's
 	blend-in (the dodge travels its whole dodgeDistance) and only fades with a clip that is stopping.
 
+	Render stalls (D-132): RenderStepped stops while the display sleeps or the window is minimised,
+	and its first dt after waking is the whole gap. A step longer than choreo.luau
+	stall.jumpSeconds is a jump. The clocks, envelopes and weights still take the whole gap (a
+	hit-stop asked for during it ends inside it, and the rest of the gap moves the clocks), so
+	nothing asked for during the stall plays out after the wake. The root takes none of it: the
+	body stays where the server saw it through the gap. The events the gap crossed are still
+	reported, each marked `jumped`, so the router closes what they close and starts nothing. A clip
+	played inside the gap (the key press that woke the display, a remote's action that arrived just
+	before the wake) is the present: it moves only by its own age, the step less its `sinceStep`,
+	and that part is a jump only when it is longer than jumpSeconds itself.
+
 	The fallback idle (the rig's idle the animator plays the frame a rig appears) fires its events
 	only while it is the Base layer's idle: hidden under another Base clip it keeps its clock but
 	reports nothing it crosses, so its sounds never double the clip that shows (D-123).
@@ -57,6 +68,9 @@ export type PlayOptions = {
 	coexist: boolean?, -- do not fade out other handles on the layer (blend-space clips)
 	fallback: boolean?, -- the auto Idle: fades out whenever another Base clip is active
 	ignorePause: boolean?, -- keeps advancing through hit-stop (death tremor)
+	-- Seconds between the mixer's last step and this play (the caller's clock). Only a jump reads
+	-- it: the clip's first step then moves it by the step less this, its own age (D-132).
+	sinceStep: number?,
 }
 
 export type Handle = {
@@ -81,9 +95,11 @@ export type Handle = {
 	hasRoot: boolean,
 	lastRoot: Types.Vec3,
 	fresh: boolean,
+	sinceStep: number, -- PlayOptions.sinceStep until the handle's first step, then 0
 }
 
-export type FiredEvent = { clipId: string, event: Types.ClipEvent, handle: Handle }
+-- jumped: a render stall's gap crossed it (the step, or this handle's part of it, was a jump).
+export type FiredEvent = { clipId: string, event: Types.ClipEvent, handle: Handle, jumped: boolean }
 
 export type StepResult = {
 	offsets: Offsets,
@@ -91,6 +107,7 @@ export type StepResult = {
 	rootDelta: Types.Vec3,
 	finished: { Handle },
 	paused: boolean,
+	jumped: boolean, -- the step was longer than stall.jumpSeconds (a render stall's gap)
 }
 
 export type Mixer = {
@@ -214,6 +231,7 @@ function Mixer.play(self: any, clip: Types.ClipDef, opts: PlayOptions?): Handle
 		hasRoot = hasRoot,
 		lastRoot = if hasRoot then ClipSampler.rootMotionAt(clip, startTime) else ZERO,
 		fresh = true,
+		sinceStep = math.max(0, options.sinceStep or 0),
 	}
 	table.insert(self._handles, handle)
 	return handle
@@ -313,11 +331,18 @@ end
 local hiddenEvents: { FiredEvent } = {}
 
 -- Events with time in (from, to], or [from, to] when `inclusive` (the first step after play).
-local function collectEvents(handle: Handle, from: number, to: number, inclusive: boolean, into: { FiredEvent })
+local function collectEvents(
+	handle: Handle,
+	from: number,
+	to: number,
+	inclusive: boolean,
+	into: { FiredEvent },
+	jumped: boolean
+)
 	for _, event in handle.clip.events do
 		local after = if inclusive then event.time >= from else event.time > from
 		if after and event.time <= to then
-			table.insert(into, { clipId = handle.clipId, event = event, handle = handle })
+			table.insert(into, { clipId = handle.clipId, event = event, handle = handle, jumped = jumped })
 		end
 	end
 end
@@ -333,8 +358,15 @@ local function rootAtLastKey(clip: Types.ClipDef): Types.Vec3
 	return ZERO
 end
 
--- Advances one handle's clock and collects crossed events and the root-motion delta.
-local function advance(handle: Handle, dt: number, paused: boolean, events: { FiredEvent }, rootDelta: Types.Vec3)
+-- Advances one handle's clock and collects crossed events (marked `jumped`) and the root-motion delta.
+local function advance(
+	handle: Handle,
+	dt: number,
+	paused: boolean,
+	events: { FiredEvent },
+	rootDelta: Types.Vec3,
+	jumped: boolean
+)
 	local clip = handle.clip
 	if dt <= 0 or (paused and not handle.ignorePause) then
 		return
@@ -358,12 +390,12 @@ local function advance(handle: Handle, dt: number, paused: boolean, events: { Fi
 
 	-- Events
 	if wrapped then
-		collectEvents(handle, previous, duration, inclusive, events)
+		collectEvents(handle, previous, duration, inclusive, events, jumped)
 		local rest = target - duration
-		collectEvents(handle, 0, rest, true, events)
+		collectEvents(handle, 0, rest, true, events, jumped)
 		target = rest % duration
 	else
-		collectEvents(handle, previous, target, inclusive, events)
+		collectEvents(handle, previous, target, inclusive, events, jumped)
 	end
 
 	-- Root motion: the authored displacement in full while the clip plays (never cut by the
@@ -497,7 +529,16 @@ local function composeOverrideLayer(result: Offsets, handles: { Handle })
 end
 
 function Mixer.step(self: any, dt: number): StepResult
+	local jumped = dt > ChoreoData.stall.jumpSeconds
+	-- The time the clocks (and envelopes and weights) of handles that keep the pause move by.
+	local clockDt = dt
 	local paused = self._pause > ChoreoData.pauseEpsilon
+	if jumped and paused and self._pause < dt then
+		-- A hit-stop asked for during a render stall is over inside the gap: the rest moves the clocks.
+		clockDt = dt - self._pause
+		self._pause = 0
+		paused = false
+	end
 	if paused then
 		self._pause = self._pause - dt
 	end
@@ -505,7 +546,7 @@ function Mixer.step(self: any, dt: number): StepResult
 	if self._pause <= ChoreoData.pauseEpsilon then
 		self._pause = 0
 	end
-	local scaledDt = dt * self._timeScale
+	local timeScale = self._timeScale
 
 	-- Fallback idle: visible only while no other Base clip is active.
 	local baseActive = false
@@ -522,25 +563,36 @@ function Mixer.step(self: any, dt: number): StepResult
 	table.clear(hiddenEvents)
 	local finished: { Handle } = {}
 	local rootDelta: Types.Vec3 = { 0, 0, 0 }
-	local fractions = weightFractions(self._handles, dt, paused)
+	-- A jump's root motion goes nowhere: each handle's root still moves on to its new clip time.
+	local jumpRoot: Types.Vec3 = { 0, 0, 0 }
+	local fractions = weightFractions(self._handles, clockDt, paused)
 
 	for _, handle in self._handles do
 		-- A paused handle holds everything: clock, blend envelope and blend-space weight.
 		local frozen = paused and not handle.ignorePause
+		local handleDt = if handle.ignorePause then dt else clockDt
+		-- A clip played inside a jump's gap moves only by its own age, and that is a jump only when
+		-- it is one too (D-132).
+		local handleJumped = jumped
+		if jumped and handle.sinceStep > 0 then
+			handleDt = math.max(0, handleDt - handle.sinceStep)
+			handleJumped = handleDt > ChoreoData.stall.jumpSeconds
+		end
+		handle.sinceStep = 0
 		if not frozen then
 			-- Envelope
 			if handle.stopping then
-				handle.fade = if handle.blendOut <= 0 then 0 else math.max(0, handle.fade - dt / handle.blendOut)
+				handle.fade = if handle.blendOut <= 0 then 0 else math.max(0, handle.fade - handleDt / handle.blendOut)
 				if handle.fade <= 0 then
 					handle.done = true
 				end
 			elseif handle.fade < 1 then
-				handle.fade = if handle.blendIn <= 0 then 1 else math.min(1, handle.fade + dt / handle.blendIn)
+				handle.fade = if handle.blendIn <= 0 then 1 else math.min(1, handle.fade + handleDt / handle.blendIn)
 			end
 			-- External weight (fallback idle is driven by the mixer, others by the caller)
 			if handle.fallback then
 				handle.targetWeight = if baseActive then 0 else 1
-				local rate = dt / ChoreoData.fallbackBlend
+				local rate = handleDt / ChoreoData.fallbackBlend
 				handle.weight = handle.weight + math.clamp(handle.targetWeight - handle.weight, -rate, rate)
 			elseif handle.weight ~= handle.targetWeight then
 				local fraction = fractions[handle.layer] or 1
@@ -560,7 +612,14 @@ function Mixer.step(self: any, dt: number): StepResult
 		if not handle.done then
 			local wasEnded = handle.ended
 			local into = if handle.fallback and handle.targetWeight == 0 then hiddenEvents else events
-			advance(handle, if handle.ignorePause then dt else scaledDt, paused, into, rootDelta)
+			advance(
+				handle,
+				if handle.ignorePause then handleDt else handleDt * timeScale,
+				paused,
+				into,
+				if handleJumped then jumpRoot else rootDelta,
+				handleJumped
+			)
 			if handle.ended and not wasEnded then
 				table.insert(finished, handle)
 				self:stop(handle)
@@ -603,7 +662,14 @@ function Mixer.step(self: any, dt: number): StepResult
 	end
 
 	self._last = result
-	return { offsets = result, events = events, rootDelta = rootDelta, finished = finished, paused = paused }
+	return {
+		offsets = result,
+		events = events,
+		rootDelta = rootDelta,
+		finished = finished,
+		paused = paused,
+		jumped = jumped,
+	}
 end
 
 Mixer.layerRank = layerRank
