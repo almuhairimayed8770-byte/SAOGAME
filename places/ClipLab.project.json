@@ -1,0 +1,158 @@
+{
+	"name": "SkyspireClipLab",
+	"globIgnorePaths": [
+		"**/*.spec.luau",
+		"**/selene.toml",
+		"**/Main.server.luau",
+		"**/Main.client.luau"
+	],
+	"tree": {
+		"$className": "DataModel",
+		"ReplicatedStorage": {
+			"Shared": {
+				"$path": "../src/shared"
+			}
+		},
+		"ServerScriptService": {
+			"Server": {
+				"$path": "../src/server"
+			}
+		},
+		"StarterPlayer": {
+			"$properties": {
+				"CharacterWalkSpeed": 0,
+				"CharacterJumpPower": 0,
+				"EnableMouseLockOption": false,
+				"CameraMode": "Classic"
+			},
+			"StarterPlayerScripts": {
+				"Client": {
+					"$path": "../src/client"
+				}
+			},
+			"StarterCharacterScripts": {
+				"Animate": {
+					"$className": "LocalScript"
+				}
+			}
+		},
+		"Workspace": {
+			"$properties": {
+				"StreamingEnabled": false,
+				"FallenPartsDestroyHeight": -200,
+				"Attributes": {
+					"Attributes": {
+						"ClipLab": { "Bool": true }
+					}
+				}
+			},
+			"ClipLab": {
+				"$className": "Model",
+				"$properties": {
+					"ModelStreamingMode": "Persistent"
+				},
+				"Stage": {
+					"$className": "Part",
+					"$properties": {
+						"Anchored": true,
+						"Shape": "Cylinder",
+						"Size": [2, 120, 120],
+						"CFrame": {
+							"CFrame": {
+								"position": [0, -1, 0],
+								"orientation": [[0, 1, 0], [-1, 0, 0], [0, 0, 1]]
+							}
+						},
+						"Material": "SmoothPlastic",
+						"Color": [0.16, 0.17, 0.19],
+						"TopSurface": "Smooth",
+						"BottomSurface": "Smooth"
+					}
+				},
+				"Backdrop": {
+					"$className": "Part",
+					"$properties": {
+						"Anchored": true,
+						"CanCollide": false,
+						"Size": [120, 60, 1],
+						"Position": [0, 29, 40],
+						"Material": "SmoothPlastic",
+						"Color": [0.2, 0.22, 0.26],
+						"TopSurface": "Smooth",
+						"BottomSurface": "Smooth"
+					}
+				},
+				"Spawn": {
+					"$className": "SpawnLocation",
+					"$properties": {
+						"Anchored": true,
+						"Size": [8, 1, 8],
+						"Position": [0, 0.5, 0],
+						"Transparency": 1,
+						"CanCollide": false,
+						"Neutral": true,
+						"Duration": 0
+					}
+				}
+			}
+		},
+		"Lighting": {
+			"$properties": {
+				"Technology": "Future",
+				"ShadowSoftness": 0.2,
+				"EnvironmentDiffuseScale": 0.6,
+				"EnvironmentSpecularScale": 0.3,
+				"Brightness": 2,
+				"ClockTime": 10,
+				"GeographicLatitude": 30,
+				"Ambient": [0.35, 0.37, 0.42],
+				"OutdoorAmbient": [0.45, 0.5, 0.58],
+				"GlobalShadows": true
+			},
+			"ColorCorrection": {
+				"$className": "ColorCorrectionEffect",
+				"$properties": {
+					"Saturation": 0.15,
+					"Contrast": 0.1,
+					"TintColor": [1, 1, 1]
+				}
+			},
+			"Bloom": {
+				"$className": "BloomEffect",
+				"$properties": {
+					"Intensity": 0.4,
+					"Size": 24,
+					"Threshold": 0.9
+				}
+			},
+			"Atmosphere": {
+				"$className": "Atmosphere",
+				"$properties": {
+					"Density": 0.3,
+					"Haze": 1.5,
+					"Glare": 0.4,
+					"Color": [0.78, 0.86, 0.95],
+					"Decay": [0.55, 0.65, 0.8]
+				}
+			},
+			"Sky": {
+				"$className": "Sky",
+				"$properties": {
+					"SunAngularSize": 14,
+					"MoonAngularSize": 8,
+					"StarCount": 1500
+				}
+			}
+		},
+		"HttpService": {
+			"$properties": {
+				"HttpEnabled": true
+			}
+		},
+		"SoundService": {
+			"$properties": {
+				"RespectFilteringEnabled": true
+			}
+		}
+	}
+}

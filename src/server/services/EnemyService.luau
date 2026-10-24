@@ -1,0 +1,1478 @@
+--!strict
+--[[
+	EnemyService: spawning, the 20 Hz AI tick, sleep, telegraphs and enemy strikes (sections 9
+	and 16; ARCHITECTURE "Combat flow" step 3).
+
+	spawn(defId, cframe, options) builds the placeholder rig through RigBuilder, registers it with
+	EntityService (which owns HP, state and threat), parents it under workspace.Enemies and gives
+	it a Brain for its archetype (Charger, Brute). The Heartbeat accumulates dt into whole AI ticks;
+	every awake brain ticks, then its mover turns the brain's MoveTo requests into Humanoid:MoveTo
+	calls, with a PathfindingService path (custom material costs) once the goal is farther than
+	ai.pathfindPastStuds or the body is stuck. Brains farther than ai.sleepRadius from every player
+	sleep. The brain owns its yaw and publishes it through an AlignOrientation on the root, so a
+	Charger really does turn slowly.
+
+	After the frame's ticks, the frame pass runs every awake brain once per Heartbeat (D-184, D-185):
+	the attack's timed edges (the wind-up's end, the strike, a rush's stretches and run) resolve on
+	the first server frame at or after their beat, and the body turns by the phase's rate times the
+	frame's seconds, so it turns smoothly instead of in 20 Hz steps. A movement the frame pass asks
+	for (the rush's launch) reaches the mover in the same frame.
+
+	The mover's stuck clock (D-183) starts with each movement: a stop, a switch to or from a direct
+	move and a release from hold all restart it, so time spent standing never reads as time stuck.
+	A strike's own movement (the rush) is direct: straight MoveTo, never a path. A path that lands
+	after the body moved on never sends it back to the waypoint it asked from (where it stood), nor
+	to any leading waypoint the body already walked past (D-196): one is passed when the body is on
+	the leg that leaves it (within waypointReach of that leg), past its start, and walked that way
+	since it asked. A detour that goes back round an obstacle starts with a leg the body is not on,
+	and a body that asked because it was stuck walked nowhere since, so both walk the path as it came.
+
+	Hold (D-120): setHeld(id, true) puts one enemy's brain to sleep and stops its mover, and the
+	sleep check never wakes it while it is held; setHoldNew(true) makes every enemy spawned after
+	it (PlaygroundService respawns included) start held. A held enemy's HP never regenerates
+	(EntityService.setHpRegenHeld), so a low HP set up for a hit waits for it. Hits still land on a
+	held enemy: HP, the Stagger interrupt, Break, death and the kill path all run through
+	EntityService as before.
+	Releasing it hands it back to the sleep rules on the next tick. This is the cinematic hold
+	(a boss entrance, the announcement, any story beat or cutscene freezes the field) and what
+	the Studio dev hook uses to run a controlled fight.
+
+	A brain's telegraph becomes the Telegraph remote (wind-up, kind, origin, facing, ground shape),
+	its clip the ActionStarted remote, its strike a CombatService.enemyStrike call, its state an
+	EntityService.setState call (EntityService fires StateChanged itself). EntityService's Died and
+	StateChanged signals stop a brain or interrupt its attack (Stagger, Break, GuardBroken).
+
+	Everything engine-facing goes through `Deps` / `Engine` (bind), so the whole service runs in
+	Lune with a fake world; `start()` binds the real engine.
+]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Shared = ReplicatedStorage.Shared
+
+local Types = require(Shared.types)
+local AI = require(Shared.data.ai)
+local Enemies = require(Shared.data.enemies)
+local Rigs = require(Shared.data.rigs)
+local Signal = require(Shared.util.Signal)
+local Brain = require(script.Parent.Parent.ai.Brain)
+local Charger = require(script.Parent.Parent.ai.Charger)
+local Brute = require(script.Parent.Parent.ai.Brute)
+
+export type SpawnOptions = {
+	band: Types.ThreatBand?, -- overrides the def's band (spawn tables)
+	elite: boolean?, -- Enemies.variant Elite: 1.5x stats, Mirror Shield, a second attack
+	night: boolean?, -- Enemies.variant Night: +25% damage
+	name: string?, -- display name override
+	level: number?, -- Level attribute override
+}
+
+export type Connection = { Disconnect: (self: any) -> () }
+
+-- The engine calls the service makes, one function each, so tests can fake a world.
+export type Engine = {
+	place: (model: Model, cframe: CFrame) -> (), -- PivotTo, server network ownership, the yaw align
+	position: (model: Model) -> Vector3,
+	facing: (model: Model) -> Vector3,
+	setFacing: (model: Model, facing: Vector3) -> (),
+	moveTo: (model: Model, position: Vector3) -> (), -- Humanoid:MoveTo
+	stop: (model: Model) -> (),
+	setWalkSpeed: (model: Model, speed: number) -> (),
+	computePath: (from: Vector3, to: Vector3) -> { Vector3 }?, -- may yield; nil when no path
+	destroy: (model: Model) -> (),
+	-- D-167: puts every part of the model in a collision group (CollisionGroups.assign). Nil: no groups.
+	setCollisionGroup: ((model: Model, group: string) -> ())?,
+	-- D-167: whether the model's root overlaps no player and no other enemy, so it can rejoin the
+	-- enemies group without being pushed out of anyone (CollisionGroups.clear). Nil: always clear.
+	bodyClear: ((model: Model) -> boolean)?,
+	-- D-197: how far ahead of the root's centre along `direction` the world meets the root (what the
+	-- root collides with in its own group: a rushing body's walls, never a player or an enemy),
+	-- within `distance` studs, and whether that face is ground it climbs (D-204); nil when nothing is
+	-- in the way (EnemyService.worldAhead). Nil: no world.
+	worldAhead: ((model: Model, direction: Vector3, distance: number) -> (number?, boolean?))?,
+}
+
+-- The world cast worldAhead makes: a box of `size` at `start` moved by `vector`, colliding as
+-- `group` does and never with `exclude`; how far it travelled before it met something, or nil, and
+-- the normal of the face it met (nil: a face named no way, taken for a wall).
+export type WorldCast = (
+	start: CFrame,
+	size: Vector3,
+	vector: Vector3,
+	group: string,
+	exclude: Instance
+) -> (number?, Vector3?)
+
+export type Deps = {
+	entities: any, -- EntityService
+	combat: any?, -- CombatService (enemyStrike); nil logs strikes until it lands
+	rigBuilder: any, -- RigBuilder.build(rigId, name) -> Model
+	fireAll: (remote: string, payload: any) -> (), -- Net.server().fireAll
+	engine: Engine,
+	players: () -> { Brain.PlayerSnapshot }, -- alive player fighters with positions
+	heartbeat: ((handler: (dt: number) -> ()) -> Connection?)?, -- RunService.Heartbeat; nil in tests
+	serverTime: () -> number, -- workspace:GetServerTimeNow
+	folder: Instance, -- workspace.Enemies
+	random: Random,
+	spawnTask: ((fn: () -> ()) -> ())?, -- task.spawn for path computation; nil runs it inline
+}
+
+type Mover = {
+	model: Model,
+	goal: Vector3?,
+	speed: number,
+	moving: boolean,
+	issuedGoal: Vector3?,
+	issuedAt: number,
+	walkSpeed: number?,
+	path: { Vector3 }?,
+	pathIndex: number,
+	pathComputedAt: number,
+	-- Where the body stood when it asked for the path in hand, and whether that path landed since the
+	-- last update: the first update after it lands skips the waypoints the body already passed (D-196).
+	pathFrom: Vector3?,
+	pathFresh: boolean,
+	pathFailedAt: number?,
+	computing: boolean,
+	pathGeneration: number, -- bumped by every request and every stop; a late result for an old goal is dropped
+	-- The stuck clock (D-183): when and where the body last made progress. Nil position: the clock
+	-- starts on the next update. Every new movement restarts it (one that starts from standing, after
+	-- a stop, a hold or a sleep, and a switch to or from a direct move), so time spent standing never
+	-- counts as time stuck.
+	lastProgressAt: number,
+	lastProgressPosition: Vector3?,
+	stuck: boolean,
+	-- A strike's own movement (the rush, any lunge): straight MoveTo, never a path (D-183).
+	direct: boolean,
+	-- A request arrived since the last update: the frame pass applies it in the same frame.
+	pending: boolean,
+}
+
+export type Entry = {
+	id: number,
+	defId: string,
+	def: Enemies.Enemy,
+	model: Model,
+	brain: Brain.Brain,
+	mover: Mover,
+	awake: boolean,
+	held: boolean, -- the cinematic / dev hold: asleep, and the sleep check never wakes it
+	home: Vector3,
+	front: number, -- studs the body reaches ahead of its root (the snout), measured at spawn
+	back: number, -- studs it reaches behind its root
+	rushEndSent: boolean, -- this rush already told the clients it stopped early (D-169)
+	rejoinPending: boolean, -- a stopped rush waits for a clear body to rejoin the enemies group (D-167)
+	clearSince: number?, -- since when a waiting body has been clear of every player and enemy (D-190)
+}
+
+local FORWARD = -Vector3.zAxis
+local FOLDER_NAME = "Enemies"
+local ALIGN_NAME = "SkyspireYaw"
+local CORNER_SIGNS = { -1, 1 }
+
+local INTERRUPTING: { [string]: boolean } = { Stagger = true, Break = true, GuardBroken = true }
+
+local ARCHETYPES: { [string]: Brain.Archetype } = {
+	Charger = Charger,
+	Brute = Brute,
+}
+
+local EnemyService = {}
+
+--- Fires (entityId, defId, model) after an enemy is registered and has a brain.
+EnemyService.Spawned = Signal.new() :: Signal.Signal<number, string, Model>
+--- Fires (entityId, defId, reason) when an enemy is gone for the spawner: "Died", "Despawned" or
+--- "Unregistered" (EntityService dropped it). PlaygroundService schedules respawns from it.
+EnemyService.Despawned = Signal.new() :: Signal.Signal<number, string, string>
+
+local deps: Deps? = nil
+local entries: { [number]: Entry } = {}
+local currentPlayers: { Brain.PlayerSnapshot } = {}
+local accumulator = 0
+local lastSleepCheck = -math.huge
+local heartbeatConnection: Connection? = nil
+local signalConnections: { Connection } = {}
+local started = false
+local warnedNoCombat = false
+local holdNew = false
+local frameList: { Entry } = {} -- the frame pass's snapshot, reused every frame (no garbage per frame)
+
+local function dependencies(): Deps
+	if deps == nil then
+		error("EnemyService: call start() or bind() first")
+	end
+	return deps :: Deps
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Payload helpers
+-- ---------------------------------------------------------------------------------------------
+
+local function toVec3(vector: Vector3): Types.Vec3
+	return { vector.X, vector.Y, vector.Z }
+end
+
+local function unitVec3(vector: Vector3): Types.Vec3
+	local flat = Brain.horizontal(vector) or FORWARD
+	return { flat.X, flat.Y, flat.Z }
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Mover: MoveTo with a pathfinding fallback
+-- ---------------------------------------------------------------------------------------------
+
+local function newMover(model: Model, speed: number): Mover
+	return {
+		model = model,
+		goal = nil,
+		speed = speed,
+		moving = false,
+		issuedGoal = nil,
+		issuedAt = -math.huge,
+		walkSpeed = nil,
+		path = nil,
+		pathIndex = 1,
+		pathComputedAt = -math.huge,
+		pathFrom = nil,
+		pathFresh = false,
+		pathFailedAt = nil,
+		computing = false,
+		pathGeneration = 0,
+		lastProgressAt = -math.huge,
+		lastProgressPosition = nil,
+		stuck = false,
+		direct = false,
+		pending = false,
+	}
+end
+
+-- Starts the stuck clock afresh: the next update measures progress from where the body stands then.
+local function restartClock(mover: Mover)
+	mover.lastProgressPosition = nil
+	mover.stuck = false
+end
+
+-- Forgets the path and drops a result still computing (it was asked for another movement).
+local function dropPath(mover: Mover)
+	mover.path = nil
+	mover.pathFresh = false
+	mover.pathGeneration += 1
+	mover.computing = false
+end
+
+-- `direct`: a strike's own movement, straight at the goal and never along a path (D-183).
+local function moverRequest(mover: Mover, goal: Vector3, speed: number, direct: boolean?)
+	local isDirect = direct == true
+	if isDirect ~= mover.direct then
+		-- A different kind of movement is a new movement: its own clock, and no path from the old one.
+		mover.direct = isDirect
+		restartClock(mover)
+		dropPath(mover)
+	end
+	mover.goal = goal
+	mover.speed = speed
+	mover.pending = true
+end
+
+local function moverStop(mover: Mover)
+	mover.goal = nil
+	mover.pending = false
+	mover.direct = false
+	if mover.moving then
+		mover.moving = false
+		mover.issuedGoal = nil
+		-- A path still computing is for a goal that no longer exists; its result is dropped.
+		dropPath(mover)
+		dependencies().engine.stop(mover.model)
+	end
+end
+
+local function issue(mover: Mover, target: Vector3, now: number)
+	local engine = dependencies().engine
+	local issued = mover.issuedGoal
+	if
+		issued == nil
+		or (target - issued).Magnitude >= AI.movement.reissueStuds
+		or now - mover.issuedAt >= AI.movement.reissueInterval
+	then
+		engine.moveTo(mover.model, target)
+		mover.issuedGoal = target
+		mover.issuedAt = now
+	end
+end
+
+local function requestPath(mover: Mover, from: Vector3, to: Vector3, now: number)
+	local d = dependencies()
+	mover.pathGeneration += 1
+	local generation = mover.pathGeneration
+	mover.computing = true
+	local function compute()
+		local waypoints = d.engine.computePath(from, to)
+		if mover.pathGeneration ~= generation then
+			return -- the mover stopped (or was re-requested) while the path computed
+		end
+		mover.computing = false
+		mover.pathComputedAt = d.serverTime()
+		if waypoints ~= nil and #waypoints > 0 then
+			mover.path = waypoints
+			-- The first waypoint is where the body stood when it asked; a path that lands after the body
+			-- moved on must never walk it back there (D-183).
+			local startsHere = #waypoints >= 2
+				and Brain.horizontalDistance(waypoints[1], from) <= AI.movement.waypointReach
+			mover.pathIndex = if startsHere then 2 else 1
+			mover.pathFrom = from
+			mover.pathFresh = true
+			mover.pathFailedAt = nil
+		else
+			mover.path = nil
+			mover.pathFailedAt = now
+		end
+	end
+	if d.spawnTask ~= nil then
+		d.spawnTask(compute)
+	else
+		compute()
+	end
+end
+
+-- The first waypoint from `index` on that a path which landed late still has the body walk to
+-- (D-196). A leading waypoint is passed when the body is within waypointReach of it, or when the
+-- body is on the leg that leaves it (within waypointReach of that leg), past its start, and walked
+-- at least stuckProgressStuds that way since it asked for the path (from `from`). A detour that goes
+-- back round an obstacle starts with a leg the body is not on, and a body that asked because it was
+-- stuck walked nowhere since, so both keep every waypoint. The last waypoint is passed only within
+-- reach.
+local function firstAhead(path: { Vector3 }, index: number, position: Vector3, from: Vector3): number
+	local movement = AI.movement
+	local i = index
+	while i < #path do
+		local start = path[i]
+		if Brain.horizontalDistance(position, start) > movement.waypointReach then
+			local leg = Brain.horizontal(path[i + 1] - start)
+			if leg == nil then
+				break
+			end
+			local offset = Vector3.new(position.X - start.X, 0, position.Z - start.Z)
+			local along = offset:Dot(leg)
+			local walked = Vector3.new(position.X - from.X, 0, position.Z - from.Z):Dot(leg)
+			if
+				along <= 0
+				or (offset - leg * along).Magnitude > movement.waypointReach
+				or walked < movement.stuckProgressStuds
+			then
+				break
+			end
+		end
+		i += 1
+	end
+	return i
+end
+
+-- Applies the tick's request: direct MoveTo inside pathfindPastStuds, a path beyond it or when stuck;
+-- a strike's own movement (direct) always goes straight.
+local function moverUpdate(mover: Mover, now: number)
+	mover.pending = false
+	local goal = mover.goal
+	if goal == nil then
+		moverStop(mover)
+		return
+	end
+	local engine = dependencies().engine
+	local movement = AI.movement
+	if not mover.moving then
+		-- A new movement from standing (after a stop, a hold or a sleep): standing is not being stuck,
+		-- so its clock starts now (D-183).
+		restartClock(mover)
+	end
+	mover.moving = true
+	if mover.walkSpeed ~= mover.speed then
+		engine.setWalkSpeed(mover.model, mover.speed)
+		mover.walkSpeed = mover.speed
+	end
+	if mover.direct then
+		issue(mover, goal, now)
+		return
+	end
+
+	local position = engine.position(mover.model)
+	local lastProgress = mover.lastProgressPosition
+	if lastProgress == nil or (position - lastProgress).Magnitude >= movement.stuckProgressStuds then
+		mover.lastProgressAt = now
+		mover.lastProgressPosition = position
+		mover.stuck = false
+	elseif now - mover.lastProgressAt >= movement.stuckSeconds then
+		mover.stuck = true
+	end
+
+	local distance = Brain.horizontalDistance(position, goal)
+	if distance <= movement.arriveRadius then
+		mover.path = nil
+		issue(mover, goal, now)
+		return
+	end
+
+	-- A path is wanted past the direct range or when stuck, and a path once taken is walked to its
+	-- end (dropping it on the first step of progress would steer straight back into the wall).
+	local path = mover.path
+	if distance > AI.pathfindPastStuds or mover.stuck or path ~= nil then
+		local failedAt = mover.pathFailedAt
+		local retryOk = failedAt == nil or now - failedAt >= movement.pathFailRetry
+		local stale = path == nil or now - mover.pathComputedAt >= movement.repathInterval
+		if not mover.computing and retryOk and stale then
+			requestPath(mover, position, goal, now)
+			path = mover.path -- filled at once when the computation ran inline
+		end
+		if path ~= nil then
+			if mover.pathFresh then
+				mover.pathFresh = false
+				mover.pathIndex = firstAhead(path, mover.pathIndex, position, mover.pathFrom or position)
+			end
+			while
+				mover.pathIndex <= #path
+				and Brain.horizontalDistance(position, path[mover.pathIndex]) <= movement.waypointReach
+			do
+				mover.pathIndex += 1
+			end
+			if mover.pathIndex <= #path then
+				issue(mover, path[mover.pathIndex], now)
+				return
+			end
+			mover.path = nil -- walked to its end; the goal is in direct reach
+		end
+	end
+	issue(mover, goal, now)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Brain context: the bridge from decisions to the engine, the remotes and the sibling services
+-- ---------------------------------------------------------------------------------------------
+
+local function fireTelegraph(
+	entry: Entry,
+	attack: Types.EnemyAttackDef,
+	origin: Vector3,
+	facing: Vector3,
+	shape: Types.TelegraphShape?
+)
+	local d = dependencies()
+	d.fireAll("Telegraph", {
+		entityId = entry.id,
+		attackId = attack.id,
+		kind = attack.telegraph,
+		windUp = attack.windUp,
+		serverTime = d.serverTime(),
+		origin = toVec3(origin),
+		facing = unitVec3(facing),
+		shape = shape,
+	})
+end
+
+local function fireActionStarted(entry: Entry, clipId: string, facing: Vector3)
+	local d = dependencies()
+	d.fireAll("ActionStarted", {
+		entityId = entry.id,
+		clipId = clipId,
+		serverTime = d.serverTime(),
+		facing = unitVec3(facing),
+	})
+end
+
+local function strike(
+	entry: Entry,
+	attack: Types.EnemyAttackDef,
+	origin: Vector3,
+	facing: Vector3,
+	options: Types.EnemyStrikeOptions?
+)
+	local d = dependencies()
+	local combat = d.combat
+	if combat == nil or typeof(combat.enemyStrike) ~= "function" then
+		if not warnedNoCombat then
+			warnedNoCombat = true
+			warn("[EnemyService] CombatService.enemyStrike is not available; enemy strikes do no damage")
+		end
+		return
+	end
+	local ok, err = pcall(combat.enemyStrike, entry.id, attack, origin, Brain.horizontal(facing) or FORWARD, options)
+	if not ok then
+		warn(("[EnemyService] enemyStrike failed for entity %d (%s): %s"):format(entry.id, entry.defId, tostring(err)))
+	end
+end
+
+-- Puts an enemy's parts in a collision group through the engine (D-167).
+local function setGroup(model: Model, group: string)
+	local setter = dependencies().engine.setCollisionGroup
+	if setter ~= nil then
+		setter(model, group)
+	end
+end
+
+-- A rush launched (D-169): the body passes through players and enemies until it stops (D-167), and
+-- every client hears the line and the clock to draw it on.
+local function rushStarted(entry: Entry, rush: Brain.Rush)
+	local d = dependencies()
+	entry.rushEndSent = false
+	entry.rejoinPending = false
+	entry.clearSince = nil
+	setGroup(entry.model, AI.collision.rushing)
+	d.fireAll("RushStarted", {
+		entityId = entry.id,
+		attackId = rush.attackId,
+		serverTime = rush.startedAt,
+		origin = toVec3(rush.origin),
+		direction = unitVec3(rush.direction),
+		speed = rush.speed,
+		duration = rush.duration,
+	})
+end
+
+-- A rush stopped: an early stop is told once; every stop (a jam stops the body too, D-190) waits to
+-- rejoin the enemies group until the body has stayed clear long enough (rejoin, from tickAll).
+local function rushEnded(entry: Entry, rush: Brain.Rush, reason: Brain.RushEnd, distance: number)
+	local d = dependencies()
+	if reason ~= "Done" and not entry.rushEndSent then
+		entry.rushEndSent = true
+		d.fireAll("RushEnded", {
+			entityId = entry.id,
+			launchedAt = rush.startedAt,
+			serverTime = d.serverTime(),
+			distance = math.max(0, distance),
+			reason = reason,
+		})
+	end
+	if not entry.rejoinPending then
+		entry.rejoinPending = true
+		entry.clearSince = nil
+	end
+end
+
+-- A stopped rush's body rejoins the enemies group once its root has overlapped no player and no
+-- enemy for ai.collision.rejoinClearSeconds in a row, so the engine never has to push two bodies
+-- apart (that push is what lifted one boar onto another). The wait outlasts the time every client
+-- draws a server body late (D-190): a body that turned solid the moment the server saw it clear was
+-- still drawn inside the player it had just run through, still moving, and the engine pushed that
+-- player out at the rush's speed, up onto its back.
+local function rejoin(entry: Entry, now: number)
+	if not entry.rejoinPending then
+		return
+	end
+	local clear = dependencies().engine.bodyClear
+	if clear ~= nil and not clear(entry.model) then
+		entry.clearSince = nil
+		return
+	end
+	local since: number = entry.clearSince or now
+	entry.clearSince = since
+	if now - since >= AI.collision.rejoinClearSeconds then
+		entry.rejoinPending = false
+		entry.clearSince = nil
+		setGroup(entry.model, AI.collision.enemies)
+	end
+end
+
+local function makeContext(entry: Entry): Brain.Context
+	local d = dependencies()
+	local id = entry.id
+	local model = entry.model
+	local mover = entry.mover
+	return {
+		entityId = id,
+		def = entry.def,
+		home = entry.home,
+		now = d.serverTime,
+		getRecord = function()
+			return d.entities.get(id)
+		end,
+		players = function()
+			return currentPlayers
+		end,
+		position = function()
+			return d.engine.position(model)
+		end,
+		facing = function()
+			return d.engine.facing(model)
+		end,
+		moveTo = function(position, speed, direct)
+			moverRequest(mover, position, speed, direct)
+		end,
+		stop = function()
+			moverStop(mover)
+		end,
+		face = function(direction)
+			d.engine.setFacing(model, direction)
+		end,
+		telegraph = function(attack, origin, facing, shape)
+			fireTelegraph(entry, attack, origin, facing, shape)
+		end,
+		strike = function(attack, origin, facing, options)
+			strike(entry, attack, origin, facing, options)
+		end,
+		setState = function(state, duration)
+			d.entities.setState(id, state, duration)
+		end,
+		actionStarted = function(clipId, facing)
+			fireActionStarted(entry, clipId, facing)
+		end,
+		random = d.random,
+		clearThreat = function()
+			if typeof(d.entities.threatOf) ~= "function" or typeof(d.entities.clearThreat) ~= "function" then
+				return
+			end
+			for attackerId in d.entities.threatOf(id) do
+				d.entities.clearThreat(id, attackerId)
+			end
+		end,
+		bodyExtents = function()
+			return entry.front, entry.back
+		end,
+		worldAhead = function(direction, distance)
+			local cast = d.engine.worldAhead
+			if cast == nil then
+				return nil, nil
+			end
+			return cast(model, direction, distance)
+		end,
+		rootReach = function(direction)
+			return EnemyService.rootReach(model, direction)
+		end,
+		rushStarted = function(rush)
+			rushStarted(entry, rush)
+		end,
+		rushEnded = function(rush, reason, distance)
+			rushEnded(entry, rush, reason, distance)
+		end,
+		extendState = function(seconds)
+			if typeof(d.entities.extendState) == "function" then
+				d.entities.extendState(id, seconds)
+			end
+		end,
+	}
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Lifecycle
+-- ---------------------------------------------------------------------------------------------
+
+local function archetypeFor(def: Enemies.Enemy): Brain.Archetype
+	local archetype = ARCHETYPES[def.archetype]
+	if archetype == nil then
+		warn(("[EnemyService] no brain for archetype %s (%s); using the Brute's"):format(def.archetype, def.id))
+		return Brute
+	end
+	return archetype
+end
+
+-- Pauses (true) or resumes (false) an enemy's HP regen in EntityService (setHpRegenHeld).
+local function holdRegen(id: number, held: boolean)
+	local entities = dependencies().entities
+	if typeof(entities.setHpRegenHeld) == "function" then
+		entities.setHpRegenHeld(id, held)
+	end
+end
+
+local function forget(id: number, reason: string)
+	local entry = entries[id]
+	if entry == nil then
+		return
+	end
+	entries[id] = nil
+	if entry.held then
+		-- A record that outlives the entry (reset) gets its regen back; a dead or gone one is a no-op.
+		entry.held = false
+		holdRegen(id, false)
+	end
+	entry.awake = false
+	entry.brain:die()
+	moverStop(entry.mover)
+	EnemyService.Despawned:Fire(id, entry.defId, reason)
+end
+
+-- Holds an enemy: its brain sleeps (it stops and forgets its target), its mover stops and its HP
+-- stops regenerating.
+local function hold(entry: Entry)
+	entry.held = true
+	if entry.awake then
+		entry.awake = false
+		entry.brain:sleep()
+	end
+	moverStop(entry.mover)
+	holdRegen(entry.id, true)
+end
+
+--- The scaled, variant-applied def an enemy spawns with (what EntityService registers).
+function EnemyService.resolveDef(defId: string, options: SpawnOptions?): Enemies.Enemy
+	local base = Enemies.byId(defId)
+	if base == nil then
+		error(("EnemyService: unknown enemy def '%s'"):format(tostring(defId)))
+	end
+	local opts: SpawnOptions = options or {}
+	local def = Enemies.scaled(base)
+	if opts.elite then
+		def = Enemies.variant(def, "Elite")
+	end
+	if opts.night then
+		def = Enemies.variant(def, "Night")
+	end
+	if opts.band ~= nil then
+		def.band = opts.band
+	end
+	return def
+end
+
+--- Spawns an enemy at a CFrame: builds the rig, registers the entity, parents it under
+--- workspace.Enemies and starts its brain. Returns the entity id.
+function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions?): number
+	local d = dependencies()
+	local opts: SpawnOptions = options or {}
+	local def = EnemyService.resolveDef(defId, opts)
+	local rig = Rigs[def.skin]
+	if rig == nil then
+		error(("EnemyService: %s uses rig '%s', which rigs.luau does not define yet"):format(def.id, def.skin))
+	end
+
+	local model: Model = d.rigBuilder.build(def.skin, def.name)
+	if model.PrimaryPart == nil then
+		local root = model:FindFirstChild(rig.rootPart)
+		if root ~= nil and root:IsA("BasePart") then
+			model.PrimaryPart = root
+		end
+	end
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	if humanoid ~= nil then
+		humanoid.AutoRotate = false -- the brain owns the yaw
+		humanoid.WalkSpeed = def.moveSpeed
+	end
+	-- Measured on the rig as built (every part at its rest pose around the root), before it moves.
+	local front, back = EnemyService.bodyExtents(model)
+	-- What players bump into instead of the root (D-198); the enemies group switches it on.
+	if typeof(d.rigBuilder.addBlocker) == "function" then
+		d.rigBuilder.addBlocker(model)
+	end
+	setGroup(model, AI.collision.enemies)
+	-- Parent first: the engine's place() claims server network ownership of the root, which the
+	-- engine refuses for a part that is not under Workspace yet.
+	model.Parent = d.folder
+	d.engine.place(model, cframe)
+
+	local id = d.entities.registerEnemy(model, def, { name = opts.name, level = opts.level })
+	local entry: Entry = {
+		id = id,
+		defId = defId,
+		def = def,
+		model = model,
+		mover = newMover(model, def.moveSpeed),
+		awake = true,
+		held = false,
+		home = d.engine.position(model),
+		front = front,
+		back = back,
+		rushEndSent = false,
+		rejoinPending = false,
+		clearSince = nil,
+		brain = nil :: any,
+	}
+	entry.brain = Brain.new(makeContext(entry), archetypeFor(def))
+	entries[id] = entry
+	if holdNew then
+		hold(entry)
+	end
+	EnemyService.Spawned:Fire(id, defId, model)
+	return id
+end
+
+--- Removes an enemy the spawner no longer wants: the brain stops, EntityService forgets it, the
+--- model is destroyed and Despawned fires with reason "Despawned".
+function EnemyService.despawn(id: number)
+	local entry = entries[id]
+	if entry == nil then
+		return
+	end
+	local d = dependencies()
+	forget(id, "Despawned")
+	if d.entities.get(id) ~= nil then
+		d.entities.unregister(id)
+	end
+	d.engine.destroy(entry.model)
+end
+
+--- Despawns every enemy.
+function EnemyService.despawnAll()
+	for id in table.clone(entries) do
+		EnemyService.despawn(id)
+	end
+end
+
+--- The brain of a living enemy, or nil (tests and the smoke script read phases through it).
+function EnemyService.brainOf(id: number): Brain.Brain?
+	local entry = entries[id]
+	return if entry ~= nil then entry.brain else nil
+end
+
+--- The model of a living enemy, or nil.
+function EnemyService.modelOf(id: number): Model?
+	local entry = entries[id]
+	return if entry ~= nil then entry.model else nil
+end
+
+--- The def an enemy was spawned with, or nil.
+function EnemyService.defOf(id: number): Enemies.Enemy?
+	local entry = entries[id]
+	return if entry ~= nil then entry.def else nil
+end
+
+--- Whether an enemy is awake (inside the sleep radius of a player).
+function EnemyService.isAwake(id: number): boolean
+	local entry = entries[id]
+	return entry ~= nil and entry.awake
+end
+
+--- Holds (true) or releases (false) a living enemy: a held enemy's brain sleeps, its mover stops,
+--- the sleep check never wakes it and its HP never regenerates (EntityService.setHpRegenHeld);
+--- hits, staggers and death still land on it. A release hands it back to the sleep rules on the
+--- next tick and lets its HP regenerate again. The cinematic hold (boss entrances, story
+--- beats, cutscenes) and the Studio dev hook (D-120). Returns false when `id` is no living enemy.
+function EnemyService.setHeld(id: number, held: boolean): boolean
+	local entry = entries[id]
+	if entry == nil then
+		return false
+	end
+	if held then
+		hold(entry)
+	elseif entry.held then
+		entry.held = false
+		holdRegen(id, false)
+		-- Asleep until the sleep check says otherwise: run it on the next tick, not in up to
+		-- ai.sleepCheckInterval.
+		lastSleepCheck = -math.huge
+	end
+	return true
+end
+
+--- Whether a living enemy is held.
+function EnemyService.isHeld(id: number): boolean
+	local entry = entries[id]
+	return entry ~= nil and entry.held
+end
+
+--- Every held enemy id, ascending.
+function EnemyService.heldIds(): { number }
+	local ids = {}
+	for id, entry in entries do
+		if entry.held then
+			table.insert(ids, id)
+		end
+	end
+	table.sort(ids)
+	return ids
+end
+
+--- Hold-new: true makes every enemy spawned from now on (PlaygroundService respawns too) start
+--- held; false stops that and releases nobody. reset() turns it off.
+function EnemyService.setHoldNew(held: boolean)
+	holdNew = held
+end
+
+--- Whether enemies spawned now start held.
+function EnemyService.holdsNew(): boolean
+	return holdNew
+end
+
+--- Hit-stop on an enemy (D-168): CombatService calls it (setEnemyHitStop) when a player's hit on
+--- the enemy is confirmed, with the seconds every client freezes the enemy's clip for. An unresolved
+--- attack (the wind-up, or the strike before it resolves) pauses with it: Brain.pauseAttack moves
+--- the wind-up's end, the strike beat, the cooldown and the Art state, capped per attack by
+--- ai.hitStop.maxPausePerAttack. Returns the seconds added (0 when capped, or for a rush already
+--- on its way), or nil when the enemy is gone or has no unresolved attack.
+function EnemyService.pauseForHit(id: number, seconds: number): number?
+	local entry = entries[id]
+	if entry == nil then
+		return nil
+	end
+	return entry.brain:pauseAttack(seconds)
+end
+
+--- Every living enemy id, ascending.
+function EnemyService.ids(): { number }
+	local ids = {}
+	for id in entries do
+		table.insert(ids, id)
+	end
+	table.sort(ids)
+	return ids
+end
+
+--- Number of living enemies.
+function EnemyService.count(): number
+	return #EnemyService.ids()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- The tick
+-- ---------------------------------------------------------------------------------------------
+
+local function refreshSleep(now: number)
+	if now - lastSleepCheck < AI.sleepCheckInterval then
+		return
+	end
+	lastSleepCheck = now
+	local engine = dependencies().engine
+	local radius = AI.sleepRadius
+	for _, entry in entries do
+		if entry.held then
+			continue -- held: asleep until released, whoever stands next to it
+		end
+		local position = engine.position(entry.model)
+		local awake = false
+		for _, player in currentPlayers do
+			if (player.position - position).Magnitude <= radius then
+				awake = true
+				break
+			end
+		end
+		if awake ~= entry.awake then
+			entry.awake = awake
+			if awake then
+				entry.brain:wake()
+			else
+				entry.brain:sleep()
+				moverStop(entry.mover)
+			end
+		end
+	end
+end
+
+-- One brain's tick and one brain's frame pass, each run under pcall so a failing brain never stops
+-- the others (each returns a value so pcall's two results keep their types).
+local function runTick(brain: Brain.Brain, step: number): boolean
+	brain:tick(step)
+	return true
+end
+
+local function runFrame(brain: Brain.Brain): boolean
+	brain:frame()
+	return true
+end
+
+local function tickAll(step: number)
+	local d = dependencies()
+	local now = d.serverTime()
+	currentPlayers = d.players()
+	refreshSleep(now)
+	local snapshot = {}
+	for _, entry in entries do
+		table.insert(snapshot, entry)
+	end
+	for _, entry in snapshot do
+		if entries[entry.id] ~= entry then
+			continue
+		end
+		rejoin(entry, now) -- asleep or held too: a stopped rush still waits for a clear body
+		if not entry.awake then
+			continue
+		end
+		local ok, err = pcall(runTick, entry.brain, step)
+		if not ok then
+			warn(("[EnemyService] brain of entity %d (%s) failed: %s"):format(entry.id, entry.defId, tostring(err)))
+		end
+		moverUpdate(entry.mover, now)
+	end
+end
+
+-- The frame pass (D-184, D-185): every awake brain resolves the attack edges due by now (the
+-- wind-up's end, the strike, a rush's stretches and run) and turns its body for the frame; a
+-- movement it asked for on the way (the rush's launch) reaches the mover in the same frame. Asleep,
+-- held and dead enemies are skipped.
+local function frameAll()
+	local d = dependencies()
+	local now = d.serverTime()
+	table.clear(frameList) -- a pass that errored out last frame left its snapshot behind
+	for _, entry in entries do
+		if entry.awake then
+			table.insert(frameList, entry)
+		end
+	end
+	for _, entry in frameList do
+		if entries[entry.id] ~= entry or not entry.awake then
+			continue -- a strike earlier in this pass killed or put it to sleep
+		end
+		local ok, err = pcall(runFrame, entry.brain)
+		if not ok then
+			warn(("[EnemyService] frame of entity %d (%s) failed: %s"):format(entry.id, entry.defId, tostring(err)))
+		end
+		if entry.mover.pending then
+			moverUpdate(entry.mover, now)
+		end
+	end
+	table.clear(frameList)
+end
+
+--- Advances the service by a frame's dt: whole AI ticks run at ai.tickHz (perception, decisions,
+--- movement); after a hitch at most ai.maxTicksPerFrame run and the rest of the backlog is dropped.
+--- Then the frame pass runs every awake brain once: the attack edges on their beats at the server's
+--- frame precision and the body turns (D-184, D-185). Heartbeat calls it; tests and the smoke script
+--- call it by hand.
+function EnemyService.step(dt: number)
+	accumulator += dt
+	local stepSeconds = AI.tickSeconds()
+	local ticks = 0
+	while accumulator >= stepSeconds and ticks < AI.maxTicksPerFrame do
+		accumulator -= stepSeconds
+		ticks += 1
+		tickAll(stepSeconds)
+	end
+	if accumulator >= stepSeconds then
+		accumulator = 0
+	end
+	frameAll()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Wiring: EntityService signals
+-- ---------------------------------------------------------------------------------------------
+
+local function idOf(recordOrId: any): number?
+	if typeof(recordOrId) == "number" then
+		return recordOrId
+	end
+	if typeof(recordOrId) == "table" and typeof(recordOrId.id) == "number" then
+		return recordOrId.id
+	end
+	return nil
+end
+
+local function connectSignals()
+	local d = dependencies()
+	local entities = d.entities
+	if entities.Died ~= nil then
+		table.insert(
+			signalConnections,
+			entities.Died:Connect(function(recordOrId: any)
+				local id = idOf(recordOrId)
+				if id ~= nil then
+					forget(id, "Died")
+				end
+			end)
+		)
+	end
+	if entities.Unregistered ~= nil then
+		table.insert(
+			signalConnections,
+			entities.Unregistered:Connect(function(recordOrId: any)
+				local id = idOf(recordOrId)
+				if id ~= nil then
+					forget(id, "Unregistered")
+				end
+			end)
+		)
+	end
+	if entities.StateChanged ~= nil then
+		table.insert(
+			signalConnections,
+			entities.StateChanged:Connect(function(recordOrId: any, state: string, duration: number?)
+				local id = idOf(recordOrId)
+				local entry = if id ~= nil then entries[id] else nil
+				if entry == nil then
+					return
+				end
+				if state == "Dead" then
+					forget(entry.id, "Died")
+				elseif INTERRUPTING[state] then
+					entry.brain:interrupt(state, duration or AI.interrupt.durations[state])
+				end
+			end)
+		)
+	end
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Engine
+-- ---------------------------------------------------------------------------------------------
+
+local function humanoidOf(model: Model): Humanoid?
+	return model:FindFirstChildOfClass("Humanoid")
+end
+
+--- How far a model's body reaches ahead of (`front`) and behind (`back`) its root along the root's
+--- look, over every corner of every BasePart as the parts stand now (spawn() measures the rig as
+--- built, at its rest pose). A rush strikes where the snout is (D-166). (0, 0) without a root.
+function EnemyService.bodyExtents(model: Model): (number, number)
+	local root = model.PrimaryPart
+	if root == nil then
+		return 0, 0
+	end
+	local rootFrame = root.CFrame
+	local front, back = 0, 0
+	for _, part in model:GetDescendants() do
+		if not part:IsA("BasePart") then
+			continue
+		end
+		local half = part.Size / 2
+		local frame = part.CFrame
+		for _, x in CORNER_SIGNS do
+			for _, y in CORNER_SIGNS do
+				for _, z in CORNER_SIGNS do
+					local corner = Vector3.new(half.X * x, half.Y * y, half.Z * z)
+					local along = rootFrame:PointToObjectSpace(frame:PointToWorldSpace(corner)).Z
+					front = math.max(front, -along) -- the root looks down -Z
+					back = math.max(back, along)
+				end
+			end
+		end
+	end
+	return front, back
+end
+
+--- The yaw align on an enemy's root (nil once the corpse is gone). Looked up rather than cached per
+--- model: EntityService destroys corpses, so a cache keyed by Model would leak one entry per kill.
+--- Found by class as well as name: the root also holds the align's Attachment under the same name,
+--- and a lookup by name alone returns whichever came first (the Attachment), so the body never
+--- turned (D-165).
+function EnemyService.alignOf(model: Model): AlignOrientation?
+	local root = model.PrimaryPart
+	if root == nil then
+		return nil
+	end
+	local first = root:FindFirstChildOfClass("AlignOrientation")
+	if first ~= nil and first.Name == ALIGN_NAME then
+		return first
+	end
+	for _, child in root:GetChildren() do
+		if child.Name == ALIGN_NAME and child:IsA("AlignOrientation") then
+			return child
+		end
+	end
+	return nil
+end
+
+--- Gives an enemy's root its yaw align: an Attachment and a rigid one-attachment AlignOrientation,
+--- both named ALIGN_NAME, holding `look` (flattened). place() calls it once per enemy, never the tick.
+function EnemyService.addYawAlign(root: BasePart, look: Vector3): AlignOrientation
+	local attachment = Instance.new("Attachment")
+	attachment.Name = ALIGN_NAME
+	attachment.Parent = root
+	local align = Instance.new("AlignOrientation")
+	align.Name = ALIGN_NAME
+	align.Mode = Enum.OrientationAlignmentMode.OneAttachment
+	align.Attachment0 = attachment
+	align.RigidityEnabled = true
+	align.CFrame = CFrame.lookAt(Vector3.zero, Brain.horizontal(look) or FORWARD)
+	align.Parent = root
+	return align
+end
+
+--- Turns an enemy's body: writes the flat facing into its yaw align. False when the model has no
+--- align or the facing has no horizontal direction.
+function EnemyService.applyFacing(model: Model, facing: Vector3): boolean
+	local align = EnemyService.alignOf(model)
+	local flat = Brain.horizontal(facing)
+	if align == nil or flat == nil then
+		return false
+	end
+	align.CFrame = CFrame.lookAt(Vector3.zero, flat)
+	return true
+end
+
+local castParams: RaycastParams? = nil
+
+-- workspace:Blockcast with the parts that collide with `group` and can collide (a hitbox, a
+-- decoration that lets bodies through, is not a wall).
+local function defaultWorldCast(
+	start: CFrame,
+	size: Vector3,
+	vector: Vector3,
+	group: string,
+	exclude: Instance
+): (number?, Vector3?)
+	local params = castParams
+	if params == nil then
+		local created = RaycastParams.new()
+		created.FilterType = Enum.RaycastFilterType.Exclude
+		created.RespectCanCollide = true
+		castParams = created
+		params = created
+	end
+	local query = params :: RaycastParams
+	query.FilterDescendantsInstances = { exclude }
+	query.CollisionGroup = group
+	local result = workspace:Blockcast(start, size, vector, query)
+	if result == nil then
+		return nil, nil
+	end
+	return result.Distance, result.Normal
+end
+
+--- Whether a face the world cast met is ground a body climbs, not a wall (D-204): its normal is
+--- within ai.luau collision.groundSlopeDegrees of straight up. Nil (a face named no way) is a wall.
+function EnemyService.isGround(normal: Vector3?): boolean
+	if normal == nil or normal.Magnitude < 1e-6 then
+		return false
+	end
+	return normal.Unit.Y >= math.cos(math.rad(AI.collision.groundSlopeDegrees))
+end
+
+--- How far ahead of a model's root centre along `direction` (flattened) the world stops the root,
+--- within `distance` studs, or nil when nothing does (D-197). The root's own box is cast in the
+--- root's own collision group (a rushing body's group collides with the world only), from where its
+--- front face stands at the root's centre: a root pressed against a wall overlaps it by a hair, and
+--- a cast never sees what its box starts in. Only the root collides, so this is where the body
+--- stops; its snout and limbs run on through the wall. The second value is whether the face is
+--- ground the root climbs (a ramp's, EnemyService.isGround, D-204): a rush's line still never
+--- resolves past it (whatever stands behind it is unseen), but it stops no body. `cast` stands in
+--- for workspace:Blockcast.
+function EnemyService.worldAhead(
+	model: Model,
+	direction: Vector3,
+	distance: number,
+	cast: WorldCast?
+): (number?, boolean?)
+	local root = model.PrimaryPart
+	local flat = Brain.horizontal(direction)
+	if root == nil or flat == nil or not (distance > 0) then
+		return nil, nil
+	end
+	local frame = root.CFrame
+	local start = frame - flat * EnemyService.rootReach(model, flat)
+	local ok, travelled, normal =
+		pcall(cast or defaultWorldCast, start, root.Size, flat * distance, root.CollisionGroup, model)
+	if not ok or typeof(travelled) ~= "number" then
+		return nil, nil
+	end
+	return math.max(0, travelled), EnemyService.isGround(if typeof(normal) == "Vector3" then normal else nil)
+end
+
+--- How far a model's root box reaches from its centre along `direction` (flattened): half its extent
+--- that way, 0 with no root or no direction. A root that worldAhead's face stops stands this far
+--- short of the face (D-202).
+function EnemyService.rootReach(model: Model, direction: Vector3): number
+	local root = model.PrimaryPart
+	local flat = Brain.horizontal(direction)
+	if root == nil or flat == nil then
+		return 0
+	end
+	local frame = root.CFrame
+	local half = root.Size / 2
+	return math.abs(frame.RightVector:Dot(flat)) * half.X
+		+ math.abs(frame.UpVector:Dot(flat)) * half.Y
+		+ math.abs(frame.LookVector:Dot(flat)) * half.Z
+end
+
+-- `groups` is world.CollisionGroups (nil while it has not landed: no groups, as before D-167).
+local function defaultEngine(groups: any?): Engine
+	local PathfindingService = game:GetService("PathfindingService")
+	return {
+		place = function(model, cframe)
+			model:PivotTo(cframe)
+			local root = model.PrimaryPart
+			if root == nil then
+				return
+			end
+			-- The server simulates every enemy (spawn() parents the model before calling this).
+			local owned, err = pcall(root.SetNetworkOwner, root, nil)
+			if not owned then
+				warn(("[EnemyService] %s: SetNetworkOwner failed: %s"):format(model.Name, tostring(err)))
+			end
+			-- One AlignOrientation per enemy (made here, once, never in the tick) carries the yaw.
+			EnemyService.addYawAlign(root, cframe.LookVector)
+		end,
+		position = function(model)
+			local root = model.PrimaryPart
+			return if root ~= nil then root.Position else Vector3.zero
+		end,
+		facing = function(model)
+			local root = model.PrimaryPart
+			return if root ~= nil then root.CFrame.LookVector else FORWARD
+		end,
+		setFacing = function(model, facing)
+			EnemyService.applyFacing(model, facing)
+		end,
+		moveTo = function(model, position)
+			local humanoid = humanoidOf(model)
+			if humanoid ~= nil then
+				humanoid:MoveTo(position)
+			end
+		end,
+		stop = function(model)
+			local humanoid = humanoidOf(model)
+			local root = model.PrimaryPart
+			if humanoid ~= nil and root ~= nil then
+				humanoid:MoveTo(root.Position)
+			end
+		end,
+		setWalkSpeed = function(model, speed)
+			local humanoid = humanoidOf(model)
+			if humanoid ~= nil then
+				humanoid.WalkSpeed = speed
+			end
+		end,
+		computePath = function(from, to)
+			local movement = AI.movement
+			local path = PathfindingService:CreatePath({
+				AgentRadius = movement.agentRadius,
+				AgentHeight = movement.agentHeight,
+				AgentCanJump = movement.agentCanJump,
+				Costs = movement.materialCosts,
+			})
+			local ok = pcall(path.ComputeAsync, path, from, to)
+			if not ok or path.Status ~= Enum.PathStatus.Success then
+				return nil
+			end
+			local waypoints = {}
+			for _, waypoint in path:GetWaypoints() do
+				table.insert(waypoints, waypoint.Position)
+			end
+			return waypoints
+		end,
+		destroy = function(model)
+			model:Destroy()
+		end,
+		setCollisionGroup = if groups ~= nil
+			then function(model: Model, group: string)
+				groups.assign(model, group)
+			end
+			else nil,
+		bodyClear = if groups ~= nil
+			then function(model: Model): boolean
+				return groups.clear(model)
+			end
+			else nil,
+		worldAhead = function(model, direction, distance)
+			return EnemyService.worldAhead(model, direction, distance)
+		end,
+	}
+end
+
+-- A sibling server module that may not have landed yet: nil (with a warning) instead of an error.
+local function sibling(parent: Instance, name: string): any
+	local node = parent:FindFirstChild(name)
+	if node == nil or not node:IsA("ModuleScript") then
+		warn(("[EnemyService] %s is not available yet"):format(name))
+		return nil
+	end
+	local ok, result = pcall(require, node :: ModuleScript)
+	if not ok then
+		warn(("[EnemyService] %s failed to load: %s"):format(name, tostring(result)))
+		return nil
+	end
+	return result
+end
+
+--- The real engine dependencies, with any field replaced by `overrides` (the smoke script swaps
+--- the player source for a stand-in and wraps fireAll to record payloads).
+function EnemyService.defaultDeps(overrides: { [string]: any }?): Deps
+	local RunService = game:GetService("RunService")
+	local Server = script.Parent.Parent
+	local entities = sibling(script.Parent, "EntityService")
+	if entities == nil then
+		error("EnemyService: EntityService is required")
+	end
+	local world = Server:FindFirstChild("world")
+	local rigBuilder = if world ~= nil then sibling(world, "RigBuilder") else nil
+	if rigBuilder == nil then
+		error("EnemyService: world.RigBuilder is required")
+	end
+	-- D-167: the fighter collision groups (Main registers them first; registering again is a no-op).
+	local groups = if world ~= nil then sibling(world, "CollisionGroups") else nil
+	if groups ~= nil then
+		groups.register()
+	end
+	local Net = require(Shared.net.Net)
+	local net = Net.server()
+
+	local folder = workspace:FindFirstChild(FOLDER_NAME)
+	if folder == nil then
+		folder = Instance.new("Folder")
+		folder.Name = FOLDER_NAME
+		folder.Parent = workspace
+	end
+
+	local built: { [string]: any } = {
+		entities = entities,
+		combat = sibling(script.Parent, "CombatService"),
+		rigBuilder = rigBuilder,
+		fireAll = net.fireAll,
+		engine = defaultEngine(groups),
+		players = function()
+			local list = {}
+			for _, record in entities.players() do
+				if record.state ~= "Dead" and record.hp > 0 then
+					local position = entities.positionOf(record.id)
+					if position ~= nil then
+						table.insert(list, { id = record.id, position = position })
+					end
+				end
+			end
+			return list
+		end,
+		heartbeat = function(handler)
+			return RunService.Heartbeat:Connect(handler)
+		end,
+		serverTime = function()
+			return workspace:GetServerTimeNow()
+		end,
+		folder = folder,
+		random = Random.new(),
+		spawnTask = function(fn)
+			task.spawn(fn)
+		end,
+	}
+	if overrides ~= nil then
+		for key, value in overrides do
+			built[key] = value
+		end
+	end
+	return built :: any
+end
+
+--- Installs dependencies (engine or fakes) and connects EntityService's signals; no loop yet.
+function EnemyService.bind(newDeps: Deps)
+	EnemyService.reset()
+	deps = newDeps
+	connectSignals()
+	local combat = newDeps.combat
+	if combat ~= nil and typeof(combat.setEnemyHitStop) == "function" then
+		combat.setEnemyHitStop(EnemyService.pauseForHit)
+	end
+end
+
+--- Starts the service on the engine: binds the real dependencies (unless bound already) and the
+--- Heartbeat loop. Safe to call once.
+function EnemyService.start()
+	if started then
+		return
+	end
+	started = true
+	if deps == nil then
+		EnemyService.bind(EnemyService.defaultDeps())
+	end
+	local d = dependencies()
+	if d.heartbeat ~= nil then
+		heartbeatConnection = d.heartbeat(EnemyService.step)
+	end
+end
+
+--- Stops the loop, drops every brain and signal connection (tests, and re-binding).
+function EnemyService.reset()
+	if heartbeatConnection ~= nil then
+		heartbeatConnection:Disconnect()
+		heartbeatConnection = nil
+	end
+	for _, connection in signalConnections do
+		connection:Disconnect()
+	end
+	table.clear(signalConnections)
+	local combat = if deps ~= nil then (deps :: Deps).combat else nil
+	if combat ~= nil and typeof(combat.setEnemyHitStop) == "function" then
+		combat.setEnemyHitStop(nil)
+	end
+	for id in table.clone(entries) do
+		forget(id, "Despawned")
+	end
+	table.clear(entries)
+	currentPlayers = {}
+	accumulator = 0
+	lastSleepCheck = -math.huge
+	started = false
+	warnedNoCombat = false
+	holdNew = false
+end
+
+return EnemyService

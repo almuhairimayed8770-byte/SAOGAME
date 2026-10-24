@@ -1,0 +1,1309 @@
+--!strict
+-- A minimal RBXScriptSignal stand-in for RunService frame signals: Connect returns a connection
+-- with Disconnect; Fire runs the handlers in order.
+local function fakeSignal()
+	local handlers = {}
+	local signal = {}
+	function signal:Connect(handler)
+		local record = { handler = handler, Connected = true }
+		table.insert(handlers, record)
+		return {
+			Disconnect = function()
+				record.Connected = false
+				local index = table.find(handlers, record)
+				if index then
+					table.remove(handlers, index)
+				end
+			end,
+		}
+	end
+	function signal:Fire(...)
+		for _, record in table.clone(handlers) do
+			if record.Connected then
+				record.handler(...)
+			end
+		end
+	end
+	return signal
+end
+
+local renderStepped = fakeSignal()
+local heartbeat = fakeSignal()
+local preSimulation = fakeSignal()
+-- The engine's render steps: a bound step runs on the frame as a RenderStepped handler does here
+-- (Fire drives both), and each binding and RenderStepped connection is counted.
+local bindings: { { name: string, priority: number } } = {}
+local bound: { [string]: any } = {}
+local connected = 0
+Harness.stubService("RunService", {
+	RenderStepped = {
+		Connect = function(_self: any, handler: (dt: number) -> ()): any
+			connected += 1
+			return renderStepped:Connect(handler)
+		end,
+	},
+	Heartbeat = heartbeat,
+	PreSimulation = preSimulation,
+	BindToRenderStep = function(_self: any, name: string, priority: number, fn: (dt: number) -> ())
+		table.insert(bindings, { name = name, priority = priority })
+		if bound[name] ~= nil then
+			bound[name].Disconnect()
+		end
+		bound[name] = renderStepped:Connect(fn)
+	end,
+	UnbindFromRenderStep = function(_self: any, name: string)
+		if bound[name] ~= nil then
+			bound[name].Disconnect()
+			bound[name] = nil
+		end
+	end,
+})
+
+local Choreo = Harness.load("src/client/choreo/Choreo")
+local ChoreoData = Harness.load("src/shared/data/choreo")
+local Combat = Harness.load("src/shared/data/combat")
+local Rigs = Harness.load("src/shared/data/rigs")
+local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
+local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
+local Easing = Harness.load("src/shared/util/Easing")
+
+local FRAME = 1 / 60
+local HORIZONTAL = "player/OneHandedSword/Horizontal"
+local GUARD = "player/OneHandedSword/Guard"
+-- The Horizontal clip's first HitWindowOpen, read from the clip so the spec follows the data.
+local HIT_OPEN_TIME: number = ClipSampler.hitWindows(ClipLibrary.get(HORIZONTAL))[1].open
+
+local clock = 0
+local camera = Vector3.zero
+Choreo.configure({
+	now = function()
+		return clock
+	end,
+	cameraPosition = function()
+		return camera
+	end,
+})
+
+-- Builds a model with one Part per rig part and one Motor6D per rig joint, named like the data.
+local function buildRig(rigId, position)
+	local model = Instance.new("Model")
+	model.Name = rigId
+	model:SetAttribute("Rig", rigId)
+	local parts = {}
+	local function part(name)
+		local existing = parts[name]
+		if existing then
+			return existing
+		end
+		local created = Instance.new("Part")
+		created.Name = name
+		created.Position = position or Vector3.zero
+		created.Parent = model
+		parts[name] = created
+		return created
+	end
+	for _, joint in Rigs[rigId].joints do
+		part(joint.part0)
+		local child = part(joint.part1)
+		local motor = Instance.new("Motor6D")
+		motor.Name = joint.name
+		motor.Parent = child
+	end
+	model.PrimaryPart = parts.HumanoidRootPart
+	return model
+end
+
+-- The Motor6D with this joint name (a Part may share the name, as the Weapon does).
+local function motorOf(model, name)
+	for _, descendant in model:GetDescendants() do
+		if descendant:IsA("Motor6D") and descendant.Name == name then
+			return descendant
+		end
+	end
+	return nil
+end
+
+-- The player character under the Avatar Joint Upgrade: a Humanoid model whose R15 joints are
+-- AnimationConstraints between rig attachments (parented to Part1, no Motor6D), with ball sockets
+-- on the same attachments and the Weapon on a Motor6D as WeaponBuilder hangs it. With
+-- `withJoints` false only the parts exist; the returned function adds the joints later (a
+-- replicated rig whose joints arrive after the animator attached) and returns them.
+local function buildUpgradedCharacter(withJoints: boolean)
+	local model = Instance.new("Model")
+	model.Name = "UpgradedCharacter"
+	local humanoid = Instance.new("Humanoid")
+	humanoid.Parent = model
+	local parts = {}
+	local function part(name)
+		local existing = parts[name]
+		if existing then
+			return existing
+		end
+		local created = Instance.new("Part")
+		created.Name = name
+		created.Position = Vector3.zero
+		created.Parent = model
+		parts[name] = created
+		return created
+	end
+	for _, joint in Rigs.PlayerR15.joints do
+		part(joint.part0)
+		part(joint.part1)
+	end
+	model.PrimaryPart = parts.HumanoidRootPart
+	local function addJoints()
+		local added = {}
+		for _, joint in Rigs.PlayerR15.joints do
+			local part0, part1 = parts[joint.part0], parts[joint.part1]
+			if joint.name == "Weapon" then
+				local motor = Instance.new("Motor6D")
+				motor.Name = joint.name
+				motor.Part0 = part0
+				motor.Part1 = part1
+				motor.Parent = part1
+				table.insert(added, motor)
+				continue
+			end
+			local attachment0 = Instance.new("Attachment")
+			attachment0.Name = joint.name .. "RigAttachment"
+			attachment0.Parent = part0
+			local attachment1 = Instance.new("Attachment")
+			attachment1.Name = joint.name .. "RigAttachment"
+			attachment1.Parent = part1
+			local constraint = Instance.new("AnimationConstraint")
+			constraint.Name = joint.name
+			constraint.Attachment0 = attachment0
+			constraint.Attachment1 = attachment1
+			constraint.Parent = part1
+			table.insert(added, constraint)
+			if joint.name ~= "Root" then
+				local socket = Instance.new("BallSocketConstraint")
+				socket.Name = joint.name .. "BallSocket"
+				socket.Attachment0 = attachment0
+				socket.Attachment1 = attachment1
+				socket.Parent = part1
+				table.insert(added, socket)
+			end
+		end
+		return added
+	end
+	if withJoints then
+		addJoints()
+	end
+	return model, addJoints
+end
+
+-- The joint (either kind) with this name.
+local function jointOf(model, name)
+	for _, descendant in model:GetDescendants() do
+		if (descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint")) and descendant.Name == name then
+			return descendant
+		end
+	end
+	return nil
+end
+
+-- Records the instance signals Choreo connects to, so a test can fire DescendantAdded by hand
+-- (Lune's instances have no events). Returns the recorder and a function that restores the
+-- engine's own connect (which fails quietly under Lune, as before).
+local function recordConnections()
+	local recorded = {}
+	Choreo.configure({
+		connect = function(instance, eventName, fn)
+			local entry = { instance = instance, eventName = eventName, fn = fn, connected = true }
+			table.insert(recorded, entry)
+			return {
+				Disconnect = function()
+					entry.connected = false
+				end,
+			}
+		end,
+	})
+	local function fire(instance, eventName, ...)
+		for _, entry in recorded do
+			if entry.connected and entry.instance == instance and entry.eventName == eventName then
+				entry.fn(...)
+			end
+		end
+	end
+	local function restore()
+		Choreo.configure({
+			connect = function(instance, eventName, fn)
+				local ok, result = pcall(function()
+					return instance[eventName]:Connect(fn)
+				end)
+				return if ok then result else nil
+			end,
+		})
+	end
+	return fire, restore
+end
+
+local function eventKinds(animator)
+	local kinds = {}
+	animator.events:Connect(function(_clipId, event)
+		table.insert(kinds, event.kind)
+	end)
+	return kinds
+end
+
+local function count(list, value)
+	local total = 0
+	for _, item in list do
+		if item == value then
+			total += 1
+		end
+	end
+	return total
+end
+
+describe("Choreo", function()
+	it("steps its rigs in a render step bound just before the camera's, not on RenderStepped (D-201)", function()
+		local model = buildRig("Boar", Vector3.zero)
+		Choreo.get(model)
+		-- The camera (Camera priority) and the local controller's step and contact read
+		-- (Character + 1) come after it whatever order the engine runs RenderStepped in.
+		expect(connected).toBe(0)
+		expect(#bindings).toBe(1)
+		expect(bindings[1].name).toBe(Choreo.RENDER_STEP)
+		expect(bindings[1].priority).toBe(Enum.RenderPriority.Camera.Value - 1)
+		expect(Choreo.renderPriority()).toBe(Enum.RenderPriority.Camera.Value - 1)
+		Choreo.release(model)
+	end)
+
+	it("registers a rig and poses it the same frame: idle and breathing play, no joint is left at rest", function()
+		local model = buildRig("PlayerR15")
+		local animator = Choreo.get(model)
+		expect(animator.rigId).toBe("PlayerR15")
+		expect(Choreo.get(model)).toBe(animator)
+		expect(Choreo.find(model)).toBe(animator)
+		expect(Choreo.count()).toBe(1)
+		expect(animator:isPlaying(ChoreoData.rigs.PlayerR15.idle)).toBe(true)
+		expect(animator:isPlaying(ChoreoData.rigs.PlayerR15.breathing)).toBe(true)
+		expect(motorOf(model, "Weapon").Transform == CFrame.identity).toBe(false)
+		expect(motorOf(model, "RightShoulder").Transform == CFrame.identity).toBe(false)
+		expect(typeof(animator:currentRootMotionDelta())).toBe("Vector3")
+		Choreo.release(model)
+		expect(Choreo.find(model)).toBeNil()
+		expect(Choreo.count()).toBe(0)
+	end)
+
+	it("poses an AnimationConstraint rig (the Avatar Joint Upgrade character) by writing Transform", function()
+		local model = buildUpgradedCharacter(true)
+		local shoulder = jointOf(model, "RightShoulder")
+		expect(shoulder:IsA("AnimationConstraint")).toBe(true)
+		expect(shoulder.Transform == CFrame.identity).toBe(true)
+		local animator = Choreo.get(model)
+		expect(animator.rigId).toBe("PlayerR15")
+		-- Posed the frame it appears, on the constraints and on the Weapon Motor6D alike.
+		expect(shoulder.Transform == CFrame.identity).toBe(false)
+		expect(jointOf(model, "Root").Transform == CFrame.identity).toBe(false)
+		expect(motorOf(model, "Weapon").Transform == CFrame.identity).toBe(false)
+		-- An Art drives the constraints frame by frame.
+		animator:play(HORIZONTAL, { startTime = HIT_OPEN_TIME - 0.1, blendIn = 0 })
+		animator:step(0)
+		local before = shoulder.Transform
+		for _ = 1, 6 do
+			animator:step(FRAME)
+		end
+		expect(shoulder.Transform == before).toBe(false)
+		-- Only Transform is written: the rig attachments the Humanoid owns are untouched.
+		expect(shoulder.Attachment0.CFrame == CFrame.identity).toBe(true)
+		expect(shoulder.Attachment1.CFrame == CFrame.identity).toBe(true)
+		Choreo.release(model)
+	end)
+
+	it("rescans when the joints arrive after the animator attached (a replicated rig)", function()
+		local fire, restore = recordConnections()
+		local model, addJoints = buildUpgradedCharacter(false)
+		local animator = Choreo.get(model)
+		animator:step(FRAME)
+
+		local added = addJoints()
+		local shoulder = jointOf(model, "RightShoulder")
+		animator:step(FRAME)
+		-- No DescendantAdded yet: the joint map is still the empty one.
+		expect(shoulder.Transform == CFrame.identity).toBe(true)
+
+		for _, instance in added do
+			fire(model, "DescendantAdded", instance)
+		end
+		animator:step(FRAME)
+		expect(shoulder.Transform == CFrame.identity).toBe(false)
+		expect(motorOf(model, "Weapon").Transform == CFrame.identity).toBe(false)
+
+		-- A joint that leaves is dropped: its replacement is the one written from then on.
+		local replacement = Instance.new("AnimationConstraint")
+		replacement.Name = "RightShoulder"
+		replacement.Attachment0 = shoulder.Attachment0
+		replacement.Attachment1 = shoulder.Attachment1
+		local parent = shoulder.Parent
+		fire(model, "DescendantRemoving", shoulder)
+		shoulder.Parent = nil
+		replacement.Parent = parent
+		fire(model, "DescendantAdded", replacement)
+		animator:step(FRAME)
+		expect(replacement.Transform == CFrame.identity).toBe(false)
+
+		-- Two joints of one name for a moment (a rebuild that adds the new joint before the old one
+		-- leaves): either may be the one written while both are there, so both orders are played
+		-- out, and once one leaves the other is written from the next step on.
+		local function sameName(): any
+			local joint = Instance.new("AnimationConstraint")
+			joint.Name = "RightShoulder"
+			joint.Attachment0 = shoulder.Attachment0
+			joint.Attachment1 = shoulder.Attachment1
+			joint.Parent = parent
+			fire(model, "DescendantAdded", joint)
+			animator:step(FRAME)
+			return joint
+		end
+		local function leaves(gone: any, stays: any)
+			fire(model, "DescendantRemoving", gone)
+			gone.Parent = nil
+			gone.Transform = CFrame.identity
+			stays.Transform = CFrame.identity
+			animator:step(FRAME)
+			expect(stays.Transform == CFrame.identity).toBe(false)
+			expect(gone.Transform == CFrame.identity).toBe(true)
+		end
+		leaves(sameName(), replacement) -- the newcomer leaves again
+		local rebuilt = sameName()
+		leaves(replacement, rebuilt) -- the old joint leaves
+
+		Choreo.release(model)
+		restore()
+	end)
+
+	it("the default Animate script is disabled at once and destroyed only at the next resumption", function()
+		-- Destroying it inside the handler, while the engine is still parenting it, makes Studio
+		-- print "Something unexpectedly tried to set the parent of Animate to NULL". The engine's
+		-- task.defer is replaced by a queue this test runs by hand.
+		local queued: { () -> () } = {}
+		local function runDeferred()
+			local now = table.clone(queued)
+			table.clear(queued)
+			for _, fn in now do
+				fn()
+			end
+		end
+		Choreo.configure({
+			defer = function(fn)
+				table.insert(queued, fn)
+			end,
+		})
+		local fire, restore = recordConnections()
+		local function animateScript(parent)
+			local script = Instance.new("LocalScript")
+			script.Name = "Animate"
+			script.Enabled = true
+			script.Parent = parent
+			return script
+		end
+
+		-- Already in the character when the animator attaches.
+		local model = buildUpgradedCharacter(true)
+		local present = animateScript(model)
+		local animator = Choreo.get(model)
+		expect(present.Parent).toBe(model)
+		expect(present.Enabled).toBe(false)
+		expect(#queued).toBe(1)
+		runDeferred()
+		expect(present.Parent).toBeNil()
+
+		-- Arriving after (a respawned character's scripts replicate in): DescendantAdded fires while
+		-- the engine is parenting it, so the handler only disables it.
+		local arriving = animateScript(model)
+		fire(model, "DescendantAdded", arriving)
+		expect(arriving.Parent).toBe(model)
+		expect(arriving.Enabled).toBe(false)
+		-- The rig keeps animating in between.
+		animator:step(FRAME)
+		expect(jointOf(model, "RightShoulder").Transform == CFrame.identity).toBe(false)
+		runDeferred()
+		expect(arriving.Parent).toBeNil()
+
+		-- Anything else called Animate (not a script), and a script with another name, stay.
+		local folder = Instance.new("Folder")
+		folder.Name = "Animate"
+		folder.Parent = model
+		fire(model, "DescendantAdded", folder)
+		local other = Instance.new("LocalScript")
+		other.Name = "Health"
+		other.Parent = model
+		fire(model, "DescendantAdded", other)
+		expect(#queued).toBe(0)
+		expect(folder.Parent).toBe(model)
+		expect(other.Parent).toBe(model)
+
+		-- A rig released before the deferred destroy runs still loses the script.
+		local late = animateScript(model)
+		fire(model, "DescendantAdded", late)
+		Choreo.release(model)
+		runDeferred()
+		expect(late.Parent).toBeNil()
+
+		restore()
+		Choreo.configure({
+			defer = function(fn)
+				task.defer(fn)
+			end,
+		})
+	end)
+
+	it("a Humanoid model without a Rig attribute is a PlayerR15; a bare model is an error", function()
+		local model = Instance.new("Model")
+		local humanoid = Instance.new("Humanoid")
+		humanoid.Parent = model
+		local animator = Choreo.get(model)
+		expect(animator.rigId).toBe("PlayerR15")
+		Choreo.release(model)
+		expect(function()
+			Choreo.get(Instance.new("Model"))
+		end).toThrow("no Rig attribute")
+		expect(Choreo.count()).toBe(0)
+	end)
+
+	it("an enemy rig poses from its own idle", function()
+		local model = buildRig("Boar")
+		local animator = Choreo.get(model)
+		expect(animator.rigId).toBe("Boar")
+		expect(animator:isPlaying(ChoreoData.rigs.Boar.idle)).toBe(true)
+		expect(motorOf(model, "Neck").Transform == CFrame.identity).toBe(false)
+		Choreo.release(model)
+	end)
+
+	it("a server-timed play catches up, fires events as frames cross them and sums its root motion", function()
+		clock = 100
+		local model = buildRig("PlayerR15")
+		local animator = Choreo.get(model)
+		local kinds = eventKinds(animator)
+		local finished = 0
+		animator.finished:Connect(function()
+			finished += 1
+		end)
+		-- Half a frame off the 60 Hz grid: the clip's events sit on frame boundaries (the window opens
+		-- on the snap key), and which step crosses a boundary event would come down to float rounding.
+		local started = 0.1 + FRAME * 0.5
+		local handle = animator:play(HORIZONTAL, { serverTime = clock - started, blendIn = 0 })
+		expect(animator:isPlaying(HORIZONTAL)).toBe(true)
+		expect(handle.clipId).toBe(HORIZONTAL)
+
+		local travel = 0
+		local framesToOpen = math.ceil((HIT_OPEN_TIME - started) / FRAME)
+		for _ = 1, framesToOpen - 1 do
+			animator:step(FRAME)
+			travel += animator:currentRootMotionDelta().Z
+		end
+		expect(count(kinds, "HitWindowOpen")).toBe(0)
+		animator:step(FRAME)
+		travel += animator:currentRootMotionDelta().Z
+		expect(count(kinds, "HitWindowOpen")).toBe(1)
+		expect(count(kinds, "ActivationHold")).toBe(1)
+
+		local steps = 0
+		while finished == 0 and steps < 200 do
+			animator:step(FRAME)
+			travel += animator:currentRootMotionDelta().Z
+			steps += 1
+		end
+		expect(finished).toBe(1)
+		expect(count(kinds, "HitWindowClose")).toBe(1)
+		expect(count(kinds, "PostMotionStart")).toBe(1)
+		expect(travel).toBeCloseTo(-1, 1e-3)
+		Choreo.release(model)
+		clock = 0
+	end)
+
+	it("a RenderStepped that comes back with a whole stall's gap is a jump: marked events, no root motion", function()
+		-- Measured in Studio: with the display asleep RenderStepped runs 0 times a second and its first
+		-- dt after waking is the whole gap (5.4 to 188 s). An Art and a kill's hit-stop asked for while
+		-- it slept replayed from the Art's start after the wake (D-132). The clock runs on through it.
+		clock = 100
+		camera = Vector3.zero
+		local model = buildRig("PlayerR15", Vector3.zero)
+		local animator = Choreo.get(model)
+		clock += FRAME
+		renderStepped:Fire(FRAME)
+		local fired = {}
+		animator.events:Connect(function(clipId, event, jumped)
+			table.insert(fired, { clipId = clipId, kind = event.kind, jumped = jumped })
+		end)
+		animator:play(HORIZONTAL, { blendIn = 0 })
+		Choreo.hitStopAll({ model }, "Kill")
+		clock += 56
+		renderStepped:Fire(56)
+		local crossed = 0
+		for _, event in fired do
+			if event.clipId == HORIZONTAL then
+				crossed += 1
+			end
+			expect(event.jumped).toBe(true)
+		end
+		expect(crossed > 0).toBe(true)
+		expect(animator:currentRootMotionDelta()).toBe(Vector3.zero)
+		expect(animator:isPlaying(HORIZONTAL)).toBe(false)
+		table.clear(fired)
+		for _ = 1, 60 do
+			clock += FRAME
+			renderStepped:Fire(FRAME)
+			expect(animator:currentRootMotionDelta()).toBe(Vector3.zero)
+		end
+		for _, event in fired do
+			expect(event.clipId).never.toBe(HORIZONTAL)
+		end
+		-- A plain frame's events are not a jump.
+		table.clear(fired)
+		animator:play(HORIZONTAL, { blendIn = 0, startTime = HIT_OPEN_TIME - FRAME * 0.5 })
+		clock += FRAME
+		renderStepped:Fire(FRAME)
+		expect(#fired > 0).toBe(true)
+		for _, event in fired do
+			expect(event.jumped).toBe(false)
+		end
+		Choreo.release(model)
+		clock = 0
+	end)
+
+	it("the root delta of the last frame before a stall is not read as the wake frame's", function()
+		-- The controller reads the delta on its own render step, which can run before Choreo's on
+		-- the wake frame: it must not move the root by a frame of a lunge the stall left behind.
+		clock = 100
+		local model = buildRig("PlayerR15", Vector3.zero)
+		local animator = Choreo.get(model)
+		-- Inside the Horizontal's step forward (its root moves from 0.35 s to 0.4 s).
+		animator:play(HORIZONTAL, { blendIn = 0, startTime = 0.355 })
+		for _ = 1, 2 do
+			clock += FRAME
+			animator:step(FRAME)
+		end
+		local moving = animator:currentRootMotionDelta()
+		expect(moving.Magnitude > 0).toBe(true)
+		-- Read again within a frame: the same delta.
+		expect(animator:currentRootMotionDelta()).toBe(moving)
+		clock += 56
+		expect(animator:currentRootMotionDelta()).toBe(Vector3.zero)
+		Choreo.release(model)
+		clock = 0
+	end)
+
+	it("a wake whose RenderStepped dt is one frame is still a jump: the clock saw the gap", function()
+		-- Studio returned the whole gap as dt, but nothing promises it: a first dt of one frame would
+		-- resume every clip where the stall left it and replay it after the wake.
+		clock = 100
+		camera = Vector3.zero
+		local model = buildRig("PlayerR15", Vector3.zero)
+		local animator = Choreo.get(model)
+		clock += FRAME
+		renderStepped:Fire(FRAME)
+		local fired = {}
+		animator.events:Connect(function(clipId, event, jumped)
+			table.insert(fired, { clipId = clipId, kind = event.kind, jumped = jumped })
+		end)
+		animator:play(HORIZONTAL, { blendIn = 0 })
+		Choreo.hitStopAll({ model }, "Kill")
+		clock += 56
+		renderStepped:Fire(FRAME)
+		local crossed = 0
+		for _, event in fired do
+			if event.clipId == HORIZONTAL then
+				crossed += 1
+				expect(event.jumped).toBe(true)
+			end
+		end
+		expect(crossed > 0).toBe(true)
+		expect(animator:currentRootMotionDelta()).toBe(Vector3.zero)
+		expect(animator:isPlaying(HORIZONTAL)).toBe(false)
+		table.clear(fired)
+		for _ = 1, 60 do
+			clock += FRAME
+			renderStepped:Fire(FRAME)
+		end
+		for _, event in fired do
+			expect(event.clipId).never.toBe(HORIZONTAL)
+		end
+		Choreo.release(model)
+		clock = 0
+	end)
+
+	it("a clip played while the display slept shows at its own age at the wake, and plays on", function()
+		-- The key press that wakes the display (or a remote's ActionStarted just before the wake)
+		-- starts its clip inside the gap: the wake shows it 0.1 s in, not jumped to its end.
+		clock = 100
+		camera = Vector3.zero
+		local model = buildRig("PlayerR15", Vector3.zero)
+		local animator = Choreo.get(model)
+		clock += FRAME
+		renderStepped:Fire(FRAME)
+		local fired = {}
+		animator.events:Connect(function(clipId, event, jumped)
+			if clipId == HORIZONTAL then
+				table.insert(fired, { kind = event.kind, jumped = jumped })
+			end
+		end)
+		clock += 55.9
+		local handle = animator:play(HORIZONTAL, { blendIn = 0 })
+		clock += 0.1
+		renderStepped:Fire(56)
+		expect(handle.time).toBeCloseTo(0.1, 1e-6)
+		expect(animator:isPlaying(HORIZONTAL)).toBe(true)
+		for _ = 1, 90 do
+			clock += FRAME
+			renderStepped:Fire(FRAME)
+		end
+		-- Every event of the clip fired once, unmarked: its first 0.1 s as an ordinary step of the
+		-- wake, the rest after it.
+		local expected = {}
+		for _, event in ClipLibrary.get(HORIZONTAL).events do
+			table.insert(expected, event.kind)
+		end
+		local kinds = {}
+		for _, event in fired do
+			expect(event.jumped).toBe(false)
+			table.insert(kinds, event.kind)
+		end
+		expect(kinds).toEqual(expected)
+		Choreo.release(model)
+		clock = 0
+	end)
+
+	it("a rig stepped on Heartbeat through a stall and near at the wake does not take the gap again", function()
+		-- A remote fighter that walked up while the display slept kept stepping on Heartbeat at the
+		-- distant rate; the wake's re-rank makes it full rate and RenderStepped hands it the whole gap.
+		-- Its swing, started 0.1 s before the wake, plays on from there instead of jumping to its end.
+		clock = 100
+		camera = Vector3.zero
+		local model = buildRig("PlayerR15", Vector3.new(ChoreoData.quality.High.nearRadius * 10, 0, 0))
+		local animator = Choreo.get(model)
+		local fired = {}
+		animator.events:Connect(function(clipId, event, jumped)
+			if clipId == HORIZONTAL then
+				table.insert(fired, { kind = event.kind, jumped = jumped })
+			end
+		end)
+		local gap = 5.4
+		local handle = nil
+		for frame = 1, math.floor(gap / FRAME + 0.5) do
+			clock += FRAME
+			heartbeat:Fire(FRAME)
+			if handle == nil and frame * FRAME >= gap - 0.1 then
+				model.PrimaryPart.Position = Vector3.zero
+				handle = animator:play(HORIZONTAL, { blendIn = 0 })
+			end
+		end
+		renderStepped:Fire(gap)
+		expect(animator:isPlaying(HORIZONTAL)).toBe(true)
+		expect(handle.time < 0.2).toBe(true)
+		for _ = 1, 90 do
+			clock += FRAME
+			renderStepped:Fire(FRAME)
+		end
+		local expected = {}
+		for _, event in ClipLibrary.get(HORIZONTAL).events do
+			table.insert(expected, event.kind)
+		end
+		local kinds = {}
+		for _, event in fired do
+			expect(event.jumped).toBe(false)
+			table.insert(kinds, event.kind)
+		end
+		expect(kinds).toEqual(expected)
+		Choreo.release(model)
+		clock = 0
+	end)
+
+	it("a near rig that is distant at the wake still jumps the gap on its first Heartbeat step", function()
+		-- The reverse: full rate before the stall (not stepped while RenderStepped slept), ranked
+		-- distant at the wake, so its next step comes from Heartbeat with a few frames' dt.
+		clock = 100
+		camera = Vector3.zero
+		local model = buildRig("PlayerR15", Vector3.zero)
+		local animator = Choreo.get(model)
+		clock += FRAME
+		renderStepped:Fire(FRAME)
+		local fired = {}
+		animator.events:Connect(function(clipId, event, jumped)
+			if clipId == HORIZONTAL then
+				table.insert(fired, { kind = event.kind, jumped = jumped })
+			end
+		end)
+		animator:play(HORIZONTAL, { blendIn = 0 })
+		local gap = 5.4
+		for _ = 1, math.floor(gap / FRAME + 0.5) do
+			clock += FRAME
+			heartbeat:Fire(FRAME)
+		end
+		model.PrimaryPart.Position = Vector3.new(ChoreoData.quality.High.nearRadius * 10, 0, 0)
+		renderStepped:Fire(gap)
+		for _ = 1, 10 do
+			clock += FRAME
+			heartbeat:Fire(FRAME)
+		end
+		expect(animator:isPlaying(HORIZONTAL)).toBe(false)
+		expect(#fired > 0).toBe(true)
+		for _, event in fired do
+			expect(event.jumped).toBe(true)
+		end
+		Choreo.release(model)
+		clock = 0
+	end)
+
+	it("hitStopAll holds every listed rig for the tier's frame count, then motion resumes", function()
+		local player = buildRig("PlayerR15")
+		local boar = buildRig("Boar")
+		local playerAnimator = Choreo.get(player)
+		local boarAnimator = Choreo.get(boar)
+		playerAnimator:play(HORIZONTAL, { blendIn = 0 })
+		Choreo.stepAll(0) -- compose the new clip into the pose without advancing any clock
+		local weapon = motorOf(player, "Weapon")
+		local neck = motorOf(boar, "Neck")
+		local frames = Combat.hitStopFrames.Final
+
+		Choreo.hitStopAll({ player, boar }, "Final")
+		expect(playerAnimator:isPaused()).toBe(true)
+		expect(boarAnimator:isPaused()).toBe(true)
+		local weaponBefore = weapon.Transform
+		local neckBefore = neck.Transform
+		for _ = 1, frames - 1 do
+			Choreo.stepAll(FRAME)
+			expect(playerAnimator:isPaused()).toBe(true)
+		end
+		expect(weapon.Transform == weaponBefore).toBe(true)
+		expect(neck.Transform == neckBefore).toBe(true)
+		Choreo.stepAll(FRAME)
+		expect(playerAnimator:isPaused()).toBe(false)
+		expect(boarAnimator:isPaused()).toBe(false)
+		for _ = 1, 30 do
+			Choreo.stepAll(FRAME)
+		end
+		expect(weapon.Transform == weaponBefore).toBe(false)
+		Choreo.release(player)
+		Choreo.release(boar)
+	end)
+
+	it("RenderStepped steps the near rigs every frame; Heartbeat steps distant rigs at the tier rate", function()
+		camera = Vector3.zero
+		local near = buildRig("PlayerR15", Vector3.zero)
+		local far = buildRig("Kobold", Vector3.new(ChoreoData.quality.High.nearRadius * 10, 0, 0))
+		local nearAnimator = Choreo.get(near)
+		local farAnimator = Choreo.get(far)
+		local nearKinds = eventKinds(nearAnimator)
+		local farKinds = eventKinds(farAnimator)
+		local justBefore = HIT_OPEN_TIME - FRAME * 0.5
+		nearAnimator:play(HORIZONTAL, { startTime = justBefore, blendIn = 0 })
+		farAnimator:play(HORIZONTAL, { startTime = justBefore, blendIn = 0 })
+
+		renderStepped:Fire(FRAME)
+		expect(count(nearKinds, "HitWindowOpen")).toBe(1)
+		expect(count(farKinds, "HitWindowOpen")).toBe(0)
+
+		heartbeat:Fire(FRAME)
+		expect(count(farKinds, "HitWindowOpen")).toBe(0)
+		heartbeat:Fire(FRAME)
+		heartbeat:Fire(FRAME)
+		expect(count(farKinds, "HitWindowOpen")).toBe(1)
+
+		-- The local player's rig is always full rate, however far the camera sits.
+		Choreo.setLocalModel(far)
+		farAnimator:play(HORIZONTAL, { startTime = justBefore, blendIn = 0 })
+		renderStepped:Fire(FRAME)
+		expect(count(farKinds, "HitWindowOpen")).toBe(2)
+		Choreo.setLocalModel(nil)
+		Choreo.release(near)
+		Choreo.release(far)
+	end)
+
+	-- The engine's Animator puts every joint back to rest after RenderStepped (D-053): stand in
+	-- for it by resetting every joint of the model.
+	local function engineReset(model)
+		for _, descendant in model:GetDescendants() do
+			if descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint") then
+				descendant.Transform = CFrame.identity
+			end
+		end
+	end
+
+	it("on a rig with an engine Animator, PreSimulation writes the pose again after the reset", function()
+		camera = Vector3.zero
+		local model = buildUpgradedCharacter(true)
+		local animatorInstance = Instance.new("Animator")
+		animatorInstance.Parent = model:FindFirstChildOfClass("Humanoid")
+		local animator = Choreo.get(model)
+		Choreo.setLocalModel(model)
+		animator:play(GUARD, { blendIn = 0 })
+		renderStepped:Fire(FRAME)
+		local shoulder = jointOf(model, "RightShoulder")
+		local hip = jointOf(model, "LeftHip")
+		local posedShoulder, posedHip = shoulder.Transform, hip.Transform
+		expect(posedShoulder == CFrame.identity).toBe(false)
+
+		engineReset(model)
+		expect(shoulder.Transform == CFrame.identity).toBe(true)
+		preSimulation:Fire(FRAME)
+		expect(shoulder.Transform == posedShoulder).toBe(true)
+		expect(hip.Transform == posedHip).toBe(true)
+
+		-- Frame after frame, whatever the step wrote last is what PreSimulation puts back.
+		for _ = 1, 5 do
+			renderStepped:Fire(FRAME)
+			local posed = shoulder.Transform
+			engineReset(model)
+			preSimulation:Fire(FRAME)
+			expect(shoulder.Transform == posed).toBe(true)
+		end
+
+		-- A pinned joint stays at rest through the rewrite; unpinned, it is written again.
+		local weapon = motorOf(model, "Weapon")
+		animator:setProcedural("test", { Weapon = { pos = { 0, 0, 0 }, rot = { 5, 0, 0 } } }, 1)
+		renderStepped:Fire(FRAME)
+		expect(weapon.Transform == CFrame.identity).toBe(false)
+		animator:pin("Weapon", true)
+		engineReset(model)
+		preSimulation:Fire(FRAME)
+		expect(weapon.Transform == CFrame.identity).toBe(true)
+		animator:pin("Weapon", false)
+		local unpinned = weapon.Transform
+		expect(unpinned == CFrame.identity).toBe(false)
+		engineReset(model)
+		preSimulation:Fire(FRAME)
+		expect(weapon.Transform == unpinned).toBe(true)
+
+		Choreo.setLocalModel(nil)
+		Choreo.release(model)
+		-- A released rig is left alone.
+		engineReset(model)
+		preSimulation:Fire(FRAME)
+		expect(shoulder.Transform == CFrame.identity).toBe(true)
+	end)
+
+	it("a rig without an engine Animator is not written on PreSimulation", function()
+		camera = Vector3.zero
+		local model = buildRig("Kobold", Vector3.zero)
+		local animator = Choreo.get(model)
+		animator:step(FRAME)
+		local any = nil
+		for _, descendant in model:GetDescendants() do
+			if descendant:IsA("Motor6D") and descendant.Transform ~= CFrame.identity then
+				any = descendant
+				break
+			end
+		end
+		expect(any).toBeTruthy()
+		local marker = CFrame.new(0, 2, 0)
+		any.Transform = marker
+		preSimulation:Fire(FRAME)
+		expect(any.Transform == marker).toBe(true)
+		Choreo.release(model)
+	end)
+
+	it("an Animator that arrives after the animator attached turns the rewrite on", function()
+		local fire, restore = recordConnections()
+		camera = Vector3.zero
+		local model = buildUpgradedCharacter(true)
+		Choreo.get(model)
+		Choreo.setLocalModel(model)
+		renderStepped:Fire(FRAME)
+		local shoulder = jointOf(model, "RightShoulder")
+		engineReset(model)
+		preSimulation:Fire(FRAME)
+		expect(shoulder.Transform == CFrame.identity).toBe(true) -- no Animator yet: nothing resets it in the engine
+
+		local animatorInstance = Instance.new("Animator")
+		animatorInstance.Parent = model:FindFirstChildOfClass("Humanoid")
+		fire(model, "DescendantAdded", animatorInstance)
+		renderStepped:Fire(FRAME)
+		local posed = shoulder.Transform
+		engineReset(model)
+		preSimulation:Fire(FRAME)
+		expect(shoulder.Transform == posed).toBe(true)
+
+		-- And it turns off again when the Animator leaves.
+		fire(model, "DescendantRemoving", animatorInstance)
+		animatorInstance.Parent = nil
+		renderStepped:Fire(FRAME)
+		engineReset(model)
+		preSimulation:Fire(FRAME)
+		expect(shoulder.Transform == CFrame.identity).toBe(true)
+		Choreo.setLocalModel(nil)
+		Choreo.release(model)
+		restore()
+	end)
+
+	it("setQuality switches the tier and rejects unknown ones", function()
+		Choreo.setQuality("Low")
+		expect(Choreo.quality()).toBe("Low")
+		expect(function()
+			Choreo.setQuality("Ultra")
+		end).toThrow("unknown tier")
+		Choreo.setQuality("High")
+		expect(Choreo.quality()).toBe("High")
+	end)
+
+	it("Choreo.play is a shortcut; stop by clip id ends the clip; release leaves the model intact", function()
+		local model = buildRig("PlayerR15")
+		local handle = Choreo.play(model, GUARD)
+		local animator = Choreo.find(model)
+		expect(handle.clipId).toBe(GUARD)
+		expect(animator:isPlaying(GUARD)).toBe(true)
+		animator:stop(GUARD, 0)
+		animator:step(FRAME)
+		expect(animator:isPlaying(GUARD)).toBe(false)
+		Choreo.release(model)
+		expect(motorOf(model, "Weapon")).toBeTruthy()
+		expect(model.PrimaryPart.Name).toBe("HumanoidRootPart")
+		renderStepped:Fire(FRAME)
+		expect(Choreo.count()).toBe(0)
+	end)
+
+	it("pin holds a keyed joint at rest from the moment it is set; unpinning puts the keyed value back", function()
+		local model = buildRig("PlayerR15")
+		local animator = Choreo.get(model)
+		local weapon = motorOf(model, "Weapon")
+		local shoulder = motorOf(model, "RightShoulder")
+		animator:play(GUARD, { blendIn = 0 })
+		animator:setProcedural("test", { Weapon = { pos = { 0, 0, 0 }, rot = { 5, 0, 0 } } }, 1)
+		animator:step(FRAME)
+		expect(weapon.Transform == CFrame.identity).toBe(false)
+
+		animator:pin("Weapon", true)
+		-- At rest at once (a pin set from a clip event shows in that frame), and on every step after,
+		-- while the clip and the procedural channel still key it; other joints are untouched.
+		expect(weapon.Transform == CFrame.identity).toBe(true)
+		for _ = 1, 3 do
+			animator:step(FRAME)
+			expect(weapon.Transform == CFrame.identity).toBe(true)
+			expect(shoulder.Transform == CFrame.identity).toBe(false)
+		end
+
+		animator:pin("Weapon", false)
+		-- Lune stores a Transform at a little under float precision: compare within 1e-4.
+		local expected = ClipSampler.toCFrame(animator.mixer:lastOffsets().Weapon)
+		expect((weapon.Transform.Position - expected.Position).Magnitude < 1e-4).toBe(true)
+		expect((weapon.Transform.LookVector - expected.LookVector).Magnitude < 1e-4).toBe(true)
+		expect(weapon.Transform == CFrame.identity).toBe(false)
+		animator:step(FRAME)
+		expect(weapon.Transform == CFrame.identity).toBe(false)
+		Choreo.release(model)
+	end)
+
+	it("only the Base clip the limbs show most sounds its footsteps; other layers sound theirs", function()
+		local idleId = "player/OneHandedSword/Idle"
+		local runId = "player/OneHandedSword/Run"
+		local runDrawnId = "player/OneHandedSword/RunDrawn"
+		local landId = "player/OneHandedSword/Land"
+		local model = buildRig("PlayerR15")
+		local animator = Choreo.get(model)
+		local frames: { { string } } = {}
+		local current: { string } = {}
+		animator.events:Connect(function(clipId, event)
+			if event.kind == "Footstep" then
+				table.insert(current, clipId)
+			end
+		end)
+		-- The footsteps the mixer crossed, by clip, whatever their weight.
+		local crossed: { [string]: number } = {}
+		local mixerStep = animator.mixer.step
+		animator.mixer.step = function(self, dt)
+			local result = mixerStep(self, dt)
+			for _, fired in result.events do
+				if fired.event.kind == "Footstep" then
+					crossed[fired.clipId] = (crossed[fired.clipId] or 0) + 1
+				end
+			end
+			return result
+		end
+		local function run(seconds: number): { string }
+			local all = {}
+			table.clear(crossed)
+			for _ = 1, math.ceil(seconds / FRAME - 1e-9) do
+				current = {}
+				animator:step(FRAME)
+				table.insert(frames, current)
+				for _, clipId in current do
+					table.insert(all, clipId)
+				end
+			end
+			return all
+		end
+		-- The locomotion set: every walk runs at once, the ones not in use at weight zero.
+		local idle = animator:play(idleId, { coexist = true, weight = 1, blendIn = 0 })
+		local runHandle = animator:play(runId, { coexist = true, weight = 0, blendIn = 0 })
+		local runDrawn = animator:play(runDrawnId, { coexist = true, weight = 0, blendIn = 0 })
+		local cycle = ClipLibrary.get(runId).duration
+		-- Standing still: no footstep, though the mixer crosses the walks' steps.
+		expect(#run(3 * cycle)).toBe(0)
+		expect(crossed[runId] >= 3).toBe(true)
+		expect(crossed[runDrawnId]).toBe(crossed[runId])
+
+		-- Running: Run's own steps.
+		animator:setWeight(idle, 0, true)
+		animator:setWeight(runHandle, 1, true)
+		local running = run(3 * cycle)
+		expect(count(running, runId)).toBe(crossed[runId])
+		expect(count(running, runDrawnId)).toBe(0)
+
+		-- Halfway into the drawn twin (same clock, same steps): one set, the first of the two.
+		animator:setWeight(runHandle, 0.5, true)
+		animator:setWeight(runDrawn, 0.5, true)
+		local half = run(3 * cycle)
+		expect(count(half, runId)).toBe(crossed[runId])
+		expect(count(half, runDrawnId)).toBe(0)
+		animator:setWeight(runHandle, 0.3, true)
+		animator:setWeight(runDrawn, 0.7, true)
+		local mostlyDrawn = run(3 * cycle)
+		expect(count(mostlyDrawn, runDrawnId)).toBe(crossed[runDrawnId])
+		expect(count(mostlyDrawn, runId)).toBe(0)
+		for _, fired in frames do
+			expect(#fired <= 1).toBe(true)
+		end
+
+		-- A clip on another layer sounds its own steps over the walk.
+		local landSteps = 0
+		for _, event in ClipLibrary.get(landId).events do
+			if event.kind == "Footstep" then
+				landSteps += 1
+			end
+		end
+		animator:setWeight(runDrawn, 0, true)
+		animator:setWeight(idle, 1, true)
+		animator:play(landId, { blendIn = 0 })
+		expect(landSteps > 0).toBe(true)
+		expect(count(run(ClipLibrary.get(landId).duration), landId)).toBe(landSteps)
+		Choreo.release(model)
+	end)
+
+	it(
+		"a FullBody clip with its own steps silences the walk's while it covers most of the limbs, then the walk steps again",
+		function()
+			local runId = "player/OneHandedSword/Run"
+			local model = buildRig("PlayerR15")
+			local animator = Choreo.get(model)
+			local fired: { string } = {}
+			animator.events:Connect(function(clipId, event)
+				if event.kind == "Footstep" then
+					table.insert(fired, clipId)
+				end
+			end)
+			-- The Run steps the mixer crossed, whatever was heard.
+			local crossed = 0
+			local mixerStep = animator.mixer.step
+			animator.mixer.step = function(self, dt)
+				local result = mixerStep(self, dt)
+				for _, step in result.events do
+					if step.event.kind == "Footstep" and step.clipId == runId then
+						crossed += 1
+					end
+				end
+				return result
+			end
+			local function stepsOf(clipId: string): number
+				local total = 0
+				for _, event in ClipLibrary.get(clipId).events do
+					if event.kind == "Footstep" then
+						total += 1
+					end
+				end
+				return total
+			end
+			local function shows(handle): boolean
+				for _, live in animator.mixer:handles() do
+					if live == handle then
+						return true
+					end
+				end
+				return false
+			end
+			animator:play(runId, { coexist = true, weight = 1, blendIn = 0 })
+			local cycle = ClipLibrary.get(runId).duration
+			for _ = 1, math.ceil(2 * cycle / FRAME) do
+				animator:step(FRAME)
+			end
+			expect(count(fired, runId) > 0).toBe(true)
+
+			-- A dodge out of the run, then a landing: each sounds its own steps, the run none of its,
+			-- from the clip's first frame until its fade-out ends.
+			for _, oneShot in { "player/OneHandedSword/DodgeForward", "player/OneHandedSword/Land" } do
+				table.clear(fired)
+				crossed = 0
+				local handle = animator:play(oneShot)
+				local frames = 0
+				repeat
+					animator:step(FRAME)
+					frames += 1
+				until not shows(handle) or frames > 120
+				expect(shows(handle)).toBe(false)
+				expect(crossed > 0).toBe(true)
+				expect(count(fired, runId)).toBe(0)
+				expect(count(fired, oneShot)).toBe(stepsOf(oneShot))
+
+				-- Faded out: the run's steps sound again, one per step crossed.
+				table.clear(fired)
+				crossed = 0
+				for _ = 1, math.ceil(2 * cycle / FRAME) do
+					animator:step(FRAME)
+				end
+				expect(crossed > 0).toBe(true)
+				expect(count(fired, runId)).toBe(crossed)
+			end
+
+			-- A FullBody clip with no steps of its own (an Art) silences the run's too: the legs are
+			-- the Art's, so a walk step would sound with no foot planting.
+			table.clear(fired)
+			crossed = 0
+			animator:play(HORIZONTAL, { blendIn = 0 })
+			for _ = 1, math.ceil(ClipLibrary.get(HORIZONTAL).duration / FRAME) do
+				animator:step(FRAME)
+			end
+			expect(stepsOf(HORIZONTAL)).toBe(0)
+			expect(crossed > 0).toBe(true)
+			expect(count(fired, runId)).toBe(0)
+			Choreo.release(model)
+		end
+	)
+
+	it(
+		"the walk under a FullBody clip that covers less than half of the limbs still steps (a light landing)",
+		function()
+			local runId = "player/OneHandedSword/Run"
+			local landId = "player/OneHandedSword/Land"
+			local model = buildRig("PlayerR15")
+			local animator = Choreo.get(model)
+			local heard: { string } = {}
+			animator.events:Connect(function(clipId, event)
+				if event.kind == "Footstep" then
+					table.insert(heard, clipId)
+				end
+			end)
+			-- The Run steps the mixer crossed while the landing showed.
+			local crossedUnder = 0
+			local landHandle = nil
+			local mixerStep = animator.mixer.step
+			animator.mixer.step = function(self, dt)
+				local result = mixerStep(self, dt)
+				for _, step in result.events do
+					if step.event.kind == "Footstep" and step.clipId == runId and landHandle ~= nil then
+						crossedUnder += 1
+					end
+				end
+				return result
+			end
+			local function shows(handle): boolean
+				return table.find(animator.mixer:handles(), handle) ~= nil
+			end
+			animator:play(runId, { coexist = true, weight = 1, blendIn = 0 })
+			for _ = 1, 60 do
+				animator:step(FRAME)
+			end
+			table.clear(heard)
+			-- A short hop's landing: Locomotion plays Land at landingWeight, 0.3 to 0.4 below 4 studs.
+			landHandle = animator:play(landId, { weight = 0.4 })
+			local frames = 0
+			repeat
+				animator:step(FRAME)
+				frames += 1
+			until not shows(landHandle) or frames > 120
+			expect(crossedUnder > 0).toBe(true)
+			expect(count(heard, runId)).toBe(crossedUnder)
+			expect(count(heard, landId)).toBe(1)
+			Choreo.release(model)
+		end
+	)
+
+	it("nothing steps in the air: a jump and the fall after it silence the run under them", function()
+		local runId = "player/OneHandedSword/Run"
+		local jumpId = "player/OneHandedSword/Jump"
+		local fallId = "player/OneHandedSword/Fall"
+		local model = buildRig("PlayerR15")
+		local animator = Choreo.get(model)
+		local heard: { string } = {}
+		animator.events:Connect(function(clipId, event)
+			if event.kind == "Footstep" then
+				table.insert(heard, clipId)
+			end
+		end)
+		local crossed = 0
+		local mixerStep = animator.mixer.step
+		animator.mixer.step = function(self, dt)
+			local result = mixerStep(self, dt)
+			for _, step in result.events do
+				if step.event.kind == "Footstep" and step.clipId == runId then
+					crossed += 1
+				end
+			end
+			return result
+		end
+		animator:play(runId, { coexist = true, weight = 1, blendIn = 0 })
+		for _ = 1, 60 do
+			animator:step(FRAME)
+		end
+		-- As Locomotion does it: the jump, then the fall loop as the jump clip ends. (The Fall clip
+		-- is loaded first: a handler that loads a module yields in Lune.)
+		ClipLibrary.get(fallId)
+		local jump = animator:play(jumpId)
+		local fall = nil
+		animator.finished:Connect(function(finished)
+			if finished == jump then
+				fall = animator:play(fallId)
+			end
+		end)
+		-- The takeoff: until the jump covers half of the limbs the feet are still on the ground.
+		local takeoff = 0
+		repeat
+			animator:step(FRAME)
+			takeoff += 1
+		until Easing.evaluate(ChoreoData.blendEasing, jump.fade) * jump.weight > 0.5 or takeoff > 30
+		expect(takeoff < 30).toBe(true)
+		table.clear(heard)
+		crossed = 0
+		-- A second in the air (a 1 s fall): the run crosses its steps and none sounds.
+		for _ = 1, 60 do
+			animator:step(FRAME)
+		end
+		expect(fall).never.toBeNil()
+		expect(crossed >= 3).toBe(true)
+		expect(count(heard, runId)).toBe(0)
+		-- Landed: the fall goes, the run steps again.
+		animator:stop(fall, ChoreoData.oneShotBlendIn)
+		for _ = 1, 30 do
+			animator:step(FRAME)
+		end
+		table.clear(heard)
+		crossed = 0
+		for _ = 1, 60 do
+			animator:step(FRAME)
+		end
+		expect(crossed > 0).toBe(true)
+		expect(count(heard, runId)).toBe(crossed)
+		Choreo.release(model)
+	end)
+
+	it("joint returns the joint Choreo writes for a name, the new one after a replace", function()
+		local fire, restore = recordConnections()
+		local model = buildRig("PlayerR15")
+		local animator = Choreo.get(model)
+		local old = motorOf(model, "Weapon")
+		expect(animator:joint("Weapon")).toBe(old)
+		expect(animator:joint("NoSuchJoint")).toBeNil()
+		animator:pin("Weapon", true)
+
+		local replacement = Instance.new("Motor6D")
+		replacement.Name = "Weapon"
+		replacement.Transform = CFrame.new(0, 1, 0)
+		local parent = old.Parent
+		fire(model, "DescendantRemoving", old)
+		old.Parent = nil
+		replacement.Parent = parent
+		fire(model, "DescendantAdded", replacement)
+		expect(animator:joint("Weapon")).toBe(replacement)
+		-- The pin is by name, so the new joint is put at rest and held there too.
+		expect(replacement.Transform == CFrame.identity).toBe(true)
+		animator:play(GUARD, { blendIn = 0 })
+		animator:step(FRAME)
+		expect(replacement.Transform == CFrame.identity).toBe(true)
+		animator:pin("Weapon", false)
+		animator:step(FRAME)
+		expect(replacement.Transform == CFrame.identity).toBe(false)
+		Choreo.release(model)
+		restore()
+	end)
+end)

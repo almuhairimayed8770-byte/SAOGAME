@@ -1,0 +1,657 @@
+--!strict
+--[[
+	ReviewMarkers: the timeline marker math the ClipLab draws and tools/animation-review.luau
+	writes, on synthetic clips with known timings and on the hand-written Horizontal clip.
+]]
+
+local ReviewMarkers = Harness.load("src/client/dev/ReviewMarkers")
+local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
+local Dev = Harness.load("src/shared/data/dev")
+
+local F = 1 / 60
+
+local function attackClip(overrides: { [string]: any }?): any
+	local clip = {
+		id = "player/OneHandedSword/TestArt",
+		rig = "PlayerR15",
+		duration = 1.0,
+		loop = false,
+		layer = "FullBody",
+		attack = true,
+		hitStop = "Normal",
+		keys = {
+			{
+				time = 0,
+				easing = "QuadOut",
+				joints = { RightShoulder = { rot = { 0, 0, 0 } } },
+				root = { pos = { 0, 0, 0 } },
+			},
+			{ time = 6 * F, easing = "QuadIn", joints = { RightShoulder = { rot = { -60, 0, 0 } } } },
+			{ time = 9 * F, easing = "ExpoOut", joints = { RightShoulder = { rot = { 70, 0, 0 } } } },
+			{
+				time = 20 * F,
+				easing = "Spring",
+				joints = { RightShoulder = { rot = { 60, 0, 0 } } },
+				root = { pos = { 0, 0, -3 } },
+			},
+			{
+				time = 1.0,
+				easing = "SineInOut",
+				joints = { RightShoulder = { rot = { 58, 0, 0 } } },
+				root = { pos = { 0, 0, -4 } },
+			},
+		},
+		events = {
+			{ time = 0, kind = "ActivationHold" },
+			{ time = 5 * F, kind = "TrailOn" },
+			{ time = 6 * F, kind = "SmearOn" },
+			{ time = 6 * F, kind = "HitWindowOpen" },
+			{ time = 8 * F, kind = "SmearOff" },
+			{ time = 10 * F, kind = "HitWindowClose" },
+			{ time = 12 * F, kind = "TrailOff" },
+			{ time = 20 * F, kind = "PostMotionStart" },
+			{ time = 30 * F, kind = "Footstep" },
+		},
+		beats = {
+			Anticipation = { start = 0, finish = 6 * F },
+			Snap = { start = 6 * F, finish = 9 * F },
+			Smear = { start = 6 * F, finish = 8 * F },
+			Hold = { start = 9 * F, finish = 12 * F },
+			Settle = { start = 12 * F, finish = 20 * F },
+			Recovery = { start = 20 * F, finish = 1.0 },
+		},
+	}
+	if overrides then
+		for key, value in overrides do
+			clip[key] = value
+		end
+	end
+	return clip
+end
+
+describe("ReviewMarkers frames and fractions", function()
+	it("converts seconds to 60 fps frames and clamps fractions", function()
+		expect(ReviewMarkers.frames(0.5)).toBeCloseTo(30)
+		expect(ReviewMarkers.fractionOf(0.25, 1)).toBeCloseTo(0.25)
+		expect(ReviewMarkers.fractionOf(5, 1)).toBe(1)
+		expect(ReviewMarkers.fractionOf(0.5, 0)).toBe(0)
+		expect(ReviewMarkers.frameLabel(0.383, 1)).toBe("f 23 / 60  0.383 s")
+	end)
+end)
+
+describe("ReviewMarkers beats", function()
+	it("lists the six beats in order with frame counts", function()
+		local rows = ReviewMarkers.beatRows(attackClip())
+		expect(#rows).toBe(6)
+		expect(rows[1].beat).toBe("Anticipation")
+		expect(rows[1].frames).toBeCloseTo(6)
+		expect(rows[2].beat).toBe("Snap")
+		expect(rows[2].frames).toBeCloseTo(3)
+		expect(rows[3].frames).toBeCloseTo(2)
+		expect(rows[6].beat).toBe("Recovery")
+		expect(rows[6].present).toBe(true)
+	end)
+
+	it("marks a missing beat absent with zero frames", function()
+		local clip = attackClip()
+		clip.beats.Hold = nil
+		local rows = ReviewMarkers.beatRows(clip)
+		expect(rows[4].beat).toBe("Hold")
+		expect(rows[4].present).toBe(false)
+		expect(rows[4].frames).toBe(0)
+		expect(ReviewMarkers.problems(clip)).toContain("missing beat(s): Hold")
+	end)
+end)
+
+describe("ReviewMarkers trail timing", function()
+	it("measures the lead-in and lag-out against the hit windows and smear", function()
+		local timing = ReviewMarkers.trailTiming(attackClip())
+		expect(#timing.spans).toBe(1)
+		expect(timing.leadFrames).toBeCloseTo(1) -- TrailOn at 5f, smear and window at 6f
+		expect(timing.lagFrames).toBeCloseTo(2) -- HitWindowClose at 10f, TrailOff at 12f
+		expect(timing.uncovered).toEqual({})
+		expect(timing.stray).toBe(0)
+		expect(timing.summary).toBe("on 1.0f before, off 2.0f after")
+	end)
+
+	it("the smear frames count as an allowed trail region (a Charger's rush)", function()
+		-- The smear on the launch snap, the trail lit from it through a rush to a window at its end.
+		local clip = attackClip({
+			events = {
+				{ time = 6 * F, kind = "SmearOn" },
+				{ time = 7 * F, kind = "TrailOn" },
+				{ time = 8 * F, kind = "SmearOff" },
+				{ time = 40 * F, kind = "HitWindowOpen" },
+				{ time = 48 * F, kind = "HitWindowClose" },
+				{ time = 49 * F, kind = "TrailOff" },
+			},
+		})
+		local timing = ReviewMarkers.trailTiming(clip)
+		expect(timing.leadFrames).toBeCloseTo(0)
+		expect(timing.lagFrames).toBeCloseTo(1)
+		expect(timing.stray).toBe(0)
+		-- The trail is fine; the window is not: it opens long after the strike's snap (6f..9f), so
+		-- the cut itself is never swept. The window must open on the snap and run through the rush.
+		expect(ReviewMarkers.problems(clip)).toEqual({
+			"hit window 1 opens 34.00 frames after its snap starts (f 6.00)",
+		})
+		-- Opened on the snap with the trail, the same rush reviews clean.
+		clip.events = {
+			{ time = 6 * F, kind = "TrailOn" },
+			{ time = 6 * F, kind = "SmearOn" },
+			{ time = 6 * F, kind = "HitWindowOpen" },
+			{ time = 8 * F, kind = "SmearOff" },
+			{ time = 48 * F, kind = "HitWindowClose" },
+			{ time = 49 * F, kind = "TrailOff" },
+		}
+		expect(ReviewMarkers.problems(clip)).toEqual({})
+	end)
+
+	it("flags a hit window the trail does not cover and a stray trail span", function()
+		local clip = attackClip({
+			events = {
+				{ time = 6 * F, kind = "SmearOn" },
+				{ time = 6 * F, kind = "HitWindowOpen" },
+				{ time = 8 * F, kind = "SmearOff" },
+				{ time = 9 * F, kind = "TrailOn" }, -- ignites after the window opened
+				{ time = 10 * F, kind = "HitWindowClose" },
+				{ time = 12 * F, kind = "TrailOff" },
+				{ time = 30 * F, kind = "TrailOn" }, -- nowhere near a window
+				{ time = 34 * F, kind = "TrailOff" },
+			},
+		})
+		local timing = ReviewMarkers.trailTiming(clip)
+		expect(timing.uncovered).toEqual({ 1 })
+		expect(timing.stray).toBe(1)
+		local problems = ReviewMarkers.problems(clip)
+		expect(problems).toContain("trail off during hit window 1")
+		expect(problems).toContain("trail on outside any hit window (1 span)")
+	end)
+
+	it("flags a trail that ignites too early or lingers too long", function()
+		local clip = attackClip({
+			events = {
+				{ time = 0, kind = "TrailOn" },
+				{ time = 8 * F, kind = "SmearOn" },
+				{ time = 8 * F, kind = "HitWindowOpen" },
+				{ time = 10 * F, kind = "SmearOff" },
+				{ time = 12 * F, kind = "HitWindowClose" },
+				{ time = 32 * F, kind = "TrailOff" },
+			},
+		})
+		local problems = ReviewMarkers.problems(clip)
+		expect(problems).toContain(("trail ignites 8.0 frames early (max %d)"):format(Dev.review.trailLeadFramesMax))
+		expect(problems).toContain(("trail lingers 20.0 frames (max %d)"):format(Dev.review.trailLagFramesMax))
+	end)
+
+	it("an unclosed TrailOn runs to the clip end and a missing trail is a problem", function()
+		local spans = ReviewMarkers.eventSpans(
+			attackClip({ events = { { time = 0.5, kind = "TrailOn" } } }),
+			"TrailOn",
+			"TrailOff"
+		)
+		expect(spans).toEqual({ { start = 0.5, finish = 1.0 } })
+		local clip = attackClip({
+			events = { { time = 6 * F, kind = "HitWindowOpen" }, { time = 10 * F, kind = "HitWindowClose" } },
+		})
+		local problems = ReviewMarkers.problems(clip)
+		expect(problems).toContain("no trail")
+		expect(problems).toContain("no smear")
+	end)
+end)
+
+describe("ReviewMarkers problems", function()
+	it("reports Linear on a limb but not on a root-only key", function()
+		local clip = attackClip()
+		clip.keys[2].easing = "Linear"
+		expect(ReviewMarkers.linearLimbKeys(clip)).toEqual({ 2 })
+		expect(ReviewMarkers.problems(clip)).toContain("Linear on a limb at key 2")
+		clip = attackClip()
+		table.insert(clip.keys, 4, { time = 15 * F, easing = "Linear", joints = {}, root = { pos = { 0, 0, -2 } } })
+		expect(ReviewMarkers.linearLimbKeys(clip)).toEqual({})
+	end)
+
+	it("checks the Snap, Settle and player Anticipation budgets and the hit-stop tier", function()
+		local clip = attackClip()
+		clip.beats.Snap = { start = 6 * F, finish = 12 * F }
+		clip.beats.Settle = { start = 12 * F, finish = 30 * F }
+		clip.beats.Anticipation = { start = 0, finish = 2 * F }
+		clip.hitStop = nil
+		local problems = ReviewMarkers.problems(clip)
+		expect(problems).toContain("Snap 6.0 frames (want 2..4)")
+		expect(problems).toContain("Settle 18.0 frames (want 6..12)")
+		expect(problems).toContain("Anticipation 2.0 frames (want 4..10)")
+		expect(problems).toContain("no hitStop tier")
+	end)
+
+	it("a player basic attack is held to the same Anticipation budget as an Art", function()
+		local clip = attackClip({ id = "player/OneHandedSword/Basic9" })
+		clip.beats.Anticipation = { start = 0, finish = 14 * F }
+		expect(ReviewMarkers.problems(clip)).toContain("Anticipation 14.0 frames (want 4..10)")
+	end)
+
+	it("an enemy wind-up longer than ten frames is not a problem", function()
+		local clip = attackClip({ id = "enemy/Boar/TestCharge", rig = "Boar" })
+		clip.beats.Anticipation = { start = 0, finish = 0.6 }
+		clip.beats.Snap = { start = 0.6, finish = 0.6 + 3 * F }
+		clip.beats.Smear = { start = 0.6, finish = 0.6 + 2 * F }
+		clip.beats.Hold = { start = 0.6 + 3 * F, finish = 0.6 + 5 * F }
+		clip.beats.Settle = { start = 0.6 + 5 * F, finish = 0.6 + 12 * F }
+		clip.beats.Recovery = { start = 0.9, finish = 1.0 }
+		clip.events = {
+			{ time = 0.6, kind = "SmearOn" },
+			{ time = 0.6, kind = "TrailOn" },
+			{ time = 0.6, kind = "HitWindowOpen" },
+			{ time = 0.6 + 2 * F, kind = "SmearOff" },
+			{ time = 0.6 + 4 * F, kind = "HitWindowClose" },
+			{ time = 0.6 + 5 * F, kind = "TrailOff" },
+		}
+		expect(ReviewMarkers.problems(clip)).toEqual({})
+	end)
+
+	it("a non-attack clip only reports Linear limbs", function()
+		local idle = {
+			id = "player/OneHandedSword/TestIdle",
+			rig = "PlayerR15",
+			duration = 2,
+			loop = true,
+			layer = "Base",
+			keys = {
+				{ time = 0, easing = "SineInOut", joints = { Neck = { rot = { 0, 0, 0 } } } },
+				{ time = 1, easing = "Linear", joints = { Neck = { rot = { 2, 0, 0 } } } },
+			},
+			events = {},
+		}
+		expect(ReviewMarkers.problems(idle)).toEqual({ "Linear on a limb at key 2" })
+		idle.keys[2].easing = "SineInOut"
+		expect(ReviewMarkers.problems(idle)).toEqual({})
+	end)
+end)
+
+-- A three-strike Art like Sharp Nail: a start pose eased in over 9 frames (ExpoOut, not a strike),
+-- then three anticipation / re-wind keys each followed by an ExpoOut snap of 3, 2 and 4 frames, and
+-- a last ExpoOut flourish over 5 frames (outside the Snap budget, so not a strike). Each hit window
+-- opens on its snap's first frame and closes in the settle.
+local function threeStrikeClip(): any
+	local function arm(x: number): any
+		return { RightShoulder = { rot = { x, 0, 0 } } }
+	end
+	local clip = attackClip({ duration = 1.4 })
+	clip.keys = {
+		{ time = 0, easing = "QuadOut", joints = arm(0), root = { pos = { 0, 0, 0 } } },
+		{ time = 9 * F, easing = "ExpoOut", joints = arm(-40) },
+		{ time = 15 * F, easing = "QuadIn", joints = arm(-60) },
+		{ time = 18 * F, easing = "ExpoOut", joints = arm(70) },
+		{ time = 26 * F, easing = "Spring", joints = arm(64) },
+		{ time = 30 * F, easing = "QuadIn", joints = arm(80) },
+		{ time = 32 * F, easing = "ExpoOut", joints = arm(-30) },
+		{ time = 40 * F, easing = "Spring", joints = arm(-24) },
+		{ time = 44 * F, easing = "QuadIn", joints = arm(-50) },
+		{ time = 48 * F, easing = "ExpoOut", joints = arm(90) },
+		{ time = 56 * F, easing = "Spring", joints = arm(84) },
+		{ time = 61 * F, easing = "ExpoOut", joints = arm(100), root = { pos = { 0, 0, 0 } } },
+		{ time = 1.4, easing = "SineInOut", joints = arm(98), root = { pos = { 0, 0, -2 } } },
+	}
+	clip.events = {
+		{ time = 15 * F, kind = "TrailOn" },
+		{ time = 15 * F, kind = "SmearOn" },
+		{ time = 15 * F, kind = "HitWindowOpen" },
+		{ time = 17 * F, kind = "SmearOff" },
+		{ time = 24 * F, kind = "HitWindowClose" },
+		{ time = 30 * F, kind = "SmearOn" },
+		{ time = 30 * F, kind = "HitWindowOpen" },
+		{ time = 32 * F, kind = "SmearOff" },
+		{ time = 38 * F, kind = "HitWindowClose" },
+		{ time = 44 * F, kind = "SmearOn" },
+		{ time = 44 * F, kind = "HitWindowOpen" },
+		{ time = 46 * F, kind = "SmearOff" },
+		{ time = 54 * F, kind = "HitWindowClose" },
+		{ time = 56 * F, kind = "TrailOff" },
+		{ time = 62 * F, kind = "PostMotionStart" },
+	}
+	clip.beats = {
+		Anticipation = { start = 9 * F, finish = 15 * F },
+		Snap = { start = 15 * F, finish = 18 * F },
+		Smear = { start = 15 * F, finish = 17 * F },
+		Hold = { start = 18 * F, finish = 20 * F },
+		Settle = { start = 20 * F, finish = 26 * F },
+		Recovery = { start = 62 * F, finish = 1.4 },
+	}
+	return clip
+end
+
+local function expectSpans(actual: { { start: number, finish: number } }, expected: { { number } })
+	expect(#actual).toBe(#expected)
+	for index, span in expected do
+		expect(actual[index].start).toBeCloseTo(span[1], 1e-9)
+		expect(actual[index].finish).toBeCloseTo(span[2], 1e-9)
+	end
+end
+
+describe("ReviewMarkers strike snaps and hit windows", function()
+	it(
+		"the first strike is the beats Snap; each later one is an ExpoOut key 2..4 frames after the key before",
+		function()
+			expectSpans(ReviewMarkers.strikeSnaps(attackClip()), { { 6 * F, 9 * F } })
+			local clip = threeStrikeClip()
+			local strikes = { { 15 * F, 18 * F }, { 30 * F, 32 * F }, { 44 * F, 48 * F } }
+			expectSpans(ReviewMarkers.strikeSnaps(clip), strikes)
+			-- Without a beats Snap the first strike is read from the keys too; the 9-frame start pose
+			-- and the 5-frame flourish stay out.
+			clip.beats.Snap = nil
+			expectSpans(ReviewMarkers.strikeSnaps(clip), strikes)
+			-- A root-only ExpoOut key is not a strike.
+			clip = threeStrikeClip()
+			clip.keys[7].joints = {}
+			expectSpans(ReviewMarkers.strikeSnaps(clip), { { 15 * F, 18 * F }, { 44 * F, 48 * F } })
+		end
+	)
+
+	it("passes windows that open on (or before) their snap's start and close after its end", function()
+		expect(ReviewMarkers.windowSnapProblems(threeStrikeClip())).toEqual({})
+		expect(ReviewMarkers.problems(threeStrikeClip())).toEqual({})
+		local early = threeStrikeClip()
+		early.events[3].time = 14 * F -- the first window opens a frame before its snap
+		table.insert(early.events, 1, table.remove(early.events, 3))
+		expect(ReviewMarkers.windowSnapProblems(early)).toEqual({})
+		-- A window written to four decimals (0.3667 for frame 22, 0.002 frames late) is within the
+		-- tolerance, which stays far under half a frame (that would skip most of an ExpoOut cut).
+		local written = attackClip()
+		written.beats.Snap = { start = 22 * F, finish = 25 * F }
+		written.events = {
+			{ time = 0.3667, kind = "HitWindowOpen" },
+			{ time = 0.45, kind = "HitWindowClose" },
+		}
+		expect(Dev.review.windowSnapToleranceFrames).toBeLessThan(0.5)
+		expect(ReviewMarkers.windowSnapProblems(written)).toEqual({})
+		-- A clip without hit windows has nothing to pair.
+		expect(ReviewMarkers.windowSnapProblems(attackClip({ events = {} }))).toEqual({})
+	end)
+
+	it("names a window that opens into its snap, one that closes inside it, and a count mismatch", function()
+		local clip = threeStrikeClip()
+		clip.events[7].time = 31.2 * F -- the second window opens 1.2 frames into its 2-frame snap
+		clip.events[13].time = 47 * F -- the third closes a frame before its snap lands
+		local expected = {
+			"hit window 2 opens 1.20 frames after its snap starts (f 30.00)",
+			"hit window 3 closes 1.00 frames before its snap ends (f 48.00)",
+		}
+		expect(ReviewMarkers.windowSnapProblems(clip)).toEqual(expected)
+		for _, message in expected do
+			expect(ReviewMarkers.problems(clip)).toContain(message)
+		end
+		-- Just past the tolerance is already late.
+		local late = attackClip()
+		late.events[4].time = 6 * F + 2 * Dev.review.windowSnapToleranceFrames * F
+		expect(ReviewMarkers.windowSnapProblems(late)).toEqual({
+			"hit window 1 opens 0.02 frames after its snap starts (f 6.00)",
+		})
+		-- The third strike eased over 5 frames is no snap: three windows, two strikes.
+		local slow = threeStrikeClip()
+		slow.keys[9].time = 43 * F
+		expect(ReviewMarkers.windowSnapProblems(slow)).toEqual({
+			"3 hit windows but 2 strike snaps (ExpoOut keys 2..4 frames after the key before)",
+		})
+	end)
+end)
+
+describe("ReviewMarkers root motion and markers", function()
+	it("measures the carry between the first and last root position", function()
+		expect(ReviewMarkers.rootMotion(attackClip())).toBeCloseTo(4)
+		local still = attackClip()
+		for _, key in still.keys do
+			key.root = nil
+		end
+		expect(ReviewMarkers.rootMotion(still)).toBe(0)
+	end)
+
+	it("lays the beats, hit windows, trail, smear and other events in lanes with palette tokens", function()
+		local Palette = Harness.load("src/shared/data/palette")
+		local markers = ReviewMarkers.markers(attackClip())
+		local lanes = {}
+		for _, marker in markers do
+			lanes[marker.lane] = (lanes[marker.lane] or 0) + 1
+			expect(Palette.tokens[marker.token]).never.toBeNil()
+			expect(marker.finish).toBeGreaterThanOrEqual(marker.start)
+		end
+		expect(lanes.Beats).toBe(6)
+		expect(lanes.HitWindows).toBe(1)
+		expect(lanes.TrailSmear).toBe(2)
+		expect(lanes.Events).toBe(3) -- ActivationHold, PostMotionStart, Footstep
+	end)
+end)
+
+describe("ReviewMarkers rows and markdown", function()
+	it("builds a row and a markdown line that carries hand-filled cells over", function()
+		local row = ReviewMarkers.row(attackClip())
+		expect(row.id).toBe("player/OneHandedSword/TestArt")
+		expect(row.attack).toBe(true)
+		expect(#row.beats).toBe(6)
+		expect(row.problems).toEqual({})
+		local header = ReviewMarkers.markdownHeader()
+		expect(#header).toBe(2)
+		local columns = ReviewMarkers.splitMarkdownLine(header[1])
+		local line = ReviewMarkers.markdownLine(row, { "yes", "arm pops at f 9", "no" })
+		local cells = ReviewMarkers.splitMarkdownLine(line)
+		expect(#cells).toBe(#columns)
+		expect(cells[1]).toBe("`player/OneHandedSword/TestArt`")
+		expect(cells[3]).toBe("attack")
+		expect(cells[5]).toBe("Y 6f")
+		expect(cells[#cells - 2]).toBe("yes")
+		expect(cells[#cells - 1]).toBe("arm pops at f 9")
+		expect(cells[#cells]).toBe("no")
+		expect(line:find("|", 1, true)).never.toBeNil()
+	end)
+
+	it("escapes pipes inside cells so the table stays rectangular", function()
+		local row = ReviewMarkers.row(attackClip())
+		local line = ReviewMarkers.markdownLine(row, { "a | b", "", "" })
+		local cells = ReviewMarkers.splitMarkdownLine(line)
+		expect(#cells).toBe(#ReviewMarkers.splitMarkdownLine(ReviewMarkers.markdownHeader()[1]))
+		expect(cells[#cells - 2]).toBe("a / b")
+	end)
+
+	it("the hand-written Horizontal clip reviews clean", function()
+		local clip = ClipLibrary.get("player/OneHandedSword/Horizontal")
+		local row = ReviewMarkers.row(clip)
+		expect(row.problems).toEqual({})
+		expect(row.hitStop).toBe("Normal")
+		expect(#row.hitWindows).toBe(1)
+		expect(row.rootMotion).toBeCloseTo(1)
+		for _, beat in row.beats do
+			expect(beat.present).toBe(true)
+		end
+	end)
+end)
+
+-- A clean draw: sheathed, the hand takes the sword at 0.2 s, where a key lines the blade up.
+local function drawClip(): any
+	return {
+		id = "player/OneHandedSword/TestDraw",
+		rig = "PlayerR15",
+		duration = 0.6,
+		loop = false,
+		sheathed = true,
+		layer = "UpperBody",
+		priority = 8,
+		keys = {
+			{ time = 0, easing = "SineInOut", joints = { RightShoulder = { rot = { 30, 0, 10 } } } },
+			{
+				time = 0.2,
+				easing = "QuadOut",
+				joints = { RightShoulder = { rot = { 170, 30, 0 } }, Weapon = { rot = { -6, -77, -3 } } },
+			},
+			{
+				time = 0.6,
+				easing = "Spring",
+				joints = { RightShoulder = { rot = { 30, 0, 10 } }, Weapon = { rot = { -50, 0, 0 } } },
+			},
+		},
+		events = { { time = 0.2, kind = "WeaponDraw" } },
+	}
+end
+
+-- A clean sheathe: the sword starts in the hand and goes to the back at 0.42 s.
+local function sheatheClip(): any
+	return {
+		id = "player/OneHandedSword/TestSheathe",
+		rig = "PlayerR15",
+		duration = 0.7,
+		loop = false,
+		layer = "UpperBody",
+		priority = 8,
+		keys = {
+			{
+				time = 0,
+				easing = "SineInOut",
+				joints = { RightShoulder = { rot = { 3, 0, 4 } }, Weapon = { rot = { 0, 0, 0 } } },
+			},
+			{
+				time = 0.42,
+				easing = "QuadOut",
+				joints = { RightShoulder = { rot = { 170, 30, 0 } }, Weapon = { rot = { -6, -77, -3 } } },
+			},
+			{ time = 0.7, easing = "Spring", joints = { RightShoulder = { rot = { 3, 0, 4 } } } },
+		},
+		events = { { time = 0.42, kind = "WeaponSheathe" } },
+	}
+end
+
+local function count(list: { string }, item: string): number
+	local n = 0
+	for _, value in list do
+		if value == item then
+			n += 1
+		end
+	end
+	return n
+end
+
+describe("ReviewMarkers sheath mount", function()
+	it("puts the sword on the back before a WeaponDraw and after a WeaponSheathe", function()
+		local draw = drawClip()
+		expect(ReviewMarkers.mountAt(draw, 0)).toBe("Back")
+		expect(ReviewMarkers.mountAt(draw, 0.199)).toBe("Back")
+		expect(ReviewMarkers.mountAt(draw, 0.2)).toBe("Hand")
+		expect(ReviewMarkers.mountAt(draw, 0.6)).toBe("Hand")
+		local sheathe = sheatheClip()
+		expect(ReviewMarkers.mountAt(sheathe, 0)).toBe("Hand")
+		expect(ReviewMarkers.mountAt(sheathe, 0.419)).toBe("Hand")
+		expect(ReviewMarkers.mountAt(sheathe, 0.42)).toBe("Back")
+		expect(ReviewMarkers.mountAt(sheathe, 0.7)).toBe("Back")
+	end)
+
+	it("keeps an unsheathed clip in the hand and a sheathed loop on the back", function()
+		expect(ReviewMarkers.mountAt(attackClip(), 0)).toBe("Hand")
+		expect(ReviewMarkers.mountAt(attackClip(), 1)).toBe("Hand")
+		local walk = drawClip()
+		walk.events = {}
+		for _, key in walk.keys do
+			key.joints.Weapon = nil
+		end
+		expect(ReviewMarkers.mountAt(walk, 0)).toBe("Back")
+		expect(ReviewMarkers.mountAt(walk, 0.6)).toBe("Back")
+		expect(ReviewMarkers.mountProblems(walk)).toEqual({})
+	end)
+
+	it("passes a clean draw, a clean sheathe and the real Draw and Sheathe clips", function()
+		expect(ReviewMarkers.mountProblems(drawClip())).toEqual({})
+		expect(ReviewMarkers.mountProblems(sheatheClip())).toEqual({})
+		expect(ReviewMarkers.problems(drawClip())).toEqual({})
+		expect(ReviewMarkers.problems(sheatheClip())).toEqual({})
+		for _, name in { "Draw", "Sheathe", "Idle", "WalkForward", "Run", "Sprint" } do
+			local clip = ClipLibrary.get("player/OneHandedSword/" .. name)
+			expect(ReviewMarkers.problems(clip)).toEqual({})
+		end
+	end)
+
+	it("flags sheathed when it is not a boolean", function()
+		local clip = drawClip()
+		clip.sheathed = "yes"
+		expect(count(ReviewMarkers.mountProblems(clip), "sheathed must be a boolean")).toBe(1)
+	end)
+
+	it("flags a second WeaponDraw, a second WeaponSheathe, both kinds, and event data", function()
+		local twice = drawClip()
+		table.insert(twice.events, { time = 0.3, kind = "WeaponDraw" })
+		expect(ReviewMarkers.mountProblems(twice)).toEqual({ "2 WeaponDraw events (at most one)" })
+
+		local twiceBack = sheatheClip()
+		table.insert(twiceBack.events, { time = 0.5, kind = "WeaponSheathe" })
+		expect(ReviewMarkers.mountProblems(twiceBack)).toEqual({ "2 WeaponSheathe events (at most one)" })
+
+		local both = sheatheClip()
+		table.insert(both.events, 1, { time = 0.1, kind = "WeaponDraw" })
+		local problems = ReviewMarkers.mountProblems(both)
+		expect(count(problems, "both WeaponDraw and WeaponSheathe (one clip moves the sword one way)")).toBe(1)
+
+		local withData = drawClip()
+		withData.events[1].data = { foot = "Left" }
+		expect(ReviewMarkers.mountProblems(withData)).toEqual({ "WeaponDraw carries data" })
+	end)
+
+	it("flags a WeaponDraw in an unsheathed clip and a WeaponSheathe in a sheathed one", function()
+		local draw = drawClip()
+		draw.sheathed = nil
+		expect(ReviewMarkers.mountProblems(draw)).toEqual({ "WeaponDraw in a clip that is not sheathed" })
+		local sheathe = sheatheClip()
+		sheathe.sheathed = true
+		local problems = ReviewMarkers.mountProblems(sheathe)
+		expect(count(problems, "WeaponSheathe in a sheathed clip")).toBe(1)
+	end)
+
+	it("flags a Weapon key on the back and a WeaponDraw with no Weapon key at its time", function()
+		local early = drawClip()
+		early.keys[1].joints.Weapon = { rot = { -50, 0, 0 } }
+		expect(ReviewMarkers.mountProblems(early)).toEqual({ "key 1 moves Weapon while the sword is on the back" })
+
+		local missing = drawClip()
+		missing.keys[2].joints.Weapon = nil
+		expect(ReviewMarkers.mountProblems(missing)).toEqual({ "no key at the WeaponDraw (0.200 s) moves Weapon" })
+	end)
+
+	it("flags a Weapon key after the WeaponSheathe", function()
+		local clip = sheatheClip()
+		clip.keys[3].joints.Weapon = { rot = { 0, 0, 0 } }
+		expect(ReviewMarkers.mountProblems(clip)).toEqual({ "key 3 moves Weapon after the WeaponSheathe" })
+	end)
+
+	it("flags a trail, smear or hit window while the sword is on the back", function()
+		local clip = drawClip()
+		table.insert(clip.events, 1, { time = 0.1, kind = "TrailOn" })
+		expect(ReviewMarkers.mountProblems(clip)).toEqual({ "TrailOn at 0.100 s while the sword is on the back" })
+		local late = sheatheClip()
+		table.insert(late.events, { time = 0.5, kind = "SmearOn" })
+		expect(ReviewMarkers.mountProblems(late)).toEqual({ "SmearOn at 0.500 s while the sword is on the back" })
+	end)
+
+	it("flags a sheathed attack (attacks are draw-cuts)", function()
+		local clip = attackClip({ sheathed = true })
+		local problems = ReviewMarkers.mountProblems(clip)
+		expect(count(problems, "an attack is never sheathed (attacks are draw-cuts)")).toBe(1)
+		expect(count(ReviewMarkers.problems(clip), "an attack is never sheathed (attacks are draw-cuts)")).toBe(1)
+	end)
+
+	it("lists the sheath problems of a non-attack clip in the review", function()
+		local clip = drawClip()
+		clip.sheathed = nil
+		expect(ReviewMarkers.problems(clip)).toEqual({ "WeaponDraw in a clip that is not sheathed" })
+	end)
+
+	it("draws WeaponDraw and WeaponSheathe in the Events lane with their palette tokens", function()
+		local Palette = Harness.load("src/shared/data/palette")
+		local tokens = Dev.clipLab.timeline.eventTokens
+		for _, case in { { drawClip(), "WeaponDraw" }, { sheatheClip(), "WeaponSheathe" } } do
+			local found = nil
+			for _, marker in ReviewMarkers.markers(case[1]) do
+				if marker.kind == case[2] then
+					found = marker
+				end
+			end
+			expect(found).never.toBeNil()
+			expect(found.lane).toBe("Events")
+			expect(found.token).toBe(tokens[case[2]])
+			expect(Palette.tokens[found.token]).never.toBeNil()
+		end
+	end)
+end)

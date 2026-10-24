@@ -1,3 +1,4 @@
+--!strict
 local Verlet = Harness.load("src/shared/util/Verlet")
 
 describe("Verlet", function()
