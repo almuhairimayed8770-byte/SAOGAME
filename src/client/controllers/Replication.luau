@@ -307,6 +307,9 @@ type Rush = {
 	ground: ((spot: Vector3) -> number?)?,
 }
 local rushes: { [number]: Rush } = {}
+-- enemy id -> the server time of the last rush launch heard (RushStarted): a Telegraph from before
+-- it is that launch's own wind-up, or an older one, come late (it is unreliable; RushStarted is not).
+local launches: { [number]: number } = {}
 
 local function dependencies(): Deps
 	if deps == nil then
@@ -1035,6 +1038,12 @@ function handlers.Telegraph(payload: any)
 	if record == nil then
 		return
 	end
+	local launched = launches[record.id]
+	if launched ~= nil and payload.serverTime < launched then
+		-- Out of order: this wind-up has launched (or a later one has) and the rush is drawn on the
+		-- server's line already. Armed again as a guess it drew the running body back to the crouch.
+		return
+	end
 	-- On the server's beat: the wind-up began serverTime, this long ago (D-172).
 	local now = serverClock()
 	local lateBy = if now ~= nil then math.max(0, now - payload.serverTime) else nil
@@ -1067,6 +1076,7 @@ function handlers.RushStarted(payload: any)
 	if record == nil or not hasRushDraw then
 		return
 	end
+	launches[record.id] = math.max(launches[record.id] or -math.huge, payload.serverTime)
 	local _, attackDef = attackDefOf(record, payload.attackId, nil)
 	local line = {
 		origin = toVector(payload.origin),
@@ -1778,6 +1788,7 @@ function Replication.unwatch(record: any)
 	destroyDriver(record.id)
 	endRush(record.id)
 	attacks[record.id] = nil
+	launches[record.id] = nil
 	stateClips[record.id] = nil
 	trailKinds[record.id] = nil
 	clipSpeeds[record.id] = nil
@@ -1808,6 +1819,7 @@ function Replication.bind(newDeps: Deps)
 		endRush(id)
 	end
 	table.clear(attacks)
+	table.clear(launches)
 	holdRun = 0
 	holdEnds = -math.huge
 	playSeconds = 0

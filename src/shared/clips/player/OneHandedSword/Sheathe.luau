@@ -2,22 +2,24 @@
 --[[
 	player/OneHandedSword/Sheathe: the sword goes back on the back (UpperBody, the right arm and the
 	head only, so it plays over any base). It plays once the server's Drawn attribute has stayed
-	false for choreo.luau sheath.sheatheDelay, when the base is already the sheathed set, and starts
-	with the arm relaxed, the sword still in the hand with its point forward, the hand a little out
-	from the side so the guard clears a run's rising thigh. The hand sinks (anticipation), swings
-	the blade up in front and over the right shoulder, the point drops behind the head into the
-	scabbard's mouth with the arm high. The three moves of the swing (0.08, 0.18, 0.275, 0.37 s)
-	each get time in step with how far the tip travels (about 6 studs each), so none peaks past
-	107 studs a second, 1.8 a 60 Hz frame (choreo.luau sheath.sheatheTipSpeed); the flip from over
-	the shoulder into the mouth is no longer packed into 0.06 s. An edge
-	goes out through the scabbard's wall for 7 ms (0.355 to 0.363 s, under two frames at 240 Hz,
-	at most 0.13 studs), and the blade slides home along the sheath line, speeding up and
-	then slowing into the seat at 0.42 s (WeaponSheathe: the Weapon key there lines the blade up
-	with the back mount exactly). The middle key is Draw's, solved so that both moves keep the blade
-	inside the scabbard's walls and the guard off the head; the wrist turns about the grip on the
-	way, the blade does not. The head tucks and leans away from the arm while the hilt passes behind
-	it. The hand lets go and falls back to the side with a small spring settle. After WeaponSheathe
-	no key moves Weapon.
+	false for choreo.luau sheath.sheatheDelay. The base keeps the drawn set under it until it has
+	faded in over the arm (Locomotion: the sheathed run and sprint pump an empty sword arm), then
+	goes on to the sheathed set. It starts with the arm relaxed, the sword still in the hand with its
+	point forward, the hand a little out from the side so the guard clears a run's rising thigh. The
+	hand sinks (anticipation), swings the blade up in front and over the right shoulder, the point
+	drops behind the head into the scabbard's mouth with the arm high. The three moves of the swing
+	(0.08 to 0.22, 0.345 and 0.485 s) each get time in step with how far the tip travels and ease in
+	and out, so on the client's own path none moves the tip past 78 studs a second (1.3 a 60 Hz
+	frame) or turns the blade past 1030 degrees a second (choreo.luau sheath.sheatheTipSpeed and
+	bladeTurnRate, tests/choreo/SheathTip.spec.luau): a whip, where the point used to swing down
+	into the mouth 1.7 studs and 25 degrees in one frame from a near stop. An edge goes out through
+	the scabbard's wall for 12 ms (0.463 to 0.475 s, under one 60 Hz frame, at most 0.14 studs), and
+	the blade slides home along the sheath line, speeding up and then slowing into the seat at
+	0.535 s (WeaponSheathe: the Weapon key there lines the blade up with the back mount exactly).
+	The middle key is Draw's, solved so that both moves keep the blade inside the scabbard's walls
+	and the guard off the head; the wrist turns about the grip on the way, the blade does not. The
+	head tucks and leans away from the arm while the hilt passes behind it. The hand lets go and
+	falls back to the side with a small spring settle. After WeaponSheathe no key moves Weapon.
 	Rotations: X+ swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -34,7 +36,7 @@ end
 local clip: Types.ClipDef = {
 	id = "player/OneHandedSword/Sheathe",
 	rig = "PlayerR15",
-	duration = 0.7,
+	duration = 0.815,
 	loop = false,
 	layer = "UpperBody",
 	priority = 8,
@@ -68,7 +70,7 @@ local clip: Types.ClipDef = {
 		},
 		{
 			-- the blade swings up in front and stands straight up
-			time = 0.18,
+			time = 0.22,
 			easing = "SineInOut",
 			joints = {
 				Neck = rot(0, 6, 2),
@@ -80,7 +82,7 @@ local clip: Types.ClipDef = {
 		},
 		{
 			-- over the shoulder: the hand high, the point dropping behind the head
-			time = 0.275,
+			time = 0.345,
 			easing = "SineInOut",
 			joints = {
 				Neck = rot(-3, 9, 4),
@@ -93,7 +95,7 @@ local clip: Types.ClipDef = {
 		{
 			-- the point finds the sheath: the arm high, the blade on the sheath line with
 			-- its lower part already in the mouth
-			time = 0.37,
+			time = 0.485,
 			easing = "SineInOut",
 			joints = {
 				RightShoulder = rot(160.8, 22.5, 27.6),
@@ -105,7 +107,7 @@ local clip: Types.ClipDef = {
 		{
 			-- the blade slides home along the sheath line, speeding up, then slowing into the seat;
 			-- on both moves it stays inside the scabbard's walls
-			time = 0.395,
+			time = 0.51,
 			easing = "QuadIn",
 			joints = {
 				RightShoulder = rot(160.3, 41.4, 46.5),
@@ -116,7 +118,7 @@ local clip: Types.ClipDef = {
 		},
 		{
 			-- the blade slides home (WeaponSheathe): the grip on the back mount
-			time = 0.42,
+			time = 0.535,
 			easing = "QuadOut",
 			joints = {
 				RightShoulder = rot(190.1, 56.8, 22),
@@ -127,7 +129,7 @@ local clip: Types.ClipDef = {
 		},
 		{
 			-- the hand lets go and comes off the hilt beside the head
-			time = 0.5,
+			time = 0.615,
 			easing = "QuadOut",
 			joints = {
 				Neck = rot(-3, 9, 4),
@@ -138,7 +140,7 @@ local clip: Types.ClipDef = {
 		},
 		{
 			-- the arm falls to the side and swings a little past it
-			time = 0.62,
+			time = 0.735,
 			easing = "SineInOut",
 			joints = {
 				Neck = rot(1, 4, 1),
@@ -149,7 +151,7 @@ local clip: Types.ClipDef = {
 		},
 		{
 			-- settle: the hand back at the side, the sheathed idle's arm
-			time = 0.7,
+			time = 0.815,
 			easing = "Spring",
 			joints = {
 				Neck = rot(3, 1, 0),
@@ -160,7 +162,7 @@ local clip: Types.ClipDef = {
 		},
 	},
 	events = {
-		{ time = 0.42, kind = "WeaponSheathe" },
+		{ time = 0.535, kind = "WeaponSheathe" },
 	},
 }
 

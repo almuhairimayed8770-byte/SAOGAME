@@ -620,10 +620,10 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
 113. [ ] **Capture Art hold at 0.25x.** Hold an Art key for more than 0.5 s. The glowing stance should stay frozen (the 0.5 s re-apply no longer unfreezes it), and releasing it launches the Art.
 114. [ ] **Capture run at 0.25x.** Run forward, then sprint, then curve. Expect the Run set (Sprint while sprinting) slowed with feet planted, not a fast walk (D-127 clockScale), and the turn lean to show on the curve.
 115. [ ] **Lock-on strafe.** Lock onto a boar and hold A, then D, for 4 s each, sheathed and drawn. Check at 0.25x time scale that the planted foot stays put. Expected: Studio-criterion slide ≤ 0.02 and about 22 stances in 4 s. Also try W+A and W+D (expect ≤ 0.1 sheathed, ≤ 0.25 drawn) and S+A and S+D (≤ 0.12). Judge by eye whether the ~5.5 steps/s chassé reads as a quick guarded sidestep and not a scurry.
-116. [ ] **Sheathe at 60 fps.** Draw, then sheathe, and frame-step the flip over the shoulder into the sheath. Expected: no frame moves the tip more than about 1.8 studs, the blade slides in with no teleport, and no edge pokes out of the back past the hilt.
+116. [ ] **Sheathe at 60 fps.** Draw, then sheathe, and frame-step the flip over the shoulder into the sheath. Expected: no frame moves the tip more than about 1.8 studs, the blade slides in with no teleport, and no edge pokes out of the back past the hilt. Superseded by item 213.
 117. [ ] **Direction snaps while locked.** Tap A to D, and W to A, at walkSpeed. Note any one-step foot skate; the probe shows up to about 1.9 studs on the first plant after a full reversal.
 118. [ ] **Light stick tilt on diagonals while locked (gamepad).** Lock a boar and tilt the stick only slightly forward-right, then back-right (about 2 studs/s), sheathed and drawn. Watch for the trailing foot briefly tapping or scuffing the ground mid-swing with no footstep sound (the probe shows 0.12–0.23 s taps at ±22.5°, ±45° and ±157.5°), and report whether it is visible.
-119. [ ] **Draw at 60 fps.** Frame-step a Draw. The probe has the tip moving about 3.4 studs in one frame near 0.45 s (unchanged from before). Report whether it reads as a whip or a pop; this decides whether Draw needs a tip-speed cap like Sheathe's.
+119. [ ] **Draw at 60 fps.** Frame-step a Draw. The probe has the tip moving about 3.4 studs in one frame near 0.45 s (unchanged from before). Report whether it reads as a whip or a pop; this decides whether Draw needs a tip-speed cap like Sheathe's. Superseded by item 212 (D-219 gives Draw a cap).
 
 ## S. After the wake and feet round (D-132 to D-137)
 
@@ -856,3 +856,34 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
 211. [ ] **A lost RushEnded (D-218).** In a scratch copy of the client, make handlers.RushEnded return at once, then ram a boar into a wall at 0 and 0.25 s of Incoming Replication Lag.
    (a) Pass: the snout reaches the face, the dust and thud play once there, and the hand-back finishes in about 1 s with no visible slide.
    (b) Restore the handler afterwards.
+
+## AB. Draw, sheathe and lost rush messages (D-219 to D-226)
+
+212. [ ] **Draw as one whip (D-219; replaces item 119).** In Playground at 1x and 60 fps, lock on while standing, walking, running and sprinting.
+   (a) Pass: the Draw reads as one continuous whip: off the back, over the shoulder, up to straight, then down into the carry with a small spring back.
+   (b) Pass: no frame jumps the blade from straight up to the guard.
+213. [ ] **Sheathe after the combat tag (D-219, D-220; replaces item 116).** Let the combat tag run out (6 s + 0.3 s) while standing, walking, running and sprinting.
+   (a) Pass: the arm keeps the drawn carry through the delay, with no arm pump while the sword is in the hand.
+   (b) Pass: the swing up, over and down into the sheath is continuous, with no jump from overhead to low across the back. No frame moves the tip more than about 1.4 studs.
+   (c) Pass: the legs switch to the sheathed run or sprint during the Sheathe.
+214. [ ] **Draw and Sheathe at 0.25x (D-219).** Repeat items 212 and 213 with the Capture panel at 0.25x.
+   (a) Pass: the tip moves about 2.3 studs or less per 9 fps capture.
+   (b) Blends (blend in and out, set crossfades) run on real time, so at 0.25x they look about 4 times as abrupt as in play. The Draw's blend-out shows about 1 stud per capture. Note it; it is not a fail.
+   (c) Say whether the edge over the scabbard mouth (out for 12–14 ms) shows in any capture.
+215. [ ] **A remote player's Draw and Sheathe (D-219, D-220).** From a second client, watch the first player draw and sheathe while running and turning under lock-on.
+   (a) Pass: the same continuous whip as in items 212 and 213, with no jump.
+216. [ ] **Kill and Final frames heard late (D-223; extends item 207).** At 60 fps with the frame-by-frame recorder, kill a FrenzyBoar 10 times with the last hit confirmed by the server. Stand still and hit; do not rely on the local contact.
+   (a) Pass: each Kill shows exactly 2 black, 2 white-figure and 2 ink frames.
+   (b) Pass: each Final shows exactly 2 dark frames.
+   (c) Pass: when a Kill takes over a Final, no frame of the 3D world shows between them.
+217. [ ] **Rush messages under lag and loss (D-221, D-222).** In Studio's network settings, set Incoming Replication Lag to 0.25 s, with packet loss if available.
+   (a) Let 10 boar rushes run past you, including one jammed on a pillar and one staggered. Pass: the drawn body follows the server body, and jammed and staggered rushes stop where the server's did.
+   (b) Pass: no body jumps back toward the crouch.
+   (c) In ReplicatedStorage's remotes folder, RushStarted, RushEnded and RushTurned are RemoteEvents, not UnreliableRemoteEvents.
+218. [ ] **No ride on a boar (D-221).** Stand in a boar's lane with 0.25 s of lag and let its rush pass through you and stop.
+   (a) Walk into its standing body from every side, and stand where it stops while it turns solid again.
+   (b) Pass: the invisible face blocks you or pushes you out sideways; you are never lifted onto its back.
+219. [ ] **A hitch at the sprint's Sheathe (D-225).** Sprint with the sword drawn and hit a dummy once. With the command bar set to Client, run `task.delay(6.3, function() local t = os.clock() while os.clock() - t < 0.1 do end end)` and keep sprinting, so a 0.1 s hitch lands as the Sheathe starts. Try a few times, record at 60 fps and step through the frames.
+   (a) Pass: on the frames after the hitch the blade keeps moving as one whip; no single frame moves it about 2 studs.
+220. [ ] **A kill over the soft dim (D-226).** Set three boars to 1 HP (DevCombat sethp) and kill them about 0, 0.9 and 1.15 s apart, so the second kill shows the soft dim and the third takes it over. Record at 60 fps and step through the frames.
+   (a) Pass: the dim goes straight to the black frames, with no frame of the bright world between them.

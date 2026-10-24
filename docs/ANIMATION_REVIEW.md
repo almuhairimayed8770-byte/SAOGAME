@@ -37,7 +37,7 @@ regeneration, matched by clip id.
 | `player/OneHandedSword/DodgeForward` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none |  |  |  |
 | `player/OneHandedSword/DodgeLeft` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none |  |  |  |
 | `player/OneHandedSword/DodgeRight` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none |  |  |  |
-| `player/OneHandedSword/Draw` | PlayerR15 | one-shot | 0.62 s / 37f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/Draw` | PlayerR15 | one-shot | 0.88 s / 52f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Fall` | PlayerR15 | loop | 0.80 s / 48f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/FlinchBack` | PlayerR15 | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/FlinchFront` | PlayerR15 | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
@@ -53,7 +53,7 @@ regeneration, matched by clip id.
 | `player/OneHandedSword/Parry` | PlayerR15 | one-shot | 0.40 s / 24f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Run` | PlayerR15 | loop | 0.60 s / 36f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/RunDrawn` | PlayerR15 | loop | 0.60 s / 36f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `player/OneHandedSword/Sheathe` | PlayerR15 | one-shot | 0.70 s / 42f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/Sheathe` | PlayerR15 | one-shot | 0.81 s / 49f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Skid` | PlayerR15 | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Sprint` | PlayerR15 | loop | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/SprintDrawn` | PlayerR15 | loop | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |

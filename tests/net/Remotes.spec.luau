@@ -97,10 +97,12 @@ describe("Remotes", function()
 		expect(Remotes.HitConfirmed.schema(payload)).toBe(false)
 	end)
 
-	it("a rush's launch and early end are unreliable messages with the server's line and clock (D-169)", function()
-		expect(Remotes.RushStarted.kind).toBe("Unreliable")
+	it("a rush's launch and early end are reliable messages with the server's line and clock (D-169)", function()
+		-- Reliable: a rush the server launched is drawn on every client even when a packet is lost;
+		-- a lost launch drew the telegraph's guess and a lost end ran the body on past its stop.
+		expect(Remotes.RushStarted.kind).toBe("Event")
 		expect(Remotes.RushStarted.direction).toBe("ServerToClient")
-		expect(Remotes.RushEnded.kind).toBe("Unreliable")
+		expect(Remotes.RushEnded.kind).toBe("Event")
 		expect(Remotes.RushEnded.direction).toBe("ServerToClient")
 		local started = {
 			entityId = 4,
@@ -149,8 +151,8 @@ describe("Remotes", function()
 		expect(Remotes.RushEnded.schema(ended)).toBe(false)
 	end)
 
-	it("a rush's bend or sidestep is an unreliable message with its whole path (D-206, D-207)", function()
-		expect(Remotes.RushTurned.kind).toBe("Unreliable")
+	it("a rush's bend or sidestep is a reliable message with its whole path (D-206, D-207)", function()
+		expect(Remotes.RushTurned.kind).toBe("Event")
 		expect(Remotes.RushTurned.direction).toBe("ServerToClient")
 		local leg = function(at: number, z: number): any
 			return { at = at, from = { 0, 0, z }, heading = { 0, 0, -1 }, facing = { 0, 0, -1 } }

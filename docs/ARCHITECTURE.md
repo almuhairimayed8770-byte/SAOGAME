@@ -179,7 +179,9 @@ The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy mod
   once. A clip that ends before its event, or a build without the clip, lands the sword where the
   target wants it.
 - The drawn sprint additive follows SprintDrawn's live weight, scaled by 1 minus the visible weight of
-  Draw or Sheathe, and is 0 while the sword is on the back.
+  Draw or Sheathe after this step (sheathShownAfter: the mixer's blend rule, read before it runs), and
+  is 0 while the sword is on the back. The sheath step hook sets it before the mixer step; update sets
+  it for a weapon with no sheath (D-225).
 - `WeaponMount`: `new(animator, model)`, `:set("Hand"|"Back")`, `:get()`, `:sheathable()`,
   `:refresh()`, `:generation()`, `:destroy()`, `WeaponMount.handFrame()`,
   `WeaponMount.backFrame(category)`. It writes only the client copy's Part0 and C0 (never C1), looks
@@ -627,7 +629,7 @@ the sweep.
   - `join(character)`; Engine.collide puts a finished character in the Players group.
   - `unlabel(character)` turns off the engine's name and health display on each Humanoid; wait() calls it on the first frame and when ready (D-178).
 - **Remotes**:
-  - `RushStarted` and `RushEnded`: Unreliable, server to client.
+  - `RushStarted`, `RushEnded` and `RushTurned`: reliable RemoteEvents, server to client (D-221).
   - `HitConfirmed.attackPause`.
   - ArtRequest, BasicAttackRequest and HitConfirmed carry an optional `swing` (integer, 1 .. combat.contact.swingSequenceMax).
 - **PlaygroundLayout / PlaygroundService**:
@@ -763,7 +765,7 @@ the sweep.
   - ground: isGround, groundBelow, climbable, runsOver;
   - contact: Slam / Glance / Clip, lookLimit.
   - Used by Charger, EnemyService, RushDraw and Replication.
-- **Remotes:** new RushTurned (Unreliable, ServerToClient: kind, at, legs up to ai.rushWorld.maxLegs, contact, normal). RushEnded gains reason "Wall" and optional contact and normal. After a Jammed or Wall, the interrupt that ends the rush is sent once more as RushEnded (D-210).
+- **Remotes:** new RushTurned (reliable since D-221, ServerToClient: kind, at, legs up to ai.rushWorld.maxLegs, contact, normal). RushEnded gains reason "Wall" and optional contact and normal. After a Jammed or Wall, the interrupt that ends the rush is sent once more as RushEnded (D-210).
 - **server/ai/Brain:** Context gains bodyProfile, rushTurned and daze. worldAhead gains an offset and returns the face normal. Brain.frame() runs the rush's look every server frame.
 - **client/choreo/RushDraw:**
   - setBody(state, body, hover), ground(spot, cast, model), wall(state, distance, contact, normal), rest(state, distance), takeCues(state).
@@ -791,6 +793,23 @@ the sweep.
 - **Line 652:** "two render steps: SkyspireCamera at camera.luau renderOrder.main (Character+2, 302) and SkyspireCameraLate at renderOrder.late (Last)".
 - **Line 722 (Client frame order):** "FrameClock (First) → SkyspireRigs 199 → SkyspireCharacter 301 (controller, contact) → SkyspireCamera 302 → SkyspireImpactFrames 303 → SkyspirePoseReaders 304 (Trails) → SkyspireCameraLate and FrameClock (Last), tied at 2000. The priorities are data rows in choreo, camera and fx .luau renderOrder (D-211)."
 - **Line 724:** "`renderPriority()` reads choreo.luau renderOrder.rigs (Camera − 1)."
+
+### Draw, sheathe and lost rush messages (D-219 to D-226)
+
+- **tests/choreo/SheathTip.spec.luau:** Draw and Sheathe through the client's own path (Locomotion, SheathState, the Choreo mixer, WeaponMount) on the hit matrix's player.
+  - It runs at 0/8/16/24 studs/s, stepped at 60 and 240 Hz, plus one 0.1 s frame after each of the clip's first 3 steps at 60 Hz.
+  - The tip stays under sheath.drawTipSpeed and sheatheTipSpeed, and the blade under sheath.bladeTurnRate (D-219, D-225).
+- **choreo.luau sheath:** drawTipSpeed, sheatheTipSpeed and bladeTurnRate are the speed caps (D-219).
+- **dev.luau groundClearance.sheathTip:** the SheathTip cases (settle, after, speeds, stepHz, hitch).
+- **Locomotion:**
+  - While the target is sheathed and the sword is still in the hand, the base shows the drawn set until a live Sheathe has faded in (showsDrawn), then the sheathed set (D-220).
+- **Remotes:**
+  - RushStarted, RushEnded and RushTurned are reliable server-to-client RemoteEvents (kind "Event"). ActionStarted, Telegraph and SwitchWindow are UnreliableRemoteEvents (D-221).
+- **Replication:** `launches[enemyId]` holds the serverTime of the last RushStarted heard. A Telegraph older than it is dropped before it shows a glow or arms a predicted rush. It is cleared on unwatch and bind (D-222).
+- **ImpactFrames:**
+  - The ScreenGui is turned on by stepSequence's first counted frame, or by run() when there is no render step (D-223).
+  - showSequence turns it on at play only when taking over a picture already on screen: it holds that sequence's look (D-223), or the soft dim frozen at its drawn opacity (D-226), until the new sequence's first counted frame.
+  - playDim still turns on at once.
 
 ## Data tables (src/shared/data)
 

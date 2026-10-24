@@ -723,12 +723,58 @@ describe("Locomotion: the sheathed sword", function()
 		expect(weights[#weights]).toBeCloseTo(ChoreoData.additiveWeights.drawnSprint, 1e-6)
 		expect(largestStep(mark)).toBeLessThan(0.15)
 
-		-- The tag runs out mid-sprint: the pose fades with SprintDrawn instead of dropping at once.
+		-- The tag runs out mid-sprint: the sword is still in the hand, so the drawn set and the pose
+		-- hold through the sheathe delay, and the pose gives way to the Sheathe as that fades in over
+		-- the arm (at most the eased blend in's own step a frame), never dropping at once.
 		mark = #weights
 		state.drawn = false
-		steps(animator, 0.3)
+		steps(animator, Sheath.sheatheDelay - 2 * FRAME)
+		expect(weights[#weights]).toBeCloseTo(ChoreoData.additiveWeights.drawnSprint, 1e-6)
+		local blendIn = ClipLibrary.get(SHEATHE).blendIn :: number
+		steps(animator, 2 * FRAME + blendIn + 2 * FRAME)
 		expect(weights[#weights]).toBe(0)
-		expect(largestStep(mark)).toBeLessThan(0.15)
+		expect(largestStep(mark)).toBeLessThan(
+			(math.pi / 2) * FRAME / blendIn * ChoreoData.additiveWeights.drawnSprint + 0.01
+		)
+		driver:destroy()
+		Choreo.release(model)
+	end)
+
+	it("keeps the drawn set while the sword is in the hand, until the Sheathe has faded in over the arm", function()
+		local model, animator, state, driver, motor = setup(true)
+		local run = Config.clipPrefix .. Config.clips.Run
+		local runDrawn = Config.clipPrefix .. Config.clips.RunDrawn
+		state.speed = Config.stride.groundSpeed.RunDrawn
+		state.moveDir = Vector3.new(0, 0, -1)
+		steps(animator, 0.5)
+		expect(handleOf(animator, runDrawn).weight).toBeCloseTo(1, 1e-6)
+		-- The sheathed Run pumps an empty sword arm: with the blade still in the hand it swung the
+		-- tip about through the sheathe delay and again under the Sheathe's blend in.
+		state.drawn = false
+		local sheathe = nil
+		local frames = 0
+		while frames < 120 do
+			animator:step(FRAME)
+			frames += 1
+			sheathe = handleOf(animator, SHEATHE)
+			if sheathe ~= nil and sheathe.fade >= 1 then
+				break
+			end
+			expect(motor.Part0).toBe(model:FindFirstChild("RightHand"))
+			expect(handleOf(animator, run).weight).toBe(0)
+			expect(handleOf(animator, runDrawn).weight).toBeCloseTo(1, 1e-6)
+		end
+		expect(sheathe).never.toBeNil()
+		expect(frames * FRAME).toBeGreaterThan(Sheath.sheatheDelay)
+		-- Then the sheathed set comes in under the Sheathe, and is the whole base by the stow.
+		local stow = eventTime(SHEATHE, "WeaponSheathe")
+		while sheathe.time + FRAME < stow do
+			animator:step(FRAME)
+		end
+		expect(handleOf(animator, run).weight).toBeCloseTo(1, 1e-6)
+		expect(handleOf(animator, runDrawn).weight).toBe(0)
+		steps(animator, 2 * FRAME)
+		expect(motor.Part0).toBe(model:FindFirstChild(ROW.part))
 		driver:destroy()
 		Choreo.release(model)
 	end)

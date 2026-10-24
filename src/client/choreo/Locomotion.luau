@@ -279,27 +279,19 @@ local function followAttributes(self: any, signalOf: (instance: Instance, name: 
 end
 
 -- What the live clips say this step: a draw-cut, a clip that hides the arm, the Draw clip, the
--- Sheathe clip; and the target. Also returns how much of the Draw and Sheathe clips the limbs show
--- (stopping ones included), for the drawn sprint pose.
-local function scanClips(self: any): (SheathState.Input, number)
+-- Sheathe clip; and the target.
+local function scanClips(self: any): SheathState.Input
 	local cut, covered, drawing, sheathing = false, false, false, false
-	local sheathWeight = 0
+	local sheatheShown = 0
 	for _, handle in self.animator.mixer:handles() do
-		if handle.done then
-			continue
-		end
-		local isSheathClip = handle.clipId == DRAW_ID or handle.clipId == SHEATHE_ID
-		if isSheathClip then
-			local shown = Easing.evaluate(ChoreoData.blendEasing, handle.fade) * handle.weight
-			sheathWeight = math.max(sheathWeight, shown)
-		end
-		if handle.stopping then
+		if handle.done or handle.stopping then
 			continue
 		end
 		if handle.clipId == DRAW_ID then
 			drawing = true
 		elseif handle.clipId == SHEATHE_ID then
 			sheathing = true
+			sheatheShown = math.max(sheatheShown, handle.fade * handle.weight)
 		else
 			if isDrawCut(handle.clip) then
 				cut = true
@@ -317,7 +309,8 @@ local function scanClips(self: any): (SheathState.Input, number)
 		sheathing = sheathing,
 		hold = self.dead,
 	}
-	return input, sheathWeight
+	self.sheatheShown = sheatheShown
+	return input
 end
 
 -- True when an event comes from the live clip of that id: one that is not stopping and whose
@@ -333,13 +326,23 @@ local function fromLiveClip(self: any, clipId: string, time: number): boolean
 end
 
 local function sheathInput(self: any): SheathState.Input
-	local input = scanClips(self)
-	return input
+	return scanClips(self)
 end
 
 -- The place the target asks for with no clip in between.
 local function targetPlace(self: any): WeaponMount.Place
 	return if self.drawn then "Hand" else "Back"
+end
+
+-- The set the base shows: the drawn set while the target is drawn, and on while the sword is
+-- still in the hand until a Sheathe has faded in over the whole arm. The sheathed set's hands are
+-- empty: its run and sprint pump the sword arm, which swung the held blade up to 2 studs a frame
+-- through the sheathe delay, and again under the Sheathe's blend in.
+local function showsDrawn(self: any): boolean
+	if self.drawn then
+		return true
+	end
+	return self.mount:sheathable() and self.sheath.place == "Hand" and self.sheatheShown < 1
 end
 
 -- Plays a sheath clip; a build without the clip moves the sword at once instead.
@@ -350,6 +353,54 @@ local function playSheathClip(self: any, clip: SheathState.Clip)
 	else
 		self.sheath.place = if clip == "Draw" then "Hand" else "Back"
 	end
+end
+
+-- How much of the drawn sprint pose ("weapon low and back") shows. It rides on SprintDrawn's live
+-- weight, which the mixer moves at the blend-space rate, so it never jumps when the target flips.
+-- It holds a sword in the hand: off while the sword is on its sheath, and it gives way to a Draw or
+-- Sheathe clip moving the arm, so the hand is on the hilt when the sword changes hands.
+local function drawnSprintWeight(self: any): number
+	local handle = self.handles.SprintDrawn
+	local weight: number = if handle ~= nil then handle.weight else 0
+	if weight <= 0 then
+		return 0
+	end
+	if self.sheath.place == "Back" and self.mount:sheathable() then
+		return 0
+	end
+	return weight * (1 - math.clamp(self.sheathClipWeight, 0, 1))
+end
+
+-- How much of the Draw and Sheathe clips (stopping ones included) the limbs show once this step has
+-- moved their envelopes: the mixer's own rule, read before it runs. A held pause moves none, one
+-- that ends inside a stall's gap moves them by the rest, and a clip played inside the gap moves only
+-- by its own age.
+local function sheathShownAfter(self: any, dt: number): number
+	local mixer = self.animator.mixer
+	local jumped = dt > ChoreoData.stall.jumpSeconds
+	local pause = mixer:pauseRemaining()
+	local clockDt = dt
+	if pause > ChoreoData.pauseEpsilon then
+		clockDt = if jumped and pause < dt then dt - pause else 0
+	end
+	local shown = 0
+	for _, handle in mixer:handles() do
+		if handle.done or (handle.clipId ~= DRAW_ID and handle.clipId ~= SHEATHE_ID) then
+			continue
+		end
+		local handleDt = if handle.ignorePause then dt else clockDt
+		if jumped and handle.sinceStep > 0 then
+			handleDt = math.max(0, handleDt - handle.sinceStep)
+		end
+		local fade: number = handle.fade
+		if handle.stopping then
+			fade = if handle.blendOut <= 0 then 0 else math.max(0, fade - handleDt / handle.blendOut)
+		elseif fade < 1 then
+			fade = if handle.blendIn <= 0 then 1 else math.min(1, fade + handleDt / handle.blendIn)
+		end
+		shown = math.max(shown, Easing.evaluate(ChoreoData.blendEasing, fade) * handle.weight)
+	end
+	return shown
 end
 
 -- The sheath step: runs before the mixer, so the sword's move and the clip pose land together.
@@ -368,8 +419,7 @@ local function stepSheath(self: any, dt: number)
 		self.mountGeneration = generation
 		self.sheath.place = targetPlace(self)
 	end
-	local input, sheathWeight = scanClips(self)
-	self.sheathClipWeight = sheathWeight
+	local input = scanClips(self)
 	local out = self.sheath:step(dt, input)
 	if out.stop ~= nil then
 		self.animator:stop(sheathClipId(out.stop), Sheath.stopBlend)
@@ -380,6 +430,19 @@ local function stepSheath(self: any, dt: number)
 	if mount:get() ~= self.sheath.place then
 		mount:set(self.sheath.place)
 	end
+	-- The drawn sprint pose gives way to the clips by what they show after this step, with this
+	-- step's play or stop in it: a long frame moves a fade a long way in one step, and a pose that
+	-- read it a step behind took that share off over the next, normal frame (1.96 studs in one
+	-- 60 Hz frame after a 100 ms one at the sprint). Only read while SprintDrawn shows.
+	local sprint = self.handles.SprintDrawn
+	if sprint ~= nil and sprint.weight > 0 then
+		self.sheathClipWeight = sheathShownAfter(self, dt)
+	end
+	self.animator:setProcedural(
+		"drawnSprint",
+		DRAWN_SPRINT,
+		drawnSprintWeight(self) * ChoreoData.additiveWeights.drawnSprint
+	)
 end
 
 -- A WeaponDraw or WeaponSheathe event from the live clip moves the sword mid-clip, when it still
@@ -521,7 +584,8 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		mount = nil :: any,
 		sheath = nil :: any,
 		mountGeneration = 0,
-		sheathClipWeight = 0, -- how much of the Draw and Sheathe clips the limbs showed last step
+		sheathClipWeight = 0, -- the Draw and Sheathe clips' share after the last step SprintDrawn showed
+		sheatheShown = 0, -- how much of a live Sheathe clip the limbs showed last step (showsDrawn)
 		unhookSheath = nil :: (() -> ())?,
 		clipEvents = nil :: any,
 		attributeDrawn = false, -- the Drawn attribute (the server's word), kept by its change signal
@@ -589,7 +653,7 @@ end
 function Locomotion.stopGait(self: any, into: LocomotionState.StopGait)
 	into.phase = self.gaitPhase
 	into.leftStep, into.leftAfter, into.rightStep, into.rightAfter =
-		LocomotionState.settlePoints(self.travelForward, self.travelRight, self.drawn)
+		LocomotionState.settlePoints(self.travelForward, self.travelRight, showsDrawn(self))
 end
 
 --- The character's Drawn attribute (the server's word, nil read as false), kept by its change
@@ -625,22 +689,6 @@ local function footDeltas(self: any, root: BasePart): (number?, number?)
 		return if hit then hit.Y - expectedGround else nil
 	end
 	return probe(-1), probe(1)
-end
-
--- How much of the drawn sprint pose ("weapon low and back") shows. It rides on SprintDrawn's live
--- weight, which the mixer moves at the blend-space rate, so it never jumps when the target flips.
--- It holds a sword in the hand: off while the sword is on its sheath, and it gives way to a Draw or
--- Sheathe clip moving the arm, so the hand is on the hilt when the sword changes hands.
-local function drawnSprintWeight(self: any): number
-	local handle = self.handles.SprintDrawn
-	local weight: number = if handle ~= nil then handle.weight else 0
-	if weight <= 0 then
-		return 0
-	end
-	if self.sheath.place == "Back" and self.mount:sheathable() then
-		return 0
-	end
-	return weight * (1 - math.clamp(self.sheathClipWeight, 0, 1))
 end
 
 -- The lean as posed: each clip in locomotion.lean.upright holds back a lean toward its side by
@@ -729,7 +777,7 @@ local function stepBlocked(
 				self.blocked = true
 				self.followX, self.followZ = 0, 0
 			end
-		elseif self.blocked and speed / scale >= LocomotionState.wholeWalkSpeed(forward, right, self.drawn) then
+		elseif self.blocked and speed / scale >= LocomotionState.wholeWalkSpeed(forward, right, showsDrawn(self)) then
 			self.blocked = false
 		end
 	end
@@ -806,7 +854,7 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 		speed = blendSpeed,
 		sprinting = state.sprinting,
 		grounded = state.grounded,
-		drawn = self.drawn,
+		drawn = showsDrawn(self),
 		turning = state.turning,
 		yawRate = yawRate,
 		verticalVelocity = state.verticalVelocity or 0,

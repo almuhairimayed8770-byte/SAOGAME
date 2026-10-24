@@ -31,7 +31,11 @@
 	stays bound from `start` (FrameOrder): a picture played at the local contact (inside the
 	controller's step) is drawn and counted from that very frame, its figures and camera copied
 	after the frame's last body and camera move; one played between frames (a HitConfirmed) from
-	the next. Kill
+	the next. The overlay goes on only with the frame that counts its first look: a hit heard
+	after the frame's render steps (a deferred remote handler runs before that frame draws) shows
+	nothing on it, where the old overlay switched on at play drew one uncounted frame of the first
+	look (a Kill Black 3, Dark 2, Ink 2 at 60 fps). A sequence taking over a picture on screen
+	keeps that picture up until then, so the world never shows between them. Kill
 	is Black 2, Dark 2, Ink 2 and Final is Dark 2 whatever the frame clock says, so a late or
 	doubled frame never takes a frame from one look and gives it to the next (the old rule ended a
 	look by elapsed time, and a jittery clock split a Kill 3/1/2). A device that draws at another
@@ -987,6 +991,15 @@ local function syncWhileFrozen(current: Showing, at: number)
 	end
 end
 
+-- The overlay goes on with the frame that counts its first look (guarded: the PlayerGui may be gone).
+local function showScreen()
+	pcall(function()
+		if gui ~= nil then
+			(gui :: ScreenGui).Enabled = true
+		end
+	end)
+end
+
 local function stepSequence(current: Showing, at: number)
 	local began = current.startedAt
 	if began == nil then
@@ -1002,7 +1015,9 @@ local function stepSequence(current: Showing, at: number)
 		current.pace = currentPace()
 		current.quotas = quotasFor(current.frames, current.pace)
 		current.drawnInLook = 1
+		applyLook(current.look :: string)
 		syncWhileFrozen(current, at)
+		showScreen()
 		holdClaim(current, at)
 		return
 	end
@@ -1061,8 +1076,13 @@ local function run(current: Showing)
 		current.unbind = unbind
 		return
 	end
-	-- No render step will come to settle the claims that waited for one: they end here.
+	-- No render step will come to settle the claims that waited for one: they end here, and with no
+	-- frame to count the picture is on from now.
 	settleTail(now())
+	if current.kind == "Sequence" and current.look ~= nil then
+		applyLook(current.look :: string)
+	end
+	showScreen()
 	task.delay(current.seconds, function()
 		if showing == current then
 			finish()
@@ -1178,6 +1198,19 @@ local function showSequence(
 	requestedAt: number?
 ): number
 	local screen = gui :: ScreenGui
+	-- Each look shows from the frame that counts it (stepSequence), never on a frame drawn before:
+	-- a hit heard after this frame's render step (a deferred remote) would otherwise draw one
+	-- uncounted frame of the first look (01.17.48: Black 3, Dark 2, Ink 2). A sequence taking over
+	-- a picture on screen keeps that picture until then, so the world stays covered: a sequence's
+	-- look, or the soft dim as last drawn (its opacity frozen, no world frame between dim and black).
+	local before = showing
+	local onScreen = before ~= nil and screen.Enabled
+	local held: string? = if onScreen and before ~= nil and before.kind == "Sequence" then before.look else nil
+	local field = background :: Frame
+	local heldDim: number? = nil
+	if onScreen and before ~= nil and before.kind == "Dim" then
+		heldDim = field.BackgroundTransparency
+	end
 	-- What showed goes, but a sequence taking its place keeps the world hidden: no whenVisible yet.
 	replacing = true
 	ImpactFrames.cancel()
@@ -1231,9 +1264,15 @@ local function showSequence(
 		lastDrawnAt = nil,
 	}
 	showing = current
-	applyLook(current.look :: string)
+	if heldDim ~= nil then
+		-- cancel hid the figures and strokes; the field goes back to the dim as drawn.
+		field.BackgroundColor3 = color(Impact.reduced.token)
+		field.BackgroundTransparency = heldDim
+	else
+		applyLook(held or current.look :: string)
+	end
 	syncFigures()
-	screen.Enabled = true
+	screen.Enabled = held ~= nil or heldDim ~= nil
 	run(current)
 	return current.seconds
 end

@@ -330,14 +330,28 @@ local Dev = {
 				after = 0.3,
 			},
 		},
+		-- Draw and Sheathe as the client plays them (SheathTip.spec.luau, choreo.luau
+		-- sheath.drawTipSpeed, sheatheTipSpeed and bladeTurnRate): each case stands `settle`
+		-- seconds in its start state, the Drawn target flips, and it runs until the clip has blended
+		-- out and `after` seconds more, at each of `speeds` (studs a second: standing, the walk, the
+		-- run and the sprint) and stepped at each of `stepHz` (a 60 fps frame, the 240 Hz review).
+		-- `hitch`: one frame `seconds` long among `hz` frames lands after each of the clip's first
+		-- `steps` steps, so the blend in takes a big share of the hitch at once.
+		sheathTip = {
+			settle = 0.5,
+			after = 0.3,
+			speeds = { 0, 8, 16, 24 },
+			stepHz = { 60, 240 },
+			hitch = { seconds = 0.1, hz = 60, steps = 3 },
+		},
 		-- From a WeaponDraw until the blade is clear of the scabbard, and back from a WeaponSheathe
 		-- to where it first meets it, every long edge of the blade that is partly inside the
 		-- scabbard's walls stays within them, posed at `sampleHz`. For `seconds` from the event
 		-- the blade runs along its sheath and comes out by at most `poke`: a blade that cuts out
 		-- through the side of its sheath reads as a broken model. The pull ends with the grip 1.53
 		-- studs from the shoulder (a straight arm reaches 2.29) and 2 studs of blade still in, so
-		-- the rest swings out over the mouth: an edge passes up to 0.163 out (0.174 with Breathe)
-		-- for 7 ms of Draw and 5 ms of Sheathe, under two frames at 240 Hz, held by `swingOut`.
+		-- the rest swings out over the mouth: an edge passes up to 0.167 out (0.174 with Breathe)
+		-- for 14 ms of Draw and 12 ms of Sheathe, under one 60 Hz frame, held by `swingOut`.
 		-- Breathe, always on, adds its wrist and sword tremor to every pose: from `breathPhases`
 		-- points of its cycle it brings an edge up to 0.106 out in the slide, held by `breathe`.
 		-- Each Additive one-shot (the flinches) is posed landing every `leadStep` seconds.

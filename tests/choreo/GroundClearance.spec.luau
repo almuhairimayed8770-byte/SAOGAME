@@ -988,8 +988,12 @@ local function drawnTally(found: Roles): Tally
 		local function before(time: number): boolean
 			return time < home - 1e-9
 		end
-		for _, base in found.sheathedSet do
-			checkOver(tally, entry.name, entry.clip, base.name, base.clip, before, never, never)
+		-- Sheathe starts over the drawn set, which shows until the clip has faded in over the arm
+		-- (Locomotion), and goes on over the sheathed set.
+		for _, set in { found.sheathedSet, found.drawnSet } do
+			for _, base in set do
+				checkOver(tally, entry.name, entry.clip, base.name, base.clip, before, never, never)
+			end
 		end
 	end
 	return tally
@@ -1000,7 +1004,9 @@ end
 type Over = { name: string, clip: any, extra: any?, back: boolean }
 
 -- The bases the field test lays a clip over, nil for a Base or FullBody clip (posed alone). A
--- clip that puts the sword away plays over the sheathed set (D-050). Draw plays over the drawn
+-- clip that puts the sword away plays over both sets: it starts over the drawn set, which shows
+-- while the sword is in the hand until the clip has faded in over the arm (Locomotion), and goes
+-- on over the sheathed set (D-050). Draw plays over the drawn
 -- set: the walk set follows the drawn state at once and has crossed over before the grab
 -- (locomotion.weightBlendRate). The other UpperBody clips and the Additive one-shots play over the
 -- drawn set, the drawn sprint with its pose on top; the Additive ones over the sheathed set too,
@@ -1017,6 +1023,7 @@ local function fieldBases(clip: any, found: Roles): { Over }?
 	end
 	if eventTime(clip, "WeaponSheathe") ~= nil then
 		add(found.sheathedSet, false)
+		add(found.drawnSet, false)
 	elseif eventTime(clip, "WeaponDraw") ~= nil then
 		add(found.drawnSet, false)
 	else
@@ -1902,33 +1909,71 @@ describe("ground clearance: every player clip", function()
 		end
 	end)
 
-	it("swings the blade into the sheath without a jump: Sheathe's tip under sheath.sheatheTipSpeed", function()
+	it("draws and sheathes without a jump: the tip under sheath.drawTipSpeed / sheatheTipSpeed", function()
+		-- Each clip posed alone over its base at the review's rate; SheathTip.spec.luau measures
+		-- the same limits on the client's own path (blends, the base set, the swap).
 		local current = body()
-		local clip = Harness.load(clipsDirectory .. "/" .. ChoreoData.sheath.clips.sheathe)
-		local base = baseFor(clip)
 		local blade = current.trailEnd.Parent.Name
 		local step = 1 / Config.sampleHz
-		local previous: any = nil
-		local worst, worstAt = 0, 0
-		for index = 0, math.floor(clip.duration * Config.sampleHz + 1e-6) do
-			local time = index * step
-			local solved =
-				solveAt(current, current.avatar.base, offsetsAt(clip, base, time), ReviewMarkers.mountAt(clip, time))
-			local tip = (solved[blade] * current.trailEnd.CFrame).Position
-			if previous ~= nil and (tip - previous).Magnitude / step > worst then
-				worst, worstAt = (tip - previous).Magnitude / step, time
-			end
-			previous = tip
-		end
-		expect(worst).toBeGreaterThan(0)
-		if worst > ChoreoData.sheath.sheatheTipSpeed then
-			error(
-				("Sheathe moves the blade's tip %.1f studs a second at %.4f s (limit %.0f)"):format(
-					worst,
-					worstAt,
-					ChoreoData.sheath.sheatheTipSpeed
+		local problems = {}
+		for _, case in
+			{
+				{ name = ChoreoData.sheath.clips.draw, limit = ChoreoData.sheath.drawTipSpeed },
+				{ name = ChoreoData.sheath.clips.sheathe, limit = ChoreoData.sheath.sheatheTipSpeed },
+			}
+		do
+			local clip = Harness.load(clipsDirectory .. "/" .. case.name)
+			local base = baseFor(clip)
+			local previous: any, previousLine: any = nil, nil
+			local worst, worstAt, sharpest, sharpestAt = 0, 0, 0, 0
+			for index = 0, math.floor(clip.duration * Config.sampleHz + 1e-6) do
+				local time = index * step
+				local solved = solveAt(
+					current,
+					current.avatar.base,
+					offsetsAt(clip, base, time),
+					ReviewMarkers.mountAt(clip, time)
 				)
-			)
+				local tip = (solved[blade] * current.trailEnd.CFrame).Position
+				local line = (tip - (solved[blade] * current.trailStart.CFrame).Position).Unit
+				if previous ~= nil then
+					local speed = (tip - previous).Magnitude / step
+					local turn = math.deg(math.acos(math.clamp(line:Dot(previousLine), -1, 1))) / step
+					if speed > worst then
+						worst, worstAt = speed, time
+					end
+					if turn > sharpest then
+						sharpest, sharpestAt = turn, time
+					end
+				end
+				previous, previousLine = tip, line
+			end
+			expect(worst).toBeGreaterThan(0)
+			if worst > case.limit then
+				table.insert(
+					problems,
+					("%s moves the blade's tip %.1f studs a second at %.4f s (limit %.0f)"):format(
+						case.name,
+						worst,
+						worstAt,
+						case.limit
+					)
+				)
+			end
+			if sharpest > ChoreoData.sheath.bladeTurnRate then
+				table.insert(
+					problems,
+					("%s turns the blade %.0f degrees a second at %.4f s (limit %.0f)"):format(
+						case.name,
+						sharpest,
+						sharpestAt,
+						ChoreoData.sheath.bladeTurnRate
+					)
+				)
+			end
+		end
+		if #problems > 0 then
+			error(table.concat(problems, "\n"))
 		end
 	end)
 

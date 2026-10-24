@@ -612,6 +612,27 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   - Glance and clip cues are not wired.
   - Studio items 199–211.
 
+## Draw, sheathe and lost rush messages (2026-10-25, D-219 to D-226)
+
+- **Draw and Sheathe (D-219, D-220, D-225):**
+  - Both read as a whip. On the client's own path the tip stays under 84 studs/s and the blade under 1080°/s, at every speed, frame rate, hitch and jitter tried (HEAD: Draw up to 233, Sheathe up to 111).
+  - Draw is 0.875 s and Sheathe 0.815 s; the sword reaches the back at 0.535 s.
+  - The drawn set stays on while the sword is in the hand. The drawn sprint pose gives way to the Sheathe in the same step, even across a long frame.
+- **Rush messages (D-221, D-222, D-224):**
+  - RushStarted, RushEnded and RushTurned are reliable, so a lost message can no longer run a jammed or staggered boar 16 studs past the server's stop.
+  - A Telegraph heard after its own RushStarted is ignored, so no body steps back toward the crouch.
+  - The torso step during a rush is rush speed × frame length; no change.
+- **Impact frames (D-223, D-226):** a Kill heard after the overlay's step draws exactly 2/2/2 and a Final draws 2. A takeover keeps the picture on screen, the soft dim included, so the world never flashes between them.
+- **Checks:**
+  - 2572 specs in 140 files pass.
+  - Validators, stylua, offline lint, the hit matrix, the animation review and gaitgen are clean.
+  - luau-lsp shows no new messages in src against HEAD.
+- **Open:**
+  - A wind-up the server drops silently is drawn as a phantom rush.
+  - A RushEnded resent after the drawn run is over still overruns at 0.25–0.5 s of lag.
+  - The wind-up faces the late root.
+  - Studio items 212–220.
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and

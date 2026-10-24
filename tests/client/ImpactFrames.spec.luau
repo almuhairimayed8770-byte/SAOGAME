@@ -557,16 +557,18 @@ describe("ImpactFrames timing", function()
 			local seconds = ImpactFrames.play("Kill", { model })
 			expect(seconds).toBeCloseTo(ImpactSequence.seconds("Kill"), 1e-9)
 			local gui, background, figures, strokes = tree()
-			expect(gui.Enabled).toBe(true)
+			-- Not on screen until the frame that counts its first look.
+			expect(gui.Enabled).toBe(false)
 			expect(ImpactFrames.isShowing()).toBe(true)
 			expect(ImpactFrames.look()).toBe("Black")
-			expectColor(background.BackgroundColor3, "OutlineInk")
-			expect(background.BackgroundTransparency).toBeCloseTo(0, 1e-6)
-			expect(figures.Visible).toBe(false)
 
 			-- The hit landed between frames: the first frame drawn after it is the black beat's first.
 			world.clock += 0.3 * F
 			advance(F)
+			expect(gui.Enabled).toBe(true)
+			expectColor(background.BackgroundColor3, "OutlineInk")
+			expect(background.BackgroundTransparency).toBeCloseTo(0, 1e-6)
+			expect(figures.Visible).toBe(false)
 			expect(ImpactFrames.look()).toBe("Black")
 			expect(ImpactFrames.remaining()).toBeCloseTo(ImpactSequence.seconds("Kill"), 1e-9)
 			advance(F)
@@ -613,6 +615,109 @@ describe("ImpactFrames timing", function()
 					expect(#folder:GetChildren()).toBe(0)
 				end
 			end
+		end)
+	end)
+
+	it("shows nothing before the frame that counts it: a Kill heard after the overlay's step is 2/2/2", function()
+		-- A remote's handler can run after a frame's render steps and before that frame draws (a
+		-- deferred event). The frame drawn then must not show an uncounted black beat: recorded at
+		-- 60 fps (01.17.48), a Kill showed Black 3, Dark 2, Ink 2 and most Finals Dark 3.
+		-- Frame lengths jitter and one runs long: each look still holds exactly its drawn frames.
+		for _, sequence in { "Kill", "Final" } do
+			withWorld(function()
+				local model = rig("Fighter", Vector3.new(0, 3, 0))
+				advance(F) -- an idle frame: its steps have run, it has not drawn yet
+				ImpactFrames.play(sequence, { model })
+				local drawn: { string } = {}
+				local function draw()
+					local gui = tree()
+					if gui.Enabled then
+						table.insert(drawn, ImpactFrames.look() :: string)
+					end
+				end
+				draw() -- the frame being drawn when the hit was heard
+				for _, length in { 1.2 * F, 0.8 * F, 2.5 * F, 1.1 * F, 0.9 * F, F, F, F } do
+					advance(length)
+					draw()
+				end
+				local expected: { string } = {}
+				for _, step in ImpactSequence.frames(sequence) do
+					for _ = 1, step.frames do
+						table.insert(expected, step.look)
+					end
+				end
+				expect(drawn).toEqual(expected)
+				expect(ImpactFrames.isShowing()).toBe(false)
+			end)
+		end
+	end)
+
+	it("keeps the drawn picture on a takeover heard after the overlay's step: the world never shows", function()
+		withWorld(function()
+			ImpactFrames.play("Final", { rig("A", Vector3.new(0, 3, 0)) })
+			advance(F) -- the final hit's dark frame is counted and drawn
+			local gui = tree()
+			expect(gui.Enabled).toBe(true)
+			ImpactFrames.play("Kill", { rig("B", Vector3.new(6, 3, 0)) }) -- heard after the step
+			local drawn: { string } = {}
+			local function draw()
+				-- The overlay is up on every frame from the final hit's first to the kill's last.
+				expect(gui.Enabled).toBe(true)
+				local _, background, figures = tree()
+				local field: Color3 = background.BackgroundColor3
+				local rgb: { number } = palette.rgb("SystemWhite")
+				local white = math.abs(field.R - rgb[1]) + math.abs(field.G - rgb[2]) + math.abs(field.B - rgb[3])
+					< 1e-3
+				table.insert(drawn, if white then "Ink" elseif figures.Visible then "Dark" else "Black")
+			end
+			draw() -- this frame: still the dark picture it took over, not an uncounted black
+			for _ = 1, ImpactSequence.frameCount("Kill") do
+				advance(F)
+				draw()
+			end
+			expect(drawn).toEqual({ "Dark", "Black", "Black", "Dark", "Dark", "Ink", "Ink" })
+			advance(F)
+			expect(ImpactFrames.isShowing()).toBe(false)
+		end)
+	end)
+
+	it("keeps the soft dim up on a takeover heard after the overlay's step: the world never shows", function()
+		withWorld(function()
+			-- An earlier flash leaves room for the dim but not a kill, and leaves the window while the
+			-- dim still shows: the next kill takes the dim over.
+			local t0 = world.clock
+			FlashBudget.request(t0 - 0.8, 2, 0)
+			ImpactFrames.play("Kill", { rig("A", Vector3.new(0, 3, 0)) })
+			expect(ImpactFrames.look()).toBe("Reduced")
+			while world.clock < t0 - 0.8 + impact.flash.windowSeconds + F do
+				advance(F)
+			end
+			local gui, background, figures = tree()
+			expect(ImpactFrames.look()).toBe("Reduced")
+			expect(gui.Enabled).toBe(true)
+			local dimmed = 1 - background.BackgroundTransparency
+			expect(dimmed).toBeGreaterThan(0)
+			-- Heard after this frame's step: the frame drawn now still shows the dim as it was drawn,
+			-- not the world for one frame between the dim and the black, and not an uncounted black.
+			expect(ImpactFrames.play("Kill", { rig("B", Vector3.new(6, 3, 0)) })).toBeGreaterThan(0)
+			expect(ImpactFrames.look()).toBe("Black")
+			expect(gui.Enabled).toBe(true)
+			expectColor(background.BackgroundColor3, impact.reduced.token)
+			expect(1 - background.BackgroundTransparency).toBeCloseTo(dimmed, 1e-6)
+			expect(figures.Visible).toBe(false)
+			local drawn: { string } = {}
+			for _ = 1, ImpactSequence.frameCount("Kill") do
+				advance(F)
+				expect(gui.Enabled).toBe(true)
+				local field: Color3 = background.BackgroundColor3
+				local rgb: { number } = palette.rgb("SystemWhite")
+				local white = math.abs(field.R - rgb[1]) + math.abs(field.G - rgb[2]) + math.abs(field.B - rgb[3])
+					< 1e-3
+				table.insert(drawn, if white then "Ink" elseif figures.Visible then "Dark" else "Black")
+			end
+			expect(drawn).toEqual({ "Black", "Black", "Dark", "Dark", "Ink", "Ink" })
+			advance(F)
+			expect(ImpactFrames.isShowing()).toBe(false)
 		end)
 	end)
 
@@ -1370,7 +1475,7 @@ describe("ImpactFrames render stalls", function()
 			local b = rig("B", Vector3.new(6, 3, 0))
 			ImpactFrames.play("Kill", { a, b })
 			local gui = tree()
-			expect(gui.Enabled).toBe(true)
+			expect(gui.Enabled).toBe(false) -- on only with the frame that counts it
 			-- Heartbeat runs, RenderStepped does not (the display asleep): inside the limit it waits.
 			beat(KILL_LIMIT - 0.5 * F)
 			expect(ImpactFrames.isShowing()).toBe(true)

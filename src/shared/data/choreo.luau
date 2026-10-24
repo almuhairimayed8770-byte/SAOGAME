@@ -285,12 +285,20 @@ local Choreo = {
 		-- attribute can land up to three 60 Hz frames before the unreliable ActionStarted of the
 		-- attack that set it, which then draw-cuts with no Draw flashing in first.
 		remoteDrawDelay = 0.06,
-		-- Fastest the blade's tip may move while Sheathe swings it up, over the shoulder and down
-		-- into the sheath (studs a second, at dev.luau groundClearance.sampleHz, the sword posed
-		-- where ReviewMarkers.mountAt puts it): two studs in a 60 Hz frame, so the flip reads as a
-		-- quick push, not a jump. Studio saw 2.74 studs in one frame after the blade had all but
-		-- stopped over the shoulder.
-		sheatheTipSpeed = 120,
+		-- How fast Draw and Sheathe may move the blade, so each swing reads as a whip and never as a
+		-- jump. Measured as the client plays them (tests/choreo/SheathTip.spec.luau: SheathState,
+		-- the mixer's blends over locomotion and WeaponMount's swap, on the hit matrix's player), in
+		-- the root part's space the camera follows, every 60 Hz frame and every 240 Hz sample,
+		-- standing, walking, running and sprinting; and with each clip posed alone over its base
+		-- (GroundClearance). The tip, in studs a second: 84 is 1.4 studs a 60 Hz frame and 2.3 in a
+		-- 9 fps window capture of the 0.25x review. Studio read 3.37 studs in a frame (Draw dropping
+		-- from straight up to the guard) and 1.72 (Sheathe's point swinging down into the mouth) as
+		-- jumps, and the 2.74 before that.
+		drawTipSpeed = 84,
+		sheatheTipSpeed = 84,
+		-- The blade's line, in degrees a second: 18 degrees a 60 Hz frame. Sheathe's jump turned it
+		-- 24.8 in a frame, Draw's 36.4.
+		bladeTurnRate = 1080,
 	},
 
 	-- Enemy attacks on the server's beat. The server pauses an enemy's unresolved attack for the

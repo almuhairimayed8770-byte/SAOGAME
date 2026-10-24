@@ -148,6 +148,25 @@ describe("RushDraw's timeline (D-171)", function()
 		expect(state.along).toBeCloseTo(RushDraw.distanceAt(state.line, now), 1e-6)
 	end)
 
+	it("a long frame moves the body the timeline's own travel over it: a hitch's step is speed x dt", function()
+		-- 01.14.00 at ef698e5: the torso stepped 2.5 to 3.4 studs on the frames a rush was drawn
+		-- across a 0.09 to 0.12 s frame. On the timeline that is the run itself (the server's body
+		-- moved as far), not a jump: no catch-up is added on top and nothing is held back.
+		local state = RushDraw.new(line(0))
+		local now = 0
+		for _ = 1, 6 do
+			now += FRAME
+			RushDraw.step(state, now, FRAME, at(0))
+		end
+		for _, dt in { 0.09, 0.12, FRAME } do
+			local before = state.along
+			now += dt
+			RushDraw.step(state, now, dt, at(0))
+			expect(state.along - before).toBeCloseTo(SPEED * dt, 1e-6)
+			expect(state.along).toBeCloseTo(RushDraw.distanceAt(state.line, now), 1e-6)
+		end
+	end)
+
 	it("never draws the body backward: a later launch from the server slows it instead", function()
 		local state = RushDraw.new(line(0))
 		local now = 0
@@ -717,6 +736,7 @@ type Options = {
 	latency: number,
 	lag: number,
 	telegraph: boolean?, -- default true
+	telegraphLatency: number?, -- the Telegraph (and its wind-up clip) comes this late (default latency)
 	started: boolean?, -- RushStarted arrives (default true)
 	stopAt: number?, -- the server's body stops this far down the line
 	events: { { at: number, name: string, payload: any } }?, -- seconds after the launch (server)
@@ -883,9 +903,10 @@ local function rush(options: Options): Run
 	animator:step(FRAME)
 
 	local messages: { { at: number, name: string, payload: any, sent: boolean? } } = {}
+	local telegraphAt = WIND_UP_START + (options.telegraphLatency or options.latency)
 	if options.telegraph ~= false then
 		table.insert(messages, {
-			at = WIND_UP_START + options.latency,
+			at = telegraphAt,
 			name = "Telegraph",
 			payload = {
 				entityId = 5,
@@ -898,7 +919,7 @@ local function rush(options: Options): Run
 			},
 		})
 		table.insert(messages, {
-			at = WIND_UP_START + options.latency,
+			at = telegraphAt,
 			name = "ActionStarted",
 			payload = {
 				entityId = 5,
@@ -1074,6 +1095,28 @@ describe("a Boar's rush through Replication and Choreo (D-171, item 1)", functio
 		for _, distance in TARGETS do
 			local contact = math.max(0, (distance - run.front) / SPEED)
 			expect(math.abs((reachedAt(run, distance) :: number) - contact) <= FRAME + EPSILON).toBe(true)
+		end
+	end)
+
+	it("a telegraph heard after its own RushStarted never draws the body back to the crouch", function()
+		-- Out of order: the unreliable Telegraph came after the reliable RushStarted it led to. Re-armed
+		-- as a fresh prediction it stepped the running body back 1.40 studs (latency 0.25 and 0.5).
+		for _, latency in { 0, 0.25, 0.5 } do
+			local run = rush({
+				latency = latency,
+				lag = latency + 0.15,
+				telegraphLatency = CHARGE.windUp + latency + 0.05,
+				frames = 200,
+			})
+			local frames = run.frames
+			for index = 2, #frames do
+				expect(frames[index].along - frames[index - 1].along >= -EPSILON).toBe(true)
+			end
+			-- A wind-up the client has seen launch shows no telegraph either.
+			for _, call in run.calls do
+				expect(call.module == "telegraphs" and call.fn == "show").toBe(false)
+			end
+			expect(frames[#frames].along).toBeCloseTo(LENGTH, EPSILON)
 		end
 	end)
 

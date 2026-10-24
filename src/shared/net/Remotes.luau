@@ -179,7 +179,8 @@ local Remotes: { [string]: RemoteDef } = {
 		}),
 	},
 
-	-- ------------------------------------------------------------------ server -> client (unreliable)
+	-- ------------------------------------------------------------------ server -> client (unreliable,
+	-- but for a rush's launch, stop and bend: one-shot state changes, reliable)
 	ActionStarted = {
 		kind = "Unreliable",
 		direction = "ServerToClient",
@@ -209,8 +210,11 @@ local Remotes: { [string]: RemoteDef } = {
 	-- D-169: a Charger's rush launched. Clients draw the body down the line on the server's clock,
 	-- distance = speed * clamp(serverNow - serverTime, 0, duration) from `origin`, instead of
 	-- waiting for the replicated root, so the snout reaches a player when the server's hit does.
+	-- Reliable: a launch is a state change sent once, never a stream the next packet mends.
+	-- Lost, a client drew the telegraph's guess (22 studs off a line the server bent at launch) or
+	-- nothing; now it can only come late, and the drawn body catches up on the server's clock.
 	RushStarted = {
-		kind = "Unreliable",
+		kind = "Event",
 		direction = "ServerToClient",
 		schema = Check.strictInterface({
 			entityId = entityId,
@@ -229,8 +233,10 @@ local Remotes: { [string]: RemoteDef } = {
 	-- will stop, `contact` where the body meets the face (the cue's place, on the frame the drawn
 	-- body gets there) and `normal` the face's. D-210: after a "Jammed" or a "Wall" the stop that ends
 	-- the rush early (an interrupt, a death, a sleep) is told too, once, with where the body stands.
+	-- Reliable: lost, a client ran the drawn body on to its full length past the server's stop
+	-- (16 studs past a jam) and handed it back with a slide.
 	RushEnded = {
-		kind = "Unreliable",
+		kind = "Event",
 		direction = "ServerToClient",
 		schema = Check.strictInterface({
 			entityId = entityId,
@@ -246,9 +252,10 @@ local Remotes: { [string]: RemoteDef } = {
 	-- root's box clips ("Clip"). `legs` is the whole path from the launch (RushWorld.Leg: each starts
 	-- `at` studs down the path at `from`, runs along `heading`, the body facing `facing`), `at` where
 	-- the cue plays (the bend, the sidestep's end), `contact` and `normal` where the body meets the
-	-- face. Clients draw the body on these legs; their own cast predicts the same bend.
+	-- face. Clients draw the body on these legs; their own cast predicts the same bend. Reliable
+	-- too, like the launch and the stop it sits between.
 	RushTurned = {
-		kind = "Unreliable",
+		kind = "Event",
 		direction = "ServerToClient",
 		schema = Check.strictInterface({
 			entityId = entityId,
