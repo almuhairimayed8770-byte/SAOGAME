@@ -284,9 +284,21 @@ describe("Charger", function()
 		expect(chaseMoves).toBeGreaterThan(0)
 	end)
 
-	it("a jammed body strikes on the same timeline: the stretches follow the clock, not the body (D-166)", function()
-		local function run(blocked: boolean)
-			local w = world()
+	it("a jammed body's line ends at its snout: the stretches keep up with the body, not the clock (D-195)", function()
+		local FRONT, BACK = 5.6, 3.3
+		local function run(blocked: boolean): ({ any }, any, { any }, any)
+			local w = world({
+				extents = function()
+					return FRONT, BACK
+				end,
+			})
+			local rushes, ends = {}, {}
+			w.context.rushStarted = function(rush)
+				table.insert(rushes, rush)
+			end
+			w.context.rushEnded = function(_rush, reason, distance)
+				table.insert(ends, { time = w.time, reason = reason, distance = distance })
+			end
 			w.players = { player(1, 0, -20) }
 			w.stepUntil(function()
 				return w.phase() == "WindUp"
@@ -297,14 +309,149 @@ describe("Charger", function()
 			end, 3)
 			local spans = {}
 			for _, strike in w.strikes do
-				table.insert(spans, { strike.time, strike.options.span.from, strike.options.span.to })
+				table.insert(
+					spans,
+					{ time = strike.time, from = strike.options.span.from, to = strike.options.span.to }
+				)
 			end
-			return spans, w
+			return spans, rushes[1], ends, w
 		end
-		local free = run(false)
-		local jammed, w = run(true)
-		expect(jammed).toEqual(free)
+		local speed = AI.rushSpeed(CHARGE)
+		local free, _, freeEnds = run(false)
+		expect(#freeEnds).toBe(1)
+		expect(freeEnds[1].reason).toBe("Done")
+		expect(free[#free].to).toBeCloseTo(speed * CHARGE.strike + FRONT, 1e-6) -- a free run keeps the clock
+		local jammed, rush, ends, w = run(true)
 		expect(Brain.horizontalDistance(w.position, w.telegraphs[1].origin)).toBeLessThan(1e-6) -- it never moved
+		-- The launch resolves the body where it crouched, as a free run does.
+		expect(jammed[1].time).toBeCloseTo(free[1].time, 1e-9)
+		expect(jammed[1].from).toBeCloseTo(free[1].from, 1e-9)
+		expect(jammed[1].to).toBeCloseTo(free[1].to, 1e-9)
+		-- Reported Jammed first, where it stood (the run's end follows when its time is up); no stretch
+		-- reaches further than its snout plus the frame it started late and keepUpStuds, and nothing
+		-- resolves after the report.
+		expect(#ends).toBe(2)
+		expect(ends[1].reason).toBe("Jammed")
+		expect(ends[2].reason).toBe("Done")
+		expect(ends[1].distance).toBeCloseTo(0, 1e-9)
+		local late = speed * (rush.bodyStartedAt - rush.startedAt)
+		for _, span in jammed do
+			expect(span.to).toBeLessThanOrEqual(ends[1].distance + FRONT + late + tuning.keepUpStuds + 1e-9)
+			expect(span.to).toBeGreaterThan(span.from)
+			expect(span.time).toBeLessThanOrEqual(ends[1].time + 1e-9)
+		end
+	end)
+
+	it(
+		"once jammed the line is over: a body shoved on down the line after the report hits nothing more (D-195)",
+		function()
+			local FRONT, BACK = 5.6, 3.3
+			local w = world({
+				extents = function()
+					return FRONT, BACK
+				end,
+			})
+			local jammedAt: number? = nil
+			w.context.rushEnded = function(_rush, reason)
+				if reason == "Jammed" then
+					jammedAt = w.time
+				end
+			end
+			w.players = { player(1, 0, -20) }
+			w.stepUntil(function()
+				return w.phase() == "WindUp"
+			end, 2)
+			w.blocked = true
+			w.stepUntil(function()
+				return jammedAt ~= nil
+			end, 2)
+			local count = #w.strikes
+			w.position += w.facing * 6 -- something shoves the stopped body on
+			w.stepUntil(function()
+				return w.phase() == "Recover"
+			end, 3)
+			expect(#w.strikes).toBe(count)
+		end
+	)
+
+	it("a body held back short of a jam leaves no gap: each stretch starts where the last one ended (D-195)", function()
+		-- A short body, so the line it keeps up with falls behind the clock's back while it is held.
+		local FRONT, BACK = 0.5, 0.5
+		local w = world({
+			extents = function()
+				return FRONT, BACK
+			end,
+		})
+		local ends = {}
+		w.context.rushEnded = function(_rush, reason)
+			table.insert(ends, reason)
+		end
+		w.players = { player(1, 0, -20) }
+		w.stepUntil(function()
+			return w.phase() == "Strike"
+		end, 2)
+		local launchAt = w.time - w.brain:phaseElapsed()
+		w.blocked = true
+		w.step(2)
+		w.blocked = false
+		w.stepUntil(function()
+			return w.phase() == "Recover"
+		end, 3)
+		expect(ends).toEqual({ "Done" }) -- held, never jammed
+		local speed = AI.rushSpeed(CHARGE)
+		local behind = false
+		for index, strike in w.strikes do
+			local span = strike.options.span
+			expect(span.to).toBeGreaterThan(span.from)
+			if index > 1 then
+				expect(span.from).toBeLessThanOrEqual(w.strikes[index - 1].options.span.to + 1e-9)
+			end
+			local clock = speed * math.min(strike.time - launchAt, CHARGE.strike) + FRONT
+			behind = behind or span.to < clock - 1e-6
+		end
+		expect(behind).toBe(true) -- the line did wait for the body
+	end)
+
+	it("a wall ahead of the root ends the line at its face: nothing behind it is reached (D-197)", function()
+		-- Only the root collides, so a body held at a wall still has its snout FRONT - ROOT_HALF past
+		-- the face; the line stops where the world stops the root, and still reaches the face.
+		local FRONT, BACK, ROOT_HALF, FACE = 5.6, 3.3, 2.5, 8
+		local w = world({
+			extents = function()
+				return FRONT, BACK
+			end,
+		})
+		local casts = {}
+		w.context.worldAhead = function(direction: Vector3, distance: number): number?
+			local along = -w.position.Z -- the line runs down -Z from the origin
+			table.insert(casts, { direction = direction, distance = distance })
+			local gap = FACE - along
+			return if gap >= 0 and gap <= distance then gap else nil
+		end
+		w.players = { player(1, 0, -20) }
+		w.stepUntil(function()
+			return w.phase() == "Strike"
+		end, 2)
+		local guard = 0
+		while w.phase() ~= "Recover" and guard < 200 do
+			w.step(1)
+			if -w.position.Z > FACE - ROOT_HALF then
+				w.position = Vector3.new(w.position.X, w.position.Y, -(FACE - ROOT_HALF)) -- held at the face
+			end
+			guard += 1
+		end
+		expect(#casts).toBeGreaterThan(0)
+		for _, cast in casts do
+			expect(cast.direction:Dot(FORWARD)).toBeCloseTo(1, 1e-6)
+			expect(cast.distance).toBeGreaterThan(0)
+		end
+		local furthest = -math.huge
+		for _, strike in w.strikes do
+			furthest = math.max(furthest, strike.options.span.to)
+			expect(strike.options.span.to).toBeGreaterThan(strike.options.span.from)
+		end
+		expect(furthest).toBeLessThanOrEqual(FACE + 1e-9)
+		expect(furthest).toBeGreaterThan(FACE - 1e-6) -- everything up to the face resolved
 	end)
 
 	it("overshoots past the target, then recovers for the attack's 1.2 s with a slow turn back", function()

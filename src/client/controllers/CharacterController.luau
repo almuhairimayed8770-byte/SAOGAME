@@ -106,6 +106,7 @@ local CameraController = require(Client.camera.CameraController)
 
 local Choreo = Siblings.load(Client, "choreo.Choreo")
 local Locomotion = Siblings.load(Client, "choreo.Locomotion")
+local DrawnBody = Siblings.load(Client, "choreo.DrawnBody")
 local ClipLibrary, hasClipLibrary = Siblings.load(Client, "choreo.ClipLibrary")
 local Trails = Siblings.load(Client, "fx.Trails")
 local Hud = Siblings.load(Client, "ui.Hud")
@@ -266,11 +267,17 @@ end
 
 -- ------------------------------------------------------------------ aim (D-112)
 
--- The locked enemy's position, or nil with no lock (TargetController drops a dead or gone lock).
+-- The locked enemy's position, or nil with no lock (TargetController drops a dead or gone lock):
+-- where its body is drawn (D-193), so the body turns to the boar the player sees, not to the
+-- hidden root a rush leaves behind it.
 local function lockPosition(): Vector3?
 	local record = Siblings.call(TargetController, "current")
 	if record == nil or record.model == nil then
 		return nil
+	end
+	local drawn = Siblings.call(DrawnBody, "position", record.model)
+	if drawn ~= nil then
+		return drawn
 	end
 	local primary = record.model.PrimaryPart
 	return if primary ~= nil then primary.Position else nil

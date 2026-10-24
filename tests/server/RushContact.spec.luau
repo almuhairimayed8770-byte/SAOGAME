@@ -5,7 +5,7 @@
 	and players that are real EntityService records. A player is hit on the tick the rush's snout
 	reaches them on the server's clock (speed * elapsed + the snout's reach past the root), from
 	the crouch point along exactly the telegraphed line; nobody past the line's end, beside it or
-	stepping in behind the passing body is hit; a jammed body hits on the same clock.
+	stepping in behind the passing body is hit; a jammed body hits only what its snout reaches (D-195).
 ]]
 
 Harness.stubService("CollectionService", {
@@ -314,22 +314,29 @@ describe("A boar's rush hits on contact (D-166)", function()
 		expect(#hitsOn(sideId)).toBe(0)
 	end)
 
-	it("a body jammed at the crouch point hits on the same clock", function()
-		local function hitTime(jam: boolean): number
+	it("a body jammed at the crouch point hits only what its snout reaches, on the same clock (D-195)", function()
+		-- A player under the snout as the rush starts, and the target 12 studs down the line.
+		local function run(jam: boolean): (number?, { any }, { any })
 			fresh()
 			local boarId = EnemyService.spawn("FrenzyBoar", CFrame.new(0, 3, 0))
-			local playerId = spawnPlayer(Vector3.new(0, 3, -12))
+			local farId = spawnPlayer(Vector3.new(0, 3, -12))
 			jammed = jam
-			local launchAt = untilLaunch(boarId)
-			for _ = 1, 30 do
+			local launchAt, crouch = untilLaunch(boarId)
+			local nearId = spawnPlayer(crouch + Vector3.new(0, 0, -6))
+			while phaseOf(boarId) == "Strike" do
 				tick()
 			end
-			local hits = hitsOn(playerId)
-			expect(#hits).toBe(1)
-			return hits[1].time - launchAt
+			local near = hitsOn(nearId)
+			return if #near == 1 then near[1].time - launchAt else nil, hitsOn(farId), sentOf("RushEnded")
 		end
-		local free = hitTime(false)
-		expect(hitTime(true)).toBeCloseTo(free, 1e-9)
+		local free, freeFar = run(false)
+		expect(free).never.toBeNil()
+		expect(#freeFar).toBe(1)
+		local near, far, ended = run(true)
+		expect(near).toBeCloseTo(free :: number, 1e-9)
+		expect(#far).toBe(0)
+		expect(#ended).toBe(1)
+		expect(ended[1].payload.reason).toBe("Jammed")
 	end)
 end)
 

@@ -24,8 +24,23 @@
 	predict from the telegraph), not on the frame up to a frame later that starts the body (D-182);
 	the body's run, its jam check and its end, counts from that frame (Rush.bodyStartedAt). A target
 	the line never reaches (beyond its end, beside it, or stepping in behind the body that already
-	passed) is never hit, and a body jammed against something still hits on the clock. Dodge, guard
-	and parry are judged per target at its own contact (CombatService.enemyStrike's options).
+	passed) is never hit. Dodge, guard and parry are judged per target at its own contact
+	(CombatService.enemyStrike's options).
+
+	A charge only hits what it reaches (D-195): the line never resolves further ahead of the body's
+	own snout than the run the body started late (speed * (bodyStartedAt - startedAt)) plus
+	keepUpStuds, more than a free-running body trails its own run by, so a free run resolves exactly
+	on the clock while a body held back by a wall stops the line within keepUpStuds (and that late
+	start) of its snout, long before the jam is told. Once the rush reports "Jammed" the line is
+	over: nothing past the body's front at the jam is hit, nor anyone who walks into the stopped body
+	afterwards. A stretch starts where the last one ended when that is behind the clock's back, so a
+	body that falls behind and catches up leaves no gap.
+
+	Nor past a wall (D-197): only the root collides (RigBuilder), so a body held at a wall still has
+	its snout front - the root's half length beyond the wall's face, and the late start and
+	keepUpStuds reach further still. Every stretch stops where the world stops the root, cast ahead
+	of it along the line in the root's own group (the rushing group meets the world only), so nobody
+	behind a wall is hit, while a free run's line, with nothing in the way, resolves on the clock.
 
 	The run is the strike's own movement (D-183): it goes straight at the line's end (moveDirect),
 	never along a path, so a body that stood still before the launch never walks back to where a
@@ -72,13 +87,18 @@ end
 
 -- Resolves the stretch of the line the body swept since the last sweep, up to `elapsed` seconds
 -- into the rush (never past the attack's strike beat): from where its back was then to where its
--- snout is now, on the rush's clock.
+-- snout is now, on the rush's clock, but never further ahead of the body's own snout than its late
+-- start plus keepUpStuds (D-195), never past the world that stops its root (D-197), and never again
+-- once the rush jammed.
 local function sweep(brain: Brain.Brain, rush: Brain.Rush, elapsed: number)
 	local attack = brain:currentAttack()
 	if attack == nil then
 		return
 	end
 	local memory = brain.memory
+	if memory.rushJammed == true then
+		return
+	end
 	local upTo = math.clamp(elapsed, 0, attack.strike)
 	local last: number? = memory.rushSwept
 	if last ~= nil and upTo <= last then
@@ -86,13 +106,26 @@ local function sweep(brain: Brain.Brain, rush: Brain.Rush, elapsed: number)
 	end
 	local front, back = brain:bodyExtents()
 	memory.rushSwept = upTo
-	brain:strikeStretch(
-		rush.origin,
-		rush.direction,
-		rush.speed * (last or 0) - back,
-		rush.speed * upTo + front,
-		memory.rushHit
-	)
+	local lateStart = rush.speed * math.max(0, rush.bodyStartedAt - rush.startedAt)
+	local reached = progressOf(brain, rush) + front + lateStart + tuning.keepUpStuds
+	local to = math.min(rush.speed * upTo + front, reached)
+	local rootAt = (brain:position() - rush.origin):Dot(rush.direction)
+	local wall = brain:worldAhead(rush.direction, to - rootAt)
+	if wall ~= nil then
+		to = math.min(to, rootAt + wall)
+	end
+	local from = rush.speed * (last or 0) - back
+	local resolved: number? = memory.rushResolved
+	if resolved ~= nil then
+		from = math.min(from, resolved)
+		if to <= resolved then
+			return -- the body has not got past what already resolved
+		end
+	elseif to <= from then
+		return -- a wall right in front of the crouch: nothing to resolve yet
+	end
+	memory.rushResolved = to
+	brain:strikeStretch(rush.origin, rush.direction, from, to, memory.rushHit)
 end
 
 --- True while the strike in progress is a rush: it resolves by contact (D-166).
@@ -193,6 +226,7 @@ function Charger.onStrikeStart(brain: Brain.Brain, _target: Brain.Target?)
 	memory.rushing = true
 	memory.rushJammed = false
 	memory.rushSwept = nil
+	memory.rushResolved = nil
 	memory.rushHit = {}
 	brain:moveDirect(rush.origin + rush.direction * length, speed)
 	brain:rushStarted(rush)
@@ -211,10 +245,11 @@ end
 
 --- Keeps the rush going and resolves what the body swept since the last pass (every server frame,
 --- D-184); it is over when its time has run, so the skid starts on the clip's beat. A body that fell
---- jamLagStuds behind the clock (a wall, a ledge) stops there and waits out the time (D-190). The line resolves on the
---- launch beat's clock (startedAt, what the clients draw); the body's own run (its jam check and its
---- end) on the frame it started (bodyStartedAt), so a launch noticed up to a frame late neither cuts
---- the run short nor reads as a jam.
+--- jamLagStuds behind the clock (a wall, a ledge) stops there and waits out the time (D-190), and
+--- its line ends at its snout (D-195). The line resolves on the launch beat's clock (startedAt, what
+--- the clients draw) as far as the body keeps up; the body's own run (its jam check and its end) on
+--- the frame it started (bodyStartedAt), so a launch noticed up to a frame late neither cuts the run
+--- short nor reads as a jam.
 function Charger.onStrike(brain: Brain.Brain, _dt: number, _phaseElapsed: number): boolean
 	local memory = brain.memory
 	local rush: Brain.Rush? = memory.rush
@@ -234,7 +269,7 @@ function Charger.onStrike(brain: Brain.Brain, _dt: number, _phaseElapsed: number
 		return true
 	end
 	if memory.rushJammed ~= true and rush.speed * ran - progress > tuning.jamLagStuds then
-		-- The hits stay on the clock and the clients stop drawing it ahead; the body stops where it
+		-- The line ends here (D-195) and the clients stop drawing it ahead; the body stops where it
 		-- jammed (D-190): sent on, it ran past its clock's end still at full speed, and turned solid
 		-- in the middle of the player it had just run through.
 		memory.rushJammed = true

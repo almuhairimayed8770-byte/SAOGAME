@@ -63,6 +63,7 @@ local Types = require(Shared.types)
 local Combat = require(Shared.data.combat)
 local ClipSampler = require(Shared.choreo.ClipSampler)
 local Pose = require(Shared.choreo.Pose)
+local BladeContact = require(Shared.choreo.BladeContact)
 
 export type Window = { open: number, close: number }
 
@@ -484,10 +485,11 @@ local function pointSegmentDistance(point: Vector3, a: Vector3, b: Vector3): num
 	return (point - (a + direction * t)).Magnitude
 end
 
--- The engine's query rule: spatial queries skip a part only when both CanQuery and CanCollide are
--- off (CanQuery takes effect only on a part that does not collide).
+-- The engine's query rule: spatial queries skip a part when both CanQuery and CanCollide are off
+-- (CanQuery takes effect only on a part that does not collide), and, run as Default, a part whose
+-- group does not collide with Default (an enemy's blocker, D-198): BladeContact.queryable.
 local function isQueryable(part: BasePart): boolean
-	return part.CanQuery or part.CanCollide
+	return BladeContact.queryable(part)
 end
 
 local function isExcluded(part: Instance, model: Model, exclude: { Instance }): boolean

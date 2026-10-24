@@ -108,6 +108,9 @@ export type Context = {
 	-- Studs the body reaches ahead of and behind its root along the facing (a rush sweeps it, D-166).
 	-- Nil: the root alone (0, 0).
 	bodyExtents: (() -> (number, number))?,
+	-- How far ahead of the root's centre along `direction` the world stops the root, within
+	-- `distance` studs; nil when nothing does (D-197: a rush's line ends at the wall). Nil: no world.
+	worldAhead: ((direction: Vector3, distance: number) -> number?)?,
 	-- A rush launched / stopped (D-169): EnemyService switches collision groups and tells the clients.
 	rushStarted: ((rush: Rush) -> ())?,
 	rushEnded: ((rush: Rush, reason: RushEnd, distance: number) -> ())?,
@@ -409,6 +412,16 @@ function Brain.bodyExtents(self: Brain): (number, number)
 		return 0, 0
 	end
 	return extents()
+end
+
+--- How far ahead of the root's centre along `direction` the world stops the body, within
+--- `distance` studs; nil when nothing does or the context knows no world (D-197).
+function Brain.worldAhead(self: Brain, direction: Vector3, distance: number): number?
+	local cast = self.context.worldAhead
+	if cast == nil or not (distance > 0) then
+		return nil
+	end
+	return cast(direction, distance)
 end
 
 --- Resolves one stretch of the attack's line, `from` to `to` studs along it from `origin` (the

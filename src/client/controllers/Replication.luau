@@ -115,6 +115,7 @@ local Siblings = require(script.Parent.Siblings)
 
 local SheathState, hasSheathState = Siblings.load(script.Parent.Parent, "choreo.SheathState")
 local RushDraw, hasRushDraw = Siblings.load(script.Parent.Parent, "choreo.RushDraw")
+local DrawnBody = Siblings.load(script.Parent.Parent, "choreo.DrawnBody")
 
 export type Deps = {
 	net: { on: (name: string, handler: (payload: any) -> ()) -> () },
@@ -1766,6 +1767,11 @@ function Replication.start()
 			return WeaponInfo.trailTokenOf(record.weaponId)
 		end,
 		positionOf = function(model)
+			-- Sounds sit on the drawn body, ahead of a rush's hidden root (D-193).
+			local drawn = Siblings.call(DrawnBody, "position", model)
+			if drawn ~= nil then
+				return drawn
+			end
 			local primary = (model :: Model).PrimaryPart
 			return if primary ~= nil then primary.Position else nil
 		end,

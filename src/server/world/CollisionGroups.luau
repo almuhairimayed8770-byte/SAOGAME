@@ -8,6 +8,15 @@
 	rush never jams on the player it hits or on a packmate. Players collide with players and with
 	walking enemies, and enemies with each other, as before.
 
+	What a player bumps into on a standing enemy is its blocker (D-198): one upright, invisible box
+	over the root's footprint from the floor up past a player's head (RigBuilder.addBlocker), in the
+	blockers group, which collides with players only. The root (a box floating at HipHeight, its top
+	edge at a player's chest) no longer collides with players: walking into that edge bobbed a player
+	up and slid them off sideways, while a face from the floor up past the head is a flat stop. The
+	blocker never collides with the world, so the body moves on the floor and stops at walls as
+	before, and a query (run as Default) never sees it. assign leaves it in its group and switches it
+	on only with the enemies group, so a rush still passes through players (D-167).
+
 	The server registers the groups once (register, from Main and EnemyService.start, either first);
 	the engine replicates the group table and every part's CollisionGroup to the clients, so a
 	client-simulated character passes a rushing boar on its own screen too. CharacterReady puts
@@ -20,7 +29,9 @@
 	player onto a boar's back.
 
 	Queries are unaffected: a RaycastParams / OverlapParams query runs as the Default group, which
-	collides with all three, so blades, spherecasts and overlap tests see every fighter as before.
+	collides with the three fighter groups, so blades, spherecasts and overlap tests see every
+	fighter as before, and not with the blockers, so none of them sees a blocker (HitSweep and
+	BladeContact follow the same rule in their own tests).
 
 	The engine calls are injectable (a PhysicsService stand-in for register, an overlap query for
 	clear), so the rules run under Lune.
@@ -46,10 +57,16 @@ local CollisionGroups = {}
 
 local registered = false
 
---- The three group names, players first.
+--- The four group names, players first.
 function CollisionGroups.names(): { string }
 	local groups = AI.collision
-	return { groups.players, groups.enemies, groups.rushing }
+	return { groups.players, groups.enemies, groups.rushing, groups.blockers }
+end
+
+--- Whether a part is an enemy's blocker (D-198): it lives in the blockers group from the moment it
+--- is made, and assign never moves it out.
+function CollisionGroups.isBlocker(part: BasePart): boolean
+	return part.CollisionGroup == AI.collision.blockers
 end
 
 --- Registers the groups and makes the `apart` pairs pass through each other. Safe to call again:
@@ -80,14 +97,25 @@ function CollisionGroups.register(physics: Physics?): boolean
 	return true
 end
 
---- Puts every BasePart of a model (or the part itself) in a group.
+-- One part's share of assign: a blocker stays a blocker and collides only while its enemy is in
+-- the enemies group (solid); every other part joins the group.
+local function assignPart(part: BasePart, group: string)
+	if CollisionGroups.isBlocker(part) then
+		part.CanCollide = group == AI.collision.enemies
+	else
+		part.CollisionGroup = group
+	end
+end
+
+--- Puts every BasePart of a model (or the part itself) in a group; an enemy's blocker stays in the
+--- blockers group and is switched on with the enemies group only (D-198).
 function CollisionGroups.assign(model: Instance, group: string)
 	if model:IsA("BasePart") then
-		model.CollisionGroup = group
+		assignPart(model, group)
 	end
 	for _, descendant in model:GetDescendants() do
 		if descendant:IsA("BasePart") then
-			descendant.CollisionGroup = group
+			assignPart(descendant, group)
 		end
 	end
 end
@@ -124,23 +152,37 @@ local function defaultOverlap(root: BasePart, exclude: Instance): { BasePart }
 	return workspace:GetPartsInPart(root, query)
 end
 
---- Whether a model's root overlaps no colliding part of a player or of another enemy: a body that
---- may rejoin the enemies group without the engine pushing anyone out of it. A model without a root
---- is clear; so is one whose query fails.
+-- Whether `probe` overlaps a colliding part in one of `groups` (a failed query finds nothing).
+local function touches(probe: BasePart, model: Model, overlap: Overlap?, groups: { string }): boolean
+	local ok, parts = pcall(overlap or defaultOverlap, probe, model)
+	if not ok then
+		return false
+	end
+	for _, part in parts :: { BasePart } do
+		if part.CanCollide and table.find(groups, part.CollisionGroup) ~= nil then
+			return true
+		end
+	end
+	return false
+end
+
+--- Whether a model's root overlaps no colliding part of a player or of another enemy, and its
+--- blocker (D-198) none of a player: a body that may rejoin the enemies group without the engine
+--- pushing anyone out of it. A model without a root is clear; so is one whose query fails.
 function CollisionGroups.clear(model: Model, overlap: Overlap?): boolean
 	local root = model.PrimaryPart
 	if root == nil then
 		return true
 	end
-	local ok, parts = pcall(overlap or defaultOverlap, root, model)
-	if not ok then
-		return true
-	end
 	local groups = AI.collision
-	for _, part in parts :: { BasePart } do
-		local group = part.CollisionGroup
-		if part.CanCollide and (group == groups.players or group == groups.enemies) then
-			return false
+	if touches(root, model, overlap, { groups.players, groups.enemies }) then
+		return false
+	end
+	for _, part in model:GetDescendants() do
+		if part:IsA("BasePart") and CollisionGroups.isBlocker(part) then
+			if touches(part, model, overlap, { groups.players }) then
+				return false
+			end
 		end
 	end
 	return true

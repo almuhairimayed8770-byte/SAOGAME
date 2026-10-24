@@ -678,6 +678,45 @@ the sweep.
 - **client/choreo/Mixer.beatStep**: a kept beat's last step evens the whole balance: maxRate when the clip is behind, minRate when it is ahead (D-188).
 - **places/Playground.project.json**: the Ceiling has CastShadow false. tests/project fails any part at or above 100 studs that casts a shadow (D-186).
 
+### Rush followers, jam line and late paths (D-193 to D-198)
+
+- **client/choreo/DrawnBody**: where a rig's body is drawn, meaning its root part moved by Choreo's body offset (a rush, D-171). Readers use DrawnBody.position and DrawnBody.cframe. DrawnBody.follow and unfollow keep a root-adorned BillboardGui over the body (D-193). Also add it to the client layout list.
+- **client/choreo/Choreo**: applyOffsets publishes each offset from the same step that writes it into the root joint, which moves the following billboards. It publishes nil when the offset ends and on destroy.
+- **Client readers of an enemy's position**, all through DrawnBody:
+  - Nameplates (plate, fade, hover), Hud (SWITCH), CameraController (lock point);
+  - Engine.modelPosition, which also feeds SfxPool, Trails, OutlineManager, ImpactFrames, Impact and Shatter;
+  - the Replication sound position, Choreo.rerank and DevAim.
+  - Digits, Sparks, SwitchRing and the telegraph decal stay on server points.
+- **client/controllers/TargetController** `positionOf` and **CharacterController** `lockPosition`: the lock range, break distance, assist and lock turn are measured on the drawn body (D-194). Extend the TargetController line accordingly.
+- **server/ai/Charger.sweep**:
+  - Each stretch is capped at progressOf + front + speed × late start + keepUpStuds (D-195).
+  - memory.rushResolved holds the furthest point resolved and starts the next stretch when that is behind the clock's back.
+  - Nothing resolves after rushJammed.
+  - The cap is also rootAt + brain:worldAhead(direction, to − rootAt) (D-197). A wall right at the crouch resolves nothing yet.
+  - This replaces "The line keeps resolving on the clock to the run's end (D-190)" in the D-183 to D-192 section.
+- **server/ai/Brain**: `worldAhead(direction, distance): number?` asks Context.worldAhead and returns nil when there is no hook or distance ≤ 0.
+- **server/services/EnemyService**:
+  - Mover gains pathFrom (where the body asked) and pathFresh (a path landed since the last update). firstAhead skips leading waypoints already passed on the first update after a path lands (D-196).
+  - `worldAhead(model, direction, distance, cast?)` flattens the direction, starts the root's box with its front face at the root's centre, and returns the distance travelled or nil.
+  - `WorldCast` type; `defaultWorldCast` is workspace:Blockcast with RaycastParams set to Exclude the model, RespectCanCollide on, and CollisionGroup set to the root's group.
+  - The engine seam gains `worldAhead`, and makeContext wires it.
+  - spawn calls rigBuilder.addBlocker before setting the enemies group (D-198).
+- **server/world/RigBuilder**: `addBlocker(model): Part?` builds the invisible blocker: the root's footprint from the floor to blockerHeight, welded to the root, in the blockers group, named `RigBuilder.BLOCKER_NAME` ("Blocker"). It returns nil when there is no root or the rig is unknown.
+- **server/world/CollisionGroups**:
+  - names() returns four groups: players, enemies, rushing, blockers.
+  - isBlocker(part) is new.
+  - assign keeps a blocker in its group, with CanCollide on only for the enemies group.
+  - clear checks the root against players and enemies, and each blocker against players.
+- **shared/choreo/BladeContact.queryable**: (CanQuery or CanCollide) and not in a group kept apart from Default. HitSweep.isQueryable delegates to it, and ContactPredictor already uses it.
+- **shared/data/ai.luau**: archetypes.Charger.keepUpStuds (1). collision.blockers ("SkyspireBlockers"), collision.blockerHeight (7), and new apart pairs: Enemies–Players, and Blockers–Default, Enemies, Rushing and Blockers.
+- **tools/validators/ai.luau** requires:
+  - keepUpStuds positive and below jamLagStuds;
+  - four distinct groups;
+  - apart pairs that name a fighter group or Default;
+  - blockers kept from Default, enemies, rushing and blockers, but not from players;
+  - enemies kept from players;
+  - blockerHeight above every enemy rig's hipHeight + root height.
+
 ## Data tables (src/shared/data)
 
 | File | Holds |

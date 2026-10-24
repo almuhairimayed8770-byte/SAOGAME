@@ -21,7 +21,11 @@
 	The mover's stuck clock (D-183) starts with each movement: a stop, a switch to or from a direct
 	move and a release from hold all restart it, so time spent standing never reads as time stuck.
 	A strike's own movement (the rush) is direct: straight MoveTo, never a path. A path that lands
-	after the body moved on never sends it back to the waypoint it asked from (where it stood).
+	after the body moved on never sends it back to the waypoint it asked from (where it stood), nor
+	to any leading waypoint the body already walked past (D-196): one is passed when the body is on
+	the leg that leaves it (within waypointReach of that leg), past its start, and walked that way
+	since it asked. A detour that goes back round an obstacle starts with a leg the body is not on,
+	and a body that asked because it was stuck walked nowhere since, so both walk the path as it came.
 
 	Hold (D-120): setHeld(id, true) puts one enemy's brain to sleep and stops its mover, and the
 	sleep check never wakes it while it is held; setHoldNew(true) makes every enemy spawned after
@@ -80,7 +84,15 @@ export type Engine = {
 	-- D-167: whether the model's root overlaps no player and no other enemy, so it can rejoin the
 	-- enemies group without being pushed out of anyone (CollisionGroups.clear). Nil: always clear.
 	bodyClear: ((model: Model) -> boolean)?,
+	-- D-197: how far ahead of the root's centre along `direction` the world stops the root (what the
+	-- root collides with in its own group: a rushing body's walls, never a player or an enemy),
+	-- within `distance` studs; nil when nothing is in the way (EnemyService.worldAhead). Nil: no world.
+	worldAhead: ((model: Model, direction: Vector3, distance: number) -> number?)?,
 }
+
+-- The world cast worldAhead makes: a box of `size` at `start` moved by `vector`, colliding as
+-- `group` does and never with `exclude`; how far it travelled before it met something, or nil.
+export type WorldCast = (start: CFrame, size: Vector3, vector: Vector3, group: string, exclude: Instance) -> number?
 
 export type Deps = {
 	entities: any, -- EntityService
@@ -107,6 +119,10 @@ type Mover = {
 	path: { Vector3 }?,
 	pathIndex: number,
 	pathComputedAt: number,
+	-- Where the body stood when it asked for the path in hand, and whether that path landed since the
+	-- last update: the first update after it lands skips the waypoints the body already passed (D-196).
+	pathFrom: Vector3?,
+	pathFresh: boolean,
 	pathFailedAt: number?,
 	computing: boolean,
 	pathGeneration: number, -- bumped by every request and every stop; a late result for an old goal is dropped
@@ -208,6 +224,8 @@ local function newMover(model: Model, speed: number): Mover
 		path = nil,
 		pathIndex = 1,
 		pathComputedAt = -math.huge,
+		pathFrom = nil,
+		pathFresh = false,
 		pathFailedAt = nil,
 		computing = false,
 		pathGeneration = 0,
@@ -228,6 +246,7 @@ end
 -- Forgets the path and drops a result still computing (it was asked for another movement).
 local function dropPath(mover: Mover)
 	mover.path = nil
+	mover.pathFresh = false
 	mover.pathGeneration += 1
 	mover.computing = false
 end
@@ -292,6 +311,8 @@ local function requestPath(mover: Mover, from: Vector3, to: Vector3, now: number
 			local startsHere = #waypoints >= 2
 				and Brain.horizontalDistance(waypoints[1], from) <= AI.movement.waypointReach
 			mover.pathIndex = if startsHere then 2 else 1
+			mover.pathFrom = from
+			mover.pathFresh = true
 			mover.pathFailedAt = nil
 		else
 			mover.path = nil
@@ -303,6 +324,39 @@ local function requestPath(mover: Mover, from: Vector3, to: Vector3, now: number
 	else
 		compute()
 	end
+end
+
+-- The first waypoint from `index` on that a path which landed late still has the body walk to
+-- (D-196). A leading waypoint is passed when the body is within waypointReach of it, or when the
+-- body is on the leg that leaves it (within waypointReach of that leg), past its start, and walked
+-- at least stuckProgressStuds that way since it asked for the path (from `from`). A detour that goes
+-- back round an obstacle starts with a leg the body is not on, and a body that asked because it was
+-- stuck walked nowhere since, so both keep every waypoint. The last waypoint is passed only within
+-- reach.
+local function firstAhead(path: { Vector3 }, index: number, position: Vector3, from: Vector3): number
+	local movement = AI.movement
+	local i = index
+	while i < #path do
+		local start = path[i]
+		if Brain.horizontalDistance(position, start) > movement.waypointReach then
+			local leg = Brain.horizontal(path[i + 1] - start)
+			if leg == nil then
+				break
+			end
+			local offset = Vector3.new(position.X - start.X, 0, position.Z - start.Z)
+			local along = offset:Dot(leg)
+			local walked = Vector3.new(position.X - from.X, 0, position.Z - from.Z):Dot(leg)
+			if
+				along <= 0
+				or (offset - leg * along).Magnitude > movement.waypointReach
+				or walked < movement.stuckProgressStuds
+			then
+				break
+			end
+		end
+		i += 1
+	end
+	return i
 end
 
 -- Applies the tick's request: direct MoveTo inside pathfindPastStuds, a path beyond it or when stuck;
@@ -360,6 +414,10 @@ local function moverUpdate(mover: Mover, now: number)
 			path = mover.path -- filled at once when the computation ran inline
 		end
 		if path ~= nil then
+			if mover.pathFresh then
+				mover.pathFresh = false
+				mover.pathIndex = firstAhead(path, mover.pathIndex, position, mover.pathFrom or position)
+			end
 			while
 				mover.pathIndex <= #path
 				and Brain.horizontalDistance(position, path[mover.pathIndex]) <= movement.waypointReach
@@ -558,6 +616,10 @@ local function makeContext(entry: Entry): Brain.Context
 		bodyExtents = function()
 			return entry.front, entry.back
 		end,
+		worldAhead = function(direction, distance)
+			local cast = d.engine.worldAhead
+			return if cast ~= nil then cast(model, direction, distance) else nil
+		end,
 		rushStarted = function(rush)
 			rushStarted(entry, rush)
 		end,
@@ -667,6 +729,10 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 	end
 	-- Measured on the rig as built (every part at its rest pose around the root), before it moves.
 	local front, back = EnemyService.bodyExtents(model)
+	-- What players bump into instead of the root (D-198); the enemies group switches it on.
+	if typeof(d.rigBuilder.addBlocker) == "function" then
+		d.rigBuilder.addBlocker(model)
+	end
 	setGroup(model, AI.collision.enemies)
 	-- Parent first: the engine's place() claims server network ownership of the root, which the
 	-- engine refuses for a part that is not under Workspace yet.
@@ -1091,6 +1157,57 @@ function EnemyService.applyFacing(model: Model, facing: Vector3): boolean
 	return true
 end
 
+local castParams: RaycastParams? = nil
+
+-- workspace:Blockcast with the parts that collide with `group` and can collide (a hitbox, a
+-- decoration that lets bodies through, is not a wall).
+local function defaultWorldCast(
+	start: CFrame,
+	size: Vector3,
+	vector: Vector3,
+	group: string,
+	exclude: Instance
+): number?
+	local params = castParams
+	if params == nil then
+		local created = RaycastParams.new()
+		created.FilterType = Enum.RaycastFilterType.Exclude
+		created.RespectCanCollide = true
+		castParams = created
+		params = created
+	end
+	local query = params :: RaycastParams
+	query.FilterDescendantsInstances = { exclude }
+	query.CollisionGroup = group
+	local result = workspace:Blockcast(start, size, vector, query)
+	return if result ~= nil then result.Distance else nil
+end
+
+--- How far ahead of a model's root centre along `direction` (flattened) the world stops the root,
+--- within `distance` studs, or nil when nothing does (D-197). The root's own box is cast in the
+--- root's own collision group (a rushing body's group collides with the world only), from where its
+--- front face stands at the root's centre: a root pressed against a wall overlaps it by a hair, and
+--- a cast never sees what its box starts in. Only the root collides, so this is where the body
+--- stops; its snout and limbs run on through the wall. `cast` stands in for workspace:Blockcast.
+function EnemyService.worldAhead(model: Model, direction: Vector3, distance: number, cast: WorldCast?): number?
+	local root = model.PrimaryPart
+	local flat = Brain.horizontal(direction)
+	if root == nil or flat == nil or not (distance > 0) then
+		return nil
+	end
+	local frame = root.CFrame
+	local half = root.Size / 2
+	local reach = math.abs(frame.RightVector:Dot(flat)) * half.X
+		+ math.abs(frame.UpVector:Dot(flat)) * half.Y
+		+ math.abs(frame.LookVector:Dot(flat)) * half.Z
+	local start = frame - flat * reach
+	local ok, travelled = pcall(cast or defaultWorldCast, start, root.Size, flat * distance, root.CollisionGroup, model)
+	if not ok or typeof(travelled) ~= "number" then
+		return nil
+	end
+	return math.max(0, travelled)
+end
+
 -- `groups` is world.CollisionGroups (nil while it has not landed: no groups, as before D-167).
 local function defaultEngine(groups: any?): Engine
 	local PathfindingService = game:GetService("PathfindingService")
@@ -1170,6 +1287,9 @@ local function defaultEngine(groups: any?): Engine
 				return groups.clear(model)
 			end
 			else nil,
+		worldAhead = function(model, direction, distance)
+			return EnemyService.worldAhead(model, direction, distance)
+		end,
 	}
 end
 

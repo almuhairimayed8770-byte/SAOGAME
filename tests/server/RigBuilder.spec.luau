@@ -239,3 +239,51 @@ describe("RigBuilder helpers", function()
 		expect(near(axis, Vector3.xAxis)).toBe(true)
 	end)
 end)
+
+describe("RigBuilder.addBlocker (D-198)", function()
+	local AI = Harness.load("src/shared/data/ai")
+	local GROUPS = AI.collision
+
+	it("an upright, invisible box over the root's footprint from the floor to blockerHeight, welded on", function()
+		for _, rigId in { "Boar", "Kobold" } do
+			local model = RigBuilder.build(rigId)
+			local root = model.PrimaryPart :: BasePart
+			local rig = Rigs[rigId]
+			local blocker = RigBuilder.addBlocker(model) :: Part
+			expect(blocker).never.toBeNil()
+			expect(blocker.Name).toBe(RigBuilder.BLOCKER_NAME)
+			expect(blocker.Parent).toBe(model)
+			expect(near(blocker.Size, Vector3.new(root.Size.X, GROUPS.blockerHeight, root.Size.Z))).toBe(true)
+			-- The root's centre stands hipHeight + half its height above the floor.
+			local floorY = root.CFrame.Position.Y - (rig.hipHeight + root.Size.Y / 2)
+			local offset = root.CFrame:ToObjectSpace(blocker.CFrame)
+			expect(
+				near(offset.Position, Vector3.new(0, GROUPS.blockerHeight / 2 - (rig.hipHeight + root.Size.Y / 2), 0))
+			).toBe(true)
+			expect(near(offset.LookVector, Vector3.new(0, 0, -1))).toBe(true)
+			expect(blocker.CFrame.Position.Y - blocker.Size.Y / 2).toBeCloseTo(floorY, 1e-4)
+			expect(blocker.Transparency).toBe(1)
+			expect(blocker.CastShadow).toBe(false)
+			expect(blocker.CanTouch).toBe(false)
+			expect(blocker.CanQuery).toBe(false)
+			expect(blocker.Massless).toBe(true)
+			expect(blocker.Anchored).toBe(false)
+			-- Off until the enemy joins the enemies group (CollisionGroups.assign switches it on).
+			expect(blocker.CanCollide).toBe(false)
+			expect(blocker.CollisionGroup).toBe(GROUPS.blockers)
+			local weld = blocker:FindFirstChildOfClass("WeldConstraint") :: WeldConstraint
+			expect(weld).never.toBeNil()
+			expect(weld.Part0).toBe(root)
+			expect(weld.Part1).toBe(blocker)
+			-- No Motor6D: the animator and the joint walkers never see it.
+			expect(blocker:FindFirstChildOfClass("Motor6D")).toBeNil()
+		end
+	end)
+
+	it("a model without a root or a known rig gets none", function()
+		expect(RigBuilder.addBlocker(Instance.new("Model"))).toBeNil()
+		local model = RigBuilder.build("Boar")
+		model:SetAttribute(RigBuilder.RIG_ATTRIBUTE, "NoSuchRig")
+		expect(RigBuilder.addBlocker(model)).toBeNil()
+	end)
+end)

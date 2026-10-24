@@ -35,6 +35,8 @@ type Fixture = {
 	setLocal: (id: number?) -> (),
 	-- Marks a record's State and fires changed the way EntityTracker does.
 	setState: (record: any, state: string) -> (),
+	-- Runs the controller's per-heartbeat lock check.
+	heartbeat: () -> (),
 }
 
 local function load(origin: Vector3, cameraLook: Vector3): Fixture
@@ -45,6 +47,7 @@ local function load(origin: Vector3, cameraLook: Vector3): Fixture
 	local outlines: { { model: any, importance: string } } = {}
 	local lockToggle = Signal.new()
 	local localId: number? = nil
+	local onHeartbeat: ((number) -> ())? = nil
 	local root = {
 		Position = origin,
 		IsA = function(_self: any, name: string): boolean
@@ -116,7 +119,13 @@ local function load(origin: Vector3, cameraLook: Vector3): Fixture
 		},
 	}
 	local services: { [string]: any } = {
-		RunService = { Heartbeat = { Connect = function() end } },
+		RunService = {
+			Heartbeat = {
+				Connect = function(_self: any, fn: (number) -> ())
+					onHeartbeat = fn
+				end,
+			},
+		},
 		Players = { LocalPlayer = { Character = character } },
 		ReplicatedStorage = Harness.game():GetService("ReplicatedStorage"),
 	}
@@ -172,6 +181,11 @@ local function load(origin: Vector3, cameraLook: Vector3): Fixture
 		setState = function(record: any, state: string)
 			record.state = state
 			fakes.EntityTracker.changed:Fire(record, "State", state)
+		end,
+		heartbeat = function()
+			if onHeartbeat ~= nil then
+				onHeartbeat(1 / 60)
+			end
 		end,
 	}
 end
@@ -353,5 +367,73 @@ describe("TargetController across the local character's death and respawn", func
 		fixture.setLocal(51)
 		fixture.lockToggle:Fire()
 		expect(fixture.controller.current()).toBe(fixture.records[7])
+	end)
+end)
+
+describe("TargetController measures an enemy where its body is drawn (D-193)", function()
+	-- A rush draws a Charger's body ahead of its hidden root part (D-171): the lock's range, its
+	-- break distance and the soft assist measure the body the player sees.
+	local function drawAway(record: any, root: Vector3, offset: CFrame)
+		local DrawnBody = Harness.load("src/client/choreo/DrawnBody")
+		record.model.PrimaryPart.CFrame = CFrame.new(root)
+		DrawnBody.publish(record.model, offset)
+	end
+
+	local function clear(record: any)
+		local DrawnBody = Harness.load("src/client/choreo/DrawnBody")
+		DrawnBody.publish(record.model, nil)
+	end
+
+	it("locks a boar drawn inside the lock range whose root is still outside it", function()
+		local fixture = load(ORIGIN, AHEAD)
+		local far = Vector3.new(0, 1, -(CameraData.lock.range + 6))
+		local boar = fixture.add(1, "Enemy", far)
+		-- Drawn 10 studs nearer than its root, down the root's own look (-Z).
+		drawAway(boar, far, CFrame.new(0, 0, 10))
+		expect(fixture.controller.lockOn(1)).toBe(true)
+		expect(fixture.controller.current()).toBe(boar)
+		local listed = fixture.controller.candidates()
+		expect(#listed).toBe(1)
+		expect(listed[1].distance).toBeCloseTo(
+			(Vector3.new(0, 1, -(CameraData.lock.range - 4)) - ORIGIN).Magnitude,
+			1e-3
+		)
+		clear(boar)
+	end)
+
+	it("breaks the lock when the drawn body runs past the break distance, not when the root does", function()
+		local fixture = load(ORIGIN, AHEAD)
+		local near = Vector3.new(0, 1, -10)
+		local boar = fixture.add(1, "Enemy", near)
+		expect(fixture.controller.lockOn(1)).toBe(true)
+		-- The root lags well inside the break distance; the drawn body is already beyond it.
+		local beyond = CameraData.lock.breakDistance + 5
+		drawAway(boar, near, CFrame.new(0, 0, -(beyond - 10)))
+		fixture.heartbeat()
+		expect(fixture.controller.current()).toBeNil()
+		clear(boar)
+		-- And the other way: a root past the break distance under a body drawn near holds the lock.
+		local again = fixture.add(2, "Enemy", near)
+		fixture.wait()
+		expect(fixture.controller.lockOn(2)).toBe(true)
+		local farRoot = Vector3.new(0, 1, -(CameraData.lock.breakDistance + 5))
+		again.model.PrimaryPart.Position = farRoot
+		drawAway(again, farRoot, CFrame.new(0, 0, CameraData.lock.breakDistance - 5))
+		fixture.heartbeat()
+		expect(fixture.controller.current()).toBe(again)
+		clear(again)
+	end)
+
+	it("gives the soft assist the drawn body's bearing and distance", function()
+		local fixture = load(ORIGIN, AHEAD)
+		local root = Vector3.new(0, 1, -12)
+		local boar = fixture.add(1, "Enemy", root)
+		-- Drawn 4 studs to the root's right (+X) and 8 nearer.
+		drawAway(boar, root, CFrame.new(4, 0, 8))
+		local list = fixture.controller.assistCandidates(ORIGIN, AHEAD)
+		expect(#list).toBe(1)
+		expect(list[1].distance).toBeCloseTo(math.sqrt(4 * 4 + 4 * 4), 1e-3)
+		expect(list[1].bearing).toBeCloseTo(-45, 1e-3)
+		clear(boar)
 	end)
 end)

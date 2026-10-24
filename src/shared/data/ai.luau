@@ -42,6 +42,8 @@ export type ChargerTuning = ArchetypeTuning & {
 	wheelAngle: number, -- degrees off the target beyond which the chase slows into the turn
 	wheelSpeedMultiplier: number, -- the chase speed while wheeling (a tighter turning circle)
 	jamLagStuds: number, -- a rushing body this far behind the rush's clock is jammed (D-169)
+	keepUpStuds: number, -- the rush's line resolves at most this far past where the body's snout
+	-- keeps up with its run (D-195); above a free body's physics lag, below jamLagStuds
 }
 
 export type BruteTuning = ArchetypeTuning & {
@@ -139,12 +141,22 @@ local AI = {
 	-- enemy is `rushing` from its launch until its body has stayed clear of every player and enemy
 	-- for rejoinClearSeconds after the rush stops: it collides with the world (Default) only, so a
 	-- rush runs through the players it hits and through its packmates instead of jamming on them.
-	-- Every other pair keeps colliding: players with players, players with walking enemies, enemies
-	-- with enemies (a pack never melts into one body).
+	-- Players collide with players, enemies with enemies (a pack never melts into one body) and the
+	-- world. What a player bumps into on an enemy is its blocker (D-198), not its root: the root
+	-- floats at HipHeight with its top edge at a player's chest, and a player walking into that edge
+	-- bobbed on it and slid off sideways. The blocker is one upright, invisible box over the root's
+	-- footprint from the floor to blockerHeight, in `blockers`: it collides with players only (never
+	-- the world, so the body moves as before, nor any query, which runs as Default), and only while
+	-- the enemy is solid (CollisionGroups.assign turns it off for a rush).
 	collision = {
 		players = "SkyspirePlayers",
 		enemies = "SkyspireEnemies",
 		rushing = "SkyspireRushing",
+		blockers = "SkyspireBlockers",
+		-- Studs above the floor an enemy's blocker reaches: above every colliding part of a standing
+		-- player (an R15 at the place's 1.08 body scale stands about 5.6 studs; its legs never
+		-- collide, its root's bottom is at HipHeight), so a walk-in meets one flat face, no edge.
+		blockerHeight = 7,
 		-- Engine fact: every client draws a server-owned body up to this late (physics replication),
 		-- while a part's collision group reaches it sooner.
 		clientDrawLagSeconds = 0.3,
@@ -154,11 +166,16 @@ local AI = {
 		-- speed, onto the boar's back), and shorter than every rush's recovery, so a clean rush is
 		-- solid before it moves off (the ai validator checks both).
 		rejoinClearSeconds = 0.5,
-		-- Pairs that pass through each other; every other pair collides.
+		-- Pairs that pass through each other; every other pair collides. Default is the world.
 		apart = {
 			{ "SkyspireRushing", "SkyspirePlayers" },
 			{ "SkyspireRushing", "SkyspireEnemies" },
 			{ "SkyspireRushing", "SkyspireRushing" },
+			{ "SkyspireEnemies", "SkyspirePlayers" },
+			{ "SkyspireBlockers", "Default" },
+			{ "SkyspireBlockers", "SkyspireEnemies" },
+			{ "SkyspireBlockers", "SkyspireRushing" },
+			{ "SkyspireBlockers", "SkyspireBlockers" },
 		},
 	},
 
@@ -190,6 +207,10 @@ local AI = {
 			-- About three 20 Hz AI ticks of the boar's rush at chargeSpeed: a body this far behind the
 			-- clock is stuck, not slow to accelerate (D-169).
 			jamLagStuds = 4,
+			-- A free-running body trails its own run by well under a stud (its acceleration over the
+			-- first frame); a body held back by a wall falls further behind, and the rush's line stops
+			-- this far past its snout, so a charge only hits what it reaches (D-195).
+			keepUpStuds = 1,
 		} :: ChargerTuning,
 		Brute = {
 			turnRate = 160,

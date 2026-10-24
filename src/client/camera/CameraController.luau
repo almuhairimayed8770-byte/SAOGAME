@@ -16,7 +16,9 @@
 	the fighters' heads behind the player, swung off the line on a spring around the player just
 	far enough to stand them side by side, aiming between them; the look input waits while it
 	holds. A blend spring eases between the two rigs, so a lock (and the draw it brings) eases on
-	and off, and a lock whose target is gone eases out from where the target was. The whole rig
+	and off, and a lock whose target is gone eases out from where the target was. The two-shot
+	frames the target's drawn body (choreo/DrawnBody, D-193), not its root part, so a charging boar
+	is framed where it is drawn (on the server's timeline), not where its hidden root lags. The whole rig
 	rides a lagged pivot (the 0.12 s follow) leashed along the view (CameraMath.leash): the camera
 	and its aim move together, so a dodge never tilts the view, and a dodge toward the lens never
 	brings it onto the player; and leashed across it (D-181), so a sideways dodge never carries the
@@ -55,6 +57,7 @@ local Shared = ReplicatedStorage.Shared
 local CameraData = require(Shared.data.camera)
 local Spring = require(Shared.util.Spring)
 local CameraMath = require(script.Parent.CameraMath)
+local DrawnBody = require(script.Parent.Parent.choreo.DrawnBody)
 
 export type Mode = "Default" | "Duel" | "Raid"
 export type KickKind = "Art" | "Dash"
@@ -343,7 +346,8 @@ local function rig(root: BasePart, span: number, settle: boolean): (Vector3, Vec
 
 	local targetRoot = lockRoot()
 	if targetRoot ~= nil then
-		lockPoint = targetRoot.Position
+		-- The target's drawn body, not its root part: a rush draws it ahead of the hidden root (D-193).
+		lockPoint = DrawnBody.position(lockTarget) or targetRoot.Position
 	elseif wasLocked then
 		-- The lock let go (or its target went): the free camera picks up the view's heading.
 		yaw = viewYaw

@@ -94,6 +94,8 @@ type Rig = {
 	root: any,
 	-- Locks an enemy standing at `position` (nil: no lock).
 	setLock: (position: Vector3?) -> (),
+	-- Locks an enemy whose body a rush draws at `drawn`, ahead of its root part at `root` (D-193).
+	setLockDrawn: (root: Vector3, drawn: Vector3) -> (),
 	-- The enemies the soft assist sees: { id, position }.
 	setEnemies: (enemies: { { id: number, position: Vector3 } }) -> (),
 	-- The last input the controller handed Locomotion.update.
@@ -364,6 +366,9 @@ local function load(options: Options?): Rig
 				if path == "controllers.TargetController" then
 					return targetController, true
 				end
+				if path == "choreo.DrawnBody" then
+					return Harness.load("src/client/choreo/DrawnBody"), true
+				end
 				return Siblings.stub(), false
 			end,
 			call = Siblings.call,
@@ -525,6 +530,12 @@ local function load(options: Options?): Rig
 			lockRecord = if position ~= nil
 				then { id = 1, kind = "Enemy", state = "Idle", model = { PrimaryPart = { Position = position } } }
 				else nil
+		end,
+		setLockDrawn = function(rootAt: Vector3, drawnAt: Vector3)
+			local DrawnBody = Harness.load("src/client/choreo/DrawnBody")
+			local lockModel = { PrimaryPart = { Position = rootAt, CFrame = CFrame.new(rootAt) } }
+			lockRecord = { id = 1, kind = "Enemy", state = "Idle", model = lockModel }
+			DrawnBody.publish(lockModel, CFrame.new(drawnAt - rootAt))
 		end,
 		setEnemies = function(list: { { id: number, position: Vector3 } })
 			enemies = list
@@ -1237,6 +1248,19 @@ describe("CharacterController aim: a swing turns the rest of the way, at most ai
 		rig.setLock(pointAt(rig, -20, 6))
 		rig.controller.basicAttack()
 		expect(sentYaw(rig, "BasicAttackRequest")).toBeCloseTo(-20, 1e-4)
+	end)
+
+	it("a swing at a rushing lock faces the body it is drawn as, not the hidden root it trails (D-193)", function()
+		local rig = standing()
+		-- The root part lags the drawn body by most of a rush's quarter second.
+		local drawn = pointAt(rig, 20, 5)
+		rig.setLockDrawn(pointAt(rig, -25, 8), drawn)
+		rig.controller.basicAttack()
+		expect(sentYaw(rig, "BasicAttackRequest")).toBeCloseTo(20, 1e-4)
+		-- The body comes round to the drawn body and stays on it.
+		settle(rig)
+		expect(bearingOf(rig, drawn)).toBeCloseTo(0, 1e-3)
+		rig.setLock(nil)
 	end)
 end)
 

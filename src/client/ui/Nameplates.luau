@@ -21,6 +21,12 @@
 	shatter's time plus ui.nameplates.shatterGraceSeconds, so only the shatter's own hide takes
 	it on time and the fallback is left for a rig whose shatter never runs on this client.
 
+	A plate sits over the drawn body (D-193): it is adorned to the root part and follows the body
+	through choreo/DrawnBody, which moves it in the same step that draws a rush's body ahead of its
+	hidden root (D-171), so it never trails a charging boar, stays over a body frozen by a death
+	mid-rush, and comes back onto the root with the body when the rush hands back. The fade and
+	the hover test read the drawn position too (Engine.modelPosition).
+
 	Respawns (D-177): the engine empties the PlayerGui when the local character respawns, keeping
 	only the LayerCollectors whose ResetOnSpawn is false, so the plates' folder goes with it
 	(measured in Studio after LoadCharacter: PlayerGui.SkyspireNameplates gone, no plates). Every
@@ -42,6 +48,7 @@ local Quality = require(script.Parent.Parent.fx.Quality)
 local El = require(script.Parent.lib.El)
 local HudLogic = require(script.Parent.HudLogic)
 local EntityTracker = require(script.Parent.Parent.controllers.EntityTracker)
+local DrawnBody = require(script.Parent.Parent.choreo.DrawnBody)
 
 type Plate = {
 	kind: "Player" | "Enemy",
@@ -137,6 +144,12 @@ local function bar(width: number, height: number, token: string, backgroundTrans
 	return back, fill
 end
 
+-- The plate's own height over its rig's root part.
+local function lift(kind: "Player" | "Enemy"): Vector3
+	local config = if kind == "Player" then UI.nameplates.player else UI.nameplates.enemy
+	return Vector3.new(0, config.offsetStuds, 0)
+end
+
 local function newPlate(kind: "Player" | "Enemy"): Plate
 	local config = if kind == "Player" then UI.nameplates.player else UI.nameplates.enemy
 	local root = El.new("Frame", {
@@ -198,7 +211,7 @@ local function newPlate(kind: "Player" | "Enemy"): Plate
 		AlwaysOnTop = true,
 		LightInfluence = UI.nameplates.lightInfluence,
 		Size = UDim2.fromOffset(config.width, config.height),
-		StudsOffsetWorldSpace = Vector3.new(0, config.offsetStuds, 0),
+		StudsOffsetWorldSpace = lift(kind),
 		MaxDistance = UI.nameplates.distance + UI.nameplates.fadeBand,
 		Enabled = false,
 		Parent = ensureFolder(),
@@ -231,6 +244,7 @@ end
 
 local function release(plate: Plate)
 	plate.gui.Enabled = false
+	DrawnBody.unfollow(plate.gui, lift(plate.kind))
 	pcall(function()
 		plate.gui.Adornee = nil
 	end)
@@ -366,13 +380,15 @@ function Nameplates.refresh(record: any)
 	end
 end
 
--- Points a plate at its record's rig: the root when the rig has one, else the model.
+-- Points a plate at its record's rig: the root when the rig has one, else the model; over the
+-- drawn body while a rush draws it ahead of the root (D-193).
 local function adorn(plate: Plate, record: any)
 	local adornee: Instance? = nil
 	pcall(function()
 		adornee = record.model.PrimaryPart
 	end)
 	plate.gui.Adornee = adornee or record.model
+	DrawnBody.follow(plate.gui, record.model, lift(plate.kind))
 end
 
 -- The folder left the PlayerGui (a respawn's reset, D-177): put it back, or, when the reset
@@ -398,6 +414,7 @@ local function keepFolder(): boolean
 	pool.Enemy = {}
 	for id, old in plates do
 		local record = old.record
+		DrawnBody.unfollow(old.gui)
 		local fresh = newPlate(old.kind)
 		fresh.record = record
 		fresh.gone = old.gone
@@ -500,7 +517,7 @@ local function defaultHover(plate: Plate): boolean
 		return false
 	end
 	local ok, result = pcall(function()
-		local screen, visible = (camera :: any):WorldToViewportPoint(position + plate.gui.StudsOffsetWorldSpace)
+		local screen, visible = (camera :: any):WorldToViewportPoint(position + lift(plate.kind))
 		if not visible then
 			return false
 		end

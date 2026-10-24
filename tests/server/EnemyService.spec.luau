@@ -109,7 +109,7 @@ local engine = {
 	moveTo = function(model, position)
 		local body = bodyOf(model)
 		body.goal = position
-		table.insert(body.moveTos, { time = clock.t, position = position })
+		table.insert(body.moveTos, { time = clock.t, position = position, from = body.position })
 	end,
 	stop = function(model)
 		local body = bodyOf(model)
@@ -1426,5 +1426,233 @@ describe("EnemyService mover: each movement starts its own stuck clock (D-183)",
 				expect((body.moveTos[index].position - near).Magnitude).toBeLessThan(1e-6)
 			end
 		end
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- A path that lands late skips the waypoints the body already walked past (D-196)
+-- ------------------------------------------------------------------------------------------
+
+-- How far behind the body a MoveTo sent it, along `way` (0 when it was ahead).
+local function behind(move: any, way: Vector3): number
+	local flat = Vector3.new(way.X, 0, way.Z).Unit
+	local ahead = Vector3.new(move.position.X - move.from.X, 0, move.position.Z - move.from.Z):Dot(flat)
+	return math.max(0, -ahead)
+end
+
+describe("EnemyService mover: a late path skips the waypoints the body already passed (D-196)", function()
+	it("a path that lands 0.05, 0.3, 0.5 or 1.0 s late never sends a walking body back", function()
+		for _, delay in { 0.05, 0.3, 0.5, 1.0 } do
+			fresh()
+			pathResult = straightRoute
+			deferPaths(delay)
+			local id, model = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+			local body = bodyOf(model)
+			local brain = EnemyService.brainOf(id)
+			putPlayer(1, Vector3.new(0, 3, 120)) -- inside the sleep radius, beyond aggro: it idles
+			advanceLate(0.5)
+			expect(phaseOf(id)).toBe("Idle")
+			-- A walk past the pathfinding range: it walks straight while each path computes, follows
+			-- the path once it lands, and asks again every repathInterval.
+			local goal = body.position + Vector3.new(0, 0, -(AI.pathfindPastStuds + 6))
+			local moves = #body.moveTos
+			local start = body.position
+			for _ = 1, math.floor(4 / TICK) do
+				brain:moveToward(goal, 14)
+				engineTick()
+			end
+			expect(#pathCalls).toBeGreaterThanOrEqual(2) -- a path landed, and another while it followed it
+			local worst = 0
+			for index = moves + 1, #body.moveTos do
+				local move = body.moveTos[index]
+				worst = math.max(worst, behind(move, goal - move.from))
+				if move.time >= pathCalls[1].time - 1e-9 then
+					-- On a path, the next waypoint ahead: never one beyond it (the route has one every 4).
+					expect((move.position - move.from).Magnitude).toBeLessThanOrEqual(4 + AI.movement.waypointReach)
+				end
+			end
+			expect(worst).toBeLessThan(1)
+			expect(body.position.Z).toBeLessThan(start.Z - 14 * (4 - TICK * 2)) -- it walked on all the while
+		end
+	end)
+
+	it("a detour that goes back round an obstacle is walked as it came: a stuck body, and a walking one", function()
+		-- A stuck body (it asked because the way ahead is blocked, and has walked nowhere since): the
+		-- route backs off, then runs along the leg that passes beside it. Cutting to that leg would
+		-- walk it into what blocked it.
+		fresh()
+		deferPaths(0.5)
+		local id, model = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		local body = bodyOf(model)
+		local brain = EnemyService.brainOf(id)
+		putPlayer(1, Vector3.new(0, 3, 120))
+		advanceLate(0.5)
+		local start = body.position
+		local back = start + Vector3.new(0, 0, 3.5)
+		pathResult = function(from: Vector3, to: Vector3): { Vector3 }
+			return { from, back, start + Vector3.new(4, 0, -0.5), start + Vector3.new(4, 0, -8), to }
+		end
+		physicsEnabled = false
+		local goal = start + Vector3.new(0, 0, -20)
+		expect(untilLate(function()
+			brain:moveToward(goal, 10)
+			return #pathCalls > 0
+		end, AI.movement.stuckSeconds + 1.5)).toBe(true)
+		local landed = pathCalls[1].time
+		local first: any = nil
+		for _, move in body.moveTos do
+			if move.time >= landed - 1e-9 then
+				first = move
+				break
+			end
+		end
+		expect(first).never.toBeNil()
+		expect(near(first.position, back)).toBe(true)
+
+		-- A walking body whose route turns back round a wall it has not reached yet: the legs that go
+		-- back are not legs it is on, so it walks back to their start.
+		fresh()
+		deferPaths(0.5)
+		id, model = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		body = bodyOf(model)
+		brain = EnemyService.brainOf(id)
+		putPlayer(1, Vector3.new(0, 3, 120))
+		advanceLate(0.5)
+		start = body.position
+		goal = start + Vector3.new(0, 0, -(AI.pathfindPastStuds + 6))
+		local turn = start + Vector3.new(0, 0, 6)
+		pathResult = function(from: Vector3, to: Vector3): { Vector3 }
+			return {
+				from,
+				from + Vector3.new(0, 0, 6),
+				from + Vector3.new(10, 0, 6),
+				from + Vector3.new(10, 0, -20),
+				to,
+			}
+		end
+		local moves = #body.moveTos
+		expect(untilLate(function()
+			brain:moveToward(goal, 14)
+			return #pathCalls > 0
+		end, 2)).toBe(true)
+		expect(pathCalls[1].from.Z).toBeCloseTo(start.Z, 1e-6) -- it asked from where it stood
+		first = nil
+		for index = moves + 1, #body.moveTos do
+			local move = body.moveTos[index]
+			if move.time >= pathCalls[1].time - 1e-9 then
+				first = move
+				break
+			end
+		end
+		expect(first).never.toBeNil()
+		expect(first.from.Z).toBeLessThan(start.Z - 5) -- it had walked on 7 studs meanwhile
+		expect(near(first.position, turn)).toBe(true)
+
+		-- A walking body whose route steps sideways to a corridor before it runs on: the body is past
+		-- the corridor's start along it and walked that way, but not on it, so it goes to its start.
+		fresh()
+		deferPaths(0.5)
+		id, model = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		body = bodyOf(model)
+		brain = EnemyService.brainOf(id)
+		putPlayer(1, Vector3.new(0, 3, 120))
+		advanceLate(0.5)
+		start = body.position
+		goal = start + Vector3.new(0, 0, -(AI.pathfindPastStuds + 6))
+		local side = start + Vector3.new(8, 0, 0)
+		pathResult = function(from: Vector3, to: Vector3): { Vector3 }
+			return { from, from + Vector3.new(8, 0, 0), from + Vector3.new(8, 0, -20), to }
+		end
+		moves = #body.moveTos
+		expect(untilLate(function()
+			brain:moveToward(goal, 14)
+			return #pathCalls > 0
+		end, 2)).toBe(true)
+		first = nil
+		for index = moves + 1, #body.moveTos do
+			local move = body.moveTos[index]
+			if move.time >= pathCalls[1].time - 1e-9 then
+				first = move
+				break
+			end
+		end
+		expect(first).never.toBeNil()
+		expect(first.from.Z).toBeLessThan(start.Z - 5)
+		expect(near(first.position, side)).toBe(true)
+	end)
+end)
+
+describe("EnemyService.worldAhead: where the world stops a root (D-197)", function()
+	-- A boar-sized root looking down -Z in the rushing group.
+	local function rootModel(): (Model, BasePart)
+		local model = Instance.new("Model")
+		local root = Instance.new("Part")
+		root.Name = "HumanoidRootPart"
+		root.Size = Vector3.new(2.4, 2.4, 5)
+		root.CFrame = CFrame.lookAt(Vector3.new(0, 3, 0), Vector3.new(0, 3, -1))
+		root.CollisionGroup = AI.collision.rushing
+		root.Parent = model
+		model.PrimaryPart = root
+		return model, root
+	end
+
+	it("casts the root's own box in its own group from where its front face is at the root's centre", function()
+		local model, root = rootModel()
+		local calls = {}
+		local function cast(start: CFrame, size: Vector3, vector: Vector3, group: string, exclude: Instance): number?
+			table.insert(calls, { start = start, size = size, vector = vector, group = group, exclude = exclude })
+			return 4.5
+		end
+		-- Down its look (a tilted direction is flattened): half its length back.
+		expect(EnemyService.worldAhead(model, Vector3.new(0, 0.5, -2), 10, cast)).toBe(4.5)
+		local call = calls[1]
+		expect(near(call.start.Position, Vector3.new(0, 3, 2.5))).toBe(true)
+		expect(near(call.start.LookVector, root.CFrame.LookVector)).toBe(true)
+		expect(call.size).toBe(root.Size)
+		expect(near(call.vector, Vector3.new(0, 0, -10))).toBe(true)
+		expect(call.group).toBe(AI.collision.rushing)
+		expect(call.exclude).toBe(model)
+		-- Across it: half its width back.
+		EnemyService.worldAhead(model, Vector3.new(1, 0, 0), 3, cast)
+		expect(near(calls[2].start.Position, Vector3.new(-1.2, 3, 0))).toBe(true)
+		expect(near(calls[2].vector, Vector3.new(3, 0, 0))).toBe(true)
+	end)
+
+	it("nothing in the way, a failed cast, no root, no distance or no direction: nil", function()
+		local model = rootModel()
+		local cast = function(): number?
+			return nil
+		end
+		expect(EnemyService.worldAhead(model, FORWARD, 10, cast)).toBeNil()
+		expect(EnemyService.worldAhead(model, FORWARD, 10, function(): number?
+			error("engine refused")
+		end)).toBeNil()
+		local called = false
+		local counting = function(): number?
+			called = true
+			return 1
+		end
+		expect(EnemyService.worldAhead(model, FORWARD, 0, counting)).toBeNil()
+		expect(EnemyService.worldAhead(model, Vector3.new(0, 1, 0), 10, counting)).toBeNil()
+		expect(EnemyService.worldAhead(Instance.new("Model"), FORWARD, 10, counting)).toBeNil()
+		expect(called).toBe(false)
+	end)
+
+	it("a brain asks through the engine with its own model; no engine cast is no world", function()
+		fresh()
+		local id, model = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		local brain = EnemyService.brainOf(id)
+		local asked = {}
+		(engine :: any).worldAhead = function(target: any, direction: Vector3, distance: number): number?
+			table.insert(asked, { model = target, direction = direction, distance = distance })
+			return 2
+		end
+		local result: number? = brain:worldAhead(FORWARD, 6);
+		(engine :: any).worldAhead = nil
+		expect(result).toBe(2)
+		expect(#asked).toBe(1)
+		expect(asked[1].model).toBe(model)
+		expect(asked[1].distance).toBe(6)
+		expect(brain:worldAhead(FORWARD, 6)).toBeNil()
 	end)
 end)

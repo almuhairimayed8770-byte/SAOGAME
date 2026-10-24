@@ -19,13 +19,15 @@
 	when the segment, grown by `radius` (combat.hitSphereRadius), reaches its box. Every part is
 	measured as its box (segmentBoxDistance, the server's math), after a cheap bounding-sphere
 	reject. `queryable(part)` is the engine's query rule the server's broad phase follows (CanQuery
-	or CanCollide).
+	or CanCollide, and a group that collides with Default, which the queries run as: an enemy's
+	blocker, D-198, is never seen).
 
 	Pure apart from reading the Instances it is handed: no engine service, no clock, so Lune runs
 	it on real rigs.
 ]]
 
 local Joints = require(script.Parent.Joints)
+local AI = require(script.Parent.Parent.data.ai)
 
 export type Link = { joint: Joints.Joint, c0: CFrame, c1Inverse: CFrame }
 
@@ -237,9 +239,21 @@ local function pointSegmentDistance(point: Vector3, a: Vector3, b: Vector3): num
 	return (point - (a + direction * t)).Magnitude
 end
 
---- The engine's spatial query rule: a part is skipped only when CanQuery and CanCollide are both off.
+-- The groups ai.collision.apart keeps from Default: a query, which runs as Default unless it names
+-- a group, never sees their parts (an enemy's blocker, D-198).
+local unseen: { [string]: boolean } = {}
+for _, pair in AI.collision.apart do
+	if pair[1] == "Default" then
+		unseen[pair[2]] = true
+	elseif pair[2] == "Default" then
+		unseen[pair[1]] = true
+	end
+end
+
+--- The engine's spatial query rule for a query run as Default: a part is skipped when CanQuery and
+--- CanCollide are both off, or when its collision group does not collide with Default (D-198).
 function BladeContact.queryable(part: BasePart): boolean
-	return part.CanQuery or part.CanCollide
+	return (part.CanQuery or part.CanCollide) and not unseen[part.CollisionGroup]
 end
 
 --- Whether the blade (start -> finish grown by `radius`) touches any of `parts`, and where: the

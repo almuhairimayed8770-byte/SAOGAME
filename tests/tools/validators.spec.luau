@@ -2037,12 +2037,18 @@ describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", fun
 		)).toBe(true)
 	end)
 
-	it("the collision groups are three distinct names, and a rush passes players", function()
+	it("the collision groups are four distinct names, and a rush passes players", function()
 		expect(hasProblem(
 			runAi(function(copy)
 				copy.collision.rushing = copy.collision.enemies
 			end),
-			"collision groups must be three distinct names"
+			"collision groups must be four distinct names"
+		)).toBe(true)
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.collision.blockers = copy.collision.players
+			end),
+			"collision groups must be four distinct names"
 		)).toBe(true)
 		expect(hasProblem(
 			runAi(function(copy)
@@ -2060,7 +2066,84 @@ describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", fun
 			runAi(function(copy)
 				table.insert(copy.collision.apart, { copy.collision.rushing, "Walls" })
 			end),
-			"collision.apart names Walls, which is not a fighter group"
+			"collision.apart names Walls, which is neither a fighter group nor Default"
+		)).toBe(true)
+	end)
+
+	-- Drops every apart pair matching `a` and `b` (either order).
+	local function without(copy: any, a: string, b: string)
+		local kept = {}
+		for _, pair in copy.collision.apart do
+			if not ((pair[1] == a and pair[2] == b) or (pair[1] == b and pair[2] == a)) then
+				table.insert(kept, pair)
+			end
+		end
+		copy.collision.apart = kept
+	end
+
+	it("an enemy's blocker meets players and nothing else, and stands in for the root (D-198)", function()
+		local groups = Harness.load("src/shared/data/ai").collision
+		for _, other in { "Default", groups.enemies, groups.rushing, groups.blockers } do
+			expect(hasProblem(
+				runAi(function(copy)
+					without(copy, groups.blockers, other)
+				end),
+				("collision.apart must keep the blockers group from %s"):format(other)
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			runAi(function(copy)
+				table.insert(copy.collision.apart, { groups.players, groups.blockers })
+			end),
+			"collision.apart must not keep the blockers group from the players group"
+		)).toBe(true)
+		expect(hasProblem(
+			runAi(function(copy)
+				without(copy, groups.enemies, groups.players)
+			end),
+			"collision.apart must keep the enemies group from the players group"
+		)).toBe(true)
+	end)
+
+	it("the blocker reaches above every enemy rig's root (D-198)", function()
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.collision.blockerHeight = 4
+			end),
+			"collision.blockerHeight 4 must reach above rig Boar's root top (4)"
+		)).toBe(true)
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.collision.blockerHeight = 4.1
+			end),
+			"must reach above rig Kobold's root top (4.2)"
+		)).toBe(true)
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.collision.blockerHeight = nil
+			end),
+			"collision.blockerHeight must be a number"
+		)).toBe(true)
+	end)
+
+	it("a rush's line keeps up with its body by less than the jam lag (D-195)", function()
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.archetypes.Charger.keepUpStuds = copy.archetypes.Charger.jamLagStuds
+			end),
+			"archetypes.Charger.keepUpStuds must be below jamLagStuds"
+		)).toBe(true)
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.archetypes.Charger.keepUpStuds = 0
+			end),
+			"archetypes.Charger.keepUpStuds must be positive"
+		)).toBe(true)
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.archetypes.Charger.keepUpStuds = nil
+			end),
+			"archetypes.Charger.keepUpStuds must be a number"
 		)).toBe(true)
 	end)
 

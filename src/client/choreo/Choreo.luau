@@ -69,7 +69,8 @@
 	joint whose Part0 is the PrimaryPart) on top of whatever the clips key there, so the root keeps
 	its physics and its replicated place while the body shows where the server's clock has it.
 	Nil puts the body back on its root. The offset is written every step and on PreSimulation
-	with the rest of the pose.
+	with the rest of the pose. The step that writes it publishes it (DrawnBody.publish, D-193), so
+	every reader of where the body is drawn, and every billboard over it, follows the body.
 
 	The engine surface (clocks, camera, frame signals) is one small table that tests replace with
 	Choreo.configure; the logic underneath is the Lune-tested Mixer.
@@ -88,6 +89,7 @@ local ChoreoData = require(Shared.data.choreo)
 local CombatData = require(Shared.data.combat)
 local Mixer = require(script.Parent.Mixer)
 local ClipLibrary = require(script.Parent.ClipLibrary)
+local DrawnBody = require(script.Parent.DrawnBody)
 
 export type PlayOptions = {
 	startTime: number?,
@@ -262,12 +264,13 @@ end
 -- are reused frame to frame (no per-frame table on RenderStepped). A body offset (setBodyOffset)
 -- is composed into the root joint's Transform: Part1 = Part0 * C0 * Transform * C1^-1, so
 -- C0^-1 * offset * C0 in front of the clip's own Transform draws the body as if the root part
--- stood at root * offset.
+-- stood at root * offset. The offset drawn (nil when none is) is published to DrawnBody (D-193).
 local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 	local motors = self.motors
 	local pinned: { [string]: boolean } = self.pinned
 	local touched: { [string]: boolean } = self.touchedScratch
 	local pose: { [string]: CFrame } = self.pose
+	local drawnAt: CFrame? = nil
 	table.clear(touched)
 	if not self.rbxActive then
 		for name, offset in offsets do
@@ -290,8 +293,13 @@ local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 				motor.Transform = transform
 				pose[name] = transform
 				touched[name] = true
+				drawnAt = body
 			end
 		end
+	end
+	if drawnAt ~= nil or self.drawnPublished then
+		self.drawnPublished = drawnAt ~= nil
+		DrawnBody.publish(self.model, drawnAt)
 	end
 	for name in self.touched do
 		if not touched[name] then
@@ -805,6 +813,10 @@ function AnimatorClass.destroy(self: any)
 	self.mixer:clear()
 	self.events:Destroy()
 	self.finished:Destroy()
+	if self.drawnPublished then
+		self.drawnPublished = false
+		DrawnBody.publish(self.model, nil)
+	end
 	registry[self.model] = nil
 	local index = table.find(ordered, self)
 	if index then
@@ -829,6 +841,7 @@ local function newAnimator(model: Model): any
 		engineAnimated = false, -- an engine Animator resets the rig each frame (D-053)
 		rootJoint = nil :: string?, -- the joint hanging the body on the root part (rootJointName)
 		bodyOffset = nil :: CFrame?, -- where the body is drawn from its root part (setBodyOffset)
+		drawnPublished = false, -- the last step published a body offset to DrawnBody
 		stepHooks = {} :: { (dt: number) -> () },
 		rootDelta = Vector3.zero,
 		rootDeltaAt = engine.now(), -- engine.now() of the last step (the one that wrote rootDelta)
@@ -914,9 +927,10 @@ local function rerank()
 	local camera = engine.cameraPosition()
 	local limits = tier()
 	for _, animator in ordered do
-		local primary = animator.model.PrimaryPart
-		if camera ~= nil and primary ~= nil then
-			animator.distance = (primary.Position - camera).Magnitude
+		-- From where the body is drawn (a rush draws it ahead of its root part, D-193).
+		local drawn = DrawnBody.position(animator.model)
+		if camera ~= nil and drawn ~= nil then
+			animator.distance = (drawn - camera).Magnitude
 		else
 			animator.distance = 0
 		end

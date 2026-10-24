@@ -37,6 +37,7 @@ local AimLogic = require(script.Parent.AimLogic)
 local InputController = require(script.Parent.InputController)
 local Siblings = require(script.Parent.Siblings)
 local CameraController = require(Client.camera.CameraController)
+local DrawnBody = require(Client.choreo.DrawnBody)
 
 local OutlineManager = Siblings.load(Client, "fx.OutlineManager")
 
@@ -61,9 +62,10 @@ local function localPosition(): Vector3?
 	return if root ~= nil and root:IsA("BasePart") then root.Position else nil
 end
 
+-- Where an enemy is drawn: a rush draws its body ahead of its hidden root part (D-193), and the
+-- lock's range, break distance and the assist measure what the player sees.
 local function positionOf(record: any): Vector3?
-	local primary = (record.model :: Model).PrimaryPart
-	return if primary ~= nil then primary.Position else nil
+	return DrawnBody.position(record.model)
 end
 
 local function rankingParams(): TargetRanking.Params

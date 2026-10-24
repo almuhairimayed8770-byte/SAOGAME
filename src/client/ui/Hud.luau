@@ -7,7 +7,8 @@
 	Guard Gauge, the status icon row (Paralysis full-width red), and the party column (built,
 	empty in Phase 0). Bottom-center: the equipped Arts with their keys, fading after 5 s idle.
 	A low-HP screen-edge tint ramps in below a quarter HP. The SWITCH prompt sits over the target
-	for the Switch window. `bindLocal(entityId)` reads the EntityTracker record and follows its
+	for the Switch window, over its drawn body (choreo/DrawnBody, D-193) when a rush draws it ahead
+	of its hidden root. `bindLocal(entityId)` reads the EntityTracker record and follows its
 	attribute changes.
 
 	The HUD's ScreenGui sits inside the engine's safe area (ui.hud.screenInsets, D-148), so the
@@ -26,6 +27,7 @@ local UI = require(Shared.data.ui)
 local Palette = require(Shared.data.palette)
 local Signal = require(Shared.util.Signal)
 local Engine = require(script.Parent.Parent.fx.Engine)
+local DrawnBody = require(script.Parent.Parent.choreo.DrawnBody)
 local El = require(script.Parent.lib.El)
 local HudLogic = require(script.Parent.HudLogic)
 local EntityTracker = require(script.Parent.Parent.controllers.EntityTracker)
@@ -79,6 +81,11 @@ local telegraphLevel = UI.hud.telegraphIntensity.default
 local touch = false
 local stopLoop: (() -> ())? = nil
 local started = false
+
+-- The SWITCH billboard's height over its target's root part.
+local function switchLift(): Vector3
+	return Vector3.new(0, UI.hud.switchPrompt.heightStuds, 0)
+end
 
 local function color(token: string): Color3
 	return Palette.color3(token :: any)
@@ -352,7 +359,7 @@ local function build(parent: Instance?): Elements
 		AlwaysOnTop = true,
 		LightInfluence = 0,
 		Size = UDim2.fromOffset(hud.switchPrompt.billboardSize.width, hud.switchPrompt.billboardSize.height),
-		StudsOffsetWorldSpace = Vector3.new(0, hud.switchPrompt.heightStuds, 0),
+		StudsOffsetWorldSpace = switchLift(),
 		Enabled = false,
 		Parent = gui,
 	}) :: BillboardGui
@@ -442,6 +449,7 @@ local function stepLoop(dt: number)
 		if transparency >= 1 then
 			switchStart = nil
 			ui.switchBillboard.Enabled = false
+			DrawnBody.unfollow(ui.switchBillboard, switchLift())
 			pcall(function()
 				ui.switchBillboard.Adornee = nil
 			end)
@@ -624,11 +632,13 @@ function Hud.showSwitchPrompt(duration: number?, target: Instance?, callerName: 
 	end
 	if adornee ~= nil then
 		ui.switchBillboard.Adornee = adornee
+		DrawnBody.follow(ui.switchBillboard, target, switchLift())
 		ui.switchLabel.Position = UDim2.fromScale(0.5, 0.5)
 		ui.switchLabel.Parent = ui.switchBillboard
 		ui.switchBillboard.Enabled = true
 	else
 		ui.switchBillboard.Enabled = false
+		DrawnBody.unfollow(ui.switchBillboard, switchLift())
 		pcall(function()
 			ui.switchBillboard.Adornee = nil
 		end)

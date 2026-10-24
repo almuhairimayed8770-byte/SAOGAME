@@ -4,10 +4,16 @@
 	Heartbeat signal, the local player, pooled-part folders), each behind a pcall so the same
 	modules load under Lune where the services are bare stubs. Tests replace the viewer through
 	`Engine.setViewer` and never touch the camera.
+
+	A model's position is where its body is drawn (choreo/DrawnBody, D-193): a rush draws a boar's
+	body ahead of its hidden root part, and every sound, fade, rank and effect placed by a rig's
+	position follows the body.
 ]]
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+
+local DrawnBody = require(script.Parent.Parent.choreo.DrawnBody)
 
 local Engine = {}
 
@@ -180,10 +186,17 @@ function Engine.onRemoved(instance: Instance, fn: () -> ()): () -> ()
 	end
 end
 
---- The world position of a model (its PrimaryPart, else its first BasePart), or nil.
+--- The world position of a model: where its body is drawn (DrawnBody, its PrimaryPart moved by a
+--- rush's offset), else its PrimaryPart, else its first BasePart; or nil.
 function Engine.modelPosition(model: Instance?): Vector3?
 	if model == nil then
 		return nil
+	end
+	if DrawnBody.offset(model) ~= nil then
+		local drawn = DrawnBody.position(model)
+		if drawn ~= nil then
+			return drawn
+		end
 	end
 	local primary: Instance? = nil
 	pcall(function()

@@ -24,6 +24,11 @@
 	  fx.luau placeholder fractions (guard near the grip, tip at the far end);
 	- the CollectionService tag Placeholder and the attribute Rig = rig id.
 
+	addBlocker (D-198) gives an enemy its blocker: what a player bumps into instead of the root, one
+	upright, invisible box over the root's footprint from the floor (HipHeight below the root's
+	bottom) to ai.collision.blockerHeight, welded to the root, massless, in the blockers group and
+	switched off until CollisionGroups.assign puts the enemy in the enemies group.
+
 	Everything here runs under Lune's Instance implementation, so the shape of every rig is tested.
 ]]
 
@@ -36,6 +41,7 @@ local Palette = require(Shared.data.palette)
 local Fx = require(Shared.data.fx)
 local WeaponModels = require(Shared.data.weaponModels)
 local Pose = require(Shared.choreo.Pose)
+local AI = require(Shared.data.ai)
 
 export type Frame = { pos: Types.Vec3, rot: Types.Vec3 }
 
@@ -52,6 +58,10 @@ local PART_SHAPES: { [string]: Enum.PartType } = {
 
 -- The root part's RootPriority: one above every limb's default, so it is the assembly root.
 local ROOT_PRIORITY = 1
+
+-- The name of an enemy's blocker part (addBlocker, D-198).
+local BLOCKER_NAME = "Blocker"
+RigBuilder.BLOCKER_NAME = BLOCKER_NAME
 
 local function toVector3(v: Types.Vec3): Vector3
 	return Vector3.new(v[1], v[2], v[3])
@@ -241,6 +251,41 @@ function RigBuilder.build(rigId: string, name: string?): Model
 	model:SetAttribute(RigBuilder.RIG_ATTRIBUTE, rig.id)
 	model:AddTag(RigBuilder.TAG)
 	return model
+end
+
+--- Gives an enemy model its blocker (D-198) and returns it, or nil when the model has no root or no
+--- rig rigs.luau knows (the Rig attribute). Over the root's footprint (its own X and Z, along its
+--- own axes), from the floor the Humanoid holds the root's bottom HipHeight above, up to
+--- ai.collision.blockerHeight; welded to the root and massless, so the body and its Humanoid move as
+--- before. Invisible, casts no shadow and touches nothing; it collides with nothing until
+--- CollisionGroups.assign puts the enemy in the enemies group, and with players only then.
+function RigBuilder.addBlocker(model: Model): Part?
+	local root = model.PrimaryPart
+	local rigId = model:GetAttribute(RigBuilder.RIG_ATTRIBUTE)
+	local rig = if typeof(rigId) == "string" then Rigs[rigId] else nil
+	if root == nil or rig == nil then
+		return nil
+	end
+	local height = AI.collision.blockerHeight
+	local floorBelowCenter = rig.hipHeight + root.Size.Y / 2
+	local blocker = Instance.new("Part")
+	blocker.Name = BLOCKER_NAME
+	blocker.Size = Vector3.new(root.Size.X, height, root.Size.Z)
+	blocker.CFrame = root.CFrame * CFrame.new(0, height / 2 - floorBelowCenter, 0)
+	blocker.Transparency = 1
+	blocker.CastShadow = false
+	blocker.CanCollide = false
+	blocker.CanQuery = false
+	blocker.CanTouch = false
+	blocker.Massless = true
+	blocker.Anchored = false
+	blocker.CollisionGroup = AI.collision.blockers
+	local weld = Instance.new("WeldConstraint")
+	weld.Part0 = root
+	weld.Part1 = blocker
+	weld.Parent = blocker
+	blocker.Parent = model
+	return blocker
 end
 
 --- Number of parts and Motor6Ds a rig builds to (budgeting and tests).

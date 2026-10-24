@@ -4,9 +4,13 @@
 	matching enemies.rules, every Charger row's line covered by chargeSpeed * strike, material
 	costs that PathfindingService accepts (positive numbers keyed by material name), and attack
 	weights that name attacks which exist in enemies.luau. The hit-stop pause cap holds at least
-	one Final hit-stop (D-168), and the fighter collision groups are three distinct names other than
-	Default whose `apart` pairs name only them and let a rush pass the players (D-167); a stopped
-	rush turns solid after longer than the clients' draw lag and before its recovery ends (D-190).
+	one Final hit-stop (D-168), and the fighter collision groups are four distinct names other than
+	Default whose `apart` pairs name only them or Default and let a rush pass the players (D-167); a
+	stopped rush turns solid after longer than the clients' draw lag and before its recovery ends
+	(D-190); a rush's line keeps up with its body by less than the lag that reads as a jam (D-195).
+	An enemy's blocker (D-198) collides with players and with nothing else (not the world, not an
+	enemy, not a rush, not another blocker), a standing enemy's root no longer collides with players,
+	and blockerHeight reaches above the top of every enemy rig's root.
 ]]
 
 type Context = {
@@ -40,6 +44,7 @@ local CHARGER_FIELDS = {
 	"wheelAngle",
 	"wheelSpeedMultiplier",
 	"jamLagStuds",
+	"keepUpStuds",
 }
 
 local function validate(ctx: Context): { string }
@@ -121,6 +126,15 @@ local function validate(ctx: Context): { string }
 		end
 		if charger.lineUpToleranceDegrees > charger.lineUpLooseToleranceDegrees then
 			problem("archetypes.Charger.lineUpToleranceDegrees must not exceed the loose tolerance")
+		end
+		if
+			typeof(charger.keepUpStuds) == "number"
+			and typeof(charger.jamLagStuds) == "number"
+			and charger.keepUpStuds >= charger.jamLagStuds
+		then
+			problem(
+				"archetypes.Charger.keepUpStuds must be below jamLagStuds (a jam is further behind than keeping up)"
+			)
 		end
 		for _, def in Enemies.list() do
 			if def.archetype == "Charger" then
@@ -217,7 +231,7 @@ local function validate(ctx: Context): { string }
 	else
 		local names: { [string]: boolean } = {}
 		local count = 0
-		for _, field in { "players", "enemies", "rushing" } do
+		for _, field in { "players", "enemies", "rushing", "blockers" } do
 			local name = collision[field]
 			if typeof(name) ~= "string" or name == "" then
 				problem(("collision.%s must be a group name"):format(field))
@@ -228,20 +242,27 @@ local function validate(ctx: Context): { string }
 				count += 1
 			end
 		end
-		if count ~= 3 then
-			problem("collision groups must be three distinct names")
+		if count ~= 4 then
+			problem("collision groups must be four distinct names")
 		end
 		local passesPlayers = false
+		local apartSet: { [string]: boolean } = {}
 		if typeof(collision.apart) ~= "table" then
 			problem("collision.apart must be a list of group pairs")
 		else
 			for _, pair in collision.apart do
 				for _, name in { pair[1], pair[2] } do
-					if not names[name] then
-						problem(("collision.apart names %s, which is not a fighter group"):format(tostring(name)))
+					if not names[name] and name ~= "Default" then
+						problem(
+							("collision.apart names %s, which is neither a fighter group nor Default"):format(
+								tostring(name)
+							)
+						)
 					end
 				end
-				local a, b = pair[1], pair[2]
+				local a, b = tostring(pair[1]), tostring(pair[2])
+				apartSet[a .. "|" .. b] = true
+				apartSet[b .. "|" .. a] = true
 				if
 					(a == collision.rushing and b == collision.players)
 					or (a == collision.players and b == collision.rushing)
@@ -252,6 +273,40 @@ local function validate(ctx: Context): { string }
 		end
 		if not passesPlayers then
 			problem("collision.apart must let the rushing group pass the players group")
+		end
+		-- D-198: the blocker is what a player bumps into, and nothing else touches it.
+		local blockers = collision.blockers
+		if typeof(blockers) == "string" then
+			if apartSet[blockers .. "|" .. tostring(collision.players)] then
+				problem("collision.apart must not keep the blockers group from the players group")
+			end
+			for _, other in { "Default", collision.enemies, collision.rushing, blockers } do
+				if not apartSet[blockers .. "|" .. tostring(other)] then
+					problem(("collision.apart must keep the blockers group from %s"):format(tostring(other)))
+				end
+			end
+			if not apartSet[tostring(collision.enemies) .. "|" .. tostring(collision.players)] then
+				problem("collision.apart must keep the enemies group from the players group (the blocker stands in)")
+			end
+		end
+		local blockerHeight = collision.blockerHeight
+		positiveNumber(blockerHeight, "collision.blockerHeight")
+		if typeof(blockerHeight) == "number" then
+			local Rigs = ctx.load("src/shared/data/rigs")
+			for _, rigId in Enemies.rigIds() do
+				local rig = Rigs[rigId]
+				local parts = if rig ~= nil then rig.parts else nil
+				local root = if parts ~= nil then parts[rig.rootPart] else nil
+				if root ~= nil and blockerHeight <= rig.hipHeight + root.size[2] then
+					problem(
+						("collision.blockerHeight %s must reach above rig %s's root top (%s)"):format(
+							tostring(blockerHeight),
+							rigId,
+							tostring(rig.hipHeight + root.size[2])
+						)
+					)
+				end
+			end
 		end
 		-- D-190: a stopped rush turns solid only once no client still draws it where it was, and
 		-- before its recovery ends (it moves off then).

@@ -9,7 +9,7 @@
 	it sooner. A rush that turns solid the tick its time runs out (still moving, or just past a
 	player) is solid on a client that still draws it inside the player, and the engine pushes the
 	player out at the rush's speed: up onto the boar's back. So:
-	- a jammed rush stops its body where it jammed (the hits stay on the clock, D-166);
+	- a jammed rush stops its body where it jammed, and its line ends at its snout (D-195);
 	- a stopped rush turns solid only once its root has stayed clear of every player and enemy for
 	  ai.collision.rejoinClearSeconds, longer than CLIENT_LAG: no client still draws it inside anyone.
 ]]
@@ -40,6 +40,7 @@ local EnemyService = Harness.load("src/server/services/EnemyService")
 local RigBuilder = Harness.load("src/server/world/RigBuilder")
 local CollisionGroups = Harness.load("src/server/world/CollisionGroups")
 local AI = Harness.load("src/shared/data/ai")
+local Enemies = Harness.load("src/shared/data/enemies")
 local Playground = Harness.load("src/shared/data/playground")
 local CollectionService = Harness.game():GetService("CollectionService")
 
@@ -61,7 +62,10 @@ type Body = {
 	history: { { t: number, position: Vector3 } },
 }
 
-type Wall = { model: Model, origin: Vector3, along: Vector3, at: number }
+-- Holds the model's root centre at most `at` studs along `along` from `origin`. With `face`, it is a
+-- wall the world casts see (engine.worldAhead): its face stands `face` studs along, where the root's
+-- front meets it; without, it is something only the body feels.
+type Wall = { model: Model, origin: Vector3, along: Vector3, at: number, face: number? }
 
 local clock = { t = 4000 }
 local sent: { any } = {}
@@ -69,6 +73,17 @@ local bodies: { [Model]: Body } = {}
 local walls: { Wall } = {}
 local playerModels: { Model } = {}
 local groupLog: { { time: number, model: Model, group: string } } = {}
+local spans: { { time: number, from: number, to: number } } = {} -- every stretch the rush resolved
+
+-- CombatService as the enemies see it, noting each stretch of a rush's line as it resolves.
+local combat = setmetatable({
+	enemyStrike = function(enemyId: number, attack: any, origin: Vector3, facing: Vector3, options: any?)
+		if options ~= nil and options.span ~= nil then
+			table.insert(spans, { time = clock.t, from = options.span.from, to = options.span.to })
+		end
+		return CombatService.enemyStrike(enemyId, attack, origin, facing, options)
+	end,
+}, { __index = CombatService })
 
 local function record(remote: string, payload: any)
 	table.insert(sent, { time = clock.t, remote = remote, payload = payload })
@@ -203,6 +218,23 @@ local engine = {
 	bodyClear = function(model: Model): boolean
 		return CollisionGroups.clear(model, overlap)
 	end,
+	-- The real engine casts the root's box from its centre along `direction` in its own group: here,
+	-- how far ahead of the root's centre the face of a wall it runs into stands (nil: none within).
+	worldAhead = function(model: Model, direction: Vector3, distance: number): number?
+		local root = model.PrimaryPart :: BasePart
+		local nearest: number? = nil
+		for _, wall in walls do
+			local face = wall.face
+			local toward = direction:Dot(wall.along)
+			if wall.model == model and face ~= nil and toward > 1e-6 then
+				local gap = (face - (root.CFrame.Position - wall.origin):Dot(wall.along)) / toward
+				if gap >= 0 and gap <= distance and (nearest == nil or gap < nearest) then
+					nearest = gap
+				end
+			end
+		end
+		return nearest
+	end,
 }
 
 local function physics(dt: number)
@@ -265,6 +297,7 @@ local function fresh()
 	walls = {}
 	playerModels = {}
 	groupLog = {}
+	spans = {}
 	local now = function()
 		return clock.t
 	end
@@ -301,7 +334,7 @@ local function fresh()
 	})
 	EnemyService.bind({
 		entities = EntityService,
-		combat = CombatService,
+		combat = combat,
 		rigBuilder = RigBuilder,
 		fireAll = record,
 		engine = engine,
@@ -407,19 +440,29 @@ local function drawnInside(boar: Model, player: Model, at: number, direction: Ve
 end
 
 describe("A stopped rush never carries a player (D-190)", function()
-	it("the setting: only the boar's root collides, and a client draws it up to CLIENT_LAG late", function()
-		expect(GROUPS.rejoinClearSeconds).toBeGreaterThan(CLIENT_LAG)
-		fresh()
-		local boarId = EnemyService.spawn("FrenzyBoar", CFrame.new(0, 3, 0))
-		local boar = EnemyService.modelOf(boarId) :: Model
-		for _, part in boar:GetDescendants() do
-			if part:IsA("BasePart") then
-				expect(part.CanCollide).toBe(part == boar.PrimaryPart)
+	it(
+		"the setting: only the boar's root and its blocker collide, and a client draws it up to CLIENT_LAG late",
+		function()
+			expect(GROUPS.rejoinClearSeconds).toBeGreaterThan(CLIENT_LAG)
+			fresh()
+			local boarId = EnemyService.spawn("FrenzyBoar", CFrame.new(0, 3, 0))
+			local boar = EnemyService.modelOf(boarId) :: Model
+			local blockers = 0
+			for _, part in boar:GetDescendants() do
+				if part:IsA("BasePart") then
+					if part.CollisionGroup == GROUPS.blockers then
+						blockers += 1 -- the root's footprint, what players bump into (D-198)
+						expect(part.CanCollide).toBe(true)
+					else
+						expect(part.CanCollide).toBe(part == boar.PrimaryPart)
+					end
+				end
 			end
+			expect(blockers).toBe(1)
 		end
-	end)
+	)
 
-	it("a jammed rush stops its body where it jammed; the line still resolves on the clock", function()
+	it("a jammed rush stops its body where it jammed; its line ends at its snout (D-195)", function()
 		local boarId, boar, _, launch = launched(12)
 		local body = bodies[boar]
 		-- Something holds the body 2 studs down its line until the jam is told, then lets go.
@@ -448,15 +491,151 @@ describe("A stopped rush never carries a player (D-190)", function()
 		expect(table.find(body.stops, jammedAt :: number)).never.toBeNil()
 		expect(#body.moveTos).toBe(movesBefore)
 		expect((body.position - stoppedAt):Dot(launch.direction)).toBeLessThan(1)
-		-- The player down the line was still hit, once, on the clock (D-166).
+		-- The player down the line, beyond the snout held 2 + front studs down it, was never hit.
 		local hits = 0
 		for _, entry in sentOf("HitConfirmed") do
 			if entry.payload.attackerId == boarId then
 				hits += 1
 			end
 		end
-		expect(hits).toBe(1)
+		expect(hits).toBe(0)
 	end)
+
+	it("a jam ends the rush's line at the body: walls 6, 8 and 10 studs down it, players at 5, 9 and 14", function()
+		local speed = AI.rushSpeed(Enemies.byId("FrenzyBoar").attacks[1])
+		local keepUp = AI.archetypes.Charger.keepUpStuds
+		-- The rush with its snout held `wall` studs down the line (nil: no wall): which players it hit,
+		-- and what it resolved and reported.
+		local function run(wall: number?): ({ [number]: boolean }, { any }, number)
+			fresh()
+			local boarId = EnemyService.spawn("FrenzyBoar", CFrame.new(0, 3, 0))
+			local boar = EnemyService.modelOf(boarId) :: Model
+			local front = EnemyService.bodyExtents(boar)
+			local targetId, target = spawnPlayer(Vector3.new(0, 3, -14))
+			local guard = 0
+			while #sentOf("Telegraph") == 0 and guard < 600 do
+				frame()
+				guard += 1
+			end
+			local telegraph = sentOf("Telegraph")[1].payload
+			local origin = Vector3.new(telegraph.origin[1], telegraph.origin[2], telegraph.origin[3])
+			local direction = Vector3.new(telegraph.facing[1], 0, telegraph.facing[3]).Unit
+			-- During the crouch: the target exactly 14 studs down the line, two more at 5 and 9.
+			movePlayer(target, origin + direction * 14)
+			local ids: { [number]: number } = { [14] = targetId }
+			for _, along in { 5, 9 } do
+				ids[along] = spawnPlayer(origin + direction * along)
+			end
+			if wall ~= nil then
+				table.insert(walls, { model = boar, origin = origin, along = direction, at = wall - front })
+			end
+			while phaseOf(boarId) ~= "Recover" and guard < 2000 do
+				frame()
+				guard += 1
+			end
+			local hit: { [number]: boolean } = {}
+			for along, id in ids do
+				local count = 0
+				for _, entry in sentOf("HitConfirmed") do
+					if entry.payload.attackerId == boarId and entry.payload.targetId == id then
+						count += 1
+					end
+				end
+				expect(count <= 1).toBe(true)
+				hit[along] = count == 1
+			end
+			return hit, sentOf("RushEnded"), front
+		end
+		local hit, ended, front = run(nil)
+		expect(hit).toEqual({ [5] = true, [9] = true, [14] = true })
+		expect(#ended).toBe(0)
+		expect(spans[#spans].to).toBeCloseTo(speed * Enemies.byId("FrenzyBoar").attacks[1].strike + front, 1e-6)
+		-- The player at 9 reaches back to 8 (its body's radius): a snout held at 8 touches it.
+		for wall, expected in
+			{
+				[6] = { [5] = true, [9] = false, [14] = false },
+				[8] = { [5] = true, [9] = true, [14] = false },
+				[10] = { [5] = true, [9] = true, [14] = false },
+			}
+		do
+			hit, ended, front = run(wall)
+			expect(hit).toEqual(expected)
+			-- Jammed once with its snout at the wall; no stretch past the snout by more than the frame
+			-- it started late and keepUpStuds, and none after the report.
+			expect(#ended).toBe(1)
+			expect(ended[1].payload.reason).toBe("Jammed")
+			expect(ended[1].payload.distance + front).toBeCloseTo(wall, 0.05)
+			for _, span in spans do
+				expect(span.to).toBeLessThanOrEqual(wall + speed * FRAME + keepUp)
+				expect(span.time).toBeLessThanOrEqual(ended[1].time + 1e-9)
+			end
+		end
+	end)
+
+	it(
+		"a wall the root runs into ends the line at its face (D-197): wall 8 studs down it, players at 5, 6.5, 9.5, 12",
+		function()
+			-- Only the root collides (the setting above), so the snout runs on through the wall face by
+			-- front - the root's half length while the root is held at it: the line must stop at the face.
+			local speed = AI.rushSpeed(Enemies.byId("FrenzyBoar").attacks[1])
+			local function run(face: number): ({ [number]: boolean }, { any }, number)
+				fresh()
+				local boarId = EnemyService.spawn("FrenzyBoar", CFrame.new(0, 3, 0))
+				local boar = EnemyService.modelOf(boarId) :: Model
+				local front = EnemyService.bodyExtents(boar)
+				local rootHalf = (boar.PrimaryPart :: BasePart).Size.Z / 2
+				local targetId, target = spawnPlayer(Vector3.new(0, 3, -12))
+				local guard = 0
+				while #sentOf("Telegraph") == 0 and guard < 600 do
+					frame()
+					guard += 1
+				end
+				local telegraph = sentOf("Telegraph")[1].payload
+				local origin = Vector3.new(telegraph.origin[1], telegraph.origin[2], telegraph.origin[3])
+				local direction = Vector3.new(telegraph.facing[1], 0, telegraph.facing[3]).Unit
+				movePlayer(target, origin + direction * 12)
+				local ids: { [number]: number } = { [12] = targetId }
+				for _, along in { 5, 6.5, 9.5 } do
+					ids[along] = spawnPlayer(origin + direction * along)
+				end
+				table.insert(
+					walls,
+					{ model = boar, origin = origin, along = direction, at = face - rootHalf, face = face }
+				)
+				while phaseOf(boarId) ~= "Recover" and guard < 2000 do
+					frame()
+					guard += 1
+				end
+				local hit: { [number]: boolean } = {}
+				for along, id in ids do
+					local count = 0
+					for _, entry in sentOf("HitConfirmed") do
+						if entry.payload.attackerId == boarId and entry.payload.targetId == id then
+							count += 1
+						end
+					end
+					hit[along] = count == 1
+				end
+				expect(front - rootHalf).toBeGreaterThan(2) -- the snout reaches well past the root's front
+				return hit, sentOf("RushEnded"), rootHalf
+			end
+			for _, face in { 8, 7.5 } do
+				local hit, ended, rootHalf = run(face)
+				expect(hit).toEqual({ [5] = true, [6.5] = true, [9.5] = false, [12] = false })
+				-- Jammed with the root against the face; no stretch past the face.
+				expect(#ended).toBe(1)
+				expect(ended[1].payload.reason).toBe("Jammed")
+				expect(ended[1].payload.distance + rootHalf).toBeCloseTo(face, 0.05)
+				for _, span in spans do
+					expect(span.to).toBeLessThanOrEqual(face + 1e-3)
+				end
+			end
+			-- A wall beyond the run's reach changes nothing: the free line, to its clock's end.
+			local hit = run(40)
+			expect(hit).toEqual({ [5] = true, [6.5] = true, [9.5] = true, [12] = true })
+			expect(spans[#spans].to).toBeGreaterThan(speed * Enemies.byId("FrenzyBoar").attacks[1].strike)
+		end
+	)
 
 	it("a rush that ran its time turns solid only when no client still draws its root in a player", function()
 		for _, distance in { 12, 14, 16, 18 } do

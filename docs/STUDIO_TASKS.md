@@ -748,3 +748,38 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
    (d) Repeat (a) with Incoming Replication Lag 0.2.
 179. [ ] **Plate across a render stall at the shatter (D-191).** Kill a boar. During its 0.67 s freeze, drag the Studio window for about 0.5 s, then for about 1 s, so the stall spans the shatter. Pass: when frames resume, the plate and the shards go on the same frame; the plate never vanishes while the body still stands.
 180. [ ] **Jumping onto an enemy (D-192).** Jump onto a standing boar's back and onto a kobold. Report whether you can stand there, for how long, and whether the enemy's movement carries you. This decides whether the slide-off follow-up is needed.
+
+## Y. Rush followers, jam line and late paths (D-193 to D-198)
+
+181. [ ] **Plate and SWITCH over a charging boar (D-193; replaces item 177).** Set Incoming Replication Lag to 0.25 s, then 0.5 s.
+   (a) Lock a boar and let it charge past you, at 0.25x capture and at 1x. Pass: the plate stays over the boar's back for the whole run.
+   (b) Kill one mid-rush. The plate stays over the frozen body until the shatter.
+   (c) Parry one mid-rush. SWITCH sits over the staggered body, and both slide back with it at the hand-back, with no jump.
+182. [ ] **Lock camera on a charging boar (D-193).** Use the same lag as item 181. Pass: the boar stays inside the frame for the whole run.
+   (a) Step frame by frame and note whether the framing is a frame behind the body's motion. That would mean Choreo's RenderStepped runs after the camera (measured worst: 0.9 studs / 3.9°).
+183. [ ] **Nothing of the hidden parts shows (D-193, D-198).**
+   (a) During a rush, the Highlight outline and the shadow never draw the boar's hidden 2.4×2.4×5 root box where the root trails behind the body.
+   (b) While a boar and a kobold telegraph (outline and tint) and while they stand, at midday and at a low sun, there is no outline or shadow of the 7-stud blocker box.
+184. [ ] **Legs at the end of a rush (D-193).** With 0.5 s of lag, watch the frames after the rush clip ends while the hidden root catches up (Settle and HandBack). Note whether the legs run in place on a body that has stopped.
+185. [ ] **Free-rush lag under keepUpStuds (D-195).** On flat ground, log a real boar's free-rush lag every server frame: speed × (now − bodyStartedAt) − progress.
+   (a) It must stay below keepUpStuds (1). If it does not, hits land late.
+   (b) If it stays well under, lower keepUpStuds to shrink the remaining gap.
+186. [ ] **A rush into a wall hits only what it reaches (D-195, D-197).** Use anchored walls across the boar's line. Distances are measured from the boar's root at its crouch along the telegraph.
+   (a) Repeat the ef698e5 setup: a wall face 8 studs down the line, you 12 studs out behind it. Pass: no hit. RushEnded says Jammed, with the root against the face (distance about face − 2.5).
+   (b) Wall faces at 6, 8 and 10, with dummies at 5, 9.5 and 14. Pass: wall 6 and wall 8 hit only 5; wall 10 hits 5 and 9.5; 14 is never hit.
+   (c) Note how far the drawn boar overruns before the report, and how far its head shows through the wall once it is held.
+   (d) If the Playground has a ramp or a low step, rush along it. The line must not end early (it should hit a dummy up the ramp).
+187. [ ] **Late paths never turn a walk back (D-196).** Watch a kobold walk to a goal more than 60 studs away over open ground. It must never turn back to a waypoint it passed.
+   (a) Wedge it in a dead end. It still backs out along the route.
+188. [ ] **Walking into an enemy is a solid stop (D-198; supersedes item 180).** Log your root's Y every frame.
+   (a) Hold a boar with the dev hold. Walk W into it from the front, the side and the back, for 3 s each. Pass: you stop flat against an invisible face at the boar's body width, with no bob (Y within 0.05 of standing), no sideways slide onto it, and never on top.
+   (b) Repeat on a kobold.
+   (c) Repeat while the boar walks toward you (not held).
+   (d) If the Playground has a ledge or a slope above an enemy, try to step onto it from there. Report whether you can stand on the blocker's top (7 studs).
+189. [ ] **The blocker stays out of the fight (D-198).**
+   (a) Swing over a held boar's back (above the body, inside its 7-stud column) from both sides. No hit, no spark, no HP change.
+   (b) Swings through the body still hit as before.
+   (c) Lock-on and the soft assist still pick the boar.
+190. [ ] **A rush still passes through you and rejoins cleanly (D-167, D-190, D-198).**
+   (a) Stand on a boar's line. The rush passes through you, and you are never pushed or lifted.
+   (b) Repeat the item 178 setup with the D-190 log. The boar turns solid again only after you have been clear of it (root and blocker) for 0.5 s.

@@ -59,6 +59,7 @@ local CharacterController = require(Client.controllers.CharacterController)
 local EntityTracker = require(Client.controllers.EntityTracker)
 local Replication = require(Client.controllers.Replication)
 local DevAimLogic = require(script.Parent.DevAimLogic)
+local DrawnBody = require(Client.choreo.DrawnBody)
 
 type Reply = { [string]: any }
 type Record = EntityTracker.Record
@@ -95,12 +96,12 @@ local function rootPart(): BasePart?
 	return if root ~= nil and root:IsA("BasePart") then root else nil
 end
 
+-- Where the record is drawn (D-193): the position the lock turn faces (CharacterController).
 local function positionOf(record: Record?): Vector3?
 	if record == nil then
 		return nil
 	end
-	local primary = record.model.PrimaryPart
-	return if primary ~= nil then primary.Position else nil
+	return DrawnBody.position(record.model)
 end
 
 -- Degrees (+ = left) from the body's flat look to the record, and the flat distance to it.

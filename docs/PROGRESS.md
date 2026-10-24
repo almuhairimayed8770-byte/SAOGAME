@@ -548,6 +548,27 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   - The plate trails the drawn body during a rush.
   - The frame pass costs about 22% more server time per step.
 
+## Rush followers, jam line and late paths (2026-10-24, D-193 to D-198)
+
+- **Clients (D-193, D-194):**
+  - The plate, SWITCH, the lock camera, the lock range and break, the assist, the turn to the lock, and position-based sounds and effects follow a charging boar's drawn body instead of its lagging hidden root.
+  - At 0.25 s and 0.5 s of lag the plate is exact, where it was 7 and 14 studs off.
+- **Server (D-195, D-196):**
+  - A jammed rush only hits what its body reaches, and nothing after the jam.
+  - Paths that land late no longer turn a walking enemy back.
+- **Verification fixes (D-197, D-198):**
+  - A rush's line ends at the wall face the boar's root runs into. This fixes the Studio case where a player behind a wall at 8 was hit at 12.
+  - Walking into an enemy meets one invisible upright blocker from the floor to 7 studs, instead of the floating root's edge, so there is no bob or slide. Rushes still pass through players.
+- **Checks:**
+  - 2416 specs in 136 files pass.
+  - Validators, stylua, offline lint, the hit matrix, the animation review and gaitgen are clean.
+  - luau-lsp shows no new messages in src or tools.
+- **Open:**
+  - Studio items 181 to 190. Item 177 is replaced by 181, and item 180 by 188.
+  - When the camera steps before the rig, the lock camera lags by up to 0.9 studs.
+  - A client still draws a jammed boar running past the wall until the jam report.
+  - A remaining hit gap of up to 1.47 studs for stops the world cast does not see.
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and
