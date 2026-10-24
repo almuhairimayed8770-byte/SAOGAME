@@ -559,6 +559,42 @@ the sweep.
   - Otherwise the stick drives the gait exactly as before.
 - `LocomotionState.wholeWalkSpeed(forward, right, drawn)` is rateFloor × the walk gait speed for a stick: the slowest speed that paces a whole walk. It is the blocked latch's release bar.
 
+### Hit on contact, camera and names (D-145 to D-164)
+
+- CameraController: each frame builds two rigs on the subject's pivot (root + focusHeight). The free rig uses orbitOffset and shoulderLook; the lock rig uses twoShotCamera and twoShotLook. A blend spring lerps between them. The rig rides a lagged pivot leashed along the view (CameraMath.leash). Collision is a repeated spherecast that skips characters, accessories and see-through parts (CameraMath.blocksView); one reach fraction scales the camera and aim offsets together.
+- CameraMath: adds shoulderLook, splitAngle, twoShot (with the TwoShotParams and TwoShot types), twoShotCamera, twoShotLook, lockSide, leash and blocksView. lockFrame, LockParams and LockFrame are removed.
+- Nameplates: hide(model) is the shatter's hook. A Dead rig's plate also expires at deathDuckDelay + deathFreeze.
+- Hud: the main gui sits in the safe area (ScreenInsets from ui.hud). The vignette has its own ScreenGui, exposed by Hud.vignetteGui().
+- RigBuilder: every rig's Humanoid has DisplayDistanceType None.
+- src/shared/choreo/BladeContact.luau: a pure blade solver.
+  - chain(model): the joint path to the TrailStart/TrailEnd part.
+  - read/copy: a pose (the root CFrame plus joint Transforms).
+  - blade(chain, pose, from?, alpha?): forward kinematics, following the arc between two frames.
+  - segmentBoxDistance: identical to HitSweep's.
+  - touch, steps, queryable.
+- src/client/controllers/ContactPredictor.luau: predicts the local swing's contacts.
+  - begin({clip, handle, artId, finalHit, multiplier}), then step(clipTime, jumped?) once per rendered frame. A jumped step re-baselines the sweep and returns no contacts (D-164).
+  - Gives at most one contact per target per window.
+  - tierFor, leastDamage, provesKill.
+  - It never decides damage.
+- Frame order:
+  - Camera at render step 200, ImpactFrames at 201, CharacterController at 301.
+  - At 301: Choreo.stepLocal → root motion → stepContacts → Replication.contact.
+  - The contact frame shows the contact pose, sound and flash. The hit-stop freezes the next steps, and the camera nudge and shake show on the frame after contact.
+- CharacterController: rigJumped is set in beforeRigStep (dt > stall.jumpSeconds), then read and cleared by stepContacts.
+- Replication.contact(contact) → boolean plays the local hit and records a prediction.
+  - HitConfirmed matches predictions by (target, hitIndex, artId), oldest first, within combat.contact.confirmSeconds of play time.
+  - An upgrade extends the running hold, using Animator:pauseRemaining(), but only when the contact's own hold run is the running one.
+  - Replication.confirmedAlready(targetId, window, artId) handles a confirm that arrived before the local contact.
+  - Every local-rig hold goes through holdLocal(animator, frames), which tracks holdRun and holdEnds: a hold joins the running one or starts a new run.
+  - playClock() and tickPlay() keep a play clock on Deps.onHeartbeat, where a step counts at most stall.jumpSeconds; start() binds RunService.Heartbeat.
+  - Prediction rows carry `at` (wall), `seen` (play) and `run`.
+- Impact.hit(info, previous?) plays only what the moment adds over `previous`, by rank in the moments rows.
+- Mixer: handles carry absorbKey and absorbSeconds; hitStop absorbs a strike's authored Hold (D-154). Choreo's Animator gains pauseRemaining().
+- ClipSampler: snapEase, isStrikeSnap, strikeHoldAfter. The server samples the eased snaps too.
+- FrameClock: render steps at First and Last priority, a Heartbeat watchdog, pace(), and bind() for specs.
+- OutlineManager.tint/untint (used by Telegraphs on weaponless rigs). Trails: the weapon-only activation flash and the cancel fade. SfxPool.asOwn and the OwnSFX group. ImpactFrames.whenVisible and drawn-frame quotas.
+
 ## Data tables (src/shared/data)
 
 | File | Holds |

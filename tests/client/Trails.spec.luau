@@ -739,18 +739,55 @@ describe("Trails across a render stall (D-142)", function()
 		return dark
 	end
 
-	it("display awake: a lit trail stays lit frame after frame and is never cleared (guard)", function()
+	it("display awake: a lit trail stays lit frame after frame and is never cleared while lit (guard)", function()
 		local d = drive()
 		local model, weapon = trackedRig()
 		d.frame()
 		Trails.setActive(model, true, "Art")
+		-- The one clear is the one that lights it (issue 11), taken while it was still out.
+		expect(#d.clears).toBe(1)
 		for _ = 1, 120 do
 			d.frame()
 			expect(trailOf(weapon).Enabled).toBe(true)
 		end
 		Trails.setActive(model, false, "Art")
 		expect(trailOf(weapon).Enabled).toBe(false)
-		expect(#d.clears).toBe(0)
+		expect(#d.clears).toBe(1)
+		d.finish()
+	end)
+
+	it("a trail lights anew only after a clear, so it never joins the last swing's blade to this one", function()
+		-- Issue 11: the engine joins where a trail went out to where it lights again, so a window
+		-- that opens on the still frame before the snap drew a streak from the last swing's blade.
+		local d = drive()
+		local model, weapon = trackedRig()
+		d.frame()
+		Trails.setActive(model, true, "Basic")
+		expect(#d.clears).toBe(1)
+		expect(d.clears[1].trail).toBe(trailOf(weapon))
+		expect(d.clears[1].enabled).toBe(false)
+		expect(trailOf(weapon).Enabled).toBe(true)
+		-- The smear frames and a second kind on a lit trail add to it: nothing is cleared.
+		Trails.setActive(model, true, "Smear")
+		Trails.setActive(model, true, "Art")
+		Trails.setActive(model, false, "Smear")
+		d.frame()
+		expect(#d.clears).toBe(1)
+		-- Out between the windows; the next window lights it from where the blade is then.
+		Trails.setActive(model, false, "Art")
+		Trails.setActive(model, false, "Basic")
+		expect(trailOf(weapon).Enabled).toBe(false)
+		d.frame()
+		expect(#d.clears).toBe(1)
+		Trails.setActive(model, true, "Art")
+		expect(#d.clears).toBe(2)
+		expect(d.clears[2].enabled).toBe(false)
+		Trails.setActive(model, false, "Art")
+		-- A white flash lights an out trail the same way.
+		Trails.flashWhite(model, 2)
+		expect(trailOf(weapon).Enabled).toBe(true)
+		expect(#d.clears).toBe(3)
+		expect(d.clears[3].enabled).toBe(false)
 		d.finish()
 	end)
 
@@ -766,7 +803,7 @@ describe("Trails across a render stall (D-142)", function()
 		end
 		d.frame()
 		expect(trailOf(weapon).Enabled).toBe(true)
-		expect(#d.clears).toBe(0)
+		expect(#d.clears).toBe(1) -- the one that lit it
 		d.finish()
 	end)
 
@@ -775,6 +812,7 @@ describe("Trails across a render stall (D-142)", function()
 		local model, weapon = trackedRig()
 		d.frame()
 		Trails.setActive(model, true, "Art")
+		table.clear(d.clears) -- the clear that lit it (issue 11)
 		local dark = d.now()
 		repeat
 			d.sleep()
@@ -876,7 +914,163 @@ describe("Trails across a render stall (D-142)", function()
 			d.sleep()
 		end
 		expect(trailOf(weapon).Enabled).toBe(true)
-		expect(#d.clears).toBe(0)
+		expect(#d.clears).toBe(1) -- the one that lit it (issue 11)
 		d.finish()
+	end)
+end)
+
+describe("Trails activation light", function()
+	local OutlineManager = Harness.load("src/client/fx/OutlineManager")
+	local FrameClock = Harness.load("src/client/fx/FrameClock")
+	local FRAME = 1 / 60
+
+	-- A body part and a Weapon part, so a flash on the whole model is told apart from one on the weapon.
+	local function bodyRig(): (Model, BasePart)
+		local model, weapon = rig()
+		local torso = Instance.new("Part")
+		torso.Name = "UpperTorso"
+		torso.Parent = model
+		return model, weapon
+	end
+
+	-- A hand-driven FrameClock: `frame()` is one rendered frame; the change made inside `during`
+	-- shows on it.
+	local function frames(): ((during: (() -> ())?) -> (), () -> ())
+		local startFn: ((number) -> ())? = nil
+		local endFn: ((number) -> ())? = nil
+		FrameClock.bind({
+			now = function(): number
+				return 0
+			end,
+			onFrameStart = function(fn)
+				startFn = fn
+				return function() end
+			end,
+			onFrameEnd = function(fn)
+				endFn = fn
+				return function() end
+			end,
+			onHeartbeat = function()
+				return function() end
+			end,
+		})
+		return function(during: (() -> ())?)
+			(startFn :: (number) -> ())(FRAME)
+			if during ~= nil then
+				during()
+			end
+			(endFn :: (number) -> ())(FRAME)
+		end, function()
+			FrameClock.bind(nil)
+		end
+	end
+
+	it("flashes the weapon alone for three frames, never the body's outline (issue 5)", function()
+		local frame, done = frames()
+		local model, weapon = bodyRig()
+		local before = OutlineManager.enabledCount()
+		local flash: Highlight? = nil
+		local shown: { boolean } = {}
+		frame(function()
+			Trails.activationLight(model, true, TOKEN)
+			flash = weapon:FindFirstChild(fx.activationLight.flashName) :: Highlight?
+		end)
+		expect(flash).never.toBeNil()
+		local highlight = flash :: Highlight
+		expect(highlight:IsA("Highlight")).toBe(true)
+		expect(highlight.Adornee).toBe(weapon)
+		expectColor(highlight.FillColor, palette.color3(fx.activationLight.flashToken))
+		expect(highlight.OutlineTransparency).toBeCloseTo(fx.activationLight.flashOutlineTransparency, 1e-6)
+		-- The rig's own outline never fills: no whole-body flash.
+		local outline = model:FindFirstChild("Outline") :: Highlight?
+		if outline ~= nil then
+			expect(outline.FillTransparency).toBeCloseTo(fx.outline.fillTransparency, 1e-6)
+		end
+		-- It holds a Highlight slot while it shows.
+		expect(OutlineManager.enabledCount()).toBe(before + 1)
+		table.insert(shown, highlight.Enabled)
+		for _ = 1, 4 do
+			frame()
+			table.insert(shown, highlight.Enabled)
+		end
+		expect(shown).toEqual({ true, true, true, false, false })
+		expect(OutlineManager.enabledCount()).toBe(before)
+		-- The light itself stays on through the hold.
+		expect(Trails.isLit(model)).toBe(true)
+		Trails.detach(model)
+		done()
+	end)
+
+	it("a new activation restarts the flash and keeps one slot; detach ends it and frees the slot", function()
+		local frame, done = frames()
+		local model, weapon = bodyRig()
+		local before = OutlineManager.enabledCount()
+		frame(function()
+			Trails.activationLight(model, true, TOKEN)
+		end)
+		frame()
+		frame(function()
+			Trails.activationLight(model, true, TOKEN)
+		end)
+		expect(OutlineManager.enabledCount()).toBe(before + 1)
+		local highlight = weapon:FindFirstChild(fx.activationLight.flashName) :: Highlight
+		frame()
+		frame()
+		expect(highlight.Enabled).toBe(true)
+		Trails.detach(model)
+		expect(highlight.Enabled).toBe(false)
+		expect(OutlineManager.enabledCount()).toBe(before)
+		done()
+	end)
+
+	it("fades a cancelled Art's light out over cancelFadeSeconds instead of cutting it (issue 13)", function()
+		local beat: ((number) -> ())? = nil
+		Trails.start()
+		Trails.bind({
+			onWatch = function(fn)
+				beat = fn
+				return function()
+					beat = nil
+				end
+			end,
+			onRender = function()
+				return function() end
+			end,
+		})
+		local model, weapon = bodyRig()
+		Trails.activationLight(model, true, TOKEN)
+		local light = weapon:FindFirstChildOfClass("PointLight") :: PointLight
+		expect(light.Brightness).toBeCloseTo(fx.activationLight.brightness, 1e-6)
+		Trails.activationLight(model, false, TOKEN, true)
+		expect(light.Enabled).toBe(true)
+		local seconds = fx.activationLight.cancelFadeSeconds
+		local steps = math.floor(seconds / FRAME + 0.5)
+		local last = light.Brightness
+		for step = 1, steps - 1 do
+			(beat :: (number) -> ())(FRAME)
+			expect(light.Enabled).toBe(true)
+			expect(light.Brightness < last).toBe(true)
+			expect(light.Brightness > 0).toBe(true)
+			last = light.Brightness
+			local _ = step
+		end
+		(beat :: (number) -> ())(FRAME)
+		expect(light.Enabled).toBe(false)
+		expect(light.Brightness).toBeCloseTo(fx.activationLight.brightness, 1e-6)
+		-- An activation in the middle of a fade lights it at full again, fade over.
+		Trails.activationLight(model, true, TOKEN)
+		Trails.activationLight(model, false, TOKEN, true);
+		(beat :: (number) -> ())(FRAME)
+		Trails.activationLight(model, true, TOKEN)
+		expect(light.Brightness).toBeCloseTo(fx.activationLight.brightness, 1e-6)
+		for _ = 1, steps + 2 do
+			(beat :: (number) -> ())(FRAME)
+		end
+		expect(light.Enabled).toBe(true)
+		-- Without the fade (the cut takes over on the first damage frame) it goes out at once.
+		Trails.activationLight(model, false, TOKEN)
+		expect(light.Enabled).toBe(false)
+		Trails.bind(nil)
+		Trails.reset()
 	end)
 end)

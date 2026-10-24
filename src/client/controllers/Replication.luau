@@ -19,7 +19,11 @@
 	the shatter and the system line move by the same lead, and an enemy's death vocal plays at
 	once (the silence chops it), once for one sweep's deaths of the same voice. The newest death
 	owns the silence: one inside another's silence brings the sound back at once for its kill, and
-	an older death's shatter never ends a newer silence (one sweep's deaths share theirs).
+	an older death's shatter never ends a newer silence (one sweep's deaths share theirs). The
+	silence spares the local player's own new sounds (issue 9): their clip sounds, footsteps,
+	chime and the hit-stop tick of a hit they are in start inside SfxPool.asOwn, and the duck asks
+	the pool to let those through at full while the music, the beds, the other fighters and the
+	UI stay down.
 
 	It also routes every rig's clip events (trail, smear,
 	activation light, footsteps, clip sounds) to the FX and audio packages, so trails, smears and
@@ -49,6 +53,21 @@
 	choreo.luau sheath.remoteDrawDelay late. The attribute can land a frame or two before the
 	unreliable ActionStarted of the attack that set it; with the delay that attack draw-cuts, and
 	no Draw or drawn walk set flashes in first. A lock-on's Draw starts that much later.
+
+	The local fighter's hits land on contact (issue 4): the character controller hands each blade
+	contact ContactPredictor finds to `Replication.contact` on the frame the blade touches, which
+	plays the hit-stop on both rigs, the white flash, the nudge, the shake, the tick and the
+	director's moment there and then, with no number. Its HitConfirmed (matched by target, window
+	and Art within combat.luau contact.confirmSeconds of play: a stall counts as at most a jump,
+	choreo.luau stall.jumpSeconds) then shows the number, the HP change and the reactions and
+	replays nothing; a stronger tier from the server (a Kill or Final the contact could not know)
+	runs the contact's hold on to its own length from the contact while that hold is still on,
+	never restarting it or holding twice, and plays what its moment adds (Impact.hit's
+	`previous`). A hold a later cut started is that cut's own: the word for the earlier cut never
+	stretches it. A contact the server never confirms shows no number. A local hit the
+	server confirmed before this client's blade got there (the client's clip runs behind by its
+	hit-stops) plays as it always did and is not predicted again (`confirmedAlready`). Everyone
+	else's hits play as before.
 
 	Nothing here decides damage; a rejected hit is simply a `rejected` Signal that the character
 	controller turns into a cancelled prediction (section 17).
@@ -94,7 +113,7 @@ export type Deps = {
 	hud: any,
 	systemLine: any,
 	sfx: any, -- SfxPool-like: play(name, position?), playLate(name, lateBy, position?), cue(name, position?, lateBy?), footstep(model, surface?), duck(db, seconds)
-	-- Impact-like: hit(info) -> string, ownsHighlight(info) -> boolean, hiddenSeconds() -> number,
+	-- Impact-like: hit(info, previous?) -> string, ownsHighlight(info) -> boolean, afterHidden(fn),
 	-- activation(model, clipId, token, isLocal, speed?, lateBy?), dodge(model, isLocal, lateBy?),
 	-- guardBreak(model, isLocal), guardRaise(model, isLocal), shatterCue(boss, heavy) -> string,
 	-- death(model?, position, boss, heavy)
@@ -105,6 +124,9 @@ export type Deps = {
 	positionOf: (model: Instance) -> Vector3?,
 	schedule: (seconds: number, fn: () -> ()) -> (),
 	now: (() -> number)?, -- monotonic seconds (one camera nudge per sweep); os.clock when nil
+	-- Calls `fn` every Heartbeat (the clock the local predictions age on: a stall counts as at most
+	-- a jump); without it they age on `now` alone.
+	onHeartbeat: ((fn: (dt: number) -> ()) -> ())?,
 }
 
 -- Sound names (family.Name in sfx.luau) the reactions play; Replication.spec checks each resolves.
@@ -158,6 +180,38 @@ local lastNudges: { [any]: number } = {}
 local lastTicks: { [any]: { at: number, rank: number } } = {}
 -- death vocal name -> when it last played: one sweep's deaths of the same voice scream once.
 local deathVocals: { [string]: number } = {}
+-- The local fighter's predicted contacts (Replication.contact, issue 4) waiting for their
+-- HitConfirmed, oldest first, each kept combat.luau contact.confirmSeconds of play (`seen`, on
+-- playClock): the hit-stop tier, the moment the contact played, when (`at`, on the clock) and
+-- the run of holds on the local rig its hold belongs to (`run`).
+type Prediction = {
+	targetId: number,
+	windowIndex: number,
+	artId: string?,
+	at: number,
+	seen: number,
+	run: number,
+	tier: string,
+	moment: string?,
+}
+local predictions: { Prediction } = {}
+-- The local fighter's hits the server confirmed before this client's blade got there (the
+-- client's clip runs behind the server's by the hit-stops it held): the predictor skips them.
+type EarlyConfirm = { targetId: number, windowIndex: number, artId: string?, seen: number }
+local earlyConfirms: { EarlyConfirm } = {}
+-- The runs of holds on the local fighter's rig: a hold put on while none runs starts a new run,
+-- one put on while one runs joins it (the same cut's other targets, a blow taken inside the
+-- hold). A confirmation's stronger tier runs on only its own contact's run, so the word for an
+-- earlier cut never stretches a later cut's hold. `holdEnds` is the clock's guess at when the
+-- current run ends, for an animator that cannot say.
+local holdRun = 0
+local holdEnds = -math.huge
+-- The play clock the predictions age on: seconds of play, a stall (an engine hitch, a minimised
+-- window) counting as at most a jump (choreo.luau stall.jumpSeconds). Counted on the Heartbeat
+-- (deps.onHeartbeat); without one it is the clock itself.
+local playSeconds = 0
+local playWall: number? = nil
+local playTicking = false
 -- The newest death owns the silence: how many deaths came so far, and when the silence a death
 -- started ends (nil while none holds).
 local deathCount = 0
@@ -239,6 +293,83 @@ local function ticksInSweep(tier: string, at: number, attacker: any): boolean
 		return true
 	end
 	return false
+end
+
+-- Seconds of a contact's hold still to run on the attacker's rig: what its animator says is left
+-- (Choreo pauseRemaining), else what the clock says of a hold of `seconds` that began `at`.
+local function holdRemaining(animator: any, seconds: number, at: number): number
+	local read = if typeof(animator) == "table" then animator.pauseRemaining else nil
+	if typeof(read) == "function" then
+		local left = read(animator)
+		if typeof(left) == "number" then
+			return math.max(0, left)
+		end
+	end
+	return math.max(0, seconds - (clock() - at))
+end
+
+-- Puts a hold of `frames` on the local fighter's rig and returns the run it belongs to: a new
+-- run when none is holding, else the one holding.
+local function holdLocal(animator: any, frames: number): number
+	local read = if typeof(animator) == "table" then animator.pauseRemaining else nil
+	local holding: boolean
+	if typeof(read) == "function" then
+		local left = read(animator)
+		holding = typeof(left) == "number" and left > ChoreoData.pauseEpsilon
+	else
+		holding = clock() < holdEnds
+	end
+	if not holding then
+		holdRun += 1
+		holdEnds = -math.huge
+	end
+	holdEnds = math.max(holdEnds, clock() + math.max(0, frames) * ChoreoData.frameSeconds)
+	animator:hitStop(frames)
+	return holdRun
+end
+
+-- Seconds of play now: the play clock's last count plus the time since, a stall's gap counting
+-- as at most a jump, whether the wake's Heartbeat or its network comes first.
+local function playClock(): number
+	local wall = clock()
+	if not playTicking then
+		return wall
+	end
+	local last = playWall
+	if last == nil then
+		playWall = wall
+		return playSeconds
+	end
+	return playSeconds + math.min(math.max(0, wall - last), ChoreoData.stall.jumpSeconds)
+end
+
+local function tickPlay()
+	playSeconds = playClock()
+	playWall = clock()
+end
+
+-- Drops the entries of a prediction list older than contact.confirmSeconds of play.
+local function dropStale(list: { any }, seen: number)
+	for index = #list, 1, -1 do
+		if seen - list[index].seen > Combat.contact.confirmSeconds then
+			table.remove(list, index)
+		end
+	end
+end
+
+-- Takes the oldest entry of `list` for this hit (target, window, Art), or nil.
+local function takeMatch(list: { any }, targetId: number, windowIndex: number, artId: string?): any
+	for index, entry in list do
+		if entry.targetId == targetId and entry.windowIndex == windowIndex and entry.artId == artId then
+			table.remove(list, index)
+			return entry
+		end
+	end
+	return nil
+end
+
+local function tierRank(tier: string): number
+	return (Combat.hitStopFrames :: { [string]: number })[tier] or 0
 end
 
 -- An Art's ActivationHold a late start jumped over while its first damage frame is still ahead:
@@ -339,6 +470,40 @@ local function stateClipName(state: string, direction: string?, isLocal: boolean
 end
 Replication.stateClipName = stateClipName
 
+-- Runs `fn` with the sounds it starts marked as the local player's own (SfxPool.asOwn) when `own`:
+-- inside a death's silence those play at full (issue 9). A pool without asOwn just runs it.
+local function asOwn(own: boolean, fn: () -> ())
+	local sfx = dependencies().sfx
+	local wrap = if own and typeof(sfx) == "table" then rawget(sfx, "asOwn") else nil
+	if typeof(wrap) == "function" then
+		wrap(fn)
+	else
+		fn()
+	end
+end
+
+-- The camera and the hit-stop tick of a hit the local player is in: one nudge toward it per sweep
+-- (twelve targets confirmed in one frame must not push twelve times; none when `nudge` is false),
+-- the shake of its tier, and the tick once per sweep (a stronger tier's taking over).
+local function feelHit(sweepKey: any, position: Vector3, tier: string, tick: string, nudge: boolean)
+	local d = dependencies()
+	local at = clock()
+	if nudge then
+		local nudgedAt = lastNudges[sweepKey]
+		if nudgedAt == nil or at - nudgedAt > Moments.sweep.mergeSeconds then
+			lastNudges[sweepKey] = at
+			d.camera.nudge(position, Combat.cameraNudgeStuds)
+		end
+	end
+	d.camera.shake(tier)
+	local sound = if SOUNDS.hitStop[tick] ~= nil then tick else "Normal"
+	if ticksInSweep(sound, at, sweepKey) then
+		asOwn(true, function()
+			d.sfx.play(SOUNDS.hitStop[sound])
+		end)
+	end
+end
+
 local handlers: { [string]: (payload: any) -> () } = {}
 
 function handlers.ActionStarted(payload: any)
@@ -387,11 +552,65 @@ function handlers.HitConfirmed(payload: any)
 	local position = toVector(payload.position)
 	local involved = payload.attackerId == localId or payload.targetId == localId
 
-	if attacker ~= nil then
-		animatorOf(attacker):hitStop(frames)
+	-- The local fighter's hit its blade already played on contact (issue 4): this brings the number,
+	-- the reactions and what a stronger tier adds; nothing that played replays. One the server
+	-- confirmed first is remembered, so the contact that follows is not predicted.
+	local predicted: Prediction? = nil
+	if localId ~= nil and payload.attackerId == localId and payload.parried ~= true then
+		local seen = playClock()
+		dropStale(predictions, seen)
+		dropStale(earlyConfirms, seen)
+		predicted = takeMatch(predictions, payload.targetId, payload.hitIndex, payload.artId)
+		if predicted == nil then
+			table.insert(earlyConfirms, {
+				targetId = payload.targetId,
+				windowIndex = payload.hitIndex,
+				artId = payload.artId,
+				seen = seen,
+			})
+		end
 	end
-	if target ~= nil and target ~= attacker then
-		animatorOf(target):hitStop(frames)
+	-- How much more the server's tier holds than the contact did (0: nothing to add).
+	local upgrade = if predicted ~= nil
+		then (if Combat.hitStopFrames[tier] ~= nil then tierRank(tier) - tierRank(predicted.tier) else 0)
+		else 0
+
+	if predicted ~= nil then
+		if upgrade > 0 and attacker ~= nil and predicted.run == holdRun then
+			-- The contact's hold, while it is still on, runs on to the stronger tier's length from
+			-- the contact, never restarted. One that already let go is not stopped again: a hit
+			-- holds once (issue 6), and a later cut's hold is that cut's own; the stronger tier
+			-- still sounds and shows below.
+			local animator = animatorOf(attacker)
+			local predictedSeconds = Combat.hitStopFrames[predicted.tier] * ChoreoData.frameSeconds
+			local remaining = holdRemaining(animator, predictedSeconds, predicted.at)
+			if remaining > 0 then
+				local held = math.max(0, predictedSeconds - remaining)
+				local left = frames - held / ChoreoData.frameSeconds
+				if left > 0 then
+					animator:hitStop(left)
+					holdEnds = math.max(holdEnds, clock() + left * ChoreoData.frameSeconds)
+					if target ~= nil and target ~= attacker then
+						animatorOf(target):hitStop(left)
+					end
+				end
+			end
+		end
+	else
+		if attacker ~= nil then
+			if payload.attackerId == localId then
+				holdLocal(animatorOf(attacker), frames)
+			else
+				animatorOf(attacker):hitStop(frames)
+			end
+		end
+		if target ~= nil and target ~= attacker then
+			if payload.targetId == localId then
+				holdLocal(animatorOf(target), frames)
+			else
+				animatorOf(target):hitStop(frames)
+			end
+		end
 	end
 
 	local window = if payload.isSwitch then switchOpeners[payload.targetId] else nil
@@ -425,19 +644,14 @@ function handlers.HitConfirmed(payload: any)
 		-- A perfect parry: the director's glint, inverted frame and ring; the spark burst and the
 		-- parrier's blade flash wait while that frame hides the world; a short shake; no number.
 		d.impact.hit(info)
-		local hidden = d.impact.hiddenSeconds()
-		local wait = if typeof(hidden) == "number" and hidden > 0 then hidden else 0
 		local function accents()
 			if target ~= nil then
 				d.trails.flashWhite(target.model, Combat.highlightFlashFrames)
 			end
 			d.sparks.parry(position)
 		end
-		if wait > 0 then
-			d.schedule(wait, accents)
-		else
-			accents()
-		end
+		-- On the first frame after the inverted frame (the render step that takes it down).
+		d.impact.afterHidden(accents)
 		if target ~= nil then
 			playReaction(target, "Parry")
 		end
@@ -460,7 +674,7 @@ function handlers.HitConfirmed(payload: any)
 		d.digits.show(position, payload.damage, kind)
 	end
 	if target ~= nil then
-		if d.impact.ownsHighlight(info) ~= true and not breaksGuard then
+		if predicted == nil and d.impact.ownsHighlight(info) ~= true and not breaksGuard then
 			-- FinalHit and Kill flash it themselves, white, after the impact frames. The blow that
 			-- breaks a guard leaves the guard break's red fill (StateChanged GuardBroken) showing.
 			d.outline.flash(target.model, "SystemWhite", Combat.highlightFlashFrames)
@@ -478,30 +692,23 @@ function handlers.HitConfirmed(payload: any)
 			end
 		end
 	end
-	if involved then
-		-- One nudge per sweep: twelve targets confirmed in one frame must not push twelve times.
-		local at = clock()
-		local sweepKey = if payload.attackerId ~= nil then payload.attackerId else NO_ATTACKER
-		local nudgedAt = lastNudges[sweepKey]
-		if nudgedAt == nil or at - nudgedAt > Moments.sweep.mergeSeconds then
-			lastNudges[sweepKey] = at
-			d.camera.nudge(position, Combat.cameraNudgeStuds)
-		end
-		d.camera.shake(tier)
-		-- The hit that breaks a player's guard ticks Final (the server keeps its hit-stop tier).
+	if involved and (predicted == nil or upgrade > 0) then
+		-- The hit that breaks a player's guard ticks Final (the server keeps its hit-stop tier). A
+		-- contact's upgrade shakes and ticks at the stronger tier; the contact gave the nudge.
 		local tick = if breaksGuard and tier == "Normal" then "Final" else tier
-		if SOUNDS.hitStop[tick] == nil then
-			tick = "Normal"
-		end
-		if ticksInSweep(tick, at, sweepKey) then
-			d.sfx.play(SOUNDS.hitStop[tick])
-		end
+		local sweepKey = if payload.attackerId ~= nil then payload.attackerId else NO_ATTACKER
+		feelHit(sweepKey, position, tier, tick, predicted == nil)
 	end
 	if payload.targetId == localId and payload.damage > 0 then
 		d.hud.flashHp()
 	end
-	-- The hit's cue (block, basic, crit, final, kill, Switch land), glint, crescent, line, frames.
-	d.impact.hit(info)
+	-- The hit's cue (block, basic, crit, final, kill, Switch land), glint, crescent, line, frames;
+	-- after a contact, only what the server's stronger tier adds to the moment it played.
+	if predicted == nil then
+		d.impact.hit(info)
+	elseif upgrade > 0 then
+		d.impact.hit(info, predicted.moment)
+	end
 	Replication.hit:Fire(payload)
 end
 
@@ -566,7 +773,8 @@ function handlers.EntityDied(payload: any)
 			return
 		end
 		silenceEnd = clock() + Combat.deathFreeze
-		d.sfx.duck(Combat.deathDuckDb, Combat.deathFreeze)
+		-- The local player's own new sounds play through it at full (issue 9).
+		d.sfx.duck(Combat.deathDuckDb, Combat.deathFreeze, true)
 	end)
 	local named = d.impact.shatterCue(boss, heavy)
 	local cue: string = if typeof(named) == "string"
@@ -637,6 +845,75 @@ end
 
 Replication.handlers = handlers
 
+--- Plays one of the local fighter's predicted contacts (ContactPredictor, issue 4) on the frame
+--- its blade touched the enemy: the hit-stop on both rigs at the contact's tier, the white flash
+--- (unless the moment owns it), the camera nudge and shake, the hit-stop tick and the director's
+--- moment (its cue, accents and impact frames). No number and no HP change: those wait for the
+--- server's HitConfirmed, which then plays only what its tier adds. A contact the server never
+--- confirms shows no number. False (nothing played) when this client does not track the local
+--- fighter or the target yet: the confirmation then plays the hit whole.
+function Replication.contact(contact: any): boolean
+	local d = dependencies()
+	local localId = d.localId()
+	local attacker = if localId ~= nil then d.entities.get(localId) else nil
+	local target = d.entities.get(contact.targetId)
+	if attacker == nil or target == nil or target == attacker then
+		return false
+	end
+	local tier = if Combat.hitStopFrames[contact.tier] ~= nil then contact.tier else "Normal"
+	local frames = Combat.hitStopFrames[tier]
+	local position: Vector3 = contact.position
+	local run = holdLocal(animatorOf(attacker), frames)
+	animatorOf(target):hitStop(frames)
+	-- What the contact knows of the hit: no crit, no Switch (the server rolls those), a kill only
+	-- when ContactPredictor proved it.
+	local info = {
+		tier = tier,
+		position = position,
+		attacker = attacker.model,
+		target = target.model,
+		involved = true,
+		localAttacker = true,
+		trailToken = d.trailToken(attacker),
+		parried = false,
+		guarded = false,
+		crit = false,
+		isSwitch = false,
+		killed = tier == "Kill",
+		art = contact.artId ~= nil,
+		partner = nil,
+	}
+	if d.impact.ownsHighlight(info) ~= true then
+		d.outline.flash(target.model, "SystemWhite", Combat.highlightFlashFrames)
+	end
+	feelHit(localId, position, tier, tier, true)
+	local moment = d.impact.hit(info)
+	local seen = playClock()
+	dropStale(predictions, seen)
+	table.insert(predictions, {
+		targetId = contact.targetId,
+		windowIndex = contact.windowIndex,
+		artId = contact.artId,
+		at = clock(),
+		seen = seen,
+		run = run,
+		tier = tier,
+		moment = if typeof(moment) == "string" then moment else nil,
+	})
+	return true
+end
+
+--- True when the server already confirmed this hit of the local fighter's (it came before the
+--- blade got there on this client): the predictor skips it, so nothing plays twice. Each
+--- confirmation answers once.
+function Replication.confirmedAlready(targetId: number, windowIndex: number, artId: string?): boolean
+	if deps == nil then
+		return false
+	end
+	dropStale(earlyConfirms, playClock())
+	return takeMatch(earlyConfirms, targetId, windowIndex, artId) ~= nil
+end
+
 -- The trail kind for a clip event: the kind the event names (remembered for the rest of the
 -- clip), else what this clip's TrailOn named, else the clip id ("/Basic" swings are Basic).
 local function resolveTrailKind(record: any, clipId: string, event: any): string
@@ -650,6 +927,36 @@ local function resolveTrailKind(record: any, clipId: string, event: any): string
 		return remembered.kind
 	end
 	return if string.find(clipId, "/Basic", 1, true) then "Basic" else "Art"
+end
+
+-- A clip's one-shot on a rig (a clip sound or voice, an Art's activation, a footstep).
+local function routeOneShot(record: any, clipId: string, event: any)
+	local d = dependencies()
+	local model = record.model
+	local kind = event.kind
+	if kind == "Sfx" or kind == "Voice" then
+		-- data.name is a sfx.luau "family.Name"; SfxPool resolves it and skips placeholders.
+		local data = event.data
+		if typeof(data) == "table" and typeof(data.name) == "string" then
+			d.sfx.play(data.name, d.positionOf(model))
+		end
+	elseif kind == "ActivationHold" then
+		local token = d.trailToken(record)
+		local isLocal = record.id == d.localId()
+		d.trails.activationLight(model, true, token)
+		d.sfx.play("artChime." .. token, d.positionOf(model))
+		if isLocal then
+			d.camera.fovKick()
+		end
+		-- The riser into the first damage frame (remote), the wind-up contour (local).
+		local entry = clipSpeeds[record.id]
+		local speed = if entry ~= nil and entry.clipId == clipId then entry.speed else nil
+		d.impact.activation(model, clipId, token, isLocal, speed)
+	elseif kind == "Footstep" then
+		-- SfxPool resolves the surface from the event or the Humanoid's floor, and the weight
+		-- from the armor attribute.
+		d.sfx.footstep(model, if event.data ~= nil then event.data.surface else nil)
+	end
 end
 
 --- Routes one clip event on a rig to the FX and audio packages (trails, smear, activation light,
@@ -686,30 +993,11 @@ function Replication.routeClipEvent(record: any, clipId: string, event: any, jum
 		trailKinds[record.id] = nil
 	elseif starts then
 		-- The one-shots. A clip sound or voice, an Art's activation (light, chime, kick, riser) or a
-		-- footstep that a render stall's gap jumped over is over: nothing replays.
-		if kind == "Sfx" or kind == "Voice" then
-			-- data.name is a sfx.luau "family.Name"; SfxPool resolves it and skips placeholders.
-			local data = event.data
-			if typeof(data) == "table" and typeof(data.name) == "string" then
-				d.sfx.play(data.name, d.positionOf(model))
-			end
-		elseif kind == "ActivationHold" then
-			local token = d.trailToken(record)
-			local isLocal = record.id == d.localId()
-			d.trails.activationLight(model, true, token)
-			d.sfx.play("artChime." .. token, d.positionOf(model))
-			if isLocal then
-				d.camera.fovKick()
-			end
-			-- The riser into the first damage frame (remote), the wind-up contour (local).
-			local entry = clipSpeeds[record.id]
-			local speed = if entry ~= nil and entry.clipId == clipId then entry.speed else nil
-			d.impact.activation(model, clipId, token, isLocal, speed)
-		elseif kind == "Footstep" then
-			-- SfxPool resolves the surface from the event or the Humanoid's floor, and the weight
-			-- from the armor attribute.
-			d.sfx.footstep(model, if event.data ~= nil then event.data.surface else nil)
-		end
+		-- footstep that a render stall's gap jumped over is over: nothing replays. The local
+		-- fighter's are their own: inside a death's silence they play at full (issue 9).
+		asOwn(record.id == d.localId(), function()
+			routeOneShot(record, clipId, event)
+		end)
 	end
 	Replication.clipEvent:Fire(record, clipId, event, not starts)
 end
@@ -848,6 +1136,16 @@ function Replication.bind(newDeps: Deps)
 	table.clear(lastNudges)
 	table.clear(lastTicks)
 	table.clear(deathVocals)
+	table.clear(predictions)
+	table.clear(earlyConfirms)
+	holdRun = 0
+	holdEnds = -math.huge
+	playSeconds = 0
+	playWall = nil
+	playTicking = typeof(newDeps.onHeartbeat) == "function"
+	if playTicking then
+		(newDeps.onHeartbeat :: any)(tickPlay)
+	end
 	deathCount = 0
 	silenceEnd = nil
 	local entities = newDeps.entities
@@ -935,6 +1233,9 @@ function Replication.start()
 			task.delay(seconds, fn)
 		end,
 		now = os.clock,
+		onHeartbeat = function(fn)
+			game:GetService("RunService").Heartbeat:Connect(fn)
+		end,
 	})
 	Replication.subscribe()
 end

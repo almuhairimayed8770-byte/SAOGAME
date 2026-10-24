@@ -206,6 +206,25 @@ describe("RigBuilder helpers", function()
 		expect(RigBuilder.placeholderRigIds()).toEqual({ "Boar", "Kobold" })
 	end)
 
+	it("never lets the engine label a rig: one name per enemy, the nameplate's", function()
+		-- Under the default Viewer the viewing player's distances apply, so the rig's own zero
+		-- distances hid nothing and every enemy showed the engine's name over its nameplate.
+		for _, id in RigBuilder.placeholderRigIds() do
+			local model = RigBuilder.build(id)
+			local humanoids = 0
+			for _, descendant in model:GetDescendants() do
+				if descendant:IsA("Humanoid") then
+					humanoids += 1
+					expect(descendant.DisplayDistanceType).toBe(Enum.HumanoidDisplayDistanceType.None)
+					expect(descendant.NameDisplayDistance).toBe(0)
+					expect(descendant.HealthDisplayDistance).toBe(0)
+				end
+			end
+			expect(humanoids).toBe(1)
+			model:Destroy()
+		end
+	end)
+
 	it("frameOf converts studs and degrees; longAxis prefers Y on ties", function()
 		local frame = RigBuilder.frameOf({ pos = { 1, 2, 3 }, rot = { 0, 90, 0 } })
 		expect(near(frame.Position, Vector3.new(1, 2, 3))).toBe(true)

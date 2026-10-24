@@ -74,6 +74,16 @@ local Fx = {
 		brightness = 2,
 		flashFrames = 3,
 		flashToken = "SystemWhite",
+		-- The flash is a Highlight of the weapon part alone (Trails names it flashName), never the
+		-- body's outline: a whole white body reads as being hit (issue 5). It draws no outline (the
+		-- rig's own Highlight owns that) and takes a slot of the Highlight budget while it shows.
+		flashName = "ActivationFlash",
+		flashFillTransparency = 0.1,
+		flashOutlineTransparency = 1,
+		-- A cancelled Art's blade light fades out over this instead of cutting off in a frame
+		-- (issue 13); a released Art's goes out on its first damage frame, as the cut takes over.
+		cancelFadeSeconds = 0.2,
+		cancelFadeEasing = "QuadOut",
 	},
 
 	-- Smear (section 10 beat 3): the weapon part scaled along the swing axis for the smear frames.
@@ -269,6 +279,12 @@ local Fx = {
 	-- Client audio pool (section 15 numbers that are the pool's, not the sound list's).
 	audio = {
 		groupVolumes = { Master = 1, Music = 0.7, SFX = 1, UI = 0.85, Voice = 1 },
+		-- The death silence's carve-out (issue 9): a SoundGroup beside SFX under Master, at SFX's
+		-- level and slider, that no duck lowers. While a death's silence holds, the local player's
+		-- own SFX (their clip sounds, footsteps, dodge, guard and the hits they are in, marked with
+		-- SfxPool.asOwn) start in it, so the swing and the hit after the kill are heard at full
+		-- while the music, the beds, the other fighters and the UI stay down.
+		ownGroupName = "OwnSFX",
 		dedupeSeconds = 0.03, -- the same sound at the same spot inside this window plays once
 		-- studs; wide enough that the death reaction's crack (at the server's death position) and
 		-- the shatter's crack (at the client's rig, which may trail a charging rig by a few studs)

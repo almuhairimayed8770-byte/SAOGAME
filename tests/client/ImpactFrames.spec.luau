@@ -32,6 +32,7 @@ type World = {
 	quality: string,
 	hasGui: boolean,
 	renderFails: boolean, -- onRender binds nothing (no engine render step)
+	pace: number?, -- the screen's measured frame length (FrameClock.pace); nil: unknown
 }
 
 local world: World = nil :: any
@@ -53,6 +54,7 @@ local function withWorld(body: () -> (), random: any?)
 		quality = "High",
 		hasGui = true,
 		renderFails = false,
+		pace = nil,
 	}
 	ImpactFrames.bind({
 		now = function()
@@ -93,6 +95,9 @@ local function withWorld(body: () -> (), random: any?)
 			return world.quality
 		end,
 		random = random or Random.new(7),
+		pace = function(): number?
+			return world.pace
+		end,
 	})
 	FlashBudget.reset()
 	local ok, err = pcall(body)
@@ -546,7 +551,7 @@ describe("ImpactFrames sweep", function()
 end)
 
 describe("ImpactFrames timing", function()
-	it("starts the clock on the first drawn frame, changes looks by elapsed time and hides on time", function()
+	it("starts on the first drawn frame, shows each look its drawn frames and hides on time", function()
 		withWorld(function()
 			local model = rig("Fighter", Vector3.new(0, 3, 0))
 			local seconds = ImpactFrames.play("Kill", { model })
@@ -560,19 +565,25 @@ describe("ImpactFrames timing", function()
 			expect(figures.Visible).toBe(false)
 
 			-- The hit landed between frames: the first frame drawn after it is the black beat's first.
-			advance(0.7 * F)
+			world.clock += 0.3 * F
+			advance(F)
 			expect(ImpactFrames.look()).toBe("Black")
 			expect(ImpactFrames.remaining()).toBeCloseTo(ImpactSequence.seconds("Kill"), 1e-9)
+			advance(F)
+			expect(ImpactFrames.look()).toBe("Black")
 
-			advance(2.5 * F)
+			advance(F)
 			expect(ImpactFrames.look()).toBe("Dark")
 			expectColor(background.BackgroundColor3, "OutlineInk")
 			expect(figures.Visible).toBe(true)
 			expectColor(figures.ImageColor3, "SystemWhite")
 			expect(strokes.Visible).toBe(false)
-			expect(ImpactFrames.hiddenSeconds()).toBeCloseTo(3.5 * F, 1e-9)
+			-- This frame and the next are Dark, two Ink, and the frame after takes it down.
+			expect(ImpactFrames.hiddenSeconds()).toBeCloseTo(4 * F, 1e-9)
 
-			advance(3 * F)
+			advance(F)
+			expect(ImpactFrames.look()).toBe("Dark")
+			advance(F)
 			expect(ImpactFrames.look()).toBe("Ink")
 			expectColor(background.BackgroundColor3, "SystemWhite")
 			expect(figures.Visible).toBe(true)
@@ -582,7 +593,9 @@ describe("ImpactFrames timing", function()
 			expect(#shown).toBeGreaterThanOrEqual(impact.strokes.count.min)
 			expect(#shown).toBeLessThanOrEqual(impact.strokes.count.max)
 
-			advance(1.6 * F)
+			advance(F)
+			expect(ImpactFrames.look()).toBe("Ink")
+			advance(F)
 			expect(ImpactFrames.isShowing()).toBe(false)
 			expect(ImpactFrames.look()).toBeNil()
 			expect(ImpactFrames.remaining()).toBe(0)
@@ -622,15 +635,64 @@ describe("ImpactFrames timing", function()
 
 	it("on a slow device gives each look a drawn frame but never shows past the hit-stop", function()
 		withWorld(function()
+			-- A steady 15 fps screen: its pace scales each look to one drawn frame.
+			world.pace = 4 * F
 			ImpactFrames.play("Kill", { rig("Fighter", Vector3.new(0, 3, 0)) })
-			advance(F)
+			advance(4 * F)
 			expect(ImpactFrames.look()).toBe("Black")
-			-- One long frame moves one look on, never past a look nobody saw.
-			advance(6 * F)
+			advance(4 * F)
 			expect(ImpactFrames.look()).toBe("Dark")
+			advance(4 * F)
+			expect(ImpactFrames.look()).toBe("Ink")
 			-- The next one is past the Kill hit-stop (10 frames): the rigs move again, so it ends.
-			advance(5 * F)
+			advance(4 * F)
 			expect(ImpactFrames.isShowing()).toBe(false)
+		end)
+	end)
+
+	it("a late frame never takes a frame from one look and gives it to the next (issue 10)", function()
+		withWorld(function()
+			world.pace = F
+			ImpactFrames.play("Kill", { rig("Fighter", Vector3.new(0, 3, 0)) })
+			local seen: { string } = {}
+			-- 60 fps with one frame two and a half frames late, inside the hit-stop.
+			for _, dt in { F, F, 2.5 * F, F, F, F, F } do
+				advance(dt)
+				table.insert(seen, ImpactFrames.look() or "-")
+			end
+			expect(seen).toEqual({ "Black", "Black", "Dark", "Dark", "Ink", "Ink", "-" })
+		end)
+	end)
+
+	it("a jittery 60 fps clock still draws Kill 2/2/2 and Final 2 (issue 10)", function()
+		withWorld(function()
+			-- The screen's pace over the last frames reads 60 fps (FrameClock.pace, a median).
+			world.pace = F
+			-- Frames that alternate early and late around 60 fps, starting either way.
+			for _, first in { 0.7, 1.3 } do
+				world.clock += 2
+				FlashBudget.reset()
+				ImpactFrames.play("Kill", { rig("Fighter", Vector3.new(0, 3, 0)) })
+				local seen: { string } = {}
+				local early = first
+				for _ = 1, 7 do
+					advance(early * F)
+					early = 2 - early
+					table.insert(seen, ImpactFrames.look() or "-")
+				end
+				expect(seen).toEqual({ "Black", "Black", "Dark", "Dark", "Ink", "Ink", "-" })
+				world.clock += 2
+				FlashBudget.reset()
+				ImpactFrames.play("Final", { rig("Fighter", Vector3.new(0, 3, 0)) })
+				local final: { string } = {}
+				early = first
+				for _ = 1, 3 do
+					advance(early * F)
+					early = 2 - early
+					table.insert(final, ImpactFrames.look() or "-")
+				end
+				expect(final).toEqual({ "Dark", "Dark", "-" })
+			end
 		end)
 	end)
 
@@ -1003,8 +1065,9 @@ describe("ImpactFrames flash safety", function()
 		withWorld(function()
 			ImpactFrames.play("Final", {})
 			local playedAt = world.clock
-			advance(0.9 * F) -- the first drawn frame
-			advance(2 * F) -- the last: the overlay hides here
+			advance(F) -- the first drawn frame
+			advance(F) -- the second
+			advance(F) -- the overlay hides here
 			expect(ImpactFrames.isShowing()).toBe(false)
 			local hiddenAt = world.clock
 			-- A window after the play, but not yet a window after the scene came back.
@@ -1063,7 +1126,9 @@ describe("ImpactFrames cancel and the pool", function()
 			expect(ImpactFrames.look()).toBe("Black")
 			expect(#ImpactFrames.clones()).toBe(3 * FIGURE)
 			expect(FlashBudget.used(world.clock)).toBe(ImpactSequence.flashCost("Kill"))
-			advance(2 * F)
+			advance(F)
+			expect(ImpactFrames.look()).toBe("Black")
+			advance(F)
 			expect(ImpactFrames.look()).toBe("Dark")
 		end)
 	end)
@@ -1218,7 +1283,8 @@ describe("ImpactFrames quality", function()
 				end
 				expect(names["P" .. (cap + 3)]).toBe(true)
 				advance(F)
-				advance(2 * F)
+				advance(F)
+				advance(F)
 				expect(ImpactFrames.look()).toBe("Dark")
 				local _, _, figures = tree()
 				expect(figures.Visible).toBe(true)
@@ -1236,11 +1302,13 @@ describe("ImpactFrames quality", function()
 			expect(FlashBudget.used(world.clock)).toBe(ImpactSequence.flashCost("Kill"))
 			local _, background, figures, strokes = tree()
 			advance(F)
-			advance(2 * F)
+			advance(F)
+			advance(F)
 			expect(ImpactFrames.look()).toBe("Dark")
 			expectColor(background.BackgroundColor3, "OutlineInk")
 			expect(figures.Visible).toBe(true)
-			advance(2 * F)
+			advance(F)
+			advance(F)
 			expect(ImpactFrames.look()).toBe("Ink")
 			expectColor(background.BackgroundColor3, "SystemWhite")
 			expect(strokes.Visible).toBe(true)
@@ -1523,7 +1591,9 @@ describe("ImpactFrames render stalls", function()
 			expect(world.binds - world.unbinds).toBe(1)
 			advance(F)
 			expect(ImpactFrames.look()).toBe("Dark")
-			advance(2 * F)
+			advance(F)
+			expect(ImpactFrames.look()).toBe("Dark")
+			advance(F)
 			expect(ImpactFrames.isShowing()).toBe(false)
 			expect(world.render).toBeNil()
 			expect(world.binds - world.unbinds).toBe(0)
@@ -1549,7 +1619,9 @@ describe("ImpactFrames render stalls", function()
 			expect(world.binds - world.unbinds).toBe(1)
 			advance(F)
 			expect(ImpactFrames.look()).toBe("Dark")
-			advance(2 * F)
+			advance(F)
+			expect(ImpactFrames.look()).toBe("Dark")
+			advance(F)
 			expect(ImpactFrames.isShowing()).toBe(false)
 		end)
 	end)

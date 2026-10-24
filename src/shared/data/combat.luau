@@ -150,6 +150,42 @@ local Combat = {
 	sweepRootSpeedMargin = 1.25, -- how much faster than the fastest honest travel a jump must be
 	facingTolerance = 0.35, -- cosine slack when comparing reported facing to the server's
 
+	-- The strike snap's ease (section 10 "Snap (2 to 4 frames)", issue 4). A key segment eased
+	-- ExpoOut that opens a hit window (a HitWindowOpen at its start) in an attack clip is a strike
+	-- snap, and ClipSampler eases it with the normalized exponential (1 - 2^(-s * u)) / (1 - 2^(-s)),
+	-- s = sharpness, instead of ExpoOut's 1 - 2^(-10 * u). Each 60 fps frame of a 3-frame snap then
+	-- shows about half the travel of the frame before (57, 29 and 14%) where ExpoOut put 87% in the
+	-- first and left 1% for the last, so the eye sees the blade arrive over the snap's frames. Only
+	-- the timing along the cut changes: every pose the snap passes through, the key it lands on and
+	-- the frame it lands on stay the same, on the client and in the server's sweep alike. Higher is
+	-- snappier; 10 is ExpoOut again.
+	snapEase = {
+		sharpness = 3,
+	},
+
+	-- Local contact prediction (section 6 "Authority and feel", issue 4). While a damage window of
+	-- the local fighter's own swing or Art is open, ContactPredictor sweeps the blade the trails draw
+	-- (TrailStart to TrailEnd) between rendered frames and Replication.contact plays the hit's
+	-- hit-stop, flash, camera and sounds on the frame it first touches an enemy's body. The server's
+	-- HitConfirmed still decides the hit and brings the number. Nothing here decides damage.
+	contact = {
+		-- Seconds a predicted hit waits for its HitConfirmed. A confirmation later than this is a hit
+		-- of its own (it plays in full); a prediction never confirmed shows no number.
+		confirmSeconds = 1.0,
+		-- Sub-samples one rendered frame of the local sweep may take, as sweepMaxSubdivisions does
+		-- for the server's; each one solves the blade and tests it against the fighters near it, and
+		-- no end of the blade moves more than sweepMaxTipStep between two of them while they last.
+		maxSubdivisions = 12,
+		-- A contact is predicted to kill only when the hit cannot do less than the enemy has left:
+		-- its least damage (the weapon's attack times the move's multiplier, less the enemy's
+		-- defense, rounded and at least minimumDamage; STR, a crit, Switch, Tempo and Break only add)
+		-- reaches the enemy's replicated HP plus half a point (the attribute is rounded) plus what
+		-- out-of-combat regen (outOfCombatRegenPerSecond) gives back in this many seconds. Anything
+		-- the client cannot be sure of (an unknown def, an unconfirmed earlier hit) predicts no kill;
+		-- the server's Kill then extends the hold from the contact frame.
+		killRegenSeconds = 1.0,
+	},
+
 	-- Aim (D-112). While a lock is held and the body is free (Idle, Guard, the held Art stance), the
 	-- body turns to face the target instead of the stick, and the stick strafes at walk speed. A
 	-- basic swing or an Art release faces the rest of the way at once, but never more than

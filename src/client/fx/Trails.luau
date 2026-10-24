@@ -14,9 +14,15 @@
 	go full width but stay whiter, and once every kind is off the fading tail keeps the look of
 	the swing that drew it (Trail.Color and WidthScale recolor the whole trail).
 
-	`activationLight` turns the blade light on in the trail color and flashes the weapon's
-	Highlight white for three frames. `flashWhite` is the two-frame white flash on a Switch
-	landing or a parry.
+	A trail that lights anew is cleared first (Trail:Clear()), so it starts where its blade is: the
+	engine would otherwise join where it went out to where it lights again (issue 11).
+
+	`activationLight` turns the blade light on in the trail color and flashes the weapon white for
+	three rendered frames: a Highlight of the weapon part alone (fx.activationLight.flashName),
+	never the rig's outline, which would turn the whole body white like a hit (issue 5); it holds a
+	slot of the Highlight budget while it shows. A cancelled Art's light fades out over
+	fx.activationLight.cancelFadeSeconds (issue 13; the Heartbeat step eases it down).
+	`flashWhite` is the two-frame white flash on a Switch landing or a parry.
 
 	Budget: at most fx.quality[tier].maxTrails trails are enabled at once; when more rigs are
 	swinging, the farthest from the viewer are disabled first. Trails past the tier's distance
@@ -62,6 +68,7 @@ local Accents = require(Shared.data.accents)
 local ChoreoData = require(Shared.data.choreo)
 local Palette = require(Shared.data.palette)
 local Weapons = require(Shared.data.weapons)
+local Easing = require(Shared.util.Easing)
 local Assets = require(Shared.data.assets)
 local Engine = require(script.Parent.Engine)
 local AccentStep = require(script.Parent.AccentStep)
@@ -100,6 +107,10 @@ type Entry = {
 	swing: Kind, -- the last swing kind on (Art or Basic): the color, and the width once nothing is on
 	flashCancel: (() -> ())?,
 	flashing: boolean,
+	weaponFlash: Highlight?, -- the activation's flash on the weapon part alone (made on first use)
+	weaponFlashCancel: (() -> ())?, -- ends the weapon flash early (a new one, detach)
+	weaponFlashSlot: (() -> ())?, -- gives back the Highlight budget slot the weapon flash holds
+	lightFade: number?, -- seconds into the cancelled Art's light fade; nil while none runs
 	allowed: boolean, -- inside the budget and the distance
 	removedCancel: () -> (), -- stops watching the rig for removal
 	tip: Attachment, -- TrailEnd: the blade tip swingDirection follows
@@ -152,6 +163,8 @@ local sinceRank = 0
 local renderedAt: number? = nil
 -- No render step for longer than a jump: every trail is out and cleared until one runs (D-142).
 local stalled = false
+local endWeaponFlash: (entry: Entry) -> ()
+local flashWeapon: (entry: Entry) -> ()
 
 local function sequence(keys: { { number } }): NumberSequence
 	local points = {}
@@ -301,7 +314,14 @@ local function applyAppearance(entry: Entry)
 		color = entry.color:Lerp(Palette.color3("TrailWhite"), Fx.trail.basicWhiteBlend)
 	end
 	entry.trail.Color = ColorSequence.new(color)
-	entry.trail.Enabled = wantsTrail(entry) and entry.allowed and not stalled
+	local lit = wantsTrail(entry) and entry.allowed and not stalled
+	if lit and not entry.trail.Enabled then
+		-- Lit anew, it starts where its blade is now: the engine joins where a trail went out to
+		-- where it lights again, which drew a streak from the last window's blade on the still
+		-- frame a window opens on, and across an Art's hold between its cuts (issue 11).
+		deps.clear(entry.trail)
+	end
+	entry.trail.Enabled = lit
 end
 
 -- Re-ranks which active trails are allowed: nearest first, inside the tier's distance, up to maxTrails.
@@ -328,6 +348,53 @@ local function rebalance()
 			applyAppearance(item.entry)
 		end
 	end
+end
+
+-- Ends the weapon's activation flash now: the Highlight off, its budget slot given back.
+endWeaponFlash = function(entry: Entry)
+	local cancel = entry.weaponFlashCancel
+	entry.weaponFlashCancel = nil
+	if cancel ~= nil then
+		cancel()
+	end
+	local highlight = entry.weaponFlash
+	if highlight ~= nil then
+		highlight.Enabled = false
+	end
+	local release = entry.weaponFlashSlot
+	entry.weaponFlashSlot = nil
+	if release ~= nil then
+		release()
+	end
+end
+
+-- The activation's flash: a Highlight on the weapon part alone, SystemWhite for
+-- fx.activationLight.flashFrames rendered frames (section 11), holding one Highlight slot while
+-- it shows. A new activation restarts it.
+flashWeapon = function(entry: Entry)
+	local config = Fx.activationLight
+	local highlight = entry.weaponFlash
+	if highlight == nil or highlight.Parent ~= entry.weapon then
+		local made = Instance.new("Highlight")
+		made.Name = config.flashName
+		made.Adornee = entry.weapon
+		made.FillColor = Palette.color3(config.flashToken :: any)
+		made.FillTransparency = config.flashFillTransparency
+		made.OutlineTransparency = config.flashOutlineTransparency
+		made.DepthMode = (Enum.HighlightDepthMode :: any)[Fx.outline.depthMode]
+		made.Enabled = false
+		made.Parent = entry.weapon
+		entry.weaponFlash = made
+		highlight = made
+	end
+	endWeaponFlash(entry)
+	entry.weaponFlashSlot = OutlineManager.reserve()
+	local shown = highlight :: Highlight
+	shown.Enabled = true
+	entry.weaponFlashCancel = FrameClock.after(config.flashFrames, function()
+		entry.weaponFlashCancel = nil
+		endWeaponFlash(entry)
+	end)
 end
 
 --- Finds (or builds) the Trail and PointLight on a rig's Weapon part; returns nil for rigs without one.
@@ -357,6 +424,10 @@ function Trails.attach(model: Instance): boolean
 		swing = "Art",
 		flashCancel = nil,
 		flashing = false,
+		weaponFlash = nil,
+		weaponFlashCancel = nil,
+		weaponFlashSlot = nil,
+		lightFade = nil,
 		allowed = true,
 		removedCancel = Engine.onRemoved(model, function()
 			Trails.detach(model)
@@ -388,9 +459,12 @@ function Trails.detach(model: Instance)
 	if entry.flashCancel ~= nil then
 		entry.flashCancel()
 	end
+	endWeaponFlash(entry)
+	entry.lightFade = nil
 	entry.removedCancel()
 	entry.trail.Enabled = false
 	entry.light.Enabled = false
+	entry.light.Brightness = Fx.activationLight.brightness
 	entries[model] = nil
 end
 
@@ -413,8 +487,10 @@ function Trails.setActive(model: Instance, on: boolean, kind: Kind)
 end
 
 --- The activation light on the blade (range 8, brightness 2) in the trail color, plus the
---- three-frame SystemWhite flash on the weapon's Highlight when it turns on.
-function Trails.activationLight(model: Instance, on: boolean, token: string?)
+--- three-frame SystemWhite flash on the weapon's own Highlight when it turns on (the weapon part
+--- alone, never the body: issue 5). `fade` (a cancelled Art) fades the light out over
+--- fx.activationLight.cancelFadeSeconds instead of putting it out at once (issue 13).
+function Trails.activationLight(model: Instance, on: boolean, token: string?, fade: boolean?)
 	if entries[model] == nil and not Trails.attach(model) then
 		return
 	end
@@ -424,9 +500,45 @@ function Trails.activationLight(model: Instance, on: boolean, token: string?)
 	else
 		entry.light.Color = entry.color
 	end
+	if not on and fade == true and entry.light.Enabled then
+		-- Already fading: it goes on from where it is.
+		entry.lightFade = entry.lightFade or 0
+		return
+	end
+	entry.lightFade = nil
+	entry.light.Brightness = Fx.activationLight.brightness
 	entry.light.Enabled = on
 	if on then
-		OutlineManager.flash(model, Fx.activationLight.flashToken, Fx.activationLight.flashFrames)
+		flashWeapon(entry)
+	end
+end
+
+--- True while a rig's activation light is on (fading counts).
+function Trails.isLit(model: Instance): boolean
+	local entry = entries[model]
+	return entry ~= nil and entry.light.Enabled
+end
+
+-- Steps every cancelled Art's light fade by `dt` (Heartbeat): the brightness eases down from the
+-- activation's, and the light goes out at the end.
+local function stepFades(dt: number)
+	local length = Fx.activationLight.cancelFadeSeconds
+	for _, entry in entries do
+		local elapsed = entry.lightFade
+		if elapsed == nil then
+			continue
+		end
+		local t = if length > 0 then math.min(1, (elapsed + dt) / length) else 1
+		-- Done within half a frame of the end, so a 60 fps clock a hair fast never adds a frame at 0.
+		if elapsed + dt >= length - dt * 0.5 then
+			entry.lightFade = nil
+			entry.light.Enabled = false
+			entry.light.Brightness = Fx.activationLight.brightness
+		else
+			entry.lightFade = elapsed + dt
+			local eased = Easing.evaluate(Fx.activationLight.cancelFadeEasing, t)
+			entry.light.Brightness = Fx.activationLight.brightness * (1 - eased)
+		end
 	end
 end
 
@@ -588,7 +700,8 @@ local function watchStall()
 end
 
 -- The render step: remembers when it ran; the first one after a stall clears each trail again
--- and lights what is still on, from where its blade is now.
+-- and lights what is still on, from where its blade is now (a trail that lights is cleared as it
+-- lights; one that stays out is cleared here).
 local function rendered()
 	renderedAt = deps.now()
 	if not stalled then
@@ -596,14 +709,17 @@ local function rendered()
 	end
 	stalled = false
 	for _, entry in entries do
-		deps.clear(entry.trail)
 		applyAppearance(entry)
+		if not entry.trail.Enabled then
+			deps.clear(entry.trail)
+		end
 	end
 end
 
 local function connectLoops()
 	stopLoop = deps.onWatch(function(dt: number)
 		watchStall()
+		stepFades(dt)
 		Trails.sample()
 		sinceRank += dt
 		if sinceRank >= Fx.trail.rankInterval then

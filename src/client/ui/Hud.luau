@@ -10,6 +10,10 @@
 	for the Switch window. `bindLocal(entityId)` reads the EntityTracker record and follows its
 	attribute changes.
 
+	The HUD's ScreenGui sits inside the engine's safe area (ui.hud.screenInsets, D-148), so the
+	top-left corner clears the top bar on every screen size and phone notches; the vignette lives
+	in its own full-screen ScreenGui just under it.
+
 	Every number is in ui.luau; every color is a palette token; the bar fill and the fades step
 	on Heartbeat through HudLogic (no linear tweens). Accessibility: colorblind mode swaps the HP
 	hues and raises a pattern overlay; the UI scale; a telegraph intensity read by Telegraphs.
@@ -35,6 +39,7 @@ export type StatusEntry = { kind: string, remaining: number? }
 
 type Elements = {
 	gui: ScreenGui,
+	vignetteGui: ScreenGui,
 	scale: UIScale,
 	name: TextLabel,
 	level: TextLabel,
@@ -140,12 +145,23 @@ local function build(parent: Instance?): Elements
 	local gui = El.new("ScreenGui", {
 		Name = hud.screenGuiName,
 		ResetOnSpawn = false,
-		IgnoreGuiInset = true,
 		DisplayOrder = hud.displayOrder,
 	}) :: ScreenGui
+	-- Inside the safe area, clear of the top bar (D-148). The engine links the two properties
+	-- (IgnoreGuiInset true means no insets), so they are set in this order, never in one table.
+	gui.IgnoreGuiInset = false
+	gui.ScreenInsets = (Enum.ScreenInsets :: any)[hud.screenInsets]
 	local scale = El.new("UIScale", { Scale = uiScale, Parent = gui }) :: UIScale
 
-	local vignette = buildVignette(gui)
+	-- The vignette covers the whole screen, top bar included, from its own ScreenGui under the
+	-- HUD (and outside the HUD's UI scale).
+	local vignetteGui = El.new("ScreenGui", {
+		Name = hud.vignetteGuiName,
+		ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		DisplayOrder = hud.vignetteDisplayOrder,
+	}) :: ScreenGui
+	local vignette = buildVignette(vignetteGui)
 
 	local topLeft = El.new("Frame", {
 		Name = "TopLeft",
@@ -344,10 +360,12 @@ local function build(parent: Instance?): Elements
 	if parent ~= nil then
 		pcall(function()
 			gui.Parent = parent
+			vignetteGui.Parent = parent
 		end)
 	end
 	return {
 		gui = gui,
+		vignetteGui = vignetteGui,
 		scale = scale,
 		name = nameLabel,
 		level = levelLabel,
@@ -657,6 +675,11 @@ end
 --- The HUD's ScreenGui (tests, the settings menu's anchor).
 function Hud.gui(): ScreenGui
 	return ensure().gui
+end
+
+--- The vignette's full-screen ScreenGui, under the HUD's (tests).
+function Hud.vignetteGui(): ScreenGui
+	return ensure().vignetteGui
 end
 
 --- The smoothed bar fraction on screen (tests).

@@ -407,6 +407,99 @@ describe("Impact.hit, involved", function()
 	end)
 end)
 
+describe("Impact.hit after a predicted contact (issue 4)", function()
+	-- The local contact played `previous`; the server's confirmation comes a round trip later.
+	local function contactThenConfirm(world: any, contact: any, confirm: any, gap: number): string
+		local played = Impact.hit(hitInfo(world, contact))
+		flush(world)
+		table.clear(world.calls)
+		world.clock += gap
+		local name = Impact.hit(hitInfo(world, confirm), played)
+		flush(world)
+		return name
+	end
+
+	it("a basic contact the server makes a kill: the kill's cue, picture, cut, punch and slash", function()
+		local world = bind(newWorld())
+		world.swing = Vector3.new(1, 0, 0)
+		local name = contactThenConfirm(world, {}, { tier = "Kill", killed = true, art = false }, 0.15)
+		expect(name).toBe("Kill")
+		expect(only(world, "sfx.cue")[1]).toBe("HitKill")
+		expect(only(world, "impactFrames.play")[1]).toBe("Kill")
+		expect(only(world, "sfx.contour")[1]).toBe("KillCut")
+		expect(only(world, "camera.punch")[1]).toBe("Kill")
+		expect(only(world, "slashArc.play")[5]).toBe("Large")
+		expect(only(world, "slashArc.line")[3]).toBe("Large")
+		-- The contact's glint and white flash already played.
+		none(world, "glint.play")
+		none(world, "outline.flash")
+	end)
+
+	it("a final hit the server makes a kill inside the sweep: only what the kill adds", function()
+		local world = bind(newWorld())
+		world.swing = Vector3.new(1, 0, 0)
+		contactThenConfirm(world, { tier = "Final", art = true }, { tier = "Kill", killed = true, art = true }, 0.05)
+		expect(only(world, "sfx.cue")[1]).toBe("HitKill")
+		expect(only(world, "impactFrames.play")[1]).toBe("Kill")
+		expect(only(world, "sfx.contour")[1]).toBe("KillCut")
+		expect(only(world, "camera.punch")[1]).toBe("Kill")
+		for _, fn in { "glint.play", "slashArc.play", "slashArc.line", "outline.flash" } do
+			none(world, fn)
+		end
+	end)
+
+	it("a confirmation of the moment the contact played replays nothing, even past the sweep", function()
+		for _, case in
+			{
+				{ contact = {}, confirm = {} },
+				{ contact = { tier = "Final", art = true }, confirm = { tier = "Final", art = true } },
+				{ contact = { tier = "Kill", killed = true }, confirm = { tier = "Kill", killed = true } },
+				-- A crit the contact could not know: its number shows it, its sound stays the hit's.
+				{ contact = {}, confirm = { crit = true } },
+			}
+		do
+			local world = bind(newWorld())
+			world.swing = Vector3.new(1, 0, 0)
+			contactThenConfirm(world, case.contact, case.confirm, 0.3)
+			for _, fn in
+				{
+					"impactFrames.play",
+					"sfx.contour",
+					"camera.punch",
+					"glint.play",
+					"slashArc.play",
+					"slashArc.line",
+					"outline.flash",
+					"trails.flashWhite",
+					"sfx.play",
+				}
+			do
+				none(world, fn)
+			end
+			none(world, "sfx.cue")
+		end
+	end)
+
+	it("never replays the Switch layer, and an unknown previous moment plays the whole row", function()
+		local world = bind(newWorld())
+		contactThenConfirm(
+			world,
+			{ isSwitch = true, partner = world.partner },
+			{ tier = "Kill", killed = true, isSwitch = true, partner = world.partner },
+			0.05
+		)
+		none(world, "trails.flashWhite")
+		none(world, "sfx.play")
+		expect(only(world, "sfx.cue")[1]).toBe("HitKill")
+
+		local fresh = bind(newWorld())
+		Impact.hit(hitInfo(fresh, { tier = "Final", art = true }), "NoSuchMoment")
+		flush(fresh)
+		expect(only(fresh, "impactFrames.play")[1]).toBe("Final")
+		expect(only(fresh, "outline.flash")[2]).toBe("SystemWhite")
+	end)
+end)
+
 describe("Impact.hit, bystanders", function()
 	it("a bystander in range sees the accents but gets no impact frames, contour or punch", function()
 		local world = bind(newWorld())
@@ -1514,5 +1607,66 @@ describe("Impact dependencies", function()
 		bind(world)
 		Impact.hit(hitInfo(world, { killed = true }))
 		expect(warningsSince(before, "camera is not available")).toBe(2)
+	end)
+end)
+
+describe("Impact marks the local player's own sounds (issue 9)", function()
+	-- A pool with asOwn: each sound remembers whether it started inside it.
+	local function ownWorld(): (any, { string })
+		local world = bind(newWorld())
+		local depth = 0
+		local heard: { string } = {}
+		local function note(fn: string): (...any) -> ()
+			return function(name: any)
+				table.insert(heard, fn .. ":" .. tostring(name) .. (if depth > 0 then ":own" else ""))
+			end
+		end
+		world.deps.sfx = {
+			asOwn = function(fn: () -> ())
+				depth += 1
+				fn()
+				depth -= 1
+			end,
+			cue = note("cue"),
+			play = note("play"),
+			playEndingAt = note("playEndingAt"),
+			contour = function() end,
+		}
+		Impact.bind(world.deps)
+		return world, heard
+	end
+
+	it("a hit the local player is in sounds as their own; a hit between others does not", function()
+		local world, heard = ownWorld()
+		Impact.hit(hitInfo(world))
+		local mine = #heard
+		expect(mine).toBeGreaterThan(0)
+		for _, line in heard do
+			expect(line:sub(-4)).toBe(":own")
+		end
+		world.clock += moments.sweep.mergeSeconds * 2
+		local other = { name = "other" }
+		world.positions[other] = HIT_POINT
+		Impact.hit(hitInfo(world, { involved = false, localAttacker = false, attacker = other }))
+		expect(#heard).toBeGreaterThan(mine)
+		for index = mine + 1, #heard do
+			expect(heard[index]:sub(-4)).never.toBe(":own")
+		end
+	end)
+
+	it("the local dodge and guard raise are their own; a remote one's are not", function()
+		local world, heard = ownWorld()
+		Impact.dodge(world.attacker, true)
+		Impact.guardRaise(world.attacker, true)
+		local mine = #heard
+		expect(mine).toBeGreaterThan(0)
+		for _, line in heard do
+			expect(line:sub(-4)).toBe(":own")
+		end
+		Impact.dodge(world.target, false)
+		Impact.guardRaise(world.target, false)
+		for index = mine + 1, #heard do
+			expect(heard[index]:sub(-4)).never.toBe(":own")
+		end
 	end)
 end)

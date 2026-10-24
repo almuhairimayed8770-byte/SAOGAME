@@ -9,6 +9,7 @@ local Nameplates = Harness.load("src/client/ui/Nameplates")
 local EntityTracker = Harness.load("src/client/controllers/EntityTracker")
 local UI = Harness.load("src/shared/data/ui")
 local Combat = Harness.load("src/shared/data/combat")
+local Moments = Harness.load("src/shared/data/moments")
 
 Engine.setViewer(function()
 	return Vector3.zero
@@ -105,14 +106,55 @@ describe("Nameplates (instances)", function()
 		expect(reused.gui.Adornee).toBe(second.PrimaryPart)
 	end)
 
-	it("hides the plate of a dead rig and draws none over a boss", function()
+	it("holds a dead rig's plate through the freeze, HP bar empty, and lets the shatter take it", function()
+		local model, id = rig("Enemy")
+		EntityTracker.track(model)
+		task.wait()
+		setAttribute(model, "HP", 0)
+		setAttribute(model, "State", "Dead")
+		task.wait()
+		local plate = Nameplates.plateOf(id)
+		expect(plate.gui.Enabled).toBe(true)
+		expect((plate.hpFill :: any).Size.X.Scale).toBe(0)
+		-- The shatter frame: the rig turns to shards and the plate goes with it.
+		Nameplates.hide(model)
+		expect(plate.gui.Enabled).toBe(false)
+		-- Nothing brings it back while the rig lingers: a late attribute, the fade loop.
+		setAttribute(model, "Guard", 0)
+		Nameplates.update()
+		expect(plate.gui.Enabled).toBe(false)
+		-- The pool hands it on whole.
+		EntityTracker.untrack(model)
+		task.wait()
+		local next, nextId = rig("Enemy")
+		EntityTracker.track(next)
+		task.wait()
+		expect(Nameplates.plateOf(nextId).gui.Enabled).toBe(true)
+	end)
+
+	it("drops a dead rig's plate when its shatter is due even if nothing hid it", function()
 		local model, id = rig("Enemy")
 		EntityTracker.track(model)
 		task.wait()
 		setAttribute(model, "State", "Dead")
 		task.wait()
-		expect(Nameplates.plateOf(id).gui.Enabled).toBe(false)
+		local plate = Nameplates.plateOf(id)
+		local due = Moments.deathDuckDelay() + Combat.deathFreeze
+		clock += due - 0.01
+		Nameplates.update()
+		expect(plate.gui.Enabled).toBe(true)
+		clock += 0.02
+		Nameplates.update()
+		expect(plate.gui.Enabled).toBe(false)
+	end)
 
+	it("ignores a hide for a rig with no plate", function()
+		expect(function()
+			Nameplates.hide(Instance.new("Model"))
+		end).never.toThrow()
+	end)
+
+	it("draws no plate over a boss", function()
 		local seen = nil
 		Nameplates.bossSeen:Connect(function(record)
 			seen = record
@@ -155,6 +197,24 @@ end)
 
 describe("Hud SWITCH prompt (instances)", function()
 	Hud.start()
+
+	it("keeps the corner clear of the engine's top bar on every screen: the HUD sits in the safe area", function()
+		local gui = Hud.gui()
+		-- IgnoreGuiInset true would draw the corner under the top bar (its menu and chat buttons).
+		expect(gui.IgnoreGuiInset).toBe(false)
+		expect(UI.hud.screenInsets).toBe("CoreUISafeInsets")
+		expect(gui.ScreenInsets).toBe(Enum.ScreenInsets.CoreUISafeInsets)
+		local corner = gui:FindFirstChild("TopLeft")
+		expect(corner).never.toBeNil()
+		expect(corner.Position).toEqual(UDim2.fromOffset(UI.hud.margin, UI.hud.margin))
+		-- The vignette still covers the whole screen, from its own gui just under the HUD.
+		expect(gui:FindFirstChild("VignetteTop", true)).toBeNil()
+		local vignette = Hud.vignetteGui()
+		expect(vignette.Name).toBe(UI.hud.vignetteGuiName)
+		expect(vignette.IgnoreGuiInset).toBe(true)
+		expect(vignette.DisplayOrder).toBeLessThan(gui.DisplayOrder)
+		expect(#vignette:GetChildren()).toBeGreaterThan(0)
+	end)
 
 	it("keeps the billboard under the HUD gui and only adorns the target", function()
 		local target = rig("Enemy")

@@ -102,6 +102,7 @@ export type Animator = {
 	stop: (self: Animator, target: Handle | string, blendOut: number?) -> (),
 	hitStop: (self: Animator, frames: number) -> (),
 	isPaused: (self: Animator) -> boolean,
+	pauseRemaining: (self: Animator) -> number,
 	setTimeScale: (self: Animator, scale: number) -> (),
 	isPlaying: (self: Animator, clipId: string) -> boolean,
 	currentRootMotionDelta: (self: Animator) -> Vector3,
@@ -455,6 +456,12 @@ end
 
 function AnimatorClass.isPaused(self: any): boolean
 	return self.mixer:pauseRemaining() > 0
+end
+
+--- Seconds of hit-stop the rig still holds (0 when none): a confirmation that extends a predicted
+--- contact's hold reads how much of it is left.
+function AnimatorClass.pauseRemaining(self: any): number
+	return self.mixer:pauseRemaining()
 end
 
 function AnimatorClass.setTimeScale(self: any, scale: number)

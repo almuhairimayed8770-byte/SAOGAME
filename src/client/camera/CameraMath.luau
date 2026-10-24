@@ -11,12 +11,16 @@
 
 export type Vec = { number }
 
-export type LockParams = {
-	focusBias: number,
+-- The lock-on two-shot's numbers (camera.luau lock).
+export type TwoShotParams = {
 	baseDistance: number,
 	minDistance: number,
 	maxDistance: number,
 	distancePerSeparation: number,
+	playerClearance: number,
+	targetClearance: number,
+	maxOrbitDegrees: number,
+	solveSteps: number,
 }
 
 -- The FOV punch's numbers (camera.luau punch rows).
@@ -28,9 +32,11 @@ export type PunchParams = {
 	band: number,
 }
 
-export type LockFrame = {
-	focus: Vec,
-	yaw: number,
+-- A lock-on two-shot: the camera sits `distance` studs (flat) from the player, swung `swing`
+-- degrees off the line behind the player (lineYaw), so the two fighters stand apart on screen.
+export type TwoShot = {
+	lineYaw: number,
+	swing: number,
 	distance: number,
 	separation: number,
 }
@@ -144,26 +150,116 @@ function CameraMath.applyLook(
 	return newYaw, newPitch
 end
 
---- Lock-on framing: a focus between the fighters, the yaw that puts the camera behind the player
---- looking at the target, and a distance that grows with their separation.
-function CameraMath.lockFrame(player: Vec, target: Vec, params: LockParams): LockFrame
-	local px, py, pz = unpack3(player)
-	local tx, ty, tz = unpack3(target)
-	local dx, dy, dz = tx - px, ty - py, tz - pz
+--- Where the free camera aims, relative to the pivot: `side` studs to the right and `height` up,
+--- so the player stands left of center and the camera's elevation is exactly its pitch (the
+--- camera is orbitOffset with the same numbers: this point plus `distance` back along the orbit).
+function CameraMath.shoulderLook(yawDegrees: number, height: number, side: number): Vec
+	local yaw = math.rad(yawDegrees)
+	return { math.cos(yaw) * side, height, -math.sin(yaw) * side }
+end
+
+--- The angle (degrees) between the two fighters seen from a camera `distance` studs behind the
+--- first and swung `swingDegrees` off the line to the second, `separation` studs further on.
+function CameraMath.splitAngle(distance: number, separation: number, swingDegrees: number): number
+	local swing = math.rad(swingDegrees)
+	return math.deg(swing - math.atan2(distance * math.sin(swing), separation + distance * math.cos(swing)))
+end
+
+-- The split a two-shot needs: half of each fighter's clearance, seen from the camera.
+local function neededSplit(distance: number, separation: number, swingDegrees: number, params: TwoShotParams): number
+	local swing = math.rad(swingDegrees)
+	local toTarget =
+		math.sqrt(distance * distance + separation * separation + 2 * distance * separation * math.cos(swing))
+	return math.deg(math.atan(params.playerClearance / distance) + math.atan(params.targetClearance / toTarget))
+end
+
+--- Lock-on two-shot: the line from the player to the target, the camera's flat distance from the
+--- player (growing with their separation, times `scale` for mobile), and the smallest swing off
+--- the line behind the player that puts the fighters side by side with their clearances apart
+--- (at most maxOrbitDegrees; found by bisection, the split growing with the swing).
+function CameraMath.twoShot(player: Vec, target: Vec, params: TwoShotParams, scale: number?): TwoShot
+	local px, _, pz = unpack3(player)
+	local tx, _, tz = unpack3(target)
+	local dx, dz = tx - px, tz - pz
 	local separation = math.sqrt(dx * dx + dz * dz)
-	local bias = params.focusBias
-	local focus = { px + dx * bias, py + dy * bias, pz + dz * bias }
 	local distance = math.clamp(
 		params.baseDistance + separation * params.distancePerSeparation,
 		params.minDistance,
 		params.maxDistance
-	)
+	) * (scale or 1)
+	local function gap(swing: number): number
+		return CameraMath.splitAngle(distance, separation, swing) - neededSplit(distance, separation, swing, params)
+	end
+	local low, high = 0, params.maxOrbitDegrees
+	local swing = high
+	if gap(low) >= 0 then
+		swing = low
+	elseif gap(high) >= 0 then
+		for _ = 1, params.solveSteps do
+			local middle = (low + high) / 2
+			if gap(middle) >= 0 then
+				high = middle
+			else
+				low = middle
+			end
+		end
+		swing = high
+	end
 	return {
-		focus = focus,
-		yaw = CameraMath.yawTowards(player, target),
+		lineYaw = CameraMath.yawTowards(player, target),
+		swing = swing,
 		distance = distance,
 		separation = separation,
 	}
+end
+
+--- The two-shot camera: `distance` studs (flat) from the player along the bearing (the yaw a
+--- camera there would have looking at the player), `height` studs above the player's root.
+function CameraMath.twoShotCamera(player: Vec, bearingDegrees: number, distance: number, height: number): Vec
+	local px, py, pz = unpack3(player)
+	local bearing = math.rad(bearingDegrees)
+	return { px + math.sin(bearing) * distance, py + height, pz + math.cos(bearing) * distance }
+end
+
+--- The two-shot aim: `bias` of the way from the player's root to the target's, `height` above.
+function CameraMath.twoShotLook(player: Vec, target: Vec, bias: number, height: number): Vec
+	local px, py, pz = unpack3(player)
+	local tx, ty, tz = unpack3(target)
+	return { px + (tx - px) * bias, py + (ty - py) * bias + height, pz + (tz - pz) * bias }
+end
+
+--- Which side of the line the two-shot camera keeps (1 right of the player, -1 left), given the
+--- side it has and where the camera is (degrees off the line, + = right): it changes sides only
+--- once the camera is more than `hysteresis` degrees over on the other one.
+function CameraMath.lockSide(current: number, offLine: number, hysteresis: number): number
+	if current >= 0 then
+		return if offLine < -hysteresis then -1 else 1
+	end
+	return if offLine > hysteresis then 1 else -1
+end
+
+--- The follow's leash: `trailing` (the lagged pivot) held within `closer` studs ahead of `focus`
+--- (the camera nearer the subject) and `further` behind it, along the flat unit `forward` (the
+--- view). Sideways and vertical lag are left alone.
+function CameraMath.leash(focus: Vec, trailing: Vec, forward: Vec, closer: number, further: number): Vec
+	local fx, _, fz = unpack3(focus)
+	local tx, ty, tz = unpack3(trailing)
+	local ux, _, uz = unpack3(forward)
+	local along = (tx - fx) * ux + (tz - fz) * uz
+	local excess = along - math.clamp(along, -further, closer)
+	return { tx - ux * excess, ty, tz - uz * excess }
+end
+
+--- Whether a part the collision probe hit blocks the view: never part of a character (any model
+--- holding a Humanoid: the player's own weapon, the lock target, other players) or an accessory,
+--- and never a part at least `seeThrough` transparent.
+function CameraMath.blocksView(
+	transparency: number,
+	seeThrough: number,
+	inCharacter: boolean,
+	inAccessory: boolean
+): boolean
+	return not inCharacter and not inAccessory and transparency < seeThrough
 end
 
 --- Distance the camera may sit at after a collision probe (nil hit = unobstructed).

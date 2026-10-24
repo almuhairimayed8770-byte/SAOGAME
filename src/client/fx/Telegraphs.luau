@@ -1,11 +1,15 @@
 --!strict
 --[[
 	Telegraphs (sections 6 and 11): the enemy's wind-up, drawn by the client from the broadcast
-	so it is never late. A Highlight fill on the enemy's weapon part (the whole rig when it has no
-	weapon) in TelegraphWhite / Yellow / Red, plus a flat ground decal (a line, a cone fan or a
-	circle of thin pooled parts, textured when the decal assets exist) that fades in over the
-	wind-up and vanishes at the strike. The accessibility intensity comes from the HUD setting;
-	its floor is still visible.
+	so it is never late. A Highlight fill on the enemy's weapon part in TelegraphWhite / Yellow /
+	Red, plus a flat ground decal (a line, a cone fan or a circle of thin pooled parts, textured
+	when the decal assets exist) that fades in over the wind-up and vanishes at the strike. The
+	accessibility intensity comes from the HUD setting; its floor is still visible.
+
+	A rig with no weapon part (the boar: its tusks are its body) is filled whole through its own
+	outline Highlight (OutlineManager.tint), never a second Highlight on the same model: the engine
+	draws one Highlight per adornee, and the left-over fill Highlight kept a boar from ever showing
+	a hit's white (issue 3).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -28,7 +32,8 @@ type Active = {
 	kind: string,
 	windUp: number,
 	start: number,
-	highlight: Highlight,
+	highlight: Highlight?, -- the weapon's fill; nil when the rig's own outline is tinted instead
+	color: Color3,
 	release: () -> (),
 	pieces: { BasePart },
 }
@@ -171,7 +176,13 @@ local function applyAlpha(active: Active, now: number)
 			end
 		end
 	end
-	active.highlight.FillTransparency = TelegraphShapes.fillTransparency(elapsed, active.windUp, level)
+	local fill = TelegraphShapes.fillTransparency(elapsed, active.windUp, level)
+	local highlight = active.highlight
+	if highlight ~= nil then
+		highlight.FillTransparency = fill
+	else
+		OutlineManager.tint(active.model, active.color, fill)
+	end
 end
 
 local function step()
@@ -213,11 +224,18 @@ function Telegraphs.show(
 	end
 	local token = TelegraphShapes.token(kind)
 	local color = Palette.color3(token :: any)
-	local highlight = highlightFor(model)
-	highlight.Adornee = findWeaponPart(model) or model
-	highlight.FillColor = color
-	highlight.FillTransparency = 1
-	highlight.Enabled = true
+	local weapon = findWeaponPart(model)
+	local highlight: Highlight? = nil
+	if weapon ~= nil then
+		local fill = highlightFor(model)
+		fill.Adornee = weapon
+		fill.FillColor = color
+		fill.FillTransparency = 1
+		fill.Enabled = true
+		highlight = fill
+	end
+	-- The weapon's fill is a Highlight of its own; a whole-rig tint can light an outline the
+	-- budget had off. Either way it holds a slot while it shows.
 	local releaseSlot = OutlineManager.reserve()
 
 	local pieces: { BasePart } = {}
@@ -240,6 +258,7 @@ function Telegraphs.show(
 		windUp = math.max(windUp, 0),
 		start = Engine.now(),
 		highlight = highlight,
+		color = color,
 		release = releaseSlot,
 		pieces = pieces,
 	}
@@ -259,8 +278,13 @@ function Telegraphs.hide(model: Instance)
 		return
 	end
 	actives[model] = nil
-	active.highlight.Enabled = false
-	active.highlight.FillTransparency = 1
+	local highlight = active.highlight
+	if highlight ~= nil then
+		highlight.Enabled = false
+		highlight.FillTransparency = 1
+	else
+		OutlineManager.untint(model)
+	end
 	active.release()
 	for _, part in active.pieces do
 		release(part)

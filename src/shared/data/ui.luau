@@ -40,7 +40,13 @@ local UI = {
 	hud = {
 		screenGuiName = "SkyspireHud",
 		displayOrder = 10,
-		margin = 24, -- pixels from the top-left corner
+		-- The HUD lives inside the engine's safe area (ScreenGui.ScreenInsets): clear of the top
+		-- bar's buttons on every screen size, and of notches and the home indicator on phones.
+		screenInsets = "CoreUISafeInsets",
+		-- The low-HP vignette covers the whole screen from its own ScreenGui, just under the HUD.
+		vignetteGuiName = "SkyspireHudVignette",
+		vignetteDisplayOrder = 9,
+		margin = 24, -- pixels from the top-left corner of the safe area
 		textStrokeTransparency = 0.6, -- every HUD label's dark stroke
 		name = { textSize = 20, token = "SystemWhite" },
 		level = { textSize = 14, token = "SystemCyan", gap = 8 },

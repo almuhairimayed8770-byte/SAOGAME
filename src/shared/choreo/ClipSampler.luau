@@ -10,6 +10,11 @@
 	to arrive at that key from the previous one. Between keys, every joint present in either key is
 	interpolated; a joint missing from a key holds its last value.
 
+	A strike snap (a key eased ExpoOut that opens a hit window in an attack clip: a HitWindowOpen
+	at the start of its segment) eases with combat.luau snapEase instead of ExpoOut, a normalized
+	exponential that spreads the cut over the snap's frames (section 10, issue 4). The path is the
+	same; only its timing differs, for the client's animator and the server's sweep alike.
+
 	Clip tables are immutable after load. The sampler keeps a per-clip cache (weak-keyed by the
 	clip table) of the clip's structure: the sorted joint list and, for every joint, which key
 	authors the value it holds at each key index. Offsets themselves are read live from the keys.
@@ -20,6 +25,7 @@
 
 local Types = require(script.Parent.Parent.types)
 local Easing = require(script.Parent.Parent.util.Easing)
+local Combat = require(script.Parent.Parent.data.combat)
 
 export type Offset = { pos: Types.Vec3, rot: Types.Vec3 }
 export type Offsets = { [string]: Offset }
@@ -27,6 +33,7 @@ export type Offsets = { [string]: Offset }
 type ClipCache = {
 	names: { string }, -- sorted and frozen; ROOT_KEY included when any key moves the root
 	held: { [string]: { number } }, -- per joint: for each key index, the key authoring the held value (0: none yet)
+	snaps: { [number]: boolean }, -- key indices whose segment (from the key before) is a strike snap
 }
 
 local ClipSampler = {}
@@ -46,6 +53,22 @@ end
 
 local function lerpVec(a: Types.Vec3, b: Types.Vec3, t: number): Types.Vec3
 	return { lerp(a[1], b[1], t), lerp(a[2], b[2], t), lerp(a[3], b[3], t) }
+end
+
+-- A HitWindowOpen this close before a snap's first key still opens it (authored times are rounded).
+local SNAP_EPSILON = 1e-4
+
+-- The strike snap's ease (combat.luau snapEase): a normalized exponential, 0 at 0 and 1 at 1.
+local SNAP_SHARPNESS: number = Combat.snapEase.sharpness
+local SNAP_SCALE = 1 / (1 - 2 ^ -SNAP_SHARPNESS)
+
+local function snapEase(u: number): number
+	if u <= 0 then
+		return 0
+	elseif u >= 1 then
+		return 1
+	end
+	return (1 - 2 ^ (-SNAP_SHARPNESS * u)) * SNAP_SCALE
 end
 
 -- One pass over the keys: the joint set and, per joint, the authoring key index at every key.
@@ -82,7 +105,27 @@ local function buildCache(clip: Types.ClipDef): ClipCache
 		end
 		held[name] = track
 	end
-	return { names = table.freeze(names), held = held }
+	-- Strike snaps: an ExpoOut key of an attack clip whose segment opens a hit window.
+	local snaps: { [number]: boolean } = {}
+	if clip.attack == true then
+		for index = 2, count do
+			local key = keys[index]
+			if key.easing == "ExpoOut" then
+				local start = keys[index - 1].time
+				for _, event in clip.events do
+					if
+						event.kind == "HitWindowOpen"
+						and event.time >= start - SNAP_EPSILON
+						and event.time < key.time
+					then
+						snaps[index] = true
+						break
+					end
+				end
+			end
+		end
+	end
+	return { names = table.freeze(names), held = held, snaps = snaps }
 end
 
 local function cacheFor(clip: Types.ClipDef): ClipCache
@@ -152,8 +195,40 @@ local function locate(clip: Types.ClipDef, time: number): (number, number, numbe
 	local previousKey = keys[previousIndex]
 	local nextKey = keys[nextIndex]
 	local span = nextKey.time - previousKey.time
-	local alpha = if span > 0 then Easing.evaluate(nextKey.easing, (t - previousKey.time) / span) else 1
+	if span <= 0 then
+		return previousIndex, nextIndex, 1
+	end
+	local u = (t - previousKey.time) / span
+	local alpha = if cacheFor(clip).snaps[nextIndex] then snapEase(u) else Easing.evaluate(nextKey.easing, u)
 	return previousIndex, nextIndex, alpha
+end
+
+--- The strike snap's ease at `u` (0..1, clamped): combat.luau snapEase's normalized exponential.
+function ClipSampler.snapEase(u: number): number
+	return snapEase(u)
+end
+
+--- True when key `index`'s segment (from the key before it) is a strike snap (eased by snapEase).
+function ClipSampler.isStrikeSnap(clip: Types.ClipDef, index: number): boolean
+	return cacheFor(clip).snaps[index] == true
+end
+
+--- The authored hold after the strike snap a hit at clip time `time` belongs to: the index of the
+--- "Hold"-eased key that follows that snap's key (its segment, from the snap's landing to the key,
+--- is the clip's still beat), when it is still ahead of `time` (nil otherwise). The snap's window
+--- opens with it, so a hit belongs to the latest snap that began at or before `time`; a hold that
+--- `time` already passed, or one that follows a later snap, is not this hit's. The animator lets
+--- a hit-stop stand in for it (Mixer.hitStop, section 10 beat 4).
+function ClipSampler.strikeHoldAfter(clip: Types.ClipDef, time: number): number?
+	local keys = clip.keys
+	local snaps = cacheFor(clip).snaps
+	for index = #keys, 3, -1 do
+		if snaps[index - 1] == true and keys[index - 2].time <= time + SNAP_EPSILON then
+			-- The latest snap begun by `time`: its hold, if it has one still ahead.
+			return if keys[index].easing == "Hold" and keys[index].time > time then index else nil
+		end
+	end
+	return nil
 end
 
 --- The set of joint names a clip touches (plus the root if any key moves it), sorted. The list is

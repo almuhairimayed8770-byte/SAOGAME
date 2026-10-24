@@ -11,7 +11,9 @@
 	  assembly root; with every part massless the engine would pick the biggest part instead, the
 	  Kobold's Torso); the root is the PrimaryPart;
 	- a Humanoid for MoveTo (D-012: its health is pinned by EntityService), HipHeight from the rig,
-	  no neck requirement, no auto-rotate (the AI owns the yaw), no name or health display;
+	  no neck requirement, no auto-rotate (the AI owns the yaw), no name or health display: the
+	  engine's own label is off for every viewer (DisplayDistanceType None; under the default
+	  Viewer the viewer's distances apply, so a rig showed the engine's name over the nameplate);
 	- a Motor6D per joint, parented to its Part1 like R15: C0 = the rest pose (studs and degrees),
 	  C1 = the joint's position relative to Part1's center when the rig gives one, else identity
 	  so Part1's center sits at the joint (the rigs.luau convention);
@@ -104,6 +106,7 @@ local function makeHumanoid(rig: Rigs.Rig): Humanoid
 	humanoid.HipHeight = rig.hipHeight
 	humanoid.RequiresNeck = false
 	humanoid.AutoRotate = false
+	humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
 	humanoid.NameDisplayDistance = 0
 	humanoid.HealthDisplayDistance = 0
 	humanoid.BreakJointsOnDeath = false

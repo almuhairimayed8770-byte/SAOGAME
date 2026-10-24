@@ -78,7 +78,21 @@
 	does not mute the one here), `footstep(model, surface?, weight?)` (surface from the Humanoid's
 	FloorMaterial when the clip event carries none), `loop(name, gain)` for the heartbeat and the
 	ambience beds (Looped over startAt .. stopAt; the caller's gain ramp is the fade, and stopping
-	resets Looped and the regions), `duck(db, seconds)` for the system voice.
+	resets Looped and the regions), `duck(db, seconds, spareOwn?)` for the system voice and the
+	death silence.
+
+	The death silence's carve-out (issue 9): `start()` also makes fx.audio ownGroupName, a
+	SoundGroup beside SFX under Master at SFX's level (the SFX slider moves it too) that no duck
+	lowers. `asOwn(fn)` marks every play `fn` starts as the local player's own (Replication and the
+	impact director wrap the local fighter's clip sounds, footsteps, dodge, guard and every hit
+	the local player is in). While a duck called with spareOwn (the death silence) holds, an own
+	play of an SFX family starts in the carve-out, so the swing and the hit after the kill are
+	heard at full; anything else (the music, the beds, the other fighters, the UI) stays ducked.
+	Only a sound started inside the silence is carved out: what played before it (the kill's own
+	crack) is chopped with the rest, and a cue decides at its call, so its delayed layers follow
+	it. Every play puts its voice back in the group it plays in, so a pooled voice an own play
+	used goes back to its family's group. A new duck (a restore of 0 dB, or the next kill's)
+	takes the silence over.
 
 	Engine seams (`bind`): the clock, the scheduler behind every delay, the per-frame step the
 	contours and fades ramp on, Sound:Play, Sound:Stop, IsPlaying, Sound.Ended, the loaded-length
@@ -194,6 +208,12 @@ local HELPER_FAMILIES = { "impact", "hitStopTick", "guard" }
 local SfxPool = {}
 
 local groups: { [string]: SoundGroup } = {}
+-- The death silence's carve-out (fx.audio ownGroupName): beside SFX, never ducked.
+local ownGroup: SoundGroup? = nil
+-- How deep the asOwn calls on the stack are: >0 marks every play started now as the player's own.
+local ownDepth = 0
+-- A duck that spares the player's own sounds (the death silence) holds now.
+local sparing = false
 local voices: { [string]: { Voice } } = {}
 local loops: { [string]: Loop } = {}
 local mixes: { [string]: Mix } = {}
@@ -297,6 +317,20 @@ end
 
 local function groupFor(family: string): SoundGroup?
 	return groups[Sfx.groupOf(family)]
+end
+
+-- True when a play started now goes to the carve-out: marked own, inside a sparing duck.
+local function carvedOut(): boolean
+	return ownDepth > 0 and sparing
+end
+
+-- The group a play of `family` starts in: the carve-out for an own SFX play inside the silence.
+local function playGroupFor(family: string, own: boolean): SoundGroup?
+	local group = Sfx.groupOf(family)
+	if own and group == "SFX" and ownGroup ~= nil then
+		return ownGroup
+	end
+	return groups[group]
 end
 
 local function ensureEmitterFolder(): Instance
@@ -821,7 +855,8 @@ local function startSound(
 	gainDb: number,
 	endIn: number?,
 	speedOverride: number?,
-	lateBy: number?
+	lateBy: number?,
+	own: boolean?
 ): Sound?
 	SfxPool.start()
 	stats.requested += 1
@@ -876,6 +911,11 @@ local function startSound(
 	voice.serial += 1
 	local serial = voice.serial
 	local sound = voice.sound
+	-- Every play sets the voice's group: a pooled voice an own play used goes back to its family's.
+	local group = playGroupFor(family, if own ~= nil then own else carvedOut())
+	if group ~= nil and sound.SoundGroup ~= group then
+		sound.SoundGroup = group
+	end
 	local volume = volumeOf(entry, gainDb)
 	local speed = pitchOf(entry, speedOverride)
 	applyPlayback(voice, entry, volume, speed, false)
@@ -1068,6 +1108,8 @@ function SfxPool.reset()
 		setEnabled(mix, false)
 	end
 	duckGeneration += 1
+	sparing = false
+	ownDepth = 0
 end
 
 --- Creates the SoundGroups under SoundService with the section 15 mix levels and the contour effects.
@@ -1094,6 +1136,13 @@ function SfxPool.start()
 			group.Parent = master
 		end
 	end
+	local carve = Instance.new("SoundGroup")
+	carve.Name = Fx.audio.ownGroupName
+	carve.Volume = baseGroupVolume("SFX")
+	if master ~= nil then
+		carve.Parent = master
+	end
+	ownGroup = carve
 	for _, name in Sfx.effects.groups do
 		local group: SoundGroup? = groups[name]
 		if group ~= nil then
@@ -1181,18 +1230,20 @@ function SfxPool.cue(name: string, position: Vector3?, lateBy: number?)
 		Sfx.get(family, entryName)
 	end
 	local late = if lateBy ~= nil and lateBy > 0 then lateBy else 0
+	-- Carved out or not at the call (issue 9): its delayed layers follow the cue.
+	local own = carvedOut()
 	for _, layer in layers do
 		local layerName, gainDb, layerPitch = layer.name, layer.gainDb, layer.pitch
 		local wait = layer.delay - late
 		if wait < 0 then
 			-- Already due: it plays from where it would be by now, or not at all when it is over.
-			startSound(layerName, position, gainDb, nil, layerPitch, -wait)
+			startSound(layerName, position, gainDb, nil, layerPitch, -wait, own)
 		elseif wait < Sfx.playback.sameFrameSeconds then
 			-- Under a frame, a scheduled thread would resume on the next frame: play it with the call.
-			startSound(layerName, position, gainDb, nil, layerPitch)
+			startSound(layerName, position, gainDb, nil, layerPitch, nil, own)
 		else
 			deps.delay(wait, function()
-				startSound(layerName, position, gainDb, nil, layerPitch)
+				startSound(layerName, position, gainDb, nil, layerPitch, nil, own)
 			end)
 		end
 	end
@@ -1406,15 +1457,23 @@ function SfxPool.footstep(model: Instance?, surface: string?, weight: string?)
 end
 
 --- Sets a group's slider (0..1 of its data level): "Master" | "Music" | "SFX" | "UI" | "Voice".
+--- The SFX slider moves the death silence's carve-out with it.
 function SfxPool.setGroupVolume(name: string, fraction: number)
-	applyGroupVolume(name, baseGroupVolume(name) * math.clamp(fraction, 0, 1))
+	local volume = baseGroupVolume(name) * math.clamp(fraction, 0, 1)
+	applyGroupVolume(name, volume)
+	if name == "SFX" and ownGroup ~= nil then
+		(ownGroup :: SoundGroup).Volume = volume
+	end
 end
 
---- Ducks Music, SFX and UI by `db` for `seconds` (the system voice ducks everything by 8 dB).
-function SfxPool.duck(db: number, seconds: number)
+--- Ducks Music, SFX and UI by `db` for `seconds` (the system voice ducks everything by 8 dB). With
+--- `spareOwn` (the death silence) the local player's own SFX started inside it (`asOwn`) play
+--- through the carve-out at full. A newer duck takes over: a restore (0 dB) ends the carve-out.
+function SfxPool.duck(db: number, seconds: number, spareOwn: boolean?)
 	duckGeneration += 1
 	local generation = duckGeneration
 	local gain = MusicState.dbToGain(db)
+	sparing = spareOwn == true and db > 0 and seconds > 0
 	for _, name in { "Music", "SFX", "UI" } do
 		applyGroupVolume(name, baseGroupVolume(name) * gain)
 	end
@@ -1422,14 +1481,30 @@ function SfxPool.duck(db: number, seconds: number)
 		if generation ~= duckGeneration then
 			return
 		end
+		sparing = false
 		for _, name in { "Music", "SFX", "UI" } do
 			applyGroupVolume(name, baseGroupVolume(name))
 		end
 	end)
 end
 
---- The SoundGroup by name once started (MusicDirector routes its stems through "Music").
+--- Runs `fn` with every play it starts marked as the local player's own: inside a death's
+--- silence (a sparing `duck`) those of an SFX family play through the carve-out at full.
+function SfxPool.asOwn(fn: () -> ...any)
+	ownDepth += 1
+	local ok, err = pcall(fn)
+	ownDepth -= 1
+	if not ok then
+		error(err, 0)
+	end
+end
+
+--- The SoundGroup by name once started (MusicDirector routes its stems through "Music"; the death
+--- silence's carve-out is fx.audio ownGroupName).
 function SfxPool.group(name: string): SoundGroup?
+	if name == Fx.audio.ownGroupName then
+		return ownGroup
+	end
 	return groups[name]
 end
 

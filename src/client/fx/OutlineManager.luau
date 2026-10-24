@@ -7,7 +7,13 @@
 	Telegraphs reserve slots from the same budget for their weapon fills.
 
 	`flash(model, token, frames)` fills the Highlight with a token color for N rendered frames
-	(white on a hit, red on a guard break, white on Art activation) and then restores it.
+	(white on a hit, red on a guard break) and then restores it.
+
+	`tint(model, color, fillTransparency)` fills the rig's own Highlight with a telegraph's color
+	until `untint`: the wind-up of a rig with no weapon part (the boar's tusks are its body). The
+	engine draws one Highlight per adornee, so a second Highlight on the same model (the old
+	TelegraphFill) could hide this one, and a boar never showed a hit's white (issue 3). A flash
+	over a tint wins for its frames, then the tint comes back.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -29,6 +35,9 @@ type Entry = {
 	ranked: boolean, -- inside the budget on the last rank
 	flashCancel: (() -> ())?,
 	flashing: boolean,
+	tinted: boolean, -- a telegraph's fill (tintColor, tintTransparency) is on
+	tintColor: Color3,
+	tintTransparency: number,
 	suspended: boolean, -- hidden by the shatter
 }
 
@@ -59,7 +68,17 @@ local function inkFor(model: Instance): Color3
 end
 
 local function applyEnabled(entry: Entry)
-	entry.highlight.Enabled = not entry.suspended and (entry.ranked or entry.flashing)
+	entry.highlight.Enabled = not entry.suspended and (entry.ranked or entry.flashing or entry.tinted)
+end
+
+-- The fill when no flash is on: the telegraph's tint, else none.
+local function applyRestingFill(entry: Entry)
+	if entry.tinted then
+		entry.highlight.FillColor = entry.tintColor
+		entry.highlight.FillTransparency = entry.tintTransparency
+	else
+		entry.highlight.FillTransparency = Fx.outline.fillTransparency
+	end
 end
 
 --- Re-ranks every registered rig against the budget and the tier's distance.
@@ -108,6 +127,9 @@ function OutlineManager.register(model: Instance, importance: Importance?)
 		ranked = false,
 		flashCancel = nil,
 		flashing = false,
+		tinted = false,
+		tintColor = highlight.FillColor,
+		tintTransparency = Fx.outline.fillTransparency,
 		suspended = false,
 	}
 	OutlineManager.rerank()
@@ -155,9 +177,38 @@ function OutlineManager.flash(model: Instance, token: string, frames: number)
 	entry.flashCancel = FrameClock.after(frames, function()
 		entry.flashing = false
 		entry.flashCancel = nil
-		entry.highlight.FillTransparency = Fx.outline.fillTransparency
+		applyRestingFill(entry)
 		applyEnabled(entry)
 	end)
+end
+
+--- Fills the rig's own Highlight with `color` at `fillTransparency` until `untint` (a telegraph on
+--- a rig with no weapon part); a flash shows over it for its frames.
+function OutlineManager.tint(model: Instance, color: Color3, fillTransparency: number)
+	if entries[model] == nil then
+		OutlineManager.register(model)
+	end
+	local entry = entries[model] :: Entry
+	entry.tinted = true
+	entry.tintColor = color
+	entry.tintTransparency = fillTransparency
+	if not entry.flashing then
+		applyRestingFill(entry)
+	end
+	applyEnabled(entry)
+end
+
+--- Takes a telegraph's tint off the rig's Highlight (a flash showing keeps its frames).
+function OutlineManager.untint(model: Instance)
+	local entry = entries[model]
+	if entry == nil or not entry.tinted then
+		return
+	end
+	entry.tinted = false
+	if not entry.flashing then
+		applyRestingFill(entry)
+	end
+	applyEnabled(entry)
 end
 
 --- Hides (true) or restores (false) a rig's outline without forgetting it (the shatter hides the rig).

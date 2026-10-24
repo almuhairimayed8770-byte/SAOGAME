@@ -6,6 +6,14 @@
 	fighters in view, a low tight orbit in duels, a high wide orbit in raids. Mobile uses the same
 	system with wider defaults.
 
+	The free camera sits low over the right shoulder: it aims `side` studs right of and `height`
+	studs above the pivot, so the player stands left of center with the way ahead open, and its
+	look-down is exactly its pitch. A lock frames the two fighters side by side (a two-shot): the
+	camera stands a little over their heads behind the player, swung off the line just far enough
+	that the target is never behind the player on screen, and aims between them. The follow lags
+	on a spring but is leashed along the view, so a dodge toward the camera never brings the lens
+	onto the player and the view never tilts with it (D-145, D-146, D-149).
+
 	The punch (the reel's push in on the big hit): an Art's final hit and a kill narrow the FOV by
 	a few degrees, eased in inside the hit-stop, then spring back past rest a little and settle.
 	It rides on top of the FOV spring, so the Art and dash kicks and the shake are untouched.
@@ -28,18 +36,25 @@ export type Punch = {
 }
 
 export type Orbit = {
-	distance: number, -- studs from the focus to the camera
-	height: number, -- studs the camera sits above the focus
-	side: number, -- studs the camera is offset to the right (over-the-shoulder)
-	pitch: number, -- degrees of elevation
+	distance: number, -- studs from the point the camera aims at back to the camera
+	height: number, -- studs above the focus the camera aims (and so sits)
+	side: number, -- studs right of the focus the camera aims (and so sits): over the right shoulder
+	pitch: number, -- degrees of elevation: the camera's look-down
 }
 
 local Camera = {
 	follow = {
 		lag = 0.12, -- seconds; the position spring's time constant (1 / omega)
 		damping = 1.0, -- critical: the follow never overshoots on its own
-		focusHeight = 2.0, -- studs above the root part the camera looks at (chest height)
+		focusHeight = 1.5, -- studs above the root part: the pivot the rigs are built on (chest)
 		snapDistance = 60, -- a subject jump bigger than this (teleport, respawn) snaps the spring
+		-- The lagged pivot is held this close to the true one along the view: `closer` studs ahead
+		-- of it (the lens nearer the player: a dodge back) and `further` behind it (a dash away).
+		-- Sideways and vertical lag are left alone (D-149).
+		leash = {
+			closer = 0.75,
+			further = 2.5,
+		},
 	},
 
 	fov = {
@@ -84,9 +99,10 @@ local Camera = {
 		cutoff = 0.004, -- studs; energy below this is zeroed
 	},
 
-	-- Orbit presets. Default is the field camera; Duel is low and tight; Raid is high and wide.
+	-- Orbit presets. Default is the field camera, low over the right shoulder; Duel is lower and
+	-- tighter; Raid is high and wide.
 	orbit = {
-		Default = { distance = 12, height = 1.6, side = 1.75, pitch = 12 } :: Orbit,
+		Default = { distance = 10, height = 0.8, side = 2.5, pitch = 8 } :: Orbit,
 		Duel = { distance = 8, height = 0.6, side = 1.25, pitch = 4 } :: Orbit,
 		Raid = { distance = 22, height = 6, side = 0, pitch = 28 } :: Orbit,
 	},
@@ -115,15 +131,22 @@ local Camera = {
 		coneDegrees = 120, -- in front of the camera
 		breakDistance = 80, -- the lock clears beyond this
 		angleWeightStuds = 20, -- ranking: one radian of off-center angle costs this many studs
-		baseDistance = 11,
-		minDistance = 9,
-		maxDistance = 20,
-		distancePerSeparation = 0.35, -- camera distance grows with the fighters' separation
-		focusBias = 0.35, -- 0 looks at the player, 1 at the target; the midpoint is 0.5
-		height = 2.5,
-		side = 2.0,
-		pitch = 10,
-		yawLag = 0.2, -- seconds; the yaw eases onto the player-target line
+		-- The two-shot (CameraMath.twoShot). Distances are flat studs from the player's root.
+		baseDistance = 9,
+		minDistance = 8,
+		maxDistance = 16,
+		distancePerSeparation = 0.25, -- camera distance grows with the fighters' separation
+		height = 3.7, -- studs above the player's root: a little over the fighters' heads
+		focusBias = 0.5, -- the aim: 0 at the player, 1 at the target; the midpoint is 0.5
+		lookHeight = 1.3, -- studs above the line between the roots the camera aims
+		-- Half widths (studs) kept apart on screen: the target never stands behind the player.
+		playerClearance = 1.6,
+		targetClearance = 1.4,
+		maxOrbitDegrees = 65, -- the widest swing off the line behind the player (fighters on top of each other)
+		sideHysteresis = 15, -- degrees past the line the camera must be before it changes shoulders
+		solveSteps = 20, -- bisection steps for the swing (65 / 2^20 degrees)
+		yawLag = 0.2, -- seconds; the two-shot eases onto its bearing, distance and aim
+		blendLag = 0.12, -- seconds; the shot eases between the free camera and the two-shot
 	},
 
 	mobile = {
@@ -136,6 +159,12 @@ local Camera = {
 		probeRadius = 0.6, -- spherecast radius from the focus to the camera
 		minDistance = 1.5, -- never closer than this to the focus
 		pullOutLag = 0.25, -- seconds; after a wall, the camera eases back out instead of popping
+		-- A probe that hits a character (any model holding a Humanoid: the player's own weapon,
+		-- the lock target, other players), an accessory or a part at least this transparent
+		-- looks past it and casts again, at most maxPasses times; only the world blocks the view
+		-- (D-149).
+		seeThrough = 0.25,
+		maxPasses = 4,
 	},
 
 	scripted = {

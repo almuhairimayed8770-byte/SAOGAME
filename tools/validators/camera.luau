@@ -2,7 +2,11 @@
 --[[
 	Validates src/shared/data/camera.luau against section 10: the follow lag, rest FOV, kicks,
 	nudge and shake tiers, the three orbit presets (Duel low and tight, Raid high and wide), sane
-	pitch and zoom limits, lock-on distances and the shake noise lanes. The punch rows (Final, Kill):
+	pitch and zoom limits, lock-on distances and the shake noise lanes. The framing (D-145, D-146,
+	D-149): the follow's leash (positive, and never clipping a hit's nudge), the two-shot's height,
+	clearances, widest swing (inside a quarter turn, where the split between the fighters grows
+	with the swing), side hysteresis, solve steps and blend lag, and the probe's see-through
+	threshold and pass count. The punch rows (Final, Kill):
 	a few degrees, an attack inside the tier's hit-stop, a spring that swings back past rest by at
 	most a quarter and is settled when it ends, eased in (never linear), short; the kill pushes in
 	at least as far as the final hit. The render-stall numbers (stall): the longest piece a frame
@@ -82,6 +86,64 @@ return function(ctx: any): { string }
 	)
 	check(lock.focusBias >= 0 and lock.focusBias <= 1, "lock.focusBias must be in 0..1")
 	check(lock.yawLag > 0 and lock.angleWeightStuds >= 0, "lock.yawLag must be positive, angleWeightStuds non-negative")
+
+	-- The framing: the two-shot, the leash and the probe.
+	local function positive(value: any): boolean
+		return typeof(value) == "number" and value == value and value > 0 and value < math.huge
+	end
+	local function count(value: any): boolean
+		return positive(value) and value == math.floor(value)
+	end
+	check(lock.minDistance > 0, "lock.minDistance must be positive")
+	check(
+		positive(lock.height),
+		"lock.height must be a positive number of studs: the two-shot camera stands over the player's root"
+	)
+	check(
+		typeof(lock.lookHeight) == "number" and lock.lookHeight == lock.lookHeight,
+		"lock.lookHeight must be a number of studs above the line between the roots"
+	)
+	check(
+		positive(lock.playerClearance) and positive(lock.targetClearance),
+		"lock.playerClearance and lock.targetClearance must be positive half widths in studs"
+	)
+	local maxOrbit = lock.maxOrbitDegrees
+	check(
+		positive(maxOrbit) and maxOrbit <= 90,
+		"lock.maxOrbitDegrees must be in (0, 90]: past a quarter turn the split between the fighters stops growing with the swing"
+	)
+	check(
+		typeof(lock.sideHysteresis) == "number"
+			and lock.sideHysteresis >= 0
+			and positive(maxOrbit)
+			and lock.sideHysteresis < maxOrbit,
+		"lock.sideHysteresis must be in [0, maxOrbitDegrees)"
+	)
+	check(count(lock.solveSteps), "lock.solveSteps must be a whole number of bisection steps, at least 1")
+	check(positive(lock.blendLag), "lock.blendLag must be a positive number of seconds")
+	local leash: any = if typeof(camera.follow.leash) == "table" then camera.follow.leash else nil
+	check(leash ~= nil, "follow.leash is missing (closer and further)")
+	if leash ~= nil then
+		check(
+			positive(leash.closer) and positive(leash.further),
+			"follow.leash.closer and follow.leash.further must be positive studs"
+		)
+		if positive(leash.closer) then
+			check(
+				leash.closer >= camera.nudge.studs,
+				("follow.leash.closer %.2f must be at least nudge.studs (%.2f): the leash would clip a hit's nudge"):format(
+					leash.closer,
+					camera.nudge.studs
+				)
+			)
+		end
+	end
+	local seeThrough = camera.collision.seeThrough
+	check(
+		positive(seeThrough) and seeThrough <= 1,
+		"collision.seeThrough must be in (0, 1]: parts at least this transparent never block the view"
+	)
+	check(count(camera.collision.maxPasses), "collision.maxPasses must be a whole number of casts, at least 1")
 
 	check(camera.mobile.distanceMultiplier >= 1, "mobile defaults must be at least as wide as desktop")
 	check(
@@ -212,6 +274,7 @@ return function(ctx: any): { string }
 				{ name = "follow", lag = camera.follow.lag, damping = camera.follow.damping },
 				{ name = "fov", lag = camera.fov.lag, damping = camera.fov.damping },
 				{ name = "lock yaw", lag = camera.lock.yawLag, damping = camera.follow.damping },
+				{ name = "lock blend", lag = camera.lock.blendLag, damping = camera.follow.damping },
 				{ name = "collision pull-out", lag = camera.collision.pullOutLag, damping = camera.follow.damping },
 			}
 			local piece, settle = stall.maxStepSeconds, stall.settleSeconds

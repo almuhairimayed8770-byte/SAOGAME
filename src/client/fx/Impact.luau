@@ -55,6 +55,10 @@
 	brings the highs back there; `cancelActivation` brings them back at once. A riser shorter
 	than the row's minLeadSeconds is skipped.
 
+	The death silence (issue 9): every sound of a hit the local player is in, of their dodge,
+	their guard and their Art's riser starts inside SfxPool.asOwn, so one that starts while a
+	death's silence holds plays through the pool's carve-out at full.
+
 	Dependencies come in through `Impact.bind(deps)` (specs pass fakes); `Impact.start()` binds the
 	real modules through Siblings. A missing module, a missing function or an effect that errors is
 	logged once and the moment's other effects still play.
@@ -165,6 +169,18 @@ local function call(name: string, fn: string, ...: any): any
 		return nil
 	end
 	return result
+end
+
+-- Runs `fn` with the sounds it starts marked as the local player's own (SfxPool.asOwn) when `own`:
+-- inside a death's silence they play at full (issue 9). A pool without asOwn just runs it.
+local function asOwn(own: boolean, fn: () -> ())
+	local sfx = deps.sfx
+	local wrap = if own and typeof(sfx) == "table" then rawget(sfx :: any, "asOwn") else nil
+	if typeof(wrap) == "function" then
+		wrap(fn)
+	else
+		fn()
+	end
 end
 
 local function now(): number
@@ -452,9 +468,23 @@ function Impact.hiddenSeconds(): number
 	return if typeof(hidden) == "number" and hidden > 0 then hidden else 0
 end
 
--- Runs `fn` once no impact frames hide the world on this screen. A picture that grew while it
--- waited (the kill of a sweep turns its first hits' two frames into the kill's six) holds it again.
+-- Runs `fn` once no impact frames hide the world on this screen. ImpactFrames.whenVisible runs it
+-- in the render step that takes the picture down, so what it shows (the white flash, the glint)
+-- is on the first frame after the picture (issue 3: a timer landed it a few frames late). Without
+-- it, a timer waits the picture's seconds; a picture that grew while it waited (the kill of a
+-- sweep turns its first hits' two frames into the kill's six) holds it again.
 local function afterHidden(fn: () -> ())
+	local frames = deps.impactFrames
+	if frames ~= nil and typeof(frames) == "table" and typeof(frames.whenVisible) == "function" then
+		local ok, err = pcall(frames.whenVisible, fn)
+		if ok then
+			return
+		end
+		report(
+			"impactFrames.whenVisible:error",
+			("impactFrames.whenVisible failed (%s); timed instead"):format(tostring(err))
+		)
+	end
 	local wait = Impact.hiddenSeconds()
 	if wait <= 0 then
 		fn()
@@ -463,6 +493,12 @@ local function afterHidden(fn: () -> ())
 	after(wait, function()
 		afterHidden(fn)
 	end)
+end
+
+--- Runs `fn` once no impact frames hide the 3D world on this screen (at once when none do): the
+--- world-space accents Replication holds for them (the parry's trail flash and sparks).
+function Impact.afterHidden(fn: () -> ())
+	afterHidden(fn)
 end
 
 -- The Switch row's trail flash on a Switch hit (both blades flash, section 11).
@@ -505,16 +541,44 @@ local function switchRow(name: string, row: Moments.Moment, info: HitInfo): (str
 	return nil, nil
 end
 
---- Fires everything a confirmed hit's moment names; returns the moment's name.
-function Impact.hit(info: HitInfo): string
+-- The hit-stop rank of a moment row (0 for a row without one).
+local function rankOf(row: Moments.Moment?): number
+	if row == nil or row.hitStop == nil then
+		return 0
+	end
+	return (Combat.hitStopFrames :: { [string]: number })[row.hitStop :: string] or 0
+end
+
+-- The row a predicted contact already played (nil when unknown or none).
+local function previousRow(previous: string?): Moments.Moment?
+	if previous == nil then
+		return nil
+	end
+	return Moments.rows[previous]
+end
+
+-- Fires everything a confirmed hit's moment names; returns the moment's name. With `before` (the
+-- moment the local contact already played for this hit), only what this moment adds plays.
+local function playHit(info: HitInfo, before: Moments.Moment?): string
 	local name = Impact.select(info)
 	local row = Moments.byId(name)
 	local position = info.position
 	local involved = info.involved
 	local switchName, switch = switchRow(name, row, info)
+	-- The upgrade a confirmation brings to a contact: only a stronger hit-stop adds anything (a
+	-- crit or a Switch the contact could not know keeps the contact's sound and accents): its cue,
+	-- picture, contour and punch, and the accents the contact's moment lacked. The target already
+	-- flashed white on contact, and the Switch layer is the contact's to have played.
+	local stronger = before == nil or rankOf(row) > rankOf(before)
+	if before ~= nil then
+		switchName, switch = nil, nil
+	end
 
 	-- The sound first, so its crack starts on the same frame as the picture; one per sweep.
 	local cue = row.cue
+	if cue ~= nil and before ~= nil and (before.cue == cue or not stronger) then
+		cue = nil
+	end
 	if cue ~= nil and allowed(name, "Cue", involved, position) then
 		local heardAt = cueInSweep(info, cue, row.hitStop, position)
 		if heardAt ~= nil then
@@ -525,9 +589,15 @@ function Impact.hit(info: HitInfo): string
 		switchSound(switchName, switch, info)
 	end
 
-	local wantsArc = row.slashArc ~= nil and allowed(name, "SlashArc", involved, position)
-	local wantsLine = row.slashLine ~= nil and allowed(name, "SlashLine", involved, position)
-	local wantsFrames = row.impactSequence ~= nil and allowed(name, "ImpactFrames", involved, position)
+	local wantsArc = row.slashArc ~= nil
+		and stronger
+		and (before == nil or before.slashArc == nil)
+		and allowed(name, "SlashArc", involved, position)
+	local wantsLine = row.slashLine ~= nil
+		and stronger
+		and (before == nil or before.slashLine == nil)
+		and allowed(name, "SlashLine", involved, position)
+	local wantsFrames = row.impactSequence ~= nil and stronger and allowed(name, "ImpactFrames", involved, position)
 	if wantsFrames and not strongestInSweep(info, "Frames", row.hitStop) and Impact.hiddenSeconds() <= 0 then
 		-- One sweep, one picture: a later hit of it joins the picture while it shows, and once that
 		-- has ended only a stronger hit-stop draws again (a sweep confirmed over frames never twice).
@@ -558,7 +628,7 @@ function Impact.hit(info: HitInfo): string
 	-- another's still showing).
 	afterHidden(function()
 		local glint = row.glint
-		if glint ~= nil and allowed(name, "Glint", involved, position) then
+		if glint ~= nil and (before == nil or before.glint == nil) and allowed(name, "Glint", involved, position) then
 			local token = if glint.trailTint then info.trailToken else glint.token
 			call("glint", "play", position, glint.size, token)
 		end
@@ -581,7 +651,7 @@ function Impact.hit(info: HitInfo): string
 				call("slashArc", "line", position, tangent, line.size)
 			end
 		end
-		local highlight = row.highlight
+		local highlight = if before == nil then row.highlight else nil
 		if highlight ~= nil and info.target ~= nil and allowed(name, "Highlight", involved, position) then
 			local token = if highlight.trailTint then info.trailToken else highlight.token
 			call("outline", "flash", info.target, token, highlight.frames)
@@ -594,15 +664,39 @@ function Impact.hit(info: HitInfo): string
 	local contour = row.contour
 	if
 		contour ~= nil
+		and stronger
 		and allowed(name, "Contour", involved, position)
 		and strongestInSweep(info, "Contour", row.hitStop)
 	then
 		call("sfx", "contour", contour)
 	end
 	local punch = row.punch
-	if punch ~= nil and allowed(name, "Punch", involved, position) and strongestInSweep(info, "Punch", row.hitStop) then
+	if
+		punch ~= nil
+		and stronger
+		and allowed(name, "Punch", involved, position)
+		and strongestInSweep(info, "Punch", row.hitStop)
+	then
 		call("camera", "punch", punch)
 	end
+	return name
+end
+
+--- Fires everything a confirmed hit's moment names; returns the moment's name. The sounds of a
+--- hit the local player is in are their own (SfxPool.asOwn): a death's silence lets them through.
+---
+--- `previous` is the moment the local fighter's predicted contact already played for this hit
+--- (Replication.contact, issue 4). The server's confirmation then plays only what its moment
+--- adds, and only when its hit-stop is stronger (a Kill the contact could not prove): its cue,
+--- impact frames, contour and punch, and a crescent or slash line the contact's moment did not
+--- have. Never a second glint, the white flash (the contact flashed the target) or the Switch
+--- layer; a crit the contact could not know shows in its number only.
+function Impact.hit(info: HitInfo, previous: string?): string
+	local name = ""
+	local before = previousRow(previous)
+	asOwn(info.involved, function()
+		name = playHit(info, before)
+	end)
 	return name
 end
 
@@ -676,7 +770,9 @@ function Impact.release(model: Model, clipId: string, clipTime: number, frozenSe
 		end)
 	end
 	if seconds ~= nil then
-		riserEndingIn(name, row, seconds :: number, true, position)
+		asOwn(true, function()
+			riserEndingIn(name, row, seconds :: number, true, position)
+		end)
 	end
 end
 
@@ -703,20 +799,25 @@ function Impact.dodge(model: Model, isLocal: boolean, lateBy: number?)
 		call("speedLines", "play", lines.kind)
 	end
 	if row.cue ~= nil and allowed(name, "Cue", isLocal, position) then
-		call("sfx", "cue", row.cue, position, lateBy)
+		asOwn(isLocal, function()
+			call("sfx", "cue", row.cue, position, lateBy)
+		end)
 	end
 end
 
--- A guard moment's cue and extra sound at the fighter, for this client when allowed.
+-- A guard moment's cue and extra sound at the fighter, for this client when allowed (the local
+-- fighter's own).
 local function guardMoment(name: string, model: Model?, isLocal: boolean)
 	local row = Moments.byId(name)
 	local position = positionOf(model)
-	if row.cue ~= nil and allowed(name, "Cue", isLocal, position) then
-		call("sfx", "cue", row.cue, position)
-	end
-	if row.sound ~= nil and allowed(name, "Sound", isLocal, position) then
-		call("sfx", "play", row.sound, position)
-	end
+	asOwn(isLocal, function()
+		if row.cue ~= nil and allowed(name, "Cue", isLocal, position) then
+			call("sfx", "cue", row.cue, position)
+		end
+		if row.sound ~= nil and allowed(name, "Sound", isLocal, position) then
+			call("sfx", "play", row.sound, position)
+		end
+	end)
 end
 
 --- A guard broke (StateChanged GuardBroken): the GuardBreak cue at the fighter.

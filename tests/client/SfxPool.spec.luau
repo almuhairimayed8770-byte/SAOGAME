@@ -134,6 +134,7 @@ type Play = {
 	loopRegion: Range,
 	looped: boolean,
 	parent: any,
+	group: any, -- the Sound's SoundGroup when it played
 }
 
 -- A hand-driven world bound into the pool. `run(t)` moves the clock to t and runs every delayed
@@ -267,6 +268,7 @@ local function world()
 				loopRegion = { min = loopRegion.Min, max = loopRegion.Max },
 				looped = sound.Looped,
 				parent = sound.Parent,
+				group = sound.SoundGroup,
 			})
 			return true
 		end,
@@ -2209,6 +2211,137 @@ describe("SfxPool.contour", function()
 			expect((SfxPool.mixState("SFX") :: any).low).toBeCloseTo(cut.low, 1e-6)
 			w.frame(hold + back.ramp + EPSILON)
 			expect((SfxPool.mixState("SFX") :: any).low).toBe(0)
+		end)
+	end)
+end)
+
+describe("SfxPool death silence: the local player's own sounds play through it (issue 9)", function()
+	local function groups(): (any, any, any)
+		SfxPool.start()
+		return SfxPool.group("SFX"), SfxPool.group(fx.audio.ownGroupName), SfxPool.group("UI")
+	end
+
+	it("inside a death's silence a play marked own starts in the carve-out at full; the rest stay ducked", function()
+		spec(function(w)
+			local sfxGroup, own, ui = groups()
+			expect(own).never.toBeNil()
+			local base = fx.audio.groupVolumes.SFX
+			expect(own.Volume).toBeCloseTo(base, FLOAT)
+			SfxPool.duck(combat.deathDuckDb, combat.deathFreeze, true)
+			expect(sfxGroup.Volume).toBeLessThan(base * 0.1)
+			expect(ui.Volume).toBeLessThan(fx.audio.groupVolumes.UI * 0.1)
+			-- No duck lowers the carve-out.
+			expect(own.Volume).toBeCloseTo(base, FLOAT)
+			SfxPool.asOwn(function()
+				SfxPool.play("spec.Plain", HIT)
+			end)
+			SfxPool.play("spec.Flat")
+			expect(w.names()).toEqual({ "spec.Plain", "spec.Flat" })
+			expect(w.plays[1].group).toBe(own)
+			expect(w.plays[2].group).toBe(sfxGroup)
+		end)
+	end)
+
+	it("a cue marked own keeps every layer in the carve-out, the delayed ones too", function()
+		spec(function(w)
+			local _, own = groups()
+			SfxPool.duck(combat.deathDuckDb, combat.deathFreeze, true)
+			SfxPool.asOwn(function()
+				SfxPool.cue("SpecLanding", HIT)
+			end)
+			w.run(0.3)
+			expect(w.names()).toEqual({ "spec.Swish", "spec.Plain" })
+			for _, play in w.plays do
+				expect(play.group).toBe(own)
+			end
+		end)
+	end)
+
+	it("only a sound started inside the silence: before it, and once it ends, own plays stay in SFX", function()
+		spec(function(w)
+			local sfxGroup, own = groups()
+			-- The kill's own crack, before the silence: the silence chops its tail.
+			SfxPool.asOwn(function()
+				SfxPool.play("spec.Plain", HIT)
+			end)
+			SfxPool.duck(combat.deathDuckDb, combat.deathFreeze, true)
+			SfxPool.asOwn(function()
+				SfxPool.play("spec.Plain", FAR)
+			end)
+			w.run(combat.deathFreeze + EPSILON)
+			expect(sfxGroup.Volume).toBeCloseTo(fx.audio.groupVolumes.SFX, FLOAT)
+			SfxPool.asOwn(function()
+				SfxPool.play("spec.Flat")
+			end)
+			expect(w.names()).toEqual({ "spec.Plain", "spec.Plain", "spec.Flat" })
+			expect(w.plays[1].group).toBe(sfxGroup)
+			expect(w.plays[2].group).toBe(own)
+			expect(w.plays[3].group).toBe(sfxGroup)
+			-- A pooled voice an own play used goes back to its family's group on its next play.
+			SfxPool.play("spec.Plain", FAR + FAR)
+			for _, play in playsOf(w, "spec.Plain") do
+				if play.time > combat.deathFreeze then
+					expect(play.group).toBe(sfxGroup)
+				end
+			end
+		end)
+	end)
+
+	it("a new duck takes the silence over: a restore (0 dB) ends the carve-out at once", function()
+		spec(function(w)
+			local sfxGroup, own = groups()
+			SfxPool.duck(combat.deathDuckDb, combat.deathFreeze, true)
+			SfxPool.duck(0, 0)
+			SfxPool.asOwn(function()
+				SfxPool.play("spec.Flat")
+			end)
+			expect(w.plays[1].group).toBe(sfxGroup)
+			-- The next kill's silence carves out again.
+			SfxPool.duck(combat.deathDuckDb, combat.deathFreeze, true)
+			SfxPool.asOwn(function()
+				SfxPool.play("spec.Plain", HIT)
+			end)
+			expect(w.plays[2].group).toBe(own)
+		end)
+	end)
+
+	it("a duck that spares nothing (the system voice) and a UI sound marked own stay ducked", function()
+		spec(function(w)
+			local sfxGroup, _, ui = groups()
+			SfxPool.duck(sfx.mix.systemVoiceDuckDb, 1)
+			SfxPool.asOwn(function()
+				SfxPool.play("spec.Flat")
+			end)
+			expect(w.plays[1].group).toBe(sfxGroup)
+			SfxPool.duck(0, 0)
+			sfx.families.specUi = { group = "UI", entries = { Click = specEntries().Flat } }
+			local ok, err = pcall(function()
+				SfxPool.duck(combat.deathDuckDb, combat.deathFreeze, true)
+				SfxPool.asOwn(function()
+					SfxPool.play("specUi.Click")
+				end)
+				expect(w.plays[2].group).toBe(ui)
+			end)
+			sfx.families.specUi = nil
+			if not ok then
+				error(err, 0)
+			end
+		end)
+	end)
+
+	it("the SFX slider moves the carve-out with it; an error inside asOwn leaves nothing marked", function()
+		spec(function(w)
+			local sfxGroup, own = groups()
+			SfxPool.setGroupVolume("SFX", 0.5)
+			expect(own.Volume).toBeCloseTo(sfxGroup.Volume, FLOAT)
+			SfxPool.setGroupVolume("SFX", 1)
+			SfxPool.duck(combat.deathDuckDb, combat.deathFreeze, true)
+			local ok = pcall(SfxPool.asOwn, function()
+				error("boom")
+			end)
+			expect(ok).toBe(false)
+			SfxPool.play("spec.Flat")
+			expect(w.plays[1].group).toBe(sfxGroup)
 		end)
 	end)
 end)

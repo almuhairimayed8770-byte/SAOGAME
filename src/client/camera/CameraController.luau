@@ -5,10 +5,27 @@
 	stick or a touch drag; the FOV sits on its own spring at 60 degrees and kicks +8 on Art
 	activation and dashes; `punch` narrows it a few degrees on an Art's final hit or a kill, eased
 	in and sprung back (CameraMath.punchOffset), added after the FOV spring so the kick's spring
-	and the shake are untouched; `nudge` is an impulse on the position spring toward a hit point; `shake`
-	is summed-sine noise with a fast exponential decay; lock-on frames both fighters from behind
-	the player; Duel and Raid presets change the orbit; a spherecast from the focus pulls the
-	camera in front of walls. Every number is in camera.luau; the math is in CameraMath (tested).
+	and the shake are untouched; `nudge` is an impulse on the follow spring toward a hit point; `shake`
+	is summed-sine noise with a fast exponential decay; Duel and Raid presets change the orbit.
+	Every number is in camera.luau; the math is in CameraMath (tested).
+
+	Framing (D-145, D-146, D-149). Each frame builds a rig on the subject's pivot (root + focusHeight):
+	where the camera sits and where it aims. The free rig sits low over the right shoulder
+	(CameraMath.orbitOffset and shoulderLook: the aim shifted right and up with the camera, so the
+	look-down is the pitch). A lock builds a two-shot (CameraMath.twoShot): the camera a little over
+	the fighters' heads behind the player, swung off the line on a spring around the player just
+	far enough to stand them side by side, aiming between them; the look input waits while it
+	holds. A blend spring eases between the two rigs, so a lock (and the draw it brings) eases on
+	and off, and a lock whose target is gone eases out from where the target was. The whole rig
+	rides a lagged pivot (the 0.12 s follow) leashed along the view (CameraMath.leash): the camera
+	and its aim move together, so a dodge never tilts the view, and a dodge toward the lens never
+	brings it onto the player.
+
+	Walls (D-149): a spherecast from the true pivot to the camera spot. A hit on a character (any model
+	holding a Humanoid: the player's own weapon, the lock target, other players), an accessory or a
+	see-through part is looked past (CameraMath.blocksView) and the probe cast again. A wall pulls
+	the rig in toward the pivot at once, the camera and its aim together (the view keeps its
+	direction), and it eases back out.
 
 	Render stalls (a display asleep, a minimised window, a long hitch: RenderStepped stops while the
 	game goes on): every step runs on the real time since the last one, whatever dt the engine
@@ -50,14 +67,28 @@ local mobile = UserInputService.TouchEnabled
 local gamepadLook = Vector2.zero
 
 local followStiffness = CameraMath.springFromLag(CameraData.follow.lag)
-local positionSpring: Spring.Spring<Vector3>? = nil
+-- The lagged pivot the rig rides on (leashed along the view when read).
+local pivotSpring: Spring.Spring<Vector3>? = nil
 local fovSpring = Spring.new(CameraData.fov.rest, CameraMath.springFromLag(CameraData.fov.lag), CameraData.fov.damping)
-local yawSpring = Spring.new(0, CameraMath.springFromLag(CameraData.lock.yawLag), CameraData.follow.damping)
-local distanceSpring = Spring.new(
-	CameraData.orbit.Default.distance,
-	CameraMath.springFromLag(CameraData.collision.pullOutLag),
-	CameraData.follow.damping
-)
+-- The two-shot camera's bearing around the player (degrees); on the free camera's while unlocked.
+local shotStiffness = CameraMath.springFromLag(CameraData.lock.yawLag)
+local bearingSpring = Spring.new(0, shotStiffness, CameraData.follow.damping)
+-- The two-shot's flat distance and its aim relative to the player's root: they ease as the
+-- fighters part or close, so a dodge widens the shot without tilting it.
+local shotDistanceSpring = Spring.new(0, shotStiffness, CameraData.follow.damping)
+local shotAimSpring = Spring.new(Vector3.zero, shotStiffness, CameraData.follow.damping)
+local shotLive = false
+-- 0 the free rig, 1 the two-shot.
+local blendSpring = Spring.new(0, CameraMath.springFromLag(CameraData.lock.blendLag), CameraData.follow.damping)
+-- The fraction of the rig's reach a wall leaves the camera: snaps in, eases out.
+local reachSpring = Spring.new(1, CameraMath.springFromLag(CameraData.collision.pullOutLag), CameraData.follow.damping)
+-- The two-shot's side of the line (1 right of the player, -1 left) and where its target last was.
+local lockSign = 1
+local lockPoint: Vector3? = nil
+local wasLocked = false
+-- The last frame's view yaw (the free camera takes it when a lock lets go) and camera spot.
+local viewYaw = 0
+local cameraSpot: Vector3? = nil
 -- The kick and the shake: their size when last asked for and when (os.clock); each decays from there.
 local kickPeak = 0
 local kickAt = 0
@@ -73,6 +104,8 @@ local lastStepAt: number? = nil -- os.clock of the last render step
 local scripted: Scripted? = nil
 local blendBack: BlendBack? = nil
 local raycastParams: RaycastParams? = nil
+-- The probe's exclude list: the subject, then whatever this frame's probe looked past.
+local probeFilter: { Instance } = {}
 local started = false
 
 -- The clock every transient is timed on (monotonic seconds).
@@ -147,6 +180,74 @@ local function lockRoot(): BasePart?
 	return if root ~= nil then root else nil
 end
 
+local function pivotOf(root: BasePart): Vector3
+	return root.Position + Vector3.yAxis * CameraData.follow.focusHeight
+end
+
+-- Back to the subject alone on the probe's exclude list.
+local function resetFilter()
+	table.clear(probeFilter)
+	if subject ~= nil then
+		table.insert(probeFilter, subject)
+	end
+	if raycastParams ~= nil then
+		raycastParams.FilterDescendantsInstances = probeFilter
+	end
+end
+
+-- The character (a model holding a Humanoid) a part belongs to, or nil. Workspace is a Model to
+-- the engine: the walk stops there.
+local function characterOf(part: Instance): Model?
+	local model = part:FindFirstAncestorWhichIsA("Model")
+	while model ~= nil and model ~= workspace do
+		if model:FindFirstChildOfClass("Humanoid") ~= nil then
+			return model
+		end
+		model = model:FindFirstAncestorWhichIsA("Model")
+	end
+	return nil
+end
+
+-- How far along `direction` from `origin` the first part that blocks the view is (nil: clear).
+-- Characters, accessories and see-through parts are looked past: added to the exclude list for
+-- the next cast, at most collision.maxPasses casts a frame.
+local function blockerDistance(origin: Vector3, direction: Vector3): number?
+	local params = raycastParams
+	if params == nil then
+		return nil
+	end
+	local found: number? = nil
+	local extended = false
+	for _ = 1, CameraData.collision.maxPasses do
+		local result = workspace:Spherecast(origin, CameraData.collision.probeRadius, direction, params)
+		if result == nil then
+			break
+		end
+		local part = result.Instance
+		local character = characterOf(part)
+		local accessory = part:FindFirstAncestorWhichIsA("Accessory")
+		if
+			CameraMath.blocksView(
+				part.Transparency,
+				CameraData.collision.seeThrough,
+				character ~= nil,
+				accessory ~= nil
+			)
+		then
+			found = result.Distance
+			break
+		end
+		local past: Instance = character or accessory or part
+		table.insert(probeFilter, past)
+		params.FilterDescendantsInstances = probeFilter
+		extended = true
+	end
+	if extended then
+		resetFilter()
+	end
+	return found
+end
+
 local function orbitDistance(): number
 	local orbit = CameraData.orbit[mode]
 	return math.clamp(orbit.distance + zoomOffset, CameraData.zoom.min, CameraData.zoom.max)
@@ -175,10 +276,75 @@ local function stepScripted(dt: number, camera: Camera)
 	if shot.elapsed >= shot.duration then
 		scripted = nil
 		blendBack = { from = camera.CFrame, elapsed = 0 }
-		if positionSpring ~= nil then
-			positionSpring:Snap(camera.CFrame.Position)
+		local root = subjectRoot()
+		if pivotSpring ~= nil and root ~= nil then
+			pivotSpring:Snap(pivotOf(root))
 		end
 	end
+end
+
+-- The rig for this frame, relative to the true pivot: where the camera sits and where it aims.
+-- Blends the free rig and the two-shot and steps the bearing and blend springs.
+local function rig(root: BasePart, span: number, settle: boolean): (Vector3, Vector3)
+	local orbit = CameraData.orbit[mode]
+	local distance = orbitDistance()
+	local usePitch = pitch
+	if mobile then
+		distance *= CameraData.mobile.distanceMultiplier
+		usePitch += CameraData.mobile.pitchAdd
+	end
+	local freeCamera = toVector(CameraMath.orbitOffset(yaw, usePitch, distance, orbit.height, orbit.side))
+	local freeLook = toVector(CameraMath.shoulderLook(yaw, orbit.height, orbit.side))
+
+	local targetRoot = lockRoot()
+	if targetRoot ~= nil then
+		lockPoint = targetRoot.Position
+	elseif wasLocked then
+		-- The lock let go (or its target went): the free camera picks up the view's heading.
+		yaw = viewYaw
+		freeCamera = toVector(CameraMath.orbitOffset(yaw, usePitch, distance, orbit.height, orbit.side))
+		freeLook = toVector(CameraMath.shoulderLook(yaw, orbit.height, orbit.side))
+	end
+	wasLocked = targetRoot ~= nil
+	blendSpring.target = if targetRoot ~= nil then 1 else 0
+	local weight = advanceSpring(blendSpring, span, settle)
+	local point = lockPoint
+	if point == nil or (targetRoot == nil and weight <= CameraData.epsilon) then
+		-- Free: the two-shot would start from where this camera stands around the player.
+		lockPoint = nil
+		shotLive = false
+		blendSpring:Snap(0)
+		bearingSpring:Snap(CameraMath.yawTowards(toTable(freeCamera), { 0, 0, 0 }))
+		return freeCamera, freeLook
+	end
+
+	local lock = CameraData.lock
+	local player = toTable(root.Position)
+	local target = toTable(point)
+	local shot = CameraMath.twoShot(player, target, lock, if mobile then CameraData.mobile.distanceMultiplier else 1)
+	local aim = toVector(CameraMath.twoShotLook(player, target, lock.focusBias, lock.lookHeight)) - root.Position
+	if not shotLive then
+		-- A new shot starts on its shape; the blend eases the camera onto it.
+		shotLive = true
+		shotDistanceSpring:Snap(shot.distance)
+		shotAimSpring:Snap(aim)
+	end
+	if targetRoot ~= nil then
+		local offLine = CameraMath.shortestDelta(shot.lineYaw, bearingSpring.position)
+		lockSign = CameraMath.lockSide(lockSign, offLine, lock.sideHysteresis)
+		local bearing = shot.lineYaw + lockSign * shot.swing
+		bearingSpring.target = bearingSpring.position + CameraMath.shortestDelta(bearingSpring.position, bearing)
+		advanceSpring(bearingSpring, span, settle)
+	end
+	shotDistanceSpring.target = shot.distance
+	shotAimSpring.target = aim
+	local distanceNow = advanceSpring(shotDistanceSpring, span, settle)
+	local aimNow = advanceSpring(shotAimSpring, span, settle)
+	local pivot = pivotOf(root)
+	local lockCamera = toVector(CameraMath.twoShotCamera(player, bearingSpring.position, distanceNow, lock.height))
+		- pivot
+	local lockLook = root.Position + aimNow - pivot
+	return freeCamera:Lerp(lockCamera, weight), freeLook:Lerp(lockLook, weight)
 end
 
 local function step(dt: number)
@@ -213,71 +379,67 @@ local function step(dt: number)
 		return
 	end
 
-	-- Right stick: integrate the held deflection over the frame (never over a stall).
-	if gamepadLook.Magnitude > 0 and not settle then
+	-- Right stick: integrate the held deflection over the frame (never over a stall). A lock owns
+	-- the view: the look input waits.
+	if gamepadLook.Magnitude > 0 and not settle and lockTarget == nil then
 		local perSecond = CameraData.input.gamepadDegreesPerSecond
 		applyLook(gamepadLook.X * span, -gamepadLook.Y * span, perSecond)
 	end
 
-	local orbit = CameraData.orbit[mode]
-	local focus = root.Position + Vector3.yAxis * CameraData.follow.focusHeight
-	local lookAt = focus
-	local distance = orbitDistance()
-	local height, side, usePitch = orbit.height, orbit.side, pitch
+	local pivot = pivotOf(root)
+	local cameraOffset, lookOffset = rig(root, span, settle)
 
-	local targetRoot = lockRoot()
-	if targetRoot ~= nil then
-		local lock = CameraData.lock
-		local frame = CameraMath.lockFrame(toTable(root.Position), toTable(targetRoot.Position), lock)
-		yawSpring.target = yawSpring.position + CameraMath.shortestDelta(yawSpring.position, frame.yaw)
-		yaw = CameraMath.wrapDegrees(advanceSpring(yawSpring, span, settle))
-		lookAt = toVector(CameraMath.raise(frame.focus, CameraData.follow.focusHeight))
-		distance = frame.distance
-		height, side = lock.height, lock.side
-		usePitch = pitch + (lock.pitch - orbit.pitch)
-	else
-		yawSpring:Snap(yaw)
-	end
-
-	if mobile then
-		distance *= CameraData.mobile.distanceMultiplier
-		usePitch += CameraData.mobile.pitchAdd
-	end
-
-	local offset = toVector(CameraMath.orbitOffset(yaw, usePitch, distance, height, side))
-	local direction = offset
-	local length = direction.Magnitude
-	if length > CameraData.epsilon and raycastParams ~= nil then
-		local result = workspace:Spherecast(focus, CameraData.collision.probeRadius, direction, raycastParams)
-		local hitDistance = if result ~= nil then result.Distance else nil
-		local allowed = CameraMath.collisionDistance(
-			length,
-			hitDistance,
-			CameraData.collision.probeRadius,
-			CameraData.collision.minDistance
-		)
-		-- Pull in instantly in front of a wall; ease back out.
-		if allowed < distanceSpring.position then
-			distanceSpring:Snap(allowed)
-		else
-			distanceSpring.target = allowed
-			advanceSpring(distanceSpring, span, settle)
-		end
-		direction = direction.Unit * distanceSpring.position
-	end
-	local desired = focus + direction
-
-	local spring = positionSpring
+	-- The lagged pivot, leashed along the view.
+	local spring = pivotSpring
 	if spring == nil then
-		spring = Spring.new(desired, followStiffness, CameraData.follow.damping)
-		positionSpring = spring
+		spring = Spring.new(pivot, followStiffness, CameraData.follow.damping)
+		pivotSpring = spring
 	end
 	local follow = spring :: Spring.Spring<Vector3>
-	if (desired - follow.position).Magnitude > CameraData.follow.snapDistance then
-		follow:Snap(desired)
+	if (pivot - follow.position).Magnitude > CameraData.follow.snapDistance then
+		follow:Snap(pivot)
 	end
-	follow.target = desired
-	local position = advanceSpring(follow, span, settle)
+	follow.target = pivot
+	local trailing = advanceSpring(follow, span, settle)
+	local view = lookOffset - cameraOffset
+	local forward = Vector3.new(view.X, 0, view.Z)
+	local anchor = trailing
+	if forward.Magnitude > CameraData.epsilon then
+		local leash = CameraData.follow.leash
+		anchor = toVector(
+			CameraMath.leash(toTable(pivot), toTable(trailing), toTable(forward.Unit), leash.closer, leash.further)
+		)
+	end
+
+	-- Walls: probe from the true pivot to the camera spot; pull the rig in toward the pivot.
+	local reach = anchor - pivot + cameraOffset
+	local aim = anchor - pivot + lookOffset
+	local length = reach.Magnitude
+	if length > CameraData.epsilon and raycastParams ~= nil then
+		local allowed = math.min(
+			CameraMath.collisionDistance(
+				length,
+				blockerDistance(pivot, reach),
+				CameraData.collision.probeRadius,
+				CameraData.collision.minDistance
+			) / length,
+			1
+		)
+		-- Pull in at once in front of a wall; ease back out.
+		if allowed < reachSpring.position then
+			reachSpring:Snap(allowed)
+		else
+			reachSpring.target = allowed
+			advanceSpring(reachSpring, span, settle)
+		end
+	end
+	local fraction = reachSpring.position
+	local position = pivot + reach * fraction
+	local lookAt = pivot + aim * fraction
+	cameraSpot = position
+	if forward.Magnitude > CameraData.epsilon then
+		viewYaw = CameraMath.yawTowards(toTable(position), toTable(lookAt))
+	end
 
 	-- Shake: noise scaled by a decaying energy, in the camera's own axes.
 	local shakeEnergy = shakeValue(at)
@@ -309,11 +471,12 @@ end
 
 --- Pushes the camera toward `toward` so it peaks `studs` away from its path (every hit, section 10).
 function CameraController.nudge(toward: Vector3, studs: number)
-	local spring = positionSpring
-	if spring == nil then
+	local spring = pivotSpring
+	local spot = cameraSpot
+	if spring == nil or spot == nil then
 		return
 	end
-	local direction = toward - spring.position
+	local direction = toward - spot
 	if direction.Magnitude <= CameraData.epsilon then
 		return
 	end
@@ -349,10 +512,13 @@ function CameraController.punch(kind: string)
 	punchAt = at
 end
 
---- Locks the framing on a model (nil clears it).
+--- Locks the framing on a model (nil clears it). The shot eases between the free camera and the
+--- two-shot; a new lock takes the right shoulder unless the camera already stands well left.
 function CameraController.setLockTarget(model: Model?)
+	if model ~= nil and lockTarget == nil then
+		lockSign = 1
+	end
 	lockTarget = model
-	yawSpring:Snap(yaw)
 end
 
 --- Switches the orbit preset.
@@ -376,13 +542,12 @@ end
 --- Sets which model the camera follows (the local character by default).
 function CameraController.setSubject(model: Model?)
 	subject = model
-	if raycastParams ~= nil then
-		raycastParams.FilterDescendantsInstances = if model ~= nil then { model } else {}
-	end
-	local spring = positionSpring
+	resetFilter()
+	reachSpring:Snap(1)
+	local spring = pivotSpring
 	local root = subjectRoot()
 	if spring ~= nil and root ~= nil then
-		spring:Snap(root.Position + toVector(CameraMath.orbitOffset(yaw, pitch, orbitDistance(), 0, 0)))
+		spring:Snap(pivotOf(root))
 	end
 end
 
@@ -404,7 +569,7 @@ end
 local function onInputChanged(input: InputObject, processed: boolean)
 	local inputType = input.UserInputType
 	if inputType == Enum.UserInputType.MouseMovement then
-		if mouseCaptured then
+		if mouseCaptured and lockTarget == nil then
 			applyLook(input.Delta.X, input.Delta.Y, CameraData.input.mouseDegreesPerPixel)
 		end
 	elseif inputType == Enum.UserInputType.MouseWheel then
@@ -414,7 +579,7 @@ local function onInputChanged(input: InputObject, processed: boolean)
 			CameraData.zoom.max - CameraData.orbit[mode].distance
 		)
 	elseif inputType == Enum.UserInputType.Touch then
-		if not processed then
+		if not processed and lockTarget == nil then
 			applyLook(input.Delta.X, input.Delta.Y, CameraData.input.touchDegreesPerPixel)
 		end
 	elseif input.KeyCode == Enum.KeyCode.Thumbstick2 then

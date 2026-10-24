@@ -96,6 +96,10 @@ export type Handle = {
 	lastRoot: Types.Vec3,
 	fresh: boolean,
 	sinceStep: number, -- PlayOptions.sinceStep until the handle's first step, then 0
+	-- The authored hold a hit-stop stands in for (ClipSampler.strikeHoldAfter's key index, 0 for
+	-- none) and how much of it, in clip seconds, the clock may skip when it gets there.
+	absorbKey: number,
+	absorbSeconds: number,
 }
 
 -- jumped: a render stall's gap crossed it (the step, or this handle's part of it, was a jump).
@@ -233,6 +237,8 @@ function Mixer.play(self: any, clip: Types.ClipDef, opts: PlayOptions?): Handle
 		lastRoot = if hasRoot then ClipSampler.rootMotionAt(clip, startTime) else ZERO,
 		fresh = true,
 		sinceStep = math.max(0, options.sinceStep or 0),
+		absorbKey = 0,
+		absorbSeconds = 0,
 	}
 	table.insert(self._handles, handle)
 	return handle
@@ -272,8 +278,34 @@ function Mixer.setSpeed(_self: any, handle: Handle, speed: number)
 	handle.speed = math.clamp(speed, ChoreoData.minSpeed, ChoreoData.maxSpeed)
 end
 
+--- Holds the rig `frames` frames (a hit-stop; a longer one already running is kept, never
+--- restarted). The hold is the strike's beat 4 (section 10): an attack clip whose strike snap is
+--- followed by an authored hold (a "Hold" key after the snap, the still beat a whiff shows) skips
+--- up to the hit-stop's length of that hold when its clock reaches it, so a hit holds once, for
+--- the longer of the two, never for both in a row (issue 6). The skipped stretch is still, so no
+--- frame shows the skip; the events in it still fire.
 function Mixer.hitStop(self: any, frames: number)
-	self._pause = math.max(self._pause, math.max(0, frames) * ChoreoData.frameSeconds)
+	local seconds = math.max(0, frames) * ChoreoData.frameSeconds
+	self._pause = math.max(self._pause, seconds)
+	if seconds <= 0 then
+		return
+	end
+	for _, handle in self._handles do
+		if handle.done or handle.ignorePause then
+			continue
+		end
+		local index = ClipSampler.strikeHoldAfter(handle.clip, handle.time)
+		if index == nil then
+			continue
+		end
+		local budget = seconds * handle.speed
+		if handle.absorbKey == index then
+			handle.absorbSeconds = math.max(handle.absorbSeconds, budget)
+		else
+			handle.absorbKey = index
+			handle.absorbSeconds = budget
+		end
+	end
 end
 
 function Mixer.pauseRemaining(self: any): number
@@ -376,6 +408,18 @@ local function advance(
 	local inclusive = handle.fresh
 	handle.fresh = false
 	local target = previous + dt * handle.speed
+	if handle.absorbKey > 0 then
+		-- A hit-stop already held this strike: the clock skips the authored hold it stands in for.
+		local keys = clip.keys
+		local holdStart = keys[handle.absorbKey - 1].time
+		local holdEnd = keys[handle.absorbKey].time
+		if previous >= holdEnd then
+			handle.absorbKey = 0
+		elseif target > holdStart then
+			target += math.min(handle.absorbSeconds, holdEnd - math.max(previous, holdStart))
+			handle.absorbKey = 0
+		end
+	end
 	local duration = clip.duration
 	local wrapped = false
 	if clip.loop and duration > 0 then

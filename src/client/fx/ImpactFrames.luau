@@ -25,15 +25,21 @@
 	  - Strokes: a layer of OutlineInk Frames (UICorner round ends, UIGradient transparency
 	    taper) rotated to the slash angle across the hit; no image assets.
 
-	Timing: the sequence's clock starts on the first frame drawn after `play` (a HitConfirmed
-	lands between frames), and every look gets at least one drawn frame: a look ends on the first
-	drawn frame at or past its finish (to the nearest frame), so a slow device shows each look
-	once instead of skipping the parry's single frame. A sequence runs at most the length of the
-	hit-stop it rides on (ImpactSequence.capSeconds) from its first drawn frame; one first drawn
-	late (a stall, below) so runs past the hit-stop itself, its figures held on the last frozen
-	frame. At the end everything hides, the render step
-	unbinds and the clones go back to the pool (the oldest past impact.silhouette.poolCap are
-	destroyed).
+	Timing: the sequence starts on the first frame drawn after `play` (a HitConfirmed lands
+	between frames), and each look shows for its frames counted in drawn frames (issue 10): Kill
+	is Black 2, Dark 2, Ink 2 and Final is Dark 2 whatever the frame clock says, so a late or
+	doubled frame never takes a frame from one look and gives it to the next (the old rule ended a
+	look by elapsed time, and a jittery clock split a Kill 3/1/2). A device that draws at another
+	pace gets the counts scaled to it, at least one drawn frame a look (impact.timing: the median
+	of the last few render-step frame lengths, fixed on the first drawn frame), so a 30 fps screen
+	shows each look once. A sequence still runs at most the length of the hit-stop it rides on
+	(ImpactSequence.capSeconds) from its first drawn frame; one first drawn late (a stall, below)
+	so runs past the hit-stop itself, its figures held on the last frozen frame. At the end
+	everything hides, the render step unbinds and the clones go back to the pool (the oldest past
+	impact.silhouette.poolCap are destroyed). `whenVisible(fn)` runs `fn` the moment no sequence
+	hides the world any more: inside the render step that takes the overlay down, so the 3D
+	accents the director held for it (the white flash, the glint, the slash line) show on the
+	very first frame after the picture, not a few frames later off a timer (issue 3).
 
 	Render stalls (a display asleep, a minimised window, a long hitch: RenderStepped stops while
 	Heartbeat goes on): every picture, the dim too, remembers when it was asked for. Its first
@@ -82,6 +88,7 @@ local Quality = require(script.Parent.Quality)
 local FlashBudget = require(script.Parent.FlashBudget)
 local ImpactSequence = require(script.Parent.ImpactSequence)
 local Smear = require(script.Parent.Smear)
+local FrameClock = require(script.Parent.FrameClock)
 
 export type Options = {
 	slashDirection: Vector2?, -- screen space, x right and y down; nil uses impact.strokes.defaultAngle
@@ -100,6 +107,9 @@ export type Deps = {
 	aspect: (() -> number)?, -- screen width / height
 	quality: (() -> string)?,
 	random: Random?,
+	-- Seconds a rendered frame takes on this screen (FrameClock.pace: sampled every frame), nil
+	-- when unknown; the overlay's own render-step lengths stand in then.
+	pace: (() -> number?)?,
 }
 
 type CloneEntry = { source: BasePart, clone: BasePart }
@@ -124,6 +134,10 @@ type Showing = {
 	shownBefore: { string }, -- looks the sequences this one took over drew under the same claim
 	rigs: { Model }, -- the rigs drawn as silhouettes
 	wantsFigures: boolean, -- a look of the sequence draws figures
+	drawnInLook: number, -- drawn frames the look on screen has had
+	quotas: { number }?, -- drawn frames each look gets (fixed on the first drawn frame)
+	pace: number, -- seconds a drawn frame takes here (fixed on the first drawn frame)
+	lastDrawnAt: number?, -- when the last frame drew it
 }
 
 local ImpactFrames = {}
@@ -151,6 +165,12 @@ local reducedDims: { FlashBudget.Claim } = {} -- the dims Reduce flashing let st
 type TailEntry = { claim: FlashBudget.Claim, before: number }
 local tailClaims: { TailEntry } = {}
 local tailUnbind: (() -> ())? = nil -- the render step kept bound to wait for that frame
+-- The last render-step frame lengths (impact.timing.paceSamples, newest last): the device's pace.
+local paceSamples: { number } = {}
+-- Callbacks waiting for the world to show again (whenVisible), oldest first.
+local visibleWaiters: { () -> ...any } = {}
+-- A bigger sequence is taking the screen: the one it replaces ends, but the world stays hidden.
+local replacing = false
 local finish: (rendering: boolean?) -> () -- ends what is showing; defined with the helpers below
 local figuresOn = true
 local strokesOn = true
@@ -776,6 +796,66 @@ local function releaseTail()
 	end
 end
 
+-- Runs every whenVisible callback once no sequence hides the world (never mid-takeover).
+local function flushVisible()
+	if replacing or #visibleWaiters == 0 then
+		return
+	end
+	local current = showing
+	if current ~= nil and current.kind == "Sequence" then
+		return
+	end
+	local waiting = visibleWaiters
+	visibleWaiters = {}
+	for _, fn in waiting do
+		local ok, err = pcall(fn)
+		if not ok then
+			warn("[ImpactFrames] whenVisible callback failed: " .. tostring(err))
+		end
+	end
+end
+
+-- Remembers a render-step frame length (the device's pace); a hitch or a stall is not one.
+local function notePace(dt: number?)
+	if dt == nil or dt <= 0 or dt > Impact.timing.maxPaceSeconds then
+		return
+	end
+	table.insert(paceSamples, dt)
+	while #paceSamples > Impact.timing.paceSamples do
+		table.remove(paceSamples, 1)
+	end
+end
+
+-- Seconds a drawn frame takes here: the screen's pace (FrameClock samples every frame), else the
+-- median of the overlay's own remembered frame lengths, else 60 fps.
+local function currentPace(): number
+	local source: () -> number? = overrides.pace or FrameClock.pace
+	local measured = source()
+	if measured ~= nil and measured > 0 then
+		return measured
+	end
+	local count = #paceSamples
+	if count == 0 then
+		return Impact.frameSeconds
+	end
+	local sorted = table.clone(paceSamples)
+	table.sort(sorted)
+	local middle = (count + 1) // 2
+	if count % 2 == 1 then
+		return sorted[middle]
+	end
+	return (sorted[middle] + sorted[middle + 1]) * 0.5
+end
+
+-- Drawn frames each look of a sequence gets at `pace`: its 60 fps frames, scaled, at least one.
+local function quotasFor(frames: { ImpactSequence.Frame }, pace: number): { number }
+	local quotas: { number } = {}
+	for index, frame in frames do
+		quotas[index] = math.max(1, math.round(frame.frames * Impact.frameSeconds / pace))
+	end
+	return quotas
+end
+
 -- `rendering`: ended by the render step, so the frame being drawn hides it. Anything else ends
 -- it between frames (the Heartbeat watchdog, a cut, a takeover), and the last frame shown still
 -- holds it until the next one renders, however long that takes.
@@ -808,6 +888,7 @@ finish = function(rendering: boolean?)
 			current.unbind()
 		end
 	end
+	flushVisible()
 end
 
 -- Seconds a picture may wait for its first drawn frame (D-122): a sequence, the hit-stop it rides
@@ -846,14 +927,28 @@ local function dimOpacityOf(current: Showing, at: number): number
 	return ImpactSequence.dimOpacity(at - (current.startedAt or at), current.from, current.hold)
 end
 
--- Seconds left of what shows; a sequence not drawn yet has all of it left.
+-- Seconds left of what shows; a sequence not drawn yet has all of it left. A drawn sequence has
+-- the frames its looks still get at its pace (the frame after the last takes it down), never past
+-- its hit-stop.
 local function remainingOf(current: Showing, at: number): number
 	local began = current.startedAt
 	if began == nil then
 		return current.seconds
 	end
-	local total = if current.kind == "Dim" then ImpactSequence.dimSeconds(current.hold) else current.seconds
-	return math.max(0, began + total - at)
+	if current.kind == "Dim" then
+		return math.max(0, began + ImpactSequence.dimSeconds(current.hold) - at)
+	end
+	local quotas = current.quotas
+	if quotas == nil then
+		return math.max(0, began + current.seconds - at)
+	end
+	local left = quotas[current.index] - current.drawnInLook
+	for index = current.index + 1, #quotas do
+		left += quotas[index]
+	end
+	local from = current.lastDrawnAt or began
+	local byFrames = from + (left + 1) * current.pace - at
+	return math.max(0, math.min(byFrames, began + current.cap - at))
 end
 
 -- The looks put on screen so far under the claim: those of the sequences this one took over,
@@ -902,18 +997,22 @@ local function stepSequence(current: Showing, at: number)
 			finish(true) -- its first frame comes too late: dropped, never started
 			return
 		end
-		-- The first frame drawn since play: the clock starts here, on the first look.
+		-- The first frame drawn since play: the sequence starts here, on the first look, and each
+		-- look's count of drawn frames is fixed at this device's pace.
 		current.drawn = true
 		current.startedAt = at
+		current.lastDrawnAt = at
+		current.pace = currentPace()
+		current.quotas = quotasFor(current.frames, current.pace)
+		current.drawnInLook = 1
 		syncWhileFrozen(current, at)
 		holdClaim(current, at)
 		return
 	end
 	local elapsed = at - began
-	local frame = current.frames[current.index]
-	-- A look ends on the first drawn frame at or past its finish, to the nearest frame, so each
-	-- look is drawn at least once and a 60 fps frame clock that runs a hair fast never adds one.
-	local due = elapsed >= frame.finish - Impact.frameSeconds * 0.5
+	local quotas = current.quotas or quotasFor(current.frames, current.pace)
+	-- The look on screen has had its drawn frames: this frame draws the next (issue 10).
+	local due = current.drawnInLook >= quotas[current.index]
 	if elapsed >= current.cap or (due and current.index >= #current.frames) then
 		finish(true)
 		return
@@ -923,12 +1022,17 @@ local function stepSequence(current: Showing, at: number)
 		local look = current.frames[current.index].look
 		current.look = look
 		applyLook(look)
+		current.drawnInLook = 1
+	else
+		current.drawnInLook += 1
 	end
+	current.lastDrawnAt = at
 	syncWhileFrozen(current, at)
 	holdClaim(current, at)
 end
 
-local function step()
+local function step(dt: number?)
+	notePace(dt)
 	-- This frame shows the pictures ended since the last one gone: their last change.
 	if #tailClaims > 0 then
 		settleTail(now())
@@ -953,8 +1057,8 @@ local function run(current: Showing)
 	current.unwatch = onHeartbeat(function()
 		watch()
 	end)
-	local unbind = onRender(function()
-		step()
+	local unbind = onRender(function(dt: number)
+		step(dt)
 	end)
 	if unbind ~= nil then
 		current.unbind = unbind
@@ -1053,6 +1157,10 @@ local function playDim(name: string, budgetNow: number, reduced: boolean): numbe
 		shownBefore = {},
 		rigs = {},
 		wantsFigures = false,
+		drawnInLook = 0,
+		quotas = nil,
+		pace = Impact.frameSeconds,
+		lastDrawnAt = nil,
 	}
 	showing = dim;
 	(gui :: ScreenGui).Enabled = true
@@ -1073,7 +1181,10 @@ local function showSequence(
 	requestedAt: number?
 ): number
 	local screen = gui :: ScreenGui
+	-- What showed goes, but a sequence taking its place keeps the world hidden: no whenVisible yet.
+	replacing = true
 	ImpactFrames.cancel()
+	replacing = false
 	local row = qualityRow()
 	figuresOn = row.silhouettes
 	strokesOn = row.strokes
@@ -1117,6 +1228,10 @@ local function showSequence(
 		shownBefore = shownBefore or {},
 		rigs = table.clone(rigs),
 		wantsFigures = wantsFigures,
+		drawnInLook = 0,
+		quotas = nil,
+		pace = Impact.frameSeconds,
+		lastDrawnAt = nil,
 	}
 	showing = current
 	applyLook(current.look :: string)
@@ -1223,9 +1338,22 @@ function ImpactFrames.cancel()
 	finish()
 end
 
---- Advances the overlay to the clock's time (the render step calls this; specs may too).
-function ImpactFrames.step()
-	step()
+--- Advances the overlay one drawn frame at the clock's time (the render step calls this with the
+--- frame's length; specs may too).
+function ImpactFrames.step(dt: number?)
+	step(dt)
+end
+
+--- Runs `fn` once no impact sequence hides the 3D world: now when none does, else in the render
+--- step that takes the overlay down (or wherever it ends: the watchdog, a cut), so what `fn`
+--- shows is on the first frame after the picture. A bigger sequence taking over keeps it waiting.
+function ImpactFrames.whenVisible(fn: () -> ...any)
+	local current = showing
+	if current == nil or current.kind ~= "Sequence" then
+		fn()
+		return
+	end
+	table.insert(visibleWaiters, fn)
 end
 
 --- Builds the overlay under the PlayerGui ahead of the first hit and watches the Reduce flashing
@@ -1248,6 +1376,8 @@ end
 --- Replaces the engine surface (specs: a fake clock, render step, PlayerGui, camera); nil
 --- restores the engine. Drops the overlay and the pool so the next play builds fresh.
 function ImpactFrames.bind(deps: Deps?)
+	table.clear(visibleWaiters)
+	table.clear(paceSamples)
 	ImpactFrames.cancel()
 	settleTail(now())
 	releaseTail()

@@ -66,6 +66,13 @@
 	clips do, so a slowed recording shows feet that keep their ground. Anywhere else (live play of
 	the published Playground too) it stays 1.
 
+	The hit on contact (issue 4): while a swing or a released Art plays, ContactPredictor sweeps the
+	blade the rig shows each frame, right after the rig's step and its root motion, and every
+	enemy it touches goes to Replication.contact on that frame: its hit-stop, the white flash, the
+	camera and the sounds play as the blade lands, not a round trip later. The server's
+	HitConfirmed still decides the hit and brings the number. A swing that ends, is refused or is
+	taken from the body (a stagger, a new action, a respawn) predicts nothing more.
+
 	Every decision is in ActionLogic and AimLogic (tested); this file is the engine glue around them.
 ]]
 
@@ -90,6 +97,7 @@ local Signal = require(Shared.util.Signal)
 
 local ActionLogic = require(script.Parent.ActionLogic)
 local AimLogic = require(script.Parent.AimLogic)
+local ContactPredictor = require(script.Parent.ContactPredictor)
 local EntityTracker = require(script.Parent.EntityTracker)
 local Replication = require(script.Parent.Replication)
 local WeaponInfo = require(script.Parent.WeaponInfo)
@@ -184,12 +192,23 @@ local STOP_CARRY: ActionLogic.StopCarryConfig = {
 local stopGait: ActionLogic.StopGait = { phase = 0, leftStep = 0, leftAfter = 0, rightStep = 0.5, rightAfter = 0 }
 -- When the local rig last stepped (now()); nil before its first step. A render stall stops it.
 local rigSteppedAt: number? = nil
+-- The rig's last step was a render stall's jump (longer than choreo.luau stall.jumpSeconds): the
+-- blade's sweep starts again from the pose it shows (ContactPredictor.step's `jumped`).
+local rigJumped = false
 -- Heartbeats since the local rig last stepped: past one, a frame went by unrendered (D-141).
 local heartbeatsSinceRigStep = 0
 -- A dodge pressed while the rig slept (D-141): its press time and token; its show waits for the wake.
 local sleptDodge: { pressedAt: number, token: number }? = nil
 local unhookRigStep: (() -> ())? = nil
 local started = false
+-- The local swing's blade contacts (issue 4), and the clip handle it follows.
+local contacts = ContactPredictor.new({
+	targets = function(): { any }
+		return EntityTracker.all()
+	end,
+	confirmed = Replication.confirmedAlready,
+})
+local contactHandle: any = nil
 
 local function now(): number
 	return os.clock()
@@ -371,6 +390,57 @@ local function playerClip(name: string): string?
 	return nil
 end
 
+-- The equipped weapon's attack (the kill rule's least damage), the loadout's before the tracker knows.
+local function weaponAttack(): number
+	local record = EntityTracker.localRecord()
+	local def = WeaponInfo.def(if record ~= nil then record.weaponId else Playground.loadout.weapon)
+	return if def ~= nil and typeof(def.attack) == "number" then def.attack else 0
+end
+
+-- Predicts the blade's contacts for the swing or Art a clip handle plays (a data clip only: an
+-- engine Animation has no clip to sweep).
+local function predictContacts(handle: any, artId: string?, finalHit: boolean, multiplier: number)
+	contacts:stop()
+	contactHandle = nil
+	local model = character
+	if model == nil or typeof(handle) ~= "table" or typeof(handle.clip) ~= "table" then
+		return
+	end
+	local swing: ContactPredictor.Swing = {
+		model = model :: Model,
+		clip = handle.clip,
+		artId = artId,
+		finalHit = finalHit,
+		multiplier = multiplier,
+		weaponAttack = weaponAttack(),
+	}
+	if contacts:begin(swing) then
+		contactHandle = handle
+	end
+end
+
+-- This frame's contacts, on the pose the rig just showed (after its step and the root motion).
+-- The swing's clip must still be the one playing.
+local function stepContacts()
+	if contactHandle == nil then
+		return
+	end
+	local current = predicted
+	local handle = contactHandle
+	if current == nil or current.handle ~= handle or handle.done == true or typeof(handle.time) ~= "number" then
+		contacts:stop()
+		contactHandle = nil
+		return
+	end
+	local jumped = rigJumped
+	rigJumped = false
+	for _, contact in contacts:step(handle.time, jumped) do
+		if Replication.contact(contact) then
+			CharacterController.predictDraw()
+		end
+	end
+end
+
 local function setTimeScale(scale: number)
 	appliedScale = scale
 	if animator ~= nil then
@@ -412,10 +482,11 @@ local function clearHold()
 	hold = nil
 	setTimeScale(captureScale)
 	stopClip(current.handle)
-	-- The wind-up contour ends with the hold, however it ended.
+	-- The wind-up contour ends with the hold, however it ended, and the blade light fades out
+	-- (issue 13): a hold that ends without a launch lets its glow go, never cuts it in a frame.
 	Impact.cancelActivation(character)
 	if character ~= nil then
-		Trails.activationLight(character, false, trailToken())
+		Trails.activationLight(character, false, trailToken(), true)
 	end
 end
 
@@ -473,6 +544,7 @@ local function beforeRigStep(dt: number)
 		end
 	end
 	rigSteppedAt = now()
+	rigJumped = dt > ChoreoData.stall.jumpSeconds
 	heartbeatsSinceRigStep = 0
 end
 
@@ -533,6 +605,8 @@ function CharacterController.releaseArt(slot: number, heldSeconds: number)
 	hold = nil
 	local launchToken = current.token
 	predicted = { action = "Art", clipId = current.art.clip, handle = current.handle, token = launchToken }
+	-- Every Art's last window is its final hit (section 6).
+	predictContacts(current.handle, current.art.id, true, current.art.multiplier)
 	setState("Art")
 	-- The server's Idle normally ends the Art; this is the fallback if that state never arrives.
 	actionEndsAt = ActionLogic.artFallbackEnd(releasedAt, plan.freezeClipTime, current.art, Combat.lagAllowance)
@@ -578,6 +652,13 @@ function CharacterController.basicAttack()
 	end
 	local basicToken = nextToken()
 	predicted = { action = "Basic", clipId = clipId, handle = animator:play(clipId), token = basicToken }
+	-- A basic chain's final hit is its last swing (section 6).
+	predictContacts(
+		(predicted :: Predicted).handle,
+		nil,
+		basicChain >= Combat.basicChainLength,
+		Combat.basicAttackMultiplier
+	)
 	setState("Basic")
 	actionEndsAt = t + Combat.basicHitDuration
 	predictDraw()
@@ -737,7 +818,8 @@ local function onRejected(action: string)
 	setTimeScale(captureScale)
 	stopClip(current.handle)
 	if character ~= nil and expected == "Art" then
-		Trails.activationLight(character, false, trailToken())
+		-- A refused Art is a cancelled one: its glow fades (issue 13).
+		Trails.activationLight(character, false, trailToken(), true)
 	end
 	actionEndsAt = nil
 	setState("Idle")
@@ -962,6 +1044,8 @@ local function step(dt: number)
 			turning = turning,
 			fallHeight = fallHeight,
 			verticalVelocity = velocity.Y,
+			-- The reading `speed` came from: a velocity off the stick blocks the body (D-144).
+			velocity = velocity,
 		})
 	end
 
@@ -977,6 +1061,8 @@ local function step(dt: number)
 			rootPart.CFrame = rootPart.CFrame + aimRotation(rootPart):VectorToWorldSpace(delta)
 		end
 	end
+	-- The blade on the pose this frame shows: a touch plays its hit now (issue 4).
+	stepContacts()
 	wakeSleptDodge(t)
 	recordYaw(rootPart, t)
 end
@@ -995,11 +1081,14 @@ local function clearCharacter()
 		unhookRigStep = nil
 	end
 	rigSteppedAt = nil
+	rigJumped = false
 	heartbeatsSinceRigStep = 0
 	sleptDodge = nil
 	Siblings.call(Choreo, "setLocalModel", nil)
 	character, humanoid, root, animator, locomotion = nil, nil, nil, nil, nil
 	predicted = nil
+	contacts:stop()
+	contactHandle = nil
 	actionEndsAt = nil
 	lastWalkSpeed = nil
 	lastAutoRotate = nil

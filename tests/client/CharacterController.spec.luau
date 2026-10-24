@@ -116,6 +116,9 @@ type Rig = {
 	animator: any,
 	clipEvents: { { clipId: string, kind: string, jumped: boolean, at: number } },
 	rigSteps: () -> number,
+	-- The fake ContactPredictor: what it was asked (begins, steps, stops) and the contacts it hands
+	-- the next step (queue); Replication.contact's calls land in `log` as kind "contact".
+	contacts: any,
 }
 
 type Options = {
@@ -125,6 +128,8 @@ type Options = {
 	stopGait: number?,
 	-- Hand the controller a recording fx.Impact sibling instead of a stub.
 	impact: boolean?,
+	-- Hand the controller a recording fx.Trails sibling (its activationLight) instead of a stub.
+	trails: boolean?,
 	-- Hand the controller a Choreo whose animator records setTimeScale and hands out root motion.
 	animator: boolean?,
 	-- The place is a capture place (workspace DevCapture attribute, dev.luau attributes.capture).
@@ -262,7 +267,43 @@ local function load(options: Options?): Rig
 			return list
 		end,
 	}
+	-- ContactPredictor (issue 4): a recording fake. Its steps note the clip time asked for, the root
+	-- at that moment and how many times the rig had stepped by then.
+	local contactLog: any = { begins = {}, steps = {}, stops = 0, queue = {}, active = false, deps = nil }
+	local rigStepCount: () -> number = function(): number
+		return 0
+	end
 	local fakes: { [string]: any } = {
+		ContactPredictor = {
+			new = function(deps: any): any
+				contactLog.deps = deps
+				return {
+					begin = function(_self: any, swing: any): boolean
+						table.insert(contactLog.begins, swing)
+						contactLog.active = true
+						return true
+					end,
+					stop = function(_self: any)
+						contactLog.stops += 1
+						contactLog.active = false
+					end,
+					active = function(_self: any): boolean
+						return contactLog.active
+					end,
+					step = function(_self: any, clipTime: number, jumped: boolean?): { any }
+						table.insert(contactLog.steps, {
+							time = clipTime,
+							root = rootState.CFrame,
+							rigSteps = rigStepCount(),
+							jumped = jumped,
+						})
+						local out = contactLog.queue
+						contactLog.queue = {}
+						return out
+					end,
+				}
+			end,
+		},
 		Net = {
 			client = function(): any
 				return {
@@ -284,7 +325,18 @@ local function load(options: Options?): Rig
 			changed = Signal.new(),
 			localChanged = Signal.new(),
 		},
-		Replication = { rejected = Signal.new(), hit = Signal.new(), clipEvent = Signal.new() },
+		Replication = {
+			rejected = Signal.new(),
+			hit = Signal.new(),
+			clipEvent = Signal.new(),
+			contact = function(contact: any): boolean
+				table.insert(log, { kind = "contact", name = "contact", args = { contact } })
+				return true
+			end,
+			confirmedAlready = function(): boolean
+				return false
+			end,
+		},
 		CameraController = {
 			fovKick = function(...: any)
 				table.insert(log, { kind = "camera", name = "fovKick", args = { ... } })
@@ -297,6 +349,14 @@ local function load(options: Options?): Rig
 				end
 				if path == "fx.Impact" and opts.impact then
 					return impact, true
+				end
+				if path == "fx.Trails" and opts.trails then
+					return {
+						activationLight = function(...: any)
+							table.insert(log, { kind = "trails", name = "activationLight", args = { ... } })
+						end,
+					},
+						true
 				end
 				if path == "choreo.Choreo" and (opts.animator or opts.choreo) then
 					return choreo, true
@@ -372,6 +432,9 @@ local function load(options: Options?): Rig
 		rigAnimator:onStep(function()
 			rigSteps += 1
 		end)
+		rigStepCount = function(): number
+			return rigSteps
+		end
 		rigAnimator.events:Connect(function(clipId: string, event: any, jumped: boolean)
 			table.insert(clipEvents, { clipId = clipId, kind = event.kind, jumped = jumped, at = clock })
 			fakes.Replication.clipEvent:Fire({ model = model }, clipId, event, jumped)
@@ -504,6 +567,7 @@ local function load(options: Options?): Rig
 		rigSteps = function(): number
 			return rigSteps
 		end,
+		contacts = contactLog,
 	}
 end
 
@@ -807,6 +871,42 @@ describe("CharacterController's impact director calls", function()
 		-- Nothing held: a cancel is a no-op.
 		rig.controller.cancelArt(1)
 		expect(#impactCalls(rig, "cancelActivation")).toBe(3)
+	end)
+
+	it("a cancelled hold fades the blade light out instead of cutting it (issue 13)", function()
+		local Combat = Harness.load("src/shared/data/combat")
+		local function lights(rig: Rig): { { any } }
+			local calls = {}
+			for _, entry in rig.log do
+				if entry.kind == "trails" and entry.name == "activationLight" then
+					table.insert(calls, entry.args)
+				end
+			end
+			return calls
+		end
+		for _, way in { "release late", "timed out", "dodge" } do
+			local rig = load({ impact = true, trails = true })
+			rig.frame(Vector3.zero)
+			rig.controller.beginArt(1)
+			if way == "release late" then
+				rig.controller.releaseArt(1, Combat.activationCancelTime + 0.05)
+			elseif way == "timed out" then
+				rig.controller.cancelArt(1)
+			else
+				rig.controller.dodge()
+			end
+			local calls = lights(rig)
+			expect(#calls).toBe(1)
+			expect(calls[1][1]).toBe(rig.model)
+			expect(calls[1][2]).toBe(false)
+			expect(calls[1][4]).toBe(true)
+		end
+		-- A launch leaves the light on: the first damage frame puts it out (Replication).
+		local rig = load({ impact = true, trails = true })
+		rig.frame(Vector3.zero)
+		rig.controller.beginArt(1)
+		rig.controller.releaseArt(1, 0.2)
+		expect(#lights(rig)).toBe(0)
 	end)
 end)
 
@@ -1334,6 +1434,20 @@ describe("CharacterController in a slowed capture", function()
 		rig.frame(FORWARD)
 		expect(rig.humanoid.WalkSpeed).toBe(RUN)
 		expect(rig.locomotionInput().clockScale).toBe(1)
+	end)
+
+	it("hands locomotion the root's own velocity, the reading its speed came from (D-144)", function()
+		local rig = load()
+		rig.frame(STILL)
+		for _ = 1, 5 do
+			rig.frame(FORWARD)
+		end
+		local input = rig.locomotionInput()
+		local velocity = rig.root.AssemblyLinearVelocity
+		expect(typeof(input.velocity)).toBe("Vector3")
+		expect((input.velocity - velocity).Magnitude).toBeCloseTo(0, 1e-9)
+		expect(Vector3.new(input.velocity.X, 0, input.velocity.Z).Magnitude).toBeCloseTo(input.speed, 1e-9)
+		expect(input.verticalVelocity).toBe(input.velocity.Y)
 	end)
 
 	it("outside a capture place, or at a scale the capture does not offer, nothing slows", function()
@@ -2076,6 +2190,164 @@ describe("CharacterController's dodge pressed while the display sleeps (D-141)",
 			expect(rig.controller.state()).toBe("Idle")
 			expect(dodgeHandle(rig)).toBeNil()
 			expect(logRows(rig, from)).toEqual({ "send DodgeRequest" })
+		end
+	end)
+end)
+
+describe("CharacterController's blade contacts (issue 4)", function()
+	local Weapons = Harness.load("src/shared/data/weapons")
+	local Playground = Harness.load("src/shared/data/playground")
+
+	local function contactRows(rig: Rig, from: number?): { any }
+		local rows = {}
+		for index = from or 1, #rig.log do
+			local row = rig.log[index]
+			if row.kind == "contact" then
+				table.insert(rows, row.args[1])
+			end
+		end
+		return rows
+	end
+
+	local function basicHandle(rig: Rig): any
+		for _, handle in rig.animator.mixer:handles() do
+			if string.find(handle.clipId, "/Basic", 1, true) ~= nil and not handle.stopping then
+				return handle
+			end
+		end
+		return nil
+	end
+
+	it("a swing predicts its clip's contacts: the basic multiplier, the chain's last swing final", function()
+		local rig = standingRig({ choreo = true })
+		local attack = Weapons.byId(Playground.loadout.weapon).attack
+		for swing = 1, 3 do
+			rig.controller.basicAttack()
+			local begun = rig.contacts.begins[swing]
+			expect(begun).never.toBeNil()
+			expect(begun.clip).toBe(basicHandle(rig).clip)
+			expect(begun.artId).toBeNil()
+			expect(begun.multiplier).toBe(Combat.basicAttackMultiplier)
+			expect(begun.finalHit).toBe(swing >= Combat.basicChainLength)
+			expect(begun.weaponAttack).toBe(attack)
+			for _ = 1, 30 do
+				rig.frame(STILL)
+			end
+		end
+		-- The predictor follows the rig's own clip handle and nothing else: it read the predictor's deps.
+		expect(typeof(rig.contacts.deps.targets)).toBe("function")
+	end)
+
+	it("sweeps each frame after the rig's step and its root motion, with the clip time it shows", function()
+		local rig = standingRig({ choreo = true })
+		local stepsBefore = rig.rigSteps()
+		rig.controller.basicAttack()
+		local handle = basicHandle(rig)
+		for frame = 1, 12 do
+			rig.frame(STILL)
+			local row = rig.contacts.steps[#rig.contacts.steps]
+			expect(#rig.contacts.steps).toBe(frame)
+			-- This frame's rig step had run, and the clip time is the one the rig shows.
+			expect(row.rigSteps).toBe(stepsBefore + frame)
+			expect(row.time).toBe(handle.time)
+			-- The root it read is where this frame left it (after the clip's root motion).
+			expect((row.root.Position - rig.root.Position).Magnitude < 1e-9).toBe(true)
+		end
+	end)
+
+	it("hands every contact to Replication.contact on its frame", function()
+		local rig = standingRig({ choreo = true })
+		rig.controller.basicAttack()
+		rig.frame(STILL)
+		local touch = { targetId = 7, windowIndex = 1, tier = "Normal", killed = false }
+		rig.contacts.queue = { touch }
+		local from = #rig.log + 1
+		rig.frame(STILL)
+		local rows = contactRows(rig, from)
+		expect(#rows).toBe(1)
+		expect(rows[1]).toBe(touch)
+		rig.frame(STILL)
+		expect(#contactRows(rig, from)).toBe(1)
+	end)
+
+	it("an Art release predicts the Art's contacts with its id and multiplier, its last window final", function()
+		local rig = standingRig({ choreo = true, impact = true })
+		local art = rig.controller.slots()[1]
+		local pressedAt = rig.now()
+		rig.controller.beginArt(1)
+		for _ = 1, 20 do
+			rig.frame(STILL)
+		end
+		expect(#rig.contacts.begins).toBe(0)
+		rig.controller.releaseArt(1, rig.now() - pressedAt)
+		local begun = rig.contacts.begins[1]
+		expect(begun).never.toBeNil()
+		expect(begun.artId).toBe(art.id)
+		expect(begun.multiplier).toBe(art.multiplier)
+		expect(begun.finalHit).toBe(true)
+		expect(begun.clip).toBe(rig.animator.mixer:find(art.clip).clip)
+	end)
+
+	it("stops on a refusal, a dodge or a respawn: no more sweeps of that swing", function()
+		for _, ending in { "reject", "dodge", "respawn" } do
+			local rig = standingRig({ choreo = true })
+			rig.controller.basicAttack()
+			rig.frame(STILL)
+			local stops = rig.contacts.stops
+			if ending == "reject" then
+				rig.reject("BasicAttack")
+			elseif ending == "dodge" then
+				for _ = 1, 40 do
+					rig.frame(STILL)
+				end
+				rig.controller.basicAttack()
+				rig.frame(STILL)
+				stops = rig.contacts.stops
+				rig.controller.dodge()
+			else
+				rig.respawn()
+			end
+			rig.frame(STILL)
+			local steps = #rig.contacts.steps
+			for _ = 1, 5 do
+				rig.frame(STILL)
+			end
+			expect(#rig.contacts.steps).toBe(steps)
+			expect(rig.contacts.stops > stops).toBe(true)
+		end
+	end)
+
+	it("re-baselines the sweep on a render stall's wake frame: no contact across the gap", function()
+		for _, sleep in { 36, 18 } do
+			local rig = standingRig({ choreo = true, impact = true })
+			local pressedAt = rig.now()
+			rig.controller.beginArt(1)
+			for _ = 1, 15 do
+				rig.frame(STILL)
+			end
+			rig.controller.releaseArt(1, rig.now() - pressedAt)
+			for _ = 1, 3 do
+				rig.frame(STILL)
+			end
+			expect(#rig.contacts.begins).toBe(1)
+			local before = #rig.contacts.steps
+			for _ = 1, sleep do
+				rig.heartbeat()
+			end
+			rig.wake()
+			rig.frame(STILL)
+			local steps = rig.contacts.steps
+			-- The swing still runs: the wake and the frame after it were swept.
+			expect(#steps).toBe(before + 2)
+			local woke = steps[#steps - 1]
+			-- A jump's wake (longer than stall.jumpSeconds) only records the pose; a shorter stall
+			-- is no jump and sweeps as any frame.
+			expect(woke.jumped == true).toBe(sleep * FRAME > ChoreoData.stall.jumpSeconds)
+			for index, row in steps do
+				if index ~= #steps - 1 then
+					expect(row.jumped == true).toBe(false)
+				end
+			end
 		end
 	end)
 end)

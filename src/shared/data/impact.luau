@@ -50,6 +50,19 @@ local Impact = {
 	-- Seconds per frame (the same 60 fps frame as hit-stop).
 	frameSeconds = Combat.hitStopFrameSeconds,
 
+	-- How a look's frames are drawn (issue 10). Each look shows for its steps' frames counted in
+	-- drawn frames, so a late or doubled frame never takes a frame from one look and gives it to
+	-- the next. On a device that draws slower (or faster) than 60 fps the count is scaled to its
+	-- pace (at least one drawn frame a look): the median of the last `paceSamples` render-step
+	-- frame lengths, taken on the sequence's first drawn frame, so one late frame never moves it.
+	-- The sequence still ends at its hit-stop (ImpactSequence.capSeconds, D-117 and D-122). A frame
+	-- longer than maxPaceSeconds is a hitch or a render stall, not the device's pace (10 fps, the
+	-- slowest screen D-122 still plays a Kill on), and is never remembered.
+	timing = {
+		paceSamples = 5,
+		maxPaceSeconds = 0.1,
+	},
+
 	looks = {
 		-- The black beat before a big hit: nothing but ink.
 		Black = { background = "OutlineInk", figures = nil, strokes = false },

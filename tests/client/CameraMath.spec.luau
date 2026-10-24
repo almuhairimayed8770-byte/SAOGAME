@@ -104,22 +104,22 @@ describe("CameraMath", function()
 		expect(inverted).toBeCloseTo(5, 1e-9)
 	end)
 
-	it("frames a lock between the fighters with a distance that grows with separation", function()
+	it("frames a lock as a two-shot whose distance grows with the separation", function()
 		local params = camera.lock
-		local frame = CameraMath.lockFrame({ 0, 0, 0 }, { 0, 0, -10 }, params)
-		expect(frame.separation).toBeCloseTo(10, 1e-6)
-		expect(frame.yaw).toBeCloseTo(0, 1e-6)
-		expect(frame.focus[3]).toBeCloseTo(-10 * params.focusBias, 1e-6)
-		expect(frame.distance).toBeCloseTo(
+		local shot = CameraMath.twoShot({ 0, 0, 0 }, { 0, 0, -10 }, params)
+		expect(shot.separation).toBeCloseTo(10, 1e-6)
+		expect(shot.lineYaw).toBeCloseTo(0, 1e-6)
+		expect(shot.distance).toBeCloseTo(
 			math.clamp(params.baseDistance + 10 * params.distancePerSeparation, params.minDistance, params.maxDistance),
 			1e-6
 		)
-		local far = CameraMath.lockFrame({ 0, 0, 0 }, { 0, 0, -200 }, params)
+		local far = CameraMath.twoShot({ 0, 0, 0 }, { 0, 0, -200 }, params)
 		expect(far.distance).toBe(params.maxDistance)
-		local near = CameraMath.lockFrame({ 0, 0, 0 }, { 0, 0, -1 }, params)
+		local near = CameraMath.twoShot({ 0, 0, 0 }, { 0, 0, -1 }, params)
 		expect(near.distance).toBeGreaterThanOrEqual(params.minDistance)
+		local mobile = CameraMath.twoShot({ 0, 0, 0 }, { 0, 0, -10 }, params, 1.25)
+		expect(mobile.distance).toBeCloseTo(shot.distance * 1.25, 1e-6)
 	end)
-
 	it("pulls the camera in front of a wall and never closer than the minimum", function()
 		expect(CameraMath.collisionDistance(12, nil, 0.6, 1.5)).toBe(12)
 		expect(CameraMath.collisionDistance(12, 8, 0.6, 1.5)).toBeCloseTo(7.4, 1e-9)
@@ -164,6 +164,104 @@ describe("CameraMath", function()
 		expect(camera.orbit.Raid.distance).toBeGreaterThan(camera.orbit.Default.distance)
 		expect(camera.orbit.Duel.pitch).toBeLessThan(camera.orbit.Raid.pitch)
 		expect(camera.mobile.distanceMultiplier).toBeGreaterThan(1)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- Framing: the free camera over the shoulder, the lock-on two-shot, the leash, the occluders
+-- ------------------------------------------------------------------------------------------
+
+local function v3(t: { number }): Vector3
+	return Vector3.new(t[1], t[2], t[3])
+end
+
+describe("CameraMath framing", function()
+	it("aims the free camera right of and above the pivot so the camera's elevation is its pitch", function()
+		for _, yaw in { 0, 37, -120, 180 } do
+			local look = v3(CameraMath.shoulderLook(yaw, 0.8, 2.5))
+			local cameraAt = v3(CameraMath.orbitOffset(yaw, 8, 10, 0.8, 2.5))
+			local view = look - cameraAt
+			expect(view.Magnitude).toBeCloseTo(10, 1e-6)
+			expect(math.deg(math.asin(-view.Unit.Y))).toBeCloseTo(8, 1e-6)
+			-- The pivot (the player) sits left of where the camera looks.
+			local right = view:Cross(Vector3.yAxis).Unit
+			expect((Vector3.zero - cameraAt):Dot(right)).toBeLessThan(-1)
+		end
+	end)
+
+	it("measures the split between the fighters, growing with the swing off the line", function()
+		expect(CameraMath.splitAngle(10, 6, 0)).toBeCloseTo(0, 1e-9)
+		local previous = 0
+		for swing = 5, 90, 5 do
+			local split = CameraMath.splitAngle(10, 6, swing)
+			expect(split).toBeGreaterThan(previous)
+			previous = split
+		end
+		-- Directly beside the player (90 degrees), the split is the angle the separation subtends.
+		expect(CameraMath.splitAngle(10, 6, 90)).toBeCloseTo(math.deg(math.atan2(6, 10)), 1e-6)
+	end)
+
+	it("swings the two-shot just far enough to stand the fighters apart, less as they part", function()
+		local params = camera.lock
+		local previous = math.huge
+		for _, separation in { 3, 4, 5, 6, 8, 10, 14, 20 } do
+			local shot = CameraMath.twoShot({ 0, 3, 0 }, { 0, 3, -separation }, params)
+			expect(shot.swing).toBeGreaterThan(0)
+			expect(shot.swing).toBeLessThanOrEqual(params.maxOrbitDegrees)
+			expect(shot.swing).toBeLessThanOrEqual(previous + 1e-9)
+			previous = shot.swing
+			if shot.swing < params.maxOrbitDegrees then
+				-- The split the swing gives covers both clearances, seen from the camera.
+				local toTarget = math.sqrt(
+					shot.distance ^ 2 + separation ^ 2 + 2 * shot.distance * separation * math.cos(math.rad(shot.swing))
+				)
+				local needed = math.deg(
+					math.atan(params.playerClearance / shot.distance) + math.atan(params.targetClearance / toTarget)
+				)
+				expect(CameraMath.splitAngle(shot.distance, separation, shot.swing)).toBeCloseTo(needed, 1e-3)
+			end
+		end
+		-- Fighters on top of each other take the widest swing.
+		expect(CameraMath.twoShot({ 0, 0, 0 }, { 0, 0, 0 }, params).swing).toBe(params.maxOrbitDegrees)
+	end)
+
+	it("puts the two-shot camera on its bearing around the player and aims between the fighters", function()
+		local cameraAt = v3(CameraMath.twoShotCamera({ 1, 3, 2 }, 90, 10, 3.7))
+		expect((cameraAt - Vector3.new(11, 6.7, 2)).Magnitude).toBeLessThan(1e-9)
+		-- The bearing is the yaw the camera there has when it looks at the player.
+		expect(CameraMath.yawTowards({ 11, 6.7, 2 }, { 1, 3, 2 })).toBeCloseTo(90, 1e-9)
+		local look = v3(CameraMath.twoShotLook({ 0, 3, 0 }, { 0, 4, -8 }, 0.5, 1.3))
+		expect((look - Vector3.new(0, 4.8, -4)).Magnitude).toBeLessThan(1e-9)
+	end)
+
+	it("keeps its side of the line until the camera is past the hysteresis on the other", function()
+		expect(CameraMath.lockSide(1, 10, 15)).toBe(1)
+		expect(CameraMath.lockSide(1, -10, 15)).toBe(1)
+		expect(CameraMath.lockSide(1, -20, 15)).toBe(-1)
+		expect(CameraMath.lockSide(-1, 10, 15)).toBe(-1)
+		expect(CameraMath.lockSide(-1, 20, 15)).toBe(1)
+	end)
+
+	it("leashes the lagged pivot along the view only: so far ahead, a little further behind", function()
+		local forward = { 0, 0, -1 }
+		-- The body hopped back toward the camera: the lagged pivot is 4 studs ahead of it.
+		local held = v3(CameraMath.leash({ 0, 3, 4 }, { 1, 3.5, 0 }, forward, 0.75, 2.5))
+		expect((held - Vector3.new(1, 3.5, 3.25)).Magnitude).toBeLessThan(1e-9)
+		-- A dash forward: the pivot trails 4 behind, held to 2.5.
+		local trailed = v3(CameraMath.leash({ 0, 3, -4 }, { 0, 3, 0 }, forward, 0.75, 2.5))
+		expect((trailed - Vector3.new(0, 3, -1.5)).Magnitude).toBeLessThan(1e-9)
+		-- Inside the leash nothing moves.
+		local inside = v3(CameraMath.leash({ 0, 3, 0 }, { 0.5, 3, -0.5 }, forward, 0.75, 2.5))
+		expect((inside - Vector3.new(0.5, 3, -0.5)).Magnitude).toBeLessThan(1e-9)
+	end)
+
+	it("lets only opaque world parts block the view, never characters or accessories", function()
+		local seeThrough = camera.collision.seeThrough
+		expect(CameraMath.blocksView(0, seeThrough, false, false)).toBe(true)
+		expect(CameraMath.blocksView(0, seeThrough, true, false)).toBe(false)
+		expect(CameraMath.blocksView(0, seeThrough, false, true)).toBe(false)
+		expect(CameraMath.blocksView(seeThrough, seeThrough, false, false)).toBe(false)
+		expect(CameraMath.blocksView(1, seeThrough, false, false)).toBe(false)
 	end)
 end)
 
@@ -397,6 +495,7 @@ describe("camera validator: punch and render stalls", function()
 		{ name = "follow", lag = camera.follow.lag, damping = camera.follow.damping },
 		{ name = "fov", lag = camera.fov.lag, damping = camera.fov.damping },
 		{ name = "lock yaw", lag = camera.lock.yawLag, damping = camera.follow.damping },
+		{ name = "lock blend", lag = camera.lock.blendLag, damping = camera.follow.damping },
 		{ name = "collision pull-out", lag = camera.collision.pullOutLag, damping = camera.follow.damping },
 	}
 
@@ -417,6 +516,40 @@ describe("camera validator: punch and render stalls", function()
 		fov.target = 0
 		fov:Step(0.25)
 		expect(fov.position).toBeLessThan(-1)
+	end)
+
+	it("rejects a leash that clips the nudge and broken two-shot and probe numbers", function()
+		local problems = runValidator(function(copy)
+			copy.follow = deepCopy(camera.follow)
+			copy.follow.leash.closer = camera.nudge.studs / 2
+			copy.lock = deepCopy(camera.lock)
+			copy.lock.maxOrbitDegrees = 120
+			copy.lock.playerClearance = 0
+			copy.lock.height = -1
+			copy.lock.solveSteps = 2.5
+			copy.lock.blendLag = 0
+			copy.collision = deepCopy(camera.collision)
+			copy.collision.seeThrough = 1.5
+			copy.collision.maxPasses = 0
+		end)
+		expect(mentions(problems, "must be at least nudge.studs")).toBe(true)
+		expect(mentions(problems, "lock.maxOrbitDegrees must be in (0, 90]")).toBe(true)
+		expect(mentions(problems, "lock.playerClearance and lock.targetClearance must be positive")).toBe(true)
+		expect(mentions(problems, "lock.height must be a positive number")).toBe(true)
+		expect(mentions(problems, "lock.solveSteps must be a whole number")).toBe(true)
+		expect(mentions(problems, "lock.blendLag must be a positive number")).toBe(true)
+		expect(mentions(problems, "collision.seeThrough must be in (0, 1]")).toBe(true)
+		expect(mentions(problems, "collision.maxPasses must be a whole number")).toBe(true)
+		local hysteresis = runValidator(function(copy)
+			copy.lock = deepCopy(camera.lock)
+			copy.lock.sideHysteresis = camera.lock.maxOrbitDegrees
+		end)
+		expect(mentions(hysteresis, "lock.sideHysteresis must be in [0, maxOrbitDegrees)")).toBe(true)
+		local missing = runValidator(function(copy)
+			copy.follow = deepCopy(camera.follow)
+			copy.follow.leash = nil
+		end)
+		expect(mentions(missing, "follow.leash is missing")).toBe(true)
 	end)
 
 	it("is clean on the real stall numbers and wants both of them", function()

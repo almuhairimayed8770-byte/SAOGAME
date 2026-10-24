@@ -83,8 +83,9 @@ local function fakeLocomotion(calls)
 end
 
 -- A fake impact director: every call is logged; hiddenSeconds, ownsHighlight and shatterCue answer
--- from `state` and the moments table.
-local function fakeImpact(calls, state)
+-- from `state` and the moments table; afterHidden runs its callback at once when nothing hides
+-- the world (state.hidden 0), else schedules it for state.hidden seconds.
+local function fakeImpact(calls, state, schedule)
 	local function log(fn, ...)
 		table.insert(calls, { module = "impact", fn = fn, args = { ... } })
 	end
@@ -93,9 +94,22 @@ local function fakeImpact(calls, state)
 			log("hiddenSeconds")
 			return state.hidden
 		end,
+		afterHidden = function(fn)
+			log("afterHidden", fn)
+			if state.hidden > 0 then
+				schedule(state.hidden, fn)
+			else
+				fn()
+			end
+		end,
 		ownsHighlight = function(info)
 			log("ownsHighlight", info)
 			return state.ownsHighlight
+		end,
+		-- The moment the director played (what Replication.contact remembers for the upgrade).
+		hit = function(...)
+			log("hit", ...)
+			return state.moment
 		end,
 		shatterCue = function(boss, heavy)
 			log("shatterCue", boss, heavy)
@@ -220,7 +234,9 @@ local function setup(options)
 		hud = recorder("hud", calls),
 		systemLine = recorder("systemLine", calls),
 		sfx = recorder("sfx", calls),
-		impact = fakeImpact(calls, state),
+		impact = fakeImpact(calls, state, function(seconds, fn)
+			table.insert(scheduled, { seconds = seconds, fn = fn })
+		end),
 		camera = recorder("camera", calls),
 		weaponCategory = function()
 			return "OneHandedSword"
@@ -580,7 +596,7 @@ describe("Replication", function()
 		for index, call in t.calls do
 			if call.module == "impact" and call.fn == "hit" then
 				hitAt = index
-			elseif call.module == "impact" and call.fn == "hiddenSeconds" then
+			elseif call.module == "impact" and call.fn == "afterHidden" then
 				askedAt = index
 			end
 		end
@@ -756,6 +772,8 @@ describe("Replication", function()
 		expect(#ducks).toBe(1)
 		expect(ducks[1].args[1]).toBe(combat.deathDuckDb)
 		expect(ducks[1].args[2]).toBe(combat.deathFreeze)
+		-- The silence spares the local player's own new sounds (issue 9).
+		expect(ducks[1].args[3]).toBe(true)
 		expect(#t.find("shatter", "play")).toBe(0)
 		t.scheduled[2].fn()
 		local shatters = t.find("shatter", "play")
@@ -838,6 +856,52 @@ describe("Replication", function()
 			table.insert(vocals, call.args[1])
 		end
 		expect(vocals).toEqual({ "enemy.BruteDeath", "enemy.BruteDeath", "enemy.ChargerDeath" })
+	end)
+
+	it("marks the local fighter's sounds and the hits they are in as their own; nobody else's (issue 9)", function()
+		local t = setup()
+		-- A pool with asOwn: each play remembers whether it started inside it.
+		local depth = 0
+		local plays: { { name: string, own: boolean } } = {}
+		local function note(name)
+			table.insert(plays, { name = name, own = depth > 0 })
+		end
+		t.deps.sfx = {
+			asOwn = function(fn)
+				depth += 1
+				fn()
+				depth -= 1
+			end,
+			play = note,
+			cue = note,
+			footstep = function()
+				note("footstep")
+			end,
+			playLate = note,
+			duck = function() end,
+		}
+		Replication.bind(t.deps)
+		local me, boar = t.records[1], t.records[7]
+		local swing = { time = 0.1, kind = "Sfx", data = { name = "whoosh.Medium" } }
+		Replication.routeClipEvent(me, "player/OneHandedSword/Basic1", swing)
+		Replication.routeClipEvent(me, "player/OneHandedSword/Run", { time = 0.2, kind = "Footstep" })
+		Replication.routeClipEvent(boar, "enemy/Boar/Charge", swing)
+		Replication.routeClipEvent(boar, "enemy/Boar/Walk", { time = 0.2, kind = "Footstep" })
+		-- The hit-stop tick of a hit the local player lands, and of one they take.
+		Replication.dispatch("HitConfirmed", hit())
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 7, targetId = 1 }))
+		local seen = {}
+		for _, play in plays do
+			table.insert(seen, play.name .. (if play.own then ":own" else ""))
+		end
+		expect(seen).toEqual({
+			"whoosh.Medium:own",
+			"footstep:own",
+			"whoosh.Medium",
+			"footstep",
+			"hitStopTick.Normal:own",
+			"hitStopTick.Normal:own",
+		})
 	end)
 
 	it("EntityDied with a director that is not loaded still shatters with the plain cue", function()
@@ -1841,6 +1905,242 @@ describe("Replication", function()
 		expect(function()
 			Replication.dispatch("Nope", {})
 		end).toThrow("no handler")
+	end)
+end)
+
+describe("Replication: the local fighter's contact (issue 4)", function()
+	local ART = "OneHandedSword.Horizontal"
+	local FRAME = ChoreoData.frameSeconds
+
+	local function contact(overrides: { [string]: any }?): any
+		local entry: { [string]: any } = {
+			targetId = 7,
+			windowIndex = 1,
+			artId = ART,
+			tier = "Normal",
+			killed = false,
+			position = Vector3.new(1, 2, -3),
+		}
+		for key, value in overrides or {} do
+			entry[key] = if value == NONE then nil else value
+		end
+		return entry
+	end
+
+	local function count(t: any, moduleName: string, fn: string): number
+		return #t.find(moduleName, fn)
+	end
+
+	local function ticks(t: any): { string }
+		local names = {}
+		for _, call in t.find("sfx", "play") do
+			if string.find(call.args[1], "hitStopTick", 1, true) then
+				table.insert(names, call.args[1])
+			end
+		end
+		return names
+	end
+
+	it("plays the hit on contact: hit-stop on both rigs, white flash, nudge, shake, tick, moment; no number", function()
+		local t = setup()
+		t.state.moment = "Hit"
+		expect(Replication.contact(contact())).toBe(true)
+		expect(t.find("animator:me", "hitStop")[1].args[1]).toBe(combat.hitStopFrames.Normal)
+		expect(t.find("animator:boar", "hitStop")[1].args[1]).toBe(combat.hitStopFrames.Normal)
+		local flash = t.find("outline", "flash")
+		expect(#flash).toBe(1)
+		expect(flash[1].args[1]).toBe(t.models.boar)
+		expect(flash[1].args[2]).toBe("SystemWhite")
+		expect(flash[1].args[3]).toBe(combat.highlightFlashFrames)
+		local nudge = t.find("camera", "nudge")
+		expect(#nudge).toBe(1)
+		expect(nudge[1].args[1]).toBe(Vector3.new(1, 2, -3))
+		expect(t.find("camera", "shake")[1].args[1]).toBe("Normal")
+		expect(ticks(t)).toEqual({ "hitStopTick.Normal" })
+		local info = lastInfo(t)
+		expect(info.tier).toBe("Normal")
+		expect(info.attacker).toBe(t.models.me)
+		expect(info.target).toBe(t.models.boar)
+		expect(info.involved).toBe(true)
+		expect(info.localAttacker).toBe(true)
+		expect(info.art).toBe(true)
+		for _, flag in { "parried", "guarded", "crit", "isSwitch", "killed" } do
+			expect(info[flag]).toBe(false)
+		end
+		-- The number and the HP change are the server's.
+		expect(count(t, "digits", "show")).toBe(0)
+		expect(count(t, "hud", "flashHp")).toBe(0)
+		-- A basic swing is no Art's; a proven kill is the Kill moment.
+		Replication.contact(contact({ artId = NONE, windowIndex = 2 }))
+		expect(lastInfo(t).art).toBe(false)
+		Replication.contact(contact({ targetId = 8, tier = "Kill", killed = true }))
+		expect(lastInfo(t).killed).toBe(true)
+		expect(t.find("animator:axeman", "hitStop")[1].args[1]).toBe(combat.hitStopFrames.Kill)
+	end)
+
+	it("its confirmation shows the number and the reactions and replays nothing", function()
+		local t = setup()
+		t.state.moment = "Hit"
+		Replication.contact(contact())
+		local before = #t.calls
+		t.state.clock += 6 * FRAME
+		local seen = {}
+		Replication.hit:Connect(function(payload)
+			table.insert(seen, payload)
+		end)
+		Replication.dispatch("HitConfirmed", hit({ crit = true, staggerDirection = "Left" }))
+		local digits = t.find("digits", "show")
+		expect(#digits).toBe(1)
+		expect(digits[1].args[2]).toBe(42)
+		expect(digits[1].args[3]).toBe("Crit")
+		expect(#seen).toBe(1)
+		local after = {}
+		for index = before + 1, #t.calls do
+			local call = t.calls[index]
+			table.insert(after, call.module .. "." .. call.fn)
+		end
+		for _, name in after do
+			for _, banned in
+				{
+					"animator:me.hitStop",
+					"animator:boar.hitStop",
+					"outline.flash",
+					"camera.nudge",
+					"camera.shake",
+					"impact.hit",
+					"sfx.play",
+				}
+			do
+				if name == banned then
+					error("the confirmation replayed " .. name)
+				end
+			end
+		end
+		-- The flinch is the server's: it plays with the confirmation.
+		local plays = t.find("animator:boar", "play")
+		expect(#plays).toBe(1)
+		-- A second confirmation of the same hit has no contact left: it plays whole.
+		Replication.dispatch("HitConfirmed", hit())
+		expect(count(t, "animator:boar", "hitStop")).toBe(2)
+	end)
+
+	it("a stronger tier holds its length from the contact, never restarted, and plays what it adds", function()
+		local t = setup()
+		t.state.moment = "Hit"
+		Replication.contact(contact())
+		t.state.clock += 2 * FRAME
+		Replication.dispatch("HitConfirmed", hit({ hitStop = "Kill", killed = true }))
+		local meStops = t.find("animator:me", "hitStop")
+		local boarStops = t.find("animator:boar", "hitStop")
+		expect(#meStops).toBe(2)
+		expect(#boarStops).toBe(2)
+		-- 10 frames from the contact, 2 of them gone while the contact's 3 still hold: 8 more.
+		expect(math.abs(meStops[2].args[1] - (combat.hitStopFrames.Kill - 2))).toBeLessThan(1e-6)
+		expect(math.abs(boarStops[2].args[1] - (combat.hitStopFrames.Kill - 2))).toBeLessThan(1e-6)
+		local shakes = t.find("camera", "shake")
+		expect(shakes[#shakes].args[1]).toBe("Kill")
+		expect(ticks(t)).toEqual({ "hitStopTick.Normal", "hitStopTick.Kill" })
+		-- The contact gave the nudge and the flash.
+		expect(count(t, "camera", "nudge")).toBe(1)
+		expect(count(t, "outline", "flash")).toBe(1)
+		local hits = t.find("impact", "hit")
+		expect(#hits).toBe(2)
+		expect(hits[2].args[1].killed).toBe(true)
+		expect(hits[2].args[1].tier).toBe("Kill")
+		expect(hits[2].args[2]).toBe("Hit")
+		expect(#t.find("digits", "show")).toBe(1)
+
+		-- A contact's Final the server makes a Kill 4 frames on: 6 more of the 10.
+		local final = setup()
+		Replication.contact(contact({ windowIndex = 3, tier = "Final" }))
+		final.state.clock += 4 * FRAME
+		Replication.dispatch("HitConfirmed", hit({ hitStop = "Kill", killed = true, hitIndex = 3 }))
+		local finalStops = final.find("animator:me", "hitStop")
+		expect(#finalStops).toBe(2)
+		expect(math.abs(finalStops[2].args[1] - (combat.hitStopFrames.Kill - 4))).toBeLessThan(1e-6)
+
+		-- A confirmation after the contact's own hold let go never stops the rig again (one hold per
+		-- hit), even with frames of the stronger tier's length left; what the tier adds still plays.
+		for _, case in
+			{ { tier = "Normal", after = 4, server = "Kill" }, { tier = "Normal", after = 12, server = "Final" } }
+		do
+			local late = setup()
+			Replication.contact(contact({ windowIndex = 3, tier = case.tier }))
+			late.state.clock += case.after * FRAME
+			Replication.dispatch("HitConfirmed", hit({ hitStop = case.server, hitIndex = 3 }))
+			expect(#late.find("animator:me", "hitStop")).toBe(1)
+			expect(#late.find("animator:boar", "hitStop")).toBe(1)
+			expect(#late.find("impact", "hit")).toBe(2)
+			local lateShakes = late.find("camera", "shake")
+			expect(lateShakes[#lateShakes].args[1]).toBe(case.server)
+		end
+	end)
+
+	it("matches the hit by target, window and Art, oldest first, within contact.confirmSeconds", function()
+		local t = setup()
+		Replication.contact(contact())
+		-- Another window, another Art, another target: each is a hit of its own and plays whole.
+		for _, other in { { hitIndex = 2 }, { artId = "OneHandedSword.Vertical" }, { artId = NONE }, { targetId = 8 } } do
+			local stops = count(t, "animator:me", "hitStop")
+			Replication.dispatch("HitConfirmed", hit(other))
+			expect(count(t, "animator:me", "hitStop")).toBe(stops + 1)
+		end
+		-- The contact's own confirmation still finds it.
+		local stops = count(t, "animator:me", "hitStop")
+		Replication.dispatch("HitConfirmed", hit())
+		expect(count(t, "animator:me", "hitStop")).toBe(stops)
+
+		-- A contact the server never confirmed in time shows nothing; a confirmation after that
+		-- plays the hit whole.
+		local stale = setup()
+		Replication.contact(contact())
+		stale.state.clock += combat.contact.confirmSeconds + 0.01
+		expect(#stale.find("digits", "show")).toBe(0)
+		Replication.dispatch("HitConfirmed", hit())
+		expect(#stale.find("animator:me", "hitStop")).toBe(2)
+		expect(#stale.find("outline", "flash")).toBe(2)
+	end)
+
+	it("a hit the server confirmed first answers confirmedAlready once, and goes stale", function()
+		local t = setup()
+		Replication.dispatch("HitConfirmed", hit({ hitIndex = 2 }))
+		expect(Replication.confirmedAlready(7, 1, ART)).toBe(false)
+		expect(Replication.confirmedAlready(7, 2, "OneHandedSword.Vertical")).toBe(false)
+		expect(Replication.confirmedAlready(7, 2, ART)).toBe(true)
+		expect(Replication.confirmedAlready(7, 2, ART)).toBe(false)
+		Replication.dispatch("HitConfirmed", hit({ hitIndex = 2 }))
+		t.state.clock += combat.contact.confirmSeconds + 0.01
+		expect(Replication.confirmedAlready(7, 2, ART)).toBe(false)
+		-- Someone else's hit, and a hit the local player took, are never the local fighter's.
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 2 }))
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 8, targetId = 1, artId = NONE }))
+		expect(Replication.confirmedAlready(7, 1, ART)).toBe(false)
+		expect(Replication.confirmedAlready(1, 1, nil)).toBe(false)
+	end)
+
+	it("plays nothing for a target or a local fighter this client does not track yet", function()
+		local t = setup()
+		expect(Replication.contact(contact({ targetId = 99 }))).toBe(false)
+		expect(Replication.contact(contact({ targetId = 1 }))).toBe(false)
+		local unknown = setup({ unknownLocal = true })
+		expect(Replication.contact(contact())).toBe(false)
+		for _, world in { t, unknown } do
+			expect(#world.calls).toBe(0)
+		end
+	end)
+
+	it("leaves everyone else's hits as they were: another player's hit on the same enemy plays whole", function()
+		local t = setup()
+		Replication.contact(contact())
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 2 }))
+		expect(#t.find("animator:ally", "hitStop")).toBe(1)
+		expect(#t.find("animator:boar", "hitStop")).toBe(2)
+		expect(#t.find("impact", "hit")).toBe(2)
+		expect(#t.find("digits", "show")).toBe(1)
+		-- The local contact still waits for its own confirmation.
+		local stops = #t.find("animator:boar", "hitStop")
+		Replication.dispatch("HitConfirmed", hit())
+		expect(#t.find("animator:boar", "hitStop")).toBe(stops)
 	end)
 end)
 

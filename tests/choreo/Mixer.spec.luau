@@ -574,6 +574,189 @@ describe("Mixer", function()
 end)
 
 -- ------------------------------------------------------------------------------------------
+-- Beat 4, the hold (section 10, issue 6): a hit-stop stands in for the authored hold after the
+-- strike's snap, so a hit holds once, never the hit-stop and then the authored hold again.
+-- ------------------------------------------------------------------------------------------
+
+describe("Mixer hit-stop and the strike's authored hold", function()
+	local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
+
+	-- Two strikes: anticipation, a 3-frame snap opening a window, a 3-frame authored hold, a settle.
+	local function strike(attack: boolean?): any
+		local function key(time: number, easing: string, value: number): any
+			return { time = time, easing = easing, joints = { Neck = { rot = { 0, value, 0 } } } }
+		end
+		return clip("strike", {
+			attack = attack,
+			duration = 1.2,
+			keys = {
+				key(0, "Hold", 0),
+				key(0.3, "QuadIn", -10),
+				key(0.35, "ExpoOut", 90), -- snap 1
+				{ time = 0.4, easing = "Hold", joints = {} }, -- its hold: the snap's pose
+				key(0.6, "Linear", 60), -- settle
+				key(0.75, "QuadIn", 70),
+				key(0.8, "ExpoOut", -90), -- snap 2
+				{ time = 0.85, easing = "Hold", joints = {} },
+				key(1.0, "Linear", -60),
+			},
+			events = {
+				{ time = 0.3, kind = "HitWindowOpen", data = { hit = 1 } },
+				{ time = 0.38, kind = "SmearOff" },
+				{ time = 0.45, kind = "HitWindowClose", data = { hit = 1 } },
+				{ time = 0.75, kind = "HitWindowOpen", data = { hit = 2 } },
+				{ time = 0.9, kind = "HitWindowClose", data = { hit = 2 } },
+			},
+		})
+	end
+
+	-- Plays the clip at 60 fps, hit-stopping `frames` the first frame its clock reaches `at`;
+	-- returns each frame's neck angle and clock, and the events fired.
+	local function run(def: any, at: number?, frames: number?): ({ number }, { number }, { string })
+		local mixer = Mixer.new()
+		local handle = mixer:play(def)
+		local angles, clocks, fired = {}, {}, {}
+		local stopped = false
+		for _ = 1, 66 do
+			local result = mixer:step(FRAME)
+			table.insert(angles, result.offsets.Neck.rot[2])
+			table.insert(clocks, handle.time)
+			for _, entry in result.events do
+				table.insert(fired, entry.event.kind)
+			end
+			if at ~= nil and not stopped and handle.time >= at then
+				stopped = true
+				mixer:hitStop(frames or 0)
+			end
+		end
+		return angles, clocks, fired
+	end
+
+	-- The runs of frames that show the same pose as the frame before, as {first frame, length}.
+	local function stills(angles: { number }): { { number } }
+		local runs = {}
+		local current: { number }? = nil
+		for index = 2, #angles do
+			if math.abs(angles[index] - angles[index - 1]) < 1e-9 then
+				if current == nil then
+					current = { index, 0 }
+					table.insert(runs, current :: { number })
+				end
+				(current :: { number })[2] += 1
+			else
+				current = nil
+			end
+		end
+		return runs
+	end
+
+	-- The still runs from `from` on, before the clock reaches `until`.
+	local function stillsBetween(angles: { number }, clocks: { number }, from: number, before: number): { number }
+		local lengths = {}
+		for _, entry in stills(angles) do
+			local first = entry[1]
+			if clocks[first] >= from and clocks[first] < before then
+				table.insert(lengths, entry[2])
+			end
+		end
+		return lengths
+	end
+
+	it("finds the hold of the snap a hit belongs to, while it is still ahead", function()
+		local def = strike(true)
+		expect(ClipSampler.strikeHoldAfter(def, 0.2)).toBeNil()
+		expect(ClipSampler.strikeHoldAfter(def, 0.3)).toBe(4)
+		expect(ClipSampler.strikeHoldAfter(def, 0.33)).toBe(4)
+		expect(ClipSampler.strikeHoldAfter(def, 0.39)).toBe(4)
+		expect(ClipSampler.strikeHoldAfter(def, 0.4)).toBeNil()
+		expect(ClipSampler.strikeHoldAfter(def, 0.44)).toBeNil()
+		expect(ClipSampler.strikeHoldAfter(def, 0.76)).toBe(8)
+		expect(ClipSampler.strikeHoldAfter(strike(nil), 0.33)).toBeNil()
+		-- Every strike of Sharp Nail has its hold right after its snap.
+		local sharp = Harness.load("src/shared/clips/player/OneHandedSword/SharpNail")
+		for _, case in { { 0.34, 0.4167 }, { 0.6, 0.66 }, { 0.86, 0.95 } } do
+			local index = ClipSampler.strikeHoldAfter(sharp, case[1])
+			expect(index).never.toBeNil()
+			expect(sharp.keys[index :: number].time).toBeCloseTo(case[2], 1e-6)
+		end
+	end)
+
+	it("a hit-stop on contact mid-snap holds once: the snap lands and the settle follows, no second hold", function()
+		-- A whiff shows the authored hold: 3 frames.
+		local whiffAngles, whiffClocks = run(strike(true))
+		expect(stillsBetween(whiffAngles, whiffClocks, 0.3, 0.6)).toEqual({ 3 })
+		local angles, clocks = run(strike(true), 0.32, 6)
+		-- The hit-stop's 6 frames, then the snap lands and goes straight into the settle.
+		expect(stillsBetween(angles, clocks, 0.3, 0.6)).toEqual({ 6 })
+		-- The second strike keeps its own hold.
+		expect(stillsBetween(angles, clocks, 0.75, 1.0)).toEqual({ 3 })
+		-- The clock skipped the 3 held frames: it ends the run 3 frames nearer the clip's.
+		local last = clocks[#clocks]
+		local whiffLast = whiffClocks[#whiffClocks]
+		expect(last).toBeCloseTo(whiffLast - 6 * FRAME + 0.05, 1e-6)
+	end)
+
+	it("a hit-stop inside the authored hold ends it: the first frame after the hit-stop moves", function()
+		local angles, clocks = run(strike(true), 0.36, 6)
+		local runs = stills(angles)
+		local hold = nil
+		for _, entry in runs do
+			if clocks[entry[1]] >= 0.34 and clocks[entry[1]] < 0.6 then
+				expect(hold).toBeNil()
+				hold = entry
+			end
+		end
+		expect(hold).never.toBeNil()
+		local entry = hold :: { number }
+		-- The still frames before the hit plus the hit-stop's 6; not the hold's rest after them.
+		expect(entry[2]).toBeLessThan(6 + 3)
+		expect(entry[2]).toBeGreaterThan(5)
+		local after = entry[1] + entry[2]
+		expect(math.abs(angles[after] - angles[after - 1]) > 1e-6).toBe(true)
+	end)
+
+	it("keeps the hold of a strike the hit-stop is not in, and of a clip that is not an attack", function()
+		-- A hit after snap 1's hold passed (late in window 1): snap 2's hold is not its to skip.
+		local angles, clocks = run(strike(true), 0.42, 6)
+		expect(stillsBetween(angles, clocks, 0.75, 1.0)).toEqual({ 3 })
+		-- Not an attack: the hit-stop and then the authored hold, as before.
+		local plain, plainClocks = run(strike(nil), 0.32, 6)
+		expect(stillsBetween(plain, plainClocks, 0.3, 0.6)).toEqual({ 6, 3 })
+		-- No hit-stop: the hold stays.
+		local zero, zeroClocks = run(strike(true), 0.32, 0)
+		expect(stillsBetween(zero, zeroClocks, 0.3, 0.6)).toEqual({ 3 })
+	end)
+
+	it("still fires the events in the skipped hold once, and a longer hit-stop keeps its own length", function()
+		local _, _, fired = run(strike(true), 0.32, 6)
+		local smears = 0
+		for _, kind in fired do
+			if kind == "SmearOff" then
+				smears += 1
+			end
+		end
+		expect(smears).toBe(1)
+		-- An upgrade (a second, longer hit-stop on the same strike) holds the longer one, once.
+		local mixer = Mixer.new()
+		local handle = mixer:play(strike(true))
+		while handle.time < 0.32 do
+			mixer:step(FRAME)
+		end
+		mixer:hitStop(3)
+		mixer:step(FRAME)
+		mixer:hitStop(10 - 1)
+		local held = 1
+		while mixer:pauseRemaining() > 0 do
+			mixer:step(FRAME)
+			held += 1
+		end
+		expect(held).toBe(10)
+		expect(handle.absorbKey).toBe(4)
+		expect(handle.absorbSeconds).toBeCloseTo(9 * FRAME, 1e-9)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
 -- Render stalls (D-132): RenderStepped stops while the display sleeps and its first dt after
 -- waking is the whole gap. A step longer than choreo.stall.jumpSeconds is a jump.
 -- ------------------------------------------------------------------------------------------

@@ -486,6 +486,18 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - Open: a velocity that lags the stick by 0.07 s or more could latch an open-ground turn as blocked for 3-5 frames
   (item 137 measures it); a slow sideways creep near 0.4 studs/s shuffles; Idle has no re-plant step.
 
+## Hit on contact, camera and names (2026-10-24, D-145 to D-164)
+
+- **The hit:** the local fighter's hit now plays on the frame the blade touches. ContactPredictor sweeps the drawn blade, and the server still decides the hit and brings the number. A kill is predicted only when proven, and each hit gets one hold. The strike snaps read over 2 to 4 frames, and the hit-stop absorbs the authored hold, so a kill shows one still. Flashes and impact frames count drawn frames, and a boar flashes over its tint. An Art's activation flashes only the sword, and a cancelled Art's light fades out. The player's own sounds carry through the death silence, and the trail no longer streaks.
+- **The camera:** it sits low over the right shoulder, and lock-on frames a two-shot. A back dodge keeps the camera at 0.93 of its distance or more (HEAD 0.69) and tilts the view at most 0.17° (HEAD 7.71°). Backing into a wall, the camera is past the wall face on 0 frames (HEAD 25). It looks past hats, weapons and characters.
+- **Names and HUD:** each enemy shows one name, the plate goes with the shatter, and the HUD sits in the safe area.
+- **Verification fixes:**
+  - An earlier cut's late Kill confirm no longer stretches a later cut's hold (SharpNail at 30 fps: 7 still frames down to 3).
+  - A 1 s hitch no longer replays a hit already played on contact.
+  - A stall no longer plays a contact for a cut that was never drawn.
+- **Checks:** 2215 specs in 126 files pass. Validators, stylua, offline lint, animation review and gaitgen are clean. In the hit matrix, every real-fight placement still registers on its strike, up to 1 frame later because of the snap ease.
+- **Open:** Studio items 138 to 149, and the Shatter hook for Nameplates.hide.
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and

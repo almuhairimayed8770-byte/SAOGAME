@@ -5,6 +5,13 @@
 	bar and the Guard Gauge; nothing over bosses (their bars sit at the top of the screen, Phase
 	3: the `bossSeen` hook is where BossBars will attach). Plates are pooled BillboardGuis driven
 	by EntityTracker.added / removed / changed; they fade past ui.nameplates.distance.
+
+	Death (D-147): the plate holds over the frozen rig through the death freeze, its HP bar empty,
+	and goes with the shatter: `hide(model)` takes it on the shatter frame (Shatter's hideRig
+	calls it), and a plate nothing hid goes when the shatter is due by the schedule the death
+	reaction uses (the kill's hit-stop, Moments.deathDuckDelay, then Combat.deathFreeze). Rigs
+	never carry the engine's own name label (RigBuilder: DisplayDistanceType None), so the plate
+	is the only name over an enemy.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -12,6 +19,8 @@ local Shared = ReplicatedStorage.Shared
 
 local UI = require(Shared.data.ui)
 local Palette = require(Shared.data.palette)
+local Combat = require(Shared.data.combat)
+local Moments = require(Shared.data.moments)
 local Signal = require(Shared.util.Signal)
 local Engine = require(script.Parent.Parent.fx.Engine)
 local Quality = require(script.Parent.Parent.fx.Quality)
@@ -30,6 +39,10 @@ type Plate = {
 	gaugeBack: Frame?,
 	record: any?,
 	alpha: number,
+	-- Taken by the shatter: hidden until the plate goes back to the pool.
+	gone: boolean,
+	-- When the record turned Dead, the Engine.now() the shatter is due (the fallback).
+	dueAt: number?,
 }
 
 local Nameplates = {}
@@ -169,6 +182,8 @@ local function newPlate(kind: "Player" | "Enemy"): Plate
 		gaugeBack = gaugeBack,
 		record = nil,
 		alpha = 1,
+		gone = false,
+		dueAt = nil,
 	}
 end
 
@@ -186,7 +201,25 @@ local function release(plate: Plate)
 		plate.gui.Adornee = nil
 	end)
 	plate.record = nil
+	plate.gone = false
+	plate.dueAt = nil
 	table.insert(pool[plate.kind], plate)
+end
+
+-- Whether a plate shows: not taken by the shatter, and not past the time its shatter was due.
+local function shows(plate: Plate): boolean
+	local due = plate.dueAt
+	return not plate.gone and (due == nil or Engine.now() < due)
+end
+
+-- Plates whose shatter came due without a hide: gone now.
+local function expireDue()
+	for _, plate in plates do
+		if not plate.gone and plate.dueAt ~= nil and not shows(plate) then
+			plate.gone = true
+			plate.gui.Enabled = false
+		end
+	end
 end
 
 local function isBoss(record: any): boolean
@@ -228,8 +261,16 @@ function Nameplates.refresh(record: any)
 		return
 	end
 	plate.name.Text = record.name or ""
-	-- Nothing hangs over a frozen, shattering rig: the plate goes with the first HP it lost.
-	plate.gui.Enabled = record.state ~= "Dead"
+	-- A dead rig keeps its plate through the freeze (the HP bar empty) and loses it with the
+	-- shatter; a record that is no longer Dead (a revive) holds no shatter time.
+	if record.state == "Dead" then
+		if plate.dueAt == nil then
+			plate.dueAt = Engine.now() + Moments.deathDuckDelay() + Combat.deathFreeze
+		end
+	else
+		plate.dueAt = nil
+	end
+	plate.gui.Enabled = shows(plate)
 	if plate.kind == "Player" then
 		local tokens = UI.nameplates.player.cursorTokens
 		local token = tokens[record.cursor] or tokens[UI.nameplates.player.defaultCursor]
@@ -262,6 +303,8 @@ function Nameplates.attach(record: any)
 		adornee = record.model.PrimaryPart
 	end)
 	plate.gui.Adornee = adornee or record.model
+	plate.gone = false
+	plate.dueAt = nil
 	plate.gui.Enabled = true
 	Nameplates.refresh(record)
 	applyAlpha(plate, 1, kind == "Enemy")
@@ -275,6 +318,18 @@ function Nameplates.detach(record: any)
 	end
 	plates[record.id] = nil
 	release(plate)
+end
+
+--- The shatter takes `model`'s plate: hidden now and until it goes back to the pool. Called by
+--- Shatter's hideRig on the frame the rig turns to shards (a model with no plate is ignored).
+function Nameplates.hide(model: Instance)
+	for _, plate in plates do
+		local record = plate.record
+		if record ~= nil and record.model == model then
+			plate.gone = true
+			plate.gui.Enabled = false
+		end
+	end
 end
 
 --- The local entity: its own plate hides the name.
@@ -309,6 +364,7 @@ end
 
 --- Fades plates by distance and shows player names on hover (called at the tier's rate).
 function Nameplates.update()
+	expireDue()
 	local distance = UI.nameplates.distance
 	local band = math.max(1e-6, UI.nameplates.fadeBand)
 	for id, plate in plates do
@@ -363,6 +419,8 @@ function Nameplates.start()
 		Nameplates.attach(record)
 	end
 	stopLoop = Engine.onHeartbeat(function(dt: number)
+		-- Every frame: a plate whose shatter came due goes on that frame, not at the tier's rate.
+		expireDue()
 		sinceUpdate += dt
 		if sinceUpdate >= 1 / Quality.params().nameplateHz then
 			sinceUpdate = 0
