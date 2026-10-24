@@ -36,26 +36,36 @@
 	afterwards. A stretch starts where the last one ended when that is behind the clock's back, so a
 	body that falls behind and catches up leaves no gap.
 
-	Nor past a wall (D-197): only the root collides (RigBuilder), so a body held at a wall still has
-	its snout front - the root's half length beyond the wall's face, and the late start and
-	keepUpStuds reach further still. Every stretch stops where the world stops the root, cast ahead
-	of it along the line in the root's own group (the rushing group meets the world only), so nobody
+	Nor past a wall (D-197): every stretch stops where the world stops the body, cast ahead of its root
+	along the leg it runs in the root's own group (the rushing group meets the world only), so nobody
 	behind a wall is hit, while a free run's line, with nothing in the way, resolves on the clock.
 
-	The run is the strike's own movement (D-183): it goes straight at the line's end (moveDirect),
+	A charge meets the world like a body (D-205 to D-210, choreo/RushWorld.luau, the same rules every
+	client draws by). The cast looks lookAheadStuds past the clock's snout, so what the run meets is
+	known before the clock gets there, on the server and on every screen:
+	  - ground (a slope, D-204, or a step the body climbs, D-209) caps the line, stops nothing;
+	  - a wall meeting the leg at less than glanceDegrees bends the path along its face where the
+	    body's leading corner touches it (a glance, D-206): RushTurned tells the clients the new legs;
+	  - a corner the root's box clips by at most clipStuds is shouldered past: the path sidesteps it
+	    and carries on along the line (a clip, D-207), told the same way;
+	  - any other wall is a slam (D-205, D-208): the body stops with its leading corner on the face (the
+	    snout, head on), not its root's box 3.1 studs short of it. The rush is over at once: RushEnded
+	    "Wall" carries where the body meets the face, the body runs to its stop and no further (D-190),
+	    the line still resolves up to the face on the clock, and when the timeline brings the snout
+	    there the body is dazed (rushWorld.slamDazeSeconds, a Stagger from the front).
+
+	The run is the strike's own movement (D-183): it goes straight at its leg's end (moveDirect),
 	never along a path, so a body that stood still before the launch never walks back to where a
 	late path began.
 
 	The launch and an early stop go to EnemyService (rushStarted / rushEnded, D-169): it switches the
 	body's collision group so the rush passes through players and other enemies (D-167), and tells
-	the clients so they draw the rush on the server's timeline. A stretch the world caps (the cast
-	above) ends the rush on that frame (D-202): it reports "Jammed" with where the root will stand,
-	its own reach short of the face, before the body gets there, and the body runs there and no
-	further (D-190). A body that falls more than jamLagStuds behind that timeline for a reason the
-	cast does not see reports "Jammed" too (the clients stop drawing it ahead of the body) and stops
-	where it is; an interrupt, a death or a sleep reports why it stopped.
-	EnemyService puts every stopped body back in the enemies group only once it has stayed clear of
-	every player and enemy for longer than the clients draw it late.
+	the clients so they draw the rush on the server's timeline. A body that falls more than
+	jamLagStuds behind that timeline for a reason the cast does not see reports "Jammed" (the clients
+	stop drawing it ahead of the body) and stops where it is; an interrupt, a death or a sleep reports
+	why it stopped, after a "Jammed" or a "Wall" too (D-210), so every client hands the body back where
+	the server's stopped. EnemyService puts every stopped body back in the enemies group only once it
+	has stayed clear of every player and enemy for longer than the clients draw it late.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -63,9 +73,11 @@ local Shared = ReplicatedStorage.Shared
 
 local Types = require(Shared.types)
 local AI = require(Shared.data.ai)
+local RushWorld = require(Shared.choreo.RushWorld)
 local Brain = require(script.Parent.Brain)
 
 local tuning: AI.ChargerTuning = AI.archetypes.Charger
+local WORLD = AI.rushWorld
 
 local Charger: Brain.Archetype = {
 	name = "Charger",
@@ -83,40 +95,138 @@ function Charger.onChaseStart(brain: Brain.Brain)
 	brain.memory.rush = nil
 end
 
--- How far down the line the body stands now, clamped to the run.
+-- How far down its path the body stands now (on the leg it last stood on or a later one), clamped
+-- to the run.
 local function progressOf(brain: Brain.Brain, rush: Brain.Rush): number
-	return math.clamp((brain:position() - rush.origin):Dot(rush.direction), 0, rush.length)
+	local memory = brain.memory
+	local d = math.clamp(RushWorld.project(rush.legs, brain:position(), memory.rushProgress), 0, rush.length)
+	memory.rushProgress = d
+	return d
 end
 
--- The world stops the root ahead (the cast saw a face `face` studs down the line, D-202): the rush is
--- over at once. It is reported Jammed with where the root will stand, its own reach short of the
--- face, and the body is sent there and no further (D-190); the rejoin wait follows as for any stop.
--- A rush a parry on this stretch already interrupted, or one already over, is left alone.
-local function stopAtWall(brain: Brain.Brain, rush: Brain.Rush, face: number)
+-- The server time the rush's timeline brings it `d` studs down its path (RushWorld.timeAt, the
+-- timeline every client draws the body on).
+local function timelineAt(rush: Brain.Rush, d: number): number
+	return rush.startedAt + RushWorld.timeAt(rush.speed, rush.length, rush.strike, d)
+end
+
+-- Resolves the stretch `from` to `to` studs down the rush's path, leg by leg (D-206, D-207): each leg's
+-- piece from its own start point along its own heading (the first leg's from behind the crouch point,
+-- the body's back at the launch).
+local function resolve(brain: Brain.Brain, rush: Brain.Rush, from: number, to: number)
 	local memory = brain.memory
-	if memory.rushing ~= true or memory.rushJammed == true or brain:getPhase() ~= "Strike" then
+	local legs = rush.legs
+	for index, leg in legs do
+		local a = if index == 1 then from else math.max(from, leg.at)
+		local b = math.min(to, RushWorld.legEnd(legs, index))
+		if b > a then
+			local origin = leg.from - leg.heading * leg.at + Vector3.new(0, rush.origin.Y, 0)
+			brain:strikeStretch(origin, leg.heading, a, b, memory.rushHit)
+		end
+	end
+end
+
+-- The slam (D-205, D-208): the body stops with its leading corner on the face, `stop` studs down the
+-- path, and the rush is over at once: reported "Wall" with where the body meets the face, the body
+-- sent there and no further (D-190), and the daze due when the timeline brings it there. The line
+-- still resolves up to the face (`cap`) on the clock. A rush already over is left alone.
+local function slam(brain: Brain.Brain, rush: Brain.Rush, contact: RushWorld.Contact, cap: number)
+	local memory = brain.memory
+	if memory.rushing ~= true or memory.rushWalled == true or brain:getPhase() ~= "Strike" then
 		return
 	end
-	memory.rushJammed = true
+	memory.rushWalled = true
+	memory.rushCap = math.min(memory.rushCap or math.huge, cap)
 	local progress = progressOf(brain, rush)
-	local stop = math.clamp(face - brain:rootReach(rush.direction), progress, rush.length)
-	brain:rushEnded(rush, "Jammed", stop)
+	local stop = math.clamp(contact.at, progress, rush.length)
+	memory.rushStop = stop
+	memory.rushDazeAt = timelineAt(rush, stop)
+	brain:rushEnded(rush, "Wall", stop, contact)
 	if stop > progress then
-		brain:moveDirect(rush.origin + rush.direction * stop, rush.speed)
+		brain:moveDirect(RushWorld.pointAt(rush.legs, stop) + Vector3.new(0, rush.origin.Y, 0), rush.speed)
 	else
 		brain.context.stop()
 	end
 end
 
--- Resolves the stretch of the line the body swept since the last sweep, up to `elapsed` seconds
+-- The root's box, standing where it does, looked at from `offset` along `direction` (RushWorld.Probe):
+-- how far its centre runs before it meets a wall, within `distance`.
+local function probeOf(brain: Brain.Brain): RushWorld.Probe
+	return function(offset: Vector3, direction: Vector3, distance: number): number?
+		local reach = brain:rootReach(direction)
+		local face, ground = brain:worldAhead(direction, distance + reach, offset)
+		if face == nil or ground then
+			return nil
+		end
+		return math.max(0, face - reach)
+	end
+end
+
+-- Looks at the world ahead of the root along the leg it runs, as far as the line resolves (`ahead`
+-- studs down the path: the clock's snout, never past where the body keeps up) plus lookAheadStuds,
+-- never past the leg's end nor the snout at the run's end. Ground caps the line (D-204, D-209); a wall
+-- bends the path (a glance), sidesteps it (a clipped corner) or stops the body (a slam).
+local function look(brain: Brain.Brain, rush: Brain.Rush, ahead: number)
+	local memory = brain.memory
+	if memory.rushWalled == true or memory.rushJammed == true then
+		return
+	end
+	local front = brain:bodyExtents()
+	local rootAt = progressOf(brain, rush)
+	local index = RushWorld.legIndex(rush.legs, rootAt)
+	local leg = rush.legs[index]
+	local reach = brain:rootReach(leg.heading)
+	local farthest =
+		math.min(ahead + WORLD.lookAheadStuds, RushWorld.lookLimit(rush.legs, index, rush.length, reach, front))
+	local wall, ground, normal = brain:worldAhead(leg.heading, farthest - rootAt)
+	if wall == nil then
+		return
+	end
+	local face = rootAt + wall
+	if ground then
+		memory.rushGround = face
+		return
+	end
+	local body = brain:bodyProfile()
+	if body == nil then
+		-- No body to judge: the root's box stops at the face (D-202).
+		slam(brain, rush, {
+			kind = "Slam",
+			at = face - reach,
+			legs = nil,
+			point = RushWorld.pointAt(rush.legs, face) + Vector3.new(0, brain:position().Y, 0),
+			normal = -leg.heading,
+		}, face)
+		return
+	end
+	local contact = RushWorld.contact(
+		rush.legs,
+		rootAt,
+		wall - reach,
+		normal,
+		body :: RushWorld.Body,
+		brain:position().Y,
+		probeOf(brain)
+	)
+	local legs = contact.legs
+	if contact.kind == "Slam" or legs == nil then
+		slam(brain, rush, contact, face)
+		return
+	end
+	if RushWorld.sameLegs(legs, rush.legs) then
+		return -- the bend or the sidestep the path already has
+	end
+	rush.legs = legs
+	brain:rushTurned(rush, contact)
+end
+
+-- Resolves the stretch of the path the body swept since the last sweep, up to `elapsed` seconds
 -- into the rush (never past the attack's strike beat): from where its back was then to where its
 -- snout is now, on the rush's clock, but never further ahead of the body's own snout than its late
--- start plus keepUpStuds (D-195), never past the world that stops its root (D-197), and never again
--- once the rush jammed. A stretch a wall caps ends the rush there at once (stopAtWall, D-202);
--- ground the root climbs (a ramp's face, D-204) caps the stretch the same way, since whatever
--- stands behind it is unseen, but stops no body: the cast moves on up the ramp with the root.
--- Once the line has resolved (past the strike beat) the run still looks as far ahead each pass, on
--- the rush's clock and up to its end, so a wall in the overshoot ends it the same way.
+-- start plus keepUpStuds (D-195), never past a slam's face (D-197) nor ground ahead (D-204), and
+-- never again once the rush jammed. Every pass first looks at the world ahead (look): the line,
+-- its bends and its sidesteps are known before the clock reaches them, on the server and on every
+-- client, and a slam ends the rush at once (D-202, D-205).
 local function sweep(brain: Brain.Brain, rush: Brain.Rush, elapsed: number)
 	local attack = brain:currentAttack()
 	if attack == nil then
@@ -129,30 +239,24 @@ local function sweep(brain: Brain.Brain, rush: Brain.Rush, elapsed: number)
 	local front, back = brain:bodyExtents()
 	local lateStart = rush.speed * math.max(0, rush.bodyStartedAt - rush.startedAt)
 	local reached = progressOf(brain, rush) + front + lateStart + tuning.keepUpStuds
-	local rootAt = (brain:position() - rush.origin):Dot(rush.direction)
+	local looked: number? = memory.rushLooked
+	if looked == nil or elapsed > looked then
+		-- Once a pass: the frame and the tick of one moment look once.
+		memory.rushLooked = elapsed
+		memory.rushGround = nil
+		local clock = math.clamp(elapsed, 0, rush.duration)
+		look(brain, rush, math.min(rush.speed * clock + front, reached))
+	end
+	if memory.rushJammed == true or brain:getPhase() ~= "Strike" then
+		return
+	end
 	local upTo = math.clamp(elapsed, 0, attack.strike)
 	local last: number? = memory.rushSwept
 	if last ~= nil and upTo <= last then
-		-- The line has resolved: the run looks ahead on its own clock, once a pass, to its end.
-		local looked: number? = memory.rushLooked
-		if elapsed <= attack.strike or (looked ~= nil and elapsed <= looked) then
-			return
-		end
-		memory.rushLooked = elapsed
-		local ahead = math.min(rush.speed * elapsed + front, reached, rush.length + brain:rootReach(rush.direction))
-		local wall, ground = brain:worldAhead(rush.direction, ahead - rootAt)
-		if wall ~= nil and not ground then
-			stopAtWall(brain, rush, rootAt + wall)
-		end
-		return
+		return -- the line has resolved: the strike beat has passed
 	end
 	memory.rushSwept = upTo
-	local to = math.min(rush.speed * upTo + front, reached)
-	local wall, ground = brain:worldAhead(rush.direction, to - rootAt)
-	local face: number? = if wall ~= nil then rootAt + wall else nil
-	if face ~= nil then
-		to = math.min(to, face)
-	end
+	local to = math.min(rush.speed * upTo + front, reached, memory.rushCap or math.huge, memory.rushGround or math.huge)
 	local from = rush.speed * (last or 0) - back
 	local resolved: number? = memory.rushResolved
 	local due: boolean
@@ -164,10 +268,7 @@ local function sweep(brain: Brain.Brain, rush: Brain.Rush, elapsed: number)
 	end
 	if due then
 		memory.rushResolved = to
-		brain:strikeStretch(rush.origin, rush.direction, from, to, memory.rushHit)
-	end
-	if face ~= nil and not ground then
-		stopAtWall(brain, rush, face)
+		resolve(brain, rush, from, to)
 	end
 end
 
@@ -181,9 +282,15 @@ function Charger.onCancel(brain: Brain.Brain, reason: Types.RushEndReason)
 	local memory = brain.memory
 	local rush: Brain.Rush? = memory.rush
 	memory.rush = nil
+	memory.rushDazeAt = nil
 	if memory.rushing == true and rush ~= nil then
 		memory.rushing = false
-		brain:rushEnded(rush, reason, progressOf(brain, rush))
+		local stop: number? = memory.rushStop
+		local distance = progressOf(brain, rush)
+		if memory.rushDazing == true and stop ~= nil then
+			distance = math.max(distance, stop) -- the daze: the body carries on to its stop
+		end
+		brain:rushEnded(rush, reason, distance)
 	end
 end
 
@@ -264,10 +371,20 @@ function Charger.onStrikeStart(brain: Brain.Brain, _target: Brain.Target?)
 		speed = speed,
 		length = length,
 		duration = length / speed,
+		strike = attack.strike,
+		legs = RushWorld.line(brain:position(), brain:getFacing()),
 	}
 	memory.rush = rush
 	memory.rushing = true
 	memory.rushJammed = false
+	memory.rushWalled = false
+	memory.rushCap = nil
+	memory.rushStop = nil
+	memory.rushDazeAt = nil
+	memory.rushDazing = false
+	memory.rushGround = nil
+	memory.rushProgress = nil
+	memory.rushPassedAt = nil
 	memory.rushSwept = nil
 	memory.rushLooked = nil
 	memory.rushResolved = nil
@@ -288,14 +405,16 @@ function Charger.strikeFrame(brain: Brain.Brain): (Vector3, Vector3)
 end
 
 --- Keeps the rush going and resolves what the body swept since the last pass (every server frame,
---- D-184); it is over when its time has run, so the skid starts on the clip's beat. A wall the cast
---- sees has already ended it in the sweep (D-202); a body that fell jamLagStuds behind the clock for
---- a reason the cast misses (a ledge, a glancing corner) stops there and waits out the time (D-190),
---- and its line ends at its snout (D-195). The line resolves on the launch beat's clock (startedAt, what
---- the clients draw) as far as the body keeps up; the body's own run (its jam check and its end) on
---- the frame it started (bodyStartedAt), so a launch noticed up to a frame late neither cuts the run
---- short nor reads as a jam.
-function Charger.onStrike(brain: Brain.Brain, _dt: number, _phaseElapsed: number): boolean
+--- D-184); it is over when its time has run, so the skid starts on the clip's beat. The body runs
+--- its path leg by leg, turning onto each new leg at rushWorld.turnRate. A slam the cast sees has
+--- already ended it in the sweep (D-202, D-205): the body runs to its stop and waits there until the
+--- timeline brings its snout to the face, and is dazed then (D-208), however late that is. A body that
+--- fell jamLagStuds behind the clock for a reason the cast misses (a ledge) stops there and waits out
+--- the time (D-190), and its line ends at its snout (D-195). The line resolves on the launch beat's
+--- clock (startedAt, what the clients draw) as far as the body keeps up; the body's own run (its jam
+--- check and its end) on the frame it started (bodyStartedAt), so a launch noticed up to a frame late
+--- neither cuts the run short nor reads as a jam.
+function Charger.onStrike(brain: Brain.Brain, dt: number, _phaseElapsed: number): boolean
 	local memory = brain.memory
 	local rush: Brain.Rush? = memory.rush
 	if rush == nil then
@@ -306,12 +425,31 @@ function Charger.onStrike(brain: Brain.Brain, _dt: number, _phaseElapsed: number
 	if brain:getPhase() ~= "Strike" or memory.rushing ~= true then
 		return true -- a parry on contact interrupted it (onCancel stopped the run)
 	end
+	local dazeAt: number? = memory.rushDazeAt
+	if dazeAt ~= nil and now >= dazeAt then
+		-- The snout is on the face on every screen: the slam dazes the body, which interrupts this
+		-- brain (onCancel tells where the body will stand). The interrupt stops the mover; a body a
+		-- hair short of its stop carries on to it through the daze, so it rests where every client
+		-- drew it, snout on the face.
+		memory.rushDazeAt = nil
+		memory.rushDazing = true
+		local stop = RushWorld.pointAt(rush.legs, memory.rushStop or progressOf(brain, rush))
+		brain:daze(WORLD.slamDazeSeconds)
+		memory.rushDazing = false
+		if brain:getPhase() ~= "Strike" or memory.rushing ~= true then
+			brain:moveDirect(stop + Vector3.new(0, rush.origin.Y, 0), rush.speed)
+			return true
+		end
+	end
 	local progress = progressOf(brain, rush)
 	local ran = now - rush.bodyStartedAt
-	if ran >= rush.duration then
+	if ran >= rush.duration and memory.rushDazeAt == nil then
 		memory.rushing = false
 		brain:rushEnded(rush, "Done", progress)
 		return true
+	end
+	if memory.rushWalled == true then
+		return false -- slam() sent the body to its stop; it waits there for the daze
 	end
 	if memory.rushJammed ~= true and rush.speed * ran - progress > tuning.jamLagStuds then
 		-- The line ends here (D-195) and the clients stop drawing it ahead; the body stops where it
@@ -322,7 +460,22 @@ function Charger.onStrike(brain: Brain.Brain, _dt: number, _phaseElapsed: number
 		brain.context.stop()
 	end
 	if memory.rushJammed ~= true then
-		brain:moveDirect(rush.origin + rush.direction * rush.length, rush.speed)
+		-- Down the leg it runs, and onto the next one when it would reach the bend before the next
+		-- pass (the passes' own gap, every server frame), so a body never pulls up at a corner of its
+		-- own path and cuts a sidestep's corner by no more than a frame's run.
+		local legs = rush.legs
+		local index = RushWorld.legIndex(legs, progress)
+		local passedAt: number? = memory.rushPassedAt
+		local gap = if passedAt ~= nil then math.clamp(now - passedAt, 0, AI.tickSeconds()) else AI.tickSeconds()
+		memory.rushPassedAt = now
+		if legs[index + 1] ~= nil and RushWorld.legEnd(legs, index) - progress <= rush.speed * gap then
+			index += 1
+		end
+		local goal = math.min(RushWorld.legEnd(legs, index), rush.length)
+		brain:moveDirect(RushWorld.pointAt(legs, goal) + Vector3.new(0, rush.origin.Y, 0), rush.speed)
+		if #legs > 1 then
+			brain:turnToward(legs[index].facing, WORLD.turnRate, dt)
+		end
 	end
 	return false
 end

@@ -44,6 +44,7 @@ local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
 local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
 local Locomotion = Harness.load("src/client/choreo/Locomotion")
 local Rigs = Harness.load("src/shared/data/rigs")
+local Fx = Harness.load("src/shared/data/fx")
 
 local FRAME = 1 / 60
 local TUNING = ChoreoData.enemy.rush
@@ -454,6 +455,196 @@ describe("the world stops a drawn rush where it stops the root (D-199)", functio
 	)
 end)
 
+describe("the drawn body meets the world as the server's does (D-205 to D-210)", function()
+	local RushWorld = Harness.load("src/shared/choreo/RushWorld")
+	local boar = RigBuilder.build("Boar")
+	local BODY = { profile = RushWorld.profileOf(boar), size = (boar.PrimaryPart :: BasePart).Size }
+	local FRONT = RushWorld.front(BODY.profile)
+	local HOVER = 2.8 -- the Boar's HipHeight (1.6) plus half its root's height
+	local REACH = BODY.size.Z / 2
+
+	-- A wall across the pure line `face` studs down it, its face toward the body (the room
+	-- RushDraw.room answers: the root centre's room, and the face's normal).
+	local function faceRoom(face: number)
+		return function(from: CFrame, _direction: Vector3, distance: number): (number?, Vector3?)
+			local free = face - REACH + from.Position.Z
+			if free < distance then
+				return math.max(0, free), Vector3.zAxis
+			end
+			return nil, nil
+		end
+	end
+
+	local function body(state: any)
+		RushDraw.setBody(state, BODY, HOVER)
+	end
+
+	it("its own cast stops the snout on the face; the slam's cue plays once, on the frame it gets there", function()
+		for _, face in { 8, 10, 14 } do
+			local stop = face - FRONT
+			local state = RushDraw.new(line(0))
+			body(state)
+			local room = faceRoom(face)
+			local now = 0
+			local played: { { t: number, kind: string } } = {}
+			while now < 1.5 do
+				now += FRAME
+				RushDraw.step(state, now, FRAME, at(0), room)
+				for _, cue in RushDraw.takeCues(state) do
+					table.insert(played, { t = now, kind = cue.kind })
+					expect(state.along).toBeCloseTo(stop, 1e-6)
+				end
+				expect(state.along).toBeLessThanOrEqual(stop + 1e-5) -- single-precision positions
+			end
+			expect(state.along).toBeCloseTo(stop, 1e-6)
+			expect(state.guess).toBeCloseTo(stop, 1e-6)
+			expect(#played).toBe(1)
+			expect(played[1].kind).toBe("Slam")
+			expect(math.abs(played[1].t - stop / SPEED)).toBeLessThanOrEqual(FRAME + 1e-9)
+		end
+	end)
+
+	it("a stop only its own cast guessed is no place to hand back before the server's word", function()
+		local face = 10
+		local stop = face - FRONT
+		local state = RushDraw.new(line(0))
+		body(state)
+		local room = faceRoom(face)
+		local now = 0
+		-- The late root passes the guessed stop at full speed (a world this client sees, the server
+		-- not): the body waits for the word, never sliding after a root that runs on.
+		while now < stop / SPEED + 0.3 do
+			now += FRAME
+			RushDraw.step(state, now, FRAME, at(math.min(SPEED * now, LENGTH)), room)
+			expect(state.phase == "HandBack").toBe(false)
+		end
+		-- The server's slam says the same stop: once its root is there, the body slides onto it.
+		RushDraw.wall(state, stop, Vector3.new(0, 3, -face), Vector3.zAxis)
+		RushDraw.rest(state, stop)
+		now += FRAME
+		RushDraw.step(state, now, FRAME, at(stop), room)
+		expect(state.phase).toBe("HandBack")
+	end)
+
+	it("the server's bend redraws the path from where the body is: no jump, its cue once at the bend", function()
+		local state = RushDraw.new(line(0))
+		body(state)
+		local now = 0
+		while now < 0.15 do
+			now += FRAME
+			RushDraw.step(state, now, FRAME, at(0))
+		end
+		-- A glance 6 studs down the line: on along a heading 30 degrees off it.
+		local bend = 6
+		local heading = Vector3.new(math.sin(math.rad(30)), 0, -math.cos(math.rad(30)))
+		local legs = RushWorld.line(Vector3.zero, Vector3.new(0, 0, -1))
+		table.insert(legs, { at = bend, from = Vector3.new(0, 0, -bend), heading = heading, facing = heading })
+		local before = state.drawn :: CFrame
+		RushDraw.turn(state, legs, "Glance", bend, Vector3.new(1, 3, -bend - 2), Vector3.new(-1, 0, 0))
+		local previous = before
+		local worst, cues = 0, 0
+		while now < 0.6 do
+			now += FRAME
+			local drawn = RushDraw.step(state, now, FRAME, at(0)) :: CFrame
+			worst = math.max(worst, (drawn.Position - previous.Position).Magnitude)
+			previous = drawn
+			for _, cue in RushDraw.takeCues(state) do
+				cues += 1
+				expect(cue.kind).toBe("Glance")
+				expect(state.along).toBeGreaterThanOrEqual(bend - RushWorld.SAME_STUDS)
+			end
+		end
+		expect(cues).toBe(1)
+		expect(worst).toBeLessThanOrEqual((1 + TUNING.catchUpFraction) * FRAME_TRAVEL + EPSILON)
+		-- On the bent path, facing its way.
+		local spot = RushWorld.pointAt(legs, state.along)
+		expect(((previous.Position - spot) * Vector3.new(1, 0, 1)).Magnitude).toBeLessThan(1e-3)
+		expect(previous.LookVector:Dot(heading)).toBeCloseTo(1, 1e-3)
+	end)
+
+	it("the server's bend drops a slam this client guessed at the same wall", function()
+		local state = RushDraw.new(line(0))
+		body(state)
+		RushDraw.wall(state, 4, Vector3.new(0, 3, -9.6), Vector3.zAxis, true)
+		expect(state.limit).toBe(4)
+		local legs = RushWorld.line(Vector3.zero, Vector3.new(0, 0, -1))
+		table.insert(legs, { at = 4, from = Vector3.new(0, 0, -4), heading = Vector3.xAxis, facing = Vector3.xAxis })
+		RushDraw.turn(state, legs, "Glance", 4, Vector3.new(0, 3, -9.6), Vector3.zAxis)
+		expect(state.limit).toBeNil()
+		expect(state.walled).toBe(false)
+		for _, cue in state.cues do
+			expect(cue.kind).toBe("Glance")
+		end
+		-- A slam the server told stands whatever bend follows.
+		local told = RushDraw.new(line(0))
+		RushDraw.wall(told, 4, nil, nil)
+		RushDraw.turn(told, legs, "Glance", 4, Vector3.new(0, 3, -9.6), Vector3.zAxis)
+		expect(told.limit).toBeCloseTo(4, 1e-6)
+	end)
+
+	-- The ground: a ramp rising `degrees` from 4 studs down the line, or a step `rise` high 6 down it.
+	local function rampGround(degrees: number): (along: number) -> number
+		return function(along: number): number
+			return math.max(0, along - 4) * math.tan(math.rad(degrees))
+		end
+	end
+	local function stepGround(rise: number): (along: number) -> number
+		return function(along: number): number
+			return if along >= 6 then rise else 0
+		end
+	end
+
+	for _, case in
+		{
+			{ name = "an 8 degree ramp", ground = rampGround(8) },
+			{ name = "a 15 degree ramp", ground = rampGround(15) },
+			{ name = "a 1 stud step", ground = stepGround(1) },
+			{ name = "a 1 stud drop", ground = stepGround(-1) },
+		}
+	do
+		for _, lag in { 0, 0.25, 0.5 } do
+			it(
+				("%s, the root %.2f s late: drawn standing on the ground under it, never in it"):format(case.name, lag),
+				function()
+					local heightAt = case.ground
+					local state = RushDraw.new(line(0))
+					body(state)
+					local probe = function(spot: Vector3): number?
+						return heightAt(-spot.Z)
+					end
+					local now = 0
+					local deepest, highest = 0, 0
+					local landed = false
+					while now < 1.4 and state.phase ~= "Done" do
+						now += FRAME
+						local rootAlong = math.clamp(SPEED * (now - lag), 0, LENGTH)
+						local root = CFrame.lookAt(
+							Vector3.new(0, heightAt(rootAlong) + HOVER, -rootAlong),
+							Vector3.new(0, heightAt(rootAlong) + HOVER, -rootAlong - 1)
+						)
+						local drawn = RushDraw.step(state, now, FRAME, root, nil, probe)
+						if drawn ~= nil and state.phase ~= "HandBack" then
+							local floor = heightAt(-drawn.Position.Z) + HOVER
+							deepest = math.max(deepest, floor - drawn.Position.Y)
+							highest = math.max(highest, drawn.Position.Y - floor)
+							landed = landed or drawn.Position.Y - floor < 1e-6
+						end
+					end
+					-- Never sunk into it; up a rise at once; down a drop under gravity, so above it only
+					-- while it falls (a stud takes sqrt(2 / fallGravity) seconds).
+					expect(deepest).toBeLessThan(1e-6)
+					if heightAt(10) >= 0 then
+						expect(highest).toBeLessThan(1e-6)
+					else
+						expect(highest).toBeLessThanOrEqual(1 + 1e-6)
+						expect(landed).toBe(true)
+					end
+				end
+			)
+		end
+	end
+end)
+
 -- ---------------------------------------------------------------------------------------------
 -- The real path
 -- ---------------------------------------------------------------------------------------------
@@ -462,7 +653,7 @@ local function recorder(calls: { any }, name: string): any
 	return setmetatable({}, {
 		__index = function(_self: any, key: string): any
 			return function(...: any): any
-				table.insert(calls, { module = name, fn = key, args = { ... } })
+				table.insert(calls, { module = name, fn = key, args = { ... }, at = clock })
 				return nil
 			end
 		end,
@@ -535,6 +726,8 @@ type Options = {
 	wall: number?, -- a wall's face this far down the line, which the client's world cast sees
 	wallNormal: Vector3?, -- the face's normal the cast reports (default: none named)
 	gait: boolean?, -- the real locomotion driver walks the rig (Replication.watch)
+	wallSlam: any?, -- the slam's dust (Replication's wallSlam dependency; none when nil)
+	me: Vector3?, -- where the local player's body stands (default: the world's origin)
 }
 
 local WIND_UP_START = 10
@@ -670,8 +863,8 @@ local function rush(options: Options): Run
 		trailToken = function(): string
 			return "TrailCyanWhite"
 		end,
-		positionOf = function(): Vector3
-			return Vector3.zero
+		positionOf = function(target: Instance): Vector3
+			return if target == me and options.me ~= nil then options.me else Vector3.zero
 		end,
 		schedule = function() end,
 		now = function(): number
@@ -681,6 +874,7 @@ local function rush(options: Options): Run
 			return clock
 		end,
 		worldCast = if options.wall ~= nil then wallCast(options.wall, casts, options.wallNormal) else nil,
+		wallSlam = options.wallSlam,
 	} :: any)
 	if options.gait then
 		Replication.watch(record)
@@ -1066,7 +1260,10 @@ describe("a Boar's rush through Replication and Choreo (D-171, item 1)", functio
 end)
 
 describe("a Boar's rush into a wall through Replication and Choreo (D-199)", function()
-	-- The root's half length: the server's body stops this far short of the wall's face (D-197).
+	-- The root's half length: a server body only its root's box stopped (a wall its own cast missed,
+	-- told late as Jammed) stands this far short of the wall's face (D-197). This client's cast still
+	-- stops the drawn snout on the face (D-205) and never draws it past the server's stop; the hand-back
+	-- waits for the server's word, not the root running past this client's own stop.
 	local REACH = 2.5
 	for _, face in { 6, 8, 10 } do
 		for _, lag in { 0, 0.25, 0.5 } do
@@ -1152,6 +1349,360 @@ describe("a Boar's rush into a wall through Replication and Choreo (D-199)", fun
 			for index, frame in open.frames do
 				expect(frame.along).toBe(plain.frames[index].along)
 			end
+		end
+	end)
+end)
+
+describe("a Boar's slam drawn through Replication and Choreo (D-205, D-208, D-210)", function()
+	local WORLD = AI.rushWorld
+	local FRONT: number = EnemyService.bodyExtents(RigBuilder.build("Boar"))
+	-- What the server says of a slam into a wall `face` studs down the line: "Wall" as soon as its cast
+	-- sees the face (lookAheadStuds past the clock's snout), with the body's stop (its snout on the
+	-- face) and where it meets the face; then, once the timeline brings the snout there, the daze's
+	-- Stagger from the front and the stop that ends the rush, at that same distance.
+	local function slam(face: number): { any }
+		local stop = face - FRONT
+		local seen = math.max(0, (stop - WORLD.lookAheadStuds) / SPEED)
+		local dazed = stop / SPEED
+		return {
+			{
+				at = seen,
+				name = "RushEnded",
+				payload = {
+					entityId = 5,
+					launchedAt = LAUNCH,
+					serverTime = LAUNCH + seen,
+					distance = stop,
+					reason = "Wall",
+					contact = vec(ORIGIN + DIRECTION * face),
+					normal = vec(-DIRECTION),
+				},
+			},
+			{
+				at = dazed,
+				name = "StateChanged",
+				payload = { entityId = 5, state = "Stagger", duration = WORLD.slamDazeSeconds, direction = "Front" },
+			},
+			{
+				at = dazed,
+				name = "RushEnded",
+				payload = {
+					entityId = 5,
+					launchedAt = LAUNCH,
+					serverTime = LAUNCH + dazed,
+					distance = stop,
+					reason = "Interrupted",
+				},
+			},
+		}
+	end
+
+	-- The rush with the rushContact cues it fired: the frame (server time since the launch) and what.
+	type Cue = { t: number, kind: string, point: Vector3, normal: Vector3 }
+	local function watched(options: Options): (Run, { Cue })
+		local cues: { Cue } = {}
+		local connection = Replication.rushContact:Connect(
+			function(_record, kind: string, point: Vector3, normal: Vector3)
+				table.insert(cues, { t = clock - LAUNCH, kind = kind, point = point, normal = normal })
+			end
+		)
+		local run = rush(options)
+		connection:Disconnect()
+		return run, cues
+	end
+
+	-- Every wall this client's world has too, at every lag; one only the server's world has, when its
+	-- word comes before the drawn snout gets there (it is sent lookAheadStuds ahead of the clock).
+	local cases: { { face: number, lag: number, seen: boolean } } = {}
+	for _, face in { 6, 8, 10 } do
+		for _, lag in { 0, 0.25, 0.5 } do
+			table.insert(cases, { face = face, lag = lag, seen = true })
+		end
+		table.insert(cases, { face = face, lag = 0, seen = false })
+	end
+	table.insert(cases, { face = 14, lag = 0.1, seen = false })
+	for _, case in cases do
+		local face, lag, seen = case.face, case.lag, case.seen
+		it(
+			("the snout is drawn onto the face and no further, its cue on that frame (wall %d studs, %.2f s late, %s)"):format(
+				face,
+				lag,
+				if seen then "this client sees it too" else "the server's word alone"
+			),
+			function()
+				local stop = face - FRONT
+				local run, cues = watched({
+					latency = lag,
+					lag = lag,
+					stopAt = stop,
+					wall = if seen then face else nil,
+					events = slam(face),
+				})
+				-- Flush: drawn to the stop (the snout on the face), never past it.
+				local farthest, reachedAt = -math.huge, nil
+				for _, frame in run.frames do
+					farthest = math.max(farthest, frame.along)
+					if reachedAt == nil and frame.along >= stop - EPSILON then
+						reachedAt = frame.t
+					end
+				end
+				expect(farthest).toBeLessThanOrEqual(stop + EPSILON)
+				expect(farthest).toBeGreaterThan(stop - EPSILON)
+				-- On the timeline: there no later than a frame after the server's body.
+				expect(reachedAt).never.toBeNil()
+				expect((reachedAt :: number) - stop / SPEED).toBeLessThanOrEqual(FRAME + EPSILON)
+				-- One slam cue, on the frame the snout reaches the face, where the face is.
+				expect(#cues).toBe(1)
+				expect(cues[1].kind).toBe("Slam")
+				expect(cues[1].t).toBeCloseTo(reachedAt :: number, EPSILON)
+				local at = (cues[1].point - ORIGIN):Dot(DIRECTION)
+				expect(at).toBeCloseTo(face, 1e-2)
+				expect(cues[1].normal:Dot(-DIRECTION)).toBeCloseTo(1, 1e-3)
+				-- Nothing jumps, the daze and the RushEnded included; it ends on its root, shown.
+				local starts, ends, worst = steps(run)
+				expect(starts).toBeLessThanOrEqual(FRAME_TRAVEL + EPSILON)
+				expect(ends).toBeLessThanOrEqual(FRAME_TRAVEL + EPSILON)
+				expect(worst).toBeLessThanOrEqual(FRAME_TRAVEL + EPSILON)
+				local last = run.frames[#run.frames]
+				expect(last.offset).toBe(false)
+				expect(last.hidden).toBe(0)
+				expect(last.along).toBeCloseTo(stop, EPSILON)
+			end
+		)
+	end
+
+	-- The slam's cue (D-217): the dust and the stone thud where the snout meets the face, on the
+	-- frame it gets there and once; the camera shakes only when that is near the local player.
+	local slamCases: { { lag: number, seen: boolean } } = {
+		{ lag = 0, seen = true },
+		{ lag = 0.25, seen = true },
+		{ lag = 0.5, seen = true },
+		{ lag = 0, seen = false },
+	}
+	for _, case in slamCases do
+		for _, near in { true, false } do
+			it(
+				("plays the slam's dust and thud once at the contact on the stop frame, %s (%.2f s late, %s)"):format(
+					if near then "shaking the camera near the local player" else "no shake far from the local player",
+					case.lag,
+					if case.seen then "this client sees the wall" else "the server's word alone"
+				),
+				function()
+					local SLAM = Fx.wallSlam
+					local face = 8
+					local stop = face - FRONT
+					local contact = ORIGIN + DIRECTION * face
+					local dust: { { at: number, point: Vector3, normal: Vector3 } } = {}
+					local run, cues = watched({
+						latency = case.lag,
+						lag = case.lag,
+						stopAt = stop,
+						wall = if case.seen then face else nil,
+						events = slam(face),
+						wallSlam = {
+							slam = function(point: Vector3, normal: Vector3): number
+								table.insert(dust, { at = clock, point = point, normal = normal })
+								return 0
+							end,
+						},
+						me = contact - DIRECTION * (if near then SLAM.shakeRadius - 1 else SLAM.shakeRadius + 1),
+					})
+					expect(#cues).toBe(1)
+					local cue = cues[1]
+					expect(cue.kind).toBe("Slam")
+					-- The dust: once, on the cue's frame, at the cue's point, thrown off the face.
+					expect(#dust).toBe(1)
+					expect(dust[1].at - LAUNCH).toBeCloseTo(cue.t, EPSILON)
+					expect((dust[1].point - cue.point).Magnitude).toBeLessThan(EPSILON)
+					expect(dust[1].normal:Dot(cue.normal)).toBeCloseTo(1, 1e-6)
+					-- The thud: the slam's cue, once, on that frame, at that point.
+					local thuds, shakes = {}, {}
+					for _, call in run.calls do
+						if call.module == "sfx" and call.fn == "cue" and call.args[1] == SLAM.cue then
+							table.insert(thuds, call)
+						elseif call.module == "camera" and call.fn == "shake" then
+							table.insert(shakes, call)
+						end
+					end
+					expect(#thuds).toBe(1)
+					expect(thuds[1].at - LAUNCH).toBeCloseTo(cue.t, EPSILON)
+					expect((thuds[1].args[2] - cue.point).Magnitude).toBeLessThan(EPSILON)
+					if near then
+						expect(#shakes).toBe(1)
+						expect(shakes[1].args[1]).toBe(SLAM.shakeTier)
+						expect(shakes[1].at - LAUNCH).toBeCloseTo(cue.t, EPSILON)
+					else
+						expect(#shakes).toBe(0)
+					end
+				end
+			)
+		end
+	end
+
+	-- The slam's "Wall" is unreliable (D-210): lost, or heard after the daze's Stagger (StateChanged is
+	-- reliable), on a link quick enough that the daze comes on the frame the drawn snout gets to the
+	-- face. This client's own cast found that face, so the daze is its slam's (D-218): the snout is
+	-- still drawn onto it and the slam plays there, once, wherever the launch falls in its frame.
+	for _, word in { "lost", "late" } do
+		for _, case in { { latency = 0, phase = 0 }, { latency = 0, phase = 0.5 }, { latency = 1 / 120, phase = 0.25 } } do
+			it(
+				("the daze heard before the slam's word (%s, %.3f s late, launch %.2f into its frame) still draws the snout onto the face and plays the slam once"):format(
+					word,
+					case.latency,
+					case.phase
+				),
+				function()
+					local face = 8
+					local stop = face - FRONT
+					local events = slam(face)
+					local wallWord: any = table.remove(events, 1) :: any
+					if word == "late" then
+						wallWord.at = events[1].at + 0.2
+						table.insert(events, wallWord)
+					end
+					local run, cues = watched({
+						latency = case.latency,
+						lag = case.latency,
+						stopAt = stop,
+						wall = face,
+						events = events,
+						phase = case.phase,
+					})
+					local farthest, reachedAt = -math.huge, nil
+					for _, frame in run.frames do
+						farthest = math.max(farthest, frame.along)
+						if reachedAt == nil and frame.along >= stop - EPSILON then
+							reachedAt = frame.t
+						end
+					end
+					expect(farthest).toBeLessThanOrEqual(stop + EPSILON)
+					expect(reachedAt).never.toBeNil()
+					expect((reachedAt :: number) - stop / SPEED).toBeLessThanOrEqual(FRAME + EPSILON)
+					expect(#cues).toBe(1)
+					expect(cues[1].kind).toBe("Slam")
+					expect(cues[1].t).toBeCloseTo(reachedAt :: number, EPSILON)
+					expect(((cues[1].point - ORIGIN):Dot(DIRECTION))).toBeCloseTo(face, 1e-2)
+					local _starts, _ends, worst = steps(run)
+					expect(worst).toBeLessThanOrEqual(FRAME_TRAVEL + EPSILON)
+				end
+			)
+		end
+	end
+
+	-- A Stagger mid-rush, short of a face this client's cast found, still holds the body where it is
+	-- drawn: only a daze the timeline had brought the snout to the face by is the slam's.
+	it("a Stagger heard short of a face this client's cast found holds the body where it is drawn", function()
+		local face = 10
+		local stop = face - FRONT
+		local hold = stop / SPEED - 4 * FRAME
+		local run, cues = watched({
+			latency = 0,
+			lag = 0,
+			stopAt = SPEED * hold,
+			wall = face,
+			events = {
+				{
+					at = hold,
+					name = "StateChanged",
+					payload = { entityId = 5, state = "Stagger", duration = 1, direction = "Front" },
+				},
+			},
+		})
+		-- On the Stagger's frame it stands where it was drawn on the frame before (not a frame on
+		-- toward the face), then slides back onto its root, never near the face.
+		local farthest, held, onHalt = -math.huge, nil, nil
+		for _, frame in run.frames do
+			farthest = math.max(farthest, frame.along)
+			if frame.t < hold - EPSILON then
+				held = frame.along
+			elseif onHalt == nil then
+				onHalt = frame.along
+			end
+		end
+		expect(held).never.toBeNil()
+		expect(onHalt).never.toBeNil()
+		expect(onHalt :: number).toBeLessThanOrEqual((held :: number) + EPSILON)
+		expect(farthest).toBeLessThan(stop - 2 * FRAME_TRAVEL)
+		expect(#cues).toBe(0)
+	end)
+
+	it("the server's sidestep (RushTurned) draws the body on its path, its cue once at the sidestep's end", function()
+		local right = Vector3.new(-DIRECTION.Z, 0, DIRECTION.X)
+		local flatOrigin = ORIGIN * Vector3.new(1, 0, 1)
+		local side = DIRECTION * 3 + right * 0.75
+		local back = 3 + side.Magnitude
+		local function leg(at: number, from: Vector3, heading: Vector3): any
+			return { at = at, from = vec(from), heading = vec(heading), facing = vec(DIRECTION) }
+		end
+		local legs = {
+			leg(0, flatOrigin, DIRECTION),
+			leg(3, flatOrigin + DIRECTION * 3, side.Unit),
+			leg(back, flatOrigin + DIRECTION * 3 + side, DIRECTION),
+		}
+		local dust = 0
+		local run, cues = watched({
+			latency = 0.05,
+			lag = 0.25,
+			wallSlam = {
+				slam = function(): number
+					dust += 1
+					return 0
+				end,
+			},
+			events = {
+				{
+					at = 0.02,
+					name = "RushTurned",
+					payload = {
+						entityId = 5,
+						launchedAt = LAUNCH,
+						serverTime = LAUNCH + 0.02,
+						kind = "Clip",
+						at = back,
+						legs = legs,
+						contact = vec(ORIGIN + DIRECTION * 12 + right * 1),
+						normal = vec(-DIRECTION),
+					},
+				},
+			},
+		})
+		-- Beside the line by the sidestep once past it, while the run lasts; no jump on the way.
+		local beside = false
+		for _, frame in run.frames do
+			if frame.t > (back + 2) / SPEED and frame.t < CHARGE.strike and frame.offset then
+				local lateral = ((frame.drawn - ORIGIN) * Vector3.new(1, 0, 1)):Dot(right)
+				expect(lateral).toBeCloseTo(0.75, 1e-3)
+				beside = true
+			end
+		end
+		expect(beside).toBe(true)
+		local _, _, worst = steps(run)
+		expect(worst).toBeLessThanOrEqual((1 + TUNING.catchUpFraction) * FRAME_TRAVEL + EPSILON)
+		expect(#cues).toBe(1)
+		expect(cues[1].kind).toBe("Clip")
+		-- A corner shouldered past is no slam: no dust, no thud, no shake (D-217).
+		expect(dust).toBe(0)
+		for _, call in run.calls do
+			expect(call.module == "sfx" and call.fn == "cue" and call.args[1] == Fx.wallSlam.cue).toBe(false)
+			expect(call.module == "camera" and call.fn == "shake").toBe(false)
+		end
+	end)
+
+	it("this client's own cast stops the snout on the face before the server's word comes", function()
+		-- The server's Wall lost on the way: the drawn body still stops flush, and its cue still plays.
+		for _, face in { 8, 10 } do
+			local stop = face - FRONT
+			local events = slam(face)
+			table.remove(events, 1)
+			local run, cues = watched({ latency = 0.25, lag = 0.25, stopAt = stop, wall = face, events = events })
+			local farthest = -math.huge
+			for _, frame in run.frames do
+				farthest = math.max(farthest, frame.along)
+			end
+			expect(farthest).toBeLessThanOrEqual(stop + EPSILON)
+			expect(farthest).toBeGreaterThan(stop - EPSILON)
+			expect(#cues).toBe(1)
+			expect(cues[1].kind).toBe("Slam")
 		end
 	end)
 end)

@@ -32,7 +32,7 @@ Harness.stubService("RunService", {
 	RenderStepped = fakeSignal(),
 	Heartbeat = fakeSignal(),
 	PreSimulation = fakeSignal(),
-	-- Choreo's rig step (bound just before the camera's): the spec steps the rigs itself.
+	-- Choreo's rig step (bound before every reader of a pose, D-211): the spec steps the rigs itself.
 	BindToRenderStep = function() end,
 	UnbindFromRenderStep = function() end,
 })

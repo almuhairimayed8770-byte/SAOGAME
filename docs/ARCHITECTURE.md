@@ -752,6 +752,46 @@ the sweep.
 - **shared/data/ai**: `collision.groundSlopeDegrees` (45); the comment on archetypes.Charger.jamLagStuds is rewritten (the value stays 4).
 - **tools/validators/ai**: groundSlopeDegrees must be a number below 90 and at least each Charger rig's atan(hipHeight / half its root's length).
 
+### Wall slams and frame order (D-205 to D-218)
+
+- **Module list.**
+  - Under src/shared/, add `choreo/RushWorld.luau        pure rules for a rush meeting the world: path legs, body outline, ground, Slam / Glance / Clip contact (D-205 to D-209)`.
+  - After line 60 (fx/AccentStep), add `fx/FrameOrder.luau           the client's render order: named bound steps that pose readers join (D-211)` and `fx/WallSlam.luau             the pooled dust a rush's slam throws off a wall (D-217)`.
+- **src/shared/choreo/RushWorld.luau:** pure shared rules for a rush meeting the world. Covers:
+  - path legs: line, legIndex, pointAt, timeAt, sameLegs, SAME_STUDS;
+  - the body outline: profileOf, front;
+  - ground: isGround, groundBelow, climbable, runsOver;
+  - contact: Slam / Glance / Clip, lookLimit.
+  - Used by Charger, EnemyService, RushDraw and Replication.
+- **Remotes:** new RushTurned (Unreliable, ServerToClient: kind, at, legs up to ai.rushWorld.maxLegs, contact, normal). RushEnded gains reason "Wall" and optional contact and normal. After a Jammed or Wall, the interrupt that ends the rush is sent once more as RushEnded (D-210).
+- **server/ai/Brain:** Context gains bodyProfile, rushTurned and daze. worldAhead gains an offset and returns the face normal. Brain.frame() runs the rush's look every server frame.
+- **client/choreo/RushDraw:**
+  - setBody(state, body, hover), ground(spot, cast, model), wall(state, distance, contact, normal), rest(state, distance), takeCues(state).
+  - step(state, now, dt, root, room?, ground?).
+  - halt(state, now) is ignored once a stop is told. With no stop told, it goes onto a face the own cast found and the timeline reached (D-218).
+- **client/controllers/Replication:**
+  - rushContact is a Signal fired as (record, kind "Slam", "Glance" or "Clip", point, normal) on the frame the drawn body reaches the contact. It fires in stepRush, inside Choreo's rig step (199).
+  - A Slam also runs slamCue: WallSlam dust, sfx cue fx.wallSlam.cue at the point, and camera.shake(shakeTier) when the local body is within shakeRadius (D-217).
+  - Deps gains wallSlam.
+- **client/fx/WallSlam:** one anchored, invisible, non-colliding part with a world-space ParticleEmitter in workspace folder WallSlamDust.
+  - start() builds it.
+  - slam(point, normal) moves it to the point, faces it along the flat normal, and emits count(particleScale) puffs through Bursts.
+  - count(scale) and emitter() are seams for specs.
+  - No FlashBudget charge (lightEmission 0).
+- **client/fx/FrameOrder:**
+  - join(name, row, fn) returns leave, or nil under Lune. prepare(name, row) returns a boolean.
+  - priority(row) returns the Enum.RenderPriority value of base plus offset.
+  - Steps are bound once and stay bound. Callbacks run in join order, each in its own pcall. No per-frame allocation.
+- **Start order (line 344):** add fx.WallSlam after fx.Sparks.
+- **Lines 99–100:** replace with "ImpactFrames runs in the render step `impact.overlay.renderStepName` (`SkyspireImpactFrames`) at fx.luau renderOrder.impactFrames (Character+3, 303). It is joined through FrameOrder and bound from ImpactFrames.start. No other module reuses that name."
+- **Line 467:** Trails' Heartbeat now runs only the watchdog, the fades and the re-rank; blade samples run in SkyspirePoseReaders (304). Choreo steps its full-rate rigs in SkyspireRigs (D-201), not on RenderStepped.
+- **Lines 580–582 (Frame order):** replace with:
+  - "SkyspireRigs 199 → CharacterController 301 (Choreo.stepLocal → root motion → stepContacts → Replication.contact) → SkyspireCamera 302 → SkyspireImpactFrames 303 → SkyspirePoseReaders 304 → SkyspireCameraLate and FrameClock's end at 2000, tied (D-211)."
+  - "The contact frame shows the contact pose, the sound, the flash, the impact picture's first frame and the camera's nudge, shake and kick. The hit-stop freezes the steps after it."
+- **Line 652:** "two render steps: SkyspireCamera at camera.luau renderOrder.main (Character+2, 302) and SkyspireCameraLate at renderOrder.late (Last)".
+- **Line 722 (Client frame order):** "FrameClock (First) → SkyspireRigs 199 → SkyspireCharacter 301 (controller, contact) → SkyspireCamera 302 → SkyspireImpactFrames 303 → SkyspirePoseReaders 304 (Trails) → SkyspireCameraLate and FrameClock (Last), tied at 2000. The priorities are data rows in choreo, camera and fx .luau renderOrder (D-211)."
+- **Line 724:** "`renderPriority()` reads choreo.luau renderOrder.rigs (Camera − 1)."
+
 ## Data tables (src/shared/data)
 
 | File | Holds |

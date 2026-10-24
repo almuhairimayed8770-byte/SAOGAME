@@ -168,6 +168,30 @@ local Fx = {
 		folderName = "ParrySparks", -- the workspace folder that holds the pooled emitter part
 	},
 
+	-- A rush's slam on a wall (D-217): a puff of dust thrown off the face where the snout meets it,
+	-- the stone thud (sfx.cues[cue]) and, near the local player, a short shake. Dust is lit by the
+	-- scene and never glows (lightEmission 0), so a slam is no flash: it charges nothing against
+	-- the flash budget and plays the same with Reduce flashing on.
+	wallSlam = {
+		particles = 18, -- per slam before the quality tier's particleScale
+		size = { birth = 1.2, death = 3.6 }, -- studs: each puff billows as it fades
+		transparency = { birth = 0.35, death = 1 }, -- soft at birth, gone by the end of its life
+		lifetime = { min = 0.45, max = 0.9 }, -- seconds
+		speed = { min = 8, max = 18 }, -- studs per second at birth, off the face
+		spreadAngle = 70, -- degrees off the face's normal on both axes: the dust fans out along it
+		drag = 6, -- per second; the puff bursts out and hangs
+		gravity = 3, -- studs per second squared: the dust settles slowly
+		rotation = 180, -- degrees; each puff starts at a random turn within this either way
+		rotSpeed = 90, -- degrees per second; each puff turns at a random rate within this either way
+		lightEmission = 0, -- dust, never light: a glow here would be a flash outside the budget
+		token = "ShatterSilver", -- a pale stone grey
+		emitterSize = 0.2, -- studs; the invisible anchored part the burst leaves from
+		folderName = "WallSlamDust", -- the workspace folder that holds the pooled emitter part
+		cue = "WallSlam", -- sfx.cues: the stone hit, the body's weight and the sub
+		shakeTier = "Normal", -- camera.luau shake amplitude (combat.cameraShakeStuds) of a near slam
+		shakeRadius = 24, -- studs from the local player's body inside which a slam shakes the camera
+	},
+
 	-- Telegraphs (section 11): Highlight fill on the weapon plus a flat ground decal.
 	telegraph = {
 		fillToken = { Normal = "TelegraphWhite", Unblockable = "TelegraphRed", GuardBreak = "TelegraphYellow" },
@@ -328,6 +352,18 @@ local Fx = {
 			rimFloor = 0.2, -- the rim wind's gain deep inside the island: faint, never gone
 			rimEasing = "QuadIn", -- the wind rises slowly at first and fastest near the edge
 		},
+	},
+
+	-- Where the effects that read a rig's pose run in the frame (D-211): an Enum.RenderPriority
+	-- name and an offset from its value, after the rigs, the character and the camera
+	-- (choreo.luau and camera.luau renderOrder), so they read the pose, the root and the view
+	-- this frame draws, in the same order on every machine. The steps stay bound (FrameOrder).
+	renderOrder = {
+		-- The impact picture (impact.luau overlay.renderStepName): the camera and the frozen bodies
+		-- copied into its figures, and a picture played at the contact counted from that frame (303).
+		impactFrames = { base = "Character", offset = 3 },
+		-- The pose readers (SkyspirePoseReaders): Trails samples every blade tip where it is drawn (304).
+		poseReaders = { base = "Character", offset = 4 },
 	},
 }
 

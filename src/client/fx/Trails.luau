@@ -28,12 +28,16 @@
 	swinging, the farthest from the viewer are disabled first. Trails past the tier's distance
 	stay off. Every instance is reused; nothing is created per frame.
 
-	`swingDirection(model)`: every Heartbeat the module records each tracked blade tip's
+	`swingDirection(model)`: every rendered frame the module records each tracked blade tip's
 	(TrailEnd's) WorldPosition in a short ring (accents.swing.samples long; only a swinging rig,
 	or an idle one within accents.swing.sampleDistance, and never a weapon that left the world; a
-	rig skipped for a frame starts its ring over) and answers with
-	the unit motion from the oldest of those samples to the newest, or nil when the tip moved
-	less than accents.swing.minTravel (or jumped more than maxTravel: a respawn, a teleport).
+	rig skipped for a frame starts its ring over). It reads the tip where that frame draws it: the
+	sample runs in the pose readers' render step (fx.luau renderOrder.poseReaders, D-211), after
+	Choreo's rigs and the local character's step have posed and moved every body and before the
+	draw, never on Heartbeat, where a remote's root has already moved on under last frame's pose.
+	It answers with the unit motion from the oldest of those samples to the newest, or nil when
+	the tip moved less than accents.swing.minTravel (or jumped more than maxTravel: a respawn, a
+	teleport).
 	The snap: when a strike begins (an Art or Basic kind turns on: TrailOn, or a HitWindowOpen,
 	which opens with the snap), the tip's chord over its first accents.swing.snapFrames (the
 	smear's two snap frames, section 10 beat 3) is kept with its time: the chord from the tip's
@@ -56,8 +60,11 @@
 	render step clears each trail again before it lights what is still on, so a swing that goes
 	on past the wake starts where its blade is. On a frame that does run the render step, the
 	jump's TrailOff (Replication closes it) puts the trail out inside the step, before the frame
-	draws. A stall shorter than a jump is a long frame and changes nothing. The render step, the
-	watchdog, the clock and Trail:Clear() sit behind `bind`, so specs drive them by hand.
+	draws. A stall shorter than a jump is a long frame and changes nothing. Nothing is sampled while
+	no frame renders, and no chord spans the gap: a rig's first sample more than a jump after its
+	last starts its ring over, and a strike begun before the gap loses its snap (one begun on the
+	wake frame measures its snap from that frame's sample). The render step, the watchdog, the
+	clock and Trail:Clear() sit behind `bind`, so specs drive them by hand.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -71,8 +78,8 @@ local Weapons = require(Shared.data.weapons)
 local Easing = require(Shared.util.Easing)
 local Assets = require(Shared.data.assets)
 local Engine = require(script.Parent.Engine)
-local AccentStep = require(script.Parent.AccentStep)
 local FrameClock = require(script.Parent.FrameClock)
+local FrameOrder = require(script.Parent.FrameOrder)
 local Quality = require(script.Parent.Quality)
 local OutlineManager = require(script.Parent.OutlineManager)
 
@@ -82,7 +89,7 @@ export type StepFn = (dt: number) -> ()
 
 export type Deps = {
 	now: () -> number, -- the watchdog's clock
-	onRender: (fn: StepFn) -> () -> (), -- the render step (RenderStepped); returns its disconnect
+	onRender: (fn: StepFn) -> () -> (), -- the pose readers' render step (FrameOrder); returns its leave
 	onWatch: (fn: StepFn) -> () -> (), -- Heartbeat (runs while nothing renders); returns its disconnect
 	clear: (trail: Trail) -> (), -- Trail:Clear(): drops every segment drawn so far
 }
@@ -117,6 +124,7 @@ type Entry = {
 	tips: { Vector3 }, -- ring of the tip's last world positions
 	tipHead: number, -- index of the newest sample in `tips`
 	tipCount: number, -- samples recorded so far (at most SWING_SAMPLES)
+	sampledAt: number, -- Engine.now() of the newest sample
 	lastSwing: Vector3?, -- the last good direction sampled while a trail kind was on
 	lastSwingAt: number, -- Engine.now() of that sample
 	strikeAt: number?, -- Engine.now() when the strike began (an Art or Basic kind turned on)
@@ -137,10 +145,16 @@ local function engineClear(trail: Trail)
 	end)
 end
 
+-- The pose readers' render step (FrameOrder.POSE_READERS at fx.luau renderOrder.poseReaders):
+-- after every step that poses or moves a body, before the draw. A no-op leave under Lune.
+local function poseReaders(fn: StepFn): () -> ()
+	return FrameOrder.join(FrameOrder.POSE_READERS, Fx.renderOrder.poseReaders, fn) or function() end
+end
+
 local function defaults(overrides: Overrides?): Deps
 	local deps: Deps = {
 		now = Engine.now,
-		onRender = AccentStep.renderStepped,
+		onRender = poseReaders,
 		onWatch = Engine.onHeartbeat,
 		clear = engineClear,
 	}
@@ -436,6 +450,7 @@ function Trails.attach(model: Instance): boolean
 		tips = {},
 		tipHead = 0,
 		tipCount = 0,
+		sampledAt = 0,
 		lastSwing = nil,
 		lastSwingAt = 0,
 		strikeAt = nil,
@@ -618,11 +633,13 @@ local function measureSnap(entry: Entry, position: Vector3, at: number)
 	end
 end
 
---- Records each tracked blade tip's world position in its ring (Heartbeat runs it; specs call
---- it), and remembers the direction of a rig that is swinging (a trail kind on). Only a rig whose
---- answer can matter is read: one swinging, or an idle one within accents.swing.sampleDistance of
---- the viewer; a weapon that left the world is never read. A rig not read this frame starts its
---- ring over, so no chord ever spans the frames it missed.
+--- Records each tracked blade tip's world position in its ring (the pose readers' render step
+--- runs it, so the tip is where this frame draws it; specs call it), and remembers the direction
+--- of a rig that is swinging (a trail kind on). Only a rig whose answer can matter is read: one
+--- swinging, or an idle one within accents.swing.sampleDistance of the viewer; a weapon that left
+--- the world is never read. A rig not read this frame starts its ring over, and so does one read
+--- more than choreo.luau stall.jumpSeconds after its last sample (a render stall): no chord ever
+--- spans the frames it missed.
 function Trails.sample()
 	local at = Engine.now()
 	local viewer = Engine.viewerPosition()
@@ -636,6 +653,17 @@ function Trails.sample()
 			continue
 		end
 		local position = entry.tip.WorldPosition
+		if entry.tipCount > 0 and at - entry.sampledAt > ChoreoData.stall.jumpSeconds then
+			-- Nothing rendered for longer than a jump: the ring starts over, a strike from before
+			-- the gap loses its snap, and one begun since measures from this sample.
+			entry.tipCount = 0
+			local strikeAt = entry.strikeAt
+			if strikeAt ~= nil and strikeAt <= entry.sampledAt then
+				entry.strikeAt = nil
+			end
+			entry.snapFrom = nil
+		end
+		entry.sampledAt = at
 		entry.tipHead = entry.tipHead % SWING_SAMPLES + 1
 		entry.tips[entry.tipHead] = position
 		entry.tipCount = math.min(entry.tipCount + 1, SWING_SAMPLES)
@@ -648,6 +676,16 @@ function Trails.sample()
 			measureSnap(entry, position, at)
 		end
 	end
+end
+
+--- The rig's newest blade tip sample (where the last rendered frame drew its tip); nil when its
+--- ring is empty or the rig is not tracked (specs).
+function Trails.lastSample(model: Instance): Vector3?
+	local entry = entries[model]
+	if entry == nil or entry.tipCount == 0 then
+		return nil
+	end
+	return entry.tips[entry.tipHead]
 end
 
 --- The unit direction the blade swung: the strike's snap inside accents.swing.memorySeconds,
@@ -720,15 +758,16 @@ local function connectLoops()
 	stopLoop = deps.onWatch(function(dt: number)
 		watchStall()
 		stepFades(dt)
-		Trails.sample()
 		sinceRank += dt
 		if sinceRank >= Fx.trail.rankInterval then
 			sinceRank = 0
 			rebalance()
 		end
 	end)
+	-- The pose readers' step: a stall's wake first, then every blade tip where this frame draws it.
 	stopRender = deps.onRender(function()
 		rendered()
+		Trails.sample()
 	end)
 end
 
@@ -743,8 +782,8 @@ local function disconnectLoops()
 	end
 end
 
---- Starts the periodic budget re-rank (rigs move), the render-stall watchdog and its render step,
---- and follows quality changes.
+--- Starts the periodic budget re-rank (rigs move), the render-stall watchdog, the render step
+--- (the stall's wake and the blade samples) and follows quality changes.
 function Trails.start()
 	if started then
 		return

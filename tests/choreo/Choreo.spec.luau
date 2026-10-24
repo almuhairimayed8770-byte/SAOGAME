@@ -258,11 +258,12 @@ local function count(list, value)
 end
 
 describe("Choreo", function()
-	it("steps its rigs in a render step bound just before the camera's, not on RenderStepped (D-201)", function()
+	it("steps its rigs in a render step bound before every pose reader, not on RenderStepped (D-201, D-211)", function()
 		local model = buildRig("Boar", Vector3.zero)
 		Choreo.get(model)
-		-- The camera (Camera priority) and the local controller's step and contact read
-		-- (Character + 1) come after it whatever order the engine runs RenderStepped in.
+		-- The local controller's step and contact read, the camera and the pose readers
+		-- (choreo.luau, camera.luau and fx.luau renderOrder) come after it whatever order the
+		-- engine runs RenderStepped in.
 		expect(connected).toBe(0)
 		expect(#bindings).toBe(1)
 		expect(bindings[1].name).toBe(Choreo.RENDER_STEP)

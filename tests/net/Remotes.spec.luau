@@ -1,6 +1,7 @@
 --!strict
 local Remotes = Harness.load("src/shared/net/Remotes")
 local World = Harness.load("src/shared/data/world")
+local AI = Harness.load("src/shared/data/ai")
 
 describe("Remotes", function()
 	it("every client-to-server remote has a rate limit and a strict schema", function()
@@ -124,6 +125,60 @@ describe("Remotes", function()
 		ended.reason = "Jammed"
 		ended.distance = -1
 		expect(Remotes.RushEnded.schema(ended)).toBe(false)
+	end)
+
+	it("a slam ends a rush with where the body meets the face (D-208)", function()
+		local ended: any = {
+			entityId = 4,
+			launchedAt = 120.5,
+			serverTime = 120.55,
+			distance = 2.4,
+			reason = "Wall",
+			contact = { 10, 2.3, -12 },
+			normal = { 0, 0, 1 },
+		}
+		expect(Remotes.RushEnded.schema(ended)).toBe(true)
+		-- The contact is optional (an old server, a stop with no face), a normal must be a unit.
+		ended.contact = nil
+		ended.normal = nil
+		expect(Remotes.RushEnded.schema(ended)).toBe(true)
+		ended.normal = { 0, 0, 3 }
+		expect(Remotes.RushEnded.schema(ended)).toBe(false)
+		ended.normal = { 0, 0, 1 }
+		ended.contact = { 0 / 0, 0, 0 }
+		expect(Remotes.RushEnded.schema(ended)).toBe(false)
+	end)
+
+	it("a rush's bend or sidestep is an unreliable message with its whole path (D-206, D-207)", function()
+		expect(Remotes.RushTurned.kind).toBe("Unreliable")
+		expect(Remotes.RushTurned.direction).toBe("ServerToClient")
+		local leg = function(at: number, z: number): any
+			return { at = at, from = { 0, 0, z }, heading = { 0, 0, -1 }, facing = { 0, 0, -1 } }
+		end
+		local turned: any = {
+			entityId = 4,
+			launchedAt = 120.5,
+			serverTime = 120.6,
+			kind = "Clip",
+			at = 7.2,
+			legs = { leg(0, 0), leg(3.4, -3.4), leg(6.5, -6.5) },
+			contact = { 0.7, 2.3, -12 },
+			normal = { 0, 0, 1 },
+		}
+		expect(Remotes.RushTurned.schema(turned)).toBe(true)
+		turned.kind = "Glance"
+		expect(Remotes.RushTurned.schema(turned)).toBe(true)
+		turned.kind = "Slam" -- a slam is a RushEnded
+		expect(Remotes.RushTurned.schema(turned)).toBe(false)
+		turned.kind = "Clip"
+		turned.legs[2].heading = { 0, 0, -2 }
+		expect(Remotes.RushTurned.schema(turned)).toBe(false)
+		turned.legs[2].heading = { 0, 0, -1 }
+		-- No more legs than a rush may run.
+		for index = #turned.legs + 1, AI.rushWorld.maxLegs + 1 do
+			turned.legs[index] = leg(index, -index)
+		end
+		expect(Remotes.RushTurned.schema(turned)).toBe(false)
 	end)
 
 	it("animation starts and telegraphs are unreliable, hits are reliable", function()

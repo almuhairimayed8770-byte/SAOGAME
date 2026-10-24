@@ -50,6 +50,7 @@ local Types = require(Shared.types)
 local AI = require(Shared.data.ai)
 local Enemies = require(Shared.data.enemies)
 local Rng = require(Shared.util.Rng)
+local RushWorld = require(Shared.choreo.RushWorld)
 
 export type Phase = "Idle" | "Alert" | "Chase" | "WindUp" | "Strike" | "Recover" | "Return" | "Interrupted" | "Dead"
 
@@ -66,12 +67,17 @@ export type Rush = {
 	origin: Vector3, -- the crouch point (where the root stood)
 	direction: Vector3, -- horizontal unit vector along the line
 	speed: number, -- studs per second
-	length: number, -- reach + overshoot
+	length: number, -- reach + overshoot, down its path
 	duration: number, -- length / speed
+	strike: number, -- the attack's strike beat (the timeline's skid starts there, RushWorld.distanceAt)
+	-- Its path (RushWorld): the line, then the bends a glancing wall and the sidesteps a clipped corner
+	-- add (D-206, D-207). Every distance down the rush is along it.
+	legs: { RushWorld.Leg },
 }
 
--- Why a rush stopped: "Done" when it ran its time, else one of the early reasons the clients hear.
-export type RushEnd = "Done" | Types.RushEndReason
+-- Why a rush stopped: "Done" when it ran its time, "Wall" when it slammed into one (D-205, D-208),
+-- else one of the early reasons the clients hear.
+export type RushEnd = "Done" | "Wall" | Types.RushEndReason
 
 export type Target = {
 	id: number,
@@ -108,16 +114,25 @@ export type Context = {
 	-- Studs the body reaches ahead of and behind its root along the facing (a rush sweeps it, D-166).
 	-- Nil: the root alone (0, 0).
 	bodyExtents: (() -> (number, number))?,
-	-- How far ahead of the root's centre along `direction` the world meets the root, within
-	-- `distance` studs, and whether that face is ground the root climbs (D-204); nil when nothing does
+	-- How far ahead of the root's centre along `direction` the world meets the root (its box moved
+	-- by `offset` first, when given), within `distance` studs, whether that face is ground the body
+	-- runs over (a slope or a step it climbs, D-204, D-209) and the face's normal; nil when nothing does
 	-- (D-197: a rush's line ends at the face). Nil: no world.
-	worldAhead: ((direction: Vector3, distance: number) -> (number?, boolean?))?,
+	worldAhead: ((direction: Vector3, distance: number, offset: Vector3?) -> (number?, boolean?, Vector3?))?,
+	-- The body a wall is judged on (its corners at rest and its root's size, RushWorld.profileOf):
+	-- a slam stops it with its leading corner on the face (D-205). Nil: the root's box alone.
+	bodyProfile: (() -> RushWorld.Body?)?,
 	-- How far the root's own box reaches ahead of its centre along `direction`: a root stopped by a
 	-- face that worldAhead found stands this far short of it (D-202). Nil: 0.
 	rootReach: ((direction: Vector3) -> number)?,
 	-- A rush launched / stopped (D-169): EnemyService switches collision groups and tells the clients.
 	rushStarted: ((rush: Rush) -> ())?,
-	rushEnded: ((rush: Rush, reason: RushEnd, distance: number) -> ())?,
+	-- `contact`: the slam that stopped it ("Wall": where the body meets the face, D-208).
+	rushEnded: ((rush: Rush, reason: RushEnd, distance: number, contact: RushWorld.Contact?) -> ())?,
+	-- The rush's path bent (a glance) or sidestepped (a clip): its legs changed (D-206, D-207).
+	rushTurned: ((rush: Rush, contact: RushWorld.Contact) -> ())?,
+	-- A slam dazes the body: EnemyService staggers it from the front for `seconds` (D-208).
+	daze: ((seconds: number) -> ())?,
 	-- Pushes the entity's timed state (the attack's Art) later by `seconds` (a hit-stop pause, D-168).
 	extendState: ((seconds: number) -> ())?,
 }
@@ -418,16 +433,31 @@ function Brain.bodyExtents(self: Brain): (number, number)
 	return extents()
 end
 
---- How far ahead of the root's centre along `direction` the world meets the body, within
---- `distance` studs, and whether that face is ground the root climbs (true) or a wall that stops it
---- (D-204); nil when nothing does or the context knows no world (D-197).
-function Brain.worldAhead(self: Brain, direction: Vector3, distance: number): (number?, boolean)
+--- How far ahead of the root's centre along `direction` the world meets the body (its box moved
+--- by `offset` first, when given), within `distance` studs, whether that face is ground the body
+--- runs over (true) or a wall (D-204, D-209), and the face's normal (nil: named no way); nil when
+--- nothing does or the context knows no world (D-197).
+function Brain.worldAhead(
+	self: Brain,
+	direction: Vector3,
+	distance: number,
+	offset: Vector3?
+): (number?, boolean, Vector3?)
 	local cast = self.context.worldAhead
 	if cast == nil or not (distance > 0) then
-		return nil, false
+		return nil, false, nil
 	end
-	local face, ground = cast(direction, distance)
-	return face, ground == true
+	local face, ground, normal = cast(direction, distance, offset)
+	return face, ground == true, normal
+end
+
+--- The body a wall is judged on (RushWorld.Body), or nil when the context knows none.
+function Brain.bodyProfile(self: Brain): RushWorld.Body?
+	local profile = self.context.bodyProfile
+	if profile == nil then
+		return nil
+	end
+	return profile()
 end
 
 --- How far the root's own box reaches ahead of its centre along `direction` (0 when the context
@@ -465,11 +495,28 @@ function Brain.rushStarted(self: Brain, rush: Rush)
 	end
 end
 
---- Tells EnemyService a rush stopped (`distance` studs down the line, as the body stands).
-function Brain.rushEnded(self: Brain, rush: Rush, reason: RushEnd, distance: number)
+--- Tells EnemyService a rush stopped (`distance` studs down its path, as the body stands or, for
+--- a wall, where it will stop; `contact` the slam's).
+function Brain.rushEnded(self: Brain, rush: Rush, reason: RushEnd, distance: number, contact: RushWorld.Contact?)
 	local hook = self.context.rushEnded
 	if hook ~= nil then
-		hook(rush, reason, distance)
+		hook(rush, reason, distance, contact)
+	end
+end
+
+--- Tells EnemyService a rush's path changed (a glance's bend, a clip's sidestep: rush.legs).
+function Brain.rushTurned(self: Brain, rush: Rush, contact: RushWorld.Contact)
+	local hook = self.context.rushTurned
+	if hook ~= nil then
+		hook(rush, contact)
+	end
+end
+
+--- Dazes the body for `seconds` (a slam, D-208): EnemyService staggers it, which interrupts the brain.
+function Brain.daze(self: Brain, seconds: number)
+	local hook = self.context.daze
+	if hook ~= nil then
+		hook(seconds)
 	end
 end
 

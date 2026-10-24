@@ -602,7 +602,8 @@ describe("A stopped rush never carries a player (D-190)", function()
 					walls,
 					{ model = boar, origin = origin, along = direction, at = face - rootHalf, face = face }
 				)
-				while phaseOf(boarId) ~= "Recover" and guard < 2000 do
+				-- Up to the recovery, or the slam's daze (D-208).
+				while phaseOf(boarId) ~= "Recover" and phaseOf(boarId) ~= "Interrupted" and guard < 2000 do
 					frame()
 					guard += 1
 				end
@@ -617,15 +618,18 @@ describe("A stopped rush never carries a player (D-190)", function()
 					hit[along] = count == 1
 				end
 				expect(front - rootHalf).toBeGreaterThan(2) -- the snout reaches well past the root's front
-				return hit, sentOf("RushEnded"), rootHalf
+				return hit, sentOf("RushEnded"), front
 			end
 			for _, face in { 8, 7.5 } do
-				local hit, ended, rootHalf = run(face)
+				local hit, ended, front = run(face)
 				expect(hit).toEqual({ [5] = true, [6.5] = true, [9.5] = false, [12] = false })
-				-- Jammed with the root against the face; no stretch past the face.
-				expect(#ended).toBe(1)
-				expect(ended[1].payload.reason).toBe("Jammed")
-				expect(ended[1].payload.distance + rootHalf).toBeCloseTo(face, 0.05)
+				-- A slam with the snout on the face (D-205), then the daze's stop at that same spot (D-210);
+				-- no stretch past the face.
+				expect(#ended).toBe(2)
+				expect(ended[1].payload.reason).toBe("Wall")
+				expect(ended[1].payload.distance + front).toBeCloseTo(face, 0.05)
+				expect(ended[2].payload.reason).toBe("Interrupted")
+				expect(ended[2].payload.distance).toBeCloseTo(ended[1].payload.distance, 1e-6)
 				for _, span in spans do
 					expect(span.to).toBeLessThanOrEqual(face + 1e-3)
 				end
@@ -671,17 +675,22 @@ describe("A stopped rush never carries a player (D-190)", function()
 				)
 				local body = bodies[boar]
 				local movesAtReport: number? = nil
-				while phaseOf(boarId) ~= "Recover" and guard < 2000 do
+				local maxSnout = -math.huge
+				local front = EnemyService.bodyExtents(boar)
+				-- Up to the slam's daze (D-208), which interrupts the strike once the timeline brings the
+				-- snout to the face.
+				while phaseOf(boarId) ~= "Recover" and phaseOf(boarId) ~= "Interrupted" and guard < 2000 do
 					frame()
 					guard += 1
 					if movesAtReport == nil and #sentOf("RushEnded") > 0 then
 						movesAtReport = #body.moveTos
 					end
+					maxSnout = math.max(maxSnout, (body.position - origin):Dot(direction) + front)
 				end
-				-- What the rush did with the body, up to its recovery. Still in the rushing group: it stopped
+				expect(phaseOf(boarId)).toBe("Interrupted")
+				-- What the rush did with the body, up to its daze. Still in the rushing group: it stopped
 				-- with players under it, who now step off to the side.
 				local movesAtRecover = #body.moveTos
-				local rest = body.position
 				expect(solidAt(boar)).toBeNil()
 				for _, model in playerModels do
 					movePlayer(model, (model.PrimaryPart :: BasePart).CFrame.Position + Vector3.new(12, 0, 0))
@@ -701,38 +710,42 @@ describe("A stopped rush never carries a player (D-190)", function()
 					end
 					expect(count == 1).toBe(expected[along])
 				end
-				-- Jammed once, on the frame the first stretch met the face, with the root's stop: its front at
-				-- the face. Nothing resolved after it, and nothing past the face.
+				-- A slam told once, on the frame the first stretch met the face, with the body's stop: its
+				-- snout on the face (D-205), then the daze's stop at that same spot (D-210). Nothing resolved
+				-- after it, and nothing past the face.
 				local ended = sentOf("RushEnded")
-				expect(#ended).toBe(1)
-				expect(ended[1].payload.reason).toBe("Jammed")
-				expect(ended[1].payload.distance + rootHalf).toBeCloseTo(face, 1e-3)
+				expect(#ended).toBe(2)
+				expect(ended[1].payload.reason).toBe("Wall")
+				expect(ended[1].payload.distance + front).toBeCloseTo(face, 1e-3)
+				expect(ended[2].payload.reason).toBe("Interrupted")
+				expect(ended[2].payload.distance).toBeCloseTo(ended[1].payload.distance, 1e-6)
+				-- The line resolves on the clock up to the face, where every client draws the snout, and no
+				-- further: the slam is told no later than that, and dazes the body once it is there.
 				local cappedAt: number? = nil
 				for _, span in spans do
 					expect(span.to).toBeLessThanOrEqual(face + 1e-3)
-					expect(span.time).toBeLessThanOrEqual(ended[1].time + 1e-9)
 					if cappedAt == nil and span.to >= face - 1e-3 then
 						cappedAt = span.time
 					end
 				end
 				expect(cappedAt).never.toBeNil()
-				expect(ended[1].time).toBeCloseTo(cappedAt :: number, 1e-9)
-				-- Told before the root reached the face: the world had not stopped it yet.
-				local worldStop: number? = nil
-				for _, sample in body.history do
-					if worldStop == nil and (sample.position - origin):Dot(direction) + rootHalf >= face - 1e-3 then
-						worldStop = sample.t
-					end
+				expect(ended[1].time).toBeLessThanOrEqual((cappedAt :: number) + 1e-9)
+				for _, span in spans do
+					expect(span.time).toBeLessThanOrEqual(ended[2].time + 1e-9)
 				end
-				expect(worldStop).never.toBeNil()
-				expect(ended[1].time).toBeLessThan(worldStop :: number)
+				-- The world never had to stop it: its root's front stays front - rootHalf short of the face
+				-- (the snout is on it), but for the mover's own overshoot of a goal (STUDIO_TASKS item 199).
+				for _, sample in body.history do
+					expect((sample.position - origin):Dot(direction) + rootHalf).toBeLessThan(face - 2)
+				end
+				expect(maxSnout).toBeLessThan(face + 0.7)
 				-- Sent to that stop and never further; it rests there.
 				local stop = origin + direction * ended[1].payload.distance
 				for index = (movesAtReport :: number) + 1, movesAtRecover do
 					local goal = body.moveTos[index].position
 					expect((goal - origin):Dot(direction)).toBeLessThanOrEqual(ended[1].payload.distance + 1e-6)
 				end
-				expect(((rest - stop) * Vector3.new(1, 0, 1)).Magnitude).toBeLessThan(0.05)
+				expect(((body.position - stop) * Vector3.new(1, 0, 1)).Magnitude).toBeLessThan(0.05)
 				-- And turned solid only after the rejoin wait once clear (D-190).
 				local at = solidAt(boar)
 				expect(at).never.toBeNil()
@@ -799,6 +812,38 @@ describe("A stopped rush never carries a player (D-190)", function()
 			expect(at).never.toBeNil()
 			expect((at :: number) - clearFrom).toBeGreaterThan(GROUPS.rejoinClearSeconds - TICK - FRAME)
 			expect((at :: number) - clearFrom).toBeLessThan(GROUPS.rejoinClearSeconds + TICK + FRAME)
+		end
+	)
+
+	it(
+		"a slam's body waits to rejoin from the stop that ends its rush, never from the slam's report (D-210)",
+		function()
+			-- Nobody under it: the wait is the window alone. The slam is told while the body is still on its
+			-- way to the face (passing through whoever stands there, D-167); its daze ends the rush there.
+			local boarId, boar, _, launch = launched(20)
+			local rootHalf = (boar.PrimaryPart :: BasePart).Size.Z / 2
+			local face = 10
+			table.insert(
+				walls,
+				{ model = boar, origin = launch.origin, along = launch.direction, at = face - rootHalf, face = face }
+			)
+			local limit = clock.t + 3
+			while phaseOf(boarId) ~= "Interrupted" and clock.t < limit do
+				frame()
+			end
+			local ended = sentOf("RushEnded")
+			expect(#ended).toBe(2)
+			expect(ended[1].payload.reason).toBe("Wall")
+			expect(ended[2].payload.reason).toBe("Interrupted")
+			expect(ended[2].time).toBeGreaterThan(ended[1].time)
+			expect(solidAt(boar)).toBeNil()
+			while solidAt(boar) == nil and clock.t < limit do
+				frame()
+			end
+			local at = solidAt(boar)
+			expect(at).never.toBeNil()
+			expect((at :: number) - ended[2].time).toBeGreaterThan(GROUPS.rejoinClearSeconds - 1e-6)
+			expect((at :: number) - ended[2].time).toBeLessThan(GROUPS.rejoinClearSeconds + TICK + FRAME)
 		end
 	)
 end)

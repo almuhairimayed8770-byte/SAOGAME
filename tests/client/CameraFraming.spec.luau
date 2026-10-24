@@ -100,7 +100,7 @@ type Step = { priority: number, fn: (dt: number) -> () }
 
 local function load(): Fixture
 	-- Every render step the controller binds, run in priority order each frame (the main step at
-	-- Camera priority and the late pass at Last, D-180).
+	-- camera.luau renderOrder.main and the late pass at renderOrder.late, D-180, D-211).
 	local state = { clock = 50, steps = {} :: { Step } }
 	local signal = {
 		Connect = function() end,

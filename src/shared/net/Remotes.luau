@@ -223,8 +223,12 @@ local Remotes: { [string]: RemoteDef } = {
 		}),
 	},
 	-- D-169: the rush stopped before its duration ran out. `launchedAt` is the RushStarted serverTime
-	-- it ends; `distance` how far down the line the server's body stands. "Jammed" bodies keep
+	-- it ends; `distance` how far down its path the server's body stands. "Jammed" bodies keep
 	-- striking on the clock (the hits never wait for the body); the others have stopped for good.
+	-- D-208: "Wall" is a slam, told as soon as the server's cast sees it: `distance` is where the root
+	-- will stop, `contact` where the body meets the face (the cue's place, on the frame the drawn
+	-- body gets there) and `normal` the face's. D-210: after a "Jammed" or a "Wall" the stop that ends
+	-- the rush early (an interrupt, a death, a sleep) is told too, once, with where the body stands.
 	RushEnded = {
 		kind = "Unreliable",
 		direction = "ServerToClient",
@@ -233,7 +237,36 @@ local Remotes: { [string]: RemoteDef } = {
 			launchedAt = Check.number(0),
 			serverTime = Check.number(0),
 			distance = Check.number(0),
-			reason = Check.literal("Jammed", "Interrupted", "Died", "Stopped"),
+			reason = Check.literal("Jammed", "Interrupted", "Died", "Stopped", "Wall"),
+			contact = Check.optional(worldVec),
+			normal = Check.optional(unitVec),
+		}),
+	},
+	-- D-206, D-207: a rush's path bent along a glancing wall ("Glance") or sidestepped a corner the
+	-- root's box clips ("Clip"). `legs` is the whole path from the launch (RushWorld.Leg: each starts
+	-- `at` studs down the path at `from`, runs along `heading`, the body facing `facing`), `at` where
+	-- the cue plays (the bend, the sidestep's end), `contact` and `normal` where the body meets the
+	-- face. Clients draw the body on these legs; their own cast predicts the same bend.
+	RushTurned = {
+		kind = "Unreliable",
+		direction = "ServerToClient",
+		schema = Check.strictInterface({
+			entityId = entityId,
+			launchedAt = Check.number(0),
+			serverTime = Check.number(0),
+			kind = Check.literal("Glance", "Clip"),
+			at = Check.number(0),
+			legs = Check.array(
+				Check.strictInterface({
+					at = Check.number(0),
+					from = worldVec,
+					heading = unitVec,
+					facing = unitVec,
+				}),
+				AI.rushWorld.maxLegs
+			),
+			contact = worldVec,
+			normal = unitVec,
 		}),
 	},
 	SwitchWindow = {

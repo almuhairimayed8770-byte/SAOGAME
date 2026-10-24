@@ -21,8 +21,11 @@
 	left to the cancel that comes in the same frame.
 
 	The rig's step (D-139): the controller steps the local rig itself (Choreo.stepLocal) between
-	feeding Locomotion and reading the root delta, so the body moves by this frame's root motion
-	(the engine does not pin Choreo's RenderStepped against this render step).
+	feeding Locomotion and reading the root delta, so the body moves by this frame's root motion.
+	Its render step runs at choreo.luau renderOrder.character: after Choreo's rigs and before
+	every reader of a pose (the camera, the impact picture, the trails' blade samples: camera.luau
+	and fx.luau renderOrder, D-211), so what this step moves and asks for (the root, the contact's
+	nudge, shake and picture) shows on this frame.
 
 	A dodge pressed while the display sleeps (D-141): the rig is asleep when a whole frame went by
 	with no render step (ActionLogic.rigAsleep, Heartbeat counted). The DodgeRequest goes at the
@@ -103,6 +106,7 @@ local Replication = require(script.Parent.Replication)
 local WeaponInfo = require(script.Parent.WeaponInfo)
 local Siblings = require(script.Parent.Siblings)
 local CameraController = require(Client.camera.CameraController)
+local FrameOrder = require(Client.fx.FrameOrder)
 
 local Choreo = Siblings.load(Client, "choreo.Choreo")
 local Locomotion = Siblings.load(Client, "choreo.Locomotion")
@@ -1198,7 +1202,7 @@ function CharacterController.start()
 		onCharacter(player.Character :: Model)
 	end
 
-	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Character.Value + 1, step)
+	RunService:BindToRenderStep(RENDER_STEP_NAME, FrameOrder.priority(ChoreoData.renderOrder.character), step)
 	-- The yaw history is kept on Heartbeat too, which runs while the display sleeps (RenderStepped
 	-- does not): a turn made outside the render step (the dev aim hook's face, the engine's own) is
 	-- timed when it happens, not taken for a turn made just before the next swing (D-112). The snap's

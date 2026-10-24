@@ -193,6 +193,16 @@ local Camera = {
 	},
 
 	epsilon = 0.000001, -- vector lengths below this count as zero
+
+	-- Where the camera's render steps run (D-180, D-211): an Enum.RenderPriority name and an offset
+	-- from its value. The main step comes after the character's (choreo.luau renderOrder: the
+	-- local root moved by its root motion, the contact's nudge, shake, kick and punch asked for),
+	-- so it frames the body this frame draws; the late pass still shows an impulse asked for after
+	-- it, at the end of the frame.
+	renderOrder = {
+		main = { base = "Character", offset = 2 }, -- SkyspireCamera (302)
+		late = { base = "Last", offset = 0 }, -- SkyspireCameraLate (2000)
+	},
 }
 
 return Camera

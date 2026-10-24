@@ -54,6 +54,7 @@ local AI = require(Shared.data.ai)
 local Enemies = require(Shared.data.enemies)
 local Rigs = require(Shared.data.rigs)
 local Signal = require(Shared.util.Signal)
+local RushWorld = require(Shared.choreo.RushWorld)
 local Brain = require(script.Parent.Parent.ai.Brain)
 local Charger = require(script.Parent.Parent.ai.Charger)
 local Brute = require(script.Parent.Parent.ai.Brute)
@@ -85,10 +86,16 @@ export type Engine = {
 	-- enemies group without being pushed out of anyone (CollisionGroups.clear). Nil: always clear.
 	bodyClear: ((model: Model) -> boolean)?,
 	-- D-197: how far ahead of the root's centre along `direction` the world meets the root (what the
-	-- root collides with in its own group: a rushing body's walls, never a player or an enemy),
-	-- within `distance` studs, and whether that face is ground it climbs (D-204); nil when nothing is
-	-- in the way (EnemyService.worldAhead). Nil: no world.
-	worldAhead: ((model: Model, direction: Vector3, distance: number) -> (number?, boolean?))?,
+	-- root collides with in its own group: a rushing body's walls, never a player or an enemy), its
+	-- box moved by `offset` first when given, within `distance` studs, whether that face is ground it
+	-- runs over (D-204, D-209) and the face's normal; nil when nothing is in the way
+	-- (EnemyService.worldAhead). Nil: no world.
+	worldAhead: ((
+		model: Model,
+		direction: Vector3,
+		distance: number,
+		offset: Vector3?
+	) -> (number?, boolean?, Vector3?))?,
 }
 
 -- The world cast worldAhead makes: a box of `size` at `start` moved by `vector`, colliding as
@@ -159,7 +166,12 @@ export type Entry = {
 	home: Vector3,
 	front: number, -- studs the body reaches ahead of its root (the snout), measured at spawn
 	back: number, -- studs it reaches behind its root
+	body: RushWorld.Body?, -- its corners at rest and its root's size: what a wall stops (D-205)
 	rushEndSent: boolean, -- this rush already told the clients it stopped early (D-169)
+	-- The early stop told was "Jammed" or "Wall" (the body still on its way to the stop), and the
+	-- stop that ended it after that was told too (D-210).
+	rushEndEarly: boolean,
+	rushEndFinal: boolean,
 	rejoinPending: boolean, -- a stopped rush waits for a clear body to rejoin the enemies group (D-167)
 	clearSince: number?, -- since when a waiting body has been clear of every player and enemy (D-190)
 }
@@ -511,6 +523,8 @@ end
 local function rushStarted(entry: Entry, rush: Brain.Rush)
 	local d = dependencies()
 	entry.rushEndSent = false
+	entry.rushEndEarly = false
+	entry.rushEndFinal = false
 	entry.rejoinPending = false
 	entry.clearSince = nil
 	setGroup(entry.model, AI.collision.rushing)
@@ -525,24 +539,79 @@ local function rushStarted(entry: Entry, rush: Brain.Rush)
 	})
 end
 
--- A rush stopped: an early stop is told once; every stop (a jam stops the body too, D-190) waits to
--- rejoin the enemies group until the body has stayed clear long enough (rejoin, from tickAll).
-local function rushEnded(entry: Entry, rush: Brain.Rush, reason: Brain.RushEnd, distance: number)
+-- A rush stopped: an early stop is told once, with where the body meets the wall for a slam
+-- (D-208); a "Jammed" or a "Wall" (the body still on its way to its stop) is followed by the stop
+-- that ends it, once, when an interrupt, a death or a sleep comes before the run's end, so every
+-- client hands the body back where the server's stopped (D-210). Every stop but a slam's (a jam
+-- stops the body too, D-190) waits to rejoin the enemies group until the body has stayed clear long
+-- enough (rejoin, from tickAll); a slam's body waits from the stop that ends its rush.
+local function rushEnded(
+	entry: Entry,
+	rush: Brain.Rush,
+	reason: Brain.RushEnd,
+	distance: number,
+	contact: RushWorld.Contact?
+)
 	local d = dependencies()
+	local tell = false
 	if reason ~= "Done" and not entry.rushEndSent then
+		tell = true
 		entry.rushEndSent = true
+		entry.rushEndEarly = reason == "Jammed" or reason == "Wall"
+	elseif
+		reason ~= "Done"
+		and entry.rushEndEarly
+		and not entry.rushEndFinal
+		and reason ~= "Jammed"
+		and reason ~= "Wall"
+	then
+		tell = true
+		entry.rushEndFinal = true
+	end
+	if tell then
+		local wall = if reason == "Wall" then contact else nil
 		d.fireAll("RushEnded", {
 			entityId = entry.id,
 			launchedAt = rush.startedAt,
 			serverTime = d.serverTime(),
 			distance = math.max(0, distance),
 			reason = reason,
+			contact = if wall ~= nil then toVec3(wall.point) else nil,
+			normal = if wall ~= nil then unitVec3(wall.normal) else nil,
 		})
 	end
-	if not entry.rejoinPending then
+	-- A slam's body is still on its way to its stop (passing through players, D-167): its wait starts
+	-- with the stop that ends the rush (the daze's interrupt, a death, its run's end).
+	if not entry.rejoinPending and reason ~= "Wall" then
 		entry.rejoinPending = true
 		entry.clearSince = nil
 	end
+end
+
+-- A rush's path bent along a glancing wall or sidestepped a clipped corner (D-206, D-207): every client
+-- hears its legs (the whole path, so a lost message is mended by the next) and where the body meets
+-- the face, to draw it on that path.
+local function rushTurned(entry: Entry, rush: Brain.Rush, contact: RushWorld.Contact)
+	local d = dependencies()
+	local legs = table.create(#rush.legs)
+	for _, leg in rush.legs do
+		table.insert(legs, {
+			at = leg.at,
+			from = toVec3(leg.from),
+			heading = unitVec3(leg.heading),
+			facing = unitVec3(leg.facing),
+		})
+	end
+	d.fireAll("RushTurned", {
+		entityId = entry.id,
+		launchedAt = rush.startedAt,
+		serverTime = d.serverTime(),
+		kind = contact.kind,
+		at = math.max(0, contact.at),
+		legs = legs,
+		contact = toVec3(contact.point),
+		normal = unitVec3(contact.normal),
+	})
 end
 
 -- A stopped rush's body rejoins the enemies group once its root has overlapped no player and no
@@ -624,12 +693,15 @@ local function makeContext(entry: Entry): Brain.Context
 		bodyExtents = function()
 			return entry.front, entry.back
 		end,
-		worldAhead = function(direction, distance)
+		bodyProfile = function()
+			return entry.body
+		end,
+		worldAhead = function(direction, distance, offset)
 			local cast = d.engine.worldAhead
 			if cast == nil then
-				return nil, nil
+				return nil, nil, nil
 			end
-			return cast(model, direction, distance)
+			return cast(model, direction, distance, offset)
 		end,
 		rootReach = function(direction)
 			return EnemyService.rootReach(model, direction)
@@ -637,8 +709,16 @@ local function makeContext(entry: Entry): Brain.Context
 		rushStarted = function(rush)
 			rushStarted(entry, rush)
 		end,
-		rushEnded = function(rush, reason, distance)
-			rushEnded(entry, rush, reason, distance)
+		rushEnded = function(rush, reason, distance, contact)
+			rushEnded(entry, rush, reason, distance, contact)
+		end,
+		rushTurned = function(rush, contact)
+			rushTurned(entry, rush, contact)
+		end,
+		daze = function(seconds)
+			-- A slam (D-208): a Stagger from the front, through EntityService like a parry's, which
+			-- interrupts this brain (connectSignals) and tells every client.
+			d.entities.setState(id, "Stagger", seconds, "Front")
 		end,
 		extendState = function(seconds)
 			if typeof(d.entities.extendState) == "function" then
@@ -743,6 +823,10 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 	end
 	-- Measured on the rig as built (every part at its rest pose around the root), before it moves.
 	local front, back = EnemyService.bodyExtents(model)
+	local root = model.PrimaryPart
+	local body: RushWorld.Body? = if root ~= nil
+		then { profile = RushWorld.profileOf(model), size = root.Size }
+		else nil
 	-- What players bump into instead of the root (D-198); the enemies group switches it on.
 	if typeof(d.rigBuilder.addBlocker) == "function" then
 		d.rigBuilder.addBlocker(model)
@@ -765,7 +849,10 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 		home = d.engine.position(model),
 		front = front,
 		back = back,
+		body = body,
 		rushEndSent = false,
+		rushEndEarly = false,
+		rushEndFinal = false,
 		rejoinPending = false,
 		clearSince = nil,
 		brain = nil :: any,
@@ -1202,41 +1289,47 @@ end
 
 --- Whether a face the world cast met is ground a body climbs, not a wall (D-204): its normal is
 --- within ai.luau collision.groundSlopeDegrees of straight up. Nil (a face named no way) is a wall.
+--- The one rule both sides judge by (RushWorld.isGround, D-209).
 function EnemyService.isGround(normal: Vector3?): boolean
-	if normal == nil or normal.Magnitude < 1e-6 then
-		return false
-	end
-	return normal.Unit.Y >= math.cos(math.rad(AI.collision.groundSlopeDegrees))
+	return RushWorld.isGround(normal)
 end
 
 --- How far ahead of a model's root centre along `direction` (flattened) the world stops the root,
 --- within `distance` studs, or nil when nothing does (D-197). The root's own box is cast in the
 --- root's own collision group (a rushing body's group collides with the world only), from where its
---- front face stands at the root's centre: a root pressed against a wall overlaps it by a hair, and
---- a cast never sees what its box starts in. Only the root collides, so this is where the body
---- stops; its snout and limbs run on through the wall. The second value is whether the face is
---- ground the root climbs (a ramp's, EnemyService.isGround, D-204): a rush's line still never
---- resolves past it (whatever stands behind it is unseen), but it stops no body. `cast` stands in
---- for workspace:Blockcast.
+--- front face stands at the root's centre (moved by `offset` first, when given: a sidestep's look,
+--- D-207): a root pressed against a wall overlaps it by a hair, and a cast never sees what its box
+--- starts in. The second value is whether the face is ground the body runs over (RushWorld.runsOver,
+--- D-209): a slope (D-204) or a step it climbs, whose riser the box, cast level, meets two or three
+--- treads ahead. A rush's line still never resolves past it (whatever stands behind it is unseen),
+--- but it stops no body. The third is the face's normal (nil: named no way). `cast` stands in for
+--- workspace:Blockcast.
 function EnemyService.worldAhead(
 	model: Model,
 	direction: Vector3,
 	distance: number,
-	cast: WorldCast?
-): (number?, boolean?)
+	cast: WorldCast?,
+	offset: Vector3?
+): (number?, boolean?, Vector3?)
 	local root = model.PrimaryPart
 	local flat = Brain.horizontal(direction)
 	if root == nil or flat == nil or not (distance > 0) then
-		return nil, nil
+		return nil, nil, nil
 	end
-	local frame = root.CFrame
-	local start = frame - flat * EnemyService.rootReach(model, flat)
-	local ok, travelled, normal =
-		pcall(cast or defaultWorldCast, start, root.Size, flat * distance, root.CollisionGroup, model)
+	local engineCast: WorldCast = cast or defaultWorldCast
+	local group = root.CollisionGroup
+	local bound: RushWorld.Cast = function(start: CFrame, size: Vector3, vector: Vector3): (number?, Vector3?)
+		return engineCast(start, size, vector, group, model)
+	end
+	local frame = root.CFrame + (offset or Vector3.zero)
+	local reach = EnemyService.rootReach(model, flat)
+	local ok, travelled, normal = pcall(bound, frame - flat * reach, root.Size, flat * distance)
 	if not ok or typeof(travelled) ~= "number" then
-		return nil, nil
+		return nil, nil, nil
 	end
-	return math.max(0, travelled), EnemyService.isGround(if typeof(normal) == "Vector3" then normal else nil)
+	local face: Vector3? = if typeof(normal) == "Vector3" then normal else nil
+	local free = math.max(0, travelled) - reach
+	return math.max(0, travelled), RushWorld.runsOver(bound, frame, root.Size, flat, free, face), face
 end
 
 --- How far a model's root box reaches from its centre along `direction` (flattened): half its extent
@@ -1334,8 +1427,8 @@ local function defaultEngine(groups: any?): Engine
 				return groups.clear(model)
 			end
 			else nil,
-		worldAhead = function(model, direction, distance)
-			return EnemyService.worldAhead(model, direction, distance)
+		worldAhead = function(model, direction, distance, offset)
+			return EnemyService.worldAhead(model, direction, distance, nil, offset)
 		end,
 	}
 end

@@ -4,13 +4,16 @@
 	render step to the spec, a fake clock behind os.clock, a plain camera table, a still subject and
 	no walls. Covers the transients (the FOV punch, the Art and dash kick, the shake, the nudge)
 	across a render stall (the display asleep: no render step for 55 s, then one frame whose dt
-	the engine may report as one frame or as the whole gap) and a long hitch.
+	the engine may report as one frame or as the whole gap) and a long hitch, and where in the
+	frame its two steps run (camera.luau renderOrder: the main step after the character
+	controller's, the late pass at the end, D-180 and D-211).
 ]]
 
 local luau = require("@lune/luau")
 
 local CameraData = Harness.load("src/shared/data/camera")
 local CameraMath = Harness.load("src/client/camera/CameraMath")
+local ChoreoData = Harness.load("src/shared/data/choreo")
 local combat = Harness.load("src/shared/data/combat")
 
 local PATH = "src/client/camera/CameraController"
@@ -25,8 +28,8 @@ type Fixture = {
 	camera: any,
 	-- Moves the clock `seconds` and runs one frame's render steps (in priority order) reporting
 	-- `dt` (`seconds` when nil). `between`, when given, runs once inside the frame just before the
-	-- first step bound above `after` (a priority): a contact made at render priority 301 is
-	-- `after = 301`, one made before the frame (the network) `after = -1`.
+	-- first step bound above `after` (a priority): the character controller's contact is
+	-- `after = CHARACTER_PRIORITY`, one made before the frame (the network) `after = -1`.
 	frame: (seconds: number, dt: number?, after: number?, between: (() -> ())?) -> (),
 	-- Runs `count` 60 fps frames.
 	frames: (count: number) -> (),
@@ -35,9 +38,15 @@ type Fixture = {
 	steps: { Step },
 }
 
--- Enum.RenderPriority values the controller binds against.
-local CAMERA_PRIORITY = 200
-local CHARACTER_PRIORITY = 301
+-- Where the frame's steps run (data rows: an Enum.RenderPriority name and an offset).
+local function priorityOf(row: any): number
+	return (Enum.RenderPriority :: any)[row.base].Value + row.offset
+end
+local MAIN_PRIORITY = priorityOf(CameraData.renderOrder.main)
+local LATE_PRIORITY = priorityOf(CameraData.renderOrder.late)
+-- The character controller's step, where the local contact asks for its nudge and shake.
+local CHARACTER_PRIORITY = priorityOf(ChoreoData.renderOrder.character)
+local LATE_STEP = "SkyspireCameraLate"
 
 local function load(options: { withoutLate: boolean? }?): Fixture
 	local state = { clock = 50, steps = {} :: { Step } }
@@ -65,8 +74,8 @@ local function load(options: { withoutLate: boolean? }?): Fixture
 	local services: { [string]: any } = {
 		RunService = {
 			BindToRenderStep = function(_self: any, name: string, priority: number, fn: (dt: number) -> ())
-				if options ~= nil and options.withoutLate and priority > CAMERA_PRIORITY then
-					return -- the controller as it was: one step at Camera priority
+				if options ~= nil and options.withoutLate and name == LATE_STEP then
+					return -- the controller as it was: its main step alone
 				end
 				table.insert(state.steps, { name = name, priority = priority, fn = fn })
 				table.sort(state.steps, function(a: Step, b: Step): boolean
@@ -270,25 +279,44 @@ local function sameFrames(a: { CFrame }, b: { CFrame }, epsilon: number): boolea
 	return true
 end
 
-describe("CameraController on the contact frame (D-180)", function()
-	it("shows a nudge and a shake asked for after its step (the contact, at 301) on that same frame", function()
+describe("CameraController on the contact frame (D-180, D-211)", function()
+	it("steps after the character controller, so the contact's nudge, shake and kick are in its main step", function()
+		local fixture = settled()
+		expect(#fixture.steps).toBe(2)
+		expect(fixture.steps[1].priority).toBe(MAIN_PRIORITY)
+		expect(fixture.steps[1].priority).toBeGreaterThan(CHARACTER_PRIORITY)
+		expect(fixture.steps[2].name).toBe(LATE_STEP)
+		expect(fixture.steps[2].priority).toBe(LATE_PRIORITY)
 		local before, spot = settled()
-		-- The frames the hit gives when it is asked for before the camera steps: the reference.
+		-- The frames the hit gives when it is asked for before the frame: the reference.
 		local reference = hitAt(before, spot, -1, 30)
 		local contact = settled()
 		local shown = hitAt(contact, spot, CHARACTER_PRIORITY, 30)
-		-- The contact frame already moves, and every frame matches the reference.
+		-- The contact frame already moves, and every frame is the reference's own.
 		expect((shown[1].Position - spot).Magnitude).toBeGreaterThan(0.05)
-		expect(sameFrames(shown, reference, 1e-6)).toBe(true)
-		-- The camera's own step at 200 had drawn the frame without them.
-		expect(contact.steps[1].priority).toBe(CAMERA_PRIORITY)
-		expect(#contact.steps).toBe(2)
-		expect(contact.steps[2].priority).toBeGreaterThan(CHARACTER_PRIORITY)
+		expect(sameFrames(shown, reference, 0)).toBe(true)
+		-- A kick asked for in the controller's step (a dash) widens that frame itself.
+		local kicked = settled()
+		kicked.frame(F, nil, CHARACTER_PRIORITY, function()
+			kicked.controller.fovKick("Dash")
+		end)
+		expect(kicked.camera.FieldOfView).toBeGreaterThan(REST + 1e-3)
 	end)
 
-	it("shows only the shake on the contact frame when no nudge comes with it", function()
+	it("shows a nudge and a shake asked for after its main step on that same frame (the late pass)", function()
+		local before, spot = settled()
+		-- The frames the hit gives when it is asked for before the camera steps: the reference.
+		local reference = hitAt(before, spot, -1, 30)
+		local late = settled()
+		local shown = hitAt(late, spot, MAIN_PRIORITY, 30)
+		-- The frame already moves, and every frame matches the reference.
+		expect((shown[1].Position - spot).Magnitude).toBeGreaterThan(0.05)
+		expect(sameFrames(shown, reference, 1e-6)).toBe(true)
+	end)
+
+	it("shows only the shake on that frame when no nudge comes with it", function()
 		local fixture, spot = settled()
-		fixture.frame(F, nil, CHARACTER_PRIORITY, function()
+		fixture.frame(F, nil, MAIN_PRIORITY, function()
 			fixture.controller.shake("Final")
 		end)
 		local moved = (fixture.camera.CFrame.Position - spot).Magnitude
@@ -315,12 +343,12 @@ describe("CameraController on the contact frame (D-180)", function()
 		expect(sameFrames(quiet, quietAlone, 0)).toBe(true)
 	end)
 
-	it("plays a late nudge out exactly as the old one-step camera did, one frame sooner", function()
+	it("plays a late nudge out exactly as the one-step camera did, one frame sooner", function()
 		local late, spot = settled()
 		local alone = settled({ withoutLate = true })
-		local a = hitAt(late, spot, CHARACTER_PRIORITY, 30, true)
-		local b = hitAt(alone, spot, CHARACTER_PRIORITY, 31, true)
-		-- The one-step camera showed nothing on the contact frame and the nudge from the next one.
+		local a = hitAt(late, spot, MAIN_PRIORITY, 30, true)
+		local b = hitAt(alone, spot, MAIN_PRIORITY, 31, true)
+		-- The one-step camera showed nothing on the asking frame and the nudge from the next one.
 		expect((b[1].Position - spot).Magnitude).toBeLessThan(1e-9)
 		local shifted = table.move(b, 2, #b, 1, {})
 		expect(sameFrames(a, shifted, 1e-4)).toBe(true)
@@ -335,16 +363,18 @@ describe("CameraController on the contact frame (D-180)", function()
 		expect(sameFrames(a, b, 0)).toBe(true)
 	end)
 
-	it("never replays a late hit after a render stall: the 55 s gap snaps it out", function()
-		local fixture, spot = settled()
-		fixture.frame(55, F, CHARACTER_PRIORITY, function()
-			fixture.controller.nudge(spot + Vector3.new(4, 0, -4), CameraData.nudge.studs)
-		end)
-		-- The stalled frame settles every spring: the nudge asked for in it is gone with them.
-		expect((fixture.camera.CFrame.Position - spot).Magnitude).toBeLessThan(1e-3)
-		for _ = 1, 20 do
-			fixture.frames(1)
+	it("never replays a hit after a render stall: the 55 s gap snaps it out", function()
+		for _, after in { CHARACTER_PRIORITY, MAIN_PRIORITY } do
+			local fixture, spot = settled()
+			fixture.frame(55, F, after, function()
+				fixture.controller.nudge(spot + Vector3.new(4, 0, -4), CameraData.nudge.studs)
+			end)
+			-- The stalled frame settles every spring: the nudge asked for in it is gone with them.
 			expect((fixture.camera.CFrame.Position - spot).Magnitude).toBeLessThan(1e-3)
+			for _ = 1, 20 do
+				fixture.frames(1)
+				expect((fixture.camera.CFrame.Position - spot).Magnitude).toBeLessThan(1e-3)
+			end
 		end
 	end)
 end)

@@ -84,6 +84,7 @@ local SIBLING_ORDER = {
 	"fx.SpeedLines",
 	"fx.Impact",
 	"fx.Sparks",
+	"fx.WallSlam",
 	"fx.Digits",
 	"fx.SwitchRing",
 	"fx.Telegraphs",

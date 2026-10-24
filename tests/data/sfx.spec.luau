@@ -872,6 +872,9 @@ local RECIPES: { [string]: { [string]: number } } = {
 		["impact.SubDrop"] = 0,
 	},
 	Dodge = { ["whoosh.Dodge"] = 0, ["footsteps.LandSoft"] = 0 },
+	-- A rush's slam on a wall (D-217): the stone hit, the body's weight 3 dB down and the sub 6 dB
+	-- down under them, all on the contact frame (impact entries already picked: no new sounds).
+	WallSlam = { ["impact.Construct"] = 0, ["impact.Body"] = -3, ["impact.Sub"] = -6 },
 }
 
 local function layerOf(cueName: string, name: string): any
@@ -1366,7 +1369,7 @@ describe("sfx reel layers", function()
 
 	it("names cues and contours, sorted, and errors on unknown ones", function()
 		local cues = Sfx.cueNames()
-		expect(#cues).toBe(12)
+		expect(#cues).toBe(13)
 		for index = 2, #cues do
 			expect(cues[index - 1] < cues[index]).toBe(true)
 		end

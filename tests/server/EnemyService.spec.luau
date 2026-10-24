@@ -1612,10 +1612,12 @@ describe("EnemyService.worldAhead: where the world stops a root (D-197)", functi
 		expect(near(call.vector, Vector3.new(0, 0, -10))).toBe(true)
 		expect(call.group).toBe(AI.collision.rushing)
 		expect(call.exclude).toBe(model)
-		-- Across it: half its width back.
+		-- Across it: half its width back. (The casts after a cast's first are the riser probes that
+		-- judge whether what it met is ground the body runs over, D-209.)
+		local before = #calls
 		EnemyService.worldAhead(model, Vector3.new(1, 0, 0), 3, cast)
-		expect(near(calls[2].start.Position, Vector3.new(-1.2, 3, 0))).toBe(true)
-		expect(near(calls[2].vector, Vector3.new(3, 0, 0))).toBe(true)
+		expect(near(calls[before + 1].start.Position, Vector3.new(-1.2, 3, 0))).toBe(true)
+		expect(near(calls[before + 1].vector, Vector3.new(3, 0, 0))).toBe(true)
 	end)
 
 	it("nothing in the way, a failed cast, no root, no distance or no direction: nil", function()

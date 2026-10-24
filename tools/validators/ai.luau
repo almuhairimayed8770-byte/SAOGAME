@@ -10,7 +10,11 @@
 	(D-190); a rush's line keeps up with its body by less than the lag that reads as a jam (D-195).
 	An enemy's blocker (D-198) collides with players and with nothing else (not the world, not an
 	enemy, not a rush, not another blocker), a standing enemy's root no longer collides with players,
-	and blockerHeight reaches above the top of every enemy rig's root.
+	and blockerHeight reaches above the top of every enemy rig's root. How a rush meets the world
+	(rushWorld, D-205 to D-209): positive numbers, a glance below 90 degrees, a look ahead at least a
+	sidestep's run, a sidestep that fits its run, at least three legs, the server's leg turn equal to
+	the drawn one (choreo enemy.rush.turnRate), a daze no shorter than a parry's stagger, and a
+	climbable riser below every Charger rig's hip.
 ]]
 
 type Context = {
@@ -365,6 +369,109 @@ local function validate(ctx: Context): { string }
 							)
 						)
 					end
+				end
+			end
+		end
+	end
+
+	-- D-205 to D-209: how a rushing body meets the world, one set of numbers for the server and the
+	-- clients.
+	local world = AI.rushWorld
+	if typeof(world) ~= "table" then
+		problem("rushWorld must be a table")
+	else
+		for _, field in
+			{
+				"riserStuds",
+				"probeStuds",
+				"glanceDegrees",
+				"clipStuds",
+				"clipMarginStuds",
+				"clipRunStuds",
+				"clipPassStuds",
+				"clipBisections",
+				"lookAheadStuds",
+				"maxLegs",
+				"turnRate",
+				"slamDazeSeconds",
+				"fallGravity",
+			}
+		do
+			positiveNumber(world[field], "rushWorld." .. field)
+		end
+		local function numbers(...: any): boolean
+			for index = 1, select("#", ...) do
+				local value = select(index, ...)
+				if typeof(value) ~= "number" or value ~= value then
+					return false
+				end
+			end
+			return true
+		end
+		if numbers(world.glanceDegrees) and world.glanceDegrees >= 90 then
+			problem(("rushWorld.glanceDegrees must be below 90, got %s"):format(tostring(world.glanceDegrees)))
+		end
+		-- A sidestep seen at once still has its whole run before the snout reaches the corner.
+		if numbers(world.lookAheadStuds, world.clipRunStuds) and world.lookAheadStuds < world.clipRunStuds then
+			problem(
+				("rushWorld.lookAheadStuds %s must be at least clipRunStuds %s"):format(
+					tostring(world.lookAheadStuds),
+					tostring(world.clipRunStuds)
+				)
+			)
+		end
+		-- A sidestep of the most overlap fits its run (one steeper than it is wide is a slam).
+		if
+			numbers(world.clipRunStuds, world.clipStuds, world.clipMarginStuds)
+			and world.clipRunStuds < world.clipStuds + world.clipMarginStuds
+		then
+			problem("rushWorld.clipRunStuds must be at least clipStuds + clipMarginStuds")
+		end
+		-- A line, a bend and a sidestep's two legs.
+		if numbers(world.maxLegs) and (world.maxLegs < 3 or world.maxLegs % 1 ~= 0) then
+			problem(("rushWorld.maxLegs must be a whole number of at least 3, got %s"):format(tostring(world.maxLegs)))
+		end
+		if numbers(world.clipBisections) and world.clipBisections % 1 ~= 0 then
+			problem("rushWorld.clipBisections must be a whole number")
+		end
+		-- The server's body and every drawn one turn onto a new leg at the same rate.
+		local Choreo = ctx.load("src/shared/data/choreo")
+		local drawnTurn = Choreo.enemy and Choreo.enemy.rush and Choreo.enemy.rush.turnRate
+		if drawnTurn ~= world.turnRate then
+			problem(
+				("rushWorld.turnRate %s must equal choreo enemy.rush.turnRate %s"):format(
+					tostring(world.turnRate),
+					tostring(drawnTurn)
+				)
+			)
+		end
+		-- A slam's daze is the best opening a boar gives: no shorter than a parry's stagger.
+		local parry = ctx.load("src/shared/data/combat").parryStagger
+		if numbers(world.slamDazeSeconds, parry) and world.slamDazeSeconds < parry then
+			problem(
+				("rushWorld.slamDazeSeconds %s must be at least combat.parryStagger %s"):format(
+					tostring(world.slamDazeSeconds),
+					tostring(parry)
+				)
+			)
+		end
+		-- A step the body climbs is lower than every rushing rig's hip (its root's box clears the
+		-- step's top when it gets there), and the ground probe reaches below the hip.
+		local Rigs = ctx.load("src/shared/data/rigs")
+		for _, def in Enemies.list() do
+			local rig = if def.archetype == "Charger" then Rigs[def.skin] else nil
+			if rig ~= nil and numbers(world.riserStuds, world.probeStuds, rig.hipHeight) then
+				if world.riserStuds >= rig.hipHeight then
+					problem(
+						("rushWorld.riserStuds %s must be below rig %s's hipHeight %s"):format(
+							tostring(world.riserStuds),
+							def.skin,
+							tostring(rig.hipHeight)
+						)
+					)
+				end
+				if world.probeStuds <= rig.hipHeight then
+					problem(("rushWorld.probeStuds must reach below rig %s's hip"):format(def.skin))
 				end
 			end
 		end

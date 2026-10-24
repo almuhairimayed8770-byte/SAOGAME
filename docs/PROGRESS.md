@@ -592,6 +592,26 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   - A drawn boar can still stop at a stair riser.
   - A wall hidden behind a ramp's contact still waits for the jam.
 
+## Wall slams and frame order (2026-10-24, D-205 to D-218)
+
+- **Wall contact (D-205 to D-210):**
+  - A charging boar now stops with its snout on the wall's face, on the server and on screen. Before, it stopped 3.1 studs inside.
+  - Shallow walls bend its path, barely-clipped corners are sidestepped, and stairs and ramps are run over.
+  - A slam dazes the boar for 1.5 s.
+- **Frame order (D-211 to D-216):** every pose reader runs in a fixed, data-driven order after the rigs move: rigs 199, character 301, camera 302, impact frames 303, trails 304. The camera, trail head and impact picture are off by 0 now, in both engine orders.
+- **Verification (D-217, D-218):**
+  - The slam plays dust, a stone thud (existing sounds only) and a near-only shake on the stop frame. It spends no flash budget.
+  - A lost or late RushEnded no longer swallows the slam's cue or leaves the boar short of the wall.
+- **Checks:**
+  - 2562 specs in 139 files pass.
+  - Validators, stylua, offline lint, the hit matrix, the animation review and gaitgen are clean.
+  - luau-lsp shows no new error sites against HEAD.
+- **Open:**
+  - The slam point is 0.2–0.6 studs off the snout.
+  - A wall only the server has can still be overrun at high lag.
+  - Glance and clip cues are not wired.
+  - Studio items 199–211.
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and

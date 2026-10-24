@@ -121,6 +121,8 @@ type Rig = {
 	-- The fake ContactPredictor: what it was asked (begins, steps, stops) and the contacts it hands
 	-- the next step (queue); Replication.contact's calls land in `log` as kind "contact".
 	contacts: any,
+	-- The name and priority the controller bound its render step at.
+	renderStep: { name: string, priority: number },
 }
 
 type Options = {
@@ -151,6 +153,7 @@ local function load(options: Options?): Rig
 	local opts: Options = options or {}
 	local clock = 0
 	local step: ((dt: number) -> ())? = nil
+	local renderStep = { name = "", priority = -1 }
 	local sent: { { name: string, payload: any } } = {}
 	local writes: { { key: string, value: any } } = {}
 	local log: { { kind: string, name: string, args: { any } } } = {}
@@ -381,8 +384,10 @@ local function load(options: Options?): Rig
 	local localPlayer = { CharacterAdded = Signal.new(), CharacterRemoving = Signal.new(), Character = model }
 	local services: { [string]: any } = {
 		RunService = {
-			BindToRenderStep = function(_self: any, _name: string, _priority: number, fn: (dt: number) -> ())
+			BindToRenderStep = function(_self: any, name: string, priority: number, fn: (dt: number) -> ())
 				step = fn
+				renderStep.name = name
+				renderStep.priority = priority
 			end,
 			Heartbeat = heartbeat,
 			RenderStepped = renderStepped,
@@ -579,6 +584,7 @@ local function load(options: Options?): Rig
 			return rigSteps
 		end,
 		contacts = contactLog,
+		renderStep = renderStep,
 	}
 end
 
@@ -594,6 +600,23 @@ local function lastDodge(rig: Rig): Vector3?
 end
 
 local FORWARD = Vector3.new(0, 0, -1) -- the root's look (CFrame.new() faces -Z)
+
+describe("CharacterController's render step (D-139, D-211)", function()
+	it("binds at choreo.luau renderOrder.character: after Choreo's rigs, before the camera and every reader", function()
+		local rig = load()
+		local function priorityOf(row: any): number
+			return (Enum.RenderPriority :: any)[row.base].Value + row.offset
+		end
+		local CameraData = Harness.load("src/shared/data/camera")
+		local Fx = Harness.load("src/shared/data/fx")
+		expect(rig.renderStep.name).toBe("SkyspireCharacter")
+		expect(rig.renderStep.priority).toBe(priorityOf(ChoreoData.renderOrder.character))
+		expect(rig.renderStep.priority).toBeGreaterThan(priorityOf(ChoreoData.renderOrder.rigs))
+		for _, reader in { CameraData.renderOrder.main, Fx.renderOrder.impactFrames, Fx.renderOrder.poseReaders } do
+			expect(rig.renderStep.priority).toBeLessThan(priorityOf(reader))
+		end
+	end)
+end)
 
 describe("CharacterController dodge direction", function()
 	it("with the stick held forward the dodge goes forward", function()

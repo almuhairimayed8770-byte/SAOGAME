@@ -537,7 +537,7 @@ describe("Charger", function()
 	end)
 
 	it(
-		"a stretch the world caps ends the rush at once (D-202): Jammed with the root's stop at the face, sent no further",
+		"a stretch the world caps ends the rush at once (D-202, D-208): Wall with the root's stop at the face, sent no further",
 		function()
 			local ROOT_HALF = 2.5
 			for _, face in { 6, 8, 10 } do
@@ -551,15 +551,18 @@ describe("Charger", function()
 					end
 				end
 				expect(cappedAt).never.toBeNil()
-				-- Reported on that tick, with the root standing its own reach short of the face; the run
-				-- still waits out its time (Done), and nothing resolves after the report.
+				-- Reported as soon as the cast sees the face (lookAheadStuds ahead of the clock, so no later
+				-- than that tick), with the root standing its own reach short of the face (no body profile to
+				-- judge: the root's box is the body). The line still resolves on the clock up to the face,
+				-- where the drawn snout meets it, and nothing after; with no daze hook the run still waits
+				-- out its time (Done).
 				expect(#ends).toBe(2)
-				expect(ends[1].reason).toBe("Jammed")
-				expect(ends[1].time).toBeCloseTo(cappedAt :: number, 1e-9)
+				expect(ends[1].reason).toBe("Wall")
+				expect(ends[1].time).toBeLessThanOrEqual((cappedAt :: number) + 1e-9)
 				expect(ends[1].distance).toBeCloseTo(face - ROOT_HALF, 1e-9)
 				expect(ends[2].reason).toBe("Done")
 				for _, span in spans do
-					expect(span.time).toBeLessThanOrEqual(ends[1].time + 1e-9)
+					expect(span.time).toBeLessThanOrEqual((cappedAt :: number) + 1e-9)
 				end
 				-- The body was told before its root reached the face, sent straight to that stop and never
 				-- past it: no goal after the report reaches further down the line.
@@ -599,7 +602,7 @@ describe("Charger", function()
 				return ROOT_HALF
 			end
 			w.context.rushEnded = function(_rush, reason)
-				if reason == "Jammed" and reportedAt == nil then
+				if reason == "Wall" and reportedAt == nil then
 					reportedAt = w.time
 				end
 			end
@@ -629,7 +632,7 @@ describe("Charger", function()
 			local face = ROOT_HALF + room
 			local w, ends, spans = wallRun(face)
 			local launchAt = spans[1].time
-			expect(ends[1].reason).toBe("Jammed")
+			expect(ends[1].reason).toBe("Wall")
 			expect(ends[1].time).toBeCloseTo(launchAt, 1e-9)
 			expect(ends[1].distance).toBeCloseTo(room, 1e-9)
 			expect(#spans).toBe(1) -- the launch's own stretch, up to the face
@@ -638,22 +641,25 @@ describe("Charger", function()
 		end
 	end)
 
-	it("once a wall ended it the rush is over: the face gone, the body goes no further and nothing resolves", function()
-		local ROOT_HALF = 2.5
-		local face = 10
-		local w, ends, spans = wallRun(face, {
-			seen = function(ends: { any }): boolean
-				return #ends == 0 -- a door that opens on the report
-			end,
-			hold = false, -- and nothing holds the body after it
-		})
-		expect(ends[1].reason).toBe("Jammed")
-		for _, span in spans do
-			expect(span.time).toBeLessThanOrEqual(ends[1].time + 1e-9)
-			expect(span.to).toBeLessThanOrEqual(face + 1e-9)
+	it(
+		"once a wall ended it the rush is over: the face gone, the body goes no further and nothing resolves past it",
+		function()
+			local ROOT_HALF = 2.5
+			local face = 10
+			local w, ends, spans = wallRun(face, {
+				seen = function(ends: { any }): boolean
+					return #ends == 0 -- a door that opens on the report
+				end,
+				hold = false, -- and nothing holds the body after it
+			})
+			expect(ends[1].reason).toBe("Wall")
+			-- The slam stands (D-208): the line resolves on the clock up to the face it saw, never past it.
+			for _, span in spans do
+				expect(span.to).toBeLessThanOrEqual(face + 1e-9)
+			end
+			expect(-w.position.Z).toBeCloseTo(face - ROOT_HALF, 1e-6)
 		end
-		expect(-w.position.Z).toBeCloseTo(face - ROOT_HALF, 1e-6)
-	end)
+	)
 
 	it("a wall in the overshoot, after the line resolved, ends it at once too, hits unchanged (D-202)", function()
 		local ROOT_HALF = 2.5
@@ -661,7 +667,7 @@ describe("Charger", function()
 		local face = length -- the root's stop, 2.5 short of the run's end
 		local free = select(3, wallRun(1000))
 		local w, ends, spans = wallRun(face)
-		expect(ends[1].reason).toBe("Jammed")
+		expect(ends[1].reason).toBe("Wall")
 		expect(ends[1].distance).toBeCloseTo(face - ROOT_HALF, 1e-9)
 		-- Told before the root got there, and sent no further than its stop.
 		expect(ends[1].at).toBeLessThan(face - ROOT_HALF - 1e-6)
@@ -681,18 +687,25 @@ describe("Charger", function()
 		end
 	end)
 
-	it("a parry on the stretch the world capped ends the rush Interrupted, never Jammed (D-202)", function()
-		local face = 8
-		local _, ends = wallRun(face, {
-			onStrike = function(w, span)
-				if span.to >= face - 1e-9 and w.brain:getPhase() == "Strike" then
-					w.brain:interrupt("Stagger", 1.0) -- the parry staggers the boar inside its strike
-				end
-			end,
-		})
-		expect(#ends).toBe(1)
-		expect(ends[1].reason).toBe("Interrupted")
-	end)
+	it(
+		"a parry on the stretch the world capped tells Interrupted after the Wall, never Jammed (D-202, D-210)",
+		function()
+			local face = 8
+			local _, ends = wallRun(face, {
+				onStrike = function(w, span)
+					if span.to >= face - 1e-9 and w.brain:getPhase() == "Strike" then
+						w.brain:interrupt("Stagger", 1.0) -- the parry staggers the boar inside its strike
+					end
+				end,
+			})
+			-- The slam is told first; the parry's stop is told after it, so every client hands the body
+			-- back where the server holds it (D-210).
+			expect(#ends).toBe(2)
+			expect(ends[1].reason).toBe("Wall")
+			expect(ends[2].reason).toBe("Interrupted")
+			expect(ends[2].distance).toBeLessThanOrEqual(ends[1].distance + 1e-9)
+		end
+	)
 
 	it("overshoots past the target, then recovers for the attack's 1.2 s with a slow turn back", function()
 		local w = world()

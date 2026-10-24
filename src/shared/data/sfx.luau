@@ -1055,6 +1055,14 @@ local Sfx = {
 			{ name = "whoosh.Dodge", delay = 0, gainDb = 0 },
 			{ name = "footsteps.LandSoft", delay = Combat.dodgeDuration, gainDb = 0 },
 		},
+		-- A rush's slam on a wall (D-217), at the contact point on the frame the snout meets the
+		-- face: the stone hit, the body's weight 3 dB down and the sub 6 dB down under them. Picked
+		-- entries only; no new sound.
+		WallSlam = {
+			{ name = "impact.Construct", delay = 0, gainDb = 0 },
+			{ name = "impact.Body", delay = 0, gainDb = -3 },
+			{ name = "impact.Sub", delay = 0, gainDb = -6 },
+		},
 	} :: { [string]: { CueLayer } },
 
 	--- Mix automation over time (frequency contrast and the reverb on the big moments).

@@ -50,6 +50,25 @@ export type BruteTuning = ArchetypeTuning & {
 	stopDistance: number, -- stops walking this far from the target
 }
 
+-- How a rush meets the world (D-205 to D-210): the same rules on the server, which moves the body and
+-- resolves the hits, and on every client, which draws the body ahead of its late root
+-- (choreo/RushWorld.luau holds the rules; Charger.luau and RushDraw.luau use them).
+export type RushWorldTuning = {
+	riserStuds: number, -- a face whose top is at most this above the ground in front of it is a step
+	probeStuds: number, -- how far below the root's centre a ground probe looks
+	glanceDegrees: number, -- a wall meeting the line at less than this turns the rush along its face
+	clipStuds: number, -- a corner the root's box overlaps sideways by at most this is shouldered past
+	clipMarginStuds: number, -- the sidestep clears the corner by this much more
+	clipRunStuds: number, -- the sidestep's run along the line, ending where the root meets the corner
+	clipPassStuds: number, -- a sidestepped box must run this far past the corner's face to be clear
+	clipBisections: number, -- halvings that find the smallest sidestep that clears
+	lookAheadStuds: number, -- every cast looks this far past the body's snout
+	maxLegs: number, -- legs one rush runs at most; past them a wall stops it
+	turnRate: number, -- degrees per second the server's body turns onto a new leg
+	slamDazeSeconds: number, -- a body that slams into a wall staggers this long, from the front
+	fallGravity: number, -- studs a second squared the drawn body drops onto lower ground under
+}
+
 local AI = {
 	-- Section 16 rates (owned by enemies.luau)
 	tickHz = Enemies.rules.aiTickHz,
@@ -185,6 +204,52 @@ local AI = {
 			{ "SkyspireBlockers", "SkyspireBlockers" },
 		},
 	},
+
+	-- A rush that meets the world (D-205 to D-210), the same on the server and on every client
+	-- (choreo/RushWorld.luau). The world cast is the root's own box in the rushing group (D-197).
+	rushWorld = {
+		-- A face the box meets is a step the body climbs, not a wall, when nothing stands higher than
+		-- this above the ground just in front of it: below the Boar's 1.6 hip height, so its root's
+		-- box clears the step's top when it gets there (the server's Humanoid climbs it), while the
+		-- box, cast level from lower ground, meets a stair's risers two and three treads ahead.
+		riserStuds = 1.5,
+		-- A ground probe looks this far below the root's centre (the hip height plus a fall).
+		probeStuds = 8,
+		-- A wall meeting the line at less than this many degrees turns the rush along its face (a
+		-- scrape that keeps the charge's speed); at this or more the body slams into it, stops with
+		-- its snout on the face and is dazed. 30 glances, 45, 60 and 75 slam.
+		glanceDegrees = 40,
+		-- A corner (a pillar, a post) the root's box overlaps sideways by at most this is shouldered
+		-- past: the rush sidesteps by the overlap (plus what the body's flank reaches past the root's
+		-- side, plus clipMarginStuds) over the clipRunStuds before its snout reaches the corner's face,
+		-- and carries on along its line. More overlap than clipStuds is a wall.
+		clipStuds = 1.0,
+		clipMarginStuds = 0.15,
+		clipRunStuds = 3,
+		-- A sidestepped box is clear of the corner when it runs this far past where the straight box
+		-- met it: a wall at glanceDegrees or more moves at most clipStuds / tan(40) = 1.2 studs that
+		-- way, a pillar's flank never meets a box running beside it.
+		clipPassStuds = 3,
+		clipBisections = 4,
+		-- Every cast (the server's and each client's) looks this far past the body's snout, so a bend
+		-- or a sidestep is known on both sides before the body reaches its start: at least
+		-- clipRunStuds plus a frame's run (0.47 studs at 60 fps), so a sidestep seen at once still
+		-- has its whole run.
+		lookAheadStuds = 3.5,
+		-- A rush runs at most this many legs (its line plus bends); a wall past them stops it.
+		maxLegs = 6,
+		-- The server's body turns onto a new leg this fast (the clients draw it at choreo.luau
+		-- enemy.rush.turnRate, the same number).
+		turnRate = 720,
+		-- A slam staggers the body from the front for this long, from the moment the server's timeline
+		-- brings its snout to the face: longer than a parry's 1.0 s (section 6), the Stun's 1.5 s, so
+		-- baiting a boar into a wall is the best opening it gives.
+		slamDazeSeconds = 1.5,
+		-- The drawn body stands on the ground under it: a step lifts it at once (its root's Humanoid
+		-- steps up as it gets there), and it drops onto lower ground under this gravity (the
+		-- workspace's default, the root's own fall), studs a second squared.
+		fallGravity = 196.2,
+	} :: RushWorldTuning,
 
 	archetypes = {
 		Charger = {

@@ -25,8 +25,13 @@
 	  - Strokes: a layer of OutlineInk Frames (UICorner round ends, UIGradient transparency
 	    taper) rotated to the slash angle across the hit; no image assets.
 
-	Timing: the sequence starts on the first frame drawn after `play` (a HitConfirmed lands
-	between frames), and each look shows for its frames counted in drawn frames (issue 10): Kill
+	Timing: the sequence starts on the first frame that draws it, and each look shows for its
+	frames counted in drawn frames (issue 10). The overlay's step runs at fx.luau
+	renderOrder.impactFrames, after the rigs, the character controller and the camera (D-211), and
+	stays bound from `start` (FrameOrder): a picture played at the local contact (inside the
+	controller's step) is drawn and counted from that very frame, its figures and camera copied
+	after the frame's last body and camera move; one played between frames (a HitConfirmed) from
+	the next. Kill
 	is Black 2, Dark 2, Ink 2 and Final is Dark 2 whatever the frame clock says, so a late or
 	doubled frame never takes a frame from one look and gives it to the next (the old rule ended a
 	look by elapsed time, and a jittery clock split a Kill 3/1/2). A device that draws at another
@@ -35,8 +40,8 @@
 	shows each look once. A sequence still runs at most the length of the hit-stop it rides on
 	(ImpactSequence.capSeconds) from its first drawn frame; one first drawn late (a stall, below)
 	so runs past the hit-stop itself, its figures held on the last frozen frame. At the end
-	everything hides, the render step unbinds and the clones go back to the pool (the oldest past
-	impact.silhouette.poolCap are destroyed). `whenVisible(fn)` runs `fn` the moment no sequence
+	everything hides, its step leaves the render step and the clones go back to the pool (the
+	oldest past impact.silhouette.poolCap are destroyed). `whenVisible(fn)` runs `fn` the moment no sequence
 	hides the world any more: inside the render step that takes the overlay down, so the 3D
 	accents the director held for it (the white flash, the glint, the slash line) show on the
 	very first frame after the picture, not a few frames later off a timer (issue 3).
@@ -55,8 +60,8 @@
 	frames (the watchdog, a cut, a takeover) while drawn, or while a picture it took over is, is
 	still on the last frame shown, so the next rendered frame (the one that shows it gone, or the
 	next picture's first) is its last change: its claim is held at math.huge (FlashBudget never
-	prunes it, so a hit while the window sleeps still counts it) and the render step stays bound
-	until that frame settles it there, as when the render step ends it.
+	prunes it, so a hit while the window sleeps still counts it) and its step stays in the render
+	step until that frame settles it there, as when the render step ends it.
 
 	Hits that land together (one sweep through several targets confirms them all in one frame):
 	a play while a sequence shows never cuts it for a dim and is never charged again. A sequence
@@ -78,7 +83,6 @@
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 local Shared = ReplicatedStorage.Shared
 
 local Impact = require(Shared.data.impact)
@@ -89,6 +93,8 @@ local FlashBudget = require(script.Parent.FlashBudget)
 local ImpactSequence = require(script.Parent.ImpactSequence)
 local Smear = require(script.Parent.Smear)
 local FrameClock = require(script.Parent.FrameClock)
+local FrameOrder = require(script.Parent.FrameOrder)
+local Fx = require(Shared.data.fx)
 
 export type Options = {
 	slashDirection: Vector2?, -- screen space, x right and y down; nil uses impact.strokes.defaultAngle
@@ -217,21 +223,12 @@ local function restSizeOf(part: BasePart): Vector3
 	return Smear.restSize(part) or part.Size
 end
 
--- Binds the step after the camera's own (CameraController binds at Camera priority), so the
--- overlay camera copies this frame's view. Returns nil when there is no engine (Lune).
+-- Runs the step in the overlay's render step (fx.luau renderOrder.impactFrames: after the rigs,
+-- the controller's contact and the camera), so the figures and their camera copy this frame's
+-- bodies and view. The step stays bound (prepared at start); the returned leave takes this
+-- picture's step out of it. Nil when there is no engine (Lune).
 local function defaultOnRender(step: (dt: number) -> ()): (() -> ())?
-	local name = Impact.overlay.renderStepName
-	local ok = pcall(function()
-		RunService:BindToRenderStep(name, Enum.RenderPriority.Camera.Value + 1, step)
-	end)
-	if not ok then
-		return nil
-	end
-	return function()
-		pcall(function()
-			RunService:UnbindFromRenderStep(name)
-		end)
-	end
+	return FrameOrder.join(Impact.overlay.renderStepName, Fx.renderOrder.impactFrames, step)
 end
 
 local function onRender(step: (dt: number) -> ()): (() -> ())?
@@ -882,7 +879,7 @@ finish = function(rendering: boolean?)
 	end
 	if current.unbind ~= nil then
 		if #tailClaims > 0 and tailUnbind == nil then
-			-- The render step stays bound to settle the waiting claims on the next frame.
+			-- Its step stays in the render step to settle the waiting claims on the next frame.
 			tailUnbind = current.unbind
 		else
 			current.unbind()
@@ -1356,10 +1353,14 @@ function ImpactFrames.whenVisible(fn: () -> ...any)
 	table.insert(visibleWaiters, fn)
 end
 
---- Builds the overlay under the PlayerGui ahead of the first hit and watches the Reduce flashing
---- setting; a sequence showing when the setting turns on is cut at once (idempotent).
+--- Builds the overlay under the PlayerGui ahead of the first hit, binds its render step (so a
+--- picture played at the contact runs on that frame) and watches the Reduce flashing setting; a
+--- sequence showing when the setting turns on is cut at once (idempotent).
 function ImpactFrames.start()
 	ensureGui()
+	if overrides.onRender == nil then
+		FrameOrder.prepare(Impact.overlay.renderStepName, Fx.renderOrder.impactFrames)
+	end
 	FlashBudget.start()
 	if started then
 		return

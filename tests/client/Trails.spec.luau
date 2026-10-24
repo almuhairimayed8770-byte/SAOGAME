@@ -191,8 +191,8 @@ describe("Trails", function()
 end)
 
 -- Trails.swingDirection: the module samples each tracked blade tip (TrailEnd) into a short ring
--- on its own Heartbeat; under Lune there is no Heartbeat, so the spec calls Trails.sample() once
--- per fake frame after moving the weapon part by hand. The module reads the part's Position and
+-- in the pose readers' render step (D-211); under Lune there is no render step, so the spec calls
+-- Trails.sample() once per fake frame after moving the weapon part by hand. The module reads the part's Position and
 -- the tip's WorldPosition, which the engine derives from the frames and Lune does not, so sampleAt
 -- puts them where the engine would. Rigs other spec files attached are forgotten first
 -- (Trails.reset).
@@ -535,7 +535,7 @@ describe("Trails.swingDirection memory", function()
 	end)
 end)
 
--- What a Heartbeat's sample costs: the tip's WorldPosition (no CFrame built), and only for rigs
+-- What a frame's sample costs: the tip's WorldPosition (no CFrame built), and only for rigs
 -- whose answer can matter: a swinging one, or an idle one within accents.swing.sampleDistance.
 describe("Trails.sample", function()
 	local function range(): number
@@ -720,7 +720,7 @@ describe("Trails across a render stall (D-142)", function()
 	end
 
 	-- A rig tracked from the start, its tip where the engine would put it (Lune derives no
-	-- WorldPosition), so the Heartbeat's sample can read it.
+	-- WorldPosition), so the frame's sample can read it.
 	local function trackedRig(): (Model, BasePart)
 		local model, weapon = rig()
 		weapon.Position = Vector3.zero

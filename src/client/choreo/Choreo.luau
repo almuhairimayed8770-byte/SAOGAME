@@ -43,12 +43,14 @@
 	wake step does not move the body by the last frame before the stall.
 
 	Update rates: the local character and the nearest rigs step every rendered frame, in a render
-	step bound just before the camera's (Choreo.RENDER_STEP at Choreo.renderPriority(), Camera
-	priority - 1); the rest step on Heartbeat at the quality tier's distant / far rate
-	(data/choreo.luau quality). The engine does not pin a RenderStepped connection's order against
-	a BindToRenderStep callback, so the rigs' step is a bound one: the camera (Camera priority)
-	frames the body offset and pose of this frame's step, as do the local controller's step and
-	its contact read (Character + 1), whatever order the engine runs the rest in. While its
+	step bound before every reader of a pose (Choreo.RENDER_STEP at Choreo.renderPriority():
+	choreo.luau renderOrder.rigs, Camera priority - 1); the rest step on Heartbeat at the quality
+	tier's distant / far rate (data/choreo.luau quality). The engine does not pin a RenderStepped
+	connection's order against a BindToRenderStep callback, so the rigs' step is a bound one: the
+	local controller's step and its contact read (renderOrder.character), the camera, the impact
+	picture and the trails' blade samples (camera.luau and fx.luau renderOrder, all after it: the
+	frame's order is in fx/FrameOrder, D-211) read the body offset and pose of this frame's step,
+	whatever order the engine runs the rest in. While its
 	owner drives the local character (setLocalModel(model, true): the character controller), the
 	owner steps it from its own render step with Choreo.stepLocal and the rigs' step leaves it
 	alone, so the owner reads the root delta of this frame's step (D-139). A clip id
@@ -172,13 +174,16 @@ local localDriven = false
 local started = false
 local rankTimer = 0
 
---- The render step the rigs step in, bound just before the camera's (Choreo.renderPriority).
+--- The render step the rigs step in, bound before every reader of a pose (Choreo.renderPriority).
 Choreo.RENDER_STEP = "SkyspireRigs"
 
---- The rigs' render step priority: one before the camera's (Enum.RenderPriority.Camera), so the
---- camera and everything bound after it read this frame's poses and body offsets.
+--- The rigs' render step priority (choreo.luau renderOrder.rigs: one below
+--- Enum.RenderPriority.Camera), so the controller, the camera and every reader bound after them
+--- read this frame's poses and body offsets. The rule is FrameOrder.priority's; Choreo needs
+--- nothing from fx.
 function Choreo.renderPriority(): number
-	return Enum.RenderPriority.Camera.Value - 1
+	local row = ChoreoData.renderOrder.rigs
+	return (Enum.RenderPriority :: any)[row.base].Value + row.offset
 end
 
 -- The engine's per-frame render signal for the rigs: a render step bound at renderPriority, not a

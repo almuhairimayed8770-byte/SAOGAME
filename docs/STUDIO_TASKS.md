@@ -790,7 +790,7 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
    (a) RushEnded "Jammed" arrives before the root touches the face, with distance about face − 2.5.
    (b) Set Incoming Replication Lag to 0.25 s, then 0.5 s. The drawn boar stops at the face: no overrun, and no snap back at RushEnded.
    (c) Hits match item 186(b).
-   (d) Note how much of the head shows through the wall (3.1 studs expected).
+   (d) Note how much of the head shows through the wall (3.1 studs expected). Superseded by item 199.
 192. [ ] **The client can cast in the rushing group (D-199, D-204).** On a client, call workspace:Blockcast with RaycastParams.CollisionGroup = "SkyspireRushing" against a wall and against a WedgePart ramp.
    (a) It does not error. If it does, the drawn rush silently falls back to the jam path.
    (b) The result has a Normal: about horizontal for the wall, tilted up for the ramp.
@@ -805,8 +805,8 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
    (a) Pass for 10°, 20° and 30°: the rush is not ended "Jammed" at the foot, the dummy up the ramp is hit, and the drawn boar runs up with its root, with no stop partway and no slide at the hand-back.
    (b) Put a wall across the top of the 20° ramp. Pass: nobody behind the wall is hit. Note how far the drawn boar overruns.
    (c) On the 40° ramp, report whether the boar climbs it or stops, and when it is reported "Jammed".
-   (d) Rush up a flight of steps and note whether the drawn boar stops at a riser while the server's runs on.
-197. [ ] **Glancing walls and pillars (D-202).**
+   (d) Rush up a flight of steps and note whether the drawn boar stops at a riser while the server's runs on. Superseded by item 201.
+197. [ ] **Glancing walls and pillars (D-202).** Superseded by item 200.
    (a) Line a rush so that only a corner of the root's box clips a pillar beside the line. Note whether it ends "Jammed" at the pillar or carries on.
    (b) Rush into a wall at 60° to the line. The rush now stops dead where it meets the wall instead of sliding along it.
    (c) Say whether each stop reads right.
@@ -814,3 +814,45 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
    (a) Log it for a flat free rush at the default frame rate and with a capped client frame rate.
    (b) Log it once across a forced server hitch.
    (c) Pass: it stays below 4, and below 1 on flat ground.
+
+## AA. Wall slams and frame order (D-205 to D-218)
+
+199. [ ] **A head-on ram stops with the snout on the face (D-205, D-208; replaces item 191(d)).** Ram a Boar head-on into anchored walls 6, 8 and 10 studs down the line.
+   (a) Pass: the snout rests on the face and no head shows through the wall.
+   (b) Note how far the Humanoid mover overshoots before it settles. In Lune the mover went up to 0.63 into the wall and settled at 0.03, and the drawn hand-back followed it up to 0.34 in.
+200. [ ] **Glance and clip at full speed (D-206, D-207; replaces item 197).** Charge along a wall at about 30°, then past a pillar whose corner the root's box clips by 0.5 studs.
+   (a) Pass: the glance bends along the face at full speed, and the sidestep reads as a shoulder past the corner, not a stop.
+   (b) Say whether each reads right.
+201. [ ] **Stairs and ramps (D-209; replaces item 196(d)).** Charge up 1-stud stairs and a 15° ramp.
+   (a) Pass: the body climbs with no Jammed, and its HipHeight hover holds.
+202. [ ] **The turn after a slam (D-208).** Slam a boar with its target standing behind the wall.
+   (a) Pass: the Recover turn toward the target does not swing the snout through the wall.
+203. [ ] **The order in the MicroProfiler (D-211).** In Play on a client, open the MicroProfiler and read one frame's render steps.
+   (a) Pass: SkyspireRigs (199), then SkyspireCharacter (301), SkyspireCamera (302), SkyspireImpactFrames (303) and SkyspirePoseReaders (304), then SkyspireCameraLate and FrameClockFrameEnd (2000). Note which of the two at 2000 runs first.
+   (b) Check it on two machines, one at 60 fps and one capped at 30.
+204. [ ] **A step bound mid-frame (D-212).** In a scratch LocalScript, from inside a step at 301, BindToRenderStep a new step at 303 and log whether it runs on that frame.
+   (a) Note the answer. FrameOrder.prepare makes ImpactFrames independent of it either way.
+205. [ ] **The trail head on the blade (D-215).** Swing Horizontal and Sharp Nail with the local character and with a second client's character, at 60 fps and at a 30 fps cap.
+   (a) In a step at 304, place a small neon Part at TrailEnd.WorldPosition and record frames.
+   (b) Pass: the part sits on the drawn blade tip on every frame, local and remote. This also confirms that WorldPosition read at 304 reflects the Transforms written at 199 and 301.
+206. [ ] **The camera on the contact frame (D-213; extends item 165).** Lock onto a dummy and hit it with a frame capture running; also dodge in every direction.
+   (a) Pass: the nudge, shake and FOV kick start on the frame the white flash first shows.
+   (b) Pass: the body never shudders a frame ahead of the camera on a dodge or a lunge.
+207. [ ] **The Final picture's frames (D-214; replaces the Final count in item 142).** Capture a Final and a Kill at 60 fps and at a 30 fps cap.
+   (a) Pass at 60 fps: Final shows exactly 2 frames, counted from the contact frame; Kill shows 2/2/2.
+   (b) Pass at the 30 fps cap: Final shows 1 frame.
+   (c) Say whether 2 frames of Final reads strong enough. If not, the fix is one more Dark frame in impact.luau, a data change only.
+208. [ ] **A render stall mid-swing (D-215; extends item 147).** Minimise the window for 1 s in the middle of a swing, then restore it.
+   (a) Pass: no trail streak across the gap.
+   (b) Pass: the next swing's trail and slash line point the right way from their first frames.
+209. [ ] **Slam dust, thud and shake (D-217).** Ram a boar into a wall close to the player, then again from about 30 studs away.
+   (a) Pass: on the frame the snout meets the face, grey dust bursts off the face at the snout and the stone thud plays from that point. Up close the camera gives a short shake; from 30 studs there is no shake.
+   (b) Turn Reduce flashing on and ram again. Pass: the slam looks and sounds the same, with no full-screen flash.
+   (c) Slam two boars at once. Pass: two puffs and two thuds.
+   (d) At Low quality there are fewer puffs. Say whether the dust reads against the wall and whether the thud is heavy enough. Tune fx.wallSlam and sfx.cues.WallSlam (data only).
+   (e) A 30° glance and a pillar clip. Pass: no dust and no thud.
+210. [ ] **A hit right after the slam (D-208, D-210; extends item 199).** Ram a boar into a wall, then hit the dazed boar within about 0.1 s of the stop, and again at about 0.3 s.
+   (a) Pass: the snout stays on the face, not frozen inside the wall. In Lune, a second Stagger within about 0.1 s left the body up to 0.63 into the wall because the mover overshot.
+211. [ ] **A lost RushEnded (D-218).** In a scratch copy of the client, make handlers.RushEnded return at once, then ram a boar into a wall at 0 and 0.25 s of Incoming Replication Lag.
+   (a) Pass: the snout reaches the face, the dust and thud play once there, and the hand-back finishes in about 1 s with no visible slide.
+   (b) Restore the handler afterwards.

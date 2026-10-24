@@ -1,6 +1,6 @@
 --!strict
 --[[
-	CameraController (section 10): a Scriptable third-person camera driven on RenderStepped. A
+	CameraController (section 10): a Scriptable third-person camera driven by a render step. A
 	spring on the position gives the 0.12 s follow lag; the orbit comes from the mouse, the right
 	stick or a touch drag; the FOV sits on its own spring at 60 degrees and kicks +8 on Art
 	activation and dashes; `punch` narrows it a few degrees on an Art's final hit or a kill, eased
@@ -30,14 +30,16 @@
 	the rig in toward the pivot at once, the camera and its aim together (the view keeps its
 	direction), and it eases back out.
 
-	The contact frame (D-180). The camera steps at Camera priority (200), before the character
-	controller (301) predicts a contact and asks for its nudge and shake. A late pass at Last
-	priority shows a nudge or a shake asked for between the two on that same frame: the follow
-	spring is linear, so the impulse's own response over the frame's time is added to the step that
-	ran (exactly as if the impulse had come before it), and the frame is drawn again from the same
-	rig, wall fraction and shake axes with the nudge's shift and the new shake. A frame with no such
-	impulse is left exactly as the main step drew it, and an impulse asked for between frames (the
-	network) shows on the next frame, as before.
+	The frame's order (D-211, D-180). The main step runs at camera.luau renderOrder.main, after
+	Choreo's rigs and the character controller's step (choreo.luau renderOrder): it frames the
+	local root where this frame draws it (moved by its root motion), and a contact the controller
+	predicts there (its nudge, shake, kick and punch) is on this same frame. A late pass at
+	renderOrder.late (Last) still shows a nudge or a shake asked for after the main step on that
+	frame: the follow spring is linear, so the impulse's own response over the frame's time is
+	added to the step that ran (exactly as if the impulse had come before it), and the frame is
+	drawn again from the same rig, wall fraction and shake axes with the nudge's shift and the new
+	shake. A frame with no such impulse is left exactly as the main step drew it, and an impulse
+	asked for between frames (the network) shows on the next frame, as before.
 
 	Render stalls (a display asleep, a minimised window, a long hitch: RenderStepped stops while the
 	game goes on): every step runs on the real time since the last one, whatever dt the engine
@@ -58,6 +60,7 @@ local CameraData = require(Shared.data.camera)
 local Spring = require(Shared.util.Spring)
 local CameraMath = require(script.Parent.CameraMath)
 local DrawnBody = require(script.Parent.Parent.choreo.DrawnBody)
+local FrameOrder = require(script.Parent.Parent.fx.FrameOrder)
 
 export type Mode = "Default" | "Duel" | "Raid"
 export type KickKind = "Art" | "Dash"
@@ -541,9 +544,9 @@ local function step(dt: number)
 	drawn.blendAlpha = blendAlpha
 end
 
--- The late pass (D-180), after every render step that can ask for a hit's nudge or shake (the
--- character controller's contact at 301): a nudge or a shake asked for since the main step shows
--- on this frame. Nothing else of the frame changes, and a frame without one is left alone.
+-- The late pass (D-180), after every render step that can ask for a hit's nudge or shake: one
+-- asked for since the main step (anything after camera.luau renderOrder.main) shows on this
+-- frame. Nothing else of the frame changes, and a frame without one is left alone.
 local function lateStep(_dt: number)
 	if not drawn.live then
 		return
@@ -732,7 +735,7 @@ local function onInputChanged(input: InputObject, processed: boolean)
 	end
 end
 
---- Binds the RenderStepped loop, input and the local character.
+--- Binds the render steps, input and the local character.
 function CameraController.start()
 	if started then
 		return
@@ -761,10 +764,11 @@ function CameraController.start()
 			mouseCaptured = true
 		end
 	end)
-	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value, step)
-	-- After the character controller's contact (Character + 1) and anything else that can ask
-	-- for a hit's nudge or shake inside the frame (D-180).
-	RunService:BindToRenderStep(LATE_STEP_NAME, Enum.RenderPriority.Last.Value, lateStep)
+	-- After the rigs and the character controller's step (its root motion and its contact), so the
+	-- frame shows the body where it is drawn and the contact's impulses (D-211).
+	RunService:BindToRenderStep(RENDER_STEP_NAME, FrameOrder.priority(CameraData.renderOrder.main), step)
+	-- After anything else that can ask for a hit's nudge or shake inside the frame (D-180).
+	RunService:BindToRenderStep(LATE_STEP_NAME, FrameOrder.priority(CameraData.renderOrder.late), lateStep)
 end
 
 return CameraController

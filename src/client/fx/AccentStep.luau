@@ -2,9 +2,13 @@
 --[[
 	AccentStep: the engine seam Glint, SlashArc and SpeedLines share. Each module reads time
 	through `now` and runs its per-frame update through `onStep` (RenderStepped in the engine:
-	the accents are screen-facing visuals and update once per rendered frame). Specs hand in a fake
-	clock and a fake step through each module's `bind`, then drive frames by hand; under Lune the
-	defaults are the package clock and a step that never fires.
+	the accents are screen-facing visuals and update once per rendered frame). They read no rig's
+	pose and no camera there (a glint's or a slash line's world anchor is placed when it plays and
+	the engine draws it with the frame's camera; the speed lines are laid out on the viewport), so
+	RenderStepped's unpinned order against the bound render steps changes nothing they show; what
+	reads a pose runs in fx/FrameOrder's steps (D-211). Specs hand in a fake clock and a fake step
+	through each module's `bind`, then drive frames by hand; under Lune the defaults are the
+	package clock and a step that never fires.
 
 	`onWatch` is the accents' watchdog (Heartbeat in the engine). RenderStepped stops while the
 	display sleeps or the window is minimised and Heartbeat goes on (measured in Studio: 0/s and

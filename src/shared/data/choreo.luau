@@ -102,6 +102,14 @@ local Choreo = {
 	},
 	rankInterval = 0.5, -- seconds between distance re-ranks
 
+	-- Where the client's render steps that pose rigs run in the frame (D-201, D-139, D-211): an
+	-- Enum.RenderPriority name and an offset from its value. Every reader of a pose runs after
+	-- both (camera.luau and fx.luau renderOrder), in this one order on every machine.
+	renderOrder = {
+		rigs = { base = "Camera", offset = -1 }, -- SkyspireRigs: Choreo's full-rate rigs (199)
+		character = { base = "Character", offset = 1 }, -- the controller: local rig, root motion, contact (301)
+	},
+
 	-- Locomotion (section 10)
 	locomotion = {
 		walkSpeed = 8,

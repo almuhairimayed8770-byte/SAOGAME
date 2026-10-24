@@ -85,12 +85,17 @@
 
 	A Charger's rush is drawn on the server's timeline (D-171, choreo/RushDraw): its telegraph arms
 	the launch it predicts (wind-up start + windUp + the pauses), RushStarted replaces the line and
-	the clock with the server's, RushEnded caps it (a jam) or stops it, a Stagger or a Break stops
-	it where it is drawn, and a death leaves the body where it was drawn. The world stops it where
-	it stops the root (the server's worldAhead cast from the drawn body, RushDraw.room), and it
-	hands back from there as from a jam, before any RushEnded says so. While the body is drawn
-	away from its root the root part is hidden, and a launched rush is not held by a hit on it (the
-	server holds nothing of it either). An enemy's flinch during its attack plays with the rig's
+	the clock with the server's, RushTurned its path (a glance's bend, a clipped corner's sidestep,
+	D-206, D-207), RushEnded caps it (a jam, a slam's "Wall" with where the snout meets the face) or
+	stops it and says where the server's body stopped (the hand-back waits for the root there,
+	D-210), a Stagger or a Break stops it where it is drawn, and a death leaves the body where it was
+	drawn. The drawn body meets the world as the server's does (choreo/RushWorld, D-205 to D-209): the
+	server's worldAhead cast from the drawn body (RushDraw.room) slams it with its snout on a wall's
+	face, bends it along a glancing wall and sidesteps a clipped corner before any message says so,
+	and a ground probe under it (RushDraw.ground) stands it on the ground its root climbs.
+	Replication.rushContact fires on the frame the drawn body reaches each contact, where it meets
+	the face. While the body is drawn away from its root the root part is hidden, and a launched
+	rush is not held by a hit on it (the server holds nothing of it either). An enemy's flinch during its attack plays with the rig's
 	attackFlinch weights (D-173): the weapon arm stays on the attack. An enemy's own strike holds
 	its rig only for what the hit-stop has beyond the hold after the snap its clip already showed
 	on the server's beat, a launched rush's not at all (D-176).
@@ -111,6 +116,7 @@ local Sfx = require(Shared.data.sfx)
 local Enemies = require(Shared.data.enemies)
 local AI = require(Shared.data.ai)
 local Signal = require(Shared.util.Signal)
+local RushWorld = require(Shared.choreo.RushWorld)
 local ClipSampler = require(Shared.choreo.ClipSampler)
 local ActionLogic = require(script.Parent.ActionLogic)
 local Siblings = require(script.Parent.Siblings)
@@ -133,6 +139,8 @@ export type Deps = {
 	smear: any,
 	shatter: any,
 	sparks: any, -- Sparks-like: parry(position)
+	-- WallSlam-like: slam(point, normal) -> puffs, the dust of a rush's slam (D-217); none: no dust.
+	wallSlam: any?,
 	telegraphs: any,
 	outline: any,
 	switchRing: any,
@@ -201,6 +209,12 @@ Replication.clipEvent = Signal.new() :: Signal.Signal<any, string, any, boolean>
 Replication.stateChanged = Signal.new() :: Signal.Signal<any, string, number?, string?>
 --- Fires the raw HitConfirmed payload after the reactions ran (the character controller tracks parries).
 Replication.hit = Signal.new() :: Signal.Signal<any>
+--- Fires (record, kind, point, normal) on the frame a rush's drawn body reaches a contact with the
+--- world (D-208): "Slam" as its snout rests on a wall's face, "Glance" as it starts along a glancing
+--- wall, "Clip" as it shoulders past a corner; `point` is where the body meets the face (world
+--- space), `normal` the face's flat normal toward the body. Once per contact, the server's word or
+--- this client's own cast's, whichever the drawn body reaches first.
+Replication.rushContact = Signal.new() :: Signal.Signal<any, string, Vector3, Vector3>
 
 local deps: Deps? = nil
 local stateClips: { [number]: any } = {} -- entity id -> handle of the reaction clip playing
@@ -275,11 +289,13 @@ local deathCount = 0
 local silenceEnd: number? = nil
 -- enemy id -> its attack in progress (D-172).
 local attacks: { [number]: Attack } = {}
--- enemy id -> its rush being drawn (D-171): the drawing state, the animator and root it draws on,
--- the step hook, whether RushStarted came (`launched`), the server time from which a RushEnded is
--- this rush's (`since`), the root's transparency modifier before it was hidden and how far the
--- world lets the drawn body move (nil without a world cast).
+-- enemy id -> its rush being drawn (D-171): its record, the drawing state, the animator and root
+-- it draws on, the step hook, whether RushStarted came (`launched`), the server time from which a
+-- RushEnded is this rush's (`since`), the root's transparency modifier before it was hidden, how far
+-- the world lets the drawn body move and how high the ground under it stands (nil without a world
+-- cast).
 type Rush = {
+	record: any,
 	state: any,
 	animator: any,
 	root: BasePart?,
@@ -287,7 +303,8 @@ type Rush = {
 	launched: boolean,
 	since: number,
 	shownAs: number?,
-	room: ((from: CFrame, direction: Vector3, distance: number) -> number?)?,
+	room: ((from: CFrame, direction: Vector3, distance: number) -> (number?, Vector3?))?,
+	ground: ((spot: Vector3) -> number?)?,
 }
 local rushes: { [number]: Rush } = {}
 
@@ -710,6 +727,25 @@ local function endRush(id: number)
 	hideRoot(rush, false)
 end
 
+-- A rush's slam on the frame its drawn snout meets the wall (D-217): the dust thrown off the
+-- face and the stone thud where they meet, and a short shake when that is near the local
+-- player's body (fx.wallSlam). The dust never glows: it is no flash, so it needs no flash budget.
+local function slamCue(point: Vector3, normal: Vector3)
+	local d = dependencies()
+	local slam = Fx.wallSlam
+	local dust = d.wallSlam
+	if dust ~= nil then
+		dust.slam(point, normal)
+	end
+	d.sfx.cue(slam.cue, point)
+	local localId = d.localId()
+	local own = if localId ~= nil then d.entities.get(localId) else nil
+	local at = if own ~= nil and own.model ~= nil then d.positionOf(own.model) else nil
+	if at ~= nil and (at - point).Magnitude <= slam.shakeRadius then
+		d.camera.shake(slam.shakeTier)
+	end
+end
+
 -- One frame of a rush's drawing, from the animator's step (before it poses the rig).
 local function stepRush(id: number, rush: Rush, dt: number)
 	if rushes[id] ~= rush then
@@ -722,13 +758,36 @@ local function stepRush(id: number, rush: Rush, dt: number)
 		return
 	end
 	local rootFrame = root.CFrame
-	local drawn = RushDraw.step(rush.state, now, dt, rootFrame, rush.room)
+	local drawn = RushDraw.step(rush.state, now, dt, rootFrame, rush.room, rush.ground)
 	if drawn ~= nil then
 		rush.animator:setBodyOffset(rootFrame:Inverse() * drawn)
 		hideRoot(rush, true)
 	elseif rush.state.phase == "Done" then
 		endRush(id)
 	end
+	-- The contacts the drawn body reached this frame, where it meets the face (D-208).
+	for _, cue in RushDraw.takeCues(rush.state) do
+		Replication.rushContact:Fire(rush.record, cue.kind, cue.point, cue.normal)
+		if cue.kind == "Slam" then
+			slamCue(cue.point, cue.normal)
+		end
+	end
+end
+
+-- How high a model's root centre stands above the ground under it (the Humanoid's HipHeight plus
+-- half the root's height), or nil without a Humanoid.
+local function hoverOf(model: Model, root: BasePart): number?
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	if humanoid == nil then
+		return nil
+	end
+	local ok, hip = pcall(function(): any
+		return (humanoid :: Humanoid).HipHeight
+	end)
+	if not ok or typeof(hip) ~= "number" then
+		return nil
+	end
+	return hip + root.Size.Y / 2
 end
 
 -- Starts drawing an enemy's rush on `line` (the telegraph's prediction, or RushStarted's own).
@@ -744,6 +803,7 @@ local function armRush(record: any, line: any, since: number, launched: boolean)
 	local model = record.model
 	local root: BasePart? = if model ~= nil then (model :: Model).PrimaryPart else nil
 	local rush: Rush = {
+		record = record,
 		state = RushDraw.new(line),
 		animator = animator,
 		root = root,
@@ -752,14 +812,24 @@ local function armRush(record: any, line: any, since: number, launched: boolean)
 		since = since,
 		shownAs = nil,
 		room = nil,
+		ground = nil,
 	}
 	local cast = dependencies().worldCast
 	if cast ~= nil and root ~= nil then
-		-- The server's worldAhead from the drawn body: its root's own box, never its own model.
+		-- The server's worldAhead from the drawn body: its root's own box, never its own model; the
+		-- body a wall stops (its corners at rest, D-205) and the ground under it.
 		local part = root :: BasePart
-		rush.room = function(from: CFrame, direction: Vector3, distance: number): number?
+		rush.room = function(from: CFrame, direction: Vector3, distance: number): (number?, Vector3?)
 			return RushDraw.room(from, part.Size, direction, distance, cast, model)
 		end
+		rush.ground = function(spot: Vector3): number?
+			return RushDraw.ground(spot, cast, model)
+		end
+		RushDraw.setBody(
+			rush.state,
+			{ profile = RushWorld.profileOf(model :: Model), size = part.Size },
+			hoverOf(model :: Model, part)
+		)
 	end
 	rushes[record.id] = rush
 	rush.unhook = animator:onStep(function(dt: number)
@@ -1015,16 +1085,51 @@ function handlers.RushStarted(payload: any)
 	end
 end
 
-function handlers.RushEnded(payload: any)
+-- The rush drawn for an enemy that a rush message stamped `launchedAt` is about, or nil (nothing
+-- drawn, or an earlier rush's message).
+local function rushOf(payload: any): Rush?
 	local rush = rushes[payload.entityId]
 	if rush == nil or payload.launchedAt < rush.since - 0.5 * AI.tickSeconds() then
-		return -- nothing drawn, or an earlier rush's end
+		return nil
+	end
+	return rush
+end
+
+function handlers.RushEnded(payload: any)
+	local rush = rushOf(payload)
+	if rush == nil then
+		return
 	end
 	if payload.reason == "Jammed" then
 		RushDraw.jam(rush.state, payload.distance)
+	elseif payload.reason == "Wall" then
+		-- A slam (D-208): the body stops with its snout on the face, where the cue plays.
+		local contact = if payload.contact ~= nil then toVector(payload.contact) else nil
+		local normal = if payload.normal ~= nil then toVector(payload.normal) else nil
+		RushDraw.wall(rush.state, payload.distance, contact, normal)
 	else
 		RushDraw.stop(rush.state, payload.distance, payload.serverTime)
 	end
+	-- Where the server's body stops: the hand-back waits for the root there (D-210).
+	RushDraw.rest(rush.state, payload.distance)
+end
+
+function handlers.RushTurned(payload: any)
+	local rush = rushOf(payload)
+	if rush == nil then
+		return
+	end
+	-- The server's path (D-206, D-207): the drawn body runs it from here on.
+	local legs = {}
+	for _, leg in payload.legs do
+		table.insert(legs, {
+			at = leg.at,
+			from = toVector(leg.from) * Vector3.new(1, 0, 1),
+			heading = toVector(leg.heading),
+			facing = toVector(leg.facing),
+		})
+	end
+	RushDraw.turn(rush.state, legs, payload.kind, payload.at, toVector(payload.contact), toVector(payload.normal))
 end
 
 function handlers.HitConfirmed(payload: any)
@@ -1804,6 +1909,7 @@ function Replication.start()
 		smear = Siblings.load(Client, "fx.Smear"),
 		shatter = Siblings.load(Client, "fx.Shatter"),
 		sparks = Siblings.load(Client, "fx.Sparks"),
+		wallSlam = Siblings.load(Client, "fx.WallSlam"),
 		telegraphs = Siblings.load(Client, "fx.Telegraphs"),
 		outline = Siblings.load(Client, "fx.OutlineManager"),
 		switchRing = Siblings.load(Client, "fx.SwitchRing"),
