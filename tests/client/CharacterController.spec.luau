@@ -2351,3 +2351,47 @@ describe("CharacterController's blade contacts (issue 4)", function()
 		end
 	end)
 end)
+
+describe("CharacterController swing sequence numbers (item 4)", function()
+	-- The `swing` of every request of these names the rig sent, in order.
+	local function swingsOf(rig: Rig): { number }
+		local found = {}
+		for _, entry in rig.sent do
+			if entry.name == "BasicAttackRequest" or entry.name == "ArtRequest" then
+				table.insert(found, entry.payload.swing)
+			end
+		end
+		return found
+	end
+
+	it("each basic swing and Art release carries the next number", function()
+		local Combat = Harness.load("src/shared/data/combat")
+		local rig = load()
+		for _ = 1, 30 do
+			rig.frame(STILL)
+		end
+		rig.controller.basicAttack()
+		for _ = 1, math.ceil(Combat.basicHitDuration / FRAME) + 2 do
+			rig.frame(STILL)
+		end
+		rig.controller.basicAttack()
+		for _ = 1, math.ceil((Combat.basicHitDuration + Combat.basicChainWindow) / FRAME) + 30 do
+			rig.frame(STILL)
+		end
+		rig.controller.beginArt(1)
+		for _ = 1, 6 do
+			rig.frame(STILL)
+		end
+		rig.controller.releaseArt(1, 6 * FRAME)
+		local swings = swingsOf(rig)
+		expect(#swings).toBe(3)
+		for index, swing in swings do
+			expect(typeof(swing)).toBe("number")
+			expect(swing >= 1 and swing <= Combat.contact.swingSequenceMax).toBe(true)
+			expect(swing == math.floor(swing)).toBe(true)
+			if index > 1 then
+				expect(swing).toBe(swings[index - 1] % Combat.contact.swingSequenceMax + 1)
+			end
+		end
+	end)
+end)

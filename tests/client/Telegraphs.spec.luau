@@ -176,3 +176,54 @@ describe("Telegraphs on a rig with a weapon (guard)", function()
 		OutlineManager.unregister(model)
 	end)
 end)
+
+describe("Telegraphs on the server's beat (D-172)", function()
+	local Engine = Harness.load("src/client/fx/Engine")
+
+	-- Shows a 1 s wind-up heard `lateBy` late at `start`, applies `delays` (seconds since the show
+	-- -> seconds), and returns when (on the spec clock) it went off, stepping 60 fps.
+	local function endOf(lateBy: number?, delays: { { number } }?): number?
+		local clock = 100
+		Engine.setClock(function(): number
+			return clock
+		end)
+		local model = kobold()
+		Telegraphs.show(model, "GuardBreak", 1.0, Vector3.zero, Vector3.zAxis, nil, lateBy)
+		local applied: { [number]: boolean } = {}
+		local ended: number? = nil
+		for _ = 1, 120 do
+			clock += 1 / 60
+			for index, delay in delays or {} do
+				if not applied[index] and clock - 100 >= delay[1] then
+					applied[index] = true
+					Telegraphs.delay(model, delay[2])
+				end
+			end
+			Telegraphs.step()
+			if ended == nil and not Telegraphs.isShowing(model) then
+				ended = clock - 100
+			end
+		end
+		Telegraphs.forget(model)
+		Engine.setClock(nil)
+		return ended
+	end
+
+	it("ends with the server's wind-up: one heard late ends that much sooner", function()
+		local onTime = endOf(nil) :: number
+		expect(math.abs(onTime - 1.0) <= 1 / 60 + 1e-6).toBe(true)
+		local late = endOf(0.2) :: number
+		expect(math.abs(late - 0.8) <= 1 / 60 + 1e-6).toBe(true)
+		-- A negative or absent lateness starts it on receipt, as before.
+		expect(endOf(-0.3)).toBe(onTime)
+	end)
+
+	it("moves its end by each pause the server gives the attack, and back for one it took back", function()
+		local paused = endOf(nil, { { 0.3, 0.05 }, { 0.5, 0.1 } }) :: number
+		expect(math.abs(paused - 1.15) <= 1 / 60 + 1e-6).toBe(true)
+		local takenBack = endOf(nil, { { 0.3, 0.05 }, { 0.6, -0.05 } }) :: number
+		expect(math.abs(takenBack - 1.0) <= 1 / 60 + 1e-6).toBe(true)
+		-- A rig showing none is left alone.
+		Telegraphs.delay(Instance.new("Model"), 0.1)
+	end)
+end)

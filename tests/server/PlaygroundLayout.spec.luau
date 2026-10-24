@@ -174,3 +174,77 @@ describe("PlaygroundLayout budget and spawns", function()
 		end).toThrow("positive")
 	end)
 end)
+
+describe("PlaygroundLayout spaced scatter (D-170)", function()
+	-- A spawning body's root keeps minStuds from every occupied root; spec numbers, not data.
+	local SPACING = { minStuds = 12, tries = 12, widenStuds = 6, widenings = 4 }
+	local RADIUS = 6
+
+	local function clearance(x: number, z: number, occupied: { { x: number, z: number } }): number
+		local nearest = math.huge
+		for _, point in occupied do
+			nearest = math.min(nearest, PlaygroundLayout.distance(x, z, point.x, point.z))
+		end
+		return nearest
+	end
+
+	it("with nobody near it draws exactly what scatter draws", function()
+		for seed = 1, 20 do
+			local a, b = Random.new(seed), Random.new(seed)
+			local far = { { x = 500, z = 500 } }
+			local x, z, clear = PlaygroundLayout.spacedScatter(60, -40, RADIUS, SPACING, far, a)
+			local ex, ez = PlaygroundLayout.scatter(60, -40, RADIUS, b)
+			expect(x).toBe(ex)
+			expect(z).toBe(ez)
+			expect(clear).toBe(true)
+			expect(a:NextNumber()).toBe(b:NextNumber()) -- no extra draws either
+			local lone = { PlaygroundLayout.spacedScatter(60, -40, RADIUS, SPACING, {}, Random.new(seed)) }
+			expect(lone[1]).toBe(ex)
+			expect(lone[2]).toBe(ez)
+		end
+	end)
+
+	it("a second pack member stands minStuds from the first, inside the widest disc", function()
+		local widest = RADIUS + SPACING.widenings * SPACING.widenStuds
+		for seed = 1, 200 do
+			local random = Random.new(seed)
+			local fx, fz = PlaygroundLayout.scatter(60, -40, RADIUS, random)
+			local occupied = { { x = fx, z = fz } }
+			local x, z, clear = PlaygroundLayout.spacedScatter(60, -40, RADIUS, SPACING, occupied, random)
+			expect(clear).toBe(true)
+			expect(clearance(x, z, occupied)).toBeGreaterThanOrEqual(SPACING.minStuds)
+			expect(PlaygroundLayout.distance(60, -40, x, z)).toBeLessThanOrEqual(widest + 1e-9)
+		end
+	end)
+
+	it("it widens the disc a step at a time, so the pack stays as close as the spacing allows", function()
+		-- A fighter on the spawn point: nothing inside 12 studs is clear, the 12-stud disc has room
+		-- only on its rim, the 18-stud disc has the annulus 12..18.
+		for seed = 1, 100 do
+			local occupied = { { x = 0, z = 0 } }
+			local x, z, clear = PlaygroundLayout.spacedScatter(0, 0, RADIUS, SPACING, occupied, Random.new(seed))
+			expect(clear).toBe(true)
+			local distance = PlaygroundLayout.distance(0, 0, x, z)
+			expect(distance).toBeGreaterThanOrEqual(SPACING.minStuds)
+			expect(distance).toBeLessThanOrEqual(RADIUS + 2 * SPACING.widenStuds + 1e-9)
+		end
+	end)
+
+	it("with no room anywhere it returns the roomiest spot it tried and says it is not clear", function()
+		local crowd = {}
+		for gx = -40, 40, 4 do
+			for gz = -40, 40, 4 do
+				table.insert(crowd, { x = gx, z = gz })
+			end
+		end
+		for seed = 1, 20 do
+			local x, z, clear = PlaygroundLayout.spacedScatter(0, 0, RADIUS, SPACING, crowd, Random.new(seed))
+			expect(clear).toBe(false)
+			local widest = RADIUS + SPACING.widenings * SPACING.widenStuds
+			expect(PlaygroundLayout.distance(0, 0, x, z)).toBeLessThanOrEqual(widest + 1e-9)
+			-- At least as roomy as the first spot it tried.
+			local fx, fz = PlaygroundLayout.scatter(0, 0, RADIUS, Random.new(seed))
+			expect(clearance(x, z, crowd)).toBeGreaterThanOrEqual(clearance(fx, fz, crowd))
+		end
+	end)
+end)

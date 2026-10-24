@@ -255,6 +255,35 @@ describe("CameraMath framing", function()
 		expect((inside - Vector3.new(0.5, 3, -0.5)).Magnitude).toBeLessThan(1e-9)
 	end)
 
+	it("leashes the lagged pivot across the view too when given a side (D-181)", function()
+		local forward = { 0, 0, -1 } -- the view's flat right is +X
+		-- A dodge left: the lagged pivot 3 studs right of the body (and 0.5 behind), held to 1.
+		local held = v3(CameraMath.leash({ -3, 3, 0 }, { 0, 3.5, 0.5 }, forward, 0.75, 2.5, 1))
+		expect((held - Vector3.new(-2, 3.5, 0.5)).Magnitude).toBeLessThan(1e-9)
+		local right = v3(CameraMath.leash({ 3, 3, 0 }, { 0, 3, 0 }, forward, 0.75, 2.5, 1))
+		expect((right - Vector3.new(2, 3, 0)).Magnitude).toBeLessThan(1e-9)
+		-- Both ways at once on a turned view: along and across are clamped on their own axes.
+		local yaw = math.rad(30)
+		local turned = { -math.sin(yaw), 0, -math.cos(yaw) }
+		local along, across = Vector3.new(turned[1], 0, turned[3]), Vector3.new(-turned[3], 0, turned[1])
+		local trailing = across * 4 - along * 5
+		local both = v3(CameraMath.leash({ 0, 0, 0 }, { trailing.X, 0, trailing.Z }, turned, 0.75, 2.5, 1))
+		expect(both:Dot(across)).toBeCloseTo(1, 1e-9)
+		expect(both:Dot(along)).toBeCloseTo(-2.5, 1e-9)
+		-- Inside the side leash nothing moves; without a side the sideways lag is left alone.
+		local inside = v3(CameraMath.leash({ 0, 3, 0 }, { 0.9, 3, -0.5 }, forward, 0.75, 2.5, 1))
+		expect((inside - Vector3.new(0.9, 3, -0.5)).Magnitude).toBeLessThan(1e-9)
+		local free = v3(CameraMath.leash({ -3, 3, 0 }, { 0, 3, 0 }, forward, 0.75, 2.5))
+		expect((free - Vector3.new(0, 3, 0)).Magnitude).toBeLessThan(1e-9)
+	end)
+
+	it("never clips a hit's nudge with the side leash (D-181)", function()
+		local side = camera.follow.leash.side
+		expect(typeof(side)).toBe("number")
+		expect(side).toBeGreaterThanOrEqual(camera.nudge.studs)
+		expect(camera.follow.leash.closer).toBeGreaterThanOrEqual(camera.nudge.studs)
+	end)
+
 	it("lets only opaque world parts block the view, never characters or accessories", function()
 		local seeThrough = camera.collision.seeThrough
 		expect(CameraMath.blocksView(0, seeThrough, false, false)).toBe(true)

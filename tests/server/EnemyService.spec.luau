@@ -146,9 +146,16 @@ local rigBuilder = {
 	end,
 }
 
+local hitStopHooks: { any } = {} -- every hook EnemyService handed CombatService.setEnemyHitStop
 local combat = {
-	enemyStrike = function(enemyId, attack, origin, facing)
-		table.insert(strikes, { time = clock.t, enemyId = enemyId, attack = attack, origin = origin, facing = facing })
+	setEnemyHitStop = function(hook)
+		table.insert(hitStopHooks, hook or false)
+	end,
+	enemyStrike = function(enemyId, attack, origin, facing, options)
+		table.insert(
+			strikes,
+			{ time = clock.t, enemyId = enemyId, attack = attack, origin = origin, facing = facing, options = options }
+		)
 		return {}
 	end,
 }
@@ -428,7 +435,7 @@ describe("EnemyService tick", function()
 	end)
 
 	it(
-		"the strike reaches CombatService.enemyStrike after the wind-up, from the crouch point along the line",
+		"the rush reaches CombatService.enemyStrike stretch by stretch from the launch to the strike beat, from the crouch point along the line (D-166)",
 		function()
 			fresh()
 			local id = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
@@ -441,18 +448,32 @@ describe("EnemyService tick", function()
 			expect(advanceUntil(function()
 				return #strikes > 0
 			end, 3)).toBe(true)
-			local strike = strikes[1]
-			expect(strike.enemyId).toBe(id)
-			expect(strike.attack.id).toBe(CHARGE.id)
-			expect(strike.time - telegraphAt).toBeCloseTo(CHARGE.windUp + CHARGE.strike, TICK + 1e-6)
-			local origin = Vector3.new(telegraph.origin[1], telegraph.origin[2], telegraph.origin[3])
-			expect(near(strike.origin, origin, 1e-3)).toBe(true)
-			local facing = Vector3.new(telegraph.facing[1], telegraph.facing[2], telegraph.facing[3])
-			expect(near(strike.facing, facing, 1e-3)).toBe(true)
+			-- The launch resolves the body where it crouched (the fake rig's 4-stud root, 2 each way),
+			-- its snout carried on by the time since the launch beat (the wind-up's end) the tick that
+			-- launches it came after.
+			local first = strikes[1]
+			expect(first.enemyId).toBe(id)
+			expect(first.attack.id).toBe(CHARGE.id)
+			expect(first.time - telegraphAt).toBeCloseTo(CHARGE.windUp, TICK + 1e-6)
+			local beat = telegraph.serverTime + CHARGE.windUp
+			expect(first.time - beat).toBeGreaterThanOrEqual(-1e-9)
+			expect(first.time - beat).toBeLessThan(TICK + 1e-6)
+			expect(first.options.span.from).toBeCloseTo(-2, 1e-6)
+			expect(first.options.span.to).toBeCloseTo(2 + AI.rushSpeed(CHARGE) * (first.time - beat), 1e-6)
 			expect(phaseOf(id)).toBe("Strike")
 			expect(advanceUntil(function()
 				return phaseOf(id) == "Recover"
 			end, 2)).toBe(true)
+			local origin = Vector3.new(telegraph.origin[1], telegraph.origin[2], telegraph.origin[3])
+			local facing = Vector3.new(telegraph.facing[1], telegraph.facing[2], telegraph.facing[3])
+			for _, strike in strikes do
+				expect(near(strike.origin, origin, 1e-3)).toBe(true)
+				expect(near(strike.facing, facing, 1e-3)).toBe(true)
+				expect(strike.options.resolved).toBe(first.options.resolved)
+			end
+			local last = strikes[#strikes]
+			expect(last.time - telegraphAt).toBeCloseTo(CHARGE.windUp + CHARGE.strike, TICK + 1e-6)
+			expect(last.options.span.to).toBeGreaterThanOrEqual(CHARGE.reach)
 			expect(EntityService.get(id).state).toBe("PostMotion")
 		end
 	)
@@ -1088,5 +1109,53 @@ describe("EnemyService hold", function()
 		expect(EnemyService.holdsNew()).toBe(false)
 		local id = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
 		expect(EnemyService.isHeld(id)).toBe(false)
+	end)
+end)
+
+describe("EnemyService hit-stop (D-168)", function()
+	it("bind hands CombatService the pause; reset takes it back", function()
+		hitStopHooks = {}
+		fresh()
+		expect(hitStopHooks[#hitStopHooks]).toBe(EnemyService.pauseForHit)
+		EnemyService.reset()
+		expect(hitStopHooks[#hitStopHooks]).toBe(false)
+	end)
+
+	it("a hit during the kobold's wind-up pushes its strike and its Art state back by the hit-stop", function()
+		local function strikeDelay(pause: number?): (number, number?, number)
+			fresh()
+			local id = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+			putPlayer(1, Vector3.new(0, 3, -4))
+			advanceUntil(function()
+				return phaseOf(id) == "WindUp"
+			end, 5)
+			local telegraphAt = clock.t - TICK
+			advance(TICK * 2)
+			local artUntil = EntityService.get(id).stateUntil
+			local added = if pause ~= nil then EnemyService.pauseForHit(id, pause) else nil
+			local shift = EntityService.get(id).stateUntil - artUntil
+			advanceUntil(function()
+				return #strikes > 0
+			end, 3)
+			return strikes[1].time - telegraphAt, added, shift
+		end
+		local plain = strikeDelay(nil)
+		local paused, added, shift = strikeDelay(TICK * 2)
+		expect(added).toBeCloseTo(TICK * 2, 1e-9)
+		expect(paused - plain).toBeCloseTo(TICK * 2, 1e-6)
+		expect(shift).toBeCloseTo(TICK * 2, 1e-9)
+		expect(#sentOf("Telegraph")).toBe(1) -- the clients hear it on HitConfirmed, not a new telegraph
+	end)
+
+	it("nothing to pause: an unknown id, an enemy between attacks, a rush on its way", function()
+		fresh()
+		expect(EnemyService.pauseForHit(999, 0.05)).toBeNil()
+		local id = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		expect(EnemyService.pauseForHit(id, 0.05)).toBeNil()
+		putPlayer(1, Vector3.new(0, 3, -20))
+		advanceUntil(function()
+			return phaseOf(id) == "Strike"
+		end, 5)
+		expect(EnemyService.pauseForHit(id, 0.05)).toBe(0)
 	end)
 end)

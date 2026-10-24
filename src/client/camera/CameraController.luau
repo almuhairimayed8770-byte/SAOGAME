@@ -19,13 +19,23 @@
 	and off, and a lock whose target is gone eases out from where the target was. The whole rig
 	rides a lagged pivot (the 0.12 s follow) leashed along the view (CameraMath.leash): the camera
 	and its aim move together, so a dodge never tilts the view, and a dodge toward the lens never
-	brings it onto the player.
+	brings it onto the player; and leashed across it (D-181), so a sideways dodge never carries the
+	player toward the screen's edge.
 
 	Walls (D-149): a spherecast from the true pivot to the camera spot. A hit on a character (any model
 	holding a Humanoid: the player's own weapon, the lock target, other players), an accessory or a
 	see-through part is looked past (CameraMath.blocksView) and the probe cast again. A wall pulls
 	the rig in toward the pivot at once, the camera and its aim together (the view keeps its
 	direction), and it eases back out.
+
+	The contact frame (D-180). The camera steps at Camera priority (200), before the character
+	controller (301) predicts a contact and asks for its nudge and shake. A late pass at Last
+	priority shows a nudge or a shake asked for between the two on that same frame: the follow
+	spring is linear, so the impulse's own response over the frame's time is added to the step that
+	ran (exactly as if the impulse had come before it), and the frame is drawn again from the same
+	rig, wall fraction and shake axes with the nudge's shift and the new shake. A frame with no such
+	impulse is left exactly as the main step drew it, and an impulse asked for between frames (the
+	network) shows on the next frame, as before.
 
 	Render stalls (a display asleep, a minimised window, a long hitch: RenderStepped stops while the
 	game goes on): every step runs on the real time since the last one, whatever dt the engine
@@ -50,6 +60,7 @@ export type Mode = "Default" | "Duel" | "Raid"
 export type KickKind = "Art" | "Dash"
 
 local RENDER_STEP_NAME = "SkyspireCamera"
+local LATE_STEP_NAME = "SkyspireCameraLate"
 
 type Scripted = { frames: { CFrame }, duration: number, elapsed: number }
 type BlendBack = { from: CFrame, elapsed: number }
@@ -67,7 +78,7 @@ local mobile = UserInputService.TouchEnabled
 local gamepadLook = Vector2.zero
 
 local followStiffness = CameraMath.springFromLag(CameraData.follow.lag)
--- The lagged pivot the rig rides on (leashed along the view when read).
+-- The lagged pivot the rig rides on (leashed along and across the view when read).
 local pivotSpring: Spring.Spring<Vector3>? = nil
 local fovSpring = Spring.new(CameraData.fov.rest, CameraMath.springFromLag(CameraData.fov.lag), CameraData.fov.damping)
 -- The two-shot camera's bearing around the player (degrees); on the free camera's while unlocked.
@@ -103,6 +114,30 @@ local shakeTime = 0
 local lastStepAt: number? = nil -- os.clock of the last render step
 local scripted: Scripted? = nil
 local blendBack: BlendBack? = nil
+-- What the main step drew this frame, for the late pass (D-180): live from the main step's end to
+-- the late pass, or to the next main step when no late pass runs.
+local drawn = {
+	live = false,
+	at = 0,
+	span = 0,
+	settle = false,
+	pivot = Vector3.zero,
+	trailing = Vector3.zero,
+	forward = Vector3.zero, -- the flat unit view the leash held the pivot along (zero: not leashed)
+	anchor = Vector3.zero,
+	fraction = 1,
+	position = Vector3.zero,
+	lookAt = Vector3.zero,
+	axes = CFrame.identity, -- the camera's CFrame before the step: the shake's axes
+	shakeTime = 0,
+	blendFrom = nil :: CFrame?,
+	blendAlpha = 1,
+}
+-- The nudge impulses and whether a shake were asked for while `drawn` is live.
+local lateImpulse = Vector3.zero
+local lateShake = false
+-- A follow spring at rest that plays a late impulse alone over the frame's time.
+local impulseProbe = Spring.new(Vector3.zero, followStiffness, CameraData.follow.damping)
 local raycastParams: RaycastParams? = nil
 -- The probe's exclude list: the subject, then whatever this frame's probe looked past.
 local probeFilter: { Instance } = {}
@@ -266,6 +301,16 @@ local function applyLook(dx: number, dy: number, degreesPerUnit: number)
 	)
 end
 
+-- The shake's offset at `time` with `energy`, in the axes of `axes` (zero with no energy).
+local function shakeIn(axes: CFrame, energy: number, time: number): Vector3
+	if energy <= 0 then
+		return Vector3.zero
+	end
+	local sx, sy, sz =
+		table.unpack(CameraMath.shakeOffset(time, energy, CameraData.shake.frequency, CameraData.shake.lanes))
+	return axes.RightVector * sx + axes.UpVector * sy + axes.LookVector * sz
+end
+
 local function stepScripted(dt: number, camera: Camera)
 	local shot = scripted :: Scripted
 	local index, alpha = CameraMath.scriptedSample(#shot.frames, shot.duration, shot.elapsed)
@@ -353,6 +398,10 @@ local function step(dt: number)
 	local at = now()
 	local gap = if lastStepAt ~= nil then at - (lastStepAt :: number) else dt
 	lastStepAt = at
+	-- A new frame: nothing of the last one is left for a late pass.
+	drawn.live = false
+	lateImpulse = Vector3.zero
+	lateShake = false
 	local span = math.max(dt, gap, 0)
 	local settle = span > CameraData.stall.settleSeconds
 	local camera = workspace.CurrentCamera
@@ -389,7 +438,7 @@ local function step(dt: number)
 	local pivot = pivotOf(root)
 	local cameraOffset, lookOffset = rig(root, span, settle)
 
-	-- The lagged pivot, leashed along the view.
+	-- The lagged pivot, leashed along and across the view.
 	local spring = pivotSpring
 	if spring == nil then
 		spring = Spring.new(pivot, followStiffness, CameraData.follow.damping)
@@ -407,7 +456,14 @@ local function step(dt: number)
 	if forward.Magnitude > CameraData.epsilon then
 		local leash = CameraData.follow.leash
 		anchor = toVector(
-			CameraMath.leash(toTable(pivot), toTable(trailing), toTable(forward.Unit), leash.closer, leash.further)
+			CameraMath.leash(
+				toTable(pivot),
+				toTable(trailing),
+				toTable(forward.Unit),
+				leash.closer,
+				leash.further,
+				leash.side
+			)
 		)
 	end
 
@@ -444,24 +500,100 @@ local function step(dt: number)
 	-- Shake: noise scaled by a decaying energy, in the camera's own axes.
 	local shakeEnergy = shakeValue(at)
 	shakeTime += span
-	local shakeVector = Vector3.zero
-	if shakeEnergy > 0 then
-		local sx, sy, sz = table.unpack(
-			CameraMath.shakeOffset(shakeTime, shakeEnergy, CameraData.shake.frequency, CameraData.shake.lanes)
-		)
-		local current = camera.CFrame
-		shakeVector = current.RightVector * sx + current.UpVector * sy + current.LookVector * sz
-	end
+	local axes = camera.CFrame
+	local shakeVector = shakeIn(axes, shakeEnergy, shakeTime)
 
 	local followCFrame = CFrame.lookAt(position + shakeVector, lookAt + shakeVector)
 	local back = blendBack
+	local blendFrom: CFrame? = nil
+	local blendAlpha = 1
 	if back ~= nil then
 		local alpha = CameraMath.easeBlend(back.elapsed, CameraData.scripted.blendOut)
 		back.elapsed += span
 		followCFrame = back.from:Lerp(followCFrame, alpha)
+		blendFrom, blendAlpha = back.from, alpha
 		if alpha >= 1 then
 			blendBack = nil
 		end
+	end
+	camera.CFrame = followCFrame
+	camera.Focus = CFrame.new(lookAt)
+
+	-- Kept for the late pass (D-180).
+	drawn.live = true
+	drawn.at = at
+	drawn.span = span
+	drawn.settle = settle
+	drawn.pivot = pivot
+	drawn.trailing = trailing
+	drawn.forward = if forward.Magnitude > CameraData.epsilon then forward.Unit else Vector3.zero
+	drawn.anchor = anchor
+	drawn.fraction = fraction
+	drawn.position = position
+	drawn.lookAt = lookAt
+	drawn.axes = axes
+	drawn.shakeTime = shakeTime
+	drawn.blendFrom = blendFrom
+	drawn.blendAlpha = blendAlpha
+end
+
+-- The late pass (D-180), after every render step that can ask for a hit's nudge or shake (the
+-- character controller's contact at 301): a nudge or a shake asked for since the main step shows
+-- on this frame. Nothing else of the frame changes, and a frame without one is left alone.
+local function lateStep(_dt: number)
+	if not drawn.live then
+		return
+	end
+	drawn.live = false
+	local impulse = lateImpulse
+	local shook = lateShake
+	lateImpulse = Vector3.zero
+	lateShake = false
+	local nudged = impulse.Magnitude > CameraData.epsilon
+	if not nudged and not shook then
+		return
+	end
+	local camera = workspace.CurrentCamera
+	if camera == nil then
+		return
+	end
+	local position = drawn.position
+	local lookAt = drawn.lookAt
+	local spring = pivotSpring
+	if nudged and spring ~= nil and spring.position == drawn.trailing then
+		-- The spring is linear: the impulse's own response over the frame adds to the step that
+		-- ran, exactly as if it had come before it (a settled stall drops it, as it would have).
+		impulseProbe:Snap(Vector3.zero)
+		impulseProbe.velocity = impulse
+		local moved = advanceSpring(impulseProbe, drawn.span, drawn.settle)
+		local trailing = drawn.trailing + moved
+		spring.position = trailing
+		spring.velocity += impulseProbe.velocity - impulse
+		local anchor = trailing
+		if drawn.forward ~= Vector3.zero then
+			local leash = CameraData.follow.leash
+			anchor = toVector(
+				CameraMath.leash(
+					toTable(drawn.pivot),
+					toTable(trailing),
+					toTable(drawn.forward),
+					leash.closer,
+					leash.further,
+					leash.side
+				)
+			)
+		end
+		-- The rig rides the anchor, pulled in by the frame's wall fraction.
+		local shift = (anchor - drawn.anchor) * drawn.fraction
+		position += shift
+		lookAt += shift
+		cameraSpot = position
+	end
+	local shakeVector = shakeIn(drawn.axes, shakeValue(drawn.at), drawn.shakeTime)
+	local followCFrame = CFrame.lookAt(position + shakeVector, lookAt + shakeVector)
+	local blendFrom = drawn.blendFrom
+	if blendFrom ~= nil then
+		followCFrame = blendFrom:Lerp(followCFrame, drawn.blendAlpha)
 	end
 	camera.CFrame = followCFrame
 	camera.Focus = CFrame.new(lookAt)
@@ -480,7 +612,12 @@ function CameraController.nudge(toward: Vector3, studs: number)
 	if direction.Magnitude <= CameraData.epsilon then
 		return
 	end
-	spring:Impulse(direction.Unit * CameraMath.impulseForDisplacement(studs, followStiffness))
+	local impulse = direction.Unit * CameraMath.impulseForDisplacement(studs, followStiffness)
+	spring:Impulse(impulse)
+	if drawn.live then
+		-- Asked for after this frame's step: the late pass shows it on this frame (D-180).
+		lateImpulse += impulse
+	end
 end
 
 --- Starts (or raises) a shake at the tier's amplitude; it decays on its own from now.
@@ -489,6 +626,9 @@ function CameraController.shake(tier: string)
 	local at = now()
 	shakePeak = math.max(shakeValue(at), amplitude)
 	shakeAt = at
+	if drawn.live then
+		lateShake = true
+	end
 end
 
 --- Kicks the FOV by the Art or dash amount; the kick decays back to rest from now.
@@ -618,6 +758,9 @@ function CameraController.start()
 		end
 	end)
 	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value, step)
+	-- After the character controller's contact (Character + 1) and anything else that can ask
+	-- for a hit's nudge or shake inside the frame (D-180).
+	RunService:BindToRenderStep(LATE_STEP_NAME, Enum.RenderPriority.Last.Value, lateStep)
 end
 
 return CameraController

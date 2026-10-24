@@ -18,7 +18,9 @@ local tuning = AI.archetypes.Charger
 local BOAR = Enemies.byId("FrenzyBoar")
 local CHARGE = BOAR.attacks[1]
 
-local function world(options: { position: Vector3?, facing: Vector3?, seed: number? }?)
+local function world(
+	options: { position: Vector3?, facing: Vector3?, seed: number?, extents: (() -> (number, number))? }?
+)
 	local opts = options or {}
 	local def = Enemies.scaled(BOAR)
 	local w: any = {
@@ -77,8 +79,11 @@ local function world(options: { position: Vector3?, facing: Vector3?, seed: numb
 				{ time = w.time, attack = attack, origin = origin, facing = facing, shape = shape }
 			)
 		end,
-		strike = function(attack, origin, facing)
-			table.insert(w.strikes, { time = w.time, attack = attack, origin = origin, facing = facing })
+		strike = function(attack, origin, facing, options)
+			table.insert(
+				w.strikes,
+				{ time = w.time, attack = attack, origin = origin, facing = facing, options = options }
+			)
 		end,
 		setState = function(state, duration)
 			w.record.state = state
@@ -88,12 +93,14 @@ local function world(options: { position: Vector3?, facing: Vector3?, seed: numb
 			table.insert(w.actions, { time = w.time, clipId = clipId, facing = facing })
 		end,
 		random = Random.new(opts.seed or 3),
+		bodyExtents = opts.extents,
 	}
+	w.blocked = false -- a jammed body: MoveTo goals are taken but the body does not move
 	w.brain = Brain.new(w.context, Charger)
 	function w.step(count: number?)
 		for _ = 1, count or 1 do
 			w.brain:tick(TICK)
-			if w.moving and w.goal ~= nil then
+			if w.moving and w.goal ~= nil and not w.blocked then
 				local delta = w.goal - w.position
 				local distance = delta.Magnitude
 				local reach = (w.speed or def.moveSpeed) * TICK
@@ -166,38 +173,115 @@ describe("Charger", function()
 		expect(w.telegraphs).toHaveLength(1)
 	end)
 
-	it("rushes along the line at the rush speed and strikes 0.5 s in from the crouch point", function()
-		local w = world()
-		w.players = { player(1, 0, -20) }
-		w.stepUntil(function()
-			return w.phase() == "WindUp"
-		end, 2)
-		local crouchAt = w.telegraphs[1].time
-		local crouchPosition = w.position
-		expect(w.stepUntil(function()
-			return w.phase() == "Strike"
-		end, 2)).toBe(true)
-		local launchAt = w.time - w.brain:phaseElapsed() -- the tick the Strike phase began
-		expect(launchAt - crouchAt).toBeGreaterThanOrEqual(CHARGE.windUp - 1e-9)
-		expect(launchAt - crouchAt).toBeLessThan(CHARGE.windUp + TICK * 2)
-		-- The rush goal is reach + overshoot down the line at the rush speed.
-		local rush = w.goals[#w.goals]
-		expect(rush.speed).toBeCloseTo(AI.rushSpeed(CHARGE), 1e-9)
-		expect(rush.speed).toBe(tuning.chargeSpeed)
-		local expectedEnd = crouchPosition + FORWARD * (CHARGE.reach + tuning.overshoot)
-		expect((rush.goal - expectedEnd).Magnitude).toBeLessThan(1e-3)
+	it(
+		"rushes along the line at the rush speed and has struck the whole line 0.5 s in, from the crouch point",
+		function()
+			local w = world()
+			w.players = { player(1, 0, -20) }
+			w.stepUntil(function()
+				return w.phase() == "WindUp"
+			end, 2)
+			local crouchAt = w.telegraphs[1].time
+			local crouchPosition = w.position
+			expect(w.stepUntil(function()
+				return w.phase() == "Strike"
+			end, 2)).toBe(true)
+			local launchAt = w.time - w.brain:phaseElapsed() -- the tick the Strike phase began
+			expect(launchAt - crouchAt).toBeGreaterThanOrEqual(CHARGE.windUp - 1e-9)
+			expect(launchAt - crouchAt).toBeLessThan(CHARGE.windUp + TICK * 2)
+			-- The rush goal is reach + overshoot down the line at the rush speed.
+			local rush = w.goals[#w.goals]
+			expect(rush.speed).toBeCloseTo(AI.rushSpeed(CHARGE), 1e-9)
+			expect(rush.speed).toBe(tuning.chargeSpeed)
+			local expectedEnd = crouchPosition + FORWARD * (CHARGE.reach + tuning.overshoot)
+			expect((rush.goal - expectedEnd).Magnitude).toBeLessThan(1e-3)
 
-		expect(w.stepUntil(function()
-			return #w.strikes == 1
-		end, 2)).toBe(true)
-		local strike = w.strikes[1]
-		expect(strike.time - launchAt).toBeGreaterThanOrEqual(CHARGE.strike - 1e-9)
-		expect(strike.time - launchAt).toBeLessThan(CHARGE.strike + TICK * 2)
-		expect(strike.attack.id).toBe("Charge")
-		expect((strike.origin - crouchPosition).Magnitude).toBeLessThan(1e-6)
-		expect(strike.facing.Z).toBeCloseTo(-1, 1e-6)
-		-- By the strike the body has swept the whole telegraphed line.
-		expect(Brain.horizontalDistance(w.position, crouchPosition)).toBeGreaterThanOrEqual(CHARGE.reach - 1e-3)
+			-- The rush resolves by contact (D-166): stretch after stretch, the last one 0.5 s in.
+			w.stepUntil(function()
+				return w.phase() ~= "Strike"
+			end, 2)
+			expect(#w.strikes).toBeGreaterThan(1)
+			local last = w.strikes[#w.strikes]
+			expect(last.time - launchAt).toBeGreaterThanOrEqual(CHARGE.strike - 1e-9)
+			expect(last.time - launchAt).toBeLessThan(CHARGE.strike + TICK * 2)
+			for _, strike in w.strikes do
+				expect(strike.attack.id).toBe("Charge")
+				expect((strike.origin - crouchPosition).Magnitude).toBeLessThan(1e-6)
+				expect(strike.facing.Z).toBeCloseTo(-1, 1e-6)
+			end
+			-- By the last stretch the swept line reaches its end, and the body has run it.
+			expect(last.options.span.to).toBeGreaterThanOrEqual(CHARGE.reach)
+			local atLast = w.goals[#w.goals]
+			expect(atLast ~= nil).toBe(true)
+			expect(Brain.horizontalDistance(w.position, crouchPosition)).toBeGreaterThanOrEqual(CHARGE.reach - 1e-3)
+		end
+	)
+
+	it(
+		"the rush strikes by contact: the launch sweeps the body, each tick the stretch it swept, never past 0.5 s (D-166)",
+		function()
+			local FRONT, BACK = 5.6, 3.3
+			local w = world({
+				extents = function()
+					return FRONT, BACK
+				end,
+			})
+			w.players = { player(1, 0, -20) }
+			w.stepUntil(function()
+				return w.phase() == "Strike"
+			end, 2)
+			local launchAt = w.time - w.brain:phaseElapsed()
+			local crouchPosition = w.telegraphs[1].origin
+			-- The launch tick already resolved the body where it crouched.
+			expect(#w.strikes).toBe(1)
+			expect(w.strikes[1].time).toBeCloseTo(launchAt, 1e-9)
+			expect(w.strikes[1].options.span.from).toBeCloseTo(-BACK, 1e-9)
+			expect(w.strikes[1].options.span.to).toBeCloseTo(FRONT, 1e-9)
+			w.stepUntil(function()
+				return w.phase() ~= "Strike"
+			end, 2)
+			local speed = AI.rushSpeed(CHARGE)
+			local resolved = w.strikes[1].options.resolved
+			expect(typeof(resolved)).toBe("table")
+			local previous = 0
+			for index, strike in w.strikes do
+				local elapsed = math.min(strike.time - launchAt, CHARGE.strike)
+				expect(strike.time - launchAt).toBeLessThan(CHARGE.strike + TICK - 1e-9) -- never a stretch after the strike's tick
+				expect(strike.options.resolved).toBe(resolved) -- one verdict per target for the whole rush
+				expect((strike.origin - crouchPosition).Magnitude).toBeLessThan(1e-6)
+				if index > 1 then
+					-- From where the body's back was on the previous tick to where its front is now.
+					expect(strike.options.span.from).toBeCloseTo(speed * previous - BACK, 1e-6)
+					expect(strike.options.span.to).toBeCloseTo(speed * elapsed + FRONT, 1e-6)
+				end
+				previous = elapsed
+			end
+			expect(previous).toBeCloseTo(CHARGE.strike, 1e-9)
+			expect(w.strikes[#w.strikes].options.span.to).toBeCloseTo(speed * CHARGE.strike + FRONT, 1e-6)
+		end
+	)
+
+	it("a jammed body strikes on the same timeline: the stretches follow the clock, not the body (D-166)", function()
+		local function run(blocked: boolean)
+			local w = world()
+			w.players = { player(1, 0, -20) }
+			w.stepUntil(function()
+				return w.phase() == "WindUp"
+			end, 2)
+			w.blocked = blocked
+			w.stepUntil(function()
+				return w.phase() == "Recover"
+			end, 3)
+			local spans = {}
+			for _, strike in w.strikes do
+				table.insert(spans, { strike.time, strike.options.span.from, strike.options.span.to })
+			end
+			return spans, w
+		end
+		local free = run(false)
+		local jammed, w = run(true)
+		expect(jammed).toEqual(free)
+		expect(Brain.horizontalDistance(w.position, w.telegraphs[1].origin)).toBeLessThan(1e-6) -- it never moved
 	end)
 
 	it("overshoots past the target, then recovers for the attack's 1.2 s with a slow turn back", function()

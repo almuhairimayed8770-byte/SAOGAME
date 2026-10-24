@@ -143,4 +143,34 @@ describe("project files", function()
 			expect(playground[name]).toBeTruthy()
 		end
 	end)
+
+	it("never turns the engine's name or health bar back on from StarterPlayer (D-178)", function()
+		-- The server unlabels every character (CharacterReady.unlabel) and every rig (RigBuilder);
+		-- a place that set a viewer distance or a StarterHumanoid label would draw the engine's
+		-- name and health bar beside the nameplate on any Humanoid that missed it.
+		local labels = {}
+		for _, path in allProjects() do
+			local starterPlayer = readProject(path).tree.StarterPlayer
+			local properties = if starterPlayer ~= nil then starterPlayer["$properties"] else nil
+			if properties ~= nil then
+				for _, name in { "NameDisplayDistance", "HealthDisplayDistance" } do
+					local value = properties[name]
+					if value ~= nil and value ~= 0 then
+						table.insert(labels, ("%s: StarterPlayer.%s = %s"):format(path, name, tostring(value)))
+					end
+				end
+			end
+			local humanoid = if starterPlayer ~= nil then starterPlayer.StarterHumanoid else nil
+			if humanoid ~= nil then
+				local displayType = humanoid["$properties"] and humanoid["$properties"].DisplayDistanceType
+				if displayType ~= "None" then
+					table.insert(
+						labels,
+						("%s: StarterHumanoid.DisplayDistanceType = %s"):format(path, tostring(displayType))
+					)
+				end
+			end
+		end
+		expect(labels).toEqual({})
+	end)
 end)

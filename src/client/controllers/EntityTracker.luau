@@ -7,6 +7,7 @@
 
 		EntityTracker.get(entityId) -> record?      EntityTracker.fromModel(model) -> record?
 		EntityTracker.all() -> { record }            EntityTracker.localId() -> number (yields)
+		EntityTracker.live() -> { record }           (read-only, no copy: a per-frame walk)
 		EntityTracker.added / removed : Signal<record>
 		EntityTracker.changed : Signal<record, attributeName, value>
 
@@ -90,6 +91,10 @@ EntityTracker.changed = Signal.new() :: Signal.Signal<Record, string, any>
 EntityTracker.localChanged = Signal.new() :: Signal.Signal<number?>
 
 local records: { [number]: Record } = {}
+-- Every tracked record sorted by id, frozen: rebuilt when a record is tracked or untracked, never
+-- per call (EntityTracker.live).
+local NONE: { Record } = table.freeze({})
+local liveList: { Record } = NONE
 local byModel: { [Instance]: Record } = {}
 local connections: { [Instance]: { Connection } } = {}
 local pending: { [Instance]: Connection } = {}
@@ -102,6 +107,18 @@ local function dependencies(): Deps
 		error("EntityTracker: call bind() or start() first")
 	end
 	return deps :: Deps
+end
+
+-- Rebuilds the frozen id-sorted list `live` hands out (on a track, an untrack or a reset).
+local function rebuildLive()
+	local list: { Record } = {}
+	for _, record in records do
+		table.insert(list, record)
+	end
+	table.sort(list, function(a, b)
+		return a.id < b.id
+	end)
+	liveList = table.freeze(list)
 end
 
 local function resolveLocal(record: Record)
@@ -174,6 +191,7 @@ function EntityTracker.track(model: Instance)
 	local typed = record :: Record
 	records[typed.id] = typed
 	byModel[model] = typed
+	rebuildLive()
 	EntityTracker.added:Fire(typed)
 	resolveLocal(typed)
 end
@@ -197,6 +215,7 @@ function EntityTracker.untrack(model: Instance)
 	if records[record.id] == record then
 		records[record.id] = nil
 	end
+	rebuildLive()
 	EntityTracker.removed:Fire(record)
 	if localIdValue == record.id then
 		localIdValue = nil
@@ -258,16 +277,16 @@ function EntityTracker.fromModel(model: Instance): Record?
 	return byModel[model]
 end
 
---- Every tracked record, sorted by id.
+--- Every tracked record, sorted by id (a new list the caller may keep or change).
 function EntityTracker.all(): { Record }
-	local list = {}
-	for _, record in records do
-		table.insert(list, record)
-	end
-	table.sort(list, function(a, b)
-		return a.id < b.id
-	end)
-	return list
+	return table.clone(liveList)
+end
+
+--- Every tracked record, sorted by id, without a copy: the tracker's own frozen list, replaced
+--- (never changed) when a record comes or goes. For a walk every frame (the local blade's contact
+--- prediction, item 5); never write to it, and read it again next frame rather than keeping it.
+function EntityTracker.live(): { Record }
+	return liveList
 end
 
 --- The local entity id if it is already known (never yields).
@@ -309,6 +328,7 @@ function EntityTracker.reset()
 	table.clear(connections)
 	table.clear(pending)
 	table.clear(localWaiters)
+	liveList = NONE
 	localIdValue = nil
 end
 

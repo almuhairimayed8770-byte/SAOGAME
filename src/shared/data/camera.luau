@@ -49,11 +49,14 @@ local Camera = {
 		focusHeight = 1.5, -- studs above the root part: the pivot the rigs are built on (chest)
 		snapDistance = 60, -- a subject jump bigger than this (teleport, respawn) snaps the spring
 		-- The lagged pivot is held this close to the true one along the view: `closer` studs ahead
-		-- of it (the lens nearer the player: a dodge back) and `further` behind it (a dash away).
-		-- Sideways and vertical lag are left alone (D-149).
+		-- of it (the lens nearer the player: a dodge back) and `further` behind it (a dash away)
+		-- (D-149); and `side` studs either way across the view, so a sideways dodge never carries
+		-- the player toward the screen's edge (D-181; at least nudge.studs, so a hit's nudge still
+		-- shows). Vertical lag is left alone.
 		leash = {
 			closer = 0.75,
 			further = 2.5,
+			side = 1.0,
 		},
 	},
 

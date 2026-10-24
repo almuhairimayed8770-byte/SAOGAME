@@ -313,17 +313,19 @@ describe("Brain attack timeline", function()
 		expect(w.states[1].state).toBe("Art")
 		expect(w.states[1].duration).toBeCloseTo(charge.windUp + charge.strike, 1e-9)
 		local telegraphAt = w.telegraphs[1].time
-		local struck = w.stepUntil(function()
-			return #w.strikes == 1
-		end, 3)
-		expect(struck).toBe(true)
-		local strikeAt = w.strikes[1].time
-		expect(strikeAt - telegraphAt).toBeGreaterThanOrEqual(charge.windUp + charge.strike - 1e-9)
-		expect(strikeAt - telegraphAt).toBeLessThan(charge.windUp + charge.strike + TICK * 2)
 		local recovered = w.stepUntil(function()
 			return w.brain:getPhase() == "Recover"
 		end, 3)
 		expect(recovered).toBe(true)
+		-- The rush resolves by contact (D-166): its first stretch at the launch, its last at the strike
+		-- beat, attack.strike after the wind-up ends, and none after it.
+		expect(#w.strikes).toBeGreaterThan(1)
+		local firstAt = w.strikes[1].time
+		expect(firstAt - telegraphAt).toBeGreaterThanOrEqual(charge.windUp - 1e-9)
+		expect(firstAt - telegraphAt).toBeLessThan(charge.windUp + TICK * 2)
+		local strikeAt = w.strikes[#w.strikes].time
+		expect(strikeAt - telegraphAt).toBeGreaterThanOrEqual(charge.windUp + charge.strike - 1e-9)
+		expect(strikeAt - telegraphAt).toBeLessThan(charge.windUp + charge.strike + TICK * 2)
 		expect(w.states[#w.states].state).toBe("PostMotion")
 		expect(w.states[#w.states].duration).toBe(charge.recovery)
 		local recoverAt = w.time
@@ -334,6 +336,101 @@ describe("Brain attack timeline", function()
 		expect(w.time - recoverAt).toBeGreaterThanOrEqual(charge.recovery - TICK)
 		expect(w.states[#w.states].state).toBe("Idle")
 		expect(w.brain:currentAttack()).toBeNil()
+	end)
+
+	it("a hit-stop pause pushes the wind-up's end, the strike beat, the Art state and the cooldown (D-168)", function()
+		local overhead = Enemies.byId("KoboldAxeman").attacks[1]
+		local function run(pause: number?)
+			local w = world("KoboldAxeman")
+			local extended = {}
+			w.context.extendState = function(seconds)
+				table.insert(extended, seconds)
+			end
+			w.players = { player(1, 0, -4) }
+			w.stepUntil(function()
+				return w.brain:getPhase() == "WindUp"
+			end, 3)
+			w.step(2)
+			local readyAt = w.brain.cooldowns[overhead.id]
+			local added = if pause ~= nil then w.brain:pauseAttack(pause) else nil
+			w.stepUntil(function()
+				return #w.strikes > 0
+			end, 3)
+			return w.strikes[1].time - w.telegraphs[1].time, added, extended, w.brain.cooldowns[overhead.id] - readyAt
+		end
+		local plain = run(nil)
+		local paused, added, extended, cooldownShift = run(TICK * 2)
+		expect(added).toBeCloseTo(TICK * 2, 1e-9)
+		expect(paused - plain).toBeCloseTo(TICK * 2, 1e-6)
+		expect(extended).toEqual({ added })
+		expect(cooldownShift).toBeCloseTo(added, 1e-9)
+	end)
+
+	it(
+		"overlapping freezes run to the later end, as the clients' do, and one attack pauses at most the cap (D-168)",
+		function()
+			local w = world("KoboldAxeman")
+			w.players = { player(1, 0, -4) }
+			w.stepUntil(function()
+				return w.brain:getPhase() == "WindUp"
+			end, 3)
+			local start = w.brain.phaseStart
+			expect(w.brain:pauseAttack(0.05)).toBeCloseTo(0.05, 1e-9)
+			expect(w.brain:pauseAttack(0.05)).toBe(0) -- the same freeze again adds nothing
+			w.time += 0.02
+			expect(w.brain:pauseAttack(0.05)).toBeCloseTo(0.02, 1e-9) -- runs 0.02 past the first
+			local total = 0.07
+			for _ = 1, 10 do
+				w.time += 0.1
+				total += w.brain:pauseAttack(0.1)
+			end
+			expect(total).toBeCloseTo(AI.hitStop.maxPausePerAttack, 1e-9)
+			expect(w.brain.phaseStart - start).toBeCloseTo(AI.hitStop.maxPausePerAttack, 1e-9)
+			w.time += 1
+			expect(w.brain:pauseAttack(0.1)).toBe(0)
+		end
+	)
+
+	it("a frozen wind-up holds its pose: no tracking turn until the freeze ends (D-168)", function()
+		local w = world("KoboldAxeman")
+		w.players = { player(1, 0, -4) }
+		w.stepUntil(function()
+			return w.brain:getPhase() == "WindUp"
+		end, 3)
+		w.players = { player(1, 4, -3) } -- off to the side: the wind-up would track toward it
+		local facing = w.brain:getFacing()
+		w.brain:pauseAttack(TICK * 2)
+		w.step(2)
+		expect(w.brain:getFacing()).toEqual(facing)
+		w.step(1)
+		expect(math.abs(Brain.signedAngle(facing, w.brain:getFacing()))).toBeGreaterThan(0)
+	end)
+
+	it("nothing to pause outside an unresolved attack, and a launched rush is never paused (D-168)", function()
+		local w = world("KoboldAxeman")
+		expect(w.brain:pauseAttack(0.05)).toBeNil() -- idle
+		w.players = { player(1, 0, -4) }
+		w.stepUntil(function()
+			return #w.strikes > 0
+		end, 4)
+		expect(w.brain:pauseAttack(0.05)).toBeNil() -- the strike resolved
+		w.stepUntil(function()
+			return w.brain:getPhase() == "Recover"
+		end, 2)
+		expect(w.brain:pauseAttack(0.05)).toBeNil()
+
+		local boar = world("FrenzyBoar")
+		boar.players = { player(1, 0, -20) }
+		boar.stepUntil(function()
+			return boar.brain:getPhase() == "WindUp"
+		end, 3)
+		expect(boar.brain:pauseAttack(0.05)).toBeCloseTo(0.05, 1e-9) -- the crouch holds a beat longer
+		boar.stepUntil(function()
+			return boar.brain:getPhase() == "Strike"
+		end, 3)
+		local start = boar.brain.phaseStart
+		expect(boar.brain:pauseAttack(0.05)).toBe(0)
+		expect(boar.brain.phaseStart).toBe(start)
 	end)
 
 	it("an attack goes on cooldown for its whole timeline plus the archetype cooldown", function()

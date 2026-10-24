@@ -541,6 +541,30 @@ describe("EntityService states and timers", function()
 		expect(EntityService.isLocked(id)).toBe(false)
 	end)
 
+	it("extendState pushes a timed state's end and its lock later, quietly (D-168)", function()
+		fresh()
+		local id = spawnBoar()
+		EntityService.setState(id, "Art", 1.0)
+		local record = EntityService.get(id)
+		local until_, lock = record.stateUntil, record.lockUntil
+		local changes = #sentOf("StateChanged")
+		expect(EntityService.extendState(id, 0.05)).toBe(true)
+		expect(record.stateUntil).toBeCloseTo(until_ + 0.05, 1e-9)
+		expect(record.lockUntil).toBeCloseTo(lock + 0.05, 1e-9)
+		expect(#sentOf("StateChanged")).toBe(changes) -- HitConfirmed carries the pause instead
+		advance(1.0)
+		expect(record.state).toBe("Art") -- the unextended end has passed
+		advance(0.2) -- past the extended end, on the enemies' slower tick
+		expect(record.state).toBe("Idle")
+		-- Nothing to extend: an untimed state, a zero push, an unknown or dead fighter.
+		expect(EntityService.extendState(id, 0.05)).toBe(false)
+		EntityService.setState(id, "Art", 1.0)
+		expect(EntityService.extendState(id, 0)).toBe(false)
+		expect(EntityService.extendState(999, 0.05)).toBe(false)
+		EntityService.die(id)
+		expect(EntityService.extendState(id, 0.05)).toBe(false)
+	end)
+
 	it("entering a lock state drops the guard; a dead fighter never changes state again", function()
 		fresh()
 		local id = spawnPlayer()

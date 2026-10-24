@@ -225,6 +225,54 @@ describe("EntityTracker", function()
 		expect(ids).toEqual({ 4, 18, 30 })
 	end)
 
+	it(
+		"live hands out one frozen list, sorted by id, replaced and never changed when a record comes or goes",
+		function()
+			local a = entityModel({ EntityId = 30, EntityKind = "Enemy", Rig = "Boar" })
+			local b = entityModel({ EntityId = 4, EntityKind = "Player", Rig = "PlayerR15", DisplayName = "Mira" })
+			local c = entityModel({ EntityId = 18, EntityKind = "Enemy", Rig = "Kobold" })
+			local env = fresh({ a, b })
+			EntityTracker.wire()
+			local first = EntityTracker.live()
+			-- No copy per call: a walk every frame allocates nothing.
+			expect(EntityTracker.live()).toBe(first)
+			expect(table.isfrozen(first)).toBe(true)
+			expect(#first).toBe(2)
+			expect(first[1]).toBe(EntityTracker.get(4))
+			expect(first[2]).toBe(EntityTracker.get(30))
+			-- An attribute change keeps the list (the records themselves change).
+			env.setAttribute(a, "HP", 5)
+			expect(EntityTracker.live()).toBe(first)
+			expect(first[2].hp).toBe(5)
+			-- A record that comes or goes replaces the list; one kept from before stays as it was.
+			env.added:Fire(c)
+			local second = EntityTracker.live()
+			expect(second).never.toBe(first)
+			expect(#first).toBe(2)
+			local ids = {}
+			for _, record in second do
+				table.insert(ids, record.id)
+			end
+			expect(ids).toEqual({ 4, 18, 30 })
+			env.removed:Fire(b)
+			local third = EntityTracker.live()
+			expect(third).never.toBe(second)
+			expect(#second).toBe(3)
+			expect(#third).toBe(2)
+			expect(third[1]).toBe(EntityTracker.get(18))
+			-- all() is still a list of the caller's own.
+			local copy = EntityTracker.all()
+			expect(copy).never.toBe(third)
+			expect(table.isfrozen(copy)).toBe(false)
+			table.insert(copy, third[1])
+			expect(#EntityTracker.live()).toBe(2)
+			-- A reset leaves nothing to walk.
+			EntityTracker.reset()
+			expect(#EntityTracker.live()).toBe(0)
+			expect(#EntityTracker.all()).toBe(0)
+		end
+	)
+
 	it("resolves the local id from the local character and wakes waiters", function()
 		local me = entityModel({
 			EntityId = 4,

@@ -113,6 +113,9 @@ export type CastOptions = {
 
 export type Candidate = { id: number, position: Vector3, radius: number? }
 
+-- A stretch of a line strike, in studs along the line from its origin (lineTargets).
+export type Span = { from: number, to: number }
+
 local HitSweep = {}
 
 -- A cast shorter than this is a point: it is not made, and the overlap test at its end stands in
@@ -784,13 +787,16 @@ function HitSweep.coneTargets(
 end
 
 --- Candidates inside a horizontal line strike: from `origin` along `facing` for `length`, `width` wide,
---- each target expanded by its radius.
+--- each target expanded by its radius. With `span`, only the stretch from `span.from` to `span.to`
+--- studs along the line counts as well (a rushing body's sweep of one tick, D-166): a target whose
+--- body (along +- radius) misses that stretch is left out, and the line's own ends still bound it.
 function HitSweep.lineTargets(
 	origin: Vector3,
 	facing: Vector3,
 	length: number,
 	width: number,
-	candidates: { Candidate }
+	candidates: { Candidate },
+	span: Span?
 ): { Candidate }
 	local forward = forwardOf(facing)
 	local inside: { Candidate } = {}
@@ -804,9 +810,13 @@ function HitSweep.lineTargets(
 		local radius = candidate.radius or 0
 		local along = offset:Dot(forward)
 		local across = math.abs(offset:Dot(right))
-		if along >= -radius and along <= length + radius and across <= halfWidth + radius then
-			table.insert(inside, candidate)
+		if along < -radius or along > length + radius or across > halfWidth + radius then
+			continue
 		end
+		if span ~= nil and (along + radius < span.from or along - radius > span.to) then
+			continue
+		end
+		table.insert(inside, candidate)
 	end
 	return inside
 end

@@ -3,7 +3,9 @@
 	Validates src/shared/data/ai.luau: the shape of every tuning table, the section 16 rates
 	matching enemies.rules, every Charger row's line covered by chargeSpeed * strike, material
 	costs that PathfindingService accepts (positive numbers keyed by material name), and attack
-	weights that name attacks which exist in enemies.luau.
+	weights that name attacks which exist in enemies.luau. The hit-stop pause cap holds at least
+	one Final hit-stop (D-168), and the fighter collision groups are three distinct names other than
+	Default whose `apart` pairs name only them and let a rush pass the players (D-167).
 ]]
 
 type Context = {
@@ -36,6 +38,7 @@ local CHARGER_FIELDS = {
 	"overshoot",
 	"wheelAngle",
 	"wheelSpeedMultiplier",
+	"jamLagStuds",
 }
 
 local function validate(ctx: Context): { string }
@@ -186,6 +189,69 @@ local function validate(ctx: Context): { string }
 			end
 		end
 		positiveNumber(AI.attack.defaultWeight, "attack.defaultWeight")
+	end
+
+	-- D-168: one Final hit-stop (the combo finisher's freeze) always fits inside the per-attack cap.
+	local Combat = ctx.load("src/shared/data/combat")
+	if typeof(AI.hitStop) ~= "table" then
+		problem("hitStop must be a table")
+	else
+		local cap = AI.hitStop.maxPausePerAttack
+		positiveNumber(cap, "hitStop.maxPausePerAttack")
+		local final = Combat.hitStopFrames.Final * Combat.hitStopFrameSeconds
+		if typeof(cap) == "number" and cap > 0 and cap < final - 1e-9 then
+			problem(
+				("hitStop.maxPausePerAttack %s is shorter than one Final hit-stop (%s s)"):format(
+					tostring(cap),
+					tostring(final)
+				)
+			)
+		end
+	end
+
+	-- D-167: the fighter collision groups.
+	local collision = AI.collision
+	if typeof(collision) ~= "table" then
+		problem("collision must be a table")
+	else
+		local names: { [string]: boolean } = {}
+		local count = 0
+		for _, field in { "players", "enemies", "rushing" } do
+			local name = collision[field]
+			if typeof(name) ~= "string" or name == "" then
+				problem(("collision.%s must be a group name"):format(field))
+			elseif name == "Default" then
+				problem(("collision.%s must not be the engine's Default group"):format(field))
+			elseif not names[name] then
+				names[name] = true
+				count += 1
+			end
+		end
+		if count ~= 3 then
+			problem("collision groups must be three distinct names")
+		end
+		local passesPlayers = false
+		if typeof(collision.apart) ~= "table" then
+			problem("collision.apart must be a list of group pairs")
+		else
+			for _, pair in collision.apart do
+				for _, name in { pair[1], pair[2] } do
+					if not names[name] then
+						problem(("collision.apart names %s, which is not a fighter group"):format(tostring(name)))
+					end
+				end
+				local a, b = pair[1], pair[2]
+				if
+					(a == collision.rushing and b == collision.players)
+					or (a == collision.players and b == collision.rushing)
+				then
+					passesPlayers = true
+				end
+			end
+		end
+		if not passesPlayers then
+			problem("collision.apart must let the rushing group pass the players group")
+		end
 	end
 
 	if typeof(AI.interrupt) == "table" then

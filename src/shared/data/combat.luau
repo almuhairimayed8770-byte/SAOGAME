@@ -172,6 +172,11 @@ local Combat = {
 		-- Seconds a predicted hit waits for its HitConfirmed. A confirmation later than this is a hit
 		-- of its own (it plays in full); a prediction never confirmed shows no number.
 		confirmSeconds = 1.0,
+		-- A contact's hold on an enemy's attack stands for the pause the server will give that
+		-- attack (D-172) until the HitConfirmed brings the server's own; a contact not confirmed
+		-- within this many seconds of play gives it back (the server did not pause the attack), so
+		-- the wind-up keeps the server's beat. A confirmation later than this still corrects it.
+		allowanceSeconds = 0.4,
 		-- Sub-samples one rendered frame of the local sweep may take, as sweepMaxSubdivisions does
 		-- for the server's; each one solves the blade and tests it against the fighters near it, and
 		-- no end of the blade moves more than sweepMaxTipStep between two of them while they last.
@@ -184,6 +189,11 @@ local Combat = {
 		-- the client cannot be sure of (an unknown def, an unconfirmed earlier hit) predicts no kill;
 		-- the server's Kill then extends the hold from the contact frame.
 		killRegenSeconds = 1.0,
+		-- Each swing or Art release the local fighter sends carries its own sequence number
+		-- (ArtRequest / BasicAttackRequest `swing`), counting up from 1 and wrapping after this, and
+		-- the server echoes it on that swing's HitConfirmed: a prediction matches the swing that
+		-- made it, never a quick second swing's hit on the same target, window and Art.
+		swingSequenceMax = 65535,
 	},
 
 	-- Aim (D-112). While a lock is held and the body is free (Idle, Guard, the held Art stance), the

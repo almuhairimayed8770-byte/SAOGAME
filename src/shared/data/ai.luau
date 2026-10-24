@@ -41,6 +41,7 @@ export type ChargerTuning = ArchetypeTuning & {
 	overshoot: number, -- studs past the end of the line the rush carries
 	wheelAngle: number, -- degrees off the target beyond which the chase slows into the turn
 	wheelSpeedMultiplier: number, -- the chase speed while wheeling (a tighter turning circle)
+	jamLagStuds: number, -- a rushing body this far behind the rush's clock is jammed (D-169)
 }
 
 export type BruteTuning = ArchetypeTuning & {
@@ -124,6 +125,33 @@ local AI = {
 		lineWidth = Combat.strikeLineWidth, -- the ground line is exactly as wide as the strike that follows
 	},
 
+	-- Hit-stop on an attacking enemy (D-168): a player's confirmed hit pauses the enemy's unresolved
+	-- attack (wind-up, or strike before it resolves) for the hit-stop its clip freezes for, at most
+	-- this many seconds per attack in all: a full basic chain (3 + 3 + 3 + 6 frames at 60 fps) and no
+	-- more, so a combo can delay a telegraphed blow by a beat but never hold it off.
+	hitStop = {
+		maxPausePerAttack = 0.25,
+	},
+
+	-- Collision groups (D-167), registered on the server through PhysicsService. Player characters
+	-- join `players` when they are ready (CharacterReady), enemies `enemies` at spawn. A rushing
+	-- enemy is `rushing` from its launch until its body is clear of every player and enemy after the
+	-- rush stops: it collides with the world (Default) only, so a rush runs through the players it
+	-- hits and through its packmates instead of jamming on them. Every other pair keeps colliding:
+	-- players with players, players with walking enemies, enemies with enemies (a pack never melts
+	-- into one body).
+	collision = {
+		players = "SkyspirePlayers",
+		enemies = "SkyspireEnemies",
+		rushing = "SkyspireRushing",
+		-- Pairs that pass through each other; every other pair collides.
+		apart = {
+			{ "SkyspireRushing", "SkyspirePlayers" },
+			{ "SkyspireRushing", "SkyspireEnemies" },
+			{ "SkyspireRushing", "SkyspireRushing" },
+		},
+	},
+
 	archetypes = {
 		Charger = {
 			turnRate = 110,
@@ -149,6 +177,9 @@ local AI = {
 			overshoot = 8,
 			wheelAngle = 45,
 			wheelSpeedMultiplier = 0.5,
+			-- About three 20 Hz AI ticks of the boar's rush at chargeSpeed: a body this far behind the
+			-- clock is stuck, not slow to accelerate (D-169).
+			jamLagStuds = 4,
 		} :: ChargerTuning,
 		Brute = {
 			turnRate = 160,

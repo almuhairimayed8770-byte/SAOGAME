@@ -146,6 +146,7 @@ type ArtRun = {
 	hitBreak: boolean, -- a target was in Break: zero post-motion
 	switchShown: boolean,
 	tracePath: { HitSweep.BladeSample }?, -- the window's blade, kept only while traceSink is set
+	swing: number?, -- the request's sequence number, echoed on every HitConfirmed of this run (item 4)
 }
 
 -- What one server frame of one fighter's timeline shares across the windows it sweeps.
@@ -156,6 +157,10 @@ type Frame = {
 
 local STAGE_PLAYER = "player"
 local CLIP_SEPARATOR = "/"
+
+-- D-168: asked with (enemy id, hit-stop seconds) when a player's hit on an enemy is confirmed;
+-- answers the seconds that pushed the enemy's unresolved attack back, or nil when it had none.
+export type EnemyHitStop = (enemyId: number, seconds: number) -> number?
 
 local CombatService = {}
 
@@ -177,6 +182,7 @@ local clipCache: { [string]: Types.ClipDef } = {}
 local heartbeatConnection: Connection? = nil
 local signalConnections: { Connection } = {}
 local started = false
+local enemyHitStop: EnemyHitStop? = nil
 
 -- ------------------------------------------------------------------------------------------
 -- Engine seam and helpers
@@ -304,7 +310,7 @@ local function playerClipId(record: Record, clipName: string): string?
 	return STAGE_PLAYER .. CLIP_SEPARATOR .. weapon.category .. CLIP_SEPARATOR .. clipName
 end
 
-local function hitPayload(applied: Types.AppliedHit): any
+local function hitPayload(applied: Types.AppliedHit, attackPause: number?, swing: number?): any
 	return {
 		attackerId = applied.attackerId,
 		targetId = applied.targetId,
@@ -323,12 +329,40 @@ local function hitPayload(applied: Types.AppliedHit): any
 		-- The side the blow came from in the target's frame: enemies play their directional
 		-- flinch from it (section 10, "Stagger has four directional clips").
 		staggerDirection = applied.staggerDirection,
+		-- D-168: what the hit-stop pushed the target enemy's unresolved attack back (see Remotes).
+		attackPause = attackPause,
+		-- Item 4: the sequence number the swing's request carried, so the swinger's client matches
+		-- this hit to the swing that made it.
+		swing = swing,
 	}
 end
 
-local function announceHit(applied: Types.AppliedHit)
-	fireAll("HitConfirmed", hitPayload(applied))
+local function announceHit(applied: Types.AppliedHit, attackPause: number?, swing: number?)
+	fireAll("HitConfirmed", hitPayload(applied, attackPause, swing))
 	CombatService.HitLanded:Fire(applied)
+end
+
+--- Installs (nil removes) the hook a player's confirmed hit on an enemy asks to pause that enemy's
+--- unresolved attack for the hit's hit-stop (D-168): combat.hitStopFrames for the tier times
+--- combat.hitStopFrameSeconds, what every client freezes the enemy's clip for. Its answer rides on
+--- HitConfirmed as attackPause. EnemyService.bind installs it; reset() removes it.
+function CombatService.setEnemyHitStop(hook: EnemyHitStop?)
+	enemyHitStop = hook
+end
+
+-- Asks EnemyService to pause the enemy's attack for this hit's hit-stop; nil when nothing paused.
+local function pauseEnemyAttack(target: Record, applied: Types.AppliedHit): number?
+	local hook = enemyHitStop
+	if hook == nil or target.kind ~= "Enemy" or applied.killed then
+		return nil
+	end
+	local frames = (Combat.hitStopFrames :: { [string]: number })[applied.hitStop] or 0
+	local ok, result = pcall(hook, target.id, frames * Combat.hitStopFrameSeconds)
+	if not ok then
+		warn(("[CombatService] the enemy hit-stop pause failed for entity %d: %s"):format(target.id, tostring(result)))
+		return nil
+	end
+	return if typeof(result) == "number" then result else nil
 end
 
 local function showSwitchWindow(enemy: Record, opener: Record, now: number)
@@ -661,7 +695,7 @@ local function landHit(run: ArtRun, attacker: Record, hit: HitSweep.Hit, now: nu
 		run.hitBreak = true
 	end
 	run.hitAny = true
-	announceHit(applied)
+	announceHit(applied, pauseEnemyAttack(target, applied), run.swing)
 	-- An Art that connects opens a Switch window on the enemy (Phase 1 logic, Phase 0 ring).
 	if run.art ~= nil and not run.switchShown and target.kind == "Enemy" and not applied.killed then
 		run.switchShown = true
@@ -939,7 +973,8 @@ local function beginRun(
 	facing: Vector3,
 	now: number,
 	startAt: number, -- clip time zero: `now`, or a request's clamped client stamp (runStartOf)
-	finalHit: boolean
+	finalHit: boolean,
+	swing: number? -- the request's sequence number (item 4), nil for code callers
 )
 	local session = sessionOf(record.id)
 	cancelRun(session, record)
@@ -977,6 +1012,7 @@ local function beginRun(
 		hitBreak = false,
 		switchShown = false,
 		tracePath = nil,
+		swing = swing,
 	}
 	fireAll("ActionStarted", {
 		entityId = record.id,
@@ -1035,7 +1071,7 @@ end
 -- The next basic-chain swing after validation; `clientTime` (a request's stamp) or nil (code callers).
 -- The swing, its chain index and the chain clock all run from the same start: the clamped stamp,
 -- floored at the moment the body was last free (runStartOf), or `now` for code callers.
-local function startBasic(entityId: number, facing: Vector3?, clientTime: number?): (boolean, string?)
+local function startBasic(entityId: number, facing: Vector3?, clientTime: number?, swing: number?): (boolean, string?)
 	local record = EntityService.get(entityId)
 	local now = dependencies().now()
 	local session = if record ~= nil then sessionOf(record.id) else nil
@@ -1070,7 +1106,8 @@ local function startBasic(entityId: number, facing: Vector3?, clientTime: number
 		look,
 		now,
 		startAt,
-		finalHit
+		finalHit,
+		swing
 	)
 	return true, nil
 end
@@ -1175,11 +1212,19 @@ end
 --- Resolves an enemy attack at strike time against every player in its cone or line: dodge frames,
 --- parry, guard, damage. Returns the hits it applied (parries included). Origin and facing may be
 --- Vector3 or {x, y, z}.
+---
+--- `options` (D-166) resolves a moving strike in stretches: a line strike counts only `span` (studs
+--- along the line, the stretch a rushing body swept this tick), and `resolved` holds the target ids
+--- the attack already reached. A target in it is skipped; every target this call reaches is added
+--- before its dodge frames are read, so a body that dodged at first contact stays missed while the
+--- rest of the rush passes over it, and nobody is hit twice. Dodge, parry and guard are judged at
+--- each target's own contact. Without options the whole shape resolves at once, as before.
 function CombatService.enemyStrike(
 	enemyId: number,
 	attackDef: Types.EnemyAttackDef,
 	origin: any,
-	facing: any
+	facing: any,
+	options: Types.EnemyStrikeOptions?
 ): { Types.AppliedHit }
 	local results: { Types.AppliedHit } = {}
 	local enemy = EntityService.get(enemyId)
@@ -1190,9 +1235,11 @@ function CombatService.enemyStrike(
 	local originVector = asVector(origin)
 	local facingVector = unitOrNil(flat(asVector(facing))) or facingOf(enemy, nil)
 
+	local resolved = if options ~= nil then options.resolved else nil
+	local span = if options ~= nil then options.span else nil
 	local candidates: { HitSweep.Candidate } = {}
 	for _, player in EntityService.players() do
-		if player.state ~= "Dead" then
+		if player.state ~= "Dead" and (resolved == nil or not resolved[player.id]) then
 			table.insert(candidates, {
 				id = player.id,
 				position = EntityService.positionOf(player.id) or Vector3.zero,
@@ -1201,13 +1248,16 @@ function CombatService.enemyStrike(
 		end
 	end
 	local struck = if attackDef.arc <= 0
-		then HitSweep.lineTargets(originVector, facingVector, attackDef.reach, Combat.strikeLineWidth, candidates)
+		then HitSweep.lineTargets(originVector, facingVector, attackDef.reach, Combat.strikeLineWidth, candidates, span)
 		else HitSweep.coneTargets(originVector, facingVector, attackDef.reach, attackDef.arc, candidates)
 
 	for _, candidate in struck do
 		local player = EntityService.get(candidate.id)
 		if player == nil or player.state == "Dead" then
 			continue
+		end
+		if resolved ~= nil then
+			resolved[player.id] = true -- reached: whatever happens now is this attack's one verdict on it
 		end
 		if EntityService.isInvulnerable(player.id, now) then
 			continue -- a clean dodge: nothing to show
@@ -1274,6 +1324,19 @@ end
 -- Net handlers
 -- ------------------------------------------------------------------------------------------
 
+-- A request's swing sequence number (item 4): the schema already holds it to a whole number in
+-- 1 .. combat.luau contact.swingSequenceMax; anything else (a request without one) is nil.
+local function swingOf(payload: any): number?
+	local swing = payload.swing
+	if typeof(swing) ~= "number" or swing ~= math.floor(swing) then
+		return nil
+	end
+	if swing < 1 or swing > Combat.contact.swingSequenceMax then
+		return nil
+	end
+	return swing
+end
+
 local function onArtRequest(player: Player, payload: any)
 	local record = EntityService.fromPlayer(player)
 	local art = Arts.byId(payload.artId)
@@ -1306,7 +1369,8 @@ local function onArtRequest(player: Player, payload: any)
 		facing,
 		now,
 		startAt,
-		true
+		true,
+		swingOf(payload)
 	)
 end
 
@@ -1319,7 +1383,7 @@ local function onBasicAttackRequest(player: Player, payload: any)
 	elseif not facingMatches(record, payload.facing, nil) then
 		ok, reason = false, "Facing"
 	else
-		ok, reason = startBasic(record.id, facing, payload.clientTime)
+		ok, reason = startBasic(record.id, facing, payload.clientTime, swingOf(payload))
 	end
 	if not ok then
 		reject(record, player, "BasicAttack", reason or "Rejected", payload.clientTime)
@@ -1479,6 +1543,7 @@ function CombatService.reset()
 	table.clear(signalConnections)
 	table.clear(sessions)
 	CombatService.traceSink = nil
+	enemyHitStop = nil
 	started = false
 end
 

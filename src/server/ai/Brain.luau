@@ -17,6 +17,17 @@
 
 	An archetype module (Charger, Brute) supplies the hooks: how to chase, which attacks are
 	usable, what the body does during the wind-up, the strike and the recovery.
+
+	A strike the archetype resolves by contact (contactStrike: the Charger's rush, D-166) skips the
+	single resolve at `attack.strike`: the archetype resolves the line in stretches as its body
+	sweeps it (strikeStretch), each target once, and finishes by `attack.strike`. An attack that is
+	cancelled (interrupt, death, sleep) tells the archetype through onCancel.
+
+	Hit-stop (D-168): a player's confirmed hit on this enemy while its attack is unresolved (the
+	wind-up, or the strike before it resolves) pauses the attack's timeline for the hit-stop the
+	clients freeze its clip for (pauseAttack), capped per attack by ai.hitStop.maxPausePerAttack.
+	The wind-up, the strike beat, the cooldown and the entity's Art state all move by the same
+	amount; a rush that has launched is never paused.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -30,6 +41,24 @@ local Rng = require(Shared.util.Rng)
 export type Phase = "Idle" | "Alert" | "Chase" | "WindUp" | "Strike" | "Recover" | "Return" | "Interrupted" | "Dead"
 
 export type PlayerSnapshot = { id: number, position: Vector3 }
+
+-- A Charger's rush as the server runs it (D-166, D-169): the line from the crouch point, the speed
+-- and how long the run lasts. EnemyService turns it into the RushStarted remote.
+export type Rush = {
+	attackId: string,
+	-- The launch beat: the wind-up's own end (the strike phase's start), which the clients predict
+	-- and draw the rush from. The line resolves on this clock (RushStarted carries it).
+	startedAt: number,
+	bodyStartedAt: number, -- the AI tick the body started running (up to a tick after startedAt)
+	origin: Vector3, -- the crouch point (where the root stood)
+	direction: Vector3, -- horizontal unit vector along the line
+	speed: number, -- studs per second
+	length: number, -- reach + overshoot
+	duration: number, -- length / speed
+}
+
+-- Why a rush stopped: "Done" when it ran its time, else one of the early reasons the clients hear.
+export type RushEnd = "Done" | Types.RushEndReason
 
 export type Target = {
 	id: number,
@@ -51,11 +80,24 @@ export type Context = {
 	stop: () -> (),
 	face: (direction: Vector3) -> (),
 	telegraph: (attack: Types.EnemyAttackDef, origin: Vector3, facing: Vector3, shape: Types.TelegraphShape?) -> (),
-	strike: (attack: Types.EnemyAttackDef, origin: Vector3, facing: Vector3) -> (),
+	strike: (
+		attack: Types.EnemyAttackDef,
+		origin: Vector3,
+		facing: Vector3,
+		options: Types.EnemyStrikeOptions?
+	) -> (),
 	setState: (state: Types.EntityState, duration: number?) -> (),
 	actionStarted: (clipId: string, facing: Vector3) -> (),
 	random: Random,
 	clearThreat: (() -> ())?, -- when EntityService offers it, the leash forgets who hit it
+	-- Studs the body reaches ahead of and behind its root along the facing (a rush sweeps it, D-166).
+	-- Nil: the root alone (0, 0).
+	bodyExtents: (() -> (number, number))?,
+	-- A rush launched / stopped (D-169): EnemyService switches collision groups and tells the clients.
+	rushStarted: ((rush: Rush) -> ())?,
+	rushEnded: ((rush: Rush, reason: RushEnd, distance: number) -> ())?,
+	-- Pushes the entity's timed state (the attack's Art) later by `seconds` (a hit-stop pause, D-168).
+	extendState: ((seconds: number) -> ())?,
 }
 
 local Brain = {}
@@ -80,6 +122,8 @@ type Fields = {
 	heldUntil: number?,
 	interruptState: string?,
 	memory: { [string]: any },
+	attackPaused: number, -- seconds this attack's timeline has been paused by hit-stop (D-168)
+	pauseEndsAt: number, -- when the latest hit-stop freeze on this attack ends
 }
 
 export type Brain = typeof(setmetatable({} :: Fields, Brain))
@@ -96,6 +140,11 @@ export type Archetype = {
 	strikeFrame: (brain: Brain) -> (Vector3, Vector3), -- the origin and facing the strike resolves from
 	onStrike: (brain: Brain, dt: number, elapsed: number) -> boolean, -- true once the strike phase is over
 	onRecover: (brain: Brain, dt: number, target: Target?) -> (),
+	-- True while the strike in progress resolves by contact (the archetype sweeps it in stretches
+	-- through strikeStretch); the brain then skips its single resolve at attack.strike (D-166).
+	contactStrike: ((brain: Brain) -> boolean)?,
+	-- The attack in progress was cancelled: "Interrupted", "Died" or "Stopped" (sleep or hold).
+	onCancel: ((brain: Brain, reason: Types.RushEndReason) -> ())?,
 }
 
 local FORWARD = -Vector3.zAxis -- Roblox forward (parts face -Z)
@@ -182,6 +231,8 @@ function Brain.new(context: Context, archetype: Archetype): Brain
 		heldUntil = nil,
 		interruptState = nil,
 		memory = {},
+		attackPaused = 0,
+		pauseEndsAt = -math.huge,
 	}
 	return setmetatable(self, Brain)
 end
@@ -272,6 +323,48 @@ end
 --- Walks toward a point.
 function Brain.moveToward(self: Brain, position: Vector3, speed: number)
 	self.context.moveTo(position, speed)
+end
+
+--- Studs the body reaches ahead of and behind its root along its facing (0, 0 when unknown).
+function Brain.bodyExtents(self: Brain): (number, number)
+	local extents = self.context.bodyExtents
+	if extents == nil then
+		return 0, 0
+	end
+	return extents()
+end
+
+--- Resolves one stretch of the attack's line, `from` to `to` studs along it from `origin` (the
+--- stretch a rushing body swept, D-166); `resolved` carries the targets this attack already reached.
+function Brain.strikeStretch(
+	self: Brain,
+	origin: Vector3,
+	facing: Vector3,
+	from: number,
+	to: number,
+	resolved: { [number]: boolean }
+)
+	local attack = self.attack
+	if attack == nil then
+		return
+	end
+	self.context.strike(attack, origin, facing, { span = { from = from, to = to }, resolved = resolved })
+end
+
+--- Tells EnemyService a rush launched (collision group, RushStarted).
+function Brain.rushStarted(self: Brain, rush: Rush)
+	local hook = self.context.rushStarted
+	if hook ~= nil then
+		hook(rush)
+	end
+end
+
+--- Tells EnemyService a rush stopped (`distance` studs down the line, as the body stands).
+function Brain.rushEnded(self: Brain, rush: Rush, reason: RushEnd, distance: number)
+	local hook = self.context.rushEnded
+	if hook ~= nil then
+		hook(rush, reason, distance)
+	end
 end
 
 --- The attacks that are off cooldown and usable against the target right now.
@@ -438,6 +531,8 @@ function Brain.beginAttack(self: Brain, attack: Types.EnemyAttackDef, now: numbe
 	local context = self.context
 	self.attack = attack
 	self.struck = false
+	self.attackPaused = 0
+	self.pauseEndsAt = -math.huge
 	self:enter("WindUp", now)
 	context.stop()
 	local origin = context.position()
@@ -466,6 +561,56 @@ end
 -- Interrupts, death, sleep
 -- ---------------------------------------------------------------------------------------------
 
+-- Tells the archetype the attack in progress is being dropped (a rush stops early, D-169).
+function Brain.cancelAttack(self: Brain, reason: Types.RushEndReason)
+	local hook = self.archetype.onCancel
+	if hook ~= nil and self.attack ~= nil then
+		hook(self, reason)
+	end
+end
+
+--- Hit-stop on this enemy (D-168): a player's confirmed hit pauses its unresolved attack for
+--- `seconds`, the way every client freezes its clip. Freezes overlap the way the clients' do (the
+--- pause runs to the later of the running freeze's end and now + seconds), and one attack pauses
+--- at most ai.hitStop.maxPausePerAttack in all. The wind-up end, the strike beat, the cooldown and
+--- the entity's timed state move by what was added. Returns the seconds added (0 when capped, or
+--- during a rush that has launched), or nil when there is no unresolved attack to pause.
+function Brain.pauseAttack(self: Brain, seconds: number): number?
+	local attack = self.attack
+	local phase = self.phase
+	if attack == nil or not (phase == "WindUp" or (phase == "Strike" and not self.struck)) then
+		return nil
+	end
+	local contact = self.archetype.contactStrike
+	if phase == "Strike" and contact ~= nil and contact(self) then
+		return 0 -- the rush runs on its own clock (the clients draw it on the server's)
+	end
+	local now = self.context.now()
+	local freezeEnd = math.max(self.pauseEndsAt, now)
+	local wanted = math.max(0, now + math.max(0, seconds) - freezeEnd)
+	local added = math.min(wanted, math.max(0, AI.hitStop.maxPausePerAttack - self.attackPaused))
+	if added <= 0 then
+		return 0
+	end
+	self.attackPaused += added
+	self.pauseEndsAt = freezeEnd + added
+	self.phaseStart += added
+	local readyAt = self.cooldowns[attack.id]
+	if readyAt ~= nil then
+		self.cooldowns[attack.id] = readyAt + added
+	end
+	local extend = self.context.extendState
+	if extend ~= nil then
+		extend(added)
+	end
+	return added
+end
+
+--- Whether a hit-stop freeze holds the attack right now (the wind-up pose does not turn).
+function Brain.frozen(self: Brain): boolean
+	return self.context.now() < self.pauseEndsAt
+end
+
 --- A stagger, break or guard break: the attack in progress is cancelled (no strike), the body
 --- stops, and the brain waits `duration` (plus the resume delay) or, with no duration, until the
 --- record leaves the interrupting state.
@@ -474,6 +619,7 @@ function Brain.interrupt(self: Brain, state: string, duration: number?)
 		return
 	end
 	local now = self.context.now()
+	self:cancelAttack("Interrupted")
 	self.attack = nil
 	self.struck = false
 	self.context.stop()
@@ -487,6 +633,7 @@ function Brain.die(self: Brain)
 	if self.phase == "Dead" then
 		return
 	end
+	self:cancelAttack("Died")
 	self.attack = nil
 	self.targetId = nil
 	self.lastTarget = nil
@@ -500,6 +647,7 @@ function Brain.sleep(self: Brain)
 		return
 	end
 	self.awake = false
+	self:cancelAttack("Stopped")
 	self.targetId = nil
 	self.lastTarget = nil
 	if self.phase ~= "Interrupted" then
@@ -632,9 +780,14 @@ function Brain.tick(self: Brain, dt: number)
 			self:enterIdle(now)
 			return
 		end
-		self.archetype.onWindUp(self, dt, target)
+		if not self:frozen() then
+			self.archetype.onWindUp(self, dt, target)
+		end
 		if now - self.phaseStart >= attack.windUp then
-			self:enterStrike(now, target)
+			-- The strike phase starts on the wind-up's own beat, not on this tick (up to a tick after
+			-- it): the strike then resolves on the first tick at or after the beat the clients draw
+			-- (D-182).
+			self:enterStrike(self.phaseStart + attack.windUp, target)
 		end
 	elseif phase == "Strike" then
 		local attack = self.attack
@@ -645,15 +798,22 @@ function Brain.tick(self: Brain, dt: number)
 		local elapsed = now - self.phaseStart
 		if not self.struck and elapsed >= attack.strike then
 			self.struck = true
-			local origin, facing = self.archetype.strikeFrame(self)
-			context.strike(attack, origin, facing)
-			-- The strike resolves synchronously: a parry staggers this enemy through EntityService and
-			-- interrupt() has already run, so the strike hook must not move the body again.
-			if self.phase ~= "Strike" then
-				return
+			local contact = self.archetype.contactStrike
+			if contact == nil or not contact(self) then
+				local origin, facing = self.archetype.strikeFrame(self)
+				context.strike(attack, origin, facing)
+				-- The strike resolves synchronously: a parry staggers this enemy through EntityService and
+				-- interrupt() has already run, so the strike hook must not move the body again.
+				if self.phase ~= "Strike" then
+					return
+				end
 			end
 		end
 		local over = self.archetype.onStrike(self, dt, elapsed)
+		-- A contact strike resolves inside onStrike, and a parry there interrupts this brain the same way.
+		if self.phase ~= "Strike" then
+			return
+		end
 		if self.struck and over then
 			self:enterRecover(now)
 		end

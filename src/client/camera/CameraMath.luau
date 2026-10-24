@@ -240,14 +240,24 @@ end
 
 --- The follow's leash: `trailing` (the lagged pivot) held within `closer` studs ahead of `focus`
 --- (the camera nearer the subject) and `further` behind it, along the flat unit `forward` (the
---- view). Sideways and vertical lag are left alone.
-function CameraMath.leash(focus: Vec, trailing: Vec, forward: Vec, closer: number, further: number): Vec
+--- view), and, when `side` is given, within `side` studs of it either way across the view (the
+--- flat right of `forward`, D-181). Vertical lag is left alone.
+function CameraMath.leash(focus: Vec, trailing: Vec, forward: Vec, closer: number, further: number, side: number?): Vec
 	local fx, _, fz = unpack3(focus)
 	local tx, ty, tz = unpack3(trailing)
 	local ux, _, uz = unpack3(forward)
 	local along = (tx - fx) * ux + (tz - fz) * uz
 	local excess = along - math.clamp(along, -further, closer)
-	return { tx - ux * excess, ty, tz - uz * excess }
+	local x, z = tx - ux * excess, tz - uz * excess
+	if side ~= nil then
+		-- The view's flat right is (-uz, ux): forward -Z gives right +X.
+		local rx, rz = -uz, ux
+		local across = (tx - fx) * rx + (tz - fz) * rz
+		local wide = across - math.clamp(across, -side, side)
+		x -= rx * wide
+		z -= rz * wide
+	end
+	return { x, ty, z }
 end
 
 --- Whether a part the collision probe hit blocks the view: never part of a character (any model

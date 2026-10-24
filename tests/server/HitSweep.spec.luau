@@ -1492,6 +1492,30 @@ describe("HitSweep.lineTargets", function()
 		expect(#HitSweep.lineTargets(origin, Vector3.new(0, 1, 0), 14, 4, { candidate(1, 0, -5) })).toBe(0)
 	end)
 
+	it("a span keeps only the stretch of the line a rushing body has swept (D-166)", function()
+		local function idsOf(list)
+			local ids = {}
+			for _, c in list do
+				table.insert(ids, c.id)
+			end
+			table.sort(ids)
+			return ids
+		end
+		local candidates = {
+			candidate(1, 0, -3, 1), -- body from 2 to 4 along the line
+			candidate(2, 0, -8, 1), -- 7 to 9
+			candidate(3, 0, -13, 1), -- 12 to 14
+			candidate(4, 0, -20, 1), -- past the line's end: never, whatever the span
+			candidate(5, 3.5, -8, 1), -- beside the line: never
+		}
+		expect(idsOf(HitSweep.lineTargets(origin, facing, 14, 4, candidates, { from = -2, to = 5 }))).toEqual({ 1 })
+		expect(idsOf(HitSweep.lineTargets(origin, facing, 14, 4, candidates, { from = 4, to = 7 }))).toEqual({ 1, 2 })
+		expect(idsOf(HitSweep.lineTargets(origin, facing, 14, 4, candidates, { from = 4.01, to = 6.99 }))).toEqual({})
+		expect(idsOf(HitSweep.lineTargets(origin, facing, 14, 4, candidates, { from = 9.5, to = 40 }))).toEqual({ 3 })
+		-- Without a span the whole line resolves, as it always did.
+		expect(idsOf(HitSweep.lineTargets(origin, facing, 14, 4, candidates))).toEqual({ 1, 2, 3 })
+	end)
+
 	it("bodyRadius is half the root part's widest horizontal side", function()
 		local target = makeTarget(1, Vector3.new(), 1.3)
 		expect(HitSweep.bodyRadius(target.model)).toBeCloseTo(1.3, 1e-3)

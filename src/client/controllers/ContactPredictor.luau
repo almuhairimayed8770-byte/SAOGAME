@@ -20,10 +20,13 @@
 	overlap rule: never the local character's own rig, a player (no PvP, as the server's
 	mayDamage), a dead fighter, or one this swing already predicted dead. A fighter counts once per
 	window, and a window touches at most combat.maxTargetsPerWindow of them. A hit the server
-	already confirmed before the blade got there (`confirmed`) is not predicted again.
+	already confirmed before the blade got there (`confirmed`) is not predicted again. A part the
+	body is drawn away from (`hidden`: the root a rush draws the body ahead of, D-171) is not where
+	the body shows, and is not tested.
 
-	Each touch is a Contact: the fighter, the window, the hit point, and the hit-stop tier the
-	server will give it: Kill when ContactPredictor.provesKill says the hit cannot leave the enemy
+	Each touch is a Contact: the fighter, the window, the swing's sequence number (the request
+	carried it and HitConfirmed echoes it), the hit point, and the hit-stop tier the server will
+	give it: Kill when ContactPredictor.provesKill says the hit cannot leave the enemy
 	standing, Final on the move's final hit (every Art's last window; a basic chain's last swing),
 	else Normal. Replication.contact plays it; HitConfirmed later brings the number and any upgrade.
 
@@ -50,6 +53,7 @@ export type Swing = {
 	finalHit: boolean, -- the last window is the move's final hit (every Art; the chain's last basic)
 	multiplier: number, -- the Art's multiplier, or combat.basicAttackMultiplier (the kill rule)
 	weaponAttack: number, -- the equipped weapon's attack (the kill rule)
+	swing: number?, -- the sequence number its request carried (ArtRequest / BasicAttackRequest swing)
 }
 
 --- A predicted hit: the blade touched this fighter in this window on this frame.
@@ -58,17 +62,20 @@ export type Contact = {
 	model: Model,
 	windowIndex: number, -- 1-based, in the clip's order (HitConfirmed's hitIndex)
 	artId: string?,
+	swing: number?, -- the swing's sequence number (HitConfirmed's swing)
 	tier: Tier,
 	killed: boolean, -- predicted to kill (tier Kill)
 	position: Vector3, -- the point of the touched part's box nearest the blade
 }
 
 export type Deps = {
-	-- Every fighter this client tracks (EntityTracker.all): records with id, model, kind, state,
-	-- hp, maxHp, defId and elite.
+	-- Every fighter this client tracks (EntityTracker.live, read each frame: never copy it per
+	-- call): records with id, model, kind, state, hp, maxHp, defId and elite.
 	targets: () -> { any },
 	-- True when the server already confirmed this hit (HitConfirmed came first): it is not predicted.
-	confirmed: ((targetId: number, windowIndex: number, artId: string?) -> boolean)?,
+	confirmed: ((targetId: number, windowIndex: number, artId: string?, swing: number?) -> boolean)?,
+	-- True for a part the body is drawn away from (Replication.drawnAway): it is not tested.
+	hidden: ((part: BasePart) -> boolean)?,
 }
 
 type Window = { open: number, close: number }
@@ -230,7 +237,11 @@ local function candidatesNear(self: any, center: Vector3, reach: number): { Cand
 			continue
 		end
 		local near: { BasePart } = {}
+		local hidden = self.deps.hidden
 		for _, part in partsOf(self, model) do
+			if hidden ~= nil and hidden(part) then
+				continue -- the body is drawn away from it (a rush's root, D-171)
+			end
 			if (part.CFrame.Position - center).Magnitude <= reach + part.Size.Magnitude * 0.5 then
 				table.insert(near, part)
 			end
@@ -324,7 +335,7 @@ function ContactPredictor.step(self: any, clipTime: number, jumped: boolean?): {
 				hits[id] = true
 				self.windowCounts[index] = (self.windowCounts[index] or 0) + 1
 				local confirmed = self.deps.confirmed
-				if confirmed ~= nil and confirmed(id, index, swing.artId) then
+				if confirmed ~= nil and confirmed(id, index, swing.artId, swing.swing) then
 					continue
 				end
 				local killed = ContactPredictor.provesKill(record, swing.weaponAttack, swing.multiplier)
@@ -336,6 +347,7 @@ function ContactPredictor.step(self: any, clipTime: number, jumped: boolean?): {
 					model = record.model,
 					windowIndex = index,
 					artId = swing.artId,
+					swing = swing.swing,
 					tier = ContactPredictor.tierFor(index, #self.windows, swing.finalHit, killed),
 					killed = killed,
 					position = at :: Vector3,

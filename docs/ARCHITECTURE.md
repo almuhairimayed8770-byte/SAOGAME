@@ -595,6 +595,64 @@ the sweep.
 - FrameClock: render steps at First and Last priority, a Heartbeat watchdog, pace(), and bind() for specs.
 - OutlineManager.tint/untint (used by Telegraphs on weaponless rigs). Trails: the weapon-only activation flash and the cancel fade. SfxPool.asOwn and the OwnSFX group. ImpactFrames.whenVisible and drawn-frame quotas.
 
+### Enemy attacks on the server's beat (D-165 to D-182)
+
+- **server/world/CollisionGroups** (D-167):
+  - `register(physics?)`: Main calls it before any service starts; idempotent; warns on failure.
+  - `assign(model, group)`.
+  - `joinPlayers(character)`: CharacterReady's default collide.
+  - `playerPartAdded`.
+  - `clear(model, overlap?)`: the rejoin test.
+  - Group names come from ai.luau `collision`.
+- **EnemyService**:
+  - `alignOf` looks the yaw aligner up by class (D-165).
+  - `bodyExtents(model)` returns front and back in studs from the root, computed at spawn.
+  - The engine seam gains optional `setCollisionGroup(model, group)` and `bodyClear(model)`.
+  - Enemies spawn in the Enemies group, switch to Rushing at RushStarted, and rejoin when clear.
+  - `pauseForHit(id, seconds)` returns the seconds added, or nil. bind installs it through `CombatService.setEnemyHitStop`.
+  - The Brain context gains `bodyExtents`, `rushStarted`, `rushEnded` and `extendState`.
+- **Brain**:
+  - New: `strikeStretch(origin, facing, from, to, resolved)`, `pauseAttack(seconds)`, `frozen()`, `cancelAttack(reason)`.
+  - Archetype hooks `contactStrike` and `onCancel`.
+  - When the wind-up ends, the strike phase starts at phaseStart + windUp, the attack's own beat, not the tick (D-182).
+  - Exported type `Rush`: startedAt is the launch beat (RushStarted.serverTime); bodyStartedAt is the AI tick the body started running.
+- **Charger**: the line resolves on startedAt's clock. The body's jam check and its end use bodyStartedAt's clock.
+- **CombatService**:
+  - `enemyStrike(enemyId, attack, origin, facing, options?)` takes `Types.EnemyStrikeOptions` {span, resolved}.
+  - `setEnemyHitStop(hook)`.
+  - HitConfirmed gains `attackPause` and echoes `swing`. swingOf validates the request's swing number.
+- **HitSweep**: `lineTargets(..., span?)` limits a line to [from, to] studs along it.
+- **EntityService**: `extendState(id, seconds)` pushes a timed state's end (and its lock) without StateChanged.
+- **CharacterReady**:
+  - `join(character)`; Engine.collide puts a finished character in the Players group.
+  - `unlabel(character)` turns off the engine's name and health display on each Humanoid; wait() calls it on the first frame and when ready (D-178).
+- **Remotes**:
+  - `RushStarted` and `RushEnded`: Unreliable, server to client.
+  - `HitConfirmed.attackPause`.
+  - ArtRequest, BasicAttackRequest and HitConfirmed carry an optional `swing` (integer, 1 .. combat.contact.swingSequenceMax).
+- **PlaygroundLayout / PlaygroundService**:
+  - `spacedScatter(cx, cz, radius, spacing, occupied, random)` returns x, z and clear.
+  - `PlaygroundService.occupied()`.
+  - spawnCFrame keeps the spacing (D-170).
+- **client/choreo/RushDraw** (pure): a Charger rush's drawn timeline on the server clock.
+  - Functions: predict (from the Telegraph), start (RushStarted), delay, jam, stop, halt, freeze and step.
+  - Replication steps it from the animator's onStep hook and draws the body with Animator.setBodyOffset (offset composed on the root joint), hiding the root part.
+- **Mixer**: keepBeat(handle, untilTime, owed), shiftBeat(handle, seconds), beatOwed(handle).
+- **Animator**: keepBeat(handle, serverTime), shiftBeat, setBodyOffset(offset?).
+- **Telegraphs**: show(..., lateBy) shortens the telegraph by the time already gone; delay(model, seconds) moves a showing telegraph's end.
+- **Replication**:
+  - drawnAway(part) feeds ContactPredictor deps.hidden.
+  - ContactPredictor deps.targets is EntityTracker.live. Contacts and confirmedAlready carry `swing`.
+  - Replication requires Shared.choreo.ClipSampler for the strike-hold credit (D-176).
+- **EntityTracker.live()**: one frozen, id-sorted list, replaced only when a record comes or goes (D-175).
+- **client/fx/Shatter**: hideRig hides the rig's parts, suspends its outline, detaches trails, hides telegraphs and now hides the nameplate (Nameplates.hide).
+- **client/ui/Nameplates**:
+  - keepFolder() runs on attach, update and Heartbeat; it puts back or rebuilds the PlayerGui folder after a respawn reset.
+  - Seams: Nameplates.step(dt) (one Heartbeat), Nameplates.folder(), Nameplates.setGuiParent(source).
+- **client/camera/CameraController**: two render steps, SkyspireCamera at Camera (200) and SkyspireCameraLate at Last. The late pass redraws only when nudge() or shake() was called after this frame's main step.
+- **client/camera/CameraMath.leash(focus, trailing, forward, closer, further, side?)**: clamps the lag along the view to [-further, closer] and, when side is given, across it to ±side.
+- **shared/data/camera.luau**: follow.leash = { closer 0.75, further 2.5, side 1.0 }.
+
 ## Data tables (src/shared/data)
 
 | File | Holds |

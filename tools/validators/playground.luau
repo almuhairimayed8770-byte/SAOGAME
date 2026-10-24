@@ -3,7 +3,8 @@
 	Playground validator (section 20, D-013): the field, rim, ceiling and kill volume numbers are
 	sane; every spawn sits on the field inside its ring (boars 40..120, kobolds 60..100); the
 	loadout is level 1 with proficiency that unlocks the four Phase 0 Arts; the lighting preset
-	exists. Cross-checks when the sibling tables exist: spawn ids in enemies.luau, the weapon in
+	exists; the spawn spacing (D-170) is positive and its widest disc has room for the largest pack.
+	Cross-checks when the sibling tables exist: spawn ids in enemies.luau, the weapon in
 	weapons.luau, the armor pieces in armor.luau, the Art slots in arts.luau.
 ]]
 
@@ -149,6 +150,51 @@ return function(ctx: Context): { string }
 	if (counts[KOBOLD] or 0) ~= KOBOLD_SPAWNS then
 		problem("playground needs %d %s spawns (got %d)", KOBOLD_SPAWNS, KOBOLD, counts[KOBOLD] or 0)
 	end
+	-- D-170: no fighter spawns on another.
+	local spacing = Playground.spawnSpacing
+	if typeof(spacing) ~= "table" then
+		problem("playground.spawnSpacing is missing")
+	else
+		local valid = true
+		for _, field in { "minStuds", "widenStuds" } do
+			local value = spacing[field]
+			if typeof(value) ~= "number" or value ~= value or value <= 0 then
+				problem("playground.spawnSpacing.%s must be a positive number", field)
+				valid = false
+			end
+		end
+		for field, least in { tries = 1, widenings = 0 } do
+			local value = spacing[field]
+			if typeof(value) ~= "number" or value ~= math.floor(value) or value < least then
+				problem("playground.spawnSpacing.%s must be a whole number of at least %d", field, least)
+				valid = false
+			end
+		end
+		local scatter = Playground.spawnScatterRadius
+		if typeof(scatter) ~= "number" or scatter <= 0 then
+			problem("playground.spawnScatterRadius must be a positive number")
+			valid = false
+		end
+		if valid then
+			-- The widest disc reaches far enough that the largest pack fits with room to draw from.
+			local largest = 1
+			for _, spawn in ipairs(Playground.spawns) do
+				if typeof(spawn.packSize) == "table" and typeof(spawn.packSize.max) == "number" then
+					largest = math.max(largest, spawn.packSize.max)
+				end
+			end
+			local widest = scatter + spacing.widenings * spacing.widenStuds
+			if widest < spacing.minStuds * (largest - 1) then
+				problem(
+					"playground.spawnSpacing: the widest disc (%s studs) leaves no room for a pack of %d spaced %s apart",
+					tostring(widest),
+					largest,
+					tostring(spacing.minStuds)
+				)
+			end
+		end
+	end
+
 	local rings = Playground.spawnRings
 	if rings[BOAR] == nil or rings[BOAR].min ~= 40 or rings[BOAR].max ~= 120 then
 		problem("playground.spawnRings.%s must be 40..120", BOAR)

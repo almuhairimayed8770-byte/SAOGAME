@@ -609,6 +609,26 @@ function EntityService.setState(id: number, state: State, duration: number?, dir
 	fireAll("StateChanged", { entityId = id, state = state, duration = duration, direction = direction })
 end
 
+--- Pushes a timed state's end, and the lock it holds, `seconds` later without changing the state
+--- and without a StateChanged: an enemy's attack paused by hit-stop (D-168; HitConfirmed carries the
+--- pause to the clients). False for an unknown or dead fighter, an untimed state or a push of zero.
+function EntityService.extendState(id: number, seconds: number): boolean
+	local record = records[id]
+	if record == nil or record.state == "Dead" or not (seconds > 0) then
+		return false
+	end
+	local stateUntil = record.stateUntil
+	if stateUntil == nil then
+		return false
+	end
+	record.stateUntil = stateUntil + seconds
+	if LOCK_STATES[record.state] then
+		record.lockUntil += seconds
+	end
+	publish(record)
+	return true
+end
+
 -- A timed state ran out: Break and GuardBroken refill the gauge; everything returns to Idle.
 local function expireState(record: Record)
 	if record.state == "Break" or record.state == "GuardBroken" then

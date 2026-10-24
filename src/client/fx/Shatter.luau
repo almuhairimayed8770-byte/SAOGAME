@@ -30,6 +30,7 @@ local Bursts = require(script.Parent.Bursts)
 local OutlineManager = require(script.Parent.OutlineManager)
 local Trails = require(script.Parent.Trails)
 local Telegraphs = require(script.Parent.Telegraphs)
+local Nameplates = require(script.Parent.Parent.ui.Nameplates)
 local SfxPool = require(script.Parent.Parent.audio.SfxPool)
 local MusicDirector = require(script.Parent.Parent.audio.MusicDirector)
 
@@ -163,6 +164,9 @@ local function hideRig(model: Instance)
 	-- death mid-Art, and a wind-up telegraph cut short by the kill.
 	Trails.detach(model)
 	Telegraphs.hide(model)
+	-- The name goes with the polygon burst (D-147); the plate's own timer stays as the fallback
+	-- for a rig that never shatters here.
+	Nameplates.hide(model)
 end
 
 local function burst(center: Vector3, boss: boolean)

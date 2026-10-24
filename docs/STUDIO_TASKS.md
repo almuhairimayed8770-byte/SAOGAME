@@ -673,3 +673,50 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
 147. [ ] **The snap and the trail (D-153, D-160).** Basic1–3 and SharpNail: each cut reads over 2 or more frames, not 1. The trail never draws a streak from the last cut's blade when the next window opens, including across SharpNail's hold.
 148. [ ] **Hits across a hitch and a stall (D-163, D-164).** (a) Mid-SharpNail on a boar, run the item 129 busy loop for about 1.2 s right after a cut lands. At the wake each hit shows once: one number, one hit sound, one still, and no second still or kill cue. Repeat with the boar at kill HP. (b) Minimise the window for about 1 s just before a SharpNail cut lands, then restore it. No flash or hold plays at the wake for the cut that was never drawn. If the server registered that cut, its number and moment play once when the confirm arrives.
 149. [ ] **A later cut's hold (D-162).** With about 250 ms of incoming replication lag, stand two boars side by side. Set the near one to low HP and let it regenerate (DevCombat sethp), so the client cannot prove the kill. Swing SharpNail so its first cut finishes the near boar and a later cut hits the far one. The later cut's still keeps its own length (3 frames Normal, 6 Final). The near boar's late Kill confirm plays its kill sound and picture but adds no still to the later cut.
+
+## W. Enemy attacks on the server's beat (D-165 to D-182)
+
+150. [ ] **Bodies turn (D-165).** Aggro a boar and a kobold and circle them. The whole body turns at the slow Charger or Brute rate, and every strike faces you.
+151. [ ] **Rush on contact (D-166).** Stand about 10 studs down a boar's line: the hit lands when the snout reaches you. At the line's end it lands late in the run (by 0.5 s). Step in behind the boar after it has passed: no hit. Dodge through the snout: one dodge per rush.
+152. [ ] **Rush passes through (D-167).** Stand still in the line. The boar passes through you on the client and on the server view (Current: Server): no jam, no slide. A packmate in the line is passed too. A boar that stops overlapping you is never pushed upward, and it collides again once clear (you cannot walk through a walking boar).
+153. [ ] **Groups registered (D-167).** Output shows no "[CollisionGroups] registering the fighter groups failed" and no "[Main] collision groups failed". The Collision Groups editor shows Rushing unticked against Players, Enemies and Rushing, and everything else ticked.
+154. [ ] **Character group (D-167).** After spawning and after a respawn, the body parts, the sword and the accessories show CollisionGroup SkyspirePlayers.
+155. [ ] **Hit-stop pause (D-168).** Hit a kobold during its overhead wind-up with a combo ending in an Art. The chop lands after the freeze, at the telegraph's end, and never before the clip's strike frame. Same for a boar's crouch. A launched rush never freezes.
+156. [ ] **Rush timing under lag, server side (D-169).** With Incoming Replication Lag 0.2, the boar's snout reaches you on the frame the hit lands. Item 158 has the full client check.
+157. [ ] **Spawns spaced (D-170).** Start the Playground 5 times. No two enemies overlap and no boar stands on another (every root at about Y 2.85). Stand on a boar spawn point and let a boar respawn there: it appears at least 12 studs away.
+158. [ ] **Rush under replication lag (D-171).** In Playground (Play Solo), set File > Studio Settings > Network > Incoming Replication Lag to 0, then 0.2, then 0.5.
+   (a) Stand 7, 10 and 14 studs in front of a Frenzy Boar and let it charge.
+   (b) Pass: the tusks reach you as your HP drops (the number may trail by the lag).
+   (c) The boar never jumps at its launch or at the end of its run, and the root box is never seen apart from the body.
+   (d) After the skid, the body slides back onto its root without a pop.
+   (e) Repeat with a wall about 9 studs down the line (a jam), and with a hit that staggers it mid-rush.
+   (f) Note whether the nameplate and camera trail the body (a known open issue).
+159. [ ] **Chop after 0, 1 and 4 hits (D-172, D-176).** Use Incoming Replication Lag 0.1 and a Kobold Axeman Overhead.
+   (a) Land no hit, then one basic hit about 0.4 s into the wind-up, then four hits spread across the wind-up.
+   (b) Pass: the chop lands as the telegraph finishes and your HP drops with it.
+   (c) The rig freezes only for each hit's 3 frames.
+   (d) With six or more hits, the chop comes at most 0.25 s later than with none.
+   (e) When the chop hits you, there is one still at the impact, not a second freeze in the rebound.
+160. [ ] **Flinch during the wind-up (D-173).**
+   (a) Hit the Kobold 0.9 to 1.3 s into its wind-up, from the front, back, left and right. The body recoils, but the raised axe stays up with no dip that reads as a chop, and the real chop follows on its beat.
+   (b) A hit during its recovery plays the full flinch.
+161. [ ] **Nameplates across a respawn (D-177).**
+   (a) In Playground, with enemies alive and one enemy just killed (in its freeze), reset or LoadCharacter.
+   (b) Every plate stays over its rig, and PlayerGui.SkyspireNameplates is back within a frame.
+   (c) The dead enemy's plate still leaves with its shatter, and your own player plate is back.
+162. [ ] **No engine labels (D-178).** On a two-player test server, look at the other player from near and far. There is no engine name or health bar, before and after either player respawns.
+163. [ ] **Plate on the shatter frame (D-147, amended).** Kill a boar and step frames, or record at 60 fps. The plate disappears on the same frame as the white burst and shards.
+164. [ ] **Dodge hop (D-179).** Record each dodge direction at 60 fps.
+   (a) The first 2 to 3 frames read as a snap, not a teleport or a slide.
+   (b) The body lean, which now also eases QuadOut on that key, still lands crisply.
+   (c) Compare the camera on a back dodge, free and locked.
+165. [ ] **Contact-frame nudge (D-180).** Hit a boar with Horizontal and step frames. The nudge and shake start on the frame the blade meets the body, not one frame later, and there is no double kick against ImpactFrames.
+166. [ ] **Sideways dodge framing (D-181).** Dodge left and right, free and locked. The player stays near their spot on screen (about 0.1 of the half width in Lune). Judge whether the world sliding about 1.5 studs in one frame during the hop feels harsh; if it does, tune camera.follow.leash.side between 0.75 and 1.5.
+167. [ ] **High-target feet crop.** Lock onto a target 8 studs above the player (a ledge). Measured in Lune, the player's body column spans y −1.47..−0.32 of the half height, so the feet are below the frame. For comparison, a target at +4 studs gives −1.06..−0.05, and a level target gives −0.73..0.21. Decide whether this is acceptable or the two-shot needs a cap on how far its aim rises. A cap needs code plus a new camera.lock key; changing focusBias would also move the level two-shot.
+168. [ ] **Shadow band after the Ceiling change.** Run this once the Ceiling place-file change (CastShadow false) is applied. It is the same check as item 138: replay the B 9.13 path, confirm the band is gone, and mark item 138 done.
+169. [ ] **Strike on the beat (D-182).**
+   (a) Add a temporary server log of each enemy strike's HitConfirmed time minus (the Telegraph's serverTime + windUp + strike + the attackPause total of the hits on that attack).
+   (b) Against a Kobold Overhead, with and without hits during the wind-up, the value is between 0 and about 0.067 s every time, and never negative.
+   (c) Against a boar, log RushStarted.serverTime minus (Telegraph serverTime + windUp + pauses): it is 0.
+   (d) With Incoming Replication Lag 0.2, stand 7, 10 and 14 studs down a boar's line. HP drops within 3 frames of the drawn tusk contact and never before it.
+   (e) In the open the boar still runs its full 22 studs and never reports Jammed.

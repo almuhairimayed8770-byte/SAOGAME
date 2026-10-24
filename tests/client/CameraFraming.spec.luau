@@ -16,6 +16,8 @@ local luau = require("@lune/luau")
 local CameraData = Harness.load("src/shared/data/camera")
 local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
 local DodgeBack = Harness.load("src/shared/clips/player/OneHandedSword/DodgeBack")
+local DodgeLeft = Harness.load("src/shared/clips/player/OneHandedSword/DodgeLeft")
+local DodgeRight = Harness.load("src/shared/clips/player/OneHandedSword/DodgeRight")
 
 local PATH = "src/client/camera/CameraController"
 local F = 1 / 60
@@ -94,8 +96,12 @@ local function filtered(candidate: Instance, list: { Instance }): boolean
 	return false
 end
 
+type Step = { priority: number, fn: (dt: number) -> () }
+
 local function load(): Fixture
-	local state = { clock = 50, step = nil :: ((dt: number) -> ())? }
+	-- Every render step the controller binds, run in priority order each frame (the main step at
+	-- Camera priority and the late pass at Last, D-180).
+	local state = { clock = 50, steps = {} :: { Step } }
 	local signal = {
 		Connect = function() end,
 	}
@@ -111,8 +117,11 @@ local function load(): Fixture
 	}
 	local services: { [string]: any } = {
 		RunService = {
-			BindToRenderStep = function(_self: any, _name: string, _priority: number, fn: (dt: number) -> ())
-				state.step = fn
+			BindToRenderStep = function(_self: any, _name: string, priority: number, fn: (dt: number) -> ())
+				table.insert(state.steps, { priority = priority, fn = fn })
+				table.sort(state.steps, function(a: Step, b: Step): boolean
+					return a.priority < b.priority
+				end)
 			end,
 		},
 		UserInputService = {
@@ -184,9 +193,8 @@ local function load(): Fixture
 		frames = function(count: number)
 			for _ = 1, count do
 				state.clock += F
-				local step = state.step
-				if step ~= nil then
-					step(F)
+				for _, step in state.steps do
+					step.fn(F)
 				end
 			end
 		end,
@@ -326,6 +334,59 @@ describe("CameraController framing: dodges", function()
 		expect(worstDepth).toBeGreaterThanOrEqual(0.92)
 		expect(worstTilt).toBeLessThanOrEqual(0.5)
 	end)
+
+	-- A sideways dodge from a settled camera (D-181): measured before the side leash, the free
+	-- camera let the player's column slide 0.49 of the half width off its spot (its edge out to
+	-- 0.89 on a dodge left) and a lock 0.36 to 0.41 (0.61); held to a stud either way across the
+	-- view, about a tenth.
+	for _, case in
+		{
+			{ name = "left", clip = DodgeLeft },
+			{ name = "right", clip = DodgeRight },
+		}
+	do
+		for _, locked in { false, true } do
+			it(
+				("rides a dodge %s %s without carrying the player toward the screen's edge"):format(
+					case.name,
+					if locked then "out of a lock" else "free"
+				),
+				function()
+					local fixture = load()
+					fixture.frames(60)
+					if locked then
+						fixture.controller.setLockTarget(
+							character("Kobold", ROOT + Vector3.new(0, 0, -6), fixture.world)
+						)
+					end
+					fixture.frames(240)
+					local camera = fixture.camera
+					local minX, maxX = column(camera, ROOT)
+					local center, edge = (minX + maxX) / 2, math.max(math.abs(minX), math.abs(maxX))
+					local shift, worstEdge, tilt = 0, edge, 0
+					local previous = lookDown(camera)
+					local clip = case.clip
+					local t = 0
+					while t < clip.duration + 0.6 do
+						t += F
+						local motion = ClipSampler.rootMotionAt(clip, math.min(t, clip.duration))
+						local at = ROOT + Vector3.new(motion[1], motion[2], motion[3])
+						fixture.root.Position = at
+						fixture.frames(1)
+						local x0, x1 = column(camera, at)
+						shift = math.max(shift, math.abs((x0 + x1) / 2 - center))
+						worstEdge = math.max(worstEdge, math.abs(x0), math.abs(x1))
+						local now = lookDown(camera)
+						tilt = math.max(tilt, math.abs(now - previous))
+						previous = now
+					end
+					expect(shift).toBeLessThanOrEqual(0.15)
+					expect(worstEdge).toBeLessThanOrEqual(edge + 0.15)
+					expect(tilt).toBeLessThanOrEqual(0.5)
+				end
+			)
+		end
+	end
 end)
 
 -- Steps `count` frames and reports the largest frame-to-frame turn of the view (degrees) and

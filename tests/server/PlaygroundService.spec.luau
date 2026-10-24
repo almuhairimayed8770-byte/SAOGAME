@@ -3,7 +3,7 @@
 	PlaygroundService under Lune: the real EntityService (fake clock, net, tags) and WeaponBuilder, a
 	fake EnemyService that records spawn CFrames and owns a real Despawned Signal, no world build.
 	Character setup (scale values, walk speed, weapon, registration), the spawn tables, respawns on
-	the service clock, and the kill-volume scan.
+	the service clock, spawn spacing (D-170), and the kill-volume scan.
 ]]
 
 Harness.stubService("CollectionService", {
@@ -30,6 +30,7 @@ local PlaygroundService = Harness.load("src/server/services/PlaygroundService")
 local EntityService = Harness.load("src/server/services/EntityService")
 local WeaponBuilder = Harness.load("src/server/world/WeaponBuilder")
 local RigBuilder = Harness.load("src/server/world/RigBuilder")
+local PlaygroundLayout = Harness.load("src/server/world/PlaygroundLayout")
 local Signal = Harness.load("src/shared/util/Signal")
 local Playground = Harness.load("src/shared/data/playground")
 local Rigs = Harness.load("src/shared/data/rigs")
@@ -405,5 +406,108 @@ describe("PlaygroundService.start", function()
 		expect(PlaygroundService.buildResult()).toEqual({ partCount = 0 })
 		expect(#PlaygroundService.enemyIds()).toBeGreaterThanOrEqual(#Playground.spawns)
 		PlaygroundService.reset()
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- Spawn spacing (D-170)
+-- ------------------------------------------------------------------------------------------
+
+describe("PlaygroundService spawn spacing (D-170)", function()
+	local function flat(cframe: CFrame): (number, number)
+		return cframe.Position.X, cframe.Position.Z
+	end
+
+	local function apart(a: CFrame, b: CFrame): number
+		local ax, az = flat(a)
+		local bx, bz = flat(b)
+		return math.sqrt((ax - bx) ^ 2 + (az - bz) ^ 2)
+	end
+
+	it("no two enemies of the first wave stand on each other, packmates included", function()
+		local minStuds = Playground.spawnSpacing.minStuds
+		local packsOfTwo = 0
+		for seed = 1, 40 do
+			fresh({ random = Random.new(seed) })
+			PlaygroundService.spawnAll()
+			for i = 1, #spawns do
+				for j = i + 1, #spawns do
+					if PlaygroundService.slotOf(spawns[i].id) == PlaygroundService.slotOf(spawns[j].id) then
+						packsOfTwo += 1
+					end
+					expect(apart(spawns[i].cframe, spawns[j].cframe)).toBeGreaterThanOrEqual(minStuds - 1e-6)
+				end
+			end
+		end
+		expect(packsOfTwo).toBeGreaterThan(10) -- the seeds really drew packs of two
+	end)
+
+	it("a respawn never lands on a living fighter: not on the player at the spawn point, not on a packmate", function()
+		local minStuds = Playground.spawnSpacing.minStuds
+		for seed = 1, 12 do
+			fresh({ random = Random.new(seed) })
+			PlaygroundService.spawnAll()
+			local victim = spawns[1].id
+			local slot = PlaygroundService.slotOf(victim)
+			local point = Playground.spawns[slot].position
+			local model = character("Camper")
+			local playerId = PlaygroundService.onCharacter(player("Camper"), model)
+			model.PrimaryPart.CFrame = CFrame.new(point[1], point[2] + 3, point[3])
+			fakeEnemies.Despawned:Fire(victim, Playground.spawns[slot].enemy, "Died")
+			EntityService.unregister(victim)
+			task.wait()
+			advance(Playground.respawnSeconds + 0.1)
+			local respawned = spawns[#spawns]
+			expect(PlaygroundService.slotOf(respawned.id)).toBe(slot)
+			local camper = EntityService.positionOf(playerId)
+			expect(apart(respawned.cframe, CFrame.new(camper))).toBeGreaterThanOrEqual(minStuds - 1e-6)
+			for _, other in spawns do
+				if other.id ~= respawned.id and other.id ~= victim then
+					expect(apart(respawned.cframe, other.cframe)).toBeGreaterThanOrEqual(minStuds - 1e-6)
+				end
+			end
+		end
+	end)
+
+	it("the dead are not in the way: a fallen player on the spawn point does not push a spawn out", function()
+		fresh({ random = Random.new(4) })
+		local spawn = Playground.spawns[1]
+		local model = character("Fallen")
+		local playerId = PlaygroundService.onCharacter(player("Fallen"), model)
+		model.PrimaryPart.CFrame = CFrame.new(spawn.position[1], 3, spawn.position[3])
+		EntityService.die(playerId, nil)
+		local expected = Random.new(4)
+		local ex, ez =
+			PlaygroundLayout.scatter(spawn.position[1], spawn.position[3], Playground.spawnScatterRadius, expected)
+		local x, z = flat(PlaygroundService.spawnCFrame(spawn))
+		expect(x).toBeCloseTo(ex, 1e-3) -- a CFrame holds single precision
+		expect(z).toBeCloseTo(ez, 1e-3)
+	end)
+
+	it("minStuds clears two of the largest Playground bodies at any facing", function()
+		local reach = 0
+		for _, spawn in Playground.spawns do
+			local def = Enemies.byId(spawn.enemy)
+			local model = RigBuilder.build(def.skin, def.name)
+			local root = model.PrimaryPart
+			for _, part in model:GetDescendants() do
+				if not part:IsA("BasePart") then
+					continue
+				end
+				local half = part.Size / 2
+				for _, sx in { -1, 1 } do
+					for _, sy in { -1, 1 } do
+						for _, sz in { -1, 1 } do
+							local corner =
+								part.CFrame:PointToWorldSpace(Vector3.new(half.X * sx, half.Y * sy, half.Z * sz))
+							local p = root.CFrame:PointToObjectSpace(corner)
+							reach = math.max(reach, math.sqrt(p.X * p.X + p.Z * p.Z))
+						end
+					end
+				end
+			end
+		end
+		expect(reach).toBeGreaterThan(0)
+		expect(2 * reach).toBeLessThanOrEqual(Playground.spawnSpacing.minStuds)
 	end)
 end)

@@ -203,12 +203,23 @@ local unhookRigStep: (() -> ())? = nil
 local started = false
 -- The local swing's blade contacts (issue 4), and the clip handle it follows.
 local contacts = ContactPredictor.new({
+	-- The tracker's live list, read every frame without a copy (item 5).
 	targets = function(): { any }
-		return EntityTracker.all()
+		return EntityTracker.live()
 	end,
 	confirmed = Replication.confirmedAlready,
+	hidden = Replication.drawnAway,
 })
 local contactHandle: any = nil
+-- The last swing's sequence number (combat.luau contact.swingSequenceMax): each ArtRequest and
+-- BasicAttackRequest carries the next, and its HitConfirmed echoes it (item 4).
+local swingSequence = 0
+
+-- The next swing's sequence number: 1 .. contact.swingSequenceMax, then round again.
+local function nextSwing(): number
+	swingSequence = swingSequence % Combat.contact.swingSequenceMax + 1
+	return swingSequence
+end
 
 local function now(): number
 	return os.clock()
@@ -399,7 +410,7 @@ end
 
 -- Predicts the blade's contacts for the swing or Art a clip handle plays (a data clip only: an
 -- engine Animation has no clip to sweep).
-local function predictContacts(handle: any, artId: string?, finalHit: boolean, multiplier: number)
+local function predictContacts(handle: any, artId: string?, finalHit: boolean, multiplier: number, sequence: number)
 	contacts:stop()
 	contactHandle = nil
 	local model = character
@@ -413,6 +424,7 @@ local function predictContacts(handle: any, artId: string?, finalHit: boolean, m
 		finalHit = finalHit,
 		multiplier = multiplier,
 		weaponAttack = weaponAttack(),
+		swing = sequence,
 	}
 	if contacts:begin(swing) then
 		contactHandle = handle
@@ -606,12 +618,13 @@ function CharacterController.releaseArt(slot: number, heldSeconds: number)
 	local launchToken = current.token
 	predicted = { action = "Art", clipId = current.art.clip, handle = current.handle, token = launchToken }
 	-- Every Art's last window is its final hit (section 6).
-	predictContacts(current.handle, current.art.id, true, current.art.multiplier)
+	local sequence = nextSwing()
+	predictContacts(current.handle, current.art.id, true, current.art.multiplier, sequence)
 	setState("Art")
 	-- The server's Idle normally ends the Art; this is the fallback if that state never arrives.
 	actionEndsAt = ActionLogic.artFallbackEnd(releasedAt, plan.freezeClipTime, current.art, Combat.lagAllowance)
 	predictDraw()
-	fire("ArtRequest", { artId = current.art.id, facing = aimForRequest(), clientTime = serverNow() })
+	fire("ArtRequest", { artId = current.art.id, facing = aimForRequest(), clientTime = serverNow(), swing = sequence })
 	task.delay(plan.freezeClipTime, function()
 		if predicted ~= nil and (predicted :: Predicted).token == launchToken then
 			setTimeScale(captureScale)
@@ -653,16 +666,18 @@ function CharacterController.basicAttack()
 	local basicToken = nextToken()
 	predicted = { action = "Basic", clipId = clipId, handle = animator:play(clipId), token = basicToken }
 	-- A basic chain's final hit is its last swing (section 6).
+	local sequence = nextSwing()
 	predictContacts(
 		(predicted :: Predicted).handle,
 		nil,
 		basicChain >= Combat.basicChainLength,
-		Combat.basicAttackMultiplier
+		Combat.basicAttackMultiplier,
+		sequence
 	)
 	setState("Basic")
 	actionEndsAt = t + Combat.basicHitDuration
 	predictDraw()
-	fire("BasicAttackRequest", { facing = aimForRequest(), clientTime = serverNow() })
+	fire("BasicAttackRequest", { facing = aimForRequest(), clientTime = serverNow(), swing = sequence })
 end
 
 --- Guard held or released; a tap inside the parry window is the server's call.

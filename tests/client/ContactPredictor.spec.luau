@@ -476,3 +476,94 @@ describe("ContactPredictor kill rule", function()
 		expect(ContactPredictor.tierFor(1, 3, true, true)).toBe("Kill")
 	end)
 end)
+
+describe("ContactPredictor swing numbers and drawn-away parts (items 4, D-171)", function()
+	-- One swing of Sharp Nail at a boar 3.5 studs out, with `deps` beyond the targets.
+	local function sweep(number: number?, deps: { [string]: any }): { any }
+		local enemy, def = placeEnemy("BoarSide", 3.5)
+		local sharp = attack("SharpNail")
+		local target = record(5, enemy, def)
+		local options: { [string]: any } = {
+			targets = function(): { any }
+				return { target }
+			end,
+		}
+		for key, value in deps do
+			options[key] = value
+		end
+		local predictor = ContactPredictor.new(options :: any)
+		assert(predictor:begin({
+			model = avatar.model,
+			clip = sharp.clip,
+			artId = sharp.artId,
+			finalHit = true,
+			multiplier = sharp.multiplier,
+			weaponAttack = WEAPON.attack,
+			swing = number,
+		}))
+		local found = {}
+		local time = 0
+		poseAt(sharp.clip, 0)
+		predictor:step(0)
+		while time <= sharp.clip.duration do
+			time += FRAME
+			poseAt(sharp.clip, math.min(time, sharp.clip.duration))
+			for _, contact in predictor:step(math.min(time, sharp.clip.duration)) do
+				table.insert(found, contact)
+			end
+		end
+		predictor:stop()
+		return found
+	end
+
+	it("every contact carries the swing's number, and the confirmed check is asked with it", function()
+		local asked: { any } = {}
+		local found = sweep(9, {
+			confirmed = function(_targetId: number, _windowIndex: number, _artId: string?, swing: number?): boolean
+				table.insert(asked, swing)
+				return false
+			end,
+		})
+		expect(#found > 0).toBe(true)
+		for _, contact in found do
+			expect(contact.swing).toBe(9)
+		end
+		expect(#asked).toBe(#found)
+		for _, swing in asked do
+			expect(swing).toBe(9)
+		end
+		-- A swing without one predicts as before.
+		for _, contact in sweep(nil, {}) do
+			expect(contact.swing).toBe(nil)
+		end
+	end)
+
+	it("skips a part the body is drawn away from; the rest of the body is still struck", function()
+		local plain = sweep(nil, {})
+		local rootOnly = sweep(nil, {
+			hidden = function(part: any): boolean
+				return part.Name == "HumanoidRootPart"
+			end,
+		})
+		expect(#rootOnly).toBe(#plain)
+		local none = sweep(nil, {
+			hidden = function(): boolean
+				return true
+			end,
+		})
+		expect(#none).toBe(0)
+	end)
+
+	it("walks the tracker's frozen live list as it is, the same contacts as a list of its own (item 5)", function()
+		local plain = sweep(nil, {})
+		local enemy, def = placeEnemy("BoarSide", 3.5)
+		local frozen = table.freeze({ record(5, enemy, def) })
+		local walked = sweep(nil, {
+			targets = function(): { any }
+				return frozen
+			end,
+		})
+		expect(#walked).toBe(#plain)
+		expect(#frozen).toBe(1)
+	end)
+end)

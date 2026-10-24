@@ -2,7 +2,8 @@
 --[[
 	player/OneHandedSword/DodgeBack: the 0.25 s dodge step (combat.luau dodgeDuration) carrying
 	dodgeDistance studs of root motion, back: a hop away, torso back, blade raised between the body and the threat; the coat flares procedurally. Two frames of lean
-	(anticipation), a 4-frame ExpoOut extension, then a BackOut recovery into the ready stance.
+	(anticipation), a 4-frame QuadOut extension
+	(the hop spread over its first 2 to 3 frames, D-179), then a BackOut recovery into the ready stance.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -53,8 +54,9 @@ local clip: Types.ClipDef = {
 		{
 			-- full extension: the torso leans back 18 degrees, no further, so the scabbard's tip stays
 			-- off the left thigh as that leg reaches back
+			-- QuadOut, not ExpoOut: ExpoOut put 81% of this key's 4.8 studs into one 60 fps frame (D-179)
 			time = 0.07,
-			easing = "ExpoOut",
+			easing = "QuadOut",
 			joints = {
 				Root = posRot(0, -0.3, 0, 0, 0, 0),
 				Waist = rot(18, -10, -2),

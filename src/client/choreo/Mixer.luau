@@ -43,6 +43,17 @@
 	The fallback idle (the rig's idle the animator plays the frame a rig appears) fires its events
 	only while it is the Base layer's idle: hidden under another Base clip it keeps its clock but
 	reports nothing it crosses, so its sounds never double the clip that shows (D-123).
+
+	The server's beat (D-172): an enemy's attack clip keeps the server's clock up to a mark (its
+	first HitWindowOpen) through `keepBeat`. The rig's pause stays the only freeze: every step it
+	holds the handle adds the held time to what the handle owes, and `shiftBeat` takes off what
+	the server paused the attack for (HitConfirmed attackPause). Whatever is left the clip repays
+	by running a little faster (or gives back by running a little slower) at the one rate that
+	evens the balance by the mark (data/choreo.luau enemy.beat), so its strike lands on the
+	server's beat and nothing freezes twice. Past the mark nothing is corrected.
+
+	A play's `mask` scales an Additive clip per joint (a joint not listed keeps its full weight):
+	an enemy's flinch during its attack leaves the weapon arm on the attack (D-173).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -71,6 +82,15 @@ export type PlayOptions = {
 	-- Seconds between the mixer's last step and this play (the caller's clock). Only a jump reads
 	-- it: the clip's first step then moves it by the step less this, its own age (D-132).
 	sinceStep: number?,
+	-- Additive clips only: joint name -> weight multiplier (a joint not listed keeps 1).
+	mask: { [string]: number }?,
+}
+
+-- The server's beat a handle keeps (Mixer.keepBeat): the clip time it is kept up to and the real
+-- seconds the clip runs behind the server there (negative: ahead).
+export type Beat = {
+	untilTime: number,
+	owed: number,
 }
 
 export type Handle = {
@@ -100,6 +120,8 @@ export type Handle = {
 	-- none) and how much of it, in clip seconds, the clock may skip when it gets there.
 	absorbKey: number,
 	absorbSeconds: number,
+	mask: { [string]: number }?, -- PlayOptions.mask (Additive only)
+	beat: Beat?, -- the server's beat it keeps (keepBeat), nil once past the mark
 }
 
 -- jumped: a render stall's gap crossed it (the step, or this handle's part of it, was a jump).
@@ -129,6 +151,9 @@ export type Mixer = {
 	handles: (self: Mixer) -> { Handle },
 	step: (self: Mixer, dt: number) -> StepResult,
 	seek: (self: Mixer, handle: Handle, clipTime: number) -> { FiredEvent },
+	keepBeat: (self: Mixer, handle: Handle, untilTime: number, owed: number?) -> (),
+	shiftBeat: (self: Mixer, handle: Handle, seconds: number) -> (),
+	beatOwed: (self: Mixer, handle: Handle) -> number?,
 	lastOffsets: (self: Mixer) -> Offsets,
 	clear: (self: Mixer) -> (),
 }
@@ -136,6 +161,7 @@ export type Mixer = {
 local ZERO: Types.Vec3 = { 0, 0, 0 }
 local REST: ClipSampler.Offset = { pos = ZERO, rot = ZERO }
 local LAYER_ORDER: { Types.ClipLayer } = ChoreoData.layerOrder
+local BEAT = ChoreoData.enemy.beat
 
 local Mixer = {}
 Mixer.__index = Mixer
@@ -239,6 +265,8 @@ function Mixer.play(self: any, clip: Types.ClipDef, opts: PlayOptions?): Handle
 		sinceStep = math.max(0, options.sinceStep or 0),
 		absorbKey = 0,
 		absorbSeconds = 0,
+		mask = options.mask,
+		beat = nil,
 	}
 	table.insert(self._handles, handle)
 	return handle
@@ -310,6 +338,33 @@ end
 
 function Mixer.pauseRemaining(self: any): number
 	return self._pause
+end
+
+--- Keeps a handle on the server's beat up to clip time `untilTime` (D-172): from now on every step
+--- the rig's pause holds it is owed back, less what `shiftBeat` says the server paused, and the
+--- clip evens the balance by `untilTime`. `owed`: real seconds it already runs behind (a late
+--- start the network catch-up could not jump all of). A handle at or past the mark keeps none.
+function Mixer.keepBeat(_self: any, handle: Handle, untilTime: number, owed: number?)
+	if handle.done or handle.stopping or handle.time >= untilTime then
+		handle.beat = nil
+		return
+	end
+	handle.beat = { untilTime = untilTime, owed = owed or 0 }
+end
+
+--- The server paused (positive) or un-paused (negative) the beat a handle keeps by `seconds`: the
+--- clip owes that much less (more). A handle keeping no beat ignores it.
+function Mixer.shiftBeat(_self: any, handle: Handle, seconds: number)
+	local beat = handle.beat
+	if beat ~= nil then
+		beat.owed -= seconds
+	end
+end
+
+--- Real seconds a handle runs behind the beat it keeps (negative: ahead), or nil when it keeps none.
+function Mixer.beatOwed(_self: any, handle: Handle): number?
+	local beat = handle.beat
+	return if beat ~= nil then beat.owed else nil
 end
 
 function Mixer.setTimeScale(self: any, scale: number)
@@ -504,20 +559,31 @@ end
 
 -- Adds `offsets` scaled by `weight` into `result`, replacing each touched entry with a new table:
 -- a sampled entry can alias the clip's own key arrays (ClipSampler holds them by reference at the
--- ends of a clip), and clip data is never written. Untouched entries are left as they are.
-local function addInto(result: Offsets, offsets: Offsets, weight: number)
+-- ends of a clip), and clip data is never written. Untouched entries are left as they are. A
+-- `mask` scales the joints it lists further (one it scales to nothing is left out).
+local function addInto(result: Offsets, offsets: Offsets, weight: number, mask: { [string]: number }?)
 	for name, offset in offsets do
+		local scaled = weight
+		if mask ~= nil then
+			local scale = mask[name]
+			if scale ~= nil then
+				if scale <= 0 then
+					continue
+				end
+				scaled = weight * scale
+			end
+		end
 		local base = result[name] or REST
 		result[name] = {
 			pos = {
-				base.pos[1] + offset.pos[1] * weight,
-				base.pos[2] + offset.pos[2] * weight,
-				base.pos[3] + offset.pos[3] * weight,
+				base.pos[1] + offset.pos[1] * scaled,
+				base.pos[2] + offset.pos[2] * scaled,
+				base.pos[3] + offset.pos[3] * scaled,
 			},
 			rot = {
-				base.rot[1] + offset.rot[1] * weight,
-				base.rot[2] + offset.rot[2] * weight,
-				base.rot[3] + offset.rot[3] * weight,
+				base.rot[1] + offset.rot[1] * scaled,
+				base.rot[2] + offset.rot[2] * scaled,
+				base.rot[3] + offset.rot[3] * scaled,
 			},
 		}
 	end
@@ -594,6 +660,28 @@ function Mixer.seek(_self: any, handle: Handle, clipTime: number): { FiredEvent 
 	return events
 end
 
+-- One step of a handle that keeps the server's beat (D-172): `held` real seconds the rig's pause
+-- held it are owed, then the clip moves by `clipDt` at the rate that evens what it owes by the
+-- mark (within data/choreo.luau enemy.beat), never past an even balance. Returns the clip dt.
+local function beatStep(handle: Handle, beat: Beat, held: number, clipDt: number): number
+	beat.owed += held
+	local owed = beat.owed
+	if clipDt <= 0 or math.abs(owed) <= ChoreoData.pauseEpsilon then
+		return clipDt
+	end
+	-- Real seconds to the mark at the clip's own rate, and the server's (it is `owed` nearer).
+	local remaining = math.max(0, beat.untilTime - handle.time) / handle.speed
+	local left = remaining - owed
+	local rate = if left > clipDt then remaining / left else BEAT.maxRate
+	rate = math.clamp(rate, BEAT.minRate, BEAT.maxRate)
+	local gain = clipDt * (rate - 1)
+	if (owed > 0 and gain > owed) or (owed < 0 and gain < owed) then
+		gain = owed
+	end
+	beat.owed = owed - gain
+	return clipDt + gain
+end
+
 function Mixer.step(self: any, dt: number): StepResult
 	local jumped = dt > ChoreoData.stall.jumpSeconds
 	-- The time the clocks (and envelopes and weights) of handles that keep the pause move by.
@@ -645,6 +733,12 @@ function Mixer.step(self: any, dt: number): StepResult
 			handleJumped = handleDt > ChoreoData.stall.jumpSeconds
 		end
 		handle.sinceStep = 0
+		local beat = handle.beat
+		if beat ~= nil and (handle.stopping or handle.done or handle.time >= beat.untilTime) then
+			-- Past the mark (or stopped): the beat is the strike's own from here.
+			handle.beat = nil
+			beat = nil
+		end
 		if not frozen then
 			-- Envelope
 			if handle.stopping then
@@ -678,14 +772,16 @@ function Mixer.step(self: any, dt: number): StepResult
 		if not handle.done then
 			local wasEnded = handle.ended
 			local into = if handle.fallback and handle.targetWeight == 0 then hiddenEvents else events
-			advance(
-				handle,
-				if handle.ignorePause then handleDt else handleDt * timeScale,
-				paused,
-				into,
-				if handleJumped then jumpRoot else rootDelta,
-				handleJumped
-			)
+			local clipDt = if handle.ignorePause then handleDt else handleDt * timeScale
+			if beat ~= nil and not handle.ignorePause then
+				-- The rig's pause held it this step (all of it, or the part of a jump's gap it ended in).
+				local held = if frozen then dt else math.max(0, dt - clockDt)
+				clipDt = if frozen then 0 else beatStep(handle, beat, held, clipDt)
+				if frozen then
+					beat.owed += held
+				end
+			end
+			advance(handle, clipDt, paused, into, if handleJumped then jumpRoot else rootDelta, handleJumped)
 			if handle.ended and not wasEnded then
 				table.insert(finished, handle)
 				self:stop(handle)
@@ -707,7 +803,7 @@ function Mixer.step(self: any, dt: number): StepResult
 			for _, handle in layerHandles do
 				local weight = visibleWeight(handle)
 				if weight > 0 then
-					addInto(result, ClipSampler.sample(handle.clip, handle.time), weight)
+					addInto(result, ClipSampler.sample(handle.clip, handle.time), weight, handle.mask)
 				end
 			end
 		else

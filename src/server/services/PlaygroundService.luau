@@ -11,7 +11,10 @@
 	  the fighter with EntityService under playground.loadout;
 	- spawns the spawn tables through EnemyService.spawn (pack size, scatter and facing jitter from
 	  playground.luau) and, when EnemyService reports an enemy gone, respawns that slot after
-	  playground.respawnSeconds;
+	  playground.respawnSeconds. Every spawn, packmates and respawns alike, stands clear of every
+	  living fighter by playground.spawnSpacing (D-170): scattered independently in one 6-stud disc,
+	  two boars of a pack (5.6 studs from root to snout) overlapped and the engine lifted one onto
+	  the other's back;
 	- on Heartbeat, kills any fighter whose root fell below playground.killVolume.y (the rim is
 	  death; EntityService handles the shatter and the respawn).
 
@@ -191,7 +194,25 @@ end
 -- Spawns
 -- ---------------------------------------------------------------------------------------------
 
---- Where a member of spawn table entry `spawn` stands: scattered around the point, at the rig's root height, facing the entry's direction with jitter.
+--- Where every living fighter (players and enemies; the dead are not in the way) stands on the field.
+function PlaygroundService.occupied(): { PlaygroundLayout.Spot }
+	local d = dependencies()
+	local spots: { PlaygroundLayout.Spot } = {}
+	for _, record in d.entities.all() do
+		if record.state == "Dead" then
+			continue
+		end
+		local position = d.entities.positionOf(record.id)
+		if position ~= nil then
+			table.insert(spots, { x = position.X, z = position.Z })
+		end
+	end
+	return spots
+end
+
+--- Where a member of spawn table entry `spawn` stands: scattered around the point, clear of every
+--- living fighter by playground.spawnSpacing (D-170), at the rig's root height, facing the entry's
+--- direction with jitter.
 function PlaygroundService.spawnCFrame(spawn: Playground.Spawn): CFrame
 	local d = dependencies()
 	local def = Enemies.byId(spawn.enemy)
@@ -204,7 +225,22 @@ function PlaygroundService.spawnCFrame(spawn: Playground.Spawn): CFrame
 	end
 	local rootSpec = if rig.parts ~= nil then (rig.parts :: any)[rig.rootPart] else nil
 	local rootHeight = if rootSpec ~= nil then rootSpec.size[2] else 0
-	local x, z = PlaygroundLayout.scatter(spawn.position[1], spawn.position[3], Playground.spawnScatterRadius, d.random)
+	local x, z, clear = PlaygroundLayout.spacedScatter(
+		spawn.position[1],
+		spawn.position[3],
+		Playground.spawnScatterRadius,
+		Playground.spawnSpacing,
+		PlaygroundService.occupied(),
+		d.random
+	)
+	if not clear then
+		warn(
+			("[PlaygroundService] no spot near %s's spawn point clears every fighter by %s studs; took the roomiest"):format(
+				spawn.enemy,
+				tostring(Playground.spawnSpacing.minStuds)
+			)
+		)
+	end
 	local y = spawn.position[2] + PlaygroundLayout.rootHeight(rig.hipHeight, rootHeight, World.spawn.groundEpsilon)
 	local facing = PlaygroundLayout.jitterFacing(spawn.facing, Playground.spawnFacingJitterDegrees, d.random)
 	return CFrame.new(x, y, z) * CFrame.Angles(0, math.rad(facing), 0)

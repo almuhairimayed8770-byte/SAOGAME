@@ -10,6 +10,10 @@
 	outline Highlight (OutlineManager.tint), never a second Highlight on the same model: the engine
 	draws one Highlight per adornee, and the left-over fill Highlight kept a boar from ever showing
 	a hit's white (issue 3).
+
+	On the server's beat (D-172): `show` takes how long ago the server began the wind-up (`lateBy`,
+	the remote's way here), so the telegraph ends when the server's wind-up does, and `delay` moves
+	that end by each pause the server gives the attack (HitConfirmed attackPause).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -211,13 +215,15 @@ local function ensureLoop()
 end
 
 --- Draws the wind-up for an enemy: weapon fill plus a ground shape at `origin` facing `facing`.
+--- `lateBy`: seconds since the server began the wind-up (the telegraph is that far into it).
 function Telegraphs.show(
 	model: Instance,
 	kind: string,
 	windUp: number,
 	origin: Vector3,
 	facing: Vector3,
-	shape: Types.TelegraphShape?
+	shape: Types.TelegraphShape?,
+	lateBy: number?
 )
 	if actives[model] ~= nil then
 		Telegraphs.hide(model)
@@ -252,23 +258,33 @@ function Telegraphs.show(
 		end
 	end
 
+	local now = Engine.now()
 	local active: Active = {
 		model = model,
 		kind = kind,
 		windUp = math.max(windUp, 0),
-		start = Engine.now(),
+		start = now - math.max(0, lateBy or 0),
 		highlight = highlight,
 		color = color,
 		release = releaseSlot,
 		pieces = pieces,
 	}
 	actives[model] = active
-	applyAlpha(active, active.start)
+	applyAlpha(active, now)
 	ensureLoop()
 
 	local sound = Fx.telegraph.sounds[kind] or Fx.telegraph.sounds.Normal
 	SfxPool.play(sound, origin)
 	MusicDirector.noteTelegraph()
+end
+
+--- Moves the end of an enemy's telegraph by `seconds` (negative: earlier): the server paused (or
+--- did not pause) its wind-up by that much. A rig showing none is left alone.
+function Telegraphs.delay(model: Instance, seconds: number)
+	local active = actives[model]
+	if active ~= nil then
+		active.start += seconds
+	end
 end
 
 --- Removes an enemy's telegraph (the strike landed, the enemy died or was interrupted).

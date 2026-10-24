@@ -2057,6 +2057,121 @@ describe("CombatService.enemyStrike", function()
 		expect(EntityService.get(besideId).hp).toBe(300)
 	end)
 
+	it("a span resolves only the stretch the rushing body swept, each target once per attack (D-166)", function()
+		fresh()
+		local nearId = spawnPlayer(CFrame.new(0, 3, -4)) -- 4 studs down the line
+		local farId = spawnPlayer(CFrame.new(0, 3, -12)) -- 12 studs down it
+		local pastId = spawnPlayer(CFrame.new(0, 3, -20)) -- past the line's 14 studs
+		local boarId = spawnBoar(CFrame.new(0, 1.2, 0))
+		local origin, facing = Vector3.new(0, 1.2, 0), Vector3.new(0, 0, -1)
+		local resolved = {}
+		local results = CombatService.enemyStrike(
+			boarId,
+			CHARGE,
+			origin,
+			facing,
+			{ span = { from = -3, to = 5 }, resolved = resolved }
+		)
+		expect(#results).toBe(1)
+		expect(results[1].targetId).toBe(nearId)
+		expect(resolved[nearId]).toBe(true)
+		expect(resolved[farId]).toBeNil()
+		expect(EntityService.get(farId).hp).toBe(300)
+		-- The body still covers the near player on the next tick: it is not hit twice.
+		results = CombatService.enemyStrike(
+			boarId,
+			CHARGE,
+			origin,
+			facing,
+			{ span = { from = 1, to = 9 }, resolved = resolved }
+		)
+		expect(#results).toBe(0)
+		results = CombatService.enemyStrike(
+			boarId,
+			CHARGE,
+			origin,
+			facing,
+			{ span = { from = 9, to = 40 }, resolved = resolved }
+		)
+		expect(#results).toBe(1)
+		expect(results[1].targetId).toBe(farId)
+		-- Past the telegraphed line nothing is hit, however far the overshoot carries the body.
+		expect(EntityService.get(pastId).hp).toBe(300)
+		expect(resolved[pastId]).toBeNil()
+		expect(#sentOf("HitConfirmed")).toBe(2)
+	end)
+
+	it(
+		"a body dodging at first contact is resolved: the rush passing over it after the frames end misses (D-166)",
+		function()
+			fresh()
+			local playerId, player = spawnPlayer(CFrame.new(0, 3, -6))
+			local boarId = spawnBoar(CFrame.new(0, 1.2, 0))
+			local origin, facing = Vector3.new(0, 1.2, 0), Vector3.new(0, 0, -1)
+			handlers.DodgeRequest(player, { direction = { 1, 0, 0 }, clientTime = clock.t })
+			local resolved = {}
+			local results = CombatService.enemyStrike(
+				boarId,
+				CHARGE,
+				origin,
+				facing,
+				{ span = { from = 0, to = 8 }, resolved = resolved }
+			)
+			expect(#results).toBe(0)
+			expect(resolved[playerId]).toBe(true)
+			advance(Combat.dodgeInvulnerability + 0.01)
+			results = CombatService.enemyStrike(
+				boarId,
+				CHARGE,
+				origin,
+				facing,
+				{ span = { from = 2, to = 10 }, resolved = resolved }
+			)
+			expect(#results).toBe(0)
+			expect(EntityService.get(playerId).hp).toBe(300)
+			expect(#sentOf("HitConfirmed")).toBe(0)
+		end
+	)
+
+	it("guard and parry are judged per target at its own contact (D-166)", function()
+		fresh()
+		-- Both face the boar coming from +Z; the near one has held its guard past the parry window.
+		local facingBoar = function(z)
+			return CFrame.lookAt(Vector3.new(0, 3, z), Vector3.new(0, 3, 10))
+		end
+		local nearId, near = spawnPlayer(facingBoar(-4))
+		local farId = spawnPlayer(facingBoar(-12))
+		local boarId = spawnBoar(CFrame.lookAt(Vector3.new(0, 1.2, 0), Vector3.new(0, 1.2, -10)))
+		handlers.GuardRequest(near, { held = true, facing = { 0, 0, 1 }, clientTime = clock.t })
+		clock.t += 1
+		local origin, facing = Vector3.new(0, 1.2, 0), Vector3.new(0, 0, -1)
+		local resolved = {}
+		local results = CombatService.enemyStrike(
+			boarId,
+			NORMAL_RUSH,
+			origin,
+			facing,
+			{ span = { from = -3, to = 5 }, resolved = resolved }
+		)
+		expect(#results).toBe(1)
+		expect(results[1].targetId).toBe(nearId)
+		expect(results[1].guarded).toBe(true)
+		expect(EntityService.get(nearId).state).toBe("Guard")
+		expect(EntityService.get(farId).state).toBe("Idle")
+		clock.t += 0.25
+		results = CombatService.enemyStrike(
+			boarId,
+			NORMAL_RUSH,
+			origin,
+			facing,
+			{ span = { from = 5, to = 16 }, resolved = resolved }
+		)
+		expect(#results).toBe(1)
+		expect(results[1].targetId).toBe(farId)
+		expect(results[1].guarded).toBe(false)
+		expect(EntityService.get(farId).state).toBe("Stagger")
+	end)
+
 	it("a cone strike respects reach and arc", function()
 		fresh()
 		spawnPlayer(CFrame.new(0, 3, -4))
@@ -2513,5 +2628,125 @@ describe("CombatService.traceSink", function()
 			expect(event.hits).toBe(0)
 			expect(event.nearest).toBeNil()
 		end
+	end)
+end)
+
+describe("CombatService enemy hit-stop (D-168)", function()
+	local function swingAtBoar(): (number, any)
+		local _, player = spawnPlayer()
+		local boarId = spawnBoar()
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		return boarId, player
+	end
+
+	it(
+		"a hit on an enemy asks EnemyService to pause its attack for the tier's hit-stop, and tells the clients",
+		function()
+			fresh()
+			local asked = {}
+			CombatService.setEnemyHitStop(function(enemyId, seconds)
+				table.insert(asked, { enemyId, seconds })
+				return 0.05
+			end)
+			local boarId = swingAtBoar()
+			advance(0.6)
+			local confirmed = sentOf("HitConfirmed")
+			expect(#confirmed).toBe(1)
+			expect(confirmed[1].hitStop).toBe("Final")
+			expect(asked).toEqual({ { boarId, Combat.hitStopFrames.Final * Combat.hitStopFrameSeconds } })
+			expect(confirmed[1].attackPause).toBe(0.05)
+		end
+	)
+
+	it("no pause field when the enemy has no attack to pause, and no question about a kill", function()
+		fresh()
+		local asked = 0
+		CombatService.setEnemyHitStop(function()
+			asked += 1
+			return nil
+		end)
+		swingAtBoar()
+		advance(0.6)
+		expect(asked).toBe(1)
+		expect(sentOf("HitConfirmed")[1].attackPause).toBeNil()
+
+		fresh()
+		CombatService.setEnemyHitStop(function()
+			asked += 1
+			return 0.05
+		end)
+		local boarId = swingAtBoar()
+		EntityService.get(boarId).hp = 1
+		advance(0.6)
+		expect(sentOf("HitConfirmed")[1].killed).toBe(true)
+		expect(sentOf("HitConfirmed")[1].attackPause).toBeNil()
+		expect(asked).toBe(1)
+	end)
+
+	it("an enemy's strike on a player asks nothing, and reset forgets the hook", function()
+		fresh()
+		local asked = 0
+		CombatService.setEnemyHitStop(function()
+			asked += 1
+			return 0.05
+		end)
+		spawnPlayer()
+		local koboldId = spawnKobold(CFrame.lookAt(Vector3.new(0, 2.2, -4), Vector3.new(0, 2.2, 0)))
+		CombatService.enemyStrike(koboldId, OVERHEAD, Vector3.new(0, 2.2, -4), Vector3.new(0, 0, 1))
+		expect(asked).toBe(0)
+		expect(sentOf("HitConfirmed")[1].attackPause).toBeNil()
+
+		fresh()
+		swingAtBoar()
+		advance(0.6)
+		expect(asked).toBe(0)
+		expect(sentOf("HitConfirmed")[1].attackPause).toBeNil()
+	end)
+end)
+
+describe("CombatService swing sequence numbers (item 4)", function()
+	it("echoes the request's swing number on every HitConfirmed of that swing", function()
+		fresh()
+		local _, player = spawnPlayer()
+		spawnBoar()
+		local payload = basicPayload()
+		payload.swing = 41
+		handlers.BasicAttackRequest(player, payload)
+		advance(0.3)
+		local hit = lastOf("HitConfirmed")
+		expect(hit).never.toBeNil()
+		expect(hit.swing).toBe(41)
+		local art = artPayload("OneHandedSword.Horizontal")
+		art.swing = 42
+		advance(Combat.basicChainWindow + 0.5)
+		handlers.ArtRequest(player, art)
+		advance(0.6)
+		expect(lastOf("HitConfirmed").swing).toBe(42)
+	end)
+
+	it("a request without one, or with one out of range, confirms with none", function()
+		for _, swing in { nil, 0, 1.5, Combat.contact.swingSequenceMax + 1, "7" } do
+			fresh()
+			local _, player = spawnPlayer()
+			spawnBoar()
+			local payload: any = basicPayload()
+			payload.swing = swing
+			handlers.BasicAttackRequest(player, payload)
+			advance(0.3)
+			local hit = lastOf("HitConfirmed")
+			expect(hit).never.toBeNil()
+			expect(hit.swing).toBeNil()
+		end
+	end)
+
+	it("an enemy's strike carries no swing number", function()
+		fresh()
+		local playerId = spawnPlayer()
+		local koboldId = spawnKobold(CFrame.lookAt(Vector3.new(0, 2.2, -4), Vector3.new(0, 2.2, 0)))
+		CombatService.enemyStrike(koboldId, OVERHEAD, Vector3.new(0, 2.2, -4), Vector3.new(0, 0, 1))
+		local hit = lastOf("HitConfirmed")
+		expect(hit).never.toBeNil()
+		expect(hit.targetId).toBe(playerId)
+		expect(hit.swing).toBeNil()
 	end)
 end)

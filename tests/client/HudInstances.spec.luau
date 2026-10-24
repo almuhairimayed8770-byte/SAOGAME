@@ -10,6 +10,27 @@ local EntityTracker = Harness.load("src/client/controllers/EntityTracker")
 local UI = Harness.load("src/shared/data/ui")
 local Combat = Harness.load("src/shared/data/combat")
 local Moments = Harness.load("src/shared/data/moments")
+local Shatter = Harness.load("src/client/fx/Shatter")
+local SfxPool = Harness.load("src/client/audio/SfxPool")
+
+-- The pool's seams with nothing to hear: the shatter's cue plays into the void.
+local quietSounds = {
+	now = function(): number
+		return 0
+	end,
+	delay = function(_seconds: number, _fn: () -> ()) end,
+	onStep = function(_fn: (number) -> ()): () -> ()
+		return function() end
+	end,
+	play = function(_sound: Sound): boolean
+		return true
+	end,
+	stop = function(_sound: Sound) end,
+	timeLength = function(_sound: Sound): number
+		return 30
+	end,
+	preload = function(_sounds: { Instance }) end,
+}
 
 Engine.setViewer(function()
 	return Vector3.zero
@@ -130,6 +151,41 @@ describe("Nameplates (instances)", function()
 		EntityTracker.track(next)
 		task.wait()
 		expect(Nameplates.plateOf(nextId).gui.Enabled).toBe(true)
+	end)
+
+	it("goes on the shatter frame itself: Shatter.play takes the plate as it hides the rig (D-147)", function()
+		local model, id = rig("Enemy")
+		local torso = Instance.new("Part")
+		torso.Name = "UpperTorso"
+		torso.Parent = model
+		EntityTracker.track(model)
+		task.wait()
+		setAttribute(model, "HP", 0)
+		setAttribute(model, "State", "Dead")
+		task.wait()
+		local plate = Nameplates.plateOf(id)
+		expect(plate.gui.Enabled).toBe(true)
+		-- Well inside the fallback: only the shatter itself can take the plate now.
+		clock += 0.01
+		Nameplates.update()
+		expect(plate.gui.Enabled).toBe(true)
+		SfxPool.bind(quietSounds)
+		local ok, err = pcall(Shatter.play, model, "Beast")
+		SfxPool.reset()
+		SfxPool.bind(nil)
+		if not ok then
+			error(err, 0)
+		end
+		-- The same frame the rig turns to shards: no update, no Heartbeat in between.
+		expect(torso.LocalTransparencyModifier).toBe(1)
+		expect(plate.gui.Enabled).toBe(false)
+		-- And it stays gone while the rig lingers, the fallback timer still in place.
+		setAttribute(model, "Guard", 0)
+		Nameplates.update()
+		expect(plate.gui.Enabled).toBe(false)
+		expect(plate.dueAt).never.toBeNil()
+		EntityTracker.untrack(model)
+		task.wait()
 	end)
 
 	it("drops a dead rig's plate when its shatter is due even if nothing hid it", function()

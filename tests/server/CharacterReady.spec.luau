@@ -113,6 +113,94 @@ describe("CharacterReady.wait", function()
 		expect(frames()).toBe(16) -- 15 frames to the deadline, one for the rig build
 	end)
 
+	it("a ready character joins the players group; one that never readies does not (D-167)", function()
+		local joined: { any } = {}
+		local function collide(character)
+			table.insert(joined, character)
+		end
+		local player, model, world = spawned()
+		model.Parent = world
+		local engine = engineFor({}, function()
+			return true
+		end)
+		engine.collide = collide
+		expect(CharacterReady.wait(player, model, 10, engine)).toBe(true)
+		expect(joined).toEqual({ model })
+
+		local late, lateModel = spawned()
+		local lateEngine = engineFor({}, function()
+			return true
+		end)
+		lateEngine.collide = collide
+		expect(CharacterReady.wait(late, lateModel, 0.25, lateEngine)).toBe(false)
+		expect(#joined).toBe(1)
+	end)
+
+	it("the engine's own join puts every part of the character in the players group (D-167)", function()
+		local AI = Harness.load("src/shared/data/ai")
+		local model = Instance.new("Model")
+		local torso = Instance.new("Part")
+		torso.Parent = model
+		CharacterReady.join(model)
+		expect(torso.CollisionGroup).toBe(AI.collision.players)
+	end)
+
+	it("takes the engine's name and health bar off the character from its first frame (D-178)", function()
+		local player, model, world = spawned()
+		local humanoid = Instance.new("Humanoid")
+		humanoid.Parent = model
+		local None = Enum.HumanoidDisplayDistanceType.None
+		local seen: { any } = {}
+		local late: Humanoid? = nil
+		local engine = engineFor({
+			[1] = function()
+				-- Still unparented and undressed: the label is already off.
+				table.insert(seen, humanoid.DisplayDistanceType)
+				model.Parent = world
+			end,
+			[2] = function()
+				-- The appearance swaps in a Humanoid of its own while it loads.
+				local swapped = Instance.new("Humanoid")
+				swapped.Name = "Swapped"
+				swapped.Parent = model
+				late = swapped
+			end,
+		}, function()
+			return late ~= nil
+		end)
+		expect(CharacterReady.wait(player, model, 10, engine)).toBe(true)
+		expect(seen).toEqual({ None })
+		for _, each in { humanoid, late :: Humanoid } do
+			expect(each.DisplayDistanceType).toBe(None)
+			expect(each.NameDisplayDistance).toBe(0)
+			expect(each.HealthDisplayDistance).toBe(0)
+		end
+	end)
+
+	it("unlabels a stand-in's character the same way and leaves one with no Humanoid alone", function()
+		local standIn = { Name = "StandIn" }
+		local model = Instance.new("Model")
+		local humanoid = Instance.new("Humanoid")
+		humanoid.Parent = model
+		model.Parent = Instance.new("Folder")
+		local engine = engineFor({}, function()
+			return true
+		end)
+		expect(CharacterReady.wait(standIn, model, 10, engine)).toBe(true)
+		expect(humanoid.DisplayDistanceType).toBe(Enum.HumanoidDisplayDistanceType.None)
+		-- A character with no Humanoid yet is left as it is.
+		local bare = Instance.new("Model")
+		bare.Parent = Instance.new("Folder")
+		expect(CharacterReady.wait(
+			standIn,
+			bare,
+			10,
+			engineFor({}, function()
+				return true
+			end)
+		)).toBe(true)
+	end)
+
 	it("reports a character removed during the last frame as not ready", function()
 		local player, model, world = spawned()
 		model.Parent = world

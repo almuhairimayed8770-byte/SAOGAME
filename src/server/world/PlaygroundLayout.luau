@@ -2,8 +2,9 @@
 --[[
 	PlaygroundLayout: the pure layout math behind PlaygroundBuilder and PlaygroundService (sections
 	5, 11, 20; D-013). Where every rim post, rail, pillar and cloud goes, how big the kill volume is,
-	how many parts the rim costs, and where a pack member stands around its spawn point. Plain
-	numbers in and out so every rule runs under Lune; the builder turns them into CFrames.
+	how many parts the rim costs, and where a pack member stands around its spawn point, clear of
+	every living fighter (spacedScatter, D-170). Plain numbers in and out so every rule runs under
+	Lune; the builder turns them into CFrames.
 
 	Angles are degrees around the field center, 0 along +X and increasing toward +Z (the direction
 	`ring` walks), so a tangent at angle a is (-sin a, cos a). Distances are studs; y is up.
@@ -162,6 +163,49 @@ function PlaygroundLayout.scatter(centerX: number, centerZ: number, radius: numb
 	local distance = radius * math.sqrt(random:NextNumber())
 	local radians = random:NextNumber() * FULL_TURN
 	return centerX + math.cos(radians) * distance, centerZ + math.sin(radians) * distance
+end
+
+-- How spacedScatter keeps spawns apart (playground.luau spawnSpacing).
+export type Spacing = { minStuds: number, tries: number, widenStuds: number, widenings: number }
+export type Spot = { x: number, z: number }
+
+-- Distance from (x, z) to the nearest occupied spot (math.huge with none).
+local function clearance(x: number, z: number, occupied: { Spot }): number
+	local nearest = math.huge
+	for _, spot in occupied do
+		nearest = math.min(nearest, PlaygroundLayout.distance(x, z, spot.x, spot.z))
+	end
+	return nearest
+end
+
+--- A scattered spot at least `spacing.minStuds` from every `occupied` spot (D-170). It draws
+--- `spacing.tries` spots in the disc of `radius`, then widens the disc by `spacing.widenStuds` and
+--- draws again, up to `spacing.widenings` times, so a pack stays as close as the spacing allows.
+--- The first clear draw wins: with nobody near, it draws exactly what `scatter` draws. With no clear
+--- spot anywhere it returns the roomiest spot it drew, and false.
+function PlaygroundLayout.spacedScatter(
+	centerX: number,
+	centerZ: number,
+	radius: number,
+	spacing: Spacing,
+	occupied: { Spot },
+	random: Random
+): (number, number, boolean)
+	local bestX, bestZ, bestRoom = centerX, centerZ, -math.huge
+	for widening = 0, spacing.widenings do
+		local discRadius = radius + widening * spacing.widenStuds
+		for _ = 1, spacing.tries do
+			local x, z = PlaygroundLayout.scatter(centerX, centerZ, discRadius, random)
+			local room = clearance(x, z, occupied)
+			if room >= spacing.minStuds then
+				return x, z, true
+			end
+			if room > bestRoom then
+				bestX, bestZ, bestRoom = x, z, room
+			end
+		end
+	end
+	return bestX, bestZ, false
 end
 
 --- A facing in degrees jittered by up to `jitterDegrees` either way.

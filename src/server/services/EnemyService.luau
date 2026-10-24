@@ -64,6 +64,11 @@ export type Engine = {
 	setWalkSpeed: (model: Model, speed: number) -> (),
 	computePath: (from: Vector3, to: Vector3) -> { Vector3 }?, -- may yield; nil when no path
 	destroy: (model: Model) -> (),
+	-- D-167: puts every part of the model in a collision group (CollisionGroups.assign). Nil: no groups.
+	setCollisionGroup: ((model: Model, group: string) -> ())?,
+	-- D-167: whether the model's root overlaps no player and no other enemy, so it can rejoin the
+	-- enemies group without being pushed out of anyone (CollisionGroups.clear). Nil: always clear.
+	bodyClear: ((model: Model) -> boolean)?,
 }
 
 export type Deps = {
@@ -109,11 +114,16 @@ export type Entry = {
 	awake: boolean,
 	held: boolean, -- the cinematic / dev hold: asleep, and the sleep check never wakes it
 	home: Vector3,
+	front: number, -- studs the body reaches ahead of its root (the snout), measured at spawn
+	back: number, -- studs it reaches behind its root
+	rushEndSent: boolean, -- this rush already told the clients it stopped early (D-169)
+	rejoinPending: boolean, -- a stopped rush waits for a clear body to rejoin the enemies group (D-167)
 }
 
 local FORWARD = -Vector3.zAxis
 local FOLDER_NAME = "Enemies"
 local ALIGN_NAME = "SkyspireYaw"
+local CORNER_SIGNS = { -1, 1 }
 
 local INTERRUPTING: { [string]: boolean } = { Stagger = true, Break = true, GuardBroken = true }
 
@@ -341,7 +351,13 @@ local function fireActionStarted(entry: Entry, clipId: string, facing: Vector3)
 	})
 end
 
-local function strike(entry: Entry, attack: Types.EnemyAttackDef, origin: Vector3, facing: Vector3)
+local function strike(
+	entry: Entry,
+	attack: Types.EnemyAttackDef,
+	origin: Vector3,
+	facing: Vector3,
+	options: Types.EnemyStrikeOptions?
+)
 	local d = dependencies()
 	local combat = d.combat
 	if combat == nil or typeof(combat.enemyStrike) ~= "function" then
@@ -351,9 +367,67 @@ local function strike(entry: Entry, attack: Types.EnemyAttackDef, origin: Vector
 		end
 		return
 	end
-	local ok, err = pcall(combat.enemyStrike, entry.id, attack, origin, Brain.horizontal(facing) or FORWARD)
+	local ok, err = pcall(combat.enemyStrike, entry.id, attack, origin, Brain.horizontal(facing) or FORWARD, options)
 	if not ok then
 		warn(("[EnemyService] enemyStrike failed for entity %d (%s): %s"):format(entry.id, entry.defId, tostring(err)))
+	end
+end
+
+-- Puts an enemy's parts in a collision group through the engine (D-167).
+local function setGroup(model: Model, group: string)
+	local setter = dependencies().engine.setCollisionGroup
+	if setter ~= nil then
+		setter(model, group)
+	end
+end
+
+-- A rush launched (D-169): the body passes through players and enemies until it stops (D-167), and
+-- every client hears the line and the clock to draw it on.
+local function rushStarted(entry: Entry, rush: Brain.Rush)
+	local d = dependencies()
+	entry.rushEndSent = false
+	entry.rejoinPending = false
+	setGroup(entry.model, AI.collision.rushing)
+	d.fireAll("RushStarted", {
+		entityId = entry.id,
+		attackId = rush.attackId,
+		serverTime = rush.startedAt,
+		origin = toVec3(rush.origin),
+		direction = unitVec3(rush.direction),
+		speed = rush.speed,
+		duration = rush.duration,
+	})
+end
+
+-- A rush stopped: an early stop is told once ("Jammed" keeps running, so it keeps its group); every
+-- stop but a jam waits to rejoin the enemies group until the body is clear (tickAll).
+local function rushEnded(entry: Entry, rush: Brain.Rush, reason: Brain.RushEnd, distance: number)
+	local d = dependencies()
+	if reason ~= "Done" and not entry.rushEndSent then
+		entry.rushEndSent = true
+		d.fireAll("RushEnded", {
+			entityId = entry.id,
+			launchedAt = rush.startedAt,
+			serverTime = d.serverTime(),
+			distance = math.max(0, distance),
+			reason = reason,
+		})
+	end
+	if reason ~= "Jammed" then
+		entry.rejoinPending = true
+	end
+end
+
+-- A stopped rush's body rejoins the enemies group once it overlaps no player and no enemy, so the
+-- engine never has to push two bodies apart (that push is what lifted one boar onto another).
+local function rejoin(entry: Entry)
+	if not entry.rejoinPending then
+		return
+	end
+	local clear = dependencies().engine.bodyClear
+	if clear == nil or clear(entry.model) then
+		entry.rejoinPending = false
+		setGroup(entry.model, AI.collision.enemies)
 	end
 end
 
@@ -391,8 +465,8 @@ local function makeContext(entry: Entry): Brain.Context
 		telegraph = function(attack, origin, facing, shape)
 			fireTelegraph(entry, attack, origin, facing, shape)
 		end,
-		strike = function(attack, origin, facing)
-			strike(entry, attack, origin, facing)
+		strike = function(attack, origin, facing, options)
+			strike(entry, attack, origin, facing, options)
 		end,
 		setState = function(state, duration)
 			d.entities.setState(id, state, duration)
@@ -407,6 +481,20 @@ local function makeContext(entry: Entry): Brain.Context
 			end
 			for attackerId in d.entities.threatOf(id) do
 				d.entities.clearThreat(id, attackerId)
+			end
+		end,
+		bodyExtents = function()
+			return entry.front, entry.back
+		end,
+		rushStarted = function(rush)
+			rushStarted(entry, rush)
+		end,
+		rushEnded = function(rush, reason, distance)
+			rushEnded(entry, rush, reason, distance)
+		end,
+		extendState = function(seconds)
+			if typeof(d.entities.extendState) == "function" then
+				d.entities.extendState(id, seconds)
 			end
 		end,
 	}
@@ -505,6 +593,9 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 		humanoid.AutoRotate = false -- the brain owns the yaw
 		humanoid.WalkSpeed = def.moveSpeed
 	end
+	-- Measured on the rig as built (every part at its rest pose around the root), before it moves.
+	local front, back = EnemyService.bodyExtents(model)
+	setGroup(model, AI.collision.enemies)
 	-- Parent first: the engine's place() claims server network ownership of the root, which the
 	-- engine refuses for a part that is not under Workspace yet.
 	model.Parent = d.folder
@@ -520,6 +611,10 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 		awake = true,
 		held = false,
 		home = d.engine.position(model),
+		front = front,
+		back = back,
+		rushEndSent = false,
+		rejoinPending = false,
 		brain = nil :: any,
 	}
 	entry.brain = Brain.new(makeContext(entry), archetypeFor(def))
@@ -628,6 +723,20 @@ function EnemyService.holdsNew(): boolean
 	return holdNew
 end
 
+--- Hit-stop on an enemy (D-168): CombatService calls it (setEnemyHitStop) when a player's hit on
+--- the enemy is confirmed, with the seconds every client freezes the enemy's clip for. An unresolved
+--- attack (the wind-up, or the strike before it resolves) pauses with it: Brain.pauseAttack moves
+--- the wind-up's end, the strike beat, the cooldown and the Art state, capped per attack by
+--- ai.hitStop.maxPausePerAttack. Returns the seconds added (0 when capped, or for a rush already
+--- on its way), or nil when the enemy is gone or has no unresolved attack.
+function EnemyService.pauseForHit(id: number, seconds: number): number?
+	local entry = entries[id]
+	if entry == nil then
+		return nil
+	end
+	return entry.brain:pauseAttack(seconds)
+end
+
 --- Every living enemy id, ascending.
 function EnemyService.ids(): { number }
 	local ids = {}
@@ -688,7 +797,11 @@ local function tickAll(step: number)
 		table.insert(snapshot, entry)
 	end
 	for _, entry in snapshot do
-		if entries[entry.id] ~= entry or not entry.awake then
+		if entries[entry.id] ~= entry then
+			continue
+		end
+		rejoin(entry) -- asleep or held too: a stopped rush still waits for a clear body
+		if not entry.awake then
 			continue
 		end
 		local ok, err = pcall(entry.brain.tick, entry.brain, step)
@@ -782,15 +895,88 @@ local function humanoidOf(model: Model): Humanoid?
 	return model:FindFirstChildOfClass("Humanoid")
 end
 
--- The yaw align on an enemy's root (nil once the corpse is gone). Looked up by name rather than cached
--- per model: EntityService destroys corpses, so a cache keyed by Model would leak one entry per kill.
-local function alignOf(model: Model): AlignOrientation?
+--- How far a model's body reaches ahead of (`front`) and behind (`back`) its root along the root's
+--- look, over every corner of every BasePart as the parts stand now (spawn() measures the rig as
+--- built, at its rest pose). A rush strikes where the snout is (D-166). (0, 0) without a root.
+function EnemyService.bodyExtents(model: Model): (number, number)
 	local root = model.PrimaryPart
-	local align = if root ~= nil then root:FindFirstChild(ALIGN_NAME) else nil
-	return if align ~= nil and align:IsA("AlignOrientation") then align else nil
+	if root == nil then
+		return 0, 0
+	end
+	local rootFrame = root.CFrame
+	local front, back = 0, 0
+	for _, part in model:GetDescendants() do
+		if not part:IsA("BasePart") then
+			continue
+		end
+		local half = part.Size / 2
+		local frame = part.CFrame
+		for _, x in CORNER_SIGNS do
+			for _, y in CORNER_SIGNS do
+				for _, z in CORNER_SIGNS do
+					local corner = Vector3.new(half.X * x, half.Y * y, half.Z * z)
+					local along = rootFrame:PointToObjectSpace(frame:PointToWorldSpace(corner)).Z
+					front = math.max(front, -along) -- the root looks down -Z
+					back = math.max(back, along)
+				end
+			end
+		end
+	end
+	return front, back
 end
 
-local function defaultEngine(): Engine
+--- The yaw align on an enemy's root (nil once the corpse is gone). Looked up rather than cached per
+--- model: EntityService destroys corpses, so a cache keyed by Model would leak one entry per kill.
+--- Found by class as well as name: the root also holds the align's Attachment under the same name,
+--- and a lookup by name alone returns whichever came first (the Attachment), so the body never
+--- turned (D-165).
+function EnemyService.alignOf(model: Model): AlignOrientation?
+	local root = model.PrimaryPart
+	if root == nil then
+		return nil
+	end
+	local first = root:FindFirstChildOfClass("AlignOrientation")
+	if first ~= nil and first.Name == ALIGN_NAME then
+		return first
+	end
+	for _, child in root:GetChildren() do
+		if child.Name == ALIGN_NAME and child:IsA("AlignOrientation") then
+			return child
+		end
+	end
+	return nil
+end
+
+--- Gives an enemy's root its yaw align: an Attachment and a rigid one-attachment AlignOrientation,
+--- both named ALIGN_NAME, holding `look` (flattened). place() calls it once per enemy, never the tick.
+function EnemyService.addYawAlign(root: BasePart, look: Vector3): AlignOrientation
+	local attachment = Instance.new("Attachment")
+	attachment.Name = ALIGN_NAME
+	attachment.Parent = root
+	local align = Instance.new("AlignOrientation")
+	align.Name = ALIGN_NAME
+	align.Mode = Enum.OrientationAlignmentMode.OneAttachment
+	align.Attachment0 = attachment
+	align.RigidityEnabled = true
+	align.CFrame = CFrame.lookAt(Vector3.zero, Brain.horizontal(look) or FORWARD)
+	align.Parent = root
+	return align
+end
+
+--- Turns an enemy's body: writes the flat facing into its yaw align. False when the model has no
+--- align or the facing has no horizontal direction.
+function EnemyService.applyFacing(model: Model, facing: Vector3): boolean
+	local align = EnemyService.alignOf(model)
+	local flat = Brain.horizontal(facing)
+	if align == nil or flat == nil then
+		return false
+	end
+	align.CFrame = CFrame.lookAt(Vector3.zero, flat)
+	return true
+end
+
+-- `groups` is world.CollisionGroups (nil while it has not landed: no groups, as before D-167).
+local function defaultEngine(groups: any?): Engine
 	local PathfindingService = game:GetService("PathfindingService")
 	return {
 		place = function(model, cframe)
@@ -805,16 +991,7 @@ local function defaultEngine(): Engine
 				warn(("[EnemyService] %s: SetNetworkOwner failed: %s"):format(model.Name, tostring(err)))
 			end
 			-- One AlignOrientation per enemy (made here, once, never in the tick) carries the yaw.
-			local attachment = Instance.new("Attachment")
-			attachment.Name = ALIGN_NAME
-			attachment.Parent = root
-			local align = Instance.new("AlignOrientation")
-			align.Name = ALIGN_NAME
-			align.Mode = Enum.OrientationAlignmentMode.OneAttachment
-			align.Attachment0 = attachment
-			align.RigidityEnabled = true
-			align.CFrame = CFrame.lookAt(Vector3.zero, Brain.horizontal(cframe.LookVector) or FORWARD)
-			align.Parent = root
+			EnemyService.addYawAlign(root, cframe.LookVector)
 		end,
 		position = function(model)
 			local root = model.PrimaryPart
@@ -825,11 +1002,7 @@ local function defaultEngine(): Engine
 			return if root ~= nil then root.CFrame.LookVector else FORWARD
 		end,
 		setFacing = function(model, facing)
-			local align = alignOf(model)
-			local flat = Brain.horizontal(facing)
-			if align ~= nil and flat ~= nil then
-				align.CFrame = CFrame.lookAt(Vector3.zero, flat)
-			end
+			EnemyService.applyFacing(model, facing)
 		end,
 		moveTo = function(model, position)
 			local humanoid = humanoidOf(model)
@@ -871,6 +1044,16 @@ local function defaultEngine(): Engine
 		destroy = function(model)
 			model:Destroy()
 		end,
+		setCollisionGroup = if groups ~= nil
+			then function(model: Model, group: string)
+				groups.assign(model, group)
+			end
+			else nil,
+		bodyClear = if groups ~= nil
+			then function(model: Model): boolean
+				return groups.clear(model)
+			end
+			else nil,
 	}
 end
 
@@ -903,6 +1086,11 @@ function EnemyService.defaultDeps(overrides: { [string]: any }?): Deps
 	if rigBuilder == nil then
 		error("EnemyService: world.RigBuilder is required")
 	end
+	-- D-167: the fighter collision groups (Main registers them first; registering again is a no-op).
+	local groups = if world ~= nil then sibling(world, "CollisionGroups") else nil
+	if groups ~= nil then
+		groups.register()
+	end
 	local Net = require(Shared.net.Net)
 	local net = Net.server()
 
@@ -918,7 +1106,7 @@ function EnemyService.defaultDeps(overrides: { [string]: any }?): Deps
 		combat = sibling(script.Parent, "CombatService"),
 		rigBuilder = rigBuilder,
 		fireAll = net.fireAll,
-		engine = defaultEngine(),
+		engine = defaultEngine(groups),
 		players = function()
 			local list = {}
 			for _, record in entities.players() do
@@ -956,6 +1144,10 @@ function EnemyService.bind(newDeps: Deps)
 	EnemyService.reset()
 	deps = newDeps
 	connectSignals()
+	local combat = newDeps.combat
+	if combat ~= nil and typeof(combat.setEnemyHitStop) == "function" then
+		combat.setEnemyHitStop(EnemyService.pauseForHit)
+	end
 end
 
 --- Starts the service on the engine: binds the real dependencies (unless bound already) and the
@@ -984,6 +1176,10 @@ function EnemyService.reset()
 		connection:Disconnect()
 	end
 	table.clear(signalConnections)
+	local combat = if deps ~= nil then (deps :: Deps).combat else nil
+	if combat ~= nil and typeof(combat.setEnemyHitStop) == "function" then
+		combat.setEnemyHitStop(nil)
+	end
 	for id in table.clone(entries) do
 		forget(id, "Despawned")
 	end

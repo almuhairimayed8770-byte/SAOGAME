@@ -2118,6 +2118,31 @@ describe("Replication: the local fighter's contact (issue 4)", function()
 		expect(Replication.confirmedAlready(1, 1, nil)).toBe(false)
 	end)
 
+	it("tells a quick second swing's hit from the first's by the swing's number (item 4)", function()
+		local t = setup()
+		Replication.contact(contact({ swing = 1 }))
+		expect(count(t, "impact", "hit")).toBe(1)
+		-- The second swing's hit, confirmed before its blade got there here: the same target, window
+		-- and Art, but not the first swing's contact. It plays whole and waits for its own blade.
+		Replication.dispatch("HitConfirmed", hit({ swing = 2 }))
+		expect(count(t, "impact", "hit")).toBe(2)
+		expect(count(t, "animator:me", "hitStop")).toBe(2)
+		expect(Replication.confirmedAlready(7, 1, ART, 1)).toBe(false)
+		expect(Replication.confirmedAlready(7, 1, ART, 2)).toBe(true)
+		-- The first swing's own confirmation finds its contact: nothing replays.
+		Replication.dispatch("HitConfirmed", hit({ swing = 1 }))
+		expect(count(t, "impact", "hit")).toBe(2)
+		expect(count(t, "animator:me", "hitStop")).toBe(2)
+		expect(#t.find("digits", "show")).toBe(2)
+		-- A side without a number (an enemy's strike, an older message) matches as before.
+		Replication.contact(contact({ swing = 3 }))
+		Replication.dispatch("HitConfirmed", hit())
+		expect(count(t, "impact", "hit")).toBe(3)
+		Replication.contact(contact())
+		Replication.dispatch("HitConfirmed", hit({ swing = 4 }))
+		expect(count(t, "impact", "hit")).toBe(4)
+	end)
+
 	it("plays nothing for a target or a local fighter this client does not track yet", function()
 		local t = setup()
 		expect(Replication.contact(contact({ targetId = 99 }))).toBe(false)

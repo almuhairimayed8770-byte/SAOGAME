@@ -11,10 +11,27 @@
 
 	Strike: the rush. At the end of the wind-up the body runs along the line at `AI.rushSpeed`
 	(at least chargeSpeed, and fast enough to reach the end of the telegraphed line as the hit
-	resolves) for reach + overshoot studs. The strike resolves `attack.strike` seconds in, from the
-	crouch point along the line, so what the telegraph drew is exactly what is hit (HitSweep
-	lineTargets through CombatService.enemyStrike). The overshoot carries it past the target; the
-	recovery is the skid and the slow turn back.
+	resolves) for reach + overshoot studs. The overshoot carries it past the target; the recovery
+	is the skid and the slow turn back.
+
+	The rush hits on contact (D-166): the line is the one the telegraph drew (from the crouch point,
+	its reach and width), and it resolves in stretches on the server's clock, not the body's. At the
+	launch the body's own length resolves (from its back to its snout, bodyExtents); every tick
+	after it resolves the stretch the body swept since the last one, from where its back was to where
+	its snout is now (speed * elapsed + front), so each target is hit the tick the snout reaches it,
+	once, and the whole line has been swept by `attack.strike`, never later. That clock starts on the
+	launch beat (the wind-up's own end, which the clients predict from the telegraph), not on the AI
+	tick up to a tick later that starts the body (D-182); the body's run, its jam check and its end,
+	counts from that tick (Rush.bodyStartedAt). A target the line never reaches (beyond its end,
+	beside it, or stepping in behind the body that already passed) is never hit, and a body jammed
+	against something still hits on the clock. Dodge, guard and parry are
+	judged per target at its own contact (CombatService.enemyStrike's options).
+
+	The launch and an early stop go to EnemyService (rushStarted / rushEnded, D-169): it switches the
+	body's collision group so the rush passes through players and other enemies (D-167), and tells
+	the clients so they draw the rush on the server's timeline. A body that falls more than
+	jamLagStuds behind that timeline reports "Jammed" (the clients stop drawing it ahead of the
+	body); an interrupt, a death or a sleep reports why it stopped.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -39,6 +56,53 @@ end
 function Charger.onChaseStart(brain: Brain.Brain)
 	brain.memory.tooClose = false
 	brain.memory.rushing = false
+	brain.memory.rush = nil
+end
+
+-- How far down the line the body stands now, clamped to the run.
+local function progressOf(brain: Brain.Brain, rush: Brain.Rush): number
+	return math.clamp((brain:position() - rush.origin):Dot(rush.direction), 0, rush.length)
+end
+
+-- Resolves the stretch of the line the body swept since the last sweep, up to `elapsed` seconds
+-- into the rush (never past the attack's strike beat): from where its back was then to where its
+-- snout is now, on the rush's clock.
+local function sweep(brain: Brain.Brain, rush: Brain.Rush, elapsed: number)
+	local attack = brain:currentAttack()
+	if attack == nil then
+		return
+	end
+	local memory = brain.memory
+	local upTo = math.clamp(elapsed, 0, attack.strike)
+	local last: number? = memory.rushSwept
+	if last ~= nil and upTo <= last then
+		return
+	end
+	local front, back = brain:bodyExtents()
+	memory.rushSwept = upTo
+	brain:strikeStretch(
+		rush.origin,
+		rush.direction,
+		rush.speed * (last or 0) - back,
+		rush.speed * upTo + front,
+		memory.rushHit
+	)
+end
+
+--- True while the strike in progress is a rush: it resolves by contact (D-166).
+function Charger.contactStrike(brain: Brain.Brain): boolean
+	return brain.memory.rush ~= nil
+end
+
+--- The rush stopped early: an interrupt, a death or a sleep.
+function Charger.onCancel(brain: Brain.Brain, reason: Types.RushEndReason)
+	local memory = brain.memory
+	local rush: Brain.Rush? = memory.rush
+	memory.rush = nil
+	if memory.rushing == true and rush ~= nil then
+		memory.rushing = false
+		brain:rushEnded(rush, reason, progressOf(brain, rush))
+	end
 end
 
 --- Runs forward along the facing while turning toward the target (the wide arc); bends outward
@@ -97,51 +161,84 @@ function Charger.onWindUp(brain: Brain.Brain, dt: number, target: Brain.Target?)
 	end
 end
 
---- The launch: fixes the line from the crouch point along the facing and starts the rush.
+--- The launch: fixes the line from the crouch point along the facing, starts the rush and resolves
+--- the body where it crouched (the launch's own stretch, D-166).
 function Charger.onStrikeStart(brain: Brain.Brain, _target: Brain.Target?)
 	local attack = brain:currentAttack()
 	local memory = brain.memory
+	memory.rush = nil
+	memory.rushing = false
 	if attack == nil or not isRush(attack) then
-		memory.rushing = false
 		return
 	end
-	local start = brain:position()
-	local direction = brain:getFacing()
 	local length = attack.reach + tuning.overshoot
 	local speed = AI.rushSpeed(attack)
+	local rush: Brain.Rush = {
+		attackId = attack.id,
+		startedAt = brain.phaseStart,
+		bodyStartedAt = brain:now(),
+		origin = brain:position(),
+		direction = brain:getFacing(),
+		speed = speed,
+		length = length,
+		duration = length / speed,
+	}
+	memory.rush = rush
 	memory.rushing = true
-	memory.rushStart = start
-	memory.rushDir = direction
-	memory.rushEnd = start + direction * length
-	memory.rushSpeed = speed
-	memory.rushDuration = length / speed
-	brain:moveToward(memory.rushEnd, speed)
+	memory.rushJammed = false
+	memory.rushSwept = nil
+	memory.rushHit = {}
+	brain:moveToward(rush.origin + rush.direction * length, speed)
+	brain:rushStarted(rush)
+	sweep(brain, rush, rush.bodyStartedAt - rush.startedAt)
 end
 
 --- A rush resolves from the crouch point along the line (what the telegraph drew); anything else
 --- from the body as it stands.
 function Charger.strikeFrame(brain: Brain.Brain): (Vector3, Vector3)
-	local memory = brain.memory
-	if memory.rushing == true then
-		return memory.rushStart, memory.rushDir
+	local rush: Brain.Rush? = brain.memory.rush
+	if rush ~= nil then
+		return rush.origin, rush.direction
 	end
 	return brain:position(), brain:getFacing()
 end
 
---- Keeps the rush going; it is over when its time has run (a body blocked by a wall simply pushes
---- until then, so the overshoot never ends early and the skid starts on the clip's beat).
-function Charger.onStrike(brain: Brain.Brain, _dt: number, elapsed: number): boolean
+--- Keeps the rush going and resolves what the body swept this tick; it is over when its time has
+--- run (a body blocked by a wall simply pushes until then, so the overshoot never ends early and
+--- the skid starts on the clip's beat). The line resolves on the launch beat's clock (startedAt,
+--- what the clients draw); the body's own run (its jam check and its end) on the tick it started
+--- (bodyStartedAt), so a launch noticed up to a tick late neither cuts the run short nor reads as
+--- a jam.
+function Charger.onStrike(brain: Brain.Brain, _dt: number, _phaseElapsed: number): boolean
 	local memory = brain.memory
-	if memory.rushing ~= true then
+	local rush: Brain.Rush? = memory.rush
+	if rush == nil then
 		return true
 	end
-	brain:moveToward(memory.rushEnd, memory.rushSpeed)
-	return elapsed >= memory.rushDuration
+	local now = brain:now()
+	sweep(brain, rush, now - rush.startedAt)
+	if brain:getPhase() ~= "Strike" or memory.rushing ~= true then
+		return true -- a parry on contact interrupted it (onCancel stopped the run)
+	end
+	local progress = progressOf(brain, rush)
+	local ran = now - rush.bodyStartedAt
+	if ran >= rush.duration then
+		memory.rushing = false
+		brain:rushEnded(rush, "Done", progress)
+		return true
+	end
+	if memory.rushJammed ~= true and rush.speed * ran - progress > tuning.jamLagStuds then
+		memory.rushJammed = true -- the hits stay on the clock; the clients stop drawing it ahead
+		brain:rushEnded(rush, "Jammed", progress)
+	end
+	brain:moveToward(rush.origin + rush.direction * rush.length, rush.speed)
+	return false
 end
 
 --- The skid and the slow turn back toward the target.
 function Charger.onRecover(brain: Brain.Brain, dt: number, target: Brain.Target?)
 	brain.memory.rushing = false
+	brain.memory.rush = nil
 	if target ~= nil then
 		brain:turnToward(target.direction, tuning.recoverTurnRate, dt)
 	end

@@ -284,6 +284,48 @@ local Choreo = {
 		-- stopped over the shoulder.
 		sheatheTipSpeed = 120,
 	},
+
+	-- Enemy attacks on the server's beat. The server pauses an enemy's unresolved attack for the
+	-- hit-stop a player's hit gives it (HitConfirmed attackPause: at most ai.luau
+	-- hitStop.maxPausePerAttack an attack, nothing once a rush has launched).
+	enemy = {
+		-- The attack clip ActionStarted plays keeps that beat up to its first HitWindowOpen (D-172):
+		-- the rig's hit-stop is the only freeze, and what it held beyond the server's pause (or
+		-- short of it) the clip evens by running at most maxRate (at least minRate) of its speed,
+		-- at the one rate that evens it by the mark.
+		beat = {
+			maxRate = 2,
+			minRate = 0.5,
+		},
+		-- A rush drawn on the server's timeline (D-171, RushDraw): the body is drawn where the
+		-- launch, the speed and the line say it is while the replicated root catches up behind it.
+		rush = {
+			-- Each frame the drawn body moves the timeline's own travel give or take this fraction of
+			-- a frame's travel at the rush speed while it closes on the timeline (no jump), and an
+			-- offset off the line closes at the same pace.
+			catchUpFraction = 0.5,
+			turnRate = 720, -- degrees a second the drawn body turns onto the line
+			-- The hand-back: once the run is over the body waits until the replicated root is this
+			-- close to where the server's body stopped (or this long), then slides onto the root over
+			-- at least handBackSeconds (more for a longer way, at the catch-up pace) on handBackEasing.
+			settleStuds = 0.5,
+			settleSeconds = 0.6,
+			handBackSeconds = 0.2,
+			handBackEasing = "QuadOut",
+			-- The root part the body is drawn away from hides meanwhile (LocalTransparencyModifier).
+			hiddenRootTransparency = 1,
+		},
+	},
+
+	-- Reactions. A directional flinch on an enemy whose attack clip is still before its
+	-- PostMotionStart (the wind-up and the strike) plays with these per-joint weights (D-173): the
+	-- weapon arm stays on the attack, so the flinch never dips the weapon into a false strike.
+	-- A joint not listed, a rig not listed and every flinch outside an attack keep full weight.
+	reaction = {
+		attackFlinch = {
+			Kobold = { RightShoulder = 0, Weapon = 0, Root = 0.35 },
+		} :: { [string]: { [string]: number } },
+	},
 }
 
 return Choreo

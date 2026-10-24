@@ -72,6 +72,27 @@
 	Nothing here decides damage; a rejected hit is simply a `rejected` Signal that the character
 	controller turns into a cancelled prediction (section 17).
 
+	An enemy's attack keeps the server's beat (D-172). The server pauses an unresolved attack for a
+	player's hit by HitConfirmed attackPause (capped per attack, nothing for a launched rush), and
+	that is all the attack clip and its telegraph move: the telegraph starts where the server's
+	wind-up began (serverNow - serverTime ago) and its end moves by each pause; the clip
+	ActionStarted played keeps its beat (Choreo keepBeat) and every pause shifts it (shiftBeat).
+	The rig's hit-stop stays the only freeze, on contact as before, and the clip evens whatever it
+	held beyond the server's pause. Until the server's word comes, a contact's hold counts as the
+	pause the server will give it (what it added to the rig's hold, inside the attack's cap); the
+	HitConfirmed swaps in the server's own, and a contact not confirmed within combat.luau
+	contact.allowanceSeconds takes it back (a confirmation after that still corrects it).
+
+	A Charger's rush is drawn on the server's timeline (D-171, choreo/RushDraw): its telegraph arms
+	the launch it predicts (wind-up start + windUp + the pauses), RushStarted replaces the line and
+	the clock with the server's, RushEnded caps it (a jam) or stops it, a Stagger or a Break stops
+	it where it is drawn, and a death leaves the body where it was drawn. While the body is drawn
+	away from its root the root part is hidden, and a launched rush is not held by a hit on it (the
+	server holds nothing of it either). An enemy's flinch during its attack plays with the rig's
+	attackFlinch weights (D-173): the weapon arm stays on the attack. An enemy's own strike holds
+	its rig only for what the hit-stop has beyond the hold after the snap its clip already showed
+	on the server's beat, a launched rush's not at all (D-176).
+
 	Dependencies come in through `Replication.bind(deps)` so Lune tests dispatch payloads at fake
 	modules; `Replication.start()` binds the real ones.
 ]]
@@ -86,11 +107,14 @@ local UI = require(Shared.data.ui)
 local Moments = require(Shared.data.moments)
 local Sfx = require(Shared.data.sfx)
 local Enemies = require(Shared.data.enemies)
+local AI = require(Shared.data.ai)
 local Signal = require(Shared.util.Signal)
+local ClipSampler = require(Shared.choreo.ClipSampler)
 local ActionLogic = require(script.Parent.ActionLogic)
 local Siblings = require(script.Parent.Siblings)
 
 local SheathState, hasSheathState = Siblings.load(script.Parent.Parent, "choreo.SheathState")
+local RushDraw, hasRushDraw = Siblings.load(script.Parent.Parent, "choreo.RushDraw")
 
 export type Deps = {
 	net: { on: (name: string, handler: (payload: any) -> ()) -> () },
@@ -127,6 +151,10 @@ export type Deps = {
 	-- Calls `fn` every Heartbeat (the clock the local predictions age on: a stall counts as at most
 	-- a jump); without it they age on `now` alone.
 	onHeartbeat: ((fn: (dt: number) -> ()) -> ())?,
+	-- The server's clock (workspace:GetServerTimeNow), the one remotes stamp serverTime on: enemy
+	-- telegraphs start on it and rushes are drawn on it. Without it a telegraph starts on receipt
+	-- and no rush is drawn.
+	serverNow: (() -> number)?,
 }
 
 -- Sound names (family.Name in sfx.luau) the reactions play; Replication.spec checks each resolves.
@@ -188,16 +216,32 @@ type Prediction = {
 	targetId: number,
 	windowIndex: number,
 	artId: string?,
+	swing: number?, -- the swing's sequence number (HitConfirmed echoes it)
 	at: number,
 	seen: number,
 	run: number,
 	tier: string,
 	moment: string?,
+	-- The pause its hold stood for on the target's attack (D-172) until the server's word, and that
+	-- attack (nil when it paused none).
+	allowance: number,
+	attack: Attack?,
+}
+-- An enemy's attack this client knows of (D-172): when its wind-up began on the server's clock,
+-- its beats, the pause the server gave it so far (or a contact's provisional share), the attack
+-- clip ActionStarted played (its handle keeps the beat) and whether it is a rush.
+type Attack = {
+	since: number,
+	windUp: number,
+	strike: number,
+	rush: boolean,
+	paused: number,
+	handle: any?,
 }
 local predictions: { Prediction } = {}
 -- The local fighter's hits the server confirmed before this client's blade got there (the
 -- client's clip runs behind the server's by the hit-stops it held): the predictor skips them.
-type EarlyConfirm = { targetId: number, windowIndex: number, artId: string?, seen: number }
+type EarlyConfirm = { targetId: number, windowIndex: number, artId: string?, swing: number?, seen: number }
 local earlyConfirms: { EarlyConfirm } = {}
 -- The runs of holds on the local fighter's rig: a hold put on while none runs starts a new run,
 -- one put on while one runs joins it (the same cut's other targets, a blow taken inside the
@@ -216,6 +260,21 @@ local playTicking = false
 -- started ends (nil while none holds).
 local deathCount = 0
 local silenceEnd: number? = nil
+-- enemy id -> its attack in progress (D-172).
+local attacks: { [number]: Attack } = {}
+-- enemy id -> its rush being drawn (D-171): the drawing state, the animator and root it draws on,
+-- the step hook, whether RushStarted came (`launched`), the server time from which a RushEnded is
+-- this rush's (`since`) and the root's transparency modifier before it was hidden.
+type Rush = {
+	state: any,
+	animator: any,
+	root: BasePart?,
+	unhook: (() -> ())?,
+	launched: boolean,
+	since: number,
+	shownAs: number?,
+}
+local rushes: { [number]: Rush } = {}
 
 local function dependencies(): Deps
 	if deps == nil then
@@ -343,10 +402,7 @@ local function playClock(): number
 	return playSeconds + math.min(math.max(0, wall - last), ChoreoData.stall.jumpSeconds)
 end
 
-local function tickPlay()
-	playSeconds = playClock()
-	playWall = clock()
-end
+local tickPlay: () -> ()
 
 -- Drops the entries of a prediction list older than contact.confirmSeconds of play.
 local function dropStale(list: { any }, seen: number)
@@ -357,10 +413,17 @@ local function dropStale(list: { any }, seen: number)
 	end
 end
 
--- Takes the oldest entry of `list` for this hit (target, window, Art), or nil.
-local function takeMatch(list: { any }, targetId: number, windowIndex: number, artId: string?): any
+-- Takes the oldest entry of `list` for this hit (target, window, Art, and the swing's sequence
+-- number when both sides carry one), or nil. The swing number keeps a quick second swing's hit
+-- from taking the first swing's word (item 4): the same target, window and Art twice in a row.
+local function takeMatch(list: { any }, targetId: number, windowIndex: number, artId: string?, swing: number?): any
 	for index, entry in list do
-		if entry.targetId == targetId and entry.windowIndex == windowIndex and entry.artId == artId then
+		if
+			entry.targetId == targetId
+			and entry.windowIndex == windowIndex
+			and entry.artId == artId
+			and (swing == nil or entry.swing == nil or entry.swing == swing)
+		then
 			table.remove(list, index)
 			return entry
 		end
@@ -370,6 +433,337 @@ end
 
 local function tierRank(tier: string): number
 	return (Combat.hitStopFrames :: { [string]: number })[tier] or 0
+end
+
+-- The server's clock (deps.serverNow), or nil when this client has none.
+local function serverClock(): number?
+	local fn = dependencies().serverNow
+	return if fn ~= nil then fn() else nil
+end
+
+-- A method of a dependency that may not have it (a fake animator, an older telegraph package).
+local function method(object: any, name: string): any
+	if typeof(object) ~= "table" then
+		return nil
+	end
+	local found = object[name]
+	return if typeof(found) == "function" then found else nil
+end
+
+-- An enemy's def and the attack named by id or played as clip `clipId`, or nil.
+local function attackDefOf(record: any, attackId: string?, clipId: string?): (any, any)
+	if record == nil or record.kind ~= "Enemy" then
+		return nil, nil
+	end
+	local def = Enemies.byId(record.defId or "")
+	if def == nil then
+		return nil, nil
+	end
+	for _, attack in def.attacks do
+		if attackId ~= nil and attack.id == attackId then
+			return def, attack
+		end
+		if clipId ~= nil and ActionLogic.clipId("Enemy", def.skin, "", attack.clip) == clipId then
+			return def, attack
+		end
+	end
+	return def, nil
+end
+
+-- The attack an enemy began at server time `since` (its Telegraph and its ActionStarted carry the
+-- same tick's time): the one already known, or a new one replacing the last.
+local function attackAt(record: any, def: any, attack: any, since: number): Attack
+	local known = attacks[record.id]
+	if known ~= nil and math.abs(known.since - since) <= 0.5 * AI.tickSeconds() then
+		return known
+	end
+	local entry: Attack = {
+		since = since,
+		windUp = attack.windUp,
+		strike = attack.strike,
+		rush = hasRushDraw and RushDraw.isRush(def.archetype, attack),
+		paused = 0,
+		handle = nil,
+	}
+	attacks[record.id] = entry
+	return entry
+end
+
+-- True while the server may still pause this attack (Brain.pauseAttack): through the wind-up and
+-- the strike before it resolves, a rush only until its launch.
+local function attackOpen(attack: Attack): boolean
+	local now = serverClock()
+	if now == nil then
+		return attack.handle ~= nil
+	end
+	local resolves = attack.since + attack.windUp + attack.paused + (if attack.rush then 0 else attack.strike)
+	return now < resolves
+end
+
+-- The rush drawn for an enemy while the server's clock still moves its body (RushDraw.running).
+local function rushRunning(id: number): boolean
+	local rush = rushes[id]
+	return rush ~= nil and hasRushDraw and RushDraw.running(rush.state)
+end
+
+-- Moves everything on an enemy's attack beat by `seconds` of server pause (negative takes one
+-- back): the clip's beat, the telegraph's end and a predicted launch (D-171, D-172).
+local function shiftAttack(record: any, attack: Attack, seconds: number)
+	if seconds == 0 or attacks[record.id] ~= attack then
+		return
+	end
+	attack.paused += seconds
+	local handle = attack.handle
+	if handle ~= nil then
+		local animator = animatorOf(record)
+		local shift = method(animator, "shiftBeat")
+		if shift ~= nil then
+			shift(animator, handle, seconds)
+		end
+	end
+	local telegraphs = dependencies().telegraphs
+	local delay = method(telegraphs, "delay")
+	if delay ~= nil then
+		delay(record.model, seconds)
+	end
+	local rush = rushes[record.id]
+	if rush ~= nil and not rush.launched and hasRushDraw then
+		RushDraw.delay(rush.state, seconds)
+	end
+end
+
+-- The pause a hold of `added` seconds on an enemy's rig stands for until the server's word: what
+-- its open attack's cap still allows (Brain.pauseAttack), applied at once. Returns it and the attack.
+local function allowPause(record: any, added: number): (number, Attack?)
+	local attack = attacks[record.id]
+	if attack == nil or added <= 0 or not attackOpen(attack) then
+		return 0, nil
+	end
+	local allowed = math.min(added, math.max(0, AI.hitStop.maxPausePerAttack - attack.paused))
+	if allowed <= 0 then
+		return 0, attack
+	end
+	shiftAttack(record, attack, allowed)
+	return allowed, attack
+end
+
+-- Seconds of hit-stop an animator holds now, or nil when it cannot say.
+local function pauseOf(animator: any): number?
+	local read = method(animator, "pauseRemaining")
+	if read == nil then
+		return nil
+	end
+	local left = read(animator)
+	return if typeof(left) == "number" then left else nil
+end
+
+-- Holds an enemy target's rig `frames` frames for a hit (never a launched rush's: the server holds
+-- nothing of it) and returns what the hold added, in seconds.
+local function holdTarget(record: any, frames: number): number
+	if rushRunning(record.id) then
+		return 0
+	end
+	local animator = animatorOf(record)
+	local before = pauseOf(animator)
+	animator:hitStop(frames)
+	local after = pauseOf(animator)
+	if before == nil or after == nil then
+		return math.max(0, frames) * ChoreoData.frameSeconds
+	end
+	return math.max(0, after - before)
+end
+
+-- Real seconds of the authored hold after its latest strike snap (D-154's hold) an enemy's attack
+-- clip has already shown: from the snap's landing up to where the clip is now, or the whole hold
+-- once the clip is past it. 0 for a clip not yet landed, one without such a hold, or no clip.
+local function strikeHoldShown(handle: any): number
+	if typeof(handle) ~= "table" or handle.done == true or typeof(handle.time) ~= "number" then
+		return 0
+	end
+	local clip = handle.clip
+	if typeof(clip) ~= "table" or typeof(clip.keys) ~= "table" then
+		return 0
+	end
+	local keys = clip.keys
+	local time: number = handle.time
+	for index = #keys, 3, -1 do -- index: a hold key, after its snap key and the key before that
+		if ClipSampler.isStrikeSnap(clip, index - 1) and keys[index - 2].time <= time then
+			local landed = keys[index - 1].time
+			if keys[index].easing ~= "Hold" or time <= landed then
+				return 0
+			end
+			local speed = if typeof(handle.speed) == "number" and handle.speed > 0 then handle.speed else 1
+			return (math.min(time, keys[index].time) - landed) / speed
+		end
+	end
+	return 0
+end
+
+-- Holds an enemy's rig for its own strike's hit (D-176). Its attack clip keeps the server's beat
+-- (D-172), so the clip's hold after the snap already showed the impact where the server resolved
+-- the strike, a latency before this HitConfirmed came: the rig holds only what the hit-stop has
+-- beyond the part of that hold already shown (D-154: the longer of the two, never their sum). A
+-- launched rush's rig is not held at all: its body never stops (the server holds nothing of it).
+local function holdStriker(record: any, frames: number)
+	if rushRunning(record.id) then
+		return
+	end
+	local attack = attacks[record.id]
+	local shown = if attack ~= nil then strikeHoldShown(attack.handle) else 0
+	local left = frames - shown / ChoreoData.frameSeconds
+	if left > 1e-6 then
+		animatorOf(record):hitStop(left)
+	end
+end
+
+-- Gives back the pause a prediction stood for when the server never confirmed it (D-172).
+local function giveBack(prediction: Prediction)
+	local attack = prediction.attack
+	if attack == nil or prediction.allowance == 0 then
+		return
+	end
+	local record = dependencies().entities.get(prediction.targetId)
+	if record ~= nil then
+		shiftAttack(record, attack, -prediction.allowance)
+	end
+	prediction.allowance = 0
+end
+
+-- Drops the predictions older than contact.confirmSeconds of play; one not confirmed within
+-- contact.allowanceSeconds gives back the pause it stood for (D-172).
+local function expirePredictions(seen: number)
+	for index = #predictions, 1, -1 do
+		local prediction = predictions[index]
+		local age = seen - prediction.seen
+		if age > Combat.contact.confirmSeconds then
+			table.remove(predictions, index)
+			giveBack(prediction)
+		elseif age > Combat.contact.allowanceSeconds and prediction.allowance ~= 0 then
+			giveBack(prediction)
+		end
+	end
+end
+
+function tickPlay()
+	playSeconds = playClock()
+	playWall = clock()
+	-- A contact the server has not confirmed in time gives back the pause it stood for (D-172).
+	if #predictions > 0 then
+		expirePredictions(playSeconds)
+	end
+end
+
+-- The root part's transparency modifier while a rush draws the body away from it.
+local function hideRoot(rush: Rush, hidden: boolean)
+	local root = rush.root
+	if root == nil then
+		return
+	end
+	local value = ChoreoData.enemy.rush.hiddenRootTransparency
+	if hidden then
+		if rush.shownAs == nil then
+			rush.shownAs = root.LocalTransparencyModifier
+			root.LocalTransparencyModifier = value
+		end
+	elseif rush.shownAs ~= nil then
+		if root.LocalTransparencyModifier == value then
+			root.LocalTransparencyModifier = rush.shownAs :: number
+		end
+		rush.shownAs = nil
+	end
+end
+
+-- Stops drawing an enemy's rush: the body goes back on its root (a frozen death's stays hidden).
+local function endRush(id: number)
+	local rush = rushes[id]
+	if rush == nil then
+		return
+	end
+	rushes[id] = nil
+	local unhook = rush.unhook
+	rush.unhook = nil
+	if unhook ~= nil then
+		unhook()
+	end
+	if hasRushDraw and rush.state.phase == "Frozen" then
+		return
+	end
+	local set = method(rush.animator, "setBodyOffset")
+	if set ~= nil then
+		set(rush.animator, nil)
+	end
+	hideRoot(rush, false)
+end
+
+-- One frame of a rush's drawing, from the animator's step (before it poses the rig).
+local function stepRush(id: number, rush: Rush, dt: number)
+	if rushes[id] ~= rush then
+		return
+	end
+	local now = serverClock()
+	local root = rush.root
+	if now == nil or root == nil or root.Parent == nil then
+		endRush(id)
+		return
+	end
+	local rootFrame = root.CFrame
+	local drawn = RushDraw.step(rush.state, now, dt, rootFrame)
+	if drawn ~= nil then
+		rush.animator:setBodyOffset(rootFrame:Inverse() * drawn)
+		hideRoot(rush, true)
+	elseif rush.state.phase == "Done" then
+		endRush(id)
+	end
+end
+
+-- Starts drawing an enemy's rush on `line` (the telegraph's prediction, or RushStarted's own).
+local function armRush(record: any, line: any, since: number, launched: boolean)
+	endRush(record.id)
+	if not hasRushDraw or serverClock() == nil then
+		return
+	end
+	local animator = animatorOf(record)
+	if method(animator, "setBodyOffset") == nil or method(animator, "onStep") == nil then
+		return
+	end
+	local model = record.model
+	local rush: Rush = {
+		state = RushDraw.new(line),
+		animator = animator,
+		root = if model ~= nil then (model :: Model).PrimaryPart else nil,
+		unhook = nil,
+		launched = launched,
+		since = since,
+		shownAs = nil,
+	}
+	rushes[record.id] = rush
+	rush.unhook = animator:onStep(function(dt: number)
+		stepRush(record.id, rush, dt)
+	end)
+end
+
+-- The flinch weights an enemy plays with while its attack clip is before its PostMotionStart
+-- (choreo.luau reaction.attackFlinch, D-173), or nil outside an attack.
+local function attackFlinchMask(record: any): { [string]: number }?
+	local mask = (ChoreoData.reaction.attackFlinch :: { [string]: { [string]: number } })[record.rig or ""]
+	local attack = attacks[record.id]
+	if mask == nil or attack == nil then
+		return nil
+	end
+	local handle = attack.handle
+	if typeof(handle) ~= "table" or handle.stopping == true or handle.done == true then
+		return nil
+	end
+	local clip = handle.clip
+	if typeof(clip) ~= "table" or typeof(clip.events) ~= "table" or typeof(handle.time) ~= "number" then
+		return nil
+	end
+	for _, event in clip.events do
+		if event.kind == "PostMotionStart" then
+			return if handle.time < event.time then mask else nil
+		end
+	end
+	return nil
 end
 
 -- An Art's ActivationHold a late start jumped over while its first damage frame is still ahead:
@@ -515,9 +909,23 @@ function handlers.ActionStarted(payload: any)
 	if record == nil then
 		return
 	end
-	local handle = animatorOf(record):play(payload.clipId, { serverTime = payload.serverTime, speed = payload.speed })
+	local animator = animatorOf(record)
+	local handle = animator:play(payload.clipId, { serverTime = payload.serverTime, speed = payload.speed })
 	clipSpeeds[record.id] = { clipId = payload.clipId, speed = payload.speed }
 	replaySkipped(record, handle, payload.clipId)
+	local def, attackDef = attackDefOf(record, nil, payload.clipId)
+	if attackDef ~= nil and typeof(handle) == "table" then
+		-- An enemy's attack clip keeps the server's beat (D-172), shifted by any pause already given.
+		local attack = attackAt(record, def, attackDef, payload.serverTime)
+		attack.handle = handle
+		local keep = method(animator, "keepBeat")
+		if keep ~= nil then
+			keep(animator, handle, payload.serverTime)
+			if attack.paused ~= 0 then
+				animator:shiftBeat(handle, attack.paused)
+			end
+		end
+	end
 	if string.find(payload.clipId, "/Dodge", 1, true) then
 		-- A remote dodge: its whoosh in range (the local dodge is the character controller's). A
 		-- dodge the catch-up started late runs its cue that much late too, so the landing keeps the
@@ -532,14 +940,66 @@ function handlers.Telegraph(payload: any)
 	if record == nil then
 		return
 	end
-	d.telegraphs.show(
-		record.model,
-		payload.kind,
-		payload.windUp,
-		toVector(payload.origin),
-		toVector(payload.facing),
-		payload.shape
-	)
+	-- On the server's beat: the wind-up began serverTime, this long ago (D-172).
+	local now = serverClock()
+	local lateBy = if now ~= nil then math.max(0, now - payload.serverTime) else nil
+	local origin, facing = toVector(payload.origin), toVector(payload.facing)
+	d.telegraphs.show(record.model, payload.kind, payload.windUp, origin, facing, payload.shape, lateBy)
+	local def, attackDef = attackDefOf(record, payload.attackId, nil)
+	if attackDef == nil then
+		return
+	end
+	local attack = attackAt(record, def, attackDef, payload.serverTime)
+	if attack.paused ~= 0 then
+		local delay = method(d.telegraphs, "delay")
+		if delay ~= nil then
+			delay(record.model, attack.paused)
+		end
+	end
+	if attack.rush then
+		-- The launch it predicts, until RushStarted brings the server's own (D-171).
+		local line = RushDraw.predict(attackDef, payload.serverTime + attack.paused, origin, facing)
+		armRush(record, line, payload.serverTime, false)
+	end
+end
+
+function handlers.RushStarted(payload: any)
+	local d = dependencies()
+	if payload.entityId == d.localId() then
+		return
+	end
+	local record = d.entities.get(payload.entityId)
+	if record == nil or not hasRushDraw then
+		return
+	end
+	local _, attackDef = attackDefOf(record, payload.attackId, nil)
+	local line = {
+		origin = toVector(payload.origin),
+		direction = toVector(payload.direction),
+		speed = payload.speed,
+		length = payload.speed * payload.duration,
+		strike = if attackDef ~= nil then attackDef.strike else payload.duration,
+		startedAt = payload.serverTime,
+	}
+	local rush = rushes[record.id]
+	if rush ~= nil and not rush.launched and rush.state.phase ~= "Done" then
+		RushDraw.retime(rush.state, line)
+		rush.launched = true
+	else
+		armRush(record, line, payload.serverTime, true)
+	end
+end
+
+function handlers.RushEnded(payload: any)
+	local rush = rushes[payload.entityId]
+	if rush == nil or payload.launchedAt < rush.since - 0.5 * AI.tickSeconds() then
+		return -- nothing drawn, or an earlier rush's end
+	end
+	if payload.reason == "Jammed" then
+		RushDraw.jam(rush.state, payload.distance)
+	else
+		RushDraw.stop(rush.state, payload.distance, payload.serverTime)
+	end
 end
 
 function handlers.HitConfirmed(payload: any)
@@ -558,18 +1018,22 @@ function handlers.HitConfirmed(payload: any)
 	local predicted: Prediction? = nil
 	if localId ~= nil and payload.attackerId == localId and payload.parried ~= true then
 		local seen = playClock()
-		dropStale(predictions, seen)
+		expirePredictions(seen)
 		dropStale(earlyConfirms, seen)
-		predicted = takeMatch(predictions, payload.targetId, payload.hitIndex, payload.artId)
+		predicted = takeMatch(predictions, payload.targetId, payload.hitIndex, payload.artId, payload.swing)
 		if predicted == nil then
 			table.insert(earlyConfirms, {
 				targetId = payload.targetId,
 				windowIndex = payload.hitIndex,
 				artId = payload.artId,
+				swing = payload.swing,
 				seen = seen,
 			})
 		end
 	end
+	-- The pause the server gave the target's attack (D-172): a contact's provisional share gives way
+	-- to it; a hit nobody predicted brings it whole. Absent: none (no open attack, or a kill).
+	local serverPause = if typeof(payload.attackPause) == "number" then payload.attackPause else 0
 	-- How much more the server's tier holds than the contact did (0: nothing to add).
 	local upgrade = if predicted ~= nil
 		then (if Combat.hitStopFrames[tier] ~= nil then tierRank(tier) - tierRank(predicted.tier) else 0)
@@ -590,16 +1054,27 @@ function handlers.HitConfirmed(payload: any)
 				if left > 0 then
 					animator:hitStop(left)
 					holdEnds = math.max(holdEnds, clock() + left * ChoreoData.frameSeconds)
-					if target ~= nil and target ~= attacker then
+					if target ~= nil and target ~= attacker and not rushRunning(target.id) then
 						animatorOf(target):hitStop(left)
 					end
 				end
 			end
 		end
+		-- A contact before this client knew of the attack (its telegraph still on the way) stood
+		-- for no pause: the server's comes whole, to the attack known now.
+		local attack = predicted.attack
+		if attack == nil and target ~= nil and serverPause > 0 then
+			attack = attacks[target.id]
+		end
+		if target ~= nil and attack ~= nil then
+			shiftAttack(target, attack, serverPause - predicted.allowance)
+		end
 	else
 		if attacker ~= nil then
 			if payload.attackerId == localId then
 				holdLocal(animatorOf(attacker), frames)
+			elseif attacker.kind == "Enemy" then
+				holdStriker(attacker, frames)
 			else
 				animatorOf(attacker):hitStop(frames)
 			end
@@ -607,6 +1082,12 @@ function handlers.HitConfirmed(payload: any)
 		if target ~= nil and target ~= attacker then
 			if payload.targetId == localId then
 				holdLocal(animatorOf(target), frames)
+			elseif target.kind == "Enemy" then
+				holdTarget(target, frames)
+				local attack = attacks[target.id]
+				if attack ~= nil and serverPause > 0 then
+					shiftAttack(target, attack, serverPause)
+				end
 			else
 				animatorOf(target):hitStop(frames)
 			end
@@ -688,7 +1169,13 @@ function handlers.HitConfirmed(payload: any)
 			-- an attack or a Break kneel without replacing the reaction clip.
 			local flinch = reactionClip(target, "Flinch" .. direction)
 			if flinch ~= nil then
-				animatorOf(target):play(flinch)
+				-- During its attack the weapon arm stays on the attack (D-173).
+				local mask = attackFlinchMask(target)
+				if mask ~= nil then
+					animatorOf(target):play(flinch, { mask = mask })
+				else
+					animatorOf(target):play(flinch)
+				end
 			end
 		end
 	end
@@ -722,6 +1209,18 @@ function handlers.StateChanged(payload: any)
 	if TELEGRAPH_CANCEL[payload.state] == true then
 		-- No strike follows an interrupted wind-up (a no-op when the rig shows no telegraph).
 		d.telegraphs.hide(record.model)
+		attacks[record.id] = nil
+		-- A rush not launched never will be; a launched one stops where it is drawn until its
+		-- RushEnded says where the server's body stopped (D-171).
+		local rush = rushes[record.id]
+		if rush ~= nil then
+			local now = serverClock()
+			if rush.state.phase == "Armed" or now == nil then
+				endRush(record.id)
+			else
+				RushDraw.halt(rush.state, now)
+			end
+		end
 	end
 	local clipName = stateClipName(payload.state, payload.direction, isLocal)
 	if clipName ~= nil then
@@ -757,6 +1256,12 @@ function handlers.EntityDied(payload: any)
 	end
 	if record ~= nil then
 		local animator = animatorOf(record)
+		-- A rush's body dies where it is drawn: it stays there for the freeze and the shatter (D-171).
+		attacks[record.id] = nil
+		local rush = rushes[record.id]
+		if rush ~= nil and not RushDraw.freeze(rush.state) then
+			endRush(record.id)
+		end
 		playReaction(record, "DeathFreeze")
 		animator:setTimeScale(0)
 		d.trails.setActive(record.model, false, "Art")
@@ -864,7 +1369,14 @@ function Replication.contact(contact: any): boolean
 	local frames = Combat.hitStopFrames[tier]
 	local position: Vector3 = contact.position
 	local run = holdLocal(animatorOf(attacker), frames)
-	animatorOf(target):hitStop(frames)
+	-- The target's hold stands for the pause the server will give its attack until the server says
+	-- (D-172); a launched rush is not held (the server holds nothing of it).
+	local allowance, attack = 0, nil
+	if target.kind == "Enemy" then
+		allowance, attack = allowPause(target, holdTarget(target, frames))
+	else
+		animatorOf(target):hitStop(frames)
+	end
 	-- What the contact knows of the hit: no crit, no Switch (the server rolls those), a kill only
 	-- when ContactPredictor proved it.
 	local info = {
@@ -889,29 +1401,43 @@ function Replication.contact(contact: any): boolean
 	feelHit(localId, position, tier, tier, true)
 	local moment = d.impact.hit(info)
 	local seen = playClock()
-	dropStale(predictions, seen)
+	expirePredictions(seen)
 	table.insert(predictions, {
 		targetId = contact.targetId,
 		windowIndex = contact.windowIndex,
 		artId = contact.artId,
+		swing = if typeof(contact.swing) == "number" then contact.swing else nil,
 		at = clock(),
 		seen = seen,
 		run = run,
 		tier = tier,
 		moment = if typeof(moment) == "string" then moment else nil,
+		allowance = allowance,
+		attack = attack,
 	})
 	return true
+end
+
+--- True for a root part a rush draws its body away from (D-171): the body is not there, so the
+--- local blade's contact prediction does not test it.
+function Replication.drawnAway(part: Instance): boolean
+	for _, rush in rushes do
+		if rush.root == part and rush.shownAs ~= nil then
+			return true
+		end
+	end
+	return false
 end
 
 --- True when the server already confirmed this hit of the local fighter's (it came before the
 --- blade got there on this client): the predictor skips it, so nothing plays twice. Each
 --- confirmation answers once.
-function Replication.confirmedAlready(targetId: number, windowIndex: number, artId: string?): boolean
+function Replication.confirmedAlready(targetId: number, windowIndex: number, artId: string?, swing: number?): boolean
 	if deps == nil then
 		return false
 	end
 	dropStale(earlyConfirms, playClock())
-	return takeMatch(earlyConfirms, targetId, windowIndex, artId) ~= nil
+	return takeMatch(earlyConfirms, targetId, windowIndex, artId, swing) ~= nil
 end
 
 -- The trail kind for a clip event: the kind the event names (remembered for the rest of the
@@ -1112,6 +1638,8 @@ function Replication.unwatch(record: any)
 		watched[record.id] = nil
 	end
 	destroyDriver(record.id)
+	endRush(record.id)
+	attacks[record.id] = nil
 	stateClips[record.id] = nil
 	trailKinds[record.id] = nil
 	clipSpeeds[record.id] = nil
@@ -1138,6 +1666,10 @@ function Replication.bind(newDeps: Deps)
 	table.clear(deathVocals)
 	table.clear(predictions)
 	table.clear(earlyConfirms)
+	for id in rushes do
+		endRush(id)
+	end
+	table.clear(attacks)
 	holdRun = 0
 	holdEnds = -math.huge
 	playSeconds = 0
@@ -1235,6 +1767,9 @@ function Replication.start()
 		now = os.clock,
 		onHeartbeat = function(fn)
 			game:GetService("RunService").Heartbeat:Connect(fn)
+		end,
+		serverNow = function(): number
+			return workspace:GetServerTimeNow()
 		end,
 	})
 	Replication.subscribe()

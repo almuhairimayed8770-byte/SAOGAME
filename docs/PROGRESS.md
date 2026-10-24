@@ -498,6 +498,33 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - **Checks:** 2215 specs in 126 files pass. Validators, stylua, offline lint, animation review and gaitgen are clean. In the hit matrix, every real-fight placement still registers on its strike, up to 1 frame later because of the snap ease.
 - **Open:** Studio items 138 to 149, and the Shatter hook for Nameplates.hide.
 
+## Enemy attacks on the server's beat (2026-10-24, D-165 to D-182)
+
+- **Server (D-165 to D-170):**
+  - Enemy bodies turn again.
+  - A boar's rush hits each target once, on contact.
+  - A rushing boar passes through players and other enemies.
+  - A player's hit pauses an enemy's unlanded attack by its hit-stop, up to 0.25 s per attack.
+  - Rushes are announced to the clients.
+  - Spawns keep 12 studs apart.
+- **Clients (D-171 to D-176):**
+  - The rush is drawn on the server's clock.
+  - Enemy attack clips and telegraphs keep the server's beat through hit-stops.
+  - A flinch no longer dips the raised axe.
+  - Swings carry a sequence number, so a quick second hit is never confused with the first.
+  - An enemy's own strike stills once.
+- **Follow-ups (D-177 to D-181):**
+  - Plates leave on the shatter frame and survive a respawn.
+  - Players carry no engine labels.
+  - The dodge hop spreads over 2 to 3 frames.
+  - A hit's camera nudge shows on the contact frame.
+  - A sideways dodge no longer carries the player toward the screen's edge.
+- **Verification fix (D-182):** strikes now resolve on the first AI tick at or after the beat the clients draw, no longer up to two ticks after it.
+  - Kobold at ±2 ms frame jitter: 1.6 frames late on average and 3.4 at most, down from 3.4 and about 6.
+  - Rush: the drawn tusks and the server's hit now agree to within the 20 Hz tick (−1 to +3 frames, down from up to +5.9).
+- **Checks:** 2310 specs in 131 files pass. Validators, stylua, offline lint, the hit matrix, animation review and gaitgen are clean. luau-lsp shows no new kind of message.
+- **Open:** Studio items 150 to 169, the Ceiling CastShadow place-file change (item 168), and the open issues listed with D-171 and D-181.
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and

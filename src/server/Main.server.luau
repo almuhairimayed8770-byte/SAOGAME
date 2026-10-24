@@ -7,6 +7,7 @@
 	Every start runs inside pcall and logs its failure; a service module that is not in this build
 	yet is reported and skipped, so the server comes up with whatever packages have landed. When
 	the last start has run, workspace gets the attribute `SkyspireReady = true` for smoke scripts.
+	Before any service, the fighter collision groups are registered (world.CollisionGroups, D-167).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -60,6 +61,25 @@ local netOk, netErr = pcall(Net.server)
 if not netOk then
 	warn("[Main] Net.server() failed: " .. tostring(netErr))
 end
+
+-- The fighter collision groups (D-167) exist before any character or enemy is put in one.
+local function registerCollisionGroups()
+	local module = Server:WaitForChild("world"):FindFirstChild("CollisionGroups")
+	if module == nil or not module:IsA("ModuleScript") then
+		warn("[Main] world.CollisionGroups is not in this build; fighters stay in the Default group")
+		return
+	end
+	local loaded, groups = pcall(require, module :: ModuleScript)
+	if not loaded or typeof(groups) ~= "table" then
+		warn("[Main] collision groups failed to load: " .. tostring(groups))
+		return
+	end
+	local ok, err = pcall(groups.register)
+	if not ok then
+		warn("[Main] collision groups failed: " .. tostring(err))
+	end
+end
+registerCollisionGroups()
 
 local startedCount = 0
 for _, name in START_ORDER do

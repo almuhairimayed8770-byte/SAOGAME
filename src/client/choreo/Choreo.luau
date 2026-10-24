@@ -59,6 +59,18 @@
 	RenderStepped or PreAnimation write read back as rest in Heartbeat, a PreSimulation write
 	held). A rig without an Animator (the RigBuilder rigs) keeps its writes.
 
+	An enemy's attack clip keeps the server's beat (D-172): `keepBeat` marks the handle ActionStarted
+	played (up to its first HitWindowOpen, owing what the network catch-up could not jump), and
+	`shiftBeat` takes off what the server paused the attack for; the Mixer evens the rest by the
+	clip's rate, never with a second freeze.
+
+	A rush is drawn on the server's timeline (D-171): `setBodyOffset` draws the body away from the
+	root part by an offset in the root's space, composed into the root joint's Transform (the
+	joint whose Part0 is the PrimaryPart) on top of whatever the clips key there, so the root keeps
+	its physics and its replicated place while the body shows where the server's clock has it.
+	Nil puts the body back on its root. The offset is written every step and on PreSimulation
+	with the rest of the pose.
+
 	The engine surface (clocks, camera, frame signals) is one small table that tests replace with
 	Choreo.configure; the logic underneath is the Lune-tested Mixer.
 ]]
@@ -88,6 +100,7 @@ export type PlayOptions = {
 	weight: number?,
 	coexist: boolean?,
 	loop: boolean?, -- Roblox Animation fallback only
+	mask: { [string]: number }?, -- Additive clips: joint name -> weight multiplier (Mixer)
 }
 
 export type Handle = Mixer.Handle
@@ -107,6 +120,9 @@ export type Animator = {
 	isPlaying: (self: Animator, clipId: string) -> boolean,
 	currentRootMotionDelta: (self: Animator) -> Vector3,
 	seek: (self: Animator, handle: Handle, clipTime: number) -> (),
+	keepBeat: (self: Animator, handle: Handle, serverTime: number?) -> (),
+	shiftBeat: (self: Animator, handle: Handle, seconds: number) -> (),
+	setBodyOffset: (self: Animator, offset: CFrame?) -> (),
 	setWeight: (self: Animator, handle: Handle, weight: number, immediate: boolean?) -> (),
 	setSpeed: (self: Animator, handle: Handle, speed: number) -> (),
 	setProcedural: (self: Animator, name: string, offsets: ClipSampler.Offsets?, weight: number?) -> (),
@@ -209,6 +225,7 @@ end
 local function rebuildMotors(self: any)
 	self.motors = Joints.map(self.model)
 	self.motorsDirty = false
+	self.rootJoint = nil
 	self.engineAnimated = engineAnimates(self.model)
 	for name in self.pinned do
 		local joint = self.motors[name]
@@ -218,10 +235,34 @@ local function rebuildMotors(self: any)
 	end
 end
 
+-- The name of the joint that hangs the body on the root part (its Part0 is the PrimaryPart), found
+-- once per joint map; nil while the rig has none.
+local function rootJointName(self: any): string?
+	local cached = self.rootJoint
+	if cached ~= nil then
+		return cached
+	end
+	local primary = self.model.PrimaryPart
+	if primary == nil then
+		return nil
+	end
+	for name, joint in self.motors :: { [string]: Joints.Joint } do
+		local part0 = Joints.parts(joint)
+		if part0 == primary then
+			self.rootJoint = name
+			return name
+		end
+	end
+	return nil
+end
+
 -- Writes the blended offsets to the joints' Transform; joints that stopped being keyed return to
 -- rest. A pinned joint is skipped, so it returns to rest too and stays there. Every written
 -- Transform is kept in `pose` for the PreSimulation rewrite (reapplyPose). The two touched sets
--- are reused frame to frame (no per-frame table on RenderStepped).
+-- are reused frame to frame (no per-frame table on RenderStepped). A body offset (setBodyOffset)
+-- is composed into the root joint's Transform: Part1 = Part0 * C0 * Transform * C1^-1, so
+-- C0^-1 * offset * C0 in front of the clip's own Transform draws the body as if the root part
+-- stood at root * offset.
 local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 	local motors = self.motors
 	local pinned: { [string]: boolean } = self.pinned
@@ -233,6 +274,19 @@ local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 			local motor = motors[name]
 			if motor ~= nil and not pinned[name] then
 				local transform = ClipSampler.toCFrame(offset)
+				motor.Transform = transform
+				pose[name] = transform
+				touched[name] = true
+			end
+		end
+		local body: CFrame? = self.bodyOffset
+		if body ~= nil then
+			local name = rootJointName(self)
+			local motor = if name ~= nil then motors[name] else nil
+			if name ~= nil and motor ~= nil and not pinned[name] then
+				local c0 = Joints.frames(motor)
+				local keyed = if touched[name] then pose[name] else CFrame.identity
+				local transform = c0:Inverse() * body * c0 * keyed
 				motor.Transform = transform
 				pose[name] = transform
 				touched[name] = true
@@ -411,6 +465,7 @@ function AnimatorClass.play(self: any, clipId: string, opts: PlayOptions?): Hand
 		blendOut = options.blendOut,
 		weight = options.weight,
 		coexist = options.coexist,
+		mask = options.mask,
 	}
 	local now = engine.now()
 	if options.serverTime ~= nil then
@@ -655,6 +710,46 @@ function AnimatorClass.seek(self: any, handle: Handle, clipTime: number)
 	fireEvents(self, self.mixer:seek(handle, clipTime))
 end
 
+--- Keeps a playing clip on the server's beat up to its first HitWindowOpen (D-172): an enemy's
+--- attack clip ActionStarted played at `serverTime`. What the network catch-up could not jump of
+--- the time since `serverTime` is owed from the start (less the part of a frame its first step
+--- credits from before the play); every hit-stop on the rig is owed back less what shiftBeat says
+--- the server paused. A clip without a hit window, an engine Animation's handle or one past its
+--- mark keeps none.
+function AnimatorClass.keepBeat(self: any, handle: Handle, serverTime: number?)
+	if self.destroyed or (handle :: any).rbx ~= nil then
+		return
+	end
+	local windows = ClipSampler.hitWindows(handle.clip)
+	local first = windows[1]
+	if first == nil then
+		return
+	end
+	local owed = 0
+	if serverTime ~= nil then
+		owed = math.max(0, (engine.now() - serverTime) - handle.time / handle.speed)
+	end
+	-- Its first step moves it by the whole frame, the part before it was played too: that much
+	-- ahead of the server, it gives that back.
+	owed -= (handle :: any).sinceStep or 0
+	self.mixer:keepBeat(handle, first.open, owed)
+end
+
+--- The server paused the attack a kept beat belongs to by `seconds` (negative takes back a pause
+--- it never gave): the clip owes that much less.
+function AnimatorClass.shiftBeat(self: any, handle: Handle, seconds: number)
+	if (handle :: any).rbx ~= nil then
+		return
+	end
+	self.mixer:shiftBeat(handle, seconds)
+end
+
+--- Draws the body `offset` away from the root part (in the root part's space) from this step on,
+--- or back on its root with nil (D-171). The root part itself does not move.
+function AnimatorClass.setBodyOffset(self: any, offset: CFrame?)
+	self.bodyOffset = offset
+end
+
 function AnimatorClass.step(self: any, dt: number)
 	if self.destroyed then
 		return
@@ -732,6 +827,8 @@ local function newAnimator(model: Model): any
 		touchedScratch = {} :: { [string]: boolean },
 		pose = {} :: { [string]: CFrame }, -- the Transform last written per joint name
 		engineAnimated = false, -- an engine Animator resets the rig each frame (D-053)
+		rootJoint = nil :: string?, -- the joint hanging the body on the root part (rootJointName)
+		bodyOffset = nil :: CFrame?, -- where the body is drawn from its root part (setBodyOffset)
 		stepHooks = {} :: { (dt: number) -> () },
 		rootDelta = Vector3.zero,
 		rootDeltaAt = engine.now(), -- engine.now() of the last step (the one that wrote rootDelta)

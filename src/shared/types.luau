@@ -465,6 +465,20 @@ export type AppliedHit = HitResult & {
 	staggerDirection: ("Front" | "Back" | "Left" | "Right")?,
 }
 
+-- CombatService.enemyStrike's optional fifth argument: how a moving strike (a Charger's rush)
+-- resolves in stretches as its body sweeps the line (D-166). A call without it resolves the whole
+-- attack shape at once, as every strike did before.
+export type EnemyStrikeOptions = {
+	-- Line strikes: only this stretch of the line, in studs along it from the origin, counts.
+	span: { from: number, to: number }?,
+	-- Target ids this attack already resolved (hit, parried, guarded or dodged): skipped, and every
+	-- target this call reaches is added, so each is resolved once per attack.
+	resolved: { [number]: boolean }?,
+}
+
+-- Why a rush stopped early (the RushEnded remote, D-169).
+export type RushEndReason = "Jammed" | "Interrupted" | "Died" | "Stopped"
+
 Types.VERSION = 1
 
 return Types

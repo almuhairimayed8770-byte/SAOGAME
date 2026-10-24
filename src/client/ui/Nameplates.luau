@@ -12,6 +12,13 @@
 	reaction uses (the kill's hit-stop, Moments.deathDuckDelay, then Combat.deathFreeze). Rigs
 	never carry the engine's own name label (RigBuilder: DisplayDistanceType None), so the plate
 	is the only name over an enemy.
+
+	Respawns (D-177): the engine empties the PlayerGui when the local character respawns, keeping
+	only the LayerCollectors whose ResetOnSpawn is false, so the plates' folder goes with it
+	(measured in Studio after LoadCharacter: PlayerGui.SkyspireNameplates gone, no plates). Every
+	frame (and before a new plate is handed out) the folder is checked: one that left the PlayerGui
+	is put back, or rebuilt with a fresh plate for every tracked record (state, HP, the shatter's
+	"gone" and its due time carried over) and a fresh pool when the reset destroyed it.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -58,20 +65,31 @@ local sinceUpdate = 0
 local hover: ((plate: Plate) -> boolean)? = nil
 local started = false
 local folder: Instance? = nil
+-- Where the folder lives: the local PlayerGui (nil under Lune, where the folder stays detached).
+local guiSource: (() -> Instance?)? = nil
+
+local function guiParent(): Instance?
+	if guiSource ~= nil then
+		return guiSource()
+	end
+	return Engine.playerGui()
+end
 
 -- Plates live in their own folder under the PlayerGui and point at rigs through Adornee: a plate
 -- parented into a rig would be destroyed with it when the server removes the model, and a pool
--- of destroyed BillboardGuis can never be re-parented (Parent is locked after Destroy).
+-- of destroyed BillboardGuis can never be re-parented (Parent is locked after Destroy). The folder
+-- is made here, not through Engine.folder, whose cache would hand back one a respawn destroyed.
 local function ensureFolder(): Instance
 	if folder == nil then
-		local gui = Engine.playerGui()
+		local made = Instance.new("Folder")
+		made.Name = UI.nameplates.folderName
+		local gui = guiParent()
 		if gui ~= nil then
-			folder = Engine.folder(gui, UI.nameplates.folderName)
-		else
-			local detached = Instance.new("Folder")
-			detached.Name = UI.nameplates.folderName
-			folder = detached
+			pcall(function()
+				made.Parent = gui
+			end)
 		end
+		folder = made
 	end
 	return folder :: Instance
 end
@@ -206,6 +224,16 @@ local function release(plate: Plate)
 	table.insert(pool[plate.kind], plate)
 end
 
+-- Fills the pool up to ui.nameplates.poolSize (start, and after a respawn destroyed it).
+local function warmPool()
+	while #pool.Player + #pool.Enemy < UI.nameplates.poolSize do
+		table.insert(pool.Enemy, newPlate("Enemy"))
+		if #pool.Player + #pool.Enemy < UI.nameplates.poolSize then
+			table.insert(pool.Player, newPlate("Player"))
+		end
+	end
+end
+
 -- Whether a plate shows: not taken by the shatter, and not past the time its shatter was due.
 local function shows(plate: Plate): boolean
 	local due = plate.dueAt
@@ -285,6 +313,57 @@ function Nameplates.refresh(record: any)
 	end
 end
 
+-- Points a plate at its record's rig: the root when the rig has one, else the model.
+local function adorn(plate: Plate, record: any)
+	local adornee: Instance? = nil
+	pcall(function()
+		adornee = record.model.PrimaryPart
+	end)
+	plate.gui.Adornee = adornee or record.model
+end
+
+-- The folder left the PlayerGui (a respawn's reset, D-177): put it back, or, when the reset
+-- destroyed it (and every plate in it), build a new one with a fresh plate for every tracked
+-- record and a fresh pool. Returns true when the plates were rebuilt.
+local function keepFolder(): boolean
+	local current = folder
+	if current == nil then
+		return false
+	end
+	local gui = guiParent()
+	if current.Parent == gui then
+		return false
+	end
+	if gui ~= nil and pcall(function()
+		current.Parent = gui
+	end) then
+		return false
+	end
+	folder = nil
+	ensureFolder()
+	pool.Player = {}
+	pool.Enemy = {}
+	for id, old in plates do
+		local record = old.record
+		local fresh = newPlate(old.kind)
+		fresh.record = record
+		fresh.gone = old.gone
+		fresh.dueAt = old.dueAt
+		fresh.alpha = old.alpha
+		plates[id] = fresh
+		if record ~= nil then
+			adorn(fresh, record)
+			Nameplates.refresh(record)
+		end
+		-- Player names wait for the next update's hover test, as on attach.
+		applyAlpha(fresh, old.alpha, fresh.kind == "Enemy")
+	end
+	if started then
+		warmPool()
+	end
+	return true
+end
+
 --- Gives a tracked record its plate (none for bosses, which fire `bossSeen` instead).
 function Nameplates.attach(record: any)
 	if plates[record.id] ~= nil then
@@ -295,14 +374,12 @@ function Nameplates.attach(record: any)
 		return
 	end
 	local kind: "Player" | "Enemy" = if record.kind == "Player" then "Player" else "Enemy"
+	-- A respawn may have emptied the PlayerGui this frame: never hand out a plate it destroyed.
+	keepFolder()
 	local plate = acquire(kind)
 	plate.record = record
 	plates[record.id] = plate
-	local adornee: Instance? = nil
-	pcall(function()
-		adornee = record.model.PrimaryPart
-	end)
-	plate.gui.Adornee = adornee or record.model
+	adorn(plate, record)
 	plate.gone = false
 	plate.dueAt = nil
 	plate.gui.Enabled = true
@@ -364,6 +441,7 @@ end
 
 --- Fades plates by distance and shows player names on hover (called at the tier's rate).
 function Nameplates.update()
+	keepFolder()
 	expireDue()
 	local distance = UI.nameplates.distance
 	local band = math.max(1e-6, UI.nameplates.fadeBand)
@@ -396,18 +474,42 @@ function Nameplates.plateOf(id: number): Plate?
 	return plates[id]
 end
 
+--- The folder the plates live in (tests).
+function Nameplates.folder(): Instance
+	return ensureFolder()
+end
+
+--- Replaces where the plates' folder lives (tests stand in a PlayerGui); nil restores the local
+--- PlayerGui. The next check moves the folder there.
+function Nameplates.setGuiParent(source: (() -> Instance?)?)
+	guiSource = source
+end
+
+-- The per-frame work: the folder kept in the PlayerGui (a respawn's reset rebuilds it on the
+-- next frame at the latest), a plate whose shatter came due goes on that frame, not at the
+-- tier's rate, and the fade and hover at the tier's rate.
+local function heartbeat(dt: number)
+	keepFolder()
+	expireDue()
+	sinceUpdate += dt
+	if sinceUpdate >= 1 / Quality.params().nameplateHz then
+		sinceUpdate = 0
+		Nameplates.update()
+	end
+end
+
+--- Runs one frame of the Heartbeat loop by hand (tests).
+function Nameplates.step(dt: number)
+	heartbeat(dt)
+end
+
 --- Wires EntityTracker and starts the fade / hover loop.
 function Nameplates.start()
 	if started then
 		return
 	end
 	started = true
-	while #pool.Player + #pool.Enemy < UI.nameplates.poolSize do
-		table.insert(pool.Enemy, newPlate("Enemy"))
-		if #pool.Player + #pool.Enemy < UI.nameplates.poolSize then
-			table.insert(pool.Player, newPlate("Player"))
-		end
-	end
+	warmPool()
 	EntityTracker.added:Connect(Nameplates.attach)
 	EntityTracker.removed:Connect(Nameplates.detach)
 	EntityTracker.changed:Connect(function(record: any)
@@ -418,15 +520,7 @@ function Nameplates.start()
 	for _, record in EntityTracker.all() do
 		Nameplates.attach(record)
 	end
-	stopLoop = Engine.onHeartbeat(function(dt: number)
-		-- Every frame: a plate whose shatter came due goes on that frame, not at the tier's rate.
-		expireDue()
-		sinceUpdate += dt
-		if sinceUpdate >= 1 / Quality.params().nameplateHz then
-			sinceUpdate = 0
-			Nameplates.update()
-		end
-	end)
+	stopLoop = Engine.onHeartbeat(heartbeat)
 end
 
 --- Stops the fade loop (place teardown).

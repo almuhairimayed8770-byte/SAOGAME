@@ -17,6 +17,13 @@ export type Spawn = {
 	packSize: { min: number, max: number },
 }
 
+export type SpawnSpacing = {
+	minStuds: number, -- root to root, studs
+	tries: number, -- spots drawn per disc
+	widenStuds: number, -- how much each widening adds to the disc radius
+	widenings: number, -- how many times the disc may widen
+}
+
 local Playground = {
 	fieldRadius = 200,
 	ceilingHeight = 350,
@@ -63,6 +70,17 @@ local Playground = {
 	respawnSeconds = 20, -- Playground only; fields use floors.anatomy.packRespawnMinutes
 	spawnScatterRadius = 6, -- pack members scatter this far from the spawn point
 	spawnFacingJitterDegrees = 20,
+	-- No fighter spawns on another (D-170). A spawning enemy's root stands at least minStuds from
+	-- the root of every living fighter, players included: a boar reaches 5.6 studs from its root
+	-- (snout), so two boars this far apart clear each other at any facing. It tries `tries` spots in
+	-- the scatter disc, then widens the disc by widenStuds, up to `widenings` times; with no clear
+	-- spot left it takes the roomiest spot it tried.
+	spawnSpacing = {
+		minStuds = 12,
+		tries = 12,
+		widenStuds = 6,
+		widenings = 4,
+	} :: SpawnSpacing,
 	playerSpawn = { position = { 0, 0, 0 }, facing = 0 },
 
 	loadout = {

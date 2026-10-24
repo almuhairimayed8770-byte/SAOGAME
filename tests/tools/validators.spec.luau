@@ -1985,3 +1985,138 @@ describe("choreo validator: the render-stall jump", function()
 		expect(runChoreo({ jumpSeconds = 2.5 }, nil, { maxStepSeconds = 1 / 30, settleSeconds = 3 })).toEqual({})
 	end)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- AI: the rush's jam lag, the hit-stop pause cap and the fighter collision groups (D-167..D-169)
+-- ------------------------------------------------------------------------------------------
+
+describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", function()
+	-- The real ai table with Charger fields, hitStop and collision replaced.
+	local function runAi(change: (copy: any) -> ()): { string }
+		local real = Harness.load("src/shared/data/ai")
+		local copy = table.clone(real)
+		copy.archetypes = table.clone(real.archetypes)
+		copy.archetypes.Charger = table.clone(real.archetypes.Charger)
+		copy.hitStop = table.clone(real.hitStop)
+		copy.collision = table.clone(real.collision)
+		copy.collision.apart = table.clone(real.collision.apart)
+		change(copy)
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/ai" then
+				return copy
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/ai")(context)
+	end
+
+	it("passes the real table", function()
+		expect(runAi(function() end)).toEqual({})
+	end)
+
+	it("a Charger needs a positive jamLagStuds", function()
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.archetypes.Charger.jamLagStuds = 0
+			end),
+			"archetypes.Charger.jamLagStuds must be positive"
+		)).toBe(true)
+	end)
+
+	it("the hit-stop pause cap holds at least one Final hit-stop", function()
+		local problems = runAi(function(copy)
+			copy.hitStop.maxPausePerAttack = 0.05
+		end)
+		expect(hasProblem(problems, "hitStop.maxPausePerAttack 0.05 is shorter than one Final hit-stop")).toBe(true)
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.hitStop.maxPausePerAttack = -1
+			end),
+			"hitStop.maxPausePerAttack must be positive"
+		)).toBe(true)
+	end)
+
+	it("the collision groups are three distinct names, and a rush passes players", function()
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.collision.rushing = copy.collision.enemies
+			end),
+			"collision groups must be three distinct names"
+		)).toBe(true)
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.collision.players = "Default"
+			end),
+			"collision.players must not be the engine's Default group"
+		)).toBe(true)
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.collision.apart = { { copy.collision.rushing, copy.collision.enemies } }
+			end),
+			"collision.apart must let the rushing group pass the players group"
+		)).toBe(true)
+		expect(hasProblem(
+			runAi(function(copy)
+				table.insert(copy.collision.apart, { copy.collision.rushing, "Walls" })
+			end),
+			"collision.apart names Walls, which is not a fighter group"
+		)).toBe(true)
+	end)
+end)
+
+describe("playground validator: spawn spacing (D-170)", function()
+	-- The real playground table with spawnSpacing (and the scatter radius) replaced.
+	local function runPlayground(change: (copy: any) -> ()): { string }
+		local real = Harness.load("src/shared/data/playground")
+		local copy = table.clone(real)
+		copy.spawnSpacing = table.clone(real.spawnSpacing)
+		change(copy)
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/playground" then
+				return copy
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/playground")(context)
+	end
+
+	it("passes the real table", function()
+		expect(runPlayground(function() end)).toEqual({})
+	end)
+
+	it("spacing numbers are positive, and tries and widenings are whole counts", function()
+		expect(hasProblem(
+			runPlayground(function(copy)
+				copy.spawnSpacing.minStuds = 0
+			end),
+			"playground.spawnSpacing.minStuds must be a positive number"
+		)).toBe(true)
+		expect(hasProblem(
+			runPlayground(function(copy)
+				copy.spawnSpacing.tries = 2.5
+			end),
+			"playground.spawnSpacing.tries must be a whole number of at least 1"
+		)).toBe(true)
+		expect(hasProblem(
+			runPlayground(function(copy)
+				copy.spawnSpacing.widenings = -1
+			end),
+			"playground.spawnSpacing.widenings must be a whole number of at least 0"
+		)).toBe(true)
+		expect(hasProblem(
+			runPlayground(function(copy)
+				copy.spawnSpacing = nil
+			end),
+			"playground.spawnSpacing is missing"
+		)).toBe(true)
+	end)
+
+	it("the widest disc leaves room for the largest pack at the spacing", function()
+		local problems = runPlayground(function(copy)
+			copy.spawnSpacing.widenings = 0
+		end)
+		expect(hasProblem(problems, "playground.spawnSpacing: the widest disc (6 studs) leaves no room")).toBe(true)
+	end)
+end)

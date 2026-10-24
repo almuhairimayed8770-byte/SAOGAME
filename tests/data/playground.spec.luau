@@ -61,6 +61,17 @@ describe("playground data", function()
 		})
 	end)
 
+	it("spawns keep clear of every living fighter (D-170)", function()
+		local spacing = Playground.spawnSpacing
+		expect(spacing.minStuds).toBe(12) -- two boars, 5.6 studs from root to snout, at any facing
+		expect(spacing.tries).toBeGreaterThanOrEqual(1)
+		expect(spacing.widenStuds).toBeGreaterThan(0)
+		-- The widest disc reaches past one spacing, so a second packmate always has room.
+		expect(Playground.spawnScatterRadius + spacing.widenings * spacing.widenStuds).toBeGreaterThanOrEqual(
+			spacing.minStuds
+		)
+	end)
+
 	it("measures distance on the field plane", function()
 		expect(Playground.distanceFromCenter({ 3, 50, 4 })).toBeCloseTo(5)
 	end)
