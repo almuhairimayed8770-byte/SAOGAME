@@ -266,7 +266,7 @@ local function hudBox(name: string, height: number, bottom: number, paddingX: nu
 	local text = El.new("TextLabel", {
 		Name = "Text",
 		BackgroundTransparency = 1,
-		Size = UDim2.new(0, 0, 1, 0),
+		Size = UDim2.fromScale(0, 1),
 		AutomaticSize = Enum.AutomaticSize.X,
 		FontFace = El.font("system", "Bold"),
 		Text = "",
