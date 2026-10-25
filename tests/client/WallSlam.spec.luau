@@ -207,3 +207,101 @@ describe("WallSlam", function()
 		end
 	end)
 end)
+
+-- The slam's shake at reel level. The owner's Studio run saw the slam from behind the boar at
+-- about 20 studs and could not tell the shake from the lock camera's own ease: a bump to 0.42
+-- studs a frame over the ease's 0.34 to 0.38. The shake must fire there and read as a short,
+-- sharp hit: bigger a frame than the ease for its first frames, then gone.
+describe("WallSlam's shake reads over the lock camera's ease", function()
+	local RigBuilder = Harness.load("src/server/world/RigBuilder")
+	local CameraMath = Harness.load("src/client/camera/CameraMath")
+	local CameraData = Harness.load("src/shared/data/camera")
+
+	local F = 1 / 60
+	local BEHIND = 20 -- studs from the boar's root back to the local player's body (the review)
+	local EASE_TOP = 0.38 -- studs a frame: the lock camera's fastest ease at the slam (the review)
+	local PHASES = 200 -- start times of the shake's noise swept across its own period
+
+	-- How far the boar's body reaches ahead of its root at rest (every corner of every part).
+	local function boarFront(): number
+		local boar = RigBuilder.build("Boar")
+		local root = (boar.PrimaryPart :: BasePart).CFrame
+		local front = 0
+		for _, part in boar:GetDescendants() do
+			if part:IsA("BasePart") then
+				local half = part.Size / 2
+				for _, x in { -1, 1 } do
+					for _, y in { -1, 1 } do
+						for _, z in { -1, 1 } do
+							local corner =
+								part.CFrame:PointToWorldSpace(Vector3.new(half.X * x, half.Y * y, half.Z * z))
+							front = math.max(front, -root:PointToObjectSpace(corner).Z)
+						end
+					end
+				end
+			end
+		end
+		boar:Destroy()
+		return front
+	end
+
+	-- The camera's shake offset `frame` frames after the slam asked for it (CameraController's
+	-- energy and noise), its noise clock at `start`.
+	local function shakeAt(start: number, frame: number): Vector3
+		local amplitude = CameraData.shake.amplitude[slam.shakeTier]
+		local energy = CameraMath.decay(amplitude, CameraData.shake.decay, frame * F)
+		if energy < CameraData.shake.cutoff then
+			return Vector3.zero
+		end
+		local offset =
+			CameraMath.shakeOffset(start + frame * F, energy, CameraData.shake.frequency, CameraData.shake.lanes)
+		return Vector3.new(offset[1], offset[2], offset[3])
+	end
+
+	-- Per frame, the shake's own move of the camera (studs) averaged over the swept phases, and
+	-- each phase's largest move over the first `early` frames.
+	local function moves(frames: number, early: number): ({ number }, { number })
+		local mean = table.create(frames + 1, 0)
+		local peaks = {}
+		local period = 1 / CameraData.shake.frequency
+		for phase = 0, PHASES - 1 do
+			local start = period * 7 * phase / PHASES
+			local last = Vector3.zero
+			local peak = 0
+			for frame = 0, frames do
+				local now = shakeAt(start, frame)
+				local move = (now - last).Magnitude
+				last = now
+				mean[frame + 1] += move / PHASES
+				if frame < early then
+					peak = math.max(peak, move)
+				end
+			end
+			table.insert(peaks, peak)
+		end
+		table.sort(peaks)
+		return mean, peaks
+	end
+
+	it("fires for the local player behind the boar at the review's 20 studs", function()
+		-- The snout meets the face this far ahead of the root: the contact is that much farther.
+		local front = boarFront()
+		expect(front).toBeGreaterThan(5)
+		expect(slam.shakeRadius).toBeGreaterThanOrEqual(BEHIND + front)
+		-- Still a slam near the player only (D-217): well inside the lock-on range, so a boar
+		-- ramming a wall across the floor does not shake the view.
+		expect(slam.shakeRadius).toBeLessThanOrEqual(CameraData.lock.range * 0.6)
+	end)
+
+	it("moves the camera more a frame than the lock ease for its first frames, then is gone", function()
+		local mean, peaks = moves(12, 3)
+		-- The first four frames (67 ms): each moves the camera past the ease's fastest frame.
+		for frame = 1, 4 do
+			expect(mean[frame]).toBeGreaterThan(EASE_TOP)
+		end
+		-- Its sharpest frame clears the ease by half again on most phases (the median phase).
+		expect(peaks[PHASES // 2]).toBeGreaterThan(EASE_TOP * 1.5)
+		-- Short: by a sixth of a second it moves the camera under a tenth of a stud a frame.
+		expect(mean[11]).toBeLessThan(0.1)
+	end)
+end)

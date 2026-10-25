@@ -22,6 +22,11 @@ local Combat = {
 		Kill = 10,
 	},
 	hitStopFrameSeconds = 1 / 60,
+	-- A hold asks the rig for this many frames less than its count (F6). A rendered frame a hair
+	-- shorter than 1/60 left a sliver of pause that froze one more whole frame (7 on a Final, 4 on a
+	-- Normal in about a third of casts at 5% frame-time jitter); half a frame short counts exactly
+	-- 3, 6 and 10 for any frame within a quarter frame of 1/60.
+	hitStopShaveFrames = 0.5,
 	cameraNudgeStuds = 0.4,
 	cameraShakeStuds = {
 		Normal = 0.15,
@@ -181,6 +186,37 @@ local Combat = {
 		-- for the server's; each one solves the blade and tests it against the fighters near it, and
 		-- no end of the blade moves more than sweepMaxTipStep between two of them while they last.
 		maxSubdivisions = 12,
+		-- Clip seconds within which a clock counts as at a key: a clock summed from 60 fps steps
+		-- lands a hair short of a key written to four decimals. A touch before its strike's key
+		-- waits for the first frame at or past it (F1).
+		keyEpsilon = 1e-4,
+		-- The server's word waits for the key too (D-267): a HitConfirmed for the local swing's hit
+		-- whose strike key this client's blade has yet to show (the server counts a point-blank cut
+		-- at the window's open, and runs ahead of the client by every hit-stop the client held)
+		-- plays on the key frame, not on arrival; at most this many seconds of play, longer than
+		-- a Normal hold still running plus a window's open to its key (a 4-frame snap) and a frame.
+		-- A kill's word plays when it comes: its EntityDied comes with it.
+		wordWaitSeconds = 0.25,
+		-- The Art stand-off (fix F1): an Art whose first cut would start with the blade already in
+		-- the target's body (the review's kobold at the hip or the shoulder) steps the body straight
+		-- away from the target over the anticipation, from the hold pose to the first window's
+		-- open, on `easing` (a push off that settles into the start pose). The step is the least
+		-- multiple of stepStuds that leaves the start pose's blade clearStuds from every part of
+		-- the target a blade can hit, at most maxStuds; none when no such step clears it, or when a
+		-- window's cut that passed deeper than the sweep's promise (hitSphereRadius less half of
+		-- sweepMaxTipStep: every hit that deep registers) would then pass shallower, so a stand-off
+		-- never costs a hit (the key rule plays a touch at the start pose on the key). Never a step
+		-- in: that would add reach the Art does not have. maxStuds stays within rootMotionSlack, so
+		-- the anti-cheat's mid-Art allowance covers it with any Art's own root motion, and over the
+		-- shortest anticipation (0.1833 s) it is well under maxSpeedStudsPerSecond (spec StandOff).
+		standOff = {
+			maxStuds = 1.5,
+			clearStuds = 0.25,
+			stepStuds = 0.05,
+			easing = "QuadOut",
+			-- Samples of each damage window the reach check poses the cut at.
+			reachSamples = 16,
+		},
 		-- A contact is predicted to kill only when the hit cannot do less than the enemy has left:
 		-- its least damage (the weapon's attack times the move's multiplier, less the enemy's
 		-- defense, rounded and at least minimumDamage; STR, a crit, Switch, Tempo and Break only add)

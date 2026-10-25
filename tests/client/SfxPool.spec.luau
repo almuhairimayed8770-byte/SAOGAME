@@ -1428,7 +1428,7 @@ describe("SfxPool.preload", function()
 end)
 
 describe("SfxPool start: the contour effects", function()
-	it("gives each contour group one flat EQ and one dry reverb, off while idle", function()
+	it("gives each contour group one flat EQ, always in, and one dry reverb, off while idle", function()
 		scenario(function()
 			SfxPool.start()
 			SfxPool.start()
@@ -1459,7 +1459,9 @@ describe("SfxPool start: the contour effects", function()
 				expect(reverb.Diffusion).toBeCloseTo(sfx.effects.reverb.diffusion, EPSILON)
 				-- The EQ runs first, so a bass cut also leaves the reverb's tail.
 				expect(eq.Priority).toBeGreaterThan(reverb.Priority)
-				expect(eq.Enabled).toBe(false)
+				-- The flat EQ stays in the chain (F15): a cut lands on the hit's own call with
+				-- nothing switched in on that frame. The reverb is switched in only while it runs.
+				expect(eq.Enabled).toBe(true)
 				expect(reverb.Enabled).toBe(false)
 				local state = SfxPool.mixState(group) :: any
 				expect(state.running).toBeNil()
@@ -1877,11 +1879,14 @@ describe("SfxPool.contour", function()
 			expect(eq.Enabled).toBe(true)
 			expect(w.steppers).toBe(1)
 
-			-- A quarter into the cut: on the eased curve, not on the straight line.
+			-- The cut's ramp is under a frame, which no step can draw: it is in place on the call.
+			expect(cut.ramp).toBeLessThan(sfx.playback.sameFrameSeconds)
+			expect((SfxPool.mixState("SFX") :: any).low).toBeCloseTo(cut.low, 1e-6)
 			w.frame(cut.at + cut.ramp / 4)
-			local quarter = (SfxPool.mixState("SFX") :: any).low
-			expect(quarter).toBeCloseTo(cut.low * ease(0.25), 1e-6)
-			expect(math.abs(quarter - cut.low * 0.25)).toBeGreaterThan(EPSILON)
+			expect((SfxPool.mixState("SFX") :: any).low).toBeCloseTo(cut.low, 1e-6)
+			-- A ramp of a frame or more still eases: on the curve, not on the straight line.
+			expect(back.ramp).toBeGreaterThanOrEqual(sfx.playback.sameFrameSeconds)
+			expect(ease(0.25)).never.toBeCloseTo(0.25, EPSILON)
 
 			-- The cut holds through the freeze.
 			w.frame(back.at - EPSILON)
@@ -1909,7 +1914,10 @@ describe("SfxPool.contour", function()
 				expect(after.enabled).toBe(false)
 				expect(after.low).toBe(0)
 			end
-			expect(eq.Enabled).toBe(false)
+			-- Idle: the reverb is switched out, the flat EQ stays in for the next hit.
+			local _, reverb = effectsOf("SFX")
+			expect(reverb.Enabled).toBe(false)
+			expect(eq.Enabled).toBe(true)
 			expect(w.steppers).toBe(0)
 		end)
 	end)
@@ -2171,7 +2179,8 @@ describe("SfxPool.contour", function()
 				expect(eq.MidGain).toBe(0)
 				expect(eq.HighGain).toBe(0)
 				w.frame(sfx.effects.restoreSeconds * 2)
-				expect(eq.Enabled).toBe(false)
+				expect((SfxPool.mixState("Master") :: any).enabled).toBe(false)
+				expect(eq.Enabled).toBe(true)
 			end)
 		end)
 	end)
@@ -2211,6 +2220,151 @@ describe("SfxPool.contour", function()
 			expect((SfxPool.mixState("SFX") :: any).low).toBeCloseTo(cut.low, 1e-6)
 			w.frame(hold + back.ramp + EPSILON)
 			expect((SfxPool.mixState("SFX") :: any).low).toBe(0)
+		end)
+	end)
+end)
+
+describe("SfxPool: an Art's final hit cuts the bass on its own call (F15)", function()
+	-- The reel review heard the FinalHit's bass for the first 3 frames of the freeze: the effects
+	-- were switched in on the hit's call and the 8 ms cut only landed on the next step.
+	it("has the flat EQ in before the hit and the cut in place when the hit's call returns", function()
+		scenario(function(w)
+			SfxPool.start()
+			local cuts: { [string]: number } = {}
+			for _, step in sfx.contour("FinalHit") do
+				if step.at == 0 and step.low ~= nil then
+					cuts[step.group] = step.low
+				end
+			end
+			expect(cuts.SFX).never.toBeNil()
+			for group in cuts do
+				local eq = effectsOf(group)
+				expect(eq.Enabled).toBe(true)
+				expect(eq.LowGain).toBe(0)
+			end
+			-- The impact director's order: the cue, then the contour, on one call.
+			SfxPool.asOwn(function()
+				SfxPool.cue("HitFinal", HIT)
+				SfxPool.contour("FinalHit")
+			end)
+			local playedAt = #w.plays
+			expect(playedAt).toBeGreaterThan(0)
+			for group, low in cuts do
+				local eq = effectsOf(group)
+				expect(eq.Enabled).toBe(true)
+				expect(eq.LowGain).toBeCloseTo(low, 1e-6)
+			end
+			-- And it holds through the first frames of the freeze.
+			for frame = 1, 3 do
+				w.frame(frame * sfx.playback.sameFrameSeconds)
+				expect(effectsOf("SFX").LowGain).toBeCloseTo(cuts.SFX, 1e-6)
+			end
+		end)
+	end)
+
+	it("still eases a cut whose ramp spans frames, from the call on", function()
+		withContours({ SpecSlowCut = { { at = 0, group = "SFX", low = -30, ramp = 0.1 } } }, function()
+			scenario(function(w)
+				SfxPool.contour("SpecSlowCut")
+				expect((SfxPool.mixState("SFX") :: any).low).toBe(0)
+				w.frame(0.025)
+				local ease = Easing.get(sfx.effects.easing)
+				expect((SfxPool.mixState("SFX") :: any).low).toBeCloseTo(-30 * ease(0.25), 1e-6)
+			end)
+		end)
+	end)
+end)
+
+describe("SfxPool: the low-HP heartbeat ducks under the local player's own hits (F15)", function()
+	local duck = sfx.mix.heartbeatDuck
+	local function ducked(full: number, db: number): number
+		return full * 10 ^ (-db / 20)
+	end
+
+	it("ducks on the hit's own call, holds, and comes back over the release", function()
+		scenario(function(w)
+			local name = fx.audio.heartbeatLoop
+			withReal({ name }, function()
+				SfxPool.loop(name, 1)
+				local sound = w.plays[1].sound
+				local full = sound.Volume
+				expect(full).toBeGreaterThan(0)
+				-- A hit the local player is not in leaves the heartbeat alone.
+				SfxPool.cue("HitNormal", HIT)
+				expect(sound.Volume).toBeCloseTo(full, FLOAT)
+				-- An enemy's hit on the player (the impact director marks it own): down at once.
+				SfxPool.asOwn(function()
+					SfxPool.cue("HitNormal", FAR)
+				end)
+				expect(sound.Volume).toBeCloseTo(ducked(full, duck.db), FLOAT)
+				-- The music director's per-frame loop call keeps the duck.
+				SfxPool.loop(name, 1)
+				expect(sound.Volume).toBeCloseTo(ducked(full, duck.db), FLOAT)
+				w.frame(duck.holdSeconds - EPSILON)
+				expect(sound.Volume).toBeCloseTo(ducked(full, duck.db), FLOAT)
+				-- Coming back: between the duck and full, rising frame after frame.
+				local previous = sound.Volume
+				for quarter = 1, 3 do
+					w.frame(duck.holdSeconds + duck.releaseSeconds * quarter / 4)
+					expect(sound.Volume).toBeGreaterThan(previous)
+					expect(sound.Volume).toBeLessThan(full)
+					previous = sound.Volume
+				end
+				w.frame(duck.holdSeconds + duck.releaseSeconds + EPSILON)
+				expect(sound.Volume).toBeCloseTo(full, FLOAT)
+				SfxPool.loop(name, 1)
+				expect(sound.Volume).toBeCloseTo(full, FLOAT)
+			end)
+		end)
+	end)
+
+	it("ducks only for the listed cues, and only the heartbeat", function()
+		spec(function(w)
+			local name = fx.audio.heartbeatLoop
+			withReal({ name }, function()
+				for _, cueName in duck.cues do
+					expect(sfx.cues[cueName]).never.toBeNil()
+				end
+				SfxPool.loop(name, 1)
+				SfxPool.loop("spec.Bed", 1)
+				local heart, bed = w.plays[1].sound, w.plays[2].sound
+				local fullHeart, fullBed = heart.Volume, bed.Volume
+				-- Not a hit: the player's own dodge leaves it alone.
+				SfxPool.asOwn(function()
+					SfxPool.cue("Dodge", HIT)
+				end)
+				expect(heart.Volume).toBeCloseTo(fullHeart, FLOAT)
+				SfxPool.asOwn(function()
+					SfxPool.cue(duck.cues[1], HIT)
+				end)
+				expect(heart.Volume).toBeCloseTo(ducked(fullHeart, duck.db), FLOAT)
+				expect(bed.Volume).toBeCloseTo(fullBed, FLOAT)
+			end)
+		end)
+	end)
+
+	it("restarts the hold on the next hit and starts a heartbeat that rises inside a duck ducked", function()
+		scenario(function(w)
+			local name = fx.audio.heartbeatLoop
+			withReal({ name }, function()
+				SfxPool.asOwn(function()
+					SfxPool.cue("HitNormal", HIT)
+				end)
+				SfxPool.loop(name, 1)
+				local heart = w.plays[#w.plays].sound
+				local entry = entryOf(name)
+				local full = math.min(entry.volume * 10 ^ (sfx.mix.heartbeatOverAllDb / 20), sfx.limits.maxPlayVolume)
+				expect(heart.Volume).toBeCloseTo(ducked(full, duck.db), FLOAT)
+				local second = duck.holdSeconds * 0.75
+				w.frame(second)
+				SfxPool.asOwn(function()
+					SfxPool.cue("HitBasic", FAR)
+				end)
+				w.frame(second + duck.holdSeconds - EPSILON)
+				expect(heart.Volume).toBeCloseTo(ducked(full, duck.db), FLOAT)
+				w.frame(second + duck.holdSeconds + duck.releaseSeconds + EPSILON)
+				expect(heart.Volume).toBeCloseTo(full, FLOAT)
+			end)
 		end)
 	end)
 end)

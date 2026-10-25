@@ -124,6 +124,7 @@ local Siblings = require(script.Parent.Siblings)
 local SheathState, hasSheathState = Siblings.load(script.Parent.Parent, "choreo.SheathState")
 local RushDraw, hasRushDraw = Siblings.load(script.Parent.Parent, "choreo.RushDraw")
 local DrawnBody = Siblings.load(script.Parent.Parent, "choreo.DrawnBody")
+local TelegraphShapes, hasTelegraphShapes = Siblings.load(script.Parent.Parent, "fx.TelegraphShapes")
 
 export type Deps = {
 	net: { on: (name: string, handler: (payload: any) -> ()) -> () },
@@ -166,6 +167,15 @@ export type Deps = {
 	-- telegraphs start on it and rushes are drawn on it. Without it a telegraph starts on receipt
 	-- and no rush is drawn.
 	serverNow: (() -> number)?,
+	-- The local fighter's defence as CharacterController knows it: its state now, and the time on
+	-- `now`'s clock it last stood in a guard or a dodge (nil: not since it spawned). Without it no
+	-- enemy blow on the local fighter shows before the server's word (D-258).
+	localDefence: (() -> (string, number?))?,
+	-- CharacterController.awaitsKey: true while the local fighter's swing (its Art and request's
+	-- sequence number) has yet to show hit `windowIndex`'s strike key on this client's clip. The
+	-- server's word for that hit waits for the key frame then (D-267). Without it the word plays
+	-- when it comes.
+	keyAhead: ((windowIndex: number, artId: string?, swing: number?) -> boolean)?,
 	-- workspace:Blockcast as the server's worldAhead makes it (RushDraw.WorldCast: how far, and the
 	-- face's normal): a drawn rush stops where the world stops its root, never at ground it climbs.
 	-- Without it the drawn rush stops only at RushEnded.
@@ -264,12 +274,21 @@ type Attack = {
 	rush: boolean,
 	paused: number,
 	handle: any?,
+	def: any?, -- its row in enemies.luau (reach, arc: the shape it lands on)
+	judged: boolean?, -- its strike frame was judged for the local fighter (D-258), or its word came
 }
 local predictions: { Prediction } = {}
 -- The local fighter's hits the server confirmed before this client's blade got there (the
 -- client's clip runs behind the server's by the hit-stops it held): the predictor skips them.
 type EarlyConfirm = { targetId: number, windowIndex: number, artId: string?, swing: number?, seen: number }
 local earlyConfirms: { EarlyConfirm } = {}
+-- The server's words for the local fighter's hits that came before this client's clip showed the
+-- strike's key (D-267): the server counts a point-blank hit at its window's open and runs ahead
+-- by the holds this client played. Each waits for the key frame (the contact the blade makes on
+-- it, or the Heartbeat after the clip showed the key), at most combat.contact.wordWaitSeconds.
+local heldWords: { { payload: any, seen: number } } = {}
+-- The word being let go now (it is not held again).
+local releasing: any = nil
 -- The runs of holds on the local fighter's rig: a hold put on while none runs starts a new run,
 -- one put on while one runs joins it (the same cut's other targets, a blow taken inside the
 -- hold). A confirmation's stronger tier runs on only its own contact's run, so the word for an
@@ -301,15 +320,22 @@ type Rush = {
 	root: BasePart?,
 	unhook: (() -> ())?,
 	launched: boolean,
+	released: boolean?, -- its wind-up was dropped or cut: no launch retimes it (releaseRush)
 	since: number,
 	shownAs: number?,
 	room: ((from: CFrame, direction: Vector3, distance: number) -> (number?, Vector3?))?,
 	ground: ((spot: Vector3) -> number?)?,
 }
 local rushes: { [number]: Rush } = {}
--- enemy id -> the server time of the last rush launch heard (RushStarted): a Telegraph from before
--- it is that launch's own wind-up, or an older one, come late (it is unreliable; RushStarted is not).
+-- enemy id -> the server time of the last rush launch heard (RushStarted), or of the last attack
+-- the server dropped (RushEnded "Dropped", its wind-up's end): a Telegraph or an ActionStarted from
+-- before it is that attack's own, or an older one's, come late (they are unreliable; these are not).
 local launches: { [number]: number } = {}
+-- enemy id -> its blow on the local fighter shown on the strike's server frame (F16, D-258), until
+-- its HitConfirmed: when (`seen`, on playClock), the moment Impact played, the target and its
+-- flinch clip.
+type Struck = { seen: number, moment: string?, targetId: number, handle: any? }
+local struck: { [number]: Struck } = {}
 
 local function dependencies(): Deps
 	if deps == nil then
@@ -402,6 +428,13 @@ local function holdRemaining(animator: any, seconds: number, at: number): number
 	return math.max(0, seconds - (clock() - at))
 end
 
+-- The frames a hit's hold of `frames` asks a rig's animator for: combat.luau hitStopShaveFrames
+-- short, so the frames it freezes count exactly (F6): a pause that outlives the last counted frame
+-- by a sliver would freeze a whole frame more.
+local function heldFrames(frames: number): number
+	return math.max(0, frames - Combat.hitStopShaveFrames)
+end
+
 -- Puts a hold of `frames` on the local fighter's rig and returns the run it belongs to: a new
 -- run when none is holding, else the one holding.
 local function holdLocal(animator: any, frames: number): number
@@ -417,8 +450,9 @@ local function holdLocal(animator: any, frames: number): number
 		holdRun += 1
 		holdEnds = -math.huge
 	end
-	holdEnds = math.max(holdEnds, clock() + math.max(0, frames) * ChoreoData.frameSeconds)
-	animator:hitStop(frames)
+	local held = heldFrames(frames)
+	holdEnds = math.max(holdEnds, clock() + held * ChoreoData.frameSeconds)
+	animator:hitStop(held)
 	return holdRun
 end
 
@@ -464,6 +498,18 @@ local function takeMatch(list: { any }, targetId: number, windowIndex: number, a
 		end
 	end
 	return nil
+end
+
+-- True when the server's word for one of the local fighter's hits is to wait for its strike's key
+-- on this client's clip (D-267). A kill's word never waits: its EntityDied comes with it. Words
+-- wait only on a client that ticks Heartbeat (deps.onHeartbeat), which lets them go.
+local function waitsForKey(payload: any): boolean
+	local keyAhead = dependencies().keyAhead
+	return playTicking
+		and keyAhead ~= nil
+		and payload.killed ~= true
+		and typeof(payload.hitIndex) == "number"
+		and keyAhead(payload.hitIndex, payload.artId, payload.swing) == true
 end
 
 local function tierRank(tier: string): number
@@ -519,6 +565,8 @@ local function attackAt(record: any, def: any, attack: any, since: number): Atta
 		rush = hasRushDraw and RushDraw.isRush(def.archetype, attack),
 		paused = 0,
 		handle = nil,
+		def = attack,
+		judged = false,
 	}
 	attacks[record.id] = entry
 	return entry
@@ -600,10 +648,11 @@ local function holdTarget(record: any, frames: number): number
 	end
 	local animator = animatorOf(record)
 	local before = pauseOf(animator)
-	animator:hitStop(frames)
+	local held = heldFrames(frames)
+	animator:hitStop(held)
 	local after = pauseOf(animator)
 	if before == nil or after == nil then
-		return math.max(0, frames) * ChoreoData.frameSeconds
+		return held * ChoreoData.frameSeconds
 	end
 	return math.max(0, after - before)
 end
@@ -730,6 +779,21 @@ local function endRush(id: number)
 	hideRoot(rush, false)
 end
 
+-- A rush that will not run as drawn (its wind-up dropped or cut before any RushStarted): a crouch
+-- keeps its turn until the late root comes round, a predicted launch slides back (RushDraw.release).
+local function releaseRush(id: number)
+	local rush = rushes[id]
+	if rush == nil then
+		return
+	end
+	local now = serverClock()
+	local root = rush.root
+	rush.released = true
+	if now == nil or not RushDraw.release(rush.state, now, if root ~= nil then root.CFrame else nil) then
+		endRush(id)
+	end
+end
+
 -- A rush's slam on the frame its drawn snout meets the wall (D-217): the dust thrown off the
 -- face and the stone thud where they meet, and a short shake when that is near the local
 -- player's body (fx.wallSlam). The dust never glows: it is no flash, so it needs no flash budget.
@@ -761,7 +825,12 @@ local function stepRush(id: number, rush: Rush, dt: number)
 		return
 	end
 	local rootFrame = root.CFrame
-	local drawn = RushDraw.step(rush.state, now, dt, rootFrame, rush.room, rush.ground)
+	-- The velocity the late root carries (D-256), when the root can say.
+	local ok, carried = pcall(function(): any
+		return (root :: BasePart).AssemblyLinearVelocity
+	end)
+	local velocity: Vector3? = if ok and typeof(carried) == "Vector3" then carried else nil
+	local drawn = RushDraw.step(rush.state, now, dt, rootFrame, rush.room, rush.ground, velocity)
 	if drawn ~= nil then
 		rush.animator:setBodyOffset(rootFrame:Inverse() * drawn)
 		hideRoot(rush, true)
@@ -996,6 +1065,236 @@ local function feelHit(sweepKey: any, position: Vector3, tier: string, tick: str
 	end
 end
 
+-- Where an enemy's telegraph lies (F11): the ground under `origin` (its root's centre at the beat,
+-- what the server sends), as this client's world cast finds it (the drawn rush's ground probe:
+-- through players and enemies); else its root's hover below it; else `origin` itself.
+local function grounded(record: any, origin: Vector3): Vector3
+	local model = record.model
+	local cast = dependencies().worldCast
+	if hasRushDraw and cast ~= nil and typeof(model) == "Instance" then
+		local below = RushDraw.ground(origin, cast, model)
+		if below ~= nil then
+			return Vector3.new(origin.X, below, origin.Z)
+		end
+	end
+	local root = if typeof(model) == "Instance" and model:IsA("Model") then model.PrimaryPart else nil
+	local hover = if root ~= nil then hoverOf(model, root) else nil
+	if hover ~= nil then
+		return origin - Vector3.new(0, hover, 0)
+	end
+	return origin
+end
+
+-- An attack the server dropped before it landed or launched (RushEnded "Dropped", D-254: a hold or a
+-- sleep, which no stagger tells): its tell comes down, its clip fades out, a launch its telegraph
+-- predicted is not drawn, and its Telegraph or ActionStarted heard late is ignored (`launches`).
+-- `beat` is its wind-up's end on the server's clock: an attack known to begin after it is a newer one.
+local function dropAttack(record: any, beat: number)
+	local id = record.id
+	launches[id] = math.max(launches[id] or -math.huge, beat)
+	local attack = attacks[id]
+	if attack ~= nil and attack.since > beat + 0.5 * AI.tickSeconds() then
+		return
+	end
+	dependencies().telegraphs.hide(record.model)
+	if attack ~= nil then
+		attacks[id] = nil
+		local handle = attack.handle
+		if handle ~= nil then
+			animatorOf(record):stop(handle, Combat.locomotionBlendOut)
+		end
+	end
+	local rush = rushes[id]
+	if rush ~= nil and not rush.launched then
+		releaseRush(id)
+	end
+end
+
+-- A model's root part, or nil (no model, no PrimaryPart).
+local function primaryOf(model: any): BasePart?
+	if typeof(model) ~= "Instance" or not model:IsA("Model") then
+		return nil
+	end
+	return (model :: Model).PrimaryPart
+end
+
+-- The side a blow comes from in the target's own frame (-Z is its front), as the server names it
+-- (DamageMath.staggerDirection): the flinch shown before its word is the one the word then names.
+local function sideOf(from: Vector3, target: CFrame): string
+	local offset = target:PointToObjectSpace(from)
+	if math.abs(offset.Z) >= math.abs(offset.X) then
+		return if offset.Z <= 0 then "Front" else "Back"
+	end
+	return if offset.X > 0 then "Right" else "Left"
+end
+
+-- Takes back an enemy's blow shown before the server's word (D-258): its flinch fades if it plays.
+local function takeBack(attackerId: number)
+	local shown = struck[attackerId]
+	if shown == nil then
+		return
+	end
+	struck[attackerId] = nil
+	local handle = shown.handle
+	if handle ~= nil and stateClips[shown.targetId] == handle then
+		stateClips[shown.targetId] = nil
+		local target = dependencies().entities.get(shown.targetId)
+		if target ~= nil then
+			animatorOf(target):stop(handle, AI.strikePrediction.takeBackBlendOut)
+		end
+	end
+end
+
+-- True when the local fighter stands open to `attack` at its strike frame as far as this client can
+-- tell (D-258): in a state a blow lands on, no guard or dodge let go within the grace (the server
+-- may hold it still), and deep inside the blow's shape from where the attacker stands and faces.
+local function exposedTo(attacker: any, target: any, attack: Attack): boolean
+	local config = AI.strikePrediction
+	local defence = dependencies().localDefence
+	if defence == nil or not hasTelegraphShapes then
+		return false
+	end
+	local state, leftAt = defence()
+	if config.exposedStates[state] ~= true then
+		return false
+	end
+	if leftAt ~= nil and clock() - leftAt < config.defenceGraceSeconds then
+		return false
+	end
+	local def = attack.def
+	local from = primaryOf(attacker.model)
+	local body = primaryOf(target.model)
+	if def == nil or from == nil or body == nil then
+		return false
+	end
+	local frame = from.CFrame
+	local origin, look, at = frame.Position, frame.LookVector, body.CFrame.Position
+	return TelegraphShapes.deepInside(
+		def.reach,
+		def.arc,
+		Combat.strikeLineWidth,
+		{ origin.X, origin.Y, origin.Z },
+		{ look.X, 0, look.Z },
+		{ at.X, at.Y, at.Z },
+		config.marginStuds,
+		config.marginDegrees
+	)
+end
+
+-- Shows an enemy's blow on the local fighter on its strike's server frame (F16, D-258): the flinch
+-- from the side it comes from, the white flash and the hit's moment (its sound). HP, the number and
+-- the hit-stop wait for the server's word (HitConfirmed, heardStrike).
+local function showStrike(attacker: any, target: any)
+	local d = dependencies()
+	local from, body = primaryOf(attacker.model), primaryOf(target.model)
+	if from == nil or body == nil then
+		return
+	end
+	local bodyFrame = body.CFrame
+	playReaction(target, "Flinch" .. sideOf(from.CFrame.Position, bodyFrame))
+	-- What the word will say of an open blow (CombatService.enemyStrike: a Normal hit-stop).
+	local info = {
+		tier = "Normal",
+		position = bodyFrame.Position,
+		attacker = attacker.model,
+		target = target.model,
+		involved = true,
+		localAttacker = false,
+		trailToken = d.trailToken(attacker),
+		parried = false,
+		guarded = false,
+		crit = false,
+		isSwitch = false,
+		killed = false,
+		art = nil,
+		partner = nil,
+	}
+	if d.impact.ownsHighlight(info) ~= true then
+		d.outline.flash(target.model, "SystemWhite", Combat.highlightFlashFrames)
+	end
+	local moment = d.impact.hit(info)
+	struck[attacker.id] = {
+		seen = playClock(),
+		moment = if typeof(moment) == "string" then moment else nil,
+		targetId = target.id,
+		handle = stateClips[target.id],
+	}
+end
+
+-- The server's word on an enemy's blow at the local fighter (D-258): the blow shown before it, or
+-- nil. A word that parries, guards or breaks a guard takes the shown flinch back and returns nil,
+-- so the word plays its own answer whole. A word heard before the strike frame leaves it unshown.
+local function heardStrike(payload: any): Struck?
+	local attackerId = payload.attackerId
+	local attack = attacks[attackerId]
+	if attack ~= nil then
+		attack.judged = true
+	end
+	local shown = struck[attackerId]
+	if shown == nil then
+		return nil
+	end
+	if payload.parried == true or payload.guarded == true or payload.broke == true then
+		takeBack(attackerId)
+		return nil
+	end
+	struck[attackerId] = nil
+	return shown
+end
+
+-- True while the flinch of a blow shown before its word plays on `targetId` (its Stagger word does
+-- not restart it).
+local function flinchShown(targetId: number): boolean
+	local handle = stateClips[targetId]
+	if handle == nil then
+		return false
+	end
+	for _, shown in struck do
+		if shown.targetId == targetId and shown.handle == handle then
+			return true
+		end
+	end
+	return false
+end
+
+--- Judges, once, every known enemy blow whose strike frame the server's clock has reached, for the
+--- local fighter (F16, D-258), and takes back the blows shown that the server has not confirmed in
+--- ai.luau strikePrediction.confirmSeconds of play. Runs every Heartbeat; tests call it.
+function Replication.stepStrikes()
+	local d = dependencies()
+	local config = AI.strikePrediction
+	local seen = playClock()
+	for attackerId, shown in struck do
+		if seen - shown.seen > config.confirmSeconds then
+			takeBack(attackerId)
+		end
+	end
+	local now = serverClock()
+	local localId = d.localId()
+	if not config.enabled or now == nil or localId == nil or d.localDefence == nil then
+		return
+	end
+	local target: any = nil
+	for id, attack in attacks do
+		if attack.judged == true or attack.rush or not (attack.strike > 0) then
+			continue
+		end
+		local lands = attack.since + attack.windUp + attack.strike + attack.paused
+		if now < lands then
+			continue
+		end
+		attack.judged = true
+		if now - lands > config.lateSeconds or struck[id] ~= nil then
+			continue
+		end
+		target = target or d.entities.get(localId)
+		local attacker = d.entities.get(id)
+		if target ~= nil and attacker ~= nil and target.kind == "Player" and exposedTo(attacker, target, attack) then
+			showStrike(attacker, target)
+		end
+	end
+end
+
 local handlers: { [string]: (payload: any) -> () } = {}
 
 function handlers.ActionStarted(payload: any)
@@ -1005,6 +1304,12 @@ function handlers.ActionStarted(payload: any)
 	end
 	local record = d.entities.get(payload.entityId)
 	if record == nil then
+		return
+	end
+	local launched = launches[record.id]
+	if launched ~= nil and payload.serverTime < launched then
+		-- Out of order (as D-222 guards the Telegraph): this attack has launched, or was dropped, and
+		-- its clip would start from the middle of its run (item 8). The gait follows the drawn body.
 		return
 	end
 	local animator = animatorOf(record)
@@ -1048,8 +1353,21 @@ function handlers.Telegraph(payload: any)
 	local now = serverClock()
 	local lateBy = if now ~= nil then math.max(0, now - payload.serverTime) else nil
 	local origin, facing = toVector(payload.origin), toVector(payload.facing)
-	d.telegraphs.show(record.model, payload.kind, payload.windUp, origin, facing, payload.shape, lateBy)
 	local def, attackDef = attackDefOf(record, payload.attackId, nil)
+	local rush = attackDef ~= nil and hasRushDraw and RushDraw.isRush(def.archetype, attackDef)
+	-- A blow's tell holds to its snap (F7); a rush's line ends at its launch. Its shape lies on the
+	-- ground under the root the server named (F11).
+	local strike = if attackDef ~= nil and not rush then attackDef.strike else nil
+	d.telegraphs.show(
+		record.model,
+		payload.kind,
+		payload.windUp,
+		grounded(record, origin),
+		facing,
+		payload.shape,
+		lateBy,
+		strike
+	)
 	if attackDef == nil then
 		return
 	end
@@ -1087,7 +1405,7 @@ function handlers.RushStarted(payload: any)
 		startedAt = payload.serverTime,
 	}
 	local rush = rushes[record.id]
-	if rush ~= nil and not rush.launched and rush.state.phase ~= "Done" then
+	if rush ~= nil and not rush.launched and rush.released ~= true and rush.state.phase ~= "Done" then
 		RushDraw.retime(rush.state, line)
 		rush.launched = true
 	else
@@ -1106,6 +1424,13 @@ local function rushOf(payload: any): Rush?
 end
 
 function handlers.RushEnded(payload: any)
+	if payload.reason == "Dropped" then
+		local record = dependencies().entities.get(payload.entityId)
+		if record ~= nil then
+			dropAttack(record, payload.launchedAt)
+		end
+		return
+	end
 	local rush = rushOf(payload)
 	if rush == nil then
 		return
@@ -1161,6 +1486,11 @@ function handlers.HitConfirmed(payload: any)
 		expirePredictions(seen)
 		dropStale(earlyConfirms, seen)
 		predicted = takeMatch(predictions, payload.targetId, payload.hitIndex, payload.artId, payload.swing)
+		if predicted == nil and payload ~= releasing and waitsForKey(payload) then
+			-- Before the blade showed the key: the hold starts on the key frame (D-267).
+			table.insert(heldWords, { payload = payload, seen = seen })
+			return
+		end
 		if predicted == nil then
 			table.insert(earlyConfirms, {
 				targetId = payload.targetId,
@@ -1170,6 +1500,12 @@ function handlers.HitConfirmed(payload: any)
 				seen = seen,
 			})
 		end
+	end
+	-- An enemy's blow on the local fighter shown on its strike frame (D-258): this word brings the
+	-- number and what it adds; one that guards or parries took the flinch back.
+	local shown: Struck? = nil
+	if localId ~= nil and payload.targetId == localId and payload.attackerId ~= nil then
+		shown = heardStrike(payload)
 	end
 	-- The pause the server gave the target's attack (D-172): a contact's provisional share gives way
 	-- to it; a hit nobody predicted brings it whole. Absent: none (no open attack, or a kill).
@@ -1186,11 +1522,11 @@ function handlers.HitConfirmed(payload: any)
 			-- holds once (issue 6), and a later cut's hold is that cut's own; the stronger tier
 			-- still sounds and shows below.
 			local animator = animatorOf(attacker)
-			local predictedSeconds = Combat.hitStopFrames[predicted.tier] * ChoreoData.frameSeconds
+			local predictedSeconds = heldFrames(Combat.hitStopFrames[predicted.tier]) * ChoreoData.frameSeconds
 			local remaining = holdRemaining(animator, predictedSeconds, predicted.at)
 			if remaining > 0 then
 				local held = math.max(0, predictedSeconds - remaining)
-				local left = frames - held / ChoreoData.frameSeconds
+				local left = heldFrames(frames) - held / ChoreoData.frameSeconds
 				if left > 0 then
 					animator:hitStop(left)
 					holdEnds = math.max(holdEnds, clock() + left * ChoreoData.frameSeconds)
@@ -1209,19 +1545,24 @@ function handlers.HitConfirmed(payload: any)
 		if target ~= nil and attack ~= nil then
 			shiftAttack(target, attack, serverPause - predicted.allowance)
 		end
-	else
+	elseif payload.parried ~= true then
+		-- A parry holds neither rig (D-257): the Inverted frame is the clash, and the deflect and the
+		-- stagger start on it (F8); the clips author their own hold on the clash.
 		if attacker ~= nil then
 			if payload.attackerId == localId then
 				holdLocal(animatorOf(attacker), frames)
 			elseif attacker.kind == "Enemy" then
 				holdStriker(attacker, frames)
 			else
-				animatorOf(attacker):hitStop(frames)
+				animatorOf(attacker):hitStop(heldFrames(frames))
 			end
 		end
 		if target ~= nil and target ~= attacker then
 			if payload.targetId == localId then
-				holdLocal(animatorOf(target), frames)
+				-- A blow shown on its strike frame holds nothing now: its flinch is under way (D-258).
+				if shown == nil then
+					holdLocal(animatorOf(target), frames)
+				end
 			elseif target.kind == "Enemy" then
 				holdTarget(target, frames)
 				local attack = attacks[target.id]
@@ -1229,7 +1570,7 @@ function handlers.HitConfirmed(payload: any)
 					shiftAttack(target, attack, serverPause)
 				end
 			else
-				animatorOf(target):hitStop(frames)
+				animatorOf(target):hitStop(heldFrames(frames))
 			end
 		end
 	end
@@ -1295,7 +1636,7 @@ function handlers.HitConfirmed(payload: any)
 		d.digits.show(position, payload.damage, kind)
 	end
 	if target ~= nil then
-		if predicted == nil and d.impact.ownsHighlight(info) ~= true and not breaksGuard then
+		if predicted == nil and shown == nil and d.impact.ownsHighlight(info) ~= true and not breaksGuard then
 			-- FinalHit and Kill flash it themselves, white, after the impact frames. The blow that
 			-- breaks a guard leaves the guard break's red fill (StateChanged GuardBroken) showing.
 			d.outline.flash(target.model, "SystemWhite", Combat.highlightFlashFrames)
@@ -1331,7 +1672,13 @@ function handlers.HitConfirmed(payload: any)
 	end
 	-- The hit's cue (block, basic, crit, final, kill, Switch land), glint, crescent, line, frames;
 	-- after a contact, only what the server's stronger tier adds to the moment it played.
-	if predicted == nil then
+	if shown ~= nil then
+		-- Only what the word adds to the moment shown on the strike frame (a kill's), D-258.
+		local moment = shown.moment
+		if moment ~= nil then
+			d.impact.hit(info, moment)
+		end
+	elseif predicted == nil then
 		d.impact.hit(info)
 	elseif upgrade > 0 then
 		d.impact.hit(info, predicted.moment)
@@ -1355,8 +1702,13 @@ function handlers.StateChanged(payload: any)
 		local rush = rushes[record.id]
 		if rush ~= nil then
 			local now = serverClock()
-			if rush.state.phase == "Armed" or now == nil then
+			if now == nil then
 				endRush(record.id)
+			elseif not rush.launched then
+				-- No RushStarted came before this (both reliable, in order): the server never
+				-- launched it. The crouch keeps its turn until the late root comes round; a launch
+				-- this client predicted slides back (D-255).
+				releaseRush(record.id)
 			else
 				RushDraw.halt(rush.state, now)
 			end
@@ -1364,7 +1716,10 @@ function handlers.StateChanged(payload: any)
 	end
 	local clipName = stateClipName(payload.state, payload.direction, isLocal)
 	if clipName ~= nil then
-		playReaction(record, clipName)
+		-- The flinch of a blow shown on its strike frame plays on (D-258).
+		if not (payload.state == "Stagger" and flinchShown(record.id)) then
+			playReaction(record, clipName)
+		end
 	elseif payload.state ~= "Dead" then
 		stopReaction(record)
 	end
@@ -1498,6 +1853,38 @@ end
 
 Replication.handlers = handlers
 
+-- Plays held word `index` (D-267): the server's word for a hit whose strike key this client's
+-- clip now shows.
+local function letGo(index: number)
+	local word = table.remove(heldWords, index)
+	if word == nil then
+		return
+	end
+	releasing = word.payload
+	handlers.HitConfirmed(word.payload)
+	releasing = nil
+end
+
+--- Plays the server's held words (D-267) once this client's clip showed their strike's key, the
+--- swing stopped or changed, or they waited combat.contact.wordWaitSeconds of play. Every
+--- Heartbeat, after the render step that moved the clip: the hold starts on the frame after the key
+--- frame, the key pose being what freezes.
+function Replication.stepWords()
+	if deps == nil then
+		return
+	end
+	local now = playClock()
+	local index = 1
+	while index <= #heldWords do
+		local word = heldWords[index]
+		if now - word.seen > Combat.contact.wordWaitSeconds or not waitsForKey(word.payload) then
+			letGo(index)
+		else
+			index += 1
+		end
+	end
+end
+
 --- Plays one of the local fighter's predicted contacts (ContactPredictor, issue 4) on the frame
 --- its blade touched the enemy: the hit-stop on both rigs at the contact's tier, the white flash
 --- (unless the moment owns it), the camera nudge and shake, the hit-stop tick and the director's
@@ -1523,7 +1910,7 @@ function Replication.contact(contact: any): boolean
 	if target.kind == "Enemy" then
 		allowance, attack = allowPause(target, holdTarget(target, frames))
 	else
-		animatorOf(target):hitStop(frames)
+		animatorOf(target):hitStop(heldFrames(frames))
 	end
 	-- What the contact knows of the hit: no crit, no Switch (the server rolls those), a kill only
 	-- when ContactPredictor proved it.
@@ -1563,6 +1950,20 @@ function Replication.contact(contact: any): boolean
 		allowance = allowance,
 		attack = attack,
 	})
+	-- The server's word for this hit, held for its key (D-267), plays on it now: it finds the
+	-- contact just played and adds only what its tier adds.
+	for index, word in heldWords do
+		local payload = word.payload
+		if
+			payload.targetId == contact.targetId
+			and payload.hitIndex == contact.windowIndex
+			and payload.artId == contact.artId
+			and (payload.swing == nil or contact.swing == nil or payload.swing == contact.swing)
+		then
+			letGo(index)
+			break
+		end
+	end
 	return true
 end
 
@@ -1633,13 +2034,37 @@ local function routeOneShot(record: any, clipId: string, event: any)
 	end
 end
 
+-- True when every handle of `clipId` on the rig was stopped before its end: the clip was taken
+-- away (the server's Stagger, a cancelled hold, a refused swing) and fades out where it stands,
+-- its clock still running. What that fade crosses only closes (F5): no tell, chime, trail or
+-- smear starts on a clip the rig no longer plays. A clip that ran to its own end is not one.
+local function takenAway(record: any, clipId: string): boolean
+	local animator = animatorOf(record)
+	local mixer = if typeof(animator) == "table" then animator.mixer else nil
+	if typeof(mixer) ~= "table" or typeof(mixer.handles) ~= "function" then
+		return false
+	end
+	local found = false
+	for _, handle in mixer:handles() do
+		if handle.clipId == clipId then
+			if not handle.stopping or handle.ended then
+				return false
+			end
+			found = true
+		end
+	end
+	return found
+end
+
 --- Routes one clip event on a rig to the FX and audio packages (trails, smear, activation light,
---- footsteps, clip sounds). `jumped`: a render stall's gap crossed it (D-132); only what it closes runs.
+--- footsteps, clip sounds). `jumped`: a render stall's gap crossed it (D-132); only what it closes
+--- runs, as for a clip taken away (F5).
 function Replication.routeClipEvent(record: any, clipId: string, event: any, jumped: boolean?)
 	local d = dependencies()
 	local model = record.model
 	local kind = event.kind
-	local starts = jumped ~= true
+	local closing = takenAway(record, clipId)
+	local starts = jumped ~= true and not closing
 	if kind == "HitWindowOpen" or kind == "TrailOn" then
 		-- A jumped one still names the clip's trail kind for the events after it.
 		local trailKind = resolveTrailKind(record, clipId, event)
@@ -1647,7 +2072,8 @@ function Replication.routeClipEvent(record: any, clipId: string, event: any, jum
 			d.trails.setActive(model, true, trailKind)
 		end
 		if kind == "HitWindowOpen" then
-			d.trails.activationLight(model, false, d.trailToken(record))
+			-- A clip taken away lets the light it lit fade, as a cancelled hold's does (F5).
+			d.trails.activationLight(model, false, d.trailToken(record), closing)
 		end
 	elseif kind == "HitWindowClose" or kind == "TrailOff" then
 		d.trails.setActive(model, false, resolveTrailKind(record, clipId, event))
@@ -1815,18 +2241,28 @@ function Replication.bind(newDeps: Deps)
 	table.clear(deathVocals)
 	table.clear(predictions)
 	table.clear(earlyConfirms)
+	table.clear(heldWords)
+	releasing = nil
 	for id in rushes do
 		endRush(id)
 	end
 	table.clear(attacks)
 	table.clear(launches)
+	table.clear(struck)
 	holdRun = 0
 	holdEnds = -math.huge
 	playSeconds = 0
 	playWall = nil
 	playTicking = typeof(newDeps.onHeartbeat) == "function"
 	if playTicking then
-		(newDeps.onHeartbeat :: any)(tickPlay)
+		local onHeartbeat = newDeps.onHeartbeat :: any
+		onHeartbeat(function()
+			tickPlay()
+			-- Enemy blows on the local fighter, judged on their strike frames (D-258).
+			Replication.stepStrikes()
+			-- The server's words held for their strike's key (D-267).
+			Replication.stepWords()
+		end)
 	end
 	deathCount = 0
 	silenceEnd = nil
@@ -1897,6 +2333,44 @@ local function worldCast(
 	return result.Distance, result.Normal
 end
 
+-- The states a defence stands in on the server a latency after the client lets it go (D-258).
+local DEFENDING: { [string]: boolean } = { Guard = true, Dodge = true }
+
+-- The local fighter's defence from CharacterController (D-258): its state now, and the os.clock time
+-- it last left a guard or a dodge. Nil when the controller is missing (a stub): nothing is shown
+-- before the server's word then.
+local function defenceOf(controller: any): (() -> (string, number?))?
+	if typeof(controller) ~= "table" or Siblings.isStub(controller) then
+		return nil
+	end
+	local state = rawget(controller, "state")
+	local changed = rawget(controller, "stateChanged")
+	if typeof(state) ~= "function" or typeof(changed) ~= "table" then
+		return nil
+	end
+	local current = state()
+	local leftAt: number? = nil
+	changed:Connect(function(nextState: string)
+		if DEFENDING[current] == true then
+			leftAt = os.clock()
+		end
+		current = nextState
+	end)
+	return function(): (string, number?)
+		return state(), leftAt
+	end
+end
+
+-- CharacterController.awaitsKey (D-267), or nil when the controller is missing (a stub): the
+-- server's word then plays when it comes.
+local function keyAheadOf(controller: any): ((windowIndex: number, artId: string?, swing: number?) -> boolean)?
+	if typeof(controller) ~= "table" or Siblings.isStub(controller) then
+		return nil
+	end
+	local awaitsKey = rawget(controller, "awaitsKey")
+	return if typeof(awaitsKey) == "function" then awaitsKey else nil
+end
+
 --- Binds the real modules (missing siblings become no-op stubs) and subscribes to the remotes.
 function Replication.start()
 	local Client = script.Parent.Parent
@@ -1907,6 +2381,7 @@ function Replication.start()
 	local CameraController = require(Client.camera.CameraController)
 	local choreo = Siblings.load(Client, "choreo.Choreo")
 	local clipLibrary = Siblings.load(Client, "choreo.ClipLibrary")
+	local controller = Siblings.load(script.Parent, "CharacterController")
 	Replication.bind({
 		net = Net.client(),
 		entities = EntityTracker,
@@ -1957,6 +2432,9 @@ function Replication.start()
 			return workspace:GetServerTimeNow()
 		end,
 		worldCast = worldCast,
+		-- Loaded by name: CharacterController requires this module.
+		localDefence = defenceOf(controller),
+		keyAhead = keyAheadOf(controller),
 	})
 	Replication.subscribe()
 end

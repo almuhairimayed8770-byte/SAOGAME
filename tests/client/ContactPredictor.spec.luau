@@ -205,74 +205,78 @@ local function bodyParts(model: any): { any }
 end
 
 describe("ContactPredictor on the real rigs", function()
-	it("predicts every window of every attack at real-fight range, on the frame the blade gets there", function()
-		local cases = { { "BoarSide", 3.5 }, { "Kobold", 3.5 }, { "BoarFacing", 7 } }
-		for _, case in cases do
-			local enemy, def = placeEnemy(case[1], case[2])
-			local parts = bodyParts(enemy)
-			for _, name in ATTACKS do
-				local which = attack(name)
-				local windows = ClipSampler.hitWindows(which.clip)
-				local snaps = ReviewMarkers.strikeSnaps(which.clip)
-				local touches = {}
-				for index, window in windows do
-					touches[index] = firstTouch(which, parts, window) or false
-				end
-				for _, phase in { 0, 0.5 } do
-					local found = swing(which, { record(5, enemy, def) }, { phase = phase })
+	it(
+		"predicts every window of every attack at real-fight range, on the frame the blade gets there or its key",
+		function()
+			local cases = { { "BoarSide", 3.5 }, { "Kobold", 3.5 }, { "BoarFacing", 7 } }
+			for _, case in cases do
+				local enemy, def = placeEnemy(case[1], case[2])
+				local parts = bodyParts(enemy)
+				for _, name in ATTACKS do
+					local which = attack(name)
+					local windows = ClipSampler.hitWindows(which.clip)
+					local snaps = ReviewMarkers.strikeSnaps(which.clip)
+					local touches = {}
 					for index, window in windows do
-						local touch: number? = touches[index] or nil
-						local mine = nil
-						for _, entry in found do
-							if entry.contact.windowIndex == index then
-								expect(mine == nil).toBe(true) -- once per window
-								mine = entry
+						touches[index] = firstTouch(which, parts, window) or false
+					end
+					for _, phase in { 0, 0.5 } do
+						local found = swing(which, { record(5, enemy, def) }, { phase = phase })
+						for index, window in windows do
+							local touch: number? = touches[index] or nil
+							local mine = nil
+							for _, entry in found do
+								if entry.contact.windowIndex == index then
+									expect(mine == nil).toBe(true) -- once per window
+									mine = entry
+								end
 							end
-						end
-						if touch == nil then
-							-- The true blade never reaches this enemy in this window: no prediction.
-							expect(mine).toBe(nil)
-							continue
-						end
-						if mine == nil then
-							error(
-								("%s %s@%s window %d phase %.1f: touched at %.4f, never predicted"):format(
-									name,
-									case[1],
-									tostring(case[2]),
-									index,
-									phase,
-									touch :: number
+							if touch == nil then
+								-- The true blade never reaches this enemy in this window: no prediction.
+								expect(mine).toBe(nil)
+								continue
+							end
+							if mine == nil then
+								error(
+									("%s %s@%s window %d phase %.1f: touched at %.4f, never predicted"):format(
+										name,
+										case[1],
+										tostring(case[2]),
+										index,
+										phase,
+										touch :: number
+									)
 								)
-							)
-						end
-						-- The first rendered frame at or after the true first touch (to the 480 Hz
-						-- search's step): never a frame early, never a frame late, never before the
-						-- window and never after the strike's snap has ended.
-						expect(mine.contact.targetId).toBe(5)
-						expect(mine.time >= window.open - 1e-9).toBe(true)
-						local firstFrameAfter = touch :: number
-						if
-							mine.time < firstFrameAfter - TOUCH_STEP - 1e-9
-							or mine.time > firstFrameAfter + FRAME + 1e-6
-						then
-							error(
-								("%s %s window %d: contact at %.4f, the blade got there at %.4f"):format(
-									name,
-									case[1],
-									index,
-									mine.time,
-									firstFrameAfter
+							end
+							-- The first rendered frame at or after the true first touch (to the 480 Hz
+							-- search's step), or at or after the strike's key when the blade got there
+							-- before it (F1: the snap shows, then the hold): never a frame early, never
+							-- a frame late, never before the window and never after the snap has ended.
+							expect(mine.contact.targetId).toBe(5)
+							expect(mine.time >= window.open - 1e-9).toBe(true)
+							local firstFrameAfter = math.max(touch :: number, snaps[index].finish - 1e-4)
+							if
+								mine.time < firstFrameAfter - TOUCH_STEP - 1e-9
+								or mine.time > firstFrameAfter + FRAME + 1e-6
+							then
+								error(
+									("%s %s window %d: contact at %.4f, the blade got there at %.4f"):format(
+										name,
+										case[1],
+										index,
+										mine.time,
+										firstFrameAfter
+									)
 								)
-							)
+							end
+							local snap = snaps[index]
+							expect(mine.time <= snap.finish + FRAME + 1e-9).toBe(true)
 						end
-						local snap = snaps[index]
-						expect(mine.time <= snap.finish + FRAME + 1e-9).toBe(true)
 					end
 				end
 			end
 		end
-	end)
+	)
 
 	it("names the tier the server gives: Final on an Art's last window and the chain's third swing", function()
 		local enemy, def = placeEnemy("BoarSide", 3.5)
@@ -378,9 +382,95 @@ describe("ContactPredictor on the real rigs", function()
 		poseAt(sharp.clip, before)
 		expect(#predictor:step(before)).toBe(0)
 		poseAt(sharp.clip, after)
-		local contacts = predictor:step(after)
+		-- Touched between the two frames, before the strike's key: kept for the key's frame (F1).
+		expect(#predictor:step(after)).toBe(0)
+		local key = ContactPredictor.strikeKey(sharp.clip, window)
+		expect(key > after).toBe(true)
+		poseAt(sharp.clip, key)
+		local contacts = predictor:step(key)
 		expect(#contacts).toBe(1)
 		expect(contacts[1].targetId).toBe(9)
+	end)
+
+	it("a touch kept for the key is dropped by a stall's jump, a stop, or the target's death", function()
+		local enemy, def = placeEnemy("Kobold", 1.8)
+		local sharp = attack("SharpNail")
+		local window = ClipSampler.hitWindows(sharp.clip)[1]
+		local key = ContactPredictor.strikeKey(sharp.clip, window)
+		local function upToKey(target: any, between: ((predictor: any) -> ())?): { any }
+			local predictor = ContactPredictor.new({
+				targets = function(): { any }
+					return { target }
+				end,
+			})
+			predictor:begin({
+				model = avatar.model,
+				clip = sharp.clip,
+				artId = sharp.artId,
+				finalHit = true,
+				multiplier = sharp.multiplier,
+				weaponAttack = WEAPON.attack,
+			})
+			poseAt(sharp.clip, window.open - FRAME)
+			predictor:step(window.open - FRAME)
+			poseAt(sharp.clip, window.open + FRAME)
+			expect(#predictor:step(window.open + FRAME)).toBe(0) -- touched, kept
+			if between ~= nil then
+				between(predictor)
+			end
+			poseAt(sharp.clip, key)
+			local found = predictor:step(key)
+			predictor:stop()
+			return found
+		end
+		-- Untouched, the kept touch plays at the key, its hit point on the key frame's blade.
+		local plain = upToKey(record(5, enemy, def))
+		expect(#plain).toBe(1)
+		local chain = BladeContact.chain(avatar.model) :: any
+		poseAt(sharp.clip, key)
+		local guard, tip = BladeContact.blade(chain, BladeContact.read(chain))
+		local nearest, at = math.huge, Vector3.zero
+		for _, part in bodyParts(enemy) do
+			local distance, point = BladeContact.segmentBoxDistance(guard, tip, part.CFrame, part.Size)
+			if distance < nearest then
+				nearest, at = distance, point
+			end
+		end
+		expect((at - plain[1].position).Magnitude < 1e-6).toBe(true)
+		-- A stall's jump between: the server's word plays it whole.
+		expect(#upToKey(record(5, enemy, def), function(predictor: any)
+			poseAt(sharp.clip, window.open + 2 * FRAME)
+			predictor:step(window.open + 2 * FRAME, true)
+		end)).toBe(0)
+		-- The target died before the key.
+		local dying = record(5, enemy, def)
+		expect(#upToKey(dying, function()
+			dying.state = "Dead"
+		end)).toBe(0)
+		-- The server confirmed it before the key: not played again.
+		local predictor = ContactPredictor.new({
+			targets = function(): { any }
+				return { record(5, enemy, def) }
+			end,
+			confirmed = function(): boolean
+				return true
+			end,
+		})
+		predictor:begin({
+			model = avatar.model,
+			clip = sharp.clip,
+			artId = sharp.artId,
+			finalHit = true,
+			multiplier = sharp.multiplier,
+			weaponAttack = WEAPON.attack,
+		})
+		poseAt(sharp.clip, window.open - FRAME)
+		predictor:step(window.open - FRAME)
+		poseAt(sharp.clip, window.open + FRAME)
+		expect(#predictor:step(window.open + FRAME)).toBe(0)
+		poseAt(sharp.clip, key)
+		expect(#predictor:step(key)).toBe(0)
+		predictor:stop()
 	end)
 
 	it("refuses a rig without a blade or a clip without a window, and stop ends the swing", function()

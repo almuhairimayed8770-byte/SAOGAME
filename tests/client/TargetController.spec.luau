@@ -6,7 +6,7 @@
 	local character's root. Covers TargetController.lockOn (the dev aim helper's and any caller's
 	way to lock a named enemy through the F key's path), the soft assist's candidates (D-112) and
 	the lock across the local character's death and respawn (the tracker's local id and the local
-	record's State).
+	record's State), and the shot held through a death until the shatter (F4).
 ]]
 
 local luau = require("@lune/luau")
@@ -14,6 +14,8 @@ local luau = require("@lune/luau")
 local Signal = Harness.load("src/shared/util/Signal")
 local CameraData = Harness.load("src/shared/data/camera")
 local TrailingSend = Harness.load("src/shared/net/TrailingSend")
+local Combat = Harness.load("src/shared/data/combat")
+local Moments = Harness.load("src/shared/data/moments")
 
 local CONTROLLER_PATH = "src/client/controllers/TargetController"
 
@@ -24,6 +26,8 @@ type Fixture = {
 	add: (id: number, kind: string, position: Vector3?, state: string?) -> any,
 	requests: { { entityId: number? } },
 	cameraLocks: { any },
+	-- Seconds of every CameraController.holdLock (the shot held after a death, F4).
+	cameraHolds: { number },
 	outlines: { { model: any, importance: string } },
 	changes: { any },
 	-- Moves the fake clock past the TargetRequest pacer's gap.
@@ -44,6 +48,7 @@ local function load(origin: Vector3, cameraLook: Vector3): Fixture
 	local records: { [number]: any } = {}
 	local requests: { { entityId: number? } } = {}
 	local cameraLocks: { any } = {}
+	local cameraHolds: { number } = {}
 	local outlines: { { model: any, importance: string } } = {}
 	local lockToggle = Signal.new()
 	local localId: number? = nil
@@ -102,6 +107,9 @@ local function load(origin: Vector3, cameraLook: Vector3): Fixture
 		CameraController = {
 			setLockTarget = function(model: any)
 				table.insert(cameraLocks, model or false)
+			end,
+			holdLock = function(seconds: number)
+				table.insert(cameraHolds, seconds)
 			end,
 		},
 		Siblings = {
@@ -167,6 +175,7 @@ local function load(origin: Vector3, cameraLook: Vector3): Fixture
 		end,
 		requests = requests,
 		cameraLocks = cameraLocks,
+		cameraHolds = cameraHolds,
 		outlines = outlines,
 		changes = changes,
 		wait = function()
@@ -286,11 +295,13 @@ describe("TargetController across the local character's death and respawn", func
 		return fixture, me, boar
 	end
 
-	it("clears the lock when the local character dies: camera, outline, TargetRequest, signal", function()
+	it("clears the lock when the local character dies: outline, TargetRequest, signal; the shot holds", function()
 		local fixture, me, boar = lockedWhileAlive()
 		fixture.setState(me, "Dead")
 		expect(fixture.controller.current()).toBeNil()
-		expect(fixture.cameraLocks[#fixture.cameraLocks]).toBe(false)
+		-- The camera keeps the framing through the freeze and lets go at the shatter (F4).
+		expect(fixture.cameraLocks).toEqual({ boar.model })
+		expect(fixture.cameraHolds).toEqual({ Moments.deathDuckDelay() + Combat.deathFreeze })
 		expect(fixture.outlines[#fixture.outlines].model).toBe(boar.model)
 		expect(fixture.outlines[#fixture.outlines].importance).toBe("Normal")
 		expect(fixture.requests).toEqual({ { entityId = 7 }, { entityId = nil } })
@@ -435,5 +446,75 @@ describe("TargetController measures an enemy where its body is drawn (D-193)", f
 		expect(list[1].distance).toBeCloseTo(math.sqrt(4 * 4 + 4 * 4), 1e-3)
 		expect(list[1].bearing).toBeCloseTo(-45, 1e-3)
 		clear(boar)
+	end)
+end)
+
+describe("TargetController holds the shot through a death until the shatter (F4)", function()
+	local SHATTER = Moments.deathDuckDelay() + Combat.deathFreeze
+
+	local function locked(): (Fixture, any)
+		local fixture = load(ORIGIN, AHEAD)
+		local boar = fixture.add(7, "Enemy", Vector3.new(0, 1, -5))
+		expect(fixture.controller.lockOn(7)).toBe(true)
+		fixture.wait()
+		return fixture, boar
+	end
+
+	it("ends the lock on the target's death but holds the camera's framing until the shatter", function()
+		local fixture, boar = locked()
+		fixture.setState(boar, "Dead")
+		-- The lock itself ends now: outline, the server's lock, the signal.
+		expect(fixture.controller.current()).toBeNil()
+		expect(fixture.outlines[#fixture.outlines].model).toBe(boar.model)
+		expect(fixture.outlines[#fixture.outlines].importance).toBe("Normal")
+		expect(fixture.requests).toEqual({ { entityId = 7 }, { entityId = nil } })
+		expect(fixture.changes[#fixture.changes]).toBe(false)
+		-- The shot does not: no pull-back to the free camera through the freeze.
+		expect(fixture.cameraLocks).toEqual({ boar.model })
+		expect(fixture.cameraHolds).toEqual({ SHATTER })
+		expect(SHATTER).toBeGreaterThanOrEqual(Combat.deathFreeze)
+	end)
+
+	it("holds the same way when the heartbeat check finds the target Dead first", function()
+		local fixture, boar = locked()
+		boar.state = "Dead" -- the attribute landed without a changed event yet
+		fixture.heartbeat()
+		expect(fixture.controller.current()).toBeNil()
+		expect(fixture.cameraLocks).toEqual({ boar.model })
+		expect(fixture.cameraHolds).toEqual({ SHATTER })
+	end)
+
+	it("lets the shot go at once on the key, on the break distance and when the target is removed", function()
+		local fixture, boar = locked()
+		fixture.controller.clear()
+		expect(fixture.cameraLocks).toEqual({ boar.model, false })
+
+		fixture, boar = locked()
+		boar.model.PrimaryPart.Position = Vector3.new(0, 1, -(CameraData.lock.breakDistance + 5))
+		fixture.heartbeat()
+		expect(fixture.controller.current()).toBeNil()
+		expect(fixture.cameraLocks).toEqual({ boar.model, false })
+
+		fixture, boar = locked()
+		fixture.tracker.removed:Fire(boar)
+		expect(fixture.cameraLocks).toEqual({ boar.model, false })
+		expect(fixture.cameraHolds).toEqual({})
+	end)
+
+	it("holds nothing when no lock was taken", function()
+		local fixture = load(ORIGIN, AHEAD)
+		local boar = fixture.add(7, "Enemy", Vector3.new(0, 1, -5))
+		fixture.setState(boar, "Dead")
+		expect(fixture.cameraLocks).toEqual({})
+		expect(fixture.cameraHolds).toEqual({})
+	end)
+
+	it("takes a new lock during the hold through the key, and the camera takes it over", function()
+		local fixture, boar = locked()
+		local kobold = fixture.add(8, "Enemy", Vector3.new(2, 1, -6))
+		fixture.setState(boar, "Dead")
+		fixture.lockToggle:Fire()
+		expect(fixture.controller.current()).toBe(kobold)
+		expect(fixture.cameraLocks).toEqual({ boar.model, kobold.model })
 	end)
 end)

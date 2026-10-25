@@ -1718,3 +1718,111 @@ describe("EnemyService.worldAhead: where the world stops a root (D-197)", functi
 		expect(brain:rootReach(root.CFrame.RightVector)).toBeCloseTo(root.Size.X / 2, 1e-4)
 	end)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- A wind-up dropped without a stagger (a hold, a sleep) is told: no phantom swing or rush
+-- ------------------------------------------------------------------------------------------
+
+-- The StateChanged payloads sent for `id` after the `from`-th message.
+local function statesOf(id: number, from: number): { any }
+	local list = {}
+	for index = from + 1, #sent do
+		local entry = sent[index]
+		if entry.remote == "StateChanged" and entry.payload.entityId == id then
+			table.insert(list, entry.payload)
+		end
+	end
+	return list
+end
+
+describe("EnemyService: a dropped wind-up is told to every client", function()
+	it("a Kobold held mid-wind-up says Idle at once, long before its Art would run out", function()
+		fresh()
+		local id = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -6))
+		expect(advanceUntil(function()
+			return phaseOf(id) == "WindUp"
+		end, 5)).toBe(true)
+		local telegraph = sentOf("Telegraph")[#sentOf("Telegraph")]
+		local before = #sent
+		EnemyService.setHeld(id, true)
+		local states = statesOf(id, before)
+		expect(#states).toBe(1)
+		expect(states[1].state).toBe("Idle")
+		expect(EntityService.get(id).state).toBe("Idle")
+		-- The reliable word on the beat the blow was due: every client drops this swing and its tell.
+		local ended = sentOf("RushEnded")
+		expect(#ended).toBe(1)
+		expect(ended[1].entityId).toBe(id)
+		expect(ended[1].reason).toBe("Dropped")
+		expect(ended[1].distance).toBe(0)
+		expect(ended[1].launchedAt).toBeCloseTo(telegraph.serverTime + OVERHEAD.windUp, 1e-6)
+	end)
+
+	it("a Kobold held in its strike before the blow lands drops it on the wind-up's end", function()
+		fresh()
+		local id = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -6))
+		expect(advanceUntil(function()
+			return phaseOf(id) == "Strike"
+		end, 5)).toBe(true)
+		local telegraph = sentOf("Telegraph")[#sentOf("Telegraph")]
+		EnemyService.setHeld(id, true)
+		local ended = sentOf("RushEnded")
+		expect(#ended).toBe(1)
+		expect(ended[1].reason).toBe("Dropped")
+		expect(ended[1].launchedAt).toBeCloseTo(telegraph.serverTime + OVERHEAD.windUp, 1e-6)
+		expect(EntityService.get(id).state).toBe("Idle")
+	end)
+
+	it("a Kobold held after its blow landed drops nothing", function()
+		fresh()
+		local id = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -6))
+		expect(advanceUntil(function()
+			return phaseOf(id) == "Recover"
+		end, 6)).toBe(true)
+		EnemyService.setHeld(id, true)
+		expect(#sentOf("RushEnded")).toBe(0)
+	end)
+
+	it("a Boar held before its launch tells its drop on the launch beat it would have had", function()
+		fresh()
+		local id = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -18))
+		expect(advanceUntil(function()
+			return phaseOf(id) == "WindUp"
+		end, 8)).toBe(true)
+		local telegraph = sentOf("Telegraph")[#sentOf("Telegraph")]
+		advance(CHARGE.windUp * 0.5)
+		local before = #sent
+		EnemyService.setHeld(id, true)
+		local ended = sentOf("RushEnded")
+		expect(#ended).toBe(1)
+		expect(ended[1].entityId).toBe(id)
+		expect(ended[1].reason).toBe("Dropped")
+		expect(ended[1].distance).toBe(0)
+		expect(ended[1].launchedAt).toBeCloseTo(telegraph.serverTime + CHARGE.windUp, 1e-6)
+		local states = statesOf(id, before)
+		expect(#states).toBe(1)
+		expect(states[1].state).toBe("Idle")
+		advance(CHARGE.windUp + CHARGE.strike + 1)
+		expect(#sentOf("RushStarted")).toBe(0)
+		expect(#sentOf("RushEnded")).toBe(1)
+	end)
+
+	it("a Boar held after its launch still tells its one RushEnded on the launch's own beat", function()
+		fresh()
+		local id = spawnAt("FrenzyBoar", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -18))
+		expect(advanceUntil(function()
+			return #sentOf("RushStarted") > 0
+		end, 10)).toBe(true)
+		advance(TICK)
+		EnemyService.setHeld(id, true)
+		local ended = sentOf("RushEnded")
+		expect(#ended).toBe(1)
+		expect(ended[1].reason).toBe("Stopped")
+		expect(ended[1].launchedAt).toBe(sentOf("RushStarted")[1].serverTime)
+	end)
+end)

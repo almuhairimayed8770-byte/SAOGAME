@@ -439,8 +439,12 @@ local function stepLoop(dt: number)
 		frame.BackgroundTransparency = 1 - tintAlpha
 	end
 	local listTransparency = HudLogic.artListTransparency(now - artIdleSince)
+	-- The stroke fades with its text, so an idle list leaves no ink ghost behind (F17).
+	local stroke = UI.hud.artList.strokeTransparency
+	local listStroke = stroke + (1 - stroke) * listTransparency
 	for _, artLabel in ui.artLabels do
 		artLabel.TextTransparency = listTransparency
+		artLabel.TextStrokeTransparency = listStroke
 	end
 	if switchStart ~= nil then
 		local transparency = HudLogic.switchPromptTransparency(now - (switchStart :: number), switchDuration)

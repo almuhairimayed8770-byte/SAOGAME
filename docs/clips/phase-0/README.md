@@ -17,7 +17,7 @@ bottom-left while you record.
 | `enemy-kobold-overhead.mp4` | 5 s | 1.0 s wind-up with the yellow edge, the chop, the recovery |
 | `parry-spark.mp4` | 5 s | guard tapped inside the window against the kobold's overhead (the boar's charge is unblockable); spark and ring; the enemy staggers |
 | `kill-shatter.mp4` | 5 s | the 10-frame kill hit-stop, the 0.5 s freeze and silence, the shards rising |
-| `locomotion.mp4` | 14 s | walk, run, sprint sheathed then drawn (lock on to draw), turn in place, skid stop, jump and land; no T-pose, no sliding foot |
+| `locomotion.mp4` | 14 s | walk, run, sprint sheathed then drawn (lock on to draw), turn in place, skid stop, fall off a ledge and land (no jump); no T-pose, no sliding foot |
 
 None of these files exists yet.
 

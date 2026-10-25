@@ -95,6 +95,77 @@ local function validate(ctx: Context): { string }
 		end
 	end
 
+	-- A blow shown before the server's word (D-258): never on a state that defends, so a guard, a
+	-- parry or a dodge is never drawn as a hit first.
+	local strike = AI.strikePrediction
+	if typeof(strike) ~= "table" then
+		problem("strikePrediction must be a table")
+	else
+		if typeof(strike.enabled) ~= "boolean" then
+			problem("strikePrediction.enabled must be a boolean")
+		end
+		if typeof(strike.exposedStates) ~= "table" then
+			problem("strikePrediction.exposedStates must be a table")
+		else
+			for _, defended in { "Guard", "Dodge", "Stagger", "GuardBroken", "Dead" } do
+				if strike.exposedStates[defended] ~= nil then
+					problem(("strikePrediction.exposedStates must not hold %s"):format(defended))
+				end
+			end
+		end
+		for _, field in
+			{
+				"defenceGraceSeconds",
+				"marginStuds",
+				"marginDegrees",
+				"lateSeconds",
+				"confirmSeconds",
+				"takeBackBlendOut",
+			}
+		do
+			positiveNumber(strike[field], "strikePrediction." .. field)
+		end
+		if typeof(strike.marginDegrees) == "number" and strike.marginDegrees >= 90 then
+			problem("strikePrediction.marginDegrees must be below 90")
+		end
+	end
+
+	-- D-259: room between enemies.
+	local spacing = AI.spacing
+	if typeof(spacing) ~= "table" then
+		problem("spacing must be a table")
+	else
+		for _, field in { "gapStuds", "slideStuds", "slideMinStuds", "stepStuds", "stepSpeedMultiplier" } do
+			positiveNumber(spacing[field], "spacing." .. field)
+		end
+		local passes = spacing.standOffPasses
+		if typeof(passes) ~= "number" or passes < 1 or passes % 1 ~= 0 then
+			problem("spacing.standOffPasses must be a whole number of at least 1")
+		end
+		if typeof(spacing.stepSpeedMultiplier) == "number" and spacing.stepSpeedMultiplier > 1 then
+			problem("spacing.stepSpeedMultiplier must be at most 1 (a step aside is never faster than a walk)")
+		end
+		local movement = AI.movement
+		if
+			typeof(spacing.slideMinStuds) == "number"
+			and typeof(movement) == "table"
+			and typeof(movement.moveAheadStuds) == "number"
+			and spacing.slideMinStuds > movement.moveAheadStuds
+		then
+			problem("spacing.slideMinStuds must be at most movement.moveAheadStuds (the slide's longest walk)")
+		end
+		if typeof(spacing.freePhases) ~= "table" then
+			problem("spacing.freePhases must be a table")
+		else
+			-- A body mid-attack, staggered or dead stays where it is: its strike resolves from there.
+			for _, busy in { "WindUp", "Strike", "Recover", "Interrupted", "Dead" } do
+				if spacing.freePhases[busy] ~= nil then
+					problem(("spacing.freePhases must not hold %s"):format(busy))
+				end
+			end
+		end
+	end
+
 	if typeof(AI.archetypes) ~= "table" then
 		problem("archetypes must be a table")
 		return problems
@@ -395,6 +466,9 @@ local function validate(ctx: Context): { string }
 				"turnRate",
 				"slamDazeSeconds",
 				"fallGravity",
+				"restStuds",
+				"restSeconds",
+				"restSpeed",
 			}
 		do
 			positiveNumber(world[field], "rushWorld." .. field)

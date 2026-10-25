@@ -106,6 +106,8 @@ type Rig = {
 	setRootMotion: (delta: Vector3) -> (),
 	-- The server refuses the local action (Replication.rejected).
 	reject: (action: string) -> (),
+	-- The server's State attribute on the local entity changes (EntityTracker.changed).
+	serverState: (value: string) -> (),
 	-- The character goes and comes back (CharacterRemoving, then CharacterAdded with the same model).
 	respawn: () -> (),
 	-- The spec's clock (os.clock and the server clock both read it).
@@ -145,6 +147,9 @@ type Options = {
 	-- Which runs first in a rendered frame: "bound" (the controller's render step, the default) or
 	-- "connections" (Choreo's RenderStepped connection).
 	renderOrder: string?,
+	-- What the fake ContactPredictor.standOff answers (fix F1): step this far along `away`, to
+	-- the clip time `to`, from the clip time the controller asks from. Nil: no stand-off.
+	standOff: { distance: number, away: Vector3, to: number }?,
 }
 
 local IMPACT_CALLS = { "guardRaise", "dodge", "release", "cancelActivation", "activation" }
@@ -274,12 +279,24 @@ local function load(options: Options?): Rig
 	}
 	-- ContactPredictor (issue 4): a recording fake. Its steps note the clip time asked for, the root
 	-- at that moment and how many times the rig had stepped by then.
-	local contactLog: any = { begins = {}, steps = {}, stops = 0, queue = {}, active = false, deps = nil }
+	local contactLog: any =
+		{ begins = {}, steps = {}, stops = 0, queue = {}, active = false, deps = nil, standOffs = {} }
 	local rigStepCount: () -> number = function(): number
 		return 0
 	end
 	local fakes: { [string]: any } = {
 		ContactPredictor = {
+			standOff = function(model: any, clip: any, from: number, rootCFrame: CFrame, target: any): any
+				table.insert(
+					contactLog.standOffs,
+					{ model = model, clip = clip, from = from, root = rootCFrame, target = target }
+				)
+				local plan = opts.standOff
+				if plan == nil then
+					return nil
+				end
+				return { distance = plan.distance, away = plan.away, from = from, to = plan.to }
+			end,
 			new = function(deps: any): any
 				contactLog.deps = deps
 				return {
@@ -322,6 +339,9 @@ local function load(options: Options?): Rig
 		},
 		EntityTracker = {
 			localRecord = function(): any
+				return nil
+			end,
+			get = function(): any
 				return nil
 			end,
 			peekLocalId = function(): any
@@ -554,6 +574,9 @@ local function load(options: Options?): Rig
 		end,
 		reject = function(action: string)
 			fakes.Replication.rejected:Fire(action)
+		end,
+		serverState = function(value: string)
+			fakes.EntityTracker.changed:Fire({ id = nil }, "State", value)
 		end,
 		respawn = function()
 			localPlayer.CharacterRemoving:Fire()
@@ -942,6 +965,89 @@ describe("CharacterController's impact director calls", function()
 		rig.controller.releaseArt(1, 0.2)
 		expect(#lights(rig)).toBe(0)
 	end)
+
+	it("the server taking a launched Art away before its first damage frame fades its light at once (F5)", function()
+		local function lights(rig: Rig): { { any } }
+			local calls = {}
+			for _, entry in rig.log do
+				if entry.kind == "trails" and entry.name == "activationLight" then
+					table.insert(calls, entry.args)
+				end
+			end
+			return calls
+		end
+		-- Released, then: hit out of it (Stagger), refused, or confirmed and ended by the server.
+		for _, way in { "Stagger", "GuardBroken", "Dead", "refused", "ended" } do
+			local rig = load({ choreo = true, impact = true, trails = true })
+			for _ = 1, 40 do
+				rig.frame(Vector3.zero)
+			end
+			local art = rig.controller.slots()[1]
+			rig.controller.beginArt(1)
+			for _ = 1, 12 do
+				rig.frame(Vector3.zero)
+			end
+			rig.controller.releaseArt(1, 12 * FRAME)
+			local handle = rig.animator.mixer:find(art.clip)
+			expect(handle).never.toBeNil()
+			rig.frame(Vector3.zero)
+			if way == "refused" then
+				rig.reject("Art")
+			elseif way == "ended" then
+				rig.serverState("Art")
+				rig.frame(Vector3.zero)
+				rig.serverState("Idle")
+			else
+				rig.serverState(way)
+			end
+			local calls = lights(rig)
+			expect(#calls).toBe(1)
+			expect(calls[1][1]).toBe(rig.model)
+			expect(calls[1][2]).toBe(false)
+			expect(calls[1][4]).toBe(true)
+			-- The wind-up contour ends with it, and the clip is let go.
+			expect(#impactCalls(rig, "cancelActivation")).toBe(1)
+			expect(handle.stopping).toBe(true)
+		end
+		-- Past its first damage frame the light is out already: a Stagger stops the clip and
+		-- fades nothing, and the server's own Idle at the end of the Art takes nothing away.
+		for _, way in { "Stagger", "Idle" } do
+			local rig = load({ choreo = true, impact = true, trails = true })
+			for _ = 1, 40 do
+				rig.frame(Vector3.zero)
+			end
+			local art = rig.controller.slots()[1]
+			rig.controller.beginArt(1)
+			for _ = 1, 12 do
+				rig.frame(Vector3.zero)
+			end
+			rig.controller.releaseArt(1, 12 * FRAME)
+			local handle = rig.animator.mixer:find(art.clip)
+			rig.serverState("Art")
+			repeat
+				rig.frame(Vector3.zero)
+			until handle.time > 0.5 or handle.done
+			rig.serverState(way)
+			expect(#lights(rig)).toBe(0)
+			expect(#impactCalls(rig, "cancelActivation")).toBe(0)
+			expect(handle.stopping).toBe(way == "Stagger")
+		end
+		-- An Idle the server sent before it ran the Art (a guard let go just before the press) is
+		-- stale: it takes nothing away.
+		local rig = load({ choreo = true, impact = true, trails = true })
+		for _ = 1, 40 do
+			rig.frame(Vector3.zero)
+		end
+		local art = rig.controller.slots()[1]
+		rig.controller.beginArt(1)
+		for _ = 1, 12 do
+			rig.frame(Vector3.zero)
+		end
+		rig.controller.releaseArt(1, 12 * FRAME)
+		rig.serverState("Idle")
+		expect(#lights(rig)).toBe(0)
+		expect(rig.animator.mixer:find(art.clip)).never.toBeNil()
+	end)
 end)
 
 -- ------------------------------------------------------------------------------------------
@@ -995,6 +1101,140 @@ local function settle(rig: Rig)
 		rig.frame(STILL)
 	end
 end
+
+describe("CharacterController: the Art stand-off (fix F1)", function()
+	it("steps the body away from the lock over the anticipation, on the clip's clock, and no farther", function()
+		local away = Vector3.new(0, 0, 1) -- straight back from a lock ahead
+		local plan = { distance = 0.8, away = away, to = 0.35 }
+		-- Two bodies in step, one stepping off and one not: what sets them apart is the stand-off
+		-- alone (the clip's own root motion carries both).
+		local rig = load({ choreo = true, impact = true, standOff = plan })
+		local twin = load({ choreo = true, impact = true })
+		local function frame()
+			rig.frame(STILL)
+			twin.frame(STILL)
+		end
+		for _ = 1, 40 do
+			frame()
+		end
+		local lockAt = Vector3.new(0, 0, -1.6)
+		rig.setLock(lockAt)
+		twin.setLock(lockAt)
+		local art = rig.controller.slots()[1]
+		rig.controller.beginArt(1)
+		twin.controller.beginArt(1)
+		for _ = 1, 12 do
+			frame()
+		end
+		local before = rig.root.Position
+		rig.controller.releaseArt(1, 12 * FRAME)
+		twin.controller.releaseArt(1, 12 * FRAME)
+		-- Asked once, at release: the clip's time then, the root facing the request, the lock's body.
+		expect(#rig.contacts.standOffs).toBe(1)
+		local asked = rig.contacts.standOffs[1]
+		local handle = rig.animator.mixer:find(art.clip)
+		expect(asked.from).toBeCloseTo(handle.time, 1e-6)
+		expect((asked.root.Position - before).Magnitude).toBeLessThan(1e-6)
+		expect(asked.root.LookVector:Dot(FORWARD)).toBeCloseTo(1, 1e-4)
+		expect(asked.target.PrimaryPart.Position).toBe(lockAt)
+		local function apart(): number
+			return (rig.root.Position - twin.root.Position):Dot(away)
+		end
+		-- The clip waits at its hold pose (ActionLogic.syncPlan): the body has not moved yet.
+		frame()
+		expect(math.abs(apart())).toBeLessThan(1e-6)
+		-- Then it steps back with the clip, all of the way by the open, and stays there.
+		local shown: { number } = {}
+		for _ = 1, 40 do
+			frame()
+			if apart() > 1e-6 then
+				table.insert(shown, apart())
+			end
+			if handle.time >= plan.to then
+				break
+			end
+		end
+		expect(handle.time >= plan.to).toBe(true)
+		expect(shown[#shown]).toBeCloseTo(plan.distance, 1e-4)
+		for index = 2, #shown do
+			expect(shown[index] >= shown[index - 1] - 1e-6).toBe(true)
+		end
+		-- Spread over the anticipation's frames, not a pop.
+		expect(#shown >= 3).toBe(true)
+		expect(shown[1]).toBeLessThan(plan.distance * 0.75)
+		for _ = 1, 20 do
+			frame()
+		end
+		expect(apart()).toBeCloseTo(plan.distance, 1e-4)
+		-- Sideways and up, the two bodies stand together.
+		local offset = rig.root.Position - twin.root.Position
+		expect((offset - away * offset:Dot(away)).Magnitude).toBeLessThan(1e-4)
+	end)
+
+	it("asks for none without a target, and steps none when the start pose already clears", function()
+		local rig = load({ choreo = true, impact = true })
+		for _ = 1, 40 do
+			rig.frame(STILL)
+		end
+		rig.controller.beginArt(1)
+		for _ = 1, 12 do
+			rig.frame(STILL)
+		end
+		rig.controller.releaseArt(1, 12 * FRAME)
+		expect(#rig.contacts.standOffs).toBe(0)
+		-- Locked on, the predictor finds the start pose clear (nil): the root only follows the clip.
+		local locked = load({ choreo = true, impact = true })
+		for _ = 1, 40 do
+			locked.frame(STILL)
+		end
+		locked.setLock(Vector3.new(0, 0, -6))
+		locked.controller.beginArt(1)
+		for _ = 1, 12 do
+			locked.frame(STILL)
+		end
+		locked.controller.releaseArt(1, 12 * FRAME)
+		expect(#locked.contacts.standOffs).toBe(1)
+		-- The fake answers nil: the plan is empty and no frame moves the root for it.
+		for _ = 1, 40 do
+			locked.frame(STILL)
+		end
+		expect(locked.controller.state()).never.toBe("Holding")
+	end)
+end)
+
+describe("CharacterController: the body holds its facing while a clip owns it (issue 16)", function()
+	it("a shove that turns the body during an Art or its post-motion is turned back that frame", function()
+		local rig = load({ choreo = true, impact = true })
+		for _ = 1, 40 do
+			rig.frame(STILL)
+		end
+		local art = rig.controller.slots()[1]
+		rig.controller.beginArt(1)
+		for _ = 1, 12 do
+			rig.frame(STILL)
+		end
+		rig.controller.releaseArt(1, 12 * FRAME)
+		settle(rig)
+		local held = yawOf(rig)
+		local handle = rig.animator.mixer:find(art.clip)
+		expect(handle).never.toBeNil()
+		-- Into the strike and on to the post-motion, a body it runs into shoves it round by 70.
+		for _ = 1, 30 do
+			rig.frame(STILL)
+		end
+		expect(rig.controller.state()).toBe("Art")
+		rig.root.CFrame = CFrame.new(rig.root.Position) * CFrame.Angles(0, math.rad(held + 70), 0)
+		rig.frame(STILL)
+		expect(math.abs(wrapped(yawOf(rig) - held))).toBeLessThan(1e-3)
+		-- Free again (the server's Idle), the body turns as it is turned.
+		rig.serverState("Art")
+		rig.serverState("Idle")
+		rig.frame(STILL)
+		rig.root.CFrame = CFrame.new(rig.root.Position) * CFrame.Angles(0, math.rad(held + 40), 0)
+		rig.frame(STILL)
+		expect(math.abs(wrapped(yawOf(rig) - (held + 40)))).toBeLessThan(1e-3)
+	end)
+end)
 
 describe("CharacterController aim: the body faces a held lock (D-112)", function()
 	it("a body walked away from the target turns back to it at lockTurnRate once it is locked", function()

@@ -139,6 +139,8 @@ type Predicted = {
 	clipId: string,
 	handle: any,
 	token: number,
+	-- The server's State said it runs this action (an Idle after that ends it; one before is stale).
+	confirmed: boolean?,
 }
 
 local CharacterController = {}
@@ -166,8 +168,19 @@ local captureScale = 1
 local appliedScale = 1
 -- The snap the body is still whipping round to (item 102), or nil.
 local snap: AimLogic.Snap? = nil
+-- The yaw a clip that owns the body holds it at (AimLogic.holdTurn), from the first frame past the
+-- snap's whip; nil while no clip owns it (issue 16).
+local heldYaw: number? = nil
 -- The facing the last ArtRequest or BasicAttackRequest carried (DevAim reports it).
 local lastFacing: { number }? = nil
+-- The enemy the soft assist turned the last request to (nil with a lock or no pick).
+local assistTargetId: number? = nil
+-- The Art stand-off the body is stepping (fix F1), the clip handle it follows and how much of it
+-- the root already shows; nil when none is under way.
+local standOff: ContactPredictor.StandOff? = nil
+local standOffHandle: any = nil
+local standOffShown = 0
+local STAND_OFF_EASING: string = Combat.contact.standOff.easing
 local lastPredictAt: number? = nil
 local lastParryAt: number? = nil
 local lastWalkSpeed: number? = nil
@@ -344,12 +357,14 @@ local function aimForRequest(): { number }
 	local frame = CFrame.new(rootPart.Position) * rotation
 	local delta: number? = nil
 	local lockAt = lockPosition()
+	assistTargetId = nil
 	if lockAt ~= nil then
 		delta = lockBearing(frame, lockAt)
 	else
 		local candidates = Siblings.call(TargetController, "assistCandidates", frame.Position, aimLook)
 		local pick = if candidates ~= nil then AimLogic.assistPick(candidates, AIM) else nil
 		delta = if pick ~= nil then pick.bearing else nil
+		assistTargetId = if pick ~= nil then pick.id else nil
 	end
 	local turn = 0
 	if delta ~= nil then
@@ -369,6 +384,65 @@ local function aimForRequest(): { number }
 	local facing = { look.X, look.Y, look.Z }
 	lastFacing = facing
 	return facing
+end
+
+-- The enemy an Art is cut at: the lock's, else the one the soft assist turned the request to.
+local function aimedTarget(): Model?
+	local record = Siblings.call(TargetController, "current")
+	if record == nil and assistTargetId ~= nil then
+		record = EntityTracker.get(assistTargetId :: number)
+	end
+	if record == nil or record.model == nil then
+		return nil
+	end
+	return record.model
+end
+
+-- Plans the Art stand-off (fix F1) for a launched Art's clip `handle`, whose request faces
+-- `facing`: the body steps away from the aimed enemy over the anticipation when the first cut's
+-- start pose would sit in its body (ContactPredictor.standOff). The root carries it in step().
+local function planStandOff(handle: any, facing: { number })
+	standOff, standOffHandle, standOffShown = nil, nil, 0
+	local model, rootPart = character, root
+	if model == nil or rootPart == nil or typeof(handle) ~= "table" then
+		return
+	end
+	if typeof(handle.clip) ~= "table" or typeof(handle.time) ~= "number" then
+		return
+	end
+	local target = aimedTarget()
+	local look = Vector3.new(facing[1], 0, facing[3])
+	if target == nil or look.Magnitude == 0 then
+		return
+	end
+	local position = rootPart.Position
+	local rootCFrame = CFrame.lookAt(position, position + look.Unit)
+	standOff = ContactPredictor.standOff(model :: Model, handle.clip, handle.time, rootCFrame, target :: Model)
+	standOffHandle = if standOff ~= nil then handle else nil
+end
+
+-- Moves the root on along a planned stand-off to where the clip's clock puts it (AimLogic.
+-- standOffAt), and forgets the plan once it is done or the Art is gone.
+local function stepStandOff(rootPart: BasePart)
+	local plan = standOff
+	if plan == nil then
+		return
+	end
+	local current = predicted
+	local handle = standOffHandle
+	if state ~= "Art" or current == nil or current.handle ~= handle or typeof(handle.time) ~= "number" then
+		standOff, standOffHandle = nil, nil
+		return
+	end
+	local shown = AimLogic.standOffAt(plan.distance, plan.from, plan.to, handle.time, STAND_OFF_EASING)
+	local by = shown - standOffShown
+	if by ~= 0 then
+		rootPart.CFrame = rootPart.CFrame + plan.away * by
+		standOffShown = shown
+	end
+	if handle.time >= plan.to then
+		standOff, standOffHandle = nil, nil
+	end
 end
 
 -- GuardRequest goes through TrailingSend: never faster than its rate limit, and the last raise or
@@ -635,7 +709,9 @@ function CharacterController.releaseArt(slot: number, heldSeconds: number)
 	-- The server's Idle normally ends the Art; this is the fallback if that state never arrives.
 	actionEndsAt = ActionLogic.artFallbackEnd(releasedAt, plan.freezeClipTime, current.art, Combat.lagAllowance)
 	predictDraw()
-	fire("ArtRequest", { artId = current.art.id, facing = aimForRequest(), clientTime = serverNow(), swing = sequence })
+	local facing = aimForRequest()
+	planStandOff(current.handle, facing)
+	fire("ArtRequest", { artId = current.art.id, facing = facing, clientTime = serverNow(), swing = sequence })
 	task.delay(plan.freezeClipTime, function()
 		if predicted ~= nil and (predicted :: Predicted).token == launchToken then
 			setTimeScale(captureScale)
@@ -795,6 +871,16 @@ function CharacterController.state(): ActionLogic.LocalState
 	return state
 end
 
+--- True while the local swing's hit `windowIndex` (of Art `artId`, request `swing`) has yet to show
+--- its strike's key (ContactPredictor.awaitsKey): Replication holds the server's word for it until
+--- the key frame (D-267). False with no swing predicted.
+function CharacterController.awaitsKey(windowIndex: number, artId: string?, swing: number?): boolean
+	if contactHandle == nil then
+		return false
+	end
+	return contacts:awaitsKey(windowIndex, artId, swing)
+end
+
 --- The facing ({x, y, z}) the last ArtRequest or BasicAttackRequest carried, or nil before the
 --- first. Each request gets a new table. The body whips round to it over aim.snapTurnSeconds, so
 --- right after the send the root may still look elsewhere (DevAim reports this one).
@@ -832,6 +918,38 @@ local function endAction()
 	setState("Idle")
 end
 
+-- True while a predicted Art's clip has not reached its first damage frame: its blade light is
+-- still lit (Replication puts it out on the first HitWindowOpen). False for a clip with no clock.
+local function beforeFirstWindow(current: Predicted): boolean
+	local handle = current.handle
+	if current.action ~= "Art" or typeof(handle) ~= "table" or typeof(handle.time) ~= "number" then
+		return false
+	end
+	local clip = handle.clip
+	if typeof(clip) ~= "table" or typeof(clip.events) ~= "table" then
+		return false
+	end
+	local first = math.huge
+	for _, event in clip.events do
+		if event.kind == "HitWindowOpen" then
+			first = math.min(first, event.time)
+		end
+	end
+	return handle.time < first
+end
+
+-- The server took a launched Art away before its first damage frame (a refusal, a hit out of
+-- it, an early end): the clip is let go, its blade light fades now over the cancel fade (D-161)
+-- and the wind-up contour ends (F5). The clip's fade crosses no tell, chime, trail or smear
+-- (Replication.routeClipEvent starts nothing on a clip taken away).
+local function takeArtAway(current: Predicted)
+	stopClip(current.handle)
+	Impact.cancelActivation(character)
+	if character ~= nil then
+		Trails.activationLight(character, false, trailToken(), true)
+	end
+end
+
 local function onRejected(action: string)
 	local map: { [string]: ActionLogic.Action } =
 		{ Art = "Art", BasicAttack = "Basic", Guard = "Guard", Dodge = "Dodge" }
@@ -842,16 +960,20 @@ local function onRejected(action: string)
 	local current = predicted :: Predicted
 	predicted = nil
 	setTimeScale(captureScale)
-	stopClip(current.handle)
-	if character ~= nil and expected == "Art" then
+	if expected == "Art" then
 		-- A refused Art is a cancelled one: its glow fades (issue 13).
-		Trails.activationLight(character, false, trailToken(), true)
+		takeArtAway(current)
+	else
+		stopClip(current.handle)
 	end
 	actionEndsAt = nil
 	setState("Idle")
 end
 
 local function onServerState(serverState: string)
+	if serverState == "Art" and predicted ~= nil then
+		(predicted :: Predicted).confirmed = true
+	end
 	local verb = ActionLogic.reconcile(state, serverState)
 	if verb == "None" then
 		return
@@ -860,12 +982,23 @@ local function onServerState(serverState: string)
 		clearHold()
 	end
 	if verb == "EndAction" then
+		local current = predicted
+		if current ~= nil and current.confirmed == true and beforeFirstWindow(current) then
+			-- The server ran the Art and ended it before the clip got to its first damage frame.
+			setTimeScale(captureScale)
+			takeArtAway(current)
+		end
 		endAction()
 		return
 	end
 	-- Stagger, GuardBroken, Break, Die: the body is taken from the player; Replication plays the clip.
 	if predicted ~= nil then
-		stopClip((predicted :: Predicted).handle)
+		local current = predicted :: Predicted
+		if beforeFirstWindow(current) then
+			takeArtAway(current)
+		else
+			stopClip(current.handle)
+		end
 		predicted = nil
 	end
 	setTimeScale(captureScale)
@@ -1079,6 +1212,24 @@ local function step(dt: number)
 	-- moved by just below. A step after a render stall is a jump (Choreo, D-132).
 	Siblings.call(Choreo, "stepLocal", dt)
 
+	-- No turning while the clip owns the body, past the snap's whip (AimLogic): a body the lunge
+	-- runs into shoved it round 60-90 degrees after Sharp Nail's Final (issue 16). The clip's own
+	-- yaw rides on the root's facing, so holding the root holds the pose's facing too.
+	if ActionLogic.rootMotionActive(state) and snap == nil then
+		local facingNow = rootPart.CFrame.LookVector
+		local yaw = AimLogic.yawOf(facingNow.X, facingNow.Z)
+		if heldYaw == nil then
+			heldYaw = yaw
+		else
+			local back = AimLogic.holdTurn(heldYaw :: number, yaw)
+			if back ~= 0 then
+				yawRoot(rootPart, back)
+				rootPart.AssemblyAngularVelocity = Vector3.zero
+			end
+		end
+	else
+		heldYaw = nil
+	end
 	if ActionLogic.rootMotionActive(state) then
 		local delta = animator:currentRootMotionDelta()
 		if typeof(delta) == "Vector3" and delta.Magnitude > 0 then
@@ -1087,6 +1238,8 @@ local function step(dt: number)
 			rootPart.CFrame = rootPart.CFrame + aimRotation(rootPart):VectorToWorldSpace(delta)
 		end
 	end
+	-- The Art stand-off over the anticipation (fix F1), on the clip's clock like the root motion.
+	stepStandOff(rootPart)
 	-- The blade on the pose this frame shows: a touch plays its hit now (issue 4).
 	stepContacts()
 	wakeSleptDodge(t)
@@ -1120,6 +1273,8 @@ local function clearCharacter()
 	lastAutoRotate = nil
 	yawHistory = AimLogic.newHistory()
 	snap = nil
+	standOff, standOffHandle, standOffShown = nil, nil, 0
+	assistTargetId = nil
 	lastPredictAt = nil
 	fallTracker = { airborneSince = nil, peakY = 0 }
 	stopCarry = ActionLogic.newStopCarry()

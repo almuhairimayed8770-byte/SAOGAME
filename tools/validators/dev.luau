@@ -24,6 +24,18 @@
 	The capture's timeScale.steps are each above 0 and at most 1, and timeScale.default is one of
 	them: the capture slows the local body with them (CharacterController.setCaptureTimeScale), so
 	a step past 1x would move it faster than the anti-cheat's sprint cap.
+
+	The capture's walk into the stand ring (D-244: the staging never moves the player):
+	- capture.stage's ring numbers are positive, and the ring is wider than the auto-walk's let-go
+	  (capture.walk.arriveStuds), so the let-go lands inside it;
+	- capture.walk.restSpeed is under choreo.luau locomotion.stopEndSpeed (the two-step stop has
+	  ended when the body is that slow);
+	- the ledge's ramp is as tall as the ledge, no wider, and no steeper than a Humanoid walks
+	  (MaxSlopeAngle, left at its default), behind the open shot's start;
+	- the open shot's approach stands on the ramp, and walk.timeoutSeconds covers the route from
+	  the stage area up to the open shot's spot at locomotion walkSpeed;
+	- walk.renderOrder runs after the control script's input step and before the character
+	  controller's step (choreo.luau renderOrder.character), and walk.cancelKeys are real KeyCodes.
 ]]
 
 type Context = {
@@ -33,7 +45,11 @@ type Context = {
 	repoRoot: string,
 }
 
+local roblox = require("@lune/roblox")
+
 local HALF_TURN_DEGREES = 180
+-- Roblox's Humanoid.MaxSlopeAngle default; nothing in the game changes it.
+local HUMANOID_MAX_SLOPE_DEGREES = 89
 local MAX_DECIMALS = 6
 local CLIPS = "src/shared/clips/"
 
@@ -80,6 +96,120 @@ return function(ctx: Context): { string }
 		end
 		if table.find(timeScale.steps, timeScale.default) == nil then
 			problem(("timeScale.default (%s) must be one of timeScale.steps"):format(tostring(timeScale.default)))
+		end
+	end
+
+	-- The capture's walk into the stand ring (D-244).
+	local capture = dev.capture
+	local stage = if typeof(capture) == "table" then capture.stage else nil
+	local walk = if typeof(capture) == "table" then capture.walk else nil
+	if typeof(stage) ~= "table" or typeof(walk) ~= "table" then
+		problem("capture.stage and capture.walk must be tables")
+	else
+		local walkProblems = #problems
+		for _, key in { "standRadius", "standHeightTolerance", "approachStuds", "routeMarginStuds" } do
+			if not isNumber(stage[key]) or stage[key] <= 0 then
+				problem(("capture.stage.%s must be a positive number"):format(key))
+			end
+		end
+		for _, key in { "timeoutSeconds", "waypointStuds", "arriveStuds", "restSpeed" } do
+			if not isNumber(walk[key]) or walk[key] <= 0 then
+				problem(("capture.walk.%s must be a positive number"):format(key))
+			end
+		end
+		local ledge = stage.ledge
+		local ramp = if typeof(ledge) == "table" and typeof(ledge.ramp) == "table" then ledge.ramp.size else nil
+		if typeof(ramp) ~= "table" or #ramp ~= 3 then
+			problem("capture.stage.ledge.ramp.size must be { width, height, length }")
+		end
+		if #problems == walkProblems then
+			local choreo = ctx.load("src/shared/data/choreo")
+			local logic = ctx.load("src/server/dev/DevStageLogic")
+			if walk.arriveStuds >= stage.standRadius then
+				problem(
+					("capture.walk.arriveStuds (%g) must be under capture.stage.standRadius (%g): the auto-walk lets go inside the ring"):format(
+						walk.arriveStuds,
+						stage.standRadius
+					)
+				)
+			end
+			if walk.restSpeed >= choreo.locomotion.stopEndSpeed then
+				problem(
+					("capture.walk.restSpeed (%g) must be under choreo locomotion.stopEndSpeed (%g): at rest means the two-step stop has ended"):format(
+						walk.restSpeed,
+						choreo.locomotion.stopEndSpeed
+					)
+				)
+			end
+			if ramp[2] ~= ledge.size[2] then
+				problem(
+					("capture.stage.ledge.ramp rises %g studs; it must rise the ledge's height (%g)"):format(
+						ramp[2],
+						ledge.size[2]
+					)
+				)
+			end
+			if ramp[1] <= 0 or ramp[1] > ledge.size[1] or ramp[3] <= 0 then
+				problem("capture.stage.ledge.ramp must be no wider than the ledge, with a positive width and length")
+			elseif math.deg(math.atan2(ramp[2], ramp[3])) >= HUMANOID_MAX_SLOPE_DEGREES then
+				problem(
+					("capture.stage.ledge.ramp is steeper than a Humanoid walks (%g degrees)"):format(
+						HUMANOID_MAX_SLOPE_DEGREES
+					)
+				)
+			else
+				local x, _, z, facing = logic.standSpot(true, stage.area, ledge)
+				local lx, lz = logic.look(facing)
+				local _, _, rampZ = logic.rampFrame(ledge)
+				if (rampZ - z) * lz >= 0 then
+					problem("capture.stage.ledge.ramp must stand behind the open shot's start, off its run")
+				end
+				if not logic.onRamp(ledge, x - lx * stage.approachStuds, z - lz * stage.approachStuds) then
+					problem("capture.stage.approachStuds must put the open shot's approach on the ledge's ramp")
+				end
+				local fromX, fromZ = stage.area.position[1], stage.area.position[3]
+				local length = 0
+				for _, point in logic.route(true, stage, true, fromX, fromZ) do
+					length += math.sqrt((point[1] - fromX) ^ 2 + (point[2] - fromZ) ^ 2)
+					fromX, fromZ = point[1], point[2]
+				end
+				local seconds = length / choreo.locomotion.walkSpeed
+				if walk.timeoutSeconds <= seconds then
+					problem(
+						("capture.walk.timeoutSeconds (%g) must cover the walk from the stage area up to the open shot (%.2f s at walk speed)"):format(
+							walk.timeoutSeconds,
+							seconds
+						)
+					)
+				end
+			end
+			local function priority(row: any): number?
+				local item = if typeof(row) == "table" then (roblox.Enum.RenderPriority :: any)[row.base] else nil
+				return if item ~= nil and isNumber(row.offset) then item.Value + row.offset else nil
+			end
+			local walkAt, characterAt = priority(walk.renderOrder), priority(choreo.renderOrder.character)
+			if
+				walkAt == nil
+				or characterAt == nil
+				or walkAt <= roblox.Enum.RenderPriority.Input.Value
+				or walkAt >= characterAt
+			then
+				problem(
+					"capture.walk.renderOrder must run after the Input render step and before choreo renderOrder.character"
+				)
+			end
+			if typeof(walk.cancelKeys) ~= "table" or #walk.cancelKeys == 0 then
+				problem("capture.walk.cancelKeys must list the movement keys")
+			else
+				for _, name in walk.cancelKeys do
+					local ok, code = pcall(function(): any
+						return (roblox.Enum.KeyCode :: any)[name]
+					end)
+					if not ok or code == nil then
+						problem(("capture.walk.cancelKeys: %s is not an Enum.KeyCode"):format(tostring(name)))
+					end
+				end
+			end
 		end
 	end
 

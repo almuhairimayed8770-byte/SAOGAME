@@ -66,6 +66,54 @@ local Fx = {
 		placeholderEnd = 0.5,
 		textureAsset = "TrailGradient",
 		rankInterval = 0.25, -- seconds between budget re-ranks (farthest disabled first)
+		-- The ribbon (D-261): the trail drawn from sub-frame blade samples, so a cut that sweeps most
+		-- of its arc between two rendered frames still draws that arc (the engine Trail takes one
+		-- sample a frame, and drew a straight chord or slab: review issue 8). Every rendered frame
+		-- the blade is solved by forward kinematics (BladeContact.blade) at sub-steps between the
+		-- last frame's pose and this one, each moving the tip at most `maxStep` studs (at most
+		-- `maxSubsteps` a frame); a step that moves the tip less than minLength adds nothing. The
+		-- ribbon keeps `maxSamples` samples, each living `lifetime`; the ages stand still while the
+		-- rig is in hit-stop, so the cut holds through the freeze. A rig with no blade chain keeps
+		-- the engine Trail.
+		ribbon = {
+			maxStep = 0.3,
+			maxSubsteps = 8,
+			maxSamples = 48,
+			-- The body's width: the weapon's trailWidth x the kind's width x this, so a one-handed
+			-- sword's band covers most of its 3.2-stud blade (thick, not the thin engine strip).
+			thickness = 2.4,
+			-- The trail color's HSV saturation is multiplied by this (at most 1): the pale trail
+			-- tokens read as white over a bright sky; the ribbon wears their hue at full strength.
+			saturation = 2.6,
+			folderName = "SkyspireTrailRibbons",
+			hostSize = 0.2,
+			-- Built once: a layer's transparency snaps to this many steps.
+			transparencySteps = 20,
+			-- Each layer is a chain of camera-facing Beams through one point of the blade
+			-- (`fraction` of the way from guard to tip), `width` times the body's width, the
+			-- saturated color lerped to SystemWhite by `whiteBlend`. lightEmission 0 draws flat
+			-- color (it holds over a bright sky); the core glows. Transparency keys run over age.
+			layers = {
+				{
+					name = "Body",
+					fraction = 0.6,
+					width = 1,
+					whiteBlend = 0,
+					lightEmission = 0,
+					zOffset = 0,
+					transparencyKeys = { { 0, 0.05 }, { 0.6, 0.25 }, { 1, 1 } },
+				},
+				{
+					name = "Core",
+					fraction = 0.92,
+					width = 0.22,
+					whiteBlend = 0.8,
+					lightEmission = 1,
+					zOffset = 0.05,
+					transparencyKeys = { { 0, 0 }, { 0.5, 0.3 }, { 1, 1 } },
+				},
+			},
+		},
 	},
 
 	-- Art activation (section 11): a PointLight on the blade and a flash on the weapon's Highlight.
@@ -84,6 +132,27 @@ local Fx = {
 		-- (issue 13); a released Art's goes out on its first damage frame, as the cut takes over.
 		cancelFadeSeconds = 0.2,
 		cancelFadeEasing = "QuadOut",
+		-- The blade's own glow while the activation holds (F13, D-263; section 5: "the blade glows
+		-- in the Art's color"): the light alone moved the lit blade only from about 173/198/217 to
+		-- 183/215/228 in daylight. Camera-facing Beams from TrailStart to TrailEnd (Trails names
+		-- them name .. layer name), in the light's color at the ribbon's saturation lerped to
+		-- SystemWhite by `whiteBlend`, unlit (LightInfluence 0) so the sun cannot wash them out,
+		-- `width` studs wide (the body over twice the blade's 0.32), on from the activation to the
+		-- first damage frame; a cancelled Art's fades with its light.
+		glow = {
+			name = "ActivationGlow",
+			layers = {
+				{
+					name = "Body",
+					width = 0.75,
+					whiteBlend = 0.1,
+					lightEmission = 0,
+					transparency = 0.15,
+					zOffset = 0.1,
+				},
+				{ name = "Core", width = 0.22, whiteBlend = 0.8, lightEmission = 1, transparency = 0, zOffset = 0.15 },
+			},
+		},
 	},
 
 	-- Smear (section 10 beat 3): the weapon part scaled along the swing axis for the smear frames.
@@ -188,8 +257,16 @@ local Fx = {
 		emitterSize = 0.2, -- studs; the invisible anchored part the burst leaves from
 		folderName = "WallSlamDust", -- the workspace folder that holds the pooled emitter part
 		cue = "WallSlam", -- sfx.cues: the stone hit, the body's weight and the sub
-		shakeTier = "Normal", -- camera.luau shake amplitude (combat.cameraShakeStuds) of a near slam
-		shakeRadius = 24, -- studs from the local player's body inside which a slam shakes the camera
+		-- The shake of a near slam: a camera.luau shake amplitude (combat.cameraShakeStuds tier).
+		-- Studio: from behind the boar at 20 studs the Normal tier (0.15) could not be told from the
+		-- lock camera's ease (0.34 to 0.38 studs a frame). The Kill tier moves the camera 0.41, 0.66,
+		-- 0.52 and 0.42 studs on its first four frames on average (Normal: 0.17 at most) and less
+		-- than 0.1 by the tenth: a short, sharp hit.
+		shakeTier = "Kill",
+		-- Studs from the local player's body to the contact inside which a slam shakes the camera:
+		-- the review's 20 studs behind the root plus the boar's snout (5.6 ahead of it) fits, with
+		-- room; 24 left that player out, so the shake never fired there.
+		shakeRadius = 32,
 	},
 
 	-- Telegraphs (section 11): Highlight fill on the weapon plus a flat ground decal.

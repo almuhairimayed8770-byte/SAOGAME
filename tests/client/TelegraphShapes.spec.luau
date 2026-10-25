@@ -40,32 +40,85 @@ describe("TelegraphShapes", function()
 		expect(pieces[1].size[3]).toBeCloseTo(10)
 	end)
 
-	it("a cone is a fan of slices spanning the arc, symmetric about the facing", function()
+	it("a cone is a fan of flat right triangles, symmetric about the facing", function()
 		local slices = Fx.telegraph.decal.coneSlices
 		local pieces = TelegraphShapes.pieces({ kind = "Cone", length = 8, width = 90 }, ORIGIN, FORWARD)
-		expect(#pieces).toBe(slices)
+		-- Each slice is an isosceles triangle from the apex to its chord, cut in two along its axis.
+		expect(#pieces).toBe(2 * slices)
 		local first, last = pieces[1], pieces[#pieces]
 		expect(first.yaw).toBeCloseTo(-last.yaw, 1e-6)
 		expect(math.abs(first.yaw)).toBeLessThan(math.rad(45))
-		-- Every slice center is `length / 2` from the origin on the ground plane.
 		for _, piece in pieces do
-			local dx, dz = piece.center[1] - ORIGIN[1], piece.center[3] - ORIGIN[3]
-			expect(math.sqrt(dx * dx + dz * dz)).toBeCloseTo(4, 1e-6)
-			expect(piece.size[3]).toBe(8)
 			expect(piece.circle).toBe(false)
+			expect(piece.wedge == 1 or piece.wedge == -1).toBe(true)
+			expect(piece.center[2]).toBeCloseTo(Fx.telegraph.decal.groundOffset)
+			-- Every corner lies on the ground at the origin's height, within the cone's length.
+			for _, corner in TelegraphShapes.triangle(piece) do
+				expect(corner[2]).toBeCloseTo(Fx.telegraph.decal.groundOffset)
+				local dx, dz = corner[1] - ORIGIN[1], corner[3] - ORIGIN[3]
+				expect(math.sqrt(dx * dx + dz * dz)).toBeLessThan(8 + 1e-6)
+			end
 		end
-		-- Slices overlap: each is wider than its exact share of the arc at the far end.
-		local exact = 2 * 8 * math.sin(math.rad(90) / slices / 2)
-		expect(first.size[1]).toBeGreaterThan(exact)
-		-- The middle slice points straight along the facing for an odd slice count.
-		if slices % 2 == 1 then
-			expect(pieces[(slices + 1) / 2].yaw).toBeCloseTo(0, 1e-6)
+	end)
+
+	-- Issue 15: the overlapping blocks of the old fan doubled their alpha where two met (the seams).
+	-- The triangles share their edges and never overlap: every point of the fan lies in exactly one.
+	it("the cone's triangles tile the fan exactly: no seam doubles it, no gap shows the grass", function()
+		local length, arc = 8, 60
+		local pieces = TelegraphShapes.pieces({ kind = "Cone", length = length, width = arc }, ORIGIN, { 1, 0, 0 })
+		local triangles = {}
+		local area = 0
+		for _, piece in pieces do
+			local t = TelegraphShapes.triangle(piece)
+			table.insert(triangles, t)
+			local ax, az = t[2][1] - t[1][1], t[2][3] - t[1][3]
+			local bx, bz = t[3][1] - t[1][1], t[3][3] - t[1][3]
+			area += math.abs(ax * bz - az * bx) / 2
 		end
+		local slices = Fx.telegraph.decal.coneSlices
+		local fan = slices * 0.5 * length * length * math.sin(math.rad(arc) / slices)
+		expect(area).toBeCloseTo(fan, 1e-6)
+		local function inside(t, x: number, z: number): boolean
+			local sign = nil
+			for index = 1, 3 do
+				local a, b = t[index], t[index % 3 + 1]
+				local cross = (b[1] - a[1]) * (z - a[3]) - (b[3] - a[3]) * (x - a[1])
+				if math.abs(cross) < 1e-6 then
+					return false -- on an edge: shared, counted by neither
+				end
+				local s = cross > 0
+				if sign == nil then
+					sign = s
+				elseif sign ~= s then
+					return false
+				end
+			end
+			return true
+		end
+		local covered, doubled = 0, 0
+		for i = 0, 80 do
+			for j = -40, 40 do
+				local x, z = ORIGIN[1] + i * 0.1013, ORIGIN[3] + j * 0.1007
+				local count = 0
+				for _, t in triangles do
+					if inside(t, x, z) then
+						count += 1
+					end
+				end
+				if count > 1 then
+					doubled += 1
+				elseif count == 1 then
+					covered += 1
+				end
+			end
+		end
+		expect(doubled).toBe(0)
+		expect(covered).toBeGreaterThan(1000)
 	end)
 
 	it("no shape draws the default cone", function()
 		local pieces = TelegraphShapes.pieces(nil, ORIGIN, FORWARD)
-		expect(#pieces).toBe(Fx.telegraph.decal.coneSlices)
+		expect(#pieces).toBe(2 * Fx.telegraph.decal.coneSlices)
 		local default = TelegraphShapes.defaultShape()
 		expect(default.kind).toBe(Fx.telegraph.decal.defaultShape.kind)
 	end)
@@ -107,10 +160,81 @@ describe("TelegraphShapes", function()
 		expect(dipped).toBeLessThan(1)
 	end)
 
+	-- F7 (issue 9): a blow's tell stays lit past the wind-up until its snap begins, the strike's
+	-- landing less ai.luau telegraph.snapLeadSeconds, and glints over the parry window before it.
+	it("a blow's tell holds through the strike to the snap and glints over the parry window", function()
+		local AI = Harness.load("src/shared/data/ai")
+		local combat = Harness.load("src/shared/data/combat")
+		local windUp, strike = 1.0, 0.35
+		local ends, glintFrom = TelegraphShapes.timing(windUp, strike)
+		expect(ends).toBeCloseTo(windUp + strike - AI.telegraph.snapLeadSeconds, 1e-9)
+		expect(glintFrom).toBeCloseTo(windUp + strike - combat.parryWindow, 1e-9)
+		-- Past the wind-up it is still lit, the ground shape at its full alpha.
+		expect(TelegraphShapes.decalAlpha(windUp + 0.1, windUp, 1, ends)).toBeCloseTo(Fx.telegraph.decal.alpha)
+		expect(TelegraphShapes.fillTransparency(windUp + 0.1, windUp, 1, ends, glintFrom)).toBeLessThan(1)
+		expect(TelegraphShapes.isOver(windUp + 0.1, ends)).toBe(false)
+		-- The glint: the fill at its brightest through the parry window, to the snap.
+		local glint = AI.telegraph.glintFillTransparency
+		expect(TelegraphShapes.fillTransparency(glintFrom + 0.01, windUp, 1, ends, glintFrom)).toBeCloseTo(glint)
+		expect(TelegraphShapes.fillTransparency(ends - 0.01, windUp, 1, ends, glintFrom)).toBeCloseTo(glint)
+		expect(glint).toBeLessThan(Fx.telegraph.fillTransparency)
+		-- Gone on the snap.
+		expect(TelegraphShapes.isOver(ends, ends)).toBe(true)
+		expect(TelegraphShapes.decalAlpha(ends, windUp, 1, ends)).toBe(0)
+		expect(TelegraphShapes.fillTransparency(ends, windUp, 1, ends, glintFrom)).toBe(1)
+		-- The accessibility floor dims the glint too, never below visible.
+		local dim = TelegraphShapes.fillTransparency(ends - 0.01, windUp, 0, ends, glintFrom)
+		expect(dim).toBeCloseTo(1 - (1 - glint) * Fx.telegraph.intensityMin)
+		-- A rush's line (no strike given) still ends at its launch, with no glint.
+		local rushEnds, rushGlint = TelegraphShapes.timing(0.6, nil)
+		expect(rushEnds).toBe(0.6)
+		expect(rushGlint).toBe(0.6)
+	end)
+
 	it("maps kinds to the three telegraph tokens", function()
 		expect(TelegraphShapes.token("Normal")).toBe("TelegraphWhite")
 		expect(TelegraphShapes.token("Unblockable")).toBe("TelegraphRed")
 		expect(TelegraphShapes.token("GuardBreak")).toBe("TelegraphYellow")
 		expect(TelegraphShapes.token("Nonsense")).toBe("TelegraphWhite")
+	end)
+end)
+
+-- F16 (D-258): a body is shown struck before the server's word only this deep in the blow's shape.
+describe("TelegraphShapes.deepInside", function()
+	local function inside(reach: number, arc: number, point: { number }, facing: { number }?): boolean
+		return TelegraphShapes.deepInside(reach, arc, 4, { 0, 3, 0 }, facing or { 0, 0, -1 }, point, 1, 8)
+	end
+
+	it("a cone holds a body inside its reach and its arc by the margins, at any height", function()
+		expect(inside(6, 60, { 0, 0, -4.9 })).toBe(true)
+		expect(inside(6, 60, { 0, 9, -3 })).toBe(true)
+		expect(inside(6, 60, { 0, 0, -5.1 })).toBe(false)
+		-- 21 degrees off the facing is inside 30 - 8; 23 is not.
+		local function at(degrees: number): { number }
+			local r = math.rad(degrees)
+			return { 4 * math.sin(r), 0, -4 * math.cos(r) }
+		end
+		expect(inside(6, 60, at(21))).toBe(true)
+		expect(inside(6, 60, at(-21))).toBe(true)
+		expect(inside(6, 60, at(23))).toBe(false)
+		expect(inside(6, 60, { 0, 0, 3 })).toBe(false)
+		-- The facing turns the cone with it; its height is ignored.
+		expect(inside(6, 60, { -4, 0, 0 }, { -1, 5, 0 })).toBe(true)
+		expect(inside(6, 60, { 0, 0, -4 }, { -1, 0, 0 })).toBe(false)
+	end)
+
+	it("a full circle holds anything inside its reach, a line its length and width", function()
+		expect(inside(6, 360, { 0, 0, 4.9 })).toBe(true)
+		expect(inside(6, 360, { 5.2, 0, 0 })).toBe(false)
+		-- A line 6 long and 4 wide: 1 in from each end and side.
+		expect(inside(6, 0, { 0, 0, -3 })).toBe(true)
+		expect(inside(6, 0, { 0.9, 0, -3 })).toBe(true)
+		expect(inside(6, 0, { 1.1, 0, -3 })).toBe(false)
+		expect(inside(6, 0, { 0, 0, -0.5 })).toBe(false)
+		expect(inside(6, 0, { 0, 0, -5.5 })).toBe(false)
+	end)
+
+	it("no facing, no shape", function()
+		expect(inside(6, 60, { 0, 0, -3 }, { 0, 1, 0 })).toBe(false)
 	end)
 end)

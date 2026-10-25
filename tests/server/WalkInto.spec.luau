@@ -13,6 +13,11 @@
 	flat, upright face from below the player's lowest colliding part to above its highest, and
 	nothing else of the enemy; a rush still passes through players (D-167), and nothing else about
 	the body changes: it runs on the world as before, and no query sees the new part.
+
+	The face stands over the whole body, not the root alone: over the root's footprint a player
+	walked into a boar head-on stopped inside its head (the root ends 2.5 studs ahead of its centre,
+	the snout 5.6), from behind inside its tail, and on the flank 0.1 into its side. A walk-in now
+	stops where the player touches the body, on every side.
 ]]
 
 Harness.stubService("CollectionService", {
@@ -193,15 +198,98 @@ describe("Walking into an enemy meets one upright face (D-198)", function()
 			-- From below the player's lowest colliding part to above its highest: no edge to climb.
 			expect(low).toBeLessThanOrEqual(PLAYER_LOWEST)
 			expect(high).toBeGreaterThanOrEqual(PLAYER_HIGHEST)
-			-- Upright over the root's own footprint (a body blocks where it blocked), and unseen.
-			expect(face.Size.X).toBeCloseTo(root.Size.X, 1e-6)
-			expect(face.Size.Z).toBeCloseTo(root.Size.Z, 1e-6)
+			-- Upright over the body's footprint (which covers the root's: a body still blocks where
+			-- it blocked), and unseen.
+			local _, size = RigBuilder.footprint(Enemies.byId(defId).skin)
+			expect(face.Size.X).toBeCloseTo(size.X, 1e-4)
+			expect(face.Size.Z).toBeCloseTo(size.Z, 1e-4)
+			expect(face.Size.X).toBeGreaterThanOrEqual(root.Size.X)
+			expect(face.Size.Z).toBeGreaterThanOrEqual(root.Size.Z)
 			expect(face.CFrame.UpVector:Dot(Vector3.yAxis)).toBeCloseTo(1, 1e-6)
 			expect(face.Transparency).toBe(1)
 			-- It meets nothing but players: not the world, not an enemy, not a rush.
 			expect(collides(face.CollisionGroup, "Default")).toBe(false)
 			expect(collides(face.CollisionGroup, GROUPS.enemies)).toBe(false)
 			expect(collides(face.CollisionGroup, GROUPS.rushing)).toBe(false)
+		end
+	end)
+
+	-- A walk-in seen from above, in the enemy root's space: a player's colliding column (a circle of
+	-- PLAYER_RADIUS) comes in along a bearing (degrees from the enemy's front, + = its right) until
+	-- it meets the face. Returns how far the player then is from the nearest part of the body at
+	-- rest (what it holds aside): 0 touching, under 0 inside it.
+	local PLAYER_RADIUS = 0.6
+	local function gapAt(model: Model, rig: any, bearing: number): number
+		local root = model.PrimaryPart :: BasePart
+		local function flat(part: BasePart): (number, number, number, number)
+			local half = part.Size / 2
+			local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
+			for _, x in { -1, 1 } do
+				for _, y in { -1, 1 } do
+					for _, z in { -1, 1 } do
+						local corner = root.CFrame:PointToObjectSpace(
+							part.CFrame:PointToWorldSpace(Vector3.new(half.X * x, half.Y * y, half.Z * z))
+						)
+						minX, maxX = math.min(minX, corner.X), math.max(maxX, corner.X)
+						minZ, maxZ = math.min(minZ, corner.Z), math.max(maxZ, corner.Z)
+					end
+				end
+			end
+			return minX, maxX, minZ, maxZ
+		end
+		-- Signed distance from a point to a flat box (under 0 inside).
+		local function distance(x: number, z: number, box: { number }): number
+			local dx = math.max(box[1] - x, x - box[2])
+			local dz = math.max(box[3] - z, z - box[4])
+			if dx <= 0 and dz <= 0 then
+				return math.max(dx, dz)
+			end
+			return math.sqrt(math.max(dx, 0) ^ 2 + math.max(dz, 0) ^ 2)
+		end
+		local face = collidersWith(model, GROUPS.players)[1]
+		local faceBox = { flat(face) }
+		local body = {}
+		for name in rig.parts do
+			if table.find(rig.trailParts or {}, name) == nil then
+				table.insert(body, { flat(model:FindFirstChild(name) :: BasePart) })
+			end
+		end
+		local ux, uz = math.sin(math.rad(bearing)), -math.cos(math.rad(bearing))
+		-- Bisect the stop: the column meets the face at PLAYER_RADIUS from it.
+		local near, far = 0, 40
+		for _ = 1, 60 do
+			local mid = (near + far) / 2
+			if distance(ux * mid, uz * mid, faceBox) < PLAYER_RADIUS then
+				near = mid
+			else
+				far = mid
+			end
+		end
+		local nearest = math.huge
+		for _, box in body do
+			nearest = math.min(nearest, distance(ux * far, uz * far, box))
+		end
+		return nearest - PLAYER_RADIUS
+	end
+
+	it("a walk-in stops touching the body on every side: snout, flank, tail; never inside it", function()
+		for _, defId in { "FrenzyBoar", "KoboldAxeman" } do
+			fresh()
+			local model = standing(defId)
+			local rig = Rigs[Enemies.byId(defId).skin]
+			-- Head-on, both flanks and from behind: touching.
+			for _, bearing in { 0, 90, 180, 270 } do
+				local gap = gapAt(model, rig, bearing)
+				expect(math.abs(gap)).toBeLessThan(0.05)
+			end
+			-- Every bearing: never inside the body, and off it only where one flat box's corner
+			-- stands out past a tapering head (the boar's, up to 0.58 studs at 20 degrees off its
+			-- snout) or beside a thin tail (0.8 at 160, a tail's length past the rump).
+			for bearing = 0, 355, 5 do
+				local gap = gapAt(model, rig, bearing)
+				expect(gap).toBeGreaterThan(-1e-4) -- float32 sizes
+				expect(gap).toBeLessThan(0.85)
+			end
 		end
 	end)
 
@@ -237,8 +325,9 @@ describe("Walking into an enemy meets one upright face (D-198)", function()
 		fresh()
 		local model = standing("FrenzyBoar")
 		local after, afterBack = EnemyService.bodyExtents(model)
-		expect(after).toBeCloseTo(front, 1e-6)
-		expect(afterBack).toBeCloseTo(back, 1e-6)
+		-- The face covers exactly the body's footprint, so the reach is the body's (to float32 sizes).
+		expect(after).toBeCloseTo(front, 1e-4)
+		expect(afterBack).toBeCloseTo(back, 1e-4)
 		local root = model.PrimaryPart :: BasePart
 		local face = collidersWith(model, GROUPS.players)[1]
 		expect(BladeContact.queryable(face)).toBe(false)

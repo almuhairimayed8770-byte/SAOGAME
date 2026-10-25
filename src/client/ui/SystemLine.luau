@@ -52,7 +52,7 @@ local function build(parent: Instance?)
 		Text = "",
 	}) :: TextLabel
 	local outline = El.new("UIStroke", {
-		Thickness = 1,
+		Thickness = config.strokeThickness,
 		Color = Palette.color3("OutlineInk"),
 		Transparency = 1,
 		ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual,

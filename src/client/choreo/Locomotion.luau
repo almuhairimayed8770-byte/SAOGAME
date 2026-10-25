@@ -372,33 +372,14 @@ local function drawnSprintWeight(self: any): number
 end
 
 -- How much of the Draw and Sheathe clips (stopping ones included) the limbs show once this step has
--- moved their envelopes: the mixer's own rule, read before it runs. A held pause moves none, one
--- that ends inside a stall's gap moves them by the rest, and a clip played inside the gap moves only
--- by its own age.
+-- moved their envelopes, read before the mixer runs it, by the mixer's own rule (Mixer.preview).
 local function sheathShownAfter(self: any, dt: number): number
 	local mixer = self.animator.mixer
-	local jumped = dt > ChoreoData.stall.jumpSeconds
-	local pause = mixer:pauseRemaining()
-	local clockDt = dt
-	if pause > ChoreoData.pauseEpsilon then
-		clockDt = if jumped and pause < dt then dt - pause else 0
-	end
 	local shown = 0
 	for _, handle in mixer:handles() do
-		if handle.done or (handle.clipId ~= DRAW_ID and handle.clipId ~= SHEATHE_ID) then
-			continue
+		if handle.clipId == DRAW_ID or handle.clipId == SHEATHE_ID then
+			shown = math.max(shown, mixer:preview(handle, dt))
 		end
-		local handleDt = if handle.ignorePause then dt else clockDt
-		if jumped and handle.sinceStep > 0 then
-			handleDt = math.max(0, handleDt - handle.sinceStep)
-		end
-		local fade: number = handle.fade
-		if handle.stopping then
-			fade = if handle.blendOut <= 0 then 0 else math.max(0, fade - handleDt / handle.blendOut)
-		elseif fade < 1 then
-			fade = if handle.blendIn <= 0 then 1 else math.min(1, fade + handleDt / handle.blendIn)
-		end
-		shown = math.max(shown, Easing.evaluate(ChoreoData.blendEasing, fade) * handle.weight)
 	end
 	return shown
 end
@@ -422,7 +403,18 @@ local function stepSheath(self: any, dt: number)
 	local input = scanClips(self)
 	local out = self.sheath:step(dt, input)
 	if out.stop ~= nil then
-		self.animator:stop(sheathClipId(out.stop), Sheath.stopBlend)
+		local id = sheathClipId(out.stop)
+		self.animator:stop(id, out.blend or Sheath.stopBlend)
+		if out.blend ~= nil then
+			-- A cut back fades out from where it was: played on, Sheathe's keys line the blade up
+			-- with the back mount (and Draw's with the hand) while the sword stays where it is.
+			local mixer = self.animator.mixer
+			for _, handle in mixer:handles() do
+				if handle.clipId == id and handle.stopping and not handle.done then
+					mixer:hold(handle)
+				end
+			end
+		end
 	end
 	if out.play ~= nil then
 		playSheathClip(self, out.play)

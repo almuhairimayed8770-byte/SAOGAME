@@ -110,8 +110,11 @@ type Worst = {
 
 -- One case: the Drawn target flips to `drawing` after the settle, the root moving straight ahead at
 -- `speed` the whole time, stepped `hz` times a second. With `hitchAfter`, the step after the clip has
--- stepped that many times is sheathTip.hitch.seconds long instead.
-local function run(drawing: boolean, speed: number, hz: number, hitchAfter: number?): Worst
+-- stepped that many times is sheathTip.hitch.seconds long instead. With `backAt`, the target turns
+-- back on the first step that finds the clip's clock at or past it: a lock-on (or any combat
+-- request) that wants the sword while the Sheathe still holds it, or a fight that ends while the
+-- Draw has not taken it yet.
+local function run(drawing: boolean, speed: number, hz: number, hitchAfter: number?, backAt: number?): Worst
 	local avatar = HitMatrix.standing(Harness)
 	local model = avatar.model
 	model:SetAttribute("Rig", "PlayerR15")
@@ -137,6 +140,12 @@ local function run(drawing: boolean, speed: number, hz: number, hitchAfter: numb
 	local clip = ClipLibrary.get(clipId)
 	local wait = if drawing then 0 else Sheath.sheatheDelay
 	local seconds = Tip.settle + wait + clip.duration + (clip.blendOut or ChoreoData.blendOut) + Tip.after
+	if backAt ~= nil then
+		-- Long enough for the clip the target turns back to as well (a Draw cut back with the sword
+		-- in the hand sheathes it again).
+		local other = ClipLibrary.get(PREFIX .. (if drawing then Sheath.clips.sheathe else Sheath.clips.draw))
+		seconds += Sheath.sheatheDelay + Sheath.cutBackBlend + other.duration
+	end
 	local frameDt = 1 / hz
 	local frames = math.floor(seconds * hz + 0.5)
 	local startPart = motor.Part0
@@ -154,6 +163,7 @@ local function run(drawing: boolean, speed: number, hz: number, hitchAfter: numb
 	local lastTip: any, lastLine: any = nil, nil
 	local travelled = Vector3.zero
 	local clipSteps = 0 -- steps the clip has been live for
+	local wentBack = false -- the target turned true again mid-Sheathe (backAt)
 	local extra = 0 -- the hitch's time past one frame, once it has landed
 	for frame = 1, frames do
 		local dt = frameDt
@@ -164,6 +174,13 @@ local function run(drawing: boolean, speed: number, hz: number, hitchAfter: numb
 		local t = frame * frameDt + extra
 		clock += dt
 		local drawn = if t > Tip.settle then drawing else not drawing
+		if backAt ~= nil then
+			local live = animator.mixer:find(clipId)
+			if wentBack or (live ~= nil and not live.stopping and live.time >= backAt - 1e-9) then
+				wentBack = true
+				drawn = not drawing
+			end
+		end
 		model:SetAttribute("Drawn", drawn)
 		travelled += Vector3.new(0, 0, -speed * dt)
 		local rootFrame = base * CFrame.new(travelled)
@@ -214,19 +231,53 @@ local function clipAt(clipTime: number?): string
 	return if clipTime ~= nil then ("clip %.3f s"):format(clipTime) else "no clip live"
 end
 
--- Every case of one clip: each speed at each step rate, then (`hitches`) each speed at the hitch's
--- frame rate with the long frame after each of the clip's first `steps` steps.
-local function check(drawing: boolean, hitches: boolean?): ()
-	local name = if drawing then "Draw" else "Sheathe"
-	local tipLimit = if drawing then Sheath.drawTipSpeed else Sheath.sheatheTipSpeed
+-- The time a sheath clip moves the sword (Draw's WeaponDraw, Sheathe's WeaponSheathe): until then
+-- the sword is where the clip found it.
+local function swapTime(drawing: boolean): number
+	local clip = ClipLibrary.get(PREFIX .. (if drawing then Sheath.clips.draw else Sheath.clips.sheathe))
+	local kind = if drawing then "WeaponDraw" else "WeaponSheathe"
+	for _, event in clip.events or {} do
+		if event.kind == kind then
+			return event.time
+		end
+	end
+	error(("the %s clip has no %s event"):format(clip.id, kind))
+end
+
+-- Steps of the first step rate between the cut-back cases: the cut-back's pace is a smooth curve
+-- over the clip's clock, so every third frame finds its worst.
+local BACK_STRIDE = 3
+
+-- Every case of one clip: each speed at each step rate, then (`mode` "hitches") each speed at the
+-- hitch's frame rate with the long frame after each of the clip's first `steps` steps, or (`mode`
+-- "back") each speed at the first step rate with the target turning back at every BACK_STRIDE-th
+-- frame of the clip's clock while the sword is in the hand: a Sheathe before its WeaponSheathe (the
+-- lock-on mid-Sheathe), a Draw after its WeaponDraw (the fight over mid-Draw). Nothing else moves
+-- the arm then, so the drawn pose comes back under the Draw's limits, or the sword goes back to
+-- the sheath under the Sheathe's. (A Draw cut back before its WeaponDraw leaves the blade on the
+-- back; a Sheathe cut back after its WeaponSheathe plays the Draw at once.)
+local function check(drawing: boolean, mode: ("hitches" | "back")?): ()
+	local name = (if drawing then "Draw" else "Sheathe") .. (if mode == "back" then " cut back" else "")
+	local tipLimit = if drawing ~= (mode == "back") then Sheath.drawTipSpeed else Sheath.sheatheTipSpeed
 	local problems: { string } = {}
 	local fastest, sharpest = 0, 0
 	local cases = 0
-	local runs: { { speed: number, hz: number, hitchAfter: number? } } = {}
+	local runs: { { speed: number, hz: number, hitchAfter: number?, backAt: number? } } = {}
+	local expected = 0
 	for _, speed in Tip.speeds do
-		if hitches then
+		if mode == "hitches" then
 			for after = 1, Tip.hitch.steps do
 				table.insert(runs, { speed = speed, hz = Tip.hitch.hz, hitchAfter = after })
+			end
+		elseif mode == "back" then
+			local hz = Tip.stepHz[1]
+			local swap = math.floor(swapTime(drawing) * hz)
+			local clip = ClipLibrary.get(PREFIX .. (if drawing then Sheath.clips.draw else Sheath.clips.sheathe))
+			local first = if drawing then swap + 1 else 1
+			local last = if drawing then math.ceil(clip.duration * hz) - 1 else swap
+			for frame = first, last, BACK_STRIDE do
+				table.insert(runs, { speed = speed, hz = hz, backAt = frame / hz })
+				expected += 1
 			end
 		else
 			for _, hz in Tip.stepHz do
@@ -236,15 +287,19 @@ local function check(drawing: boolean, hitches: boolean?): ()
 	end
 	for _, each in runs do
 		local speed, hz = each.speed, each.hz
-		local worst = run(drawing, speed, hz, each.hitchAfter)
+		local worst = run(drawing, speed, hz, each.hitchAfter, each.backAt)
 		cases += 1
-		-- The sword must actually change place, or the case measured nothing of the swap.
-		expect(worst.swapped).toBe(true)
+		-- The sword must actually change place, or the case measured nothing of the swap; a Sheathe
+		-- cut back keeps it in the hand.
+		expect(worst.swapped).toBe(drawing or mode ~= "back")
 		fastest = math.max(fastest, worst.tip)
 		sharpest = math.max(sharpest, worst.turn)
 		local case = ("%s at %g studs/s, %g Hz"):format(name, speed, hz)
 		if each.hitchAfter ~= nil then
 			case ..= (", a %g s frame after clip step %d"):format(Tip.hitch.seconds, each.hitchAfter)
+		end
+		if each.backAt ~= nil then
+			case ..= (", the target back at clip %.3f s"):format(each.backAt)
 		end
 		if worst.tip > tipLimit then
 			table.insert(
@@ -273,7 +328,12 @@ local function check(drawing: boolean, hitches: boolean?): ()
 			)
 		end
 	end
-	expect(cases).toBe(#Tip.speeds * (if hitches then Tip.hitch.steps else #Tip.stepHz))
+	if mode == "back" then
+		expect(cases).toBe(expected)
+		expect(cases).toBeGreaterThan(#Tip.speeds)
+	else
+		expect(cases).toBe(#Tip.speeds * (if mode == "hitches" then Tip.hitch.steps else #Tip.stepHz))
+	end
 	expect(fastest).toBeGreaterThan(0)
 	print(
 		("  %s: %d cases, the tip at most %.1f studs/s, the blade turning at most %.0f degrees/s"):format(
@@ -298,10 +358,18 @@ describe("Draw and Sheathe move the blade as a whip on the client's own path", f
 	end)
 
 	it("Draw: a hitch early in the clip moves the tip no faster on the frames after it", function()
-		check(true, true)
+		check(true, "hitches")
 	end)
 
 	it("Sheathe: a hitch early in the clip moves the tip no faster on the frames after it", function()
-		check(false, true)
+		check(false, "hitches")
+	end)
+
+	it("Sheathe cut back with the sword still in the hand: back to drawn under the Draw's limits", function()
+		check(false, "back")
+	end)
+
+	it("Draw cut back with the sword in the hand: sheathed again under the Sheathe's limits", function()
+		check(true, "back")
 	end)
 end)

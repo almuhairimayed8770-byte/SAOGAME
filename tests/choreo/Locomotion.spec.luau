@@ -532,33 +532,36 @@ describe("Locomotion: the sheathed sword", function()
 		end
 	)
 
-	it(
-		"a target that turns back before the grab leaves the sword on the back, though the Draw fades past it",
-		function()
-			local model, animator, state, driver, motor = setup(false)
-			state.drawn = true
+	it("a target that turns back before the grab leaves the sword on the back: the Draw fades where it was", function()
+		local model, animator, state, driver, motor = setup(false)
+		state.drawn = true
+		animator:step(FRAME)
+		local draw = handleOf(animator, DRAW)
+		local grab = eventTime(DRAW, "WeaponDraw")
+		-- Turn back just before the grab: played on through its fade, the Draw would cross it.
+		while draw.time + Sheath.stopBlend * 0.5 < grab do
 			animator:step(FRAME)
-			local draw = handleOf(animator, DRAW)
-			local grab = eventTime(DRAW, "WeaponDraw")
-			-- Turn back while the fading Draw will still cross its WeaponDraw.
-			while draw.time + Sheath.stopBlend * 0.5 < grab do
-				animator:step(FRAME)
-			end
-			state.drawn = false
-			local fired = false
-			animator.events:Connect(function(clipId, event)
-				if clipId == DRAW and event.kind == "WeaponDraw" then
-					fired = true
-				end
-			end)
-			steps(animator, 0.5)
-			expect(fired).toBe(true)
-			expect(motor.Part0).toBe(model:FindFirstChild(ROW.part))
-			expect(animator:isPlaying(SHEATHE)).toBe(false)
-			driver:destroy()
-			Choreo.release(model)
 		end
-	)
+		state.drawn = false
+		local fired = false
+		animator.events:Connect(function(clipId, event)
+			if clipId == DRAW and event.kind == "WeaponDraw" then
+				fired = true
+			end
+		end)
+		animator:step(FRAME)
+		-- A cut back: stopped over sheath.cutBackBlend with its clock held (Mixer.hold).
+		expect(draw.stopping).toBe(true)
+		expect(draw.blendOut).toBe(Sheath.cutBackBlend)
+		local heldAt = draw.time
+		steps(animator, 0.5)
+		expect(draw.time).toBe(heldAt)
+		expect(fired).toBe(false)
+		expect(motor.Part0).toBe(model:FindFirstChild(ROW.part))
+		expect(animator:isPlaying(SHEATHE)).toBe(false)
+		driver:destroy()
+		Choreo.release(model)
+	end)
 
 	it(
 		"a late event from a Draw or Sheathe stopped under a cover moves nothing; the new clip's own event does",

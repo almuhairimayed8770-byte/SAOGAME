@@ -239,7 +239,7 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 | Part of the gate sentence | State |
 | --- | --- |
 | The 20-second fight: six beats on every attack, the parry sparks, the kill shatters | Needs the owner's recording (`fight-boar-kobold.mp4`) |
-| The server registered every hit | **Met** in the hit matrix (every window, both enemies, real fight distances, four frame phases; D-045) and in `combat.smoke` in Studio; the recording shows it again as a digit per hit |
+| The server registered every hit | **Met** in the hit matrix (every window, both enemies, real fight distances, four frame phases; D-045) and in `combat.smoke` in Studio; the recording shows it again as a digit per hit. The first takes (2026-10-25) showed one point-blank Horizontal hit the server did not register; the matrix now also swings at four point-blank placements at 30, 60 and 144 fps (D-234) |
 | 60 fps in Studio | **Partly met**: 59.9 to 60.0 fps in Play with the window rendering on the owner's PC (2026-10-20, builds 927dbed and 6d6eb74, frame cap 60, p95 17.6 to 17.7 ms), standing and running with the enemies 66+ studs away; still to read during the recorded fight (**View > Stats**) |
 | All tests green | **Met** in Lune on 6e0fd5e (1559 tests in 94 spec files, 28 validators, `tools/lint.sh --offline` ALL GREEN); the six Studio smokes and CI last passed on earlier builds (1051 tests) and still have to run on this one |
 
@@ -633,6 +633,39 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   - The wind-up faces the late root.
   - Studio items 212–220.
 
+## Gate shot fixes (2026-10-25, D-227 to D-270)
+
+- **Hits (D-227 to D-235, D-267):**
+  - A hit's freeze starts on its strike key, from the client's contact (HEAD: 824 of 844 early; now 0 of 845) and from the server's word (0 of 80 early at 0–100 ms of lag).
+  - Holds are exactly 3, 6 and 10 frames at 60 fps under jitter. The smear shows only while the blade moves, and Sharp Nail's trail goes out between cuts.
+  - The client draws exactly the hits the server counts, over the whole hit matrix at 30, 60 and 144 fps.
+  - An Art whose first cut would start inside the enemy steps back up to 1.5 studs during its wind-up.
+  - An Art the server takes away shows no tell. No body spin after Sharp Nail. No small-enemy launch in Phase 0.
+- **Camera and capture (D-236 to D-251, D-268):**
+  - Toe-to-toe fights are framed three-quarter at head height. The lock camera turns at most 150°/s and never looks down onto the hat, and it holds still through the death freeze.
+  - Walking into a boar or kobold stops at its body on every side.
+  - Each gate shot stages itself in Studio: the player is walked into a ring (never teleported), then the enemies, heal, camera, prompts, auto-stop and optional auto-perform. J gives the field back only once the server agrees.
+- **Enemies (D-252 to D-260):**
+  - The kobold's tell stays lit to the snap, with a white glint over the parry window. Cones lie on the ground.
+  - A parry shows no freeze and eases into the deflect and the stagger.
+  - An enemy blow flinches the player on the frame it lands; HP still waits for the server.
+  - A dropped wind-up draws no phantom rush, the crouch faces the blow, a jam is read from a root at rest, and a late ActionStarted no longer replays the Charge.
+  - Enemies keep room between their bodies.
+- **Trails, glow, sound and HUD (D-261 to D-266, D-269, D-270):**
+  - The trail is a thick ribbon that follows the arc, and the activation glow reads in daylight.
+  - The FinalHit bass cut holds from the hit frame, the heartbeat ducks under the player's own hits, and the shatter glass sits over the bass.
+  - Bigger system lines and hotbar labels, plates that lift apart and keep their order, inked speed lines, and a wall-slam shake that fires and reads.
+  - A Draw or Sheathe that is cut back stays under the tip-speed cap.
+- **Checks:**
+  - 2845 specs pass in 156 files (HEAD: 2572 in 140); tools/lint.sh --offline is ALL GREEN. The staging first teleported the player through the anti-cheat's server-move path from its remote, which D-143's caller test refused; it now walks the player into a ring instead (D-244), and that test is unchanged.
+  - Stylua, selene, the 32 validators (0 problems), the rojo builds, the hit matrix, the animation review and gaitgen are clean.
+  - luau-lsp shows no new messages against HEAD.
+- **Open:**
+  - Lock-relative movement is not wired (D-238). Kill words are not held (D-267). Holds run 8–17% short at 120 Hz and above.
+  - The parry glint is wholly inside the press window only up to 50 ms of one-way latency.
+  - A jam still overruns 9–14 studs at 0.25–0.5 s of lag. The trail's first segment can show one frame of wind-up. The slam shake has no falloff.
+  - Studio items 221–262, then the gate shots recorded again.
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and
@@ -701,4 +734,20 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 | `docs/clips/phase-0/enemy-kobold-overhead.mp4` | 5 s | 1.0 s wind-up with the yellow edge, the chop, the recovery |
 | `docs/clips/phase-0/parry-spark.mp4` | 5 s | guard tapped inside the window against the kobold's overhead (the boar's charge is unblockable); spark and ring; the enemy staggers |
 | `docs/clips/phase-0/kill-shatter.mp4` | 5 s | the 10-frame kill hit-stop, the 0.5 s freeze and silence, the shards rising |
-| `docs/clips/phase-0/locomotion.mp4` | 14 s | sheathed: walk, run, sprint with the sword on the back; lock on to draw; drawn: walk, run, sprint with the blade low and back; turn in place, skid stop, jump and land; no T-pose, no sliding foot |
+| `docs/clips/phase-0/locomotion.mp4` | 14 s | sheathed: walk, run, sprint with the sword on the back; lock on to draw; drawn: walk, run, sprint with the blade low and back; turn in place, skid stop, fall off a ledge and land (no jump, D-024); no T-pose, no sliding foot |
+
+### First takes reviewed (2026-10-25)
+
+The owner recorded eight of the ten shots on 66f85c7 (two Desktop recordings, 2560x1440 at 60 fps). Each was reviewed frame by frame at 0.25x; the review is in the project files at `reviews/2026-10-25-gate-shots/REVIEW.md`. The capture counter read one game frame per captured frame (for example 300 of 300 in art-rising-arc), so the game ran at 60 fps during the takes; no Stats readout was taken. Every shot is to be recorded again on the build with the gate shot fixes (D-227 to D-270), which stages each shot itself (D-242).
+
+- fight-boar-kobold.mp4 (20 s): Not met. Not recorded.
+- art-horizontal.mp4: Not met. The hit fires before the blade crosses the kobold (f73, f179), so snap/smear/settle are never seen; hit 2 was never registered by the server; take stopped at 3.9 s with two Arts.
+- art-vertical.mp4: Not met. The overhead cut never shows: blade frozen straight up 7 frames, chop in 1 frame (f49-56, f167-174). The gauge-heavy hit itself is right.
+- art-sharp-nail.mp4: Not met. Only 2 of 3 hit-stops visible (bodies overlap); trail lit between windows (clip data); tell after a hit out of stance; Final cut off.
+- art-rising-arc.mp4: Not met. Both hits land on the first frame of the cut (blade still in the start pose); rise onto the toes hidden by the overlapping kobold.
+- enemy-boar-charge.mp4: Not met. Take marked done at 0.6 s, before the launch.
+- enemy-kobold-overhead.mp4: Not met. Recovery not recorded (stopped at 3.57 s); kobold hidden behind the player; tell ends 18 frames before the chop.
+- parry-spark.mp4: Not met. The counted 5 s shows the player dying (guard held 0.45 s early at 18 HP); stagger barely reads even on the later parries.
+- kill-shatter.mp4: Not met as cut; met in the take. All three points pass at src 6342; recut source A frames 6280-6579 (camera drift in the freeze still open).
+- locomotion.mp4: Not met. 0.4 s of sheathed walk then a boar fight; no run/sprint/lock-to-draw/turn/skid/fall-land, feet never visible.
+

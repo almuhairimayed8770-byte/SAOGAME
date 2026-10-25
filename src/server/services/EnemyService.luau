@@ -27,6 +27,12 @@
 	since it asked. A detour that goes back round an obstacle starts with a leg the body is not on,
 	and a body that asked because it was stuck walked nowhere since, so both walk the path as it came.
 
+	Room between enemies (D-259): after each free enemy's tick (deciding or walking, never mid-attack,
+	staggered or asleep) Spacing steers its mover so no enemy stands, stops or walks inside another's
+	footprint (measured on its rig at spawn): a goal inside another body moves out to its edge, a walk
+	into one slides along it, and a body caught inside one steps out. A strike's own movement is
+	never steered. A Return reaches a home another body stands on at its side (context.standOff).
+
 	Hold (D-120): setHeld(id, true) puts one enemy's brain to sleep and stops its mover, and the
 	sleep check never wakes it while it is held; setHoldNew(true) makes every enemy spawned after
 	it (PlaygroundService respawns included) start held. A held enemy's HP never regenerates
@@ -58,6 +64,7 @@ local RushWorld = require(Shared.choreo.RushWorld)
 local Brain = require(script.Parent.Parent.ai.Brain)
 local Charger = require(script.Parent.Parent.ai.Charger)
 local Brute = require(script.Parent.Parent.ai.Brute)
+local Spacing = require(script.Parent.Parent.ai.Spacing)
 
 export type SpawnOptions = {
 	band: Types.ThreatBand?, -- overrides the def's band (spawn tables)
@@ -167,6 +174,10 @@ export type Entry = {
 	front: number, -- studs the body reaches ahead of its root (the snout), measured at spawn
 	back: number, -- studs it reaches behind its root
 	body: RushWorld.Body?, -- its corners at rest and its root's size: what a wall stops (D-205)
+	footprint: Spacing.Footprint, -- the ground it takes up, measured at spawn: the room others keep (D-259)
+	-- The mover's goal is a step out of another body (D-259), not the brain's: the next tick steps
+	-- afresh from where the body stands rather than adding the step to it again.
+	stepping: boolean,
 	rushEndSent: boolean, -- this rush already told the clients it stopped early (D-169)
 	-- The early stop told was "Jammed" or "Wall" (the body still on its way to the stop), and the
 	-- stop that ended it after that was told too (D-210).
@@ -638,6 +649,74 @@ local function rejoin(entry: Entry, now: number)
 	end
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- Room between enemies (D-259)
+-- ---------------------------------------------------------------------------------------------
+
+-- Deciding or walking (ai.luau spacing.freePhases): a body that may move to keep its room. Busy
+-- (mid-attack, staggered, dead), asleep, held and rooted (moveSpeed 0) bodies stay where they are.
+local function isFree(entry: Entry): boolean
+	return entry.awake
+		and not entry.held
+		and entry.def.moveSpeed > 0
+		and AI.spacing.freePhases[entry.brain:getPhase()] == true
+end
+
+local function spacingBody(entry: Entry): Spacing.Body
+	local engine = dependencies().engine
+	return {
+		position = engine.position(entry.model),
+		facing = engine.facing(entry.model),
+		footprint = entry.footprint,
+	}
+end
+
+-- Where `entry` would stand nearest `point` with its room to every other enemy (Spacing.standOff).
+local function standOffFor(entry: Entry, point: Vector3): Vector3
+	local others: { Spacing.Body } = {}
+	for _, other in entries do
+		if other ~= entry then
+			table.insert(others, spacingBody(other))
+		end
+	end
+	return Spacing.standOff(spacingBody(entry), point, others, AI.spacing.gapStuds, Vector3.xAxis)
+end
+
+-- After a free enemy's tick: its goal moves out of any other body, a walk into one slides along it,
+-- and a body inside another's room steps out (Spacing.steer). A strike's own movement (the rush)
+-- is never steered.
+local function keepRoom(entry: Entry)
+	local mover = entry.mover
+	if mover.direct or not isFree(entry) then
+		return
+	end
+	local neighbors: { Spacing.Neighbor } = {}
+	for _, other in entries do
+		if other ~= entry then
+			table.insert(neighbors, {
+				body = spacingBody(other),
+				share = if isFree(other) then 0.5 else 1,
+				side = if entry.id < other.id then 1 else -1,
+			})
+		end
+	end
+	if #neighbors == 0 then
+		return
+	end
+	local goal = if entry.stepping then nil else mover.goal
+	local target = Spacing.steer(spacingBody(entry), goal, neighbors)
+	if target == nil then
+		return
+	end
+	if goal ~= nil and mover.path ~= nil and Brain.horizontalDistance(target, goal) >= AI.flatEpsilon then
+		-- A turn along another body is a short, straight walk: the path to the old goal waits.
+		dropPath(mover)
+	end
+	local speed = if goal ~= nil then mover.speed else entry.def.moveSpeed * AI.spacing.stepSpeedMultiplier
+	moverRequest(mover, target, speed, false)
+	entry.stepping = goal == nil
+end
+
 local function makeContext(entry: Entry): Brain.Context
 	local d = dependencies()
 	local id = entry.id
@@ -661,10 +740,15 @@ local function makeContext(entry: Entry): Brain.Context
 			return d.engine.facing(model)
 		end,
 		moveTo = function(position, speed, direct)
+			entry.stepping = false
 			moverRequest(mover, position, speed, direct)
 		end,
 		stop = function()
+			entry.stepping = false
 			moverStop(mover)
+		end,
+		standOff = function(point)
+			return standOffFor(entry, point)
 		end,
 		face = function(direction)
 			d.engine.setFacing(model, direction)
@@ -714,6 +798,18 @@ local function makeContext(entry: Entry): Brain.Context
 		end,
 		rushTurned = function(rush, contact)
 			rushTurned(entry, rush, contact)
+		end,
+		attackDropped = function(beat)
+			-- Reliable, on the beat the clients keep the attack by (its wind-up's end): each drops the
+			-- swing, the tell and a launch its telegraph predicted (Replication, D-254). A rush's own
+			-- remote, so it stays in order with the launch and the stop it stands in for.
+			d.fireAll("RushEnded", {
+				entityId = id,
+				launchedAt = math.max(0, beat),
+				serverTime = d.serverTime(),
+				distance = 0,
+				reason = "Dropped",
+			})
 		end,
 		daze = function(seconds)
 			-- A slam (D-208): a Stagger from the front, through EntityService like a parry's, which
@@ -827,6 +923,7 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 	local body: RushWorld.Body? = if root ~= nil
 		then { profile = RushWorld.profileOf(model), size = root.Size }
 		else nil
+	local footprint = Spacing.footprintOf(if body ~= nil then body.profile else {})
 	-- What players bump into instead of the root (D-198); the enemies group switches it on.
 	if typeof(d.rigBuilder.addBlocker) == "function" then
 		d.rigBuilder.addBlocker(model)
@@ -850,6 +947,8 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 		front = front,
 		back = back,
 		body = body,
+		footprint = footprint,
+		stepping = false,
 		rushEndSent = false,
 		rushEndEarly = false,
 		rushEndFinal = false,
@@ -1059,6 +1158,9 @@ local function tickAll(step: number)
 		local ok, err = pcall(runTick, entry.brain, step)
 		if not ok then
 			warn(("[EnemyService] brain of entity %d (%s) failed: %s"):format(entry.id, entry.defId, tostring(err)))
+		end
+		if entries[entry.id] == entry then
+			keepRoom(entry)
 		end
 		moverUpdate(entry.mover, now)
 	end

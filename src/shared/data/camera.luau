@@ -150,6 +150,25 @@ local Camera = {
 		solveSteps = 20, -- bisection steps for the swing (65 / 2^20 degrees)
 		yawLag = 0.2, -- seconds; the two-shot eases onto its bearing, distance and aim
 		blendLag = 0.12, -- seconds; the shot eases between the free camera and the two-shot
+		-- Close fights (F3). Toe to toe no swing stands two bodies apart on screen, and from behind
+		-- the player's hat and coat cover the target and the blade; the shot turns to a
+		-- three-quarter view of both instead, a little lower. How close is the flat gap from the
+		-- player's root to the target's footprint: its blocker (D-198), which covers the body's
+		-- rest silhouette, else its root part. At or under closeGap the shot is fully close, from
+		-- openGap out not at all, eased between (CameraMath.closeness) and on the yaw spring.
+		footprintPart = "Blocker", -- RigBuilder.BLOCKER_NAME (a spec keeps the two the same)
+		closeGap = 1.5, -- studs: an arm's length, toe to toe
+		openGap = 4.5, -- studs: past a lunge, the two-shot solves its swing alone
+		closeSwingDegrees = 80, -- the close shot's least swing off the line behind the player
+		closeHeight = 2.7, -- studs above the player's root: about head height, under a hat's brim
+		-- The bearing never turns faster than this (degrees per second): a target running past the
+		-- player, or two fighters circling toe to toe, swing the shot as a fast pan, never a whip
+		-- (issue 12, issue 22). Below it the yaw spring eases as before; only a whip is capped.
+		maxTurnDegreesPerSecond = 150,
+		-- The aim never comes nearer the lens than this fraction of the player's depth along the
+		-- view: a target that ran past to the camera's side would pull the midpoint in under it, a
+		-- look straight down onto the player's hat (issue 12).
+		aimDepthFraction = 1,
 	},
 
 	mobile = {

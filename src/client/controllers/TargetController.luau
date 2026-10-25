@@ -10,6 +10,12 @@
 	camera frames both fighters and the outline manager marks the target. Ranking lives in
 	TargetRanking (tested).
 
+	A death ends the lock at once (the outline, the server's lock, targetChanged and the body's
+	turn), but not the shot (F4): the camera holds the lock's framing through the kill's hit-stop
+	and the death freeze (CameraController.holdLock) and lets go as the body shatters, so the freeze
+	reads as a still picture, never a pull-back to the free camera. Every other end (the key, a
+	target out of range or gone, a respawn) lets the shot go at once.
+
 	Every lock change goes to the server as a TargetRequest through TrailingSend: never faster than
 	the remote's rate limit, and the last change always arrives, so mashing the key cannot leave the
 	server holding a lock (and the sword drawn, D-050) that the client already let go of.
@@ -27,6 +33,8 @@ local Shared = ReplicatedStorage.Shared
 local Client = script.Parent.Parent
 
 local CameraData = require(Shared.data.camera)
+local Combat = require(Shared.data.combat)
+local Moments = require(Shared.data.moments)
 local Net = require(Shared.net.Net)
 local TrailingSend = require(Shared.net.TrailingSend)
 local Signal = require(Shared.util.Signal)
@@ -131,7 +139,14 @@ function TargetController.assistCandidates(origin: Vector3, look: Vector3): { Ai
 	return list
 end
 
-local function setTarget(record: any)
+-- Seconds from a death to its shatter (Replication's EntityDied): the kill's hit-stop, then the freeze.
+local function untilShatter(): number
+	return Moments.deathDuckDelay() + Combat.deathFreeze
+end
+
+-- `death`: the lock ends with a death (the target's or the local character's); the camera holds
+-- its framing until the shatter instead of letting go now (F4).
+local function setTarget(record: any, death: boolean?)
 	if record == target then
 		return
 	end
@@ -142,7 +157,11 @@ local function setTarget(record: any)
 	if record ~= nil then
 		OutlineManager.setImportance(record.model, "Lock")
 	end
-	CameraController.setLockTarget(if record ~= nil then record.model else nil)
+	if record == nil and death == true then
+		CameraController.holdLock(untilShatter())
+	else
+		CameraController.setLockTarget(if record ~= nil then record.model else nil)
+	end
 	if sender ~= nil then
 		sender:set(if record ~= nil then record.id else nil)
 	end
@@ -206,7 +225,7 @@ local function check()
 	local live = EntityTracker.get(target.id)
 	local state = if live == target then target.state else nil
 	if TargetRanking.shouldClear(state, distance, CameraData.lock.breakDistance) then
-		setTarget(nil)
+		setTarget(nil, state == "Dead")
 	end
 end
 
@@ -233,13 +252,14 @@ function TargetController.start()
 			setTarget(nil)
 		end
 	end)
-	-- The target's death, and the local character's: the lock ends with either.
+	-- The target's death, and the local character's: the lock ends with either, and the shot
+	-- holds until the shatter (F4).
 	EntityTracker.changed:Connect(function(record: any, attribute: string, value: any)
 		if attribute ~= "State" or value ~= "Dead" then
 			return
 		end
 		if record == target or EntityTracker.isLocal(record.id) then
-			setTarget(nil)
+			setTarget(nil, true)
 		end
 	end)
 	-- A respawn gives the player a new server record, and it starts with no lock. The old

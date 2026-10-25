@@ -239,11 +239,12 @@ describe("A confirmation's stronger tier and the hold on the local rig", functio
 		f.contact(5, 1, "Normal")
 		f.frames(10)
 		expect(f.me:pauseRemaining()).toBe(0)
-		-- The next cut lands: its own hold runs.
+		-- The next cut lands: its own hold runs (its frames less the shave that keeps a short
+		-- frame from freezing one more, F6).
 		f.contact(5, 2, "Normal")
 		f.frames(1)
 		local left = f.me:pauseRemaining()
-		expect(left).toBeCloseTo(frames(Combat.hitStopFrames.Normal - 1), 1e-9)
+		expect(left).toBeCloseTo(frames(Combat.hitStopFrames.Normal - Combat.hitStopShaveFrames - 1), 1e-9)
 		-- The word for the first cut: a kill. Its moment still plays what the Kill adds...
 		f.confirm(5, 1, "Kill")
 		expect(f.count("impact", "hit")).toBe(3)
@@ -257,7 +258,10 @@ describe("A confirmation's stronger tier and the hold on the local rig", functio
 		f.contact(5, 1, "Normal")
 		f.frames(1)
 		f.confirm(5, 1, "Kill")
-		expect(f.me:pauseRemaining()).toBeCloseTo(frames(Combat.hitStopFrames.Kill - 1), 1e-9)
+		expect(f.me:pauseRemaining()).toBeCloseTo(
+			frames(Combat.hitStopFrames.Kill - Combat.hitStopShaveFrames - 1),
+			1e-9
+		)
 		expect(f.count("animator:5", "hitStop")).toBe(2)
 	end)
 
@@ -267,7 +271,10 @@ describe("A confirmation's stronger tier and the hold on the local rig", functio
 		f.contact(6, 1, "Normal")
 		f.frames(1)
 		f.confirm(5, 1, "Kill")
-		expect(f.me:pauseRemaining()).toBeCloseTo(frames(Combat.hitStopFrames.Kill - 1), 1e-9)
+		expect(f.me:pauseRemaining()).toBeCloseTo(
+			frames(Combat.hitStopFrames.Kill - Combat.hitStopShaveFrames - 1),
+			1e-9
+		)
 	end)
 
 	it("never stretches the hold of a hit the local fighter took after the contact's hold", function()

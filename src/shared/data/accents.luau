@@ -66,7 +66,7 @@ export type SpeedLineKind = {
 	inFrames: number, -- the lines rush in from the edges
 	outFrames: number, -- they pull back out and fade
 	transparency: number, -- at full strength
-	thicknessPixels: number,
+	thicknessPixels: number, -- the whole width, the ink edge on both sides included
 	-- Where each line's inner end sits, as a fraction of the way from the middle third's edge to the
 	-- screen's edge along its ray (0 = right on the middle third, 1 = at the screen edge).
 	innerReach: { min: number, max: number },
@@ -289,8 +289,18 @@ local Accents = {
 		clearFraction = 1 / 3,
 		-- The screen size used when the viewport cannot be read (Lune, before the camera exists).
 		referenceScreen = { width = 1920, height = 1080 },
-		-- At most this fraction of the reference screen is covered by lines at once (worst case).
-		maxCoverage = 0.03,
+		-- At most this fraction of the reference screen is covered by lines at once (worst case),
+		-- counting each line's whole width with its ink edge.
+		maxCoverage = 0.045,
+		-- F17: the reel review found the dodge's lines faint on the daylight sky (2 px of white at
+		-- 0.3 over the Floor 1 haze moved a pixel under a tenth). Each line is a white core inside a
+		-- thin ink edge, the way a hand-drawn speed line is inked: the core carries it on a dark
+		-- floor, the edge on a bright sky. The edge fades its inner end and goes with the line.
+		edge = {
+			token = "OutlineInk",
+			pixels = 1, -- each side of the core
+			transparency = 0.2, -- at full strength
+		},
 		defaultKind = "Dodge",
 		kinds = {
 			-- The dodge's 0.25 s step (section 6).
@@ -300,7 +310,7 @@ local Accents = {
 				inFrames = 4,
 				outFrames = 7,
 				transparency = 0.3,
-				thicknessPixels = 2,
+				thicknessPixels = 5, -- the whole width: a 3 px core inside the ink edge
 				innerReach = { min = 0.05, max = 0.4 },
 				startReach = 0.7,
 				overshoot = 1.05,
@@ -309,11 +319,11 @@ local Accents = {
 			-- A dash (a gap-closer Art or a sprint burst): a little longer and denser.
 			Dash = {
 				seconds = 0.35,
-				count = 18,
+				count = 16, -- F17: 18 before the lines grew their ink edge; held under maxCoverage
 				inFrames = 4,
 				outFrames = 11,
 				transparency = 0.25,
-				thicknessPixels = 2,
+				thicknessPixels = 5,
 				innerReach = { min = 0.03, max = 0.32 },
 				startReach = 0.65,
 				overshoot = 1.05,

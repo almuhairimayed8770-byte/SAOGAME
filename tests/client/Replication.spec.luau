@@ -11,6 +11,12 @@ local moments = Harness.load("src/shared/data/moments")
 -- A payload override that removes the field (a basic swing carries no artId).
 local NONE = table.freeze({})
 
+-- What a hold of `tier` asks the Mixer for: its frames less the shave that keeps a frame a hair
+-- short of 1/60 from freezing one more (F6).
+local function held(tier: string): number
+	return combat.hitStopFrames[tier] - combat.hitStopShaveFrames
+end
+
 -- A recorder module: every field is a function that logs its call.
 local function recorder(moduleName, calls)
 	return setmetatable({}, {
@@ -377,9 +383,10 @@ describe("Replication", function()
 		local attackerStops = t.find("animator:me", "hitStop")
 		local targetStops = t.find("animator:boar", "hitStop")
 		expect(#attackerStops).toBe(1)
-		expect(attackerStops[1].args[1]).toBe(combat.hitStopFrames.Normal)
+		-- A hold of n frames asks the Mixer for n less the shave, so it freezes exactly n (F6).
+		expect(attackerStops[1].args[1]).toBe(held("Normal"))
 		expect(#targetStops).toBe(1)
-		expect(targetStops[1].args[1]).toBe(combat.hitStopFrames.Normal)
+		expect(targetStops[1].args[1]).toBe(held("Normal"))
 		local digits = t.find("digits", "show")
 		expect(#digits).toBe(1)
 		expect(digits[1].args[1]).toBe(Vector3.new(3, 2, -5))
@@ -482,13 +489,13 @@ describe("Replication", function()
 	it("HitConfirmed: the Kill tier gives 10 frames and a Kill shake; crit and Switch pick the digit kind", function()
 		local t = setup()
 		Replication.dispatch("HitConfirmed", hit({ hitStop = "Kill", killed = true, crit = true }))
-		expect(t.find("animator:boar", "hitStop")[1].args[1]).toBe(combat.hitStopFrames.Kill)
+		expect(t.find("animator:boar", "hitStop")[1].args[1]).toBe(held("Kill"))
 		expect(t.find("camera", "shake")[1].args[1]).toBe("Kill")
 		expect(t.find("digits", "show")[1].args[3]).toBe("Crit")
 
 		local switch = setup()
 		Replication.dispatch("HitConfirmed", hit({ hitStop = "Final", isSwitch = true, crit = true }))
-		expect(switch.find("animator:me", "hitStop")[1].args[1]).toBe(combat.hitStopFrames.Final)
+		expect(switch.find("animator:me", "hitStop")[1].args[1]).toBe(held("Final"))
 		expect(switch.find("digits", "show")[1].args[3]).toBe("Switch")
 		-- The blades' white flash and the land sound are the director's Switch row now.
 		expect(#switch.find("trails", "flashWhite")).toBe(0)
@@ -1103,6 +1110,79 @@ describe("Replication", function()
 		expect(seen[#seen].jumped).toBe(false)
 	end)
 
+	it("a clip taken away starts nothing as it fades out: no tell, chime, trail or smear (F5)", function()
+		local Mixer = Harness.load("src/client/choreo/Mixer")
+		local root = "src/shared/clips/player/OneHandedSword/"
+		local t = setup()
+		local me = t.records[1]
+		-- The rig's animator over a real Mixer, as Choreo's is: its stopped clips keep their clock
+		-- through the blend-out and cross events on the way.
+		local mixer = Mixer.new()
+		t.deps.choreo.get(t.models.me).mixer = mixer
+		local function run(seconds: number, dt: number)
+			for _ = 1, math.round(seconds / dt) do
+				for _, fired in mixer:step(dt).events do
+					Replication.routeClipEvent(me, fired.clipId, fired.event, fired.jumped)
+				end
+			end
+		end
+		local function starts(): number
+			local count = #t.find("sfx", "play") + #t.find("camera", "fovKick") + #t.find("impact", "activation")
+			for _, call in t.find("trails", "activationLight") do
+				count += if call.args[2] == true then 1 else 0
+			end
+			for _, call in t.find("trails", "setActive") do
+				count += if call.args[2] == true then 1 else 0
+			end
+			for _, call in t.find("smear", "apply") do
+				count += if call.args[2] == true then 1 else 0
+			end
+			return count
+		end
+		-- Hit out of the start pose: the server's Stagger stops the held Art before its activation
+		-- hold (0.15). Its blend-out carries it over the hold: no tell, chime, kick or riser.
+		local horizontal = mixer:play(Harness.load(root .. "Horizontal"))
+		run(0.1, 1 / 60)
+		mixer:stop(horizontal, combat.locomotionBlendOut)
+		run(0.5, 1 / 60)
+		expect(starts()).toBe(0)
+		-- One stopped in the stance after its tell: the fade crosses its first damage frame (0.35),
+		-- which starts no trail or smear, and its light goes with the cancel fade, not in a frame.
+		horizontal = mixer:play(Harness.load(root .. "Horizontal"))
+		run(0.2, 1 / 60)
+		local before = starts()
+		expect(before).toBeGreaterThan(0)
+		local lights = #t.find("trails", "activationLight")
+		mixer:stop(horizontal, combat.locomotionBlendOut)
+		run(0.5, 1 / 60)
+		expect(starts()).toBe(before)
+		local offs = t.find("trails", "activationLight")
+		expect(#offs).toBe(lights + 1)
+		expect(offs[#offs].args[2]).toBe(false)
+		expect(offs[#offs].args[4]).toBe(true)
+		-- A refused swing stopped before its trail (0.10): nothing lights on its fade.
+		local basic = mixer:play(Harness.load(root .. "Basic1"))
+		run(0.05, 1 / 60)
+		before = starts()
+		mixer:stop(basic, combat.locomotionBlendOut)
+		run(0.5, 1 / 60)
+		expect(starts()).toBe(before)
+		-- A clip that runs to its own end still plays what its last frame crosses (a turn's second
+		-- footstep, 0.38 of 0.4, at 30 fps), and a clip played over a stopping one of the same id
+		-- starts as ever.
+		local footsteps = #t.find("sfx", "footstep")
+		mixer:play(Harness.load(root .. "TurnLeft"))
+		run(0.5, 1 / 30)
+		expect(#t.find("sfx", "footstep")).toBe(footsteps + 2)
+		local first = mixer:play(Harness.load(root .. "Horizontal"))
+		run(0.05, 1 / 60)
+		mixer:stop(first, combat.locomotionBlendOut)
+		mixer:play(Harness.load(root .. "Horizontal"))
+		local chimes = #t.find("sfx", "play")
+		run(0.2, 1 / 60)
+		expect(#t.find("sfx", "play")).toBeGreaterThan(chimes)
+	end)
+
 	it("a TrailOn's data.kind picks the trail kind for the rest of that clip's trail events", function()
 		local t = setup()
 		local boar = t.records[7]
@@ -1384,7 +1464,7 @@ describe("Replication", function()
 		local info = lastInfo(t)
 		expect(info.art).toBe(false)
 		expect(info.tier).toBe("Final")
-		expect(t.find("animator:boar", "hitStop")[1].args[1]).toBe(combat.hitStopFrames.Final)
+		expect(t.find("animator:boar", "hitStop")[1].args[1]).toBe(held("Final"))
 		expect(t.find("sfx", "play")[1].args[1]).toBe("hitStopTick.Final")
 		-- An enemy's strike is neither an Art nor a player's basic swing.
 		Replication.dispatch("HitConfirmed", hit({ attackerId = 7, targetId = 1, artId = NONE }))
@@ -1945,8 +2025,8 @@ describe("Replication: the local fighter's contact (issue 4)", function()
 		local t = setup()
 		t.state.moment = "Hit"
 		expect(Replication.contact(contact())).toBe(true)
-		expect(t.find("animator:me", "hitStop")[1].args[1]).toBe(combat.hitStopFrames.Normal)
-		expect(t.find("animator:boar", "hitStop")[1].args[1]).toBe(combat.hitStopFrames.Normal)
+		expect(t.find("animator:me", "hitStop")[1].args[1]).toBe(held("Normal"))
+		expect(t.find("animator:boar", "hitStop")[1].args[1]).toBe(held("Normal"))
 		local flash = t.find("outline", "flash")
 		expect(#flash).toBe(1)
 		expect(flash[1].args[1]).toBe(t.models.boar)
@@ -1975,7 +2055,7 @@ describe("Replication: the local fighter's contact (issue 4)", function()
 		expect(lastInfo(t).art).toBe(false)
 		Replication.contact(contact({ targetId = 8, tier = "Kill", killed = true }))
 		expect(lastInfo(t).killed).toBe(true)
-		expect(t.find("animator:axeman", "hitStop")[1].args[1]).toBe(combat.hitStopFrames.Kill)
+		expect(t.find("animator:axeman", "hitStop")[1].args[1]).toBe(held("Kill"))
 	end)
 
 	it("its confirmation shows the number and the reactions and replays nothing", function()
@@ -2035,8 +2115,8 @@ describe("Replication: the local fighter's contact (issue 4)", function()
 		expect(#meStops).toBe(2)
 		expect(#boarStops).toBe(2)
 		-- 10 frames from the contact, 2 of them gone while the contact's 3 still hold: 8 more.
-		expect(math.abs(meStops[2].args[1] - (combat.hitStopFrames.Kill - 2))).toBeLessThan(1e-6)
-		expect(math.abs(boarStops[2].args[1] - (combat.hitStopFrames.Kill - 2))).toBeLessThan(1e-6)
+		expect(math.abs(meStops[2].args[1] - (held("Kill") - 2))).toBeLessThan(1e-6)
+		expect(math.abs(boarStops[2].args[1] - (held("Kill") - 2))).toBeLessThan(1e-6)
 		local shakes = t.find("camera", "shake")
 		expect(shakes[#shakes].args[1]).toBe("Kill")
 		expect(ticks(t)).toEqual({ "hitStopTick.Normal", "hitStopTick.Kill" })
@@ -2057,7 +2137,7 @@ describe("Replication: the local fighter's contact (issue 4)", function()
 		Replication.dispatch("HitConfirmed", hit({ hitStop = "Kill", killed = true, hitIndex = 3 }))
 		local finalStops = final.find("animator:me", "hitStop")
 		expect(#finalStops).toBe(2)
-		expect(math.abs(finalStops[2].args[1] - (combat.hitStopFrames.Kill - 4))).toBeLessThan(1e-6)
+		expect(math.abs(finalStops[2].args[1] - (held("Kill") - 4))).toBeLessThan(1e-6)
 
 		-- A confirmation after the contact's own hold let go never stops the rig again (one hold per
 		-- hit), even with frames of the stronger tier's length left; what the tier adds still plays.

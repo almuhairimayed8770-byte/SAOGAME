@@ -16,7 +16,7 @@
 	  0.25-0.33  Anticipation (5 frames): the crouch deepens, the point drags lower and further back
 	  0.33-0.38  Snap 1 (3 frames, ExpoOut): the rising cut, the legs drive the hips up onto the
 	             toes, the torso whips right                                   (hit 1: 0.33-0.45)
-	  0.33-0.37  Smear (2 frames, X: the diagonal)
+	  0.34-0.38  Smear (2 frames, X: the diagonal): the snap's first two moving frames
 	  0.38-0.42  Hold (hit-stop pauses the clock here on a hit)
 	  0.42-0.52  Settle (Spring, 6 frames): the pose comes back 5-8 degrees from the extreme
 	  0.52-0.56  re-cock: the blade carries over the head, the elbow and wrist cock back
@@ -25,8 +25,9 @@
 	  0.61-0.64  Hold, then Settle to 0.75 (the arm springs back up)
 	  0.75-0.90  the heels come down, the knees take the weight, the point stays on the target
 	  0.90-1.40  Recovery / post-motion: caught with the blade out, breathing, the point trembling
-	Each hit window opens on its snap's first frame (the trail ignites with the first), so the
-	server sweeps the whole cut, and closes in the settle.
+	Each hit window opens on its snap's first frame (its trail ignites with it), so the server
+	sweeps the whole cut, and closes in the settle; each trail goes out in its settle, so the
+	re-cock between the cuts draws none.
 	Hit-stop: Normal on hit 1, Final on hit 2 (the server tiers an Art's last window, as it does
 	for Sharp Nail). Root motion: 1 stud forward over the two snaps (-Z is forward).
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
@@ -307,14 +308,16 @@ local clip: Types.ClipDef = {
 		{ time = 0.15, kind = "ActivationHold", data = { hold = 0.1 } },
 		{ time = 0.27, kind = "Sfx", data = { name = "whoosh.Medium" } },
 		{ time = 0.3333, kind = "TrailOn", data = { kind = "Art" } },
-		{ time = 0.3333, kind = "SmearOn", data = { axis = "X" } },
 		{ time = 0.3333, kind = "HitWindowOpen", data = { hit = 1 } },
-		{ time = 0.3667, kind = "SmearOff" },
+		{ time = 0.3416, kind = "SmearOn", data = { axis = "X" } },
+		{ time = 0.375, kind = "SmearOff" },
 		{ time = 0.45, kind = "HitWindowClose", data = { hit = 1 } },
+		{ time = 0.49, kind = "TrailOff" },
 		{ time = 0.5, kind = "Sfx", data = { name = "whoosh.Medium" } },
-		{ time = 0.56, kind = "SmearOn", data = { axis = "Y" } },
+		{ time = 0.56, kind = "TrailOn", data = { kind = "Art" } },
 		{ time = 0.56, kind = "HitWindowOpen", data = { hit = 2 } },
-		{ time = 0.5933, kind = "SmearOff" },
+		{ time = 0.5683, kind = "SmearOn", data = { axis = "Y" } },
+		{ time = 0.6017, kind = "SmearOff" },
 		{ time = 0.68, kind = "HitWindowClose", data = { hit = 2 } },
 		{ time = 0.72, kind = "TrailOff" },
 		{ time = 0.9, kind = "PostMotionStart" },
@@ -322,7 +325,7 @@ local clip: Types.ClipDef = {
 	beats = {
 		Anticipation = { start = 0.25, finish = 0.3333 },
 		Snap = { start = 0.3333, finish = 0.3833 },
-		Smear = { start = 0.3333, finish = 0.3667 },
+		Smear = { start = 0.3416, finish = 0.375 },
 		Hold = { start = 0.3833, finish = 0.4167 },
 		Settle = { start = 0.4167, finish = 0.5167 },
 		Recovery = { start = 0.9, finish = 1.4 },

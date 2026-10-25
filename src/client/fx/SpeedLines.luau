@@ -8,7 +8,9 @@
 	end faded by a UIGradient. The ray layout is worked out in pixels from the viewport at each
 	play, so the middle third holds at any aspect ratio. On play the inner ends rush in from the
 	edges (inEasing), hold, then pull back out to the edges as the lines fade (outEasing), all
-	inside the kind's seconds (a Dodge is the dodge's 0.25 s). The count is the kind's count times
+	inside the kind's seconds (a Dodge is the dodge's 0.25 s). Each line is a white core inside a
+	thin ink edge (accents.speedLines.edge, a UIStroke with its own copy of the inner-end fade), so
+	it reads on a bright sky as well as a dark floor. The count is the kind's count times
 	the quality tier's speedLineScale. The lines are thin and change no screen-wide brightness, so
 	they are never a flash and never ask the flash budget. A line whose whole pixels did not move
 	since the last frame is not written again, so the hold builds nothing. A Heartbeat watchdog
@@ -48,6 +50,7 @@ export type View = {
 
 type Line = {
 	frame: Frame,
+	edge: UIStroke,
 	angle: number,
 	reach: number,
 	-- The whole pixels last laid (x, y off the center, length); math.huge before the first.
@@ -118,6 +121,7 @@ local function ensureGui(): ScreenGui
 		container.Parent = screen
 		local fade = gradient()
 		local color = Palette.color3(config.token :: any)
+		local ink = Palette.color3(config.edge.token :: any)
 		for _ = 1, poolSize() do
 			local frame = Instance.new("Frame")
 			frame.Name = "Line"
@@ -129,11 +133,26 @@ local function ensureGui(): ScreenGui
 			local ramp = Instance.new("UIGradient")
 			ramp.Transparency = fade
 			ramp.Parent = frame
+			-- The ink edge round the core; a stroke takes its own gradient, not the frame's.
+			local edge = Instance.new("UIStroke")
+			edge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+			edge.Color = ink
+			edge.Thickness = config.edge.pixels
+			edge.Transparency = 1
+			local edgeRamp = Instance.new("UIGradient")
+			edgeRamp.Transparency = fade
+			edgeRamp.Parent = edge
+			edge.Parent = frame
 			frame.Parent = container
-			table.insert(
-				pool,
-				{ frame = frame, angle = 0, reach = 0, laidX = math.huge, laidY = math.huge, laidLength = math.huge }
-			)
+			table.insert(pool, {
+				frame = frame,
+				edge = edge,
+				angle = 0,
+				reach = 0,
+				laidX = math.huge,
+				laidY = math.huge,
+				laidLength = math.huge,
+			})
 		end
 		gui = screen
 	end
@@ -215,9 +234,13 @@ end
 -- and length did not move is not written (no UDim2 built), nor is an unchanged transparency.
 local function lay(pose: Pose)
 	local _, config = kindOf(kindName)
+	local edge = Accents.speedLines.edge
 	local transparency = config.transparency + (1 - config.transparency) * pose.fade
 	local fadeChanged = transparency ~= laidTransparency
 	laidTransparency = transparency
+	local edgeTransparency = edge.transparency + (1 - edge.transparency) * pose.fade
+	-- The core is the line's whole width less the edge drawn outside it on both sides.
+	local core = math.max(config.thicknessPixels - 2 * edge.pixels, 1)
 	for index = 1, shown do
 		local line = pool[index]
 		local reach = config.startReach + (line.reach - config.startReach) * pose.reachIn
@@ -235,10 +258,11 @@ local function lay(pose: Pose)
 		local length = math.floor(math.max(outer - inner, 0) + 0.5)
 		if length ~= line.laidLength then
 			line.laidLength = length
-			frame.Size = UDim2.fromOffset(length, config.thicknessPixels)
+			frame.Size = UDim2.fromOffset(length, core)
 		end
 		if fadeChanged then
 			frame.BackgroundTransparency = transparency
+			line.edge.Transparency = edgeTransparency
 		end
 	end
 end

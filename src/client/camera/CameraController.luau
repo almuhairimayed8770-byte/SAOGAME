@@ -18,7 +18,16 @@
 	holds. A blend spring eases between the two rigs, so a lock (and the draw it brings) eases on
 	and off, and a lock whose target is gone eases out from where the target was. The two-shot
 	frames the target's drawn body (choreo/DrawnBody, D-193), not its root part, so a charging boar
-	is framed where it is drawn (on the server's timeline), not where its hidden root lags. The whole rig
+	is framed where it is drawn (on the server's timeline), not where its hidden root lags.
+
+	Close fights (F3): toe to toe no swing stands the bodies apart, so as the gap from the player to
+	the target's footprint (its blocker over the body's silhouette, D-198) closes, the shot swings to
+	at least a three-quarter view (camera.luau lock.closeSwingDegrees) and comes down to about head
+	height. The bearing turns no faster than lock.maxTurnDegreesPerSecond, so a target running past
+	or circling toe to toe pans the shot instead of whipping it, and the aim never comes nearer the
+	lens than the player (a rush past the camera's side looked straight down onto the hat, issue 12).
+	A kill or a death holds the shot on its target through the freeze (holdLock, F4). lockMove reads
+	the stick in the lock's frame (forward at the target), for the character controller. The whole rig
 	rides a lagged pivot (the 0.12 s follow) leashed along the view (CameraMath.leash): the camera
 	and its aim move together, so a dodge never tilts the view, and a dodge toward the lens never
 	brings it onto the player; and leashed across it (D-181), so a sideways dodge never carries the
@@ -94,6 +103,9 @@ local bearingSpring = Spring.new(0, shotStiffness, CameraData.follow.damping)
 -- fighters part or close, so a dodge widens the shot without tilting it.
 local shotDistanceSpring = Spring.new(0, shotStiffness, CameraData.follow.damping)
 local shotAimSpring = Spring.new(Vector3.zero, shotStiffness, CameraData.follow.damping)
+-- How close the fight is (0 apart, 1 toe to toe; F3), eased like the shot's shape: it swings the
+-- shot to its three-quarter view and lowers it.
+local closeSpring = Spring.new(0, shotStiffness, CameraData.follow.damping)
 local shotLive = false
 -- 0 the free rig, 1 the two-shot.
 local blendSpring = Spring.new(0, CameraMath.springFromLag(CameraData.lock.blendLag), CameraData.follow.damping)
@@ -103,6 +115,19 @@ local reachSpring = Spring.new(1, CameraMath.springFromLag(CameraData.collision.
 local lockSign = 1
 local lockPoint: Vector3? = nil
 local wasLocked = false
+-- A lock held past its target's death (F4): the shot stays on it until this os.clock, then lets go.
+local holdUntil: number? = nil
+-- A staged view (the capture's gate shots, F12; setStage): it rides over the free rig and the
+-- lock's two-shot on its own blend, its bearing on its own spring and turn cap. The target's last
+-- drawn spot and look stay when it is gone (the kill shot's shatter).
+local stage: { view: CameraMath.StageView, target: Model?, side: number }? = nil
+local stageBlend = Spring.new(0, CameraMath.springFromLag(CameraData.lock.blendLag), CameraData.follow.damping)
+local stageBearing = Spring.new(0, shotStiffness, CameraData.follow.damping)
+local stageLive = false
+local stagePoint: Vector3? = nil
+local stageLook: Vector3? = nil
+local stageCamera = Vector3.zero -- the staged rig relative to the pivot, kept to ease out from
+local stageAim = Vector3.zero
 -- The last frame's view yaw (the free camera takes it when a lock lets go) and camera spot.
 local viewYaw = 0
 local cameraSpot: Vector3? = nil
@@ -219,6 +244,25 @@ local function lockRoot(): BasePart?
 	end
 	local root = model.PrimaryPart
 	return if root ~= nil then root else nil
+end
+
+-- How close the fight is: the flat gap from `at` (the player's root) to the target's footprint
+-- (camera.luau lock.footprintPart, its blocker over the body's silhouette; else its root part),
+-- where its body is drawn (D-193), eased from closeGap to openGap.
+local function closenessOf(at: Vector3, model: Model, targetRoot: BasePart): number
+	local lock = CameraData.lock
+	local drawn = DrawnBody.cframe(model) or targetRoot.CFrame
+	-- Where the body is drawn and which way it faces (the point the lock frames, D-193).
+	local body = CFrame.new(DrawnBody.position(model) or targetRoot.Position) * drawn.Rotation
+	local frame, size = body, targetRoot.Size
+	local footprint = model:FindFirstChild(lock.footprintPart)
+	if footprint ~= nil and footprint:IsA("BasePart") then
+		frame = body * targetRoot.CFrame:ToObjectSpace(footprint.CFrame)
+		size = footprint.Size
+	end
+	local spot = frame:PointToObjectSpace(at)
+	local gap = CameraMath.footprintGap(spot.X, spot.Z, size.X / 2, size.Z / 2)
+	return CameraMath.closeness(gap, lock.closeGap, lock.openGap)
 end
 
 local function pivotOf(root: BasePart): Vector3
@@ -365,6 +409,7 @@ local function rig(root: BasePart, span: number, settle: boolean): (Vector3, Vec
 		-- Free: the two-shot would start from where this camera stands around the player.
 		lockPoint = nil
 		shotLive = false
+		closeSpring:Snap(0)
 		blendSpring:Snap(0)
 		bearingSpring:Snap(CameraMath.yawTowards(toTable(freeCamera), { 0, 0, 0 }))
 		return freeCamera, freeLook
@@ -373,7 +418,17 @@ local function rig(root: BasePart, span: number, settle: boolean): (Vector3, Vec
 	local lock = CameraData.lock
 	local player = toTable(root.Position)
 	local target = toTable(point)
-	local shot = CameraMath.twoShot(player, target, lock, if mobile then CameraData.mobile.distanceMultiplier else 1)
+	-- A close fight turns the shot to a three-quarter view (F3); a target that is gone keeps the
+	-- closeness it had while the shot eases out from where it was.
+	if targetRoot ~= nil and lockTarget ~= nil then
+		closeSpring.target = closenessOf(root.Position, lockTarget, targetRoot)
+		if not shotLive then
+			closeSpring:Snap(closeSpring.target)
+		end
+	end
+	local closeness = math.clamp(advanceSpring(closeSpring, span, settle), 0, 1)
+	local shot =
+		CameraMath.twoShot(player, target, lock, if mobile then CameraData.mobile.distanceMultiplier else 1, closeness)
 	local aim = toVector(CameraMath.twoShotLook(player, target, lock.focusBias, lock.lookHeight)) - root.Position
 	if not shotLive then
 		-- A new shot starts on its shape; the blend eases the camera onto it.
@@ -385,18 +440,103 @@ local function rig(root: BasePart, span: number, settle: boolean): (Vector3, Vec
 		local offLine = CameraMath.shortestDelta(shot.lineYaw, bearingSpring.position)
 		lockSign = CameraMath.lockSide(lockSign, offLine, lock.sideHysteresis)
 		local bearing = shot.lineYaw + lockSign * shot.swing
-		bearingSpring.target = bearingSpring.position + CameraMath.shortestDelta(bearingSpring.position, bearing)
+		local before = bearingSpring.position
+		bearingSpring.target = before + CameraMath.shortestDelta(before, bearing)
 		advanceSpring(bearingSpring, span, settle)
+		if not settle then
+			-- A whip (a target running past, a side change toe to toe) turns no faster than the cap.
+			bearingSpring.position, bearingSpring.velocity = CameraMath.capTurn(
+				before,
+				bearingSpring.position,
+				bearingSpring.velocity,
+				lock.maxTurnDegreesPerSecond,
+				span
+			)
+		end
 	end
 	shotDistanceSpring.target = shot.distance
 	shotAimSpring.target = aim
 	local distanceNow = advanceSpring(shotDistanceSpring, span, settle)
 	local aimNow = advanceSpring(shotAimSpring, span, settle)
 	local pivot = pivotOf(root)
-	local lockCamera = toVector(CameraMath.twoShotCamera(player, bearingSpring.position, distanceNow, lock.height))
-		- pivot
-	local lockLook = root.Position + aimNow - pivot
+	local height = lock.height + (lock.closeHeight - lock.height) * closeness
+	local cameraAt = CameraMath.twoShotCamera(player, bearingSpring.position, distanceNow, height)
+	-- The aim never comes in under the lens (issue 12): a target past the player on the camera's
+	-- side leaves it out at the player's depth, beside them.
+	local aimAt = CameraMath.holdAimDepth(cameraAt, player, toTable(root.Position + aimNow), lock.aimDepthFraction)
+	local lockCamera = toVector(cameraAt) - pivot
+	local lockLook = toVector(aimAt) - pivot
 	return freeCamera:Lerp(lockCamera, weight), freeLook:Lerp(lockLook, weight)
+end
+
+-- The staged view over the rig `rig` built (F12): the camera and its aim relative to the true
+-- pivot, eased in and out on the stage's blend.
+local function staged(
+	root: BasePart,
+	span: number,
+	settle: boolean,
+	cameraOffset: Vector3,
+	lookOffset: Vector3
+): (Vector3, Vector3)
+	local current = stage
+	stageBlend.target = if current ~= nil then 1 else 0
+	local weight = advanceSpring(stageBlend, span, settle)
+	if current == nil then
+		if weight <= CameraData.epsilon then
+			stageBlend:Snap(0)
+			stageLive = false
+			return cameraOffset, lookOffset
+		end
+		return cameraOffset:Lerp(stageCamera, weight), lookOffset:Lerp(stageAim, weight)
+	end
+	local view = current.view
+	local model = current.target
+	if model ~= nil and model.Parent ~= nil and model.PrimaryPart ~= nil then
+		local targetRoot = model.PrimaryPart :: BasePart
+		-- The drawn body, not the root part (D-193): a rush draws it ahead of the hidden root.
+		stagePoint = DrawnBody.position(model) or targetRoot.Position
+		stageLook = (DrawnBody.cframe(model) or targetRoot.CFrame).LookVector
+	end
+	local player = toTable(root.Position)
+	local target = if stagePoint ~= nil then toTable(stagePoint :: Vector3) else nil
+	local look = if view.anchor == "Target" then stageLook else root.CFrame.LookVector
+	local anchor = CameraMath.stageAnchor(view.anchor, player, target)
+	local reference = CameraMath.stageReference(
+		view.reference,
+		view.anchor,
+		player,
+		target,
+		if look ~= nil then toTable(look) else nil
+	)
+	if reference ~= nil then
+		local bearing = reference + current.side * view.degrees
+		if not stageLive then
+			stageBearing:Snap(bearing)
+		end
+		local before = stageBearing.position
+		stageBearing.target = before + CameraMath.shortestDelta(before, bearing)
+		advanceSpring(stageBearing, span, settle)
+		if not settle then
+			-- A boar running past and turning back pans the view, never whips it (issue 12).
+			stageBearing.position, stageBearing.velocity = CameraMath.capTurn(
+				before,
+				stageBearing.position,
+				stageBearing.velocity,
+				CameraData.lock.maxTurnDegreesPerSecond,
+				span
+			)
+		end
+	end
+	stageLive = true
+	local cameraAt = CameraMath.twoShotCamera(anchor, stageBearing.position, view.distance, view.height)
+	local aim = CameraMath.twoShotLook(player, target or player, view.focusBias, view.lookHeight)
+	-- The aim never comes nearer the lens than the anchor: a fighter that ran past the camera's
+	-- side leaves it at the anchor's depth, never a look back down under the lens.
+	aim = CameraMath.holdAimDepth(cameraAt, anchor, aim, CameraData.lock.aimDepthFraction)
+	local pivot = pivotOf(root)
+	stageCamera = toVector(cameraAt) - pivot
+	stageAim = toVector(aim) - pivot
+	return cameraOffset:Lerp(stageCamera, weight), lookOffset:Lerp(stageAim, weight)
 end
 
 local function step(dt: number)
@@ -437,13 +577,20 @@ local function step(dt: number)
 
 	-- Right stick: integrate the held deflection over the frame (never over a stall). A lock owns
 	-- the view: the look input waits.
-	if gamepadLook.Magnitude > 0 and not settle and lockTarget == nil then
+	if gamepadLook.Magnitude > 0 and not settle and lockTarget == nil and stage == nil then
 		local perSecond = CameraData.input.gamepadDegreesPerSecond
 		applyLook(gamepadLook.X * span, -gamepadLook.Y * span, perSecond)
 	end
 
+	-- A lock held through a death freeze lets go at the shatter (F4).
+	if holdUntil ~= nil and at >= (holdUntil :: number) then
+		holdUntil = nil
+		lockTarget = nil
+	end
+
 	local pivot = pivotOf(root)
 	local cameraOffset, lookOffset = rig(root, span, settle)
+	cameraOffset, lookOffset = staged(root, span, settle, cameraOffset, lookOffset)
 
 	-- The lagged pivot, leashed along and across the view.
 	local spring = pivotSpring
@@ -660,12 +807,84 @@ function CameraController.punch(kind: string)
 end
 
 --- Locks the framing on a model (nil clears it). The shot eases between the free camera and the
---- two-shot; a new lock takes the right shoulder unless the camera already stands well left.
+--- two-shot; a new lock takes the right shoulder unless the camera already stands well left. A
+--- lock held through a death freeze (holdLock) gives way to this at once.
 function CameraController.setLockTarget(model: Model?)
 	if model ~= nil and lockTarget == nil then
 		lockSign = 1
 	end
+	holdUntil = nil
 	lockTarget = model
+end
+
+--- Holds the lock's shot on its target for `seconds` more, then lets it go and eases out (F4): a
+--- kill's or a death's 0.5 s freeze is one still picture, the punch alone moving it, until the
+--- shatter. Does nothing with no lock; a setLockTarget in the meantime takes over.
+function CameraController.holdLock(seconds: number)
+	if lockTarget == nil then
+		return
+	end
+	holdUntil = now() + math.max(seconds, 0)
+end
+
+--- Whether the shot frames a target the player still holds a lock on (not one held for a freeze).
+function CameraController.lockLive(): boolean
+	return lockTarget ~= nil and holdUntil == nil
+end
+
+--- A move direction the engine read in the camera's flat frame, read in the lock's instead while a
+--- live lock frames a target: forward walks at the target's drawn body, back away from it, sideways
+--- around it, wherever the two-shot stands (CameraMath.lockMove). The engine's own reading walks
+--- forward along the camera's look, which a two-shot keeps 45 to 60 degrees off the line and a
+--- spring behind it, so W only circled the target, about 4.2 studs out (D-198's wide flank stop).
+--- Unchanged with no live lock.
+function CameraController.lockMove(direction: Vector3): Vector3
+	local model = lockTarget
+	local root = subjectRoot()
+	local camera = workspace.CurrentCamera
+	if model == nil or holdUntil ~= nil or root == nil or camera == nil then
+		return direction
+	end
+	if direction.Magnitude <= CameraData.epsilon then
+		return direction
+	end
+	local targetRoot = lockRoot()
+	local point = DrawnBody.position(model) or (if targetRoot ~= nil then targetRoot.Position else nil)
+	if point == nil then
+		return direction
+	end
+	return toVector(
+		CameraMath.lockMove(toTable(direction), toTable(camera.CFrame.LookVector), toTable(point - root.Position))
+	)
+end
+
+--- Stages a view for a capture shot (F12; dev.luau capture.cameras): the camera stands around the
+--- player, the target or the middle of the two as `view` says, on the `side` (1 or -1) of its
+--- reference, and holds that over the free camera and the lock's two-shot until setStage(nil). It
+--- eases on and off on the lock's blend, its bearing turns no faster than the lock's cap, the look
+--- input waits while it holds, and a target that is gone keeps the spot it was last drawn at.
+function CameraController.setStage(view: CameraMath.StageView?, target: Model?, side: number?)
+	if view == nil then
+		if stage ~= nil then
+			-- The free camera picks up the view's heading under the ease out.
+			yaw = viewYaw
+		end
+		stage = nil
+		return
+	end
+	if stage == nil or (stage :: any).target ~= target then
+		stagePoint = nil
+		stageLook = nil
+	end
+	if stage == nil then
+		stageLive = false
+	end
+	stage = { view = view, target = target, side = if side ~= nil and side < 0 then -1 else 1 }
+end
+
+--- Whether a staged view holds the camera.
+function CameraController.staged(): boolean
+	return stage ~= nil
 end
 
 --- Switches the orbit preset.
@@ -716,7 +935,7 @@ end
 local function onInputChanged(input: InputObject, processed: boolean)
 	local inputType = input.UserInputType
 	if inputType == Enum.UserInputType.MouseMovement then
-		if mouseCaptured and lockTarget == nil then
+		if mouseCaptured and lockTarget == nil and stage == nil then
 			applyLook(input.Delta.X, input.Delta.Y, CameraData.input.mouseDegreesPerPixel)
 		end
 	elseif inputType == Enum.UserInputType.MouseWheel then
@@ -726,7 +945,7 @@ local function onInputChanged(input: InputObject, processed: boolean)
 			CameraData.zoom.max - CameraData.orbit[mode].distance
 		)
 	elseif inputType == Enum.UserInputType.Touch then
-		if not processed and lockTarget == nil then
+		if not processed and lockTarget == nil and stage == nil then
 			applyLook(input.Delta.X, input.Delta.Y, CameraData.input.touchDegreesPerPixel)
 		end
 	elseif input.KeyCode == Enum.KeyCode.Thumbstick2 then

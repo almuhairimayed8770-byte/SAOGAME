@@ -116,6 +116,13 @@ function AimLogic.yawOf(lookX: number, lookZ: number): number
 	return math.deg(math.atan2(-lookX, -lookZ))
 end
 
+--- The turn (degrees, + = left) that brings a body now at yaw `current` back to the yaw `held`,
+--- the short way round. While a clip owns the body (Art, Basic, Dodge, past the snap's whip) the
+--- body turns only with its clip: a shove from a body it runs into is turned back (issue 16).
+function AimLogic.holdTurn(held: number, current: number): number
+	return (held - current + 180) % 360 - 180
+end
+
 --- One frame of the lock turn: `delta` clamped to the rate times the frame.
 function AimLogic.turnStep(delta: number, rate: number, dt: number): number
 	local most = rate * dt
@@ -182,6 +189,19 @@ function AimLogic.snapStep(snap: Snap, t: number, easing: string): number
 	local step = shown - snap.applied
 	snap.applied = shown
 	return step
+end
+
+--- How far along the Art stand-off (fix F1) the body is at clip time `clipTime`: none before
+--- `from` (the clip time the stand-off starts at, the hold pose), all `distance` from `to` (the first
+--- window's open) on, eased between. It follows the clip's clock, so a hold, a hit-stop or a slowed
+--- capture holds it with the pose.
+function AimLogic.standOffAt(distance: number, from: number, to: number, clipTime: number, easing: string): number
+	if distance <= 0 or clipTime <= from then
+		return 0
+	elseif clipTime >= to or to <= from then
+		return distance
+	end
+	return distance * Easing.evaluate(easing, (clipTime - from) / (to - from))
 end
 
 --- The degrees of the snap the body has still to show (0 once it is over).

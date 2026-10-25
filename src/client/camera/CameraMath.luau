@@ -11,7 +11,25 @@
 
 export type Vec = { number }
 
--- The lock-on two-shot's numbers (camera.luau lock).
+-- A staged view (the capture's shots, F12; dev.luau capture.cameras): the camera stands
+-- `distance` studs (flat) from the anchor and `height` above it, at a bearing `degrees` off the
+-- reference (stageReference), and aims `lookHeight` above the point `focusBias` of the way from
+-- the player to the target.
+export type StageAnchor = "Player" | "Target" | "Middle"
+export type StageReference = "Line" | "Facing" | "World"
+
+export type StageView = {
+	anchor: StageAnchor,
+	reference: StageReference,
+	degrees: number,
+	distance: number,
+	height: number,
+	focusBias: number,
+	lookHeight: number,
+}
+
+-- The lock-on two-shot's numbers (camera.luau lock). closeSwingDegrees is the close fight's
+-- three-quarter swing (F3): a shot `closeness` 1 swings at least this far off the line.
 export type TwoShotParams = {
 	baseDistance: number,
 	minDistance: number,
@@ -21,6 +39,7 @@ export type TwoShotParams = {
 	targetClearance: number,
 	maxOrbitDegrees: number,
 	solveSteps: number,
+	closeSwingDegrees: number?,
 }
 
 -- The FOV punch's numbers (camera.luau punch rows).
@@ -34,11 +53,13 @@ export type PunchParams = {
 
 -- A lock-on two-shot: the camera sits `distance` studs (flat) from the player, swung `swing`
 -- degrees off the line behind the player (lineYaw), so the two fighters stand apart on screen.
+-- `closeness` is the close fight's weight it was solved with (0 apart, 1 toe to toe).
 export type TwoShot = {
 	lineYaw: number,
 	swing: number,
 	distance: number,
 	separation: number,
+	closeness: number,
 }
 
 local CameraMath = {}
@@ -173,11 +194,41 @@ local function neededSplit(distance: number, separation: number, swingDegrees: n
 	return math.deg(math.atan(params.playerClearance / distance) + math.atan(params.targetClearance / toTarget))
 end
 
+--- How close a fight is, from the flat gap (studs) between the player and the target's body:
+--- 1 at or under `close`, 0 at or past `open`, eased between (smoothstep), so the close shot comes
+--- and goes without a kink.
+function CameraMath.closeness(gap: number, close: number, open: number): number
+	if gap <= close then
+		return 1
+	end
+	if gap >= open then
+		return 0
+	end
+	local t = (open - gap) / (open - close)
+	return t * t * (3 - 2 * t) -- unit: smoothstep, 3t^2 - 2t^3
+end
+
+--- The flat distance from a point to a box's footprint, both in the box's own space: the point at
+--- (x, z), the box `halfX` by `halfZ` around the origin (0 inside it).
+function CameraMath.footprintGap(x: number, z: number, halfX: number, halfZ: number): number
+	local dx = math.max(math.abs(x) - halfX, 0)
+	local dz = math.max(math.abs(z) - halfZ, 0)
+	return math.sqrt(dx * dx + dz * dz)
+end
+
 --- Lock-on two-shot: the line from the player to the target, the camera's flat distance from the
 --- player (growing with their separation, times `scale` for mobile), and the smallest swing off
 --- the line behind the player that puts the fighters side by side with their clearances apart
---- (at most maxOrbitDegrees; found by bisection, the split growing with the swing).
-function CameraMath.twoShot(player: Vec, target: Vec, params: TwoShotParams, scale: number?): TwoShot
+--- (at most maxOrbitDegrees; found by bisection, the split growing with the swing). A close fight
+--- (`closeness` above 0, CameraMath.closeness) swings at least closeness x closeSwingDegrees: toe
+--- to toe no swing stands the bodies apart, so the shot turns to a three-quarter view of both (F3).
+function CameraMath.twoShot(
+	player: Vec,
+	target: Vec,
+	params: TwoShotParams,
+	scale: number?,
+	closeness: number?
+): TwoShot
 	local px, _, pz = unpack3(player)
 	local tx, _, tz = unpack3(target)
 	local dx, dz = tx - px, tz - pz
@@ -205,12 +256,73 @@ function CameraMath.twoShot(player: Vec, target: Vec, params: TwoShotParams, sca
 		end
 		swing = high
 	end
+	local close = math.clamp(closeness or 0, 0, 1)
+	swing = math.max(swing, close * (params.closeSwingDegrees or 0))
 	return {
 		lineYaw = CameraMath.yawTowards(player, target),
 		swing = swing,
 		distance = distance,
 		separation = separation,
+		closeness = close,
 	}
+end
+
+--- A turn capped at `maxRate` degrees per second over `span` seconds: from `previous` (where the
+--- angle was before the step) to `position` (where its spring put it), with the spring's
+--- `velocity`. Returns the capped position and velocity; a turn under the cap is unchanged, so
+--- only a whip is slowed, never an ordinary ease (issue 12, issue 22).
+function CameraMath.capTurn(
+	previous: number,
+	position: number,
+	velocity: number,
+	maxRate: number,
+	span: number
+): (number, number)
+	local most = math.max(maxRate, 0)
+	local step = math.clamp(position - previous, -most * span, most * span)
+	return previous + step, math.clamp(velocity, -most, most)
+end
+
+--- The two-shot's aim held out at depth: the flat view runs from the camera to the player, and an
+--- aim whose depth along it is under `fraction` of the player's is pushed out along it to that
+--- depth (only along the view, so its height and its side stay). A target that has run past the
+--- player to the camera's side would otherwise pull the aim in under the lens: a look straight
+--- down onto the player's head (issue 12).
+function CameraMath.holdAimDepth(cameraAt: Vec, player: Vec, aim: Vec, fraction: number): Vec
+	local cx, _, cz = unpack3(cameraAt)
+	local px, _, pz = unpack3(player)
+	local ax, ay, az = unpack3(aim)
+	local vx, vz = px - cx, pz - cz
+	local length = math.sqrt(vx * vx + vz * vz)
+	if length <= 0 then
+		return { ax, ay, az }
+	end
+	local ux, uz = vx / length, vz / length
+	local depth = (ax - cx) * ux + (az - cz) * uz
+	local least = length * fraction
+	if depth >= least then
+		return { ax, ay, az }
+	end
+	local push = least - depth
+	return { ax + ux * push, ay, az + uz * push }
+end
+
+--- A move direction the engine read in the camera's flat frame (`view`, the camera's look), read
+--- again in the lock's: turned by the yaw from the flat view to the flat `line` (player to target),
+--- so forward walks at the target, back away from it and sideways around it, wherever the
+--- two-shot stands. The length and the height are kept; with no flat view or line it is unchanged.
+function CameraMath.lockMove(move: Vec, view: Vec, line: Vec): Vec
+	local mx, my, mz = unpack3(move)
+	local vx, _, vz = unpack3(view)
+	local lx, _, lz = unpack3(line)
+	if (vx == 0 and vz == 0) or (lx == 0 and lz == 0) then
+		return { mx, my, mz }
+	end
+	-- The turn from the view's heading to the line's (yaw counter-clockwise from above, -Z = 0).
+	local turn = math.atan2(-lx, -lz) - math.atan2(-vx, -vz)
+	local c, s = math.cos(turn), math.sin(turn)
+	-- Rotating (x, z) counter-clockwise from above by `turn` about +Y.
+	return { mx * c + mz * s, my, -mx * s + mz * c }
 end
 
 --- The two-shot camera: `distance` studs (flat) from the player along the bearing (the yaw a
@@ -226,6 +338,48 @@ function CameraMath.twoShotLook(player: Vec, target: Vec, bias: number, height: 
 	local px, py, pz = unpack3(player)
 	local tx, ty, tz = unpack3(target)
 	return { px + (tx - px) * bias, py + (ty - py) * bias + height, pz + (tz - pz) * bias }
+end
+
+--- A staged view's anchor (the capture's shots, F12): the player's root, the target's, or the
+--- middle of the two; the player's alone when there is no target.
+function CameraMath.stageAnchor(anchor: string, player: Vec, target: Vec?): Vec
+	local px, py, pz = unpack3(player)
+	if target == nil or anchor == "Player" then
+		return { px, py, pz }
+	end
+	local tx, ty, tz = unpack3(target)
+	if anchor == "Target" then
+		return { tx, ty, tz }
+	end
+	return { (px + tx) / 2, (py + ty) / 2, (pz + tz) / 2 }
+end
+
+--- A staged view's reference bearing (degrees, as twoShotCamera reads a bearing): "Line", behind
+--- the anchor on the line from the other fighter (the player's end of it for "Middle"); "Facing",
+--- behind the anchor's flat `look`; "World", 0 (the anchor's +Z). Nil when the reference needs a
+--- target or a look that is not there.
+function CameraMath.stageReference(reference: string, anchor: string, player: Vec, target: Vec?, look: Vec?): number?
+	if reference == "World" then
+		return 0
+	end
+	if reference == "Facing" then
+		if look == nil then
+			return nil
+		end
+		local lx, _, lz = unpack3(look)
+		if lx == 0 and lz == 0 then
+			return nil
+		end
+		-- Behind a rig looking along (lx, lz) is the other way: a bearing b stands at (sin b, cos b).
+		return math.deg(math.atan2(-lx, -lz))
+	end
+	if target == nil then
+		return nil
+	end
+	if anchor == "Target" then
+		return CameraMath.yawTowards(target, player)
+	end
+	return CameraMath.yawTowards(player, target)
 end
 
 --- Which side of the line the two-shot camera keeps (1 right of the player, -1 left), given the

@@ -235,6 +235,9 @@ local Remotes: { [string]: RemoteDef } = {
 	-- the rush early (an interrupt, a death, a sleep) is told too, once, with where the body stands.
 	-- Reliable: lost, a client ran the drawn body on to its full length past the server's stop
 	-- (16 studs past a jam) and handed it back with a slide.
+	-- D-254: "Dropped" is any enemy's attack a sleep or a hold dropped before it landed or launched
+	-- (a blow's wind-up or strike, a rush's wind-up): `launchedAt` is the beat its wind-up ended or
+	-- was due to end, `distance` 0. Clients drop the swing, the tell and the launch they predicted.
 	RushEnded = {
 		kind = "Event",
 		direction = "ServerToClient",
@@ -243,7 +246,7 @@ local Remotes: { [string]: RemoteDef } = {
 			launchedAt = Check.number(0),
 			serverTime = Check.number(0),
 			distance = Check.number(0),
-			reason = Check.literal("Jammed", "Interrupted", "Died", "Stopped", "Wall"),
+			reason = Check.literal("Jammed", "Interrupted", "Died", "Stopped", "Wall", "Dropped"),
 			contact = Check.optional(worldVec),
 			normal = Check.optional(unitVec),
 		}),

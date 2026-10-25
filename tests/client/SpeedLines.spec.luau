@@ -211,7 +211,8 @@ describe("SpeedLines", function()
 				local _, outer = ends(frame)
 				local pastEdge = math.abs(outer.X) >= shape.X * 0.5 - 1e-3 or math.abs(outer.Y) >= shape.Y * 0.5 - 1e-3
 				expect(pastEdge).toBe(true)
-				expect(frame.Size.Y.Offset).toBe(kind.thicknessPixels)
+				-- The core: the line's whole width less its ink edge on both sides.
+				expect(frame.Size.Y.Offset).toBe(kind.thicknessPixels - 2 * speed.edge.pixels)
 			end
 			-- The rays go all the way round.
 			local quadrants: { [string]: boolean } = {}
@@ -379,4 +380,46 @@ describe("SpeedLines", function()
 			end)
 		end
 	)
+	it("reads over the daylight sky: a white core 3 px or more inside an ink edge (F17)", function()
+		-- The reel review found the dodge's lines faint on the sky: 2 px of white at 0.3 over the
+		-- Floor 1 haze moved a pixel under a tenth. An ink edge carries them over any bright sky.
+		local lighting = Harness.load("src/shared/data/lighting")
+		local sky = lighting.biomes.Floor1.atmosphere
+		local skyColor = Color3.new(sky[1], sky[2], sky[3])
+		local function moved(color: Color3, transparency: number): number
+			local shown = skyColor:Lerp(color, 1 - transparency)
+			return math.max(
+				math.abs(shown.R - skyColor.R),
+				math.abs(shown.G - skyColor.G),
+				math.abs(shown.B - skyColor.B)
+			)
+		end
+		atTier("High", function()
+			fresh(Vector2.new(1920, 1080))
+			local kind = speed.kinds.Dodge
+			SpeedLines.play("Dodge")
+			frames(kind.inFrames)
+			local lines = visibleLines()
+			expect(#lines).toBeGreaterThan(0)
+			for _, frame in lines do
+				expect(frame.Size.Y.Offset).toBeGreaterThanOrEqual(3)
+				local edge = frame:FindFirstChildOfClass("UIStroke")
+				expect(edge).never.toBeNil()
+				local stroke = edge :: UIStroke
+				expect(stroke.Thickness).toBe(speed.edge.pixels)
+				expect(stroke.Color).toEqual(palette.color3(speed.edge.token))
+				-- The edge fades its inner end with the line.
+				expect(stroke:FindFirstChildOfClass("UIGradient")).never.toBeNil()
+				-- The white alone barely shows on the haze; the edge moves it by far more.
+				expect(moved(frame.BackgroundColor3, frame.BackgroundTransparency)).toBeLessThan(0.15)
+				expect(moved(stroke.Color, stroke.Transparency)).toBeGreaterThan(0.4)
+			end
+			-- And the edge goes with the line.
+			frames(math.ceil(kind.seconds / F) + 1)
+			for _, line in SpeedLines.view().lines do
+				expect(line.frame.Visible).toBe(false)
+			end
+			SpeedLines.reset()
+		end)
+	end)
 end)

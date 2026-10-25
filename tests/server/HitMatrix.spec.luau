@@ -6,6 +6,11 @@
 	every real-fight placement in dev.luau hitMatrix, registers at every frame phase, and lands on
 	its strike: by the first server frame at or after its snap ends (section 10: the Hold freezes
 	the contact pose), never first in the settle or the recovery.
+
+	Fix F2: the matrix also stands enemies point-blank at either shoulder, inside the blade's start
+	pose, and draws every swing the way the local client does (a Mixer posing the body at 30, 60
+	and 144 fps, ContactPredictor sweeping the frames): every hit the client draws registers on
+	the server at every frame phase, so a predicted flash always gets its number.
 	tools/hitmatrix/HitMatrix.luau runs the swings; `lune run tools/hit-matrix.luau` prints the same
 	matrix with the sample that registered each hit, or how far the blade passed when one did not.
 ]]
@@ -44,6 +49,14 @@ local report
 local function matrix(): any
 	if report == nil then
 		report = HitMatrix.run(Harness, { realOnly = true, skipAttribution = true })
+		-- Point-blank placements stand inside their range but are never required to register.
+		local pointBlank: { [string]: boolean } = {}
+		for _, setup in Dev.hitMatrix.setups do
+			pointBlank[setup.id] = setup.pointBlank == true
+		end
+		for _, cell in report.cells do
+			expect(cell.required).toBe(cell.real and not pointBlank[cell.setup])
+		end
 	end
 	return report
 end
@@ -120,6 +133,69 @@ describe("HitMatrix placements", function()
 					expect(distance).toBeGreaterThan(setup.distances[index - 1])
 				end
 			end
+		end
+	end)
+end)
+
+describe("HitMatrix: the server counts every hit the client draws (F2)", function()
+	it("stands enemies point-blank at either shoulder, inside the blade's start pose", function()
+		local sides: { [string]: boolean } = {}
+		for _, setup in Dev.hitMatrix.setups do
+			if setup.pointBlank then
+				local bearing = setup.bearing or 0
+				-- Outside the aim assist's cone: nothing turns the body to it.
+				expect(math.abs(bearing) > Combat.aim.assistConeDegrees / 2).toBe(true)
+				sides[(if bearing > 0 then "right" else "left") .. setup.enemy] = true
+			end
+		end
+		for _, enemy in { "KoboldAxeman", "FrenzyBoar" } do
+			expect(sides["right" .. enemy]).toBe(true)
+			expect(sides["left" .. enemy]).toBe(true)
+		end
+		-- Some point-blank swing registers at the window's first sample: the start pose's blade is
+		-- already in the body (the placement the review's Horizontal hit 2 stood at).
+		local inside = false
+		for _, cell in matrix().cells do
+			for _, result in cell.phases do
+				if cell.required == false and cell.real and result.landed ~= nil and result.landed < 1e-6 then
+					inside = true
+				end
+			end
+		end
+		expect(inside).toBe(true)
+	end)
+
+	it("draws every swing on the client at every frame rate and phase", function()
+		for _, cell in matrix().cells do
+			expect(cell.drawn).never.toBeNil()
+			expect(#(cell.drawn :: any)).toBe(#Dev.hitMatrix.clientFps * #Dev.hitMatrix.framePhases)
+		end
+	end)
+
+	it("never draws a hit the server does not count, at any placement", function()
+		local problems = HitMatrix.drawnNotCounted(matrix())
+		if #problems > 0 then
+			error(
+				("%d hit(s) the client draws and the server does not count:\n%s"):format(
+					#problems,
+					table.concat(problems, "\n")
+				)
+			)
+		end
+	end)
+
+	it("draws every hit the server counts, so no flash waits a round trip for its number (issue 13)", function()
+		-- The client's sweep follows the clip's own arc between frames and poses the window's open
+		-- instant as the server does: a start pose leaving the body at the open, or a snap whose
+		-- frames straddle its key at 30 fps, is drawn exactly when the server counts it.
+		local problems = HitMatrix.countedNotDrawn(matrix())
+		if #problems > 0 then
+			error(
+				("%d hit(s) the server counts and the client does not draw:\n%s"):format(
+					#problems,
+					table.concat(problems, "\n")
+				)
+			)
 		end
 	end)
 end)

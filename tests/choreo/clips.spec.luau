@@ -142,9 +142,10 @@ describe("clip data", function()
 				for index, on in smearOn do
 					expect(smearOff[index] - on).toBeCloseTo(2 * FRAME, 1e-3)
 				end
-				expect(smearOn[1]).toBeCloseTo(clip.beats.Snap.start, EPSILON)
+				expect(smearOn[1]).toBeCloseTo(clip.beats.Smear.start, EPSILON)
 				expect(eventTimes(clip, "TrailOn")[1]).toBeLessThanOrEqual(windows[1].open)
-				expect(eventTimes(clip, "TrailOff")[1]).toBeGreaterThanOrEqual(windows[#windows].close)
+				local trailOffs = eventTimes(clip, "TrailOff")
+				expect(trailOffs[#trailOffs]).toBeGreaterThanOrEqual(windows[#windows].close)
 			end
 		end
 	)
@@ -222,11 +223,93 @@ describe("clip data", function()
 				-- On the snap's first frame: not during the wind-up, not into the ExpoOut cut.
 				expect(window.open).toBeCloseTo(snaps[index].start, EPSILON)
 				expect(window.close).toBeGreaterThanOrEqual(snaps[index].finish)
-				-- The trail and the smear ignite on the same frame as the strike (section 10).
+				-- The trail ignites on the same frame as the strike (section 10), the smear inside the
+				-- snap's first frame: on the first frame that shows the blade cutting (F10).
 				local smearOn = eventTimes(clip, "SmearOn")[index]
-				expect(smearOn).toBeCloseTo(window.open, EPSILON)
+				expect(smearOn).toBeGreaterThanOrEqual(window.open - EPSILON)
+				expect(smearOn).toBeLessThan(window.open + FRAME)
 			end
 			expect(eventTimes(clip, "TrailOn")[1]).toBeCloseTo(windows[1].open, EPSILON)
+		end
+	end)
+
+	it("every hit window has its own trail: one TrailOn/TrailOff pair each, out between windows (F9)", function()
+		for _, clip in attackClips() do
+			local windows = ClipSampler.hitWindows(clip)
+			local spans = ReviewMarkers.eventSpans(clip, "TrailOn", "TrailOff")
+			if #spans ~= #windows then
+				error(("%s lights %d trail spans for %d hit windows"):format(clip.id, #spans, #windows))
+			end
+			for index, window in windows do
+				local span = spans[index]
+				expect(span.start).toBeLessThanOrEqual(window.open + EPSILON)
+				expect(span.finish).toBeGreaterThanOrEqual(window.close - EPSILON)
+				local nextWindow = windows[index + 1]
+				if nextWindow ~= nil and span.finish >= nextWindow.open - EPSILON then
+					error(("%s keeps its trail lit from hit %d into hit %d"):format(clip.id, index, index + 1))
+				end
+			end
+		end
+	end)
+
+	it("the smear shows only on frames past the snap's start: the two that show the cut moving (F10)", function()
+		-- Played on its own clock at 30, 60 and 144 fps and at four frame phases, a clip turns its
+		-- smear on and off on the frames whose step crosses SmearOn and SmearOff (events fire for
+		-- times in (previous frame, this frame]). Every frame drawn with the smear on must show the
+		-- strike past its snap's start key, where the blade has left the wind-up and cuts: the
+		-- frame on the snap start shows the still wind-up extreme. At 60 fps from the snap start,
+		-- that is exactly the snap's first two moving frames, the scale back on the third.
+		local owned = {}
+		for _, clip in attackClips() do
+			if clip.id:sub(1, 7) == "player/" or clip.id == "enemy/Kobold/Overhead" then
+				table.insert(owned, clip)
+			end
+		end
+		expect(#owned).toBe(8)
+		for _, clip in owned do
+			local snaps = ReviewMarkers.strikeSnaps(clip)
+			local smears = ReviewMarkers.eventSpans(clip, "SmearOn", "SmearOff")
+			expect(#smears).toBe(#snaps)
+			for index, snap in snaps do
+				local smear = smears[index]
+				for _, fps in { 30, 60, 144 } do
+					local dt = 1 / fps
+					for _, phase in { 0, 0.25, 0.5, 0.75 } do
+						local lit = false
+						local litFrames = 0
+						local previous = snap.start - 3 * dt + phase * dt
+						for _ = 1, math.ceil((snap.finish - snap.start) / dt) + 6 do
+							local now = previous + dt
+							if smear.start > previous and smear.start <= now then
+								lit = true
+							end
+							if smear.finish > previous and smear.finish <= now then
+								lit = false
+							end
+							if lit then
+								litFrames += 1
+								if now <= snap.start + EPSILON then
+									error(
+										("%s hit %d at %d fps (phase %.2f): the smear is on at %.4f, on the still snap start %.4f"):format(
+											clip.id,
+											index,
+											fps,
+											phase,
+											now,
+											snap.start
+										)
+									)
+								end
+							end
+							previous = now
+						end
+						expect(litFrames).toBeGreaterThanOrEqual(1)
+						if fps == 60 and phase == 0 then
+							expect(litFrames).toBe(2)
+						end
+					end
+				end
+			end
 		end
 	end)
 

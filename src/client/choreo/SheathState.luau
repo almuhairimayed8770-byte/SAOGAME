@@ -16,6 +16,11 @@
 	sword where the target wants it; a clip this state stopped itself does not count. Nothing
 	starts while the fighter is dead.
 
+	A target that turns back while its clip plays stops that clip over sheath.cutBackBlend (out.blend),
+	not the shorter stopBlend a cut, a cover or the other clip taking over at once is given: nothing
+	else moves the arm then, so the pose the target wants comes back at the pace a Draw or Sheathe
+	would move it. Locomotion holds a cut-back clip's clock where it was (Mixer.hold).
+
 	The sword only changes hands where the hand is. While a clip above the sheath clips hides the
 	right arm ("covered": a turn, a landing, a dodge, a stagger), the hand is not at the hilt, so
 	Draw and Sheathe wait; one that has not moved the sword yet stops and plays again once the arm
@@ -48,7 +53,8 @@ export type Input = {
 	hold: boolean, -- the fighter is Dead: nothing starts
 }
 
-export type Output = { place: Place?, play: Clip?, stop: Clip? }
+-- blend: the blend-out the stopped clip takes, when it is not sheath.stopBlend (a cut back).
+export type Output = { place: Place?, play: Clip?, stop: Clip?, blend: number? }
 
 export type Config = typeof(ChoreoData.sheath)
 
@@ -128,8 +134,13 @@ function SheathState.step(self: any, dt: number, input: Input): Output
 	elseif input.target then
 		self.falseFor = 0
 		if input.sheathing then
-			-- Reversed mid-sheathe; if the sword already went back, Draw plays next step.
+			-- Reversed mid-sheathe; if the sword already went back, Draw plays next step and takes
+			-- the arm over. With the sword still in the hand nothing does: the arm turns back over
+			-- sheath.cutBackBlend, and the drawn pose comes back as a Draw would move it.
 			out.stop = "Sheathe"
+			if self.place == "Hand" then
+				out.blend = self.config.cutBackBlend
+			end
 		elseif self.place == "Back" then
 			if covered then
 				-- The hand cannot reach the hilt under the cover: a Draw that has not taken the
@@ -144,7 +155,9 @@ function SheathState.step(self: any, dt: number, input: Input): Output
 	else
 		self.falseFor += dt
 		if input.drawing then
+			-- Reversed mid-draw: the arm turns back over sheath.cutBackBlend, as a Sheathe would.
 			out.stop = "Draw"
+			out.blend = self.config.cutBackBlend
 		elseif self.place == "Hand" then
 			if input.sheathing then
 				-- A Sheathe that has not put the sword away yet stops under a cover.

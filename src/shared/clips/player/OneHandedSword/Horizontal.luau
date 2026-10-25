@@ -9,7 +9,7 @@
 	  0.15-0.25  activation hold (the tell): the stance breathes, the blade lights
 	  0.25-0.35  Anticipation (6 frames): the coil deepens, hips turn further right
 	  0.35-0.40  Snap (3 frames, ExpoOut): the cut, torso whipped left, weight onto the left foot
-	  0.35-0.38  Smear (2 frames)
+	  0.36-0.39  Smear (2 frames): on the snap's first two moving frames, off on the third
 	  0.35-0.48  Hit window: opens on the snap's first frame (the trail ignites with it), so the
 	             server sweeps the whole cut, and closes in the settle
 	  0.40-0.43  Hold (the contact; hit-stop pauses the clock here on a hit)
@@ -200,9 +200,9 @@ local clip: Types.ClipDef = {
 		{ time = 0.15, kind = "ActivationHold", data = { hold = 0.1 } },
 		{ time = 0.29, kind = "Sfx", data = { name = "whoosh.Medium" } },
 		{ time = 0.35, kind = "TrailOn", data = { kind = "Art" } },
-		{ time = 0.35, kind = "SmearOn", data = { axis = "X" } },
 		{ time = 0.35, kind = "HitWindowOpen", data = { hit = 1 } },
-		{ time = 0.3833, kind = "SmearOff" },
+		{ time = 0.3583, kind = "SmearOn", data = { axis = "X" } },
+		{ time = 0.3917, kind = "SmearOff" },
 		{ time = 0.48, kind = "HitWindowClose", data = { hit = 1 } },
 		{ time = 0.52, kind = "TrailOff" },
 		{ time = 0.6, kind = "PostMotionStart" },
@@ -210,7 +210,7 @@ local clip: Types.ClipDef = {
 	beats = {
 		Anticipation = { start = 0.25, finish = 0.35 },
 		Snap = { start = 0.35, finish = 0.4 },
-		Smear = { start = 0.35, finish = 0.3833 },
+		Smear = { start = 0.3583, finish = 0.3917 },
 		Hold = { start = 0.4, finish = 0.43 },
 		Settle = { start = 0.43, finish = 0.55 },
 		Recovery = { start = 0.6, finish = 1.0 },

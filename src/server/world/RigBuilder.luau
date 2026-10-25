@@ -25,9 +25,12 @@
 	- the CollectionService tag Placeholder and the attribute Rig = rig id.
 
 	addBlocker (D-198) gives an enemy its blocker: what a player bumps into instead of the root, one
-	upright, invisible box over the root's footprint from the floor (HipHeight below the root's
-	bottom) to ai.collision.blockerHeight, welded to the root, massless, in the blockers group and
-	switched off until CollisionGroups.assign puts the enemy in the enemies group.
+	upright, invisible box over the body's footprint (footprint: the flat box over its rest pose,
+	every part but the ones it holds) from the floor (HipHeight below the root's bottom) to
+	ai.collision.blockerHeight, welded to the root, massless, in the blockers group and switched off
+	until CollisionGroups.assign puts the enemy in the enemies group. Over the whole body, not the
+	root alone, so a walk-in stops where the player touches it on every side: at the boar's snout
+	and tail as at its flank, never inside its head.
 
 	Everything here runs under Lune's Instance implementation, so the shape of every rig is tested.
 ]]
@@ -253,25 +256,66 @@ function RigBuilder.build(rigId: string, name: string?): Model
 	return model
 end
 
+-- The flat box over a built model's rest pose in its root's space: every rigs.luau part but the
+-- rig's trailParts (what it holds: a blade or an axe is not the body), corners and all. Returns
+-- its centre and size with Y 0. The root is one of the parts, so it always covers the root's own
+-- footprint.
+local function restFootprint(model: Model, rig: Rigs.Rig): (Vector3, Vector3)
+	local held = rig.trailParts or {}
+	local solved = Pose.solve(model, CFrame.identity, {})
+	local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
+	for partName in rig.parts :: { [string]: any } do
+		local part = model:FindFirstChild(partName)
+		local solvedFrame: CFrame? = solved[partName]
+		if table.find(held, partName) ~= nil or solvedFrame == nil or part == nil or not part:IsA("BasePart") then
+			continue
+		end
+		local frame = solvedFrame :: CFrame
+		local half = part.Size / 2
+		for _, x in { -1, 1 } do
+			for _, y in { -1, 1 } do
+				for _, z in { -1, 1 } do
+					local corner = frame:PointToWorldSpace(Vector3.new(half.X * x, half.Y * y, half.Z * z))
+					minX, maxX = math.min(minX, corner.X), math.max(maxX, corner.X)
+					minZ, maxZ = math.min(minZ, corner.Z), math.max(maxZ, corner.Z)
+				end
+			end
+		end
+	end
+	return Vector3.new((minX + maxX) / 2, 0, (minZ + maxZ) / 2), Vector3.new(maxX - minX, 0, maxZ - minZ)
+end
+
+--- The footprint of a rig's body at rest in its root's space (the blocker's, addBlocker): the
+--- centre and size, Y 0, of the flat box over every part but its trailParts. Builds the rig to
+--- measure it (specs, tools).
+function RigBuilder.footprint(rigId: string): (Vector3, Vector3)
+	local model = RigBuilder.build(rigId)
+	local centre, size = restFootprint(model, RigBuilder.definition(rigId))
+	model:Destroy()
+	return centre, size
+end
+
 --- Gives an enemy model its blocker (D-198) and returns it, or nil when the model has no root or no
---- rig rigs.luau knows (the Rig attribute). Over the root's footprint (its own X and Z, along its
---- own axes), from the floor the Humanoid holds the root's bottom HipHeight above, up to
---- ai.collision.blockerHeight; welded to the root and massless, so the body and its Humanoid move as
---- before. Invisible, casts no shadow and touches nothing; it collides with nothing until
---- CollisionGroups.assign puts the enemy in the enemies group, and with players only then.
+--- rig rigs.luau knows (the Rig attribute). Over the body's footprint at rest (RigBuilder.footprint:
+--- every part but the ones it holds, along the root's own axes), from the floor the Humanoid holds
+--- the root's bottom HipHeight above, up to ai.collision.blockerHeight; welded to the root and
+--- massless, so the body and its Humanoid move as before. Invisible, casts no shadow and touches
+--- nothing; it collides with nothing until CollisionGroups.assign puts the enemy in the enemies
+--- group, and with players only then.
 function RigBuilder.addBlocker(model: Model): Part?
 	local root = model.PrimaryPart
 	local rigId = model:GetAttribute(RigBuilder.RIG_ATTRIBUTE)
 	local rig = if typeof(rigId) == "string" then Rigs[rigId] else nil
-	if root == nil or rig == nil then
+	if root == nil or rig == nil or rig.parts == nil then
 		return nil
 	end
 	local height = AI.collision.blockerHeight
 	local floorBelowCenter = rig.hipHeight + root.Size.Y / 2
+	local centre, size = restFootprint(model, rig)
 	local blocker = Instance.new("Part")
 	blocker.Name = BLOCKER_NAME
-	blocker.Size = Vector3.new(root.Size.X, height, root.Size.Z)
-	blocker.CFrame = root.CFrame * CFrame.new(0, height / 2 - floorBelowCenter, 0)
+	blocker.Size = Vector3.new(size.X, height, size.Z)
+	blocker.CFrame = root.CFrame * CFrame.new(centre.X, height / 2 - floorBelowCenter, centre.Z)
 	blocker.Transparency = 1
 	blocker.CastShadow = false
 	blocker.CanCollide = false

@@ -811,6 +811,53 @@ the sweep.
   - showSequence turns it on at play only when taking over a picture already on screen: it holds that sequence's look (D-223), or the soft dim frozen at its drawn opacity (D-226), until the new sequence's first counted frame.
   - playDim still turns on at once.
 
+### Gate shot fixes (D-227 to D-270)
+
+- **ContactPredictor:**
+  - step sweeps the clip's own arc between rendered frames (the clip pose times the drawn pose's interpolated residual, split adaptively within combat.contact.maxSubdivisions). It holds a touch predicted before its strike's key until the key frame (D-227, D-234).
+  - standOff(model, clip, from, rootCFrame, target) is pure and plans the Art stand-off (D-235).
+  - awaitsKey(self, windowIndex, artId?, swing?) → boolean: true while that hit's strike key (window.key) has not shown on the predicted clip (time < key − keyEpsilon, or not stepped yet). False with no swing, another Art, another swing number, or no such window (D-267).
+- **CharacterController:**
+  - planStandOff runs at ArtRequest. stepStandOff moves the root each frame after root motion and before stepContacts. AimLogic.standOffAt is the eased curve on the clip clock (D-235).
+  - takeArtAway lets go of an Art the server took away and fades its light and glow (D-231). The heldYaw block holds the root's yaw under root motion (AimLogic.holdTurn, D-232).
+  - awaitsKey(windowIndex, artId?, swing?) gives the predictor's answer for the swing being predicted, false with none (D-267).
+- **Replication:**
+  - heldFrames applies combat.hitStopShaveFrames to every animator hold (D-228). takenAway makes routeClipEvent close-only on a clip taken away (D-231).
+  - Deps.keyAhead (optional) is bound in start() to CharacterController.awaitsKey through keyAheadOf (nil for a stub); the CharacterController module is loaded once and shared with localDefence.
+  - heldWords holds the server's words for their key. Replication.contact plays a matching one right after the contact it predicted. stepWords() runs on the Heartbeat after stepStrikes and plays any whose key has passed, whose swing ended, or that waited combat.contact.wordWaitSeconds. Words are held only on a client with onHeartbeat; bind() clears the list (D-267).
+  - stepStrikes runs on the Heartbeat beside tickPlay. It predicts the reaction to enemy blows on the local fighter (ai.strikePrediction; localDefence comes from CharacterController.state and stateChanged). HitConfirmed confirms the HP or takes the reaction back (D-258).
+  - A parried HitConfirmed puts no hold on either rig (D-257). RushEnded "Dropped" drops the drawn attack, hides the telegraph and releases a swing clip (D-254). An ActionStarted heard after its own RushStarted starts no Charge clip (D-260).
+- **tools/hitmatrix:** the server swing plus a client draw (Mixer and ContactPredictor) at dev.hitMatrix.clientFps × framePhases. It reports drawnNotCounted and countedNotDrawn, and models the Art stand-off for setups inside the assist cone and range (D-234, D-235).
+- **Camera:**
+  - CameraController.setStage(view?, target?, side?) and staged(): the capture's staged view. It anchors on the player, the target or their middle, and references the player-to-target line, the target's facing or the world, at side × degrees, at a distance and height. It uses the lock's turn cap and aim depth, takes priority over the lock and free cameras but not a scripted camera, and blends on lock.blendLag. The pure helpers are CameraMath.stageAnchor and stageReference (D-251).
+  - holdLock(seconds), lockLive() and lockMove(direction) (D-238, D-239). camera.lock gains closeGap, openGap, closeSwingDegrees, closeHeight, maxTurnDegreesPerSecond, aimDepthFraction and footprintPart; CameraMath gains closeness, capTurn and holdAimDepth (D-236, D-240).
+  - TargetController ends the lock at once when the target dies and calls holdLock for the death freeze (D-239).
+- **Dev capture (module map, next to dev/Capture.client.luau):**
+  - client/dev/CaptureLogic: pure rules for the counter text, K decisions, prompt lines and auto-perform presses (D-248 to D-250).
+  - Capture.client: P stages, frames and counts 3-2-1; U toggles auto-perform; J gives the field back through giveBack(token), which asks again at the stage request rate, up to stageTimeoutSeconds, and drops out when stageToken changes. Only the server's agreement sets "Field given back" (D-268).
+  - server/dev/DevStage.server: the Studio and DevCapture-only RemoteFunction DevStage, with stage, go and release (D-242 to D-247). It is a dev hook beside DevCombat (D-114), but a RemoteFunction, because the client's Capture panel calls it.
+  - server/dev/DevStageLogic: pure rules for spots, holds and the rate limit, and the stand ring and walk route: ring(open, stage), inRing(ring, x, feetY, z), route(open, stage, built, fromX, fromZ) round the ledge and ramp ending with an approach along the spot's facing, crosses(box, ax, az, bx, bz), rampFrame(ledge), onRamp(ledge, x, z) (D-244).
+  - DevStage "stage" never moves the player and no longer requires AntiCheatService (D-244). Outside the ring it replies { ok = false, error = "walk into the ring first", walk = { x, y, z, facing, radius, tolerance, over?, path } }; inside, it heals and spawns around the root's actual position and facing.
+  - Capture.client phase "Walking": a flat SystemCyan disc marks the ring, and the render step "SkyspireCaptureWalk" at dev.luau capture.walk.renderOrder (Input + 1, after the control script's Move and before CharacterController reads MoveDirection) hands the route's direction to Humanoid:Move. It lets go 2 studs short so the two-step stop carries the body in, waits for rest, removes the disc and asks again. A movement key hands the walk over (the shot stages once the root stands in the ring); J and P end it; capture.walk.timeoutSeconds (15) ends it with a note. It is not a FrameOrder step. CaptureLogic.walkFrom, inRing, steer and askWait are its pure half.
+  - dev.luau capture gains staging: shots (stage, camera, cameraSide, prompts, perform), cameras, stage, prompt, confirmSeconds, stageTimeoutSeconds, and hotkeys U and J.
+- **Rigs:** RigBuilder.footprint(rigId), and the blocker over the rest footprint (D-237).
+- **Enemies (server):**
+  - server/ai/Spacing.luau: pure capsule spacing between enemies. footprintOf(profile) is taken from RushWorld.profileOf corners at spawn; clearance, standOff and steer cover the goal edge, the slide and the step out. EnemyService.keepRoom reads it every AI tick before moverUpdate, and Brain reads it through context.standOff for the Return home (D-259).
+  - EnemyService entries carry footprint and stepping. keepRoom(entry) steers free enemies (ai.spacing.freePhases). context.attackDropped fires RushEnded "Dropped" when a held or sleeping enemy loses its wind-up (D-254).
+  - Remotes: the RushEnded reasons gain "Dropped" (the server abandoned a wind-up before launch).
+- **Telegraphs and rushes (client):**
+  - A melee tell stays lit to the snap, with a steady glint over the parry window (ai.telegraph snapLeadSeconds, glintFillTransparency; D-252). Cones are WedgePart fans on the ground (RushDraw.ground; D-253).
+  - RushDraw's Armed phase faces the Telegraph's facing (D-255) and infers a jam from a root at rest (ai.rushWorld restStuds, restSeconds, restSpeed; D-256).
+- **Trails, glow, sound and HUD:**
+  - TrailRibbon (client/fx): a ring of blade samples drawn as chained camera-facing Beams. Trails owns one per rig with a blade chain and feeds it the sub-step blades from BladeContact.blade between rendered frames. Trails.bind takes a held dependency so the ribbon's ages stand still during hit-stop. Trails.ribbonOf(model) is for specs (D-261, D-269).
+  - Trails.activationLight also lights the blade's glow Beams (fx.activationLight.glow) and fades them with the light when cancelled (D-263).
+  - Mixer.preview(handle, dt) reports what a handle's limbs will show after the next step, by Mixer.step's own rule. Mixer.hold(handle) stops its clock while the envelope keeps moving. Locomotion's sheath hook uses preview; SheathState cuts back with hold plus choreo.sheath.cutBackBlend (D-262).
+  - SfxPool: each group's EQ is always in (flat while idle) and setEnabled switches only the reverb; sub-frame ramps land at once. The low-HP heartbeat loop ducks under the local player's own hit cues (sfx.mix.heartbeatDuck), stepped on Heartbeat (D-264).
+  - HudLogic.declutter(boxes, gap, maxHeights, previous?) → (lifts, order) is pure: it returns each screen box's lift, the nearest first. PlateBox.key names a plate from update to update; with previous given, adjacent plates swap only past reorderStuds. HudLogic.easeLift eases a lift exponentially (D-265, D-270).
+  - Nameplates: each update builds boxes for the shown plates, keyed by record.id, declutters them and keeps declutterOrder; each Heartbeat eases SizeOffset.Y. Nameplates.setProjector(fn) is for specs.
+  - SpeedLines: each pooled line carries a UIStroke ink edge with its own UIGradient; lay() writes the edge's transparency with the core's.
+- **Data tables:** combat.luau hitStopShaveFrames and contact (keyEpsilon, wordWaitSeconds, standOff); camera.luau lock keys; ai.luau telegraph, strikePrediction, rushWorld rest keys and spacing; fx.luau trail.ribbon, activationLight.glow and wallSlam; sfx.luau mix.heartbeatDuck, playback.sameFrameSeconds and shatterBalance; ui.luau systemLine, hud.artList and nameplates.declutter; accents.luau speedLines edge; choreo.luau sheath.cutBackBlend; dev.luau capture staging and hitMatrix.clientFps.
+
 ## Data tables (src/shared/data)
 
 | File | Holds |

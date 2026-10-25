@@ -586,14 +586,17 @@ local function overhead(options: Options): Run
 	return run
 end
 
--- The chop lands with the server's resolve, the telegraph ends with its wind-up, and nothing
--- freezes beyond the hits' own hit-stops.
+-- The chop lands with the server's resolve, the telegraph holds through the strike until the snap
+-- falls (F7: the resolve less ai.luau telegraph.snapLeadSeconds, moved by every pause the server
+-- gave), and nothing freezes beyond the hits' own hit-stops.
 local function onBeat(run: Run, frames: number?)
 	local slack = (frames or 2) * FRAME + 1e-6
 	expect(run.chopAt ~= nil).toBe(true)
 	expect(math.abs((run.chopAt :: number) - run.resolveAt) <= slack).toBe(true)
 	expect(run.telegraphEnd ~= nil).toBe(true)
-	expect(math.abs((run.telegraphEnd :: number) - run.windUpEnd) <= FRAME + 1e-6).toBe(true)
+	local snap = run.resolveAt - AI.telegraph.snapLeadSeconds
+	expect(math.abs((run.telegraphEnd :: number) - snap) <= FRAME + 1e-6).toBe(true)
+	expect((run.telegraphEnd :: number) > run.windUpEnd).toBe(true)
 	expect(run.held <= run.holds).toBe(true)
 end
 

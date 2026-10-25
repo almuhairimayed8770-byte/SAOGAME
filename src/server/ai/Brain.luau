@@ -99,6 +99,9 @@ export type Context = {
 	-- a path (D-183). Nil or false: the mover may pathfind past a wall or a long way.
 	moveTo: (position: Vector3, speed: number, direct: boolean?) -> (),
 	stop: () -> (),
+	-- Where the body may stand nearest `point` with its room to every other enemy (D-259: a home
+	-- another body now stands on is reached at its side). Nil: the point itself.
+	standOff: ((point: Vector3) -> Vector3)?,
 	face: (direction: Vector3) -> (),
 	telegraph: (attack: Types.EnemyAttackDef, origin: Vector3, facing: Vector3, shape: Types.TelegraphShape?) -> (),
 	strike: (
@@ -129,6 +132,11 @@ export type Context = {
 	rushStarted: ((rush: Rush) -> ())?,
 	-- `contact`: the slam that stopped it ("Wall": where the body meets the face, D-208).
 	rushEnded: ((rush: Rush, reason: RushEnd, distance: number, contact: RushWorld.Contact?) -> ())?,
+	-- An attack a sleep or a hold dropped before it landed (its wind-up, or a blow's strike before
+	-- it resolved): EnemyService tells every client, reliably, with `beat` (the wind-up's end it was
+	-- due at or had reached, its pauses in it), so none plays the swing on, keeps the tell lit or
+	-- draws the launch the telegraph predicted. No interrupt or death: their StateChanged tells it.
+	attackDropped: ((beat: number) -> ())?,
 	-- The rush's path bent (a glance) or sidestepped (a clip): its legs changed (D-206, D-207).
 	rushTurned: ((rush: Rush, contact: RushWorld.Contact) -> ())?,
 	-- A slam dazes the body: EnemyService staggers it from the front for `seconds` (D-208).
@@ -801,13 +809,31 @@ function Brain.die(self: Brain)
 	self.phase = "Dead"
 end
 
---- Puts the brain to sleep (no player within the sleep radius): it stops and forgets its target.
+--- Puts the brain to sleep (no player within the sleep radius, or a hold): it stops and forgets its
+--- target. An attack it drops before it resolved ends its Art state at once, and one not yet landed
+--- or launched is told to the clients (attackDropped): nothing else would (no stagger comes), and
+--- they would play the swing on, keep the tell lit and draw the rush its telegraph predicted. A
+--- launched rush tells its stop as any other (Charger.onCancel's RushEnded "Stopped").
 function Brain.sleep(self: Brain)
 	if not self.awake or self.phase == "Dead" then
 		return
 	end
 	self.awake = false
+	local attack = self.attack
+	local phase = self.phase
+	local open = attack ~= nil and (phase == "WindUp" or (phase == "Strike" and not self.struck))
+	local contact = self.archetype.contactStrike
+	local launched = phase == "Strike" and contact ~= nil and contact(self)
+	-- The wind-up's end, due or reached (phaseStart carries the pauses).
+	local beat = if phase == "WindUp" and attack ~= nil then self.phaseStart + attack.windUp else self.phaseStart
 	self:cancelAttack("Stopped")
+	if open then
+		self.context.setState("Idle")
+		local told = self.context.attackDropped
+		if not launched and told ~= nil then
+			told(beat)
+		end
+	end
 	self.targetId = nil
 	self.lastTarget = nil
 	self.turnGoal = nil
@@ -860,7 +886,10 @@ end
 
 function Brain.tickReturn(self: Brain, now: number, dt: number)
 	local context = self.context
-	local home = context.home
+	-- Home, or the nearest spot to it with room when another body stands there (D-259): a home that
+	-- is taken never keeps the body walking (and blind to players) forever.
+	local standOff = context.standOff
+	local home = if standOff ~= nil then standOff(context.home) else context.home
 	local position = context.position()
 	if Brain.horizontalDistance(position, home) <= AI.leash.homeRadius then
 		self:enterIdle(now)

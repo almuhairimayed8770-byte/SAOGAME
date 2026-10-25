@@ -302,3 +302,40 @@ describe("AimLogic.assistPick: the two-boar case behind item 102's 12 degrees", 
 		expect((far :: any).id).toBe(1)
 	end)
 end)
+
+describe("AimLogic.holdTurn: the body holds its facing while a clip owns it (issue 16)", function()
+	it("turns a shoved body back to the yaw it held, the short way round", function()
+		expect(AimLogic.holdTurn(10, 10)).toBe(0)
+		expect(AimLogic.holdTurn(10, 80)).toBeCloseTo(-70, 1e-9)
+		expect(AimLogic.holdTurn(10, -60)).toBeCloseTo(70, 1e-9)
+		-- Across the back: 170 held, -170 now is 20 to the right, not 340 to the left.
+		expect(AimLogic.holdTurn(170, -170)).toBeCloseTo(-20, 1e-9)
+		expect(AimLogic.holdTurn(-170, 170)).toBeCloseTo(20, 1e-9)
+	end)
+end)
+
+describe("AimLogic.standOffAt: the Art stand-off's step over the anticipation (fix F1)", function()
+	local standOff = combat.contact.standOff
+	it("is nothing up to the hold pose and the whole step from the first window's open on", function()
+		expect(AimLogic.standOffAt(0.8, 0.15, 0.35, 0, standOff.easing)).toBe(0)
+		expect(AimLogic.standOffAt(0.8, 0.15, 0.35, 0.15, standOff.easing)).toBe(0)
+		expect(AimLogic.standOffAt(0.8, 0.15, 0.35, 0.35, standOff.easing)).toBe(0.8)
+		expect(AimLogic.standOffAt(0.8, 0.15, 0.35, 1.2, standOff.easing)).toBe(0.8)
+	end)
+
+	it("pushes off and settles: rises over the anticipation, more than halfway by its middle", function()
+		local last = 0
+		for k = 1, 19 do
+			local shown = AimLogic.standOffAt(0.8, 0.15, 0.35, 0.15 + 0.2 * k / 20, standOff.easing)
+			expect(shown > last and shown < 0.8).toBe(true)
+			last = shown
+		end
+		expect(AimLogic.standOffAt(0.8, 0.15, 0.35, 0.25, standOff.easing) > 0.4).toBe(true)
+	end)
+
+	it("takes no step for no plan or an empty anticipation", function()
+		expect(AimLogic.standOffAt(0, 0.15, 0.35, 0.25, standOff.easing)).toBe(0)
+		expect(AimLogic.standOffAt(-1, 0.15, 0.35, 0.25, standOff.easing)).toBe(0)
+		expect(AimLogic.standOffAt(0.8, 0.35, 0.35, 0.4, standOff.easing)).toBe(0.8)
+	end)
+end)

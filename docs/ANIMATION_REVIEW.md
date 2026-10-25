@@ -24,33 +24,33 @@ regeneration, matched by clip id.
 
 | Clip | Rig | Kind | Duration | Anticipation | Snap | Smear | Hold | Settle | Recovery | Hit-stop | Hits | Trail vs windows | Root motion | Problems found | Watched at 0.25x | Problems seen | Fixed |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `player/OneHandedSword/Basic1` | PlayerR15 | attack | 0.45 s / 27f | Y 6f | Y 3f | Y 2f | Y 2f | Y 6f | Y 9f | Normal | 1 | on 0.0f before, off 1.8f after | 0.40 | none |  |  |  |
-| `player/OneHandedSword/Basic2` | PlayerR15 | attack | 0.45 s / 27f | Y 6f | Y 3f | Y 2f | Y 2f | Y 6f | Y 9f | Normal | 1 | on 0.0f before, off 1.8f after | 0.40 | none |  |  |  |
-| `player/OneHandedSword/Basic3` | PlayerR15 | attack | 0.45 s / 27f | Y 6f | Y 3f | Y 2f | Y 2f | Y 6f | Y 9f | Normal | 1 | on 0.0f before, off 1.8f after | 0.60 | none |  |  |  |
-| `player/OneHandedSword/Horizontal` | PlayerR15 | attack | 1.00 s / 60f | Y 6f | Y 3f | Y 2f | Y 2f | Y 7f | Y 24f | Normal | 1 | on 0.0f before, off 2.4f after | 1.00 | none |  |  |  |
-| `player/OneHandedSword/RisingArc` | PlayerR15 | attack | 1.40 s / 84f | Y 5f | Y 3f | Y 2f | Y 2f | Y 6f | Y 30f | Normal | 2 | on 0.0f before, off 2.4f after | 1.00 | none |  |  |  |
-| `player/OneHandedSword/SharpNail` | PlayerR15 | attack | 1.70 s / 102f | Y 5f | Y 3f | Y 2f | Y 2f | Y 6f | Y 36f | Normal | 3 | on 0.0f before, off 2.4f after | 2.00 | none |  |  |  |
-| `player/OneHandedSword/Vertical` | PlayerR15 | attack | 1.00 s / 60f | Y 6f | Y 3f | Y 2f | Y 2f | Y 7f | Y 24f | Normal | 1 | on 0.0f before, off 2.4f after | 0.00 | none |  |  |  |
+| `player/OneHandedSword/Basic1` | PlayerR15 | attack | 0.45 s / 27f | Y 6f | Y 3f | Y 2f | Y 2f | Y 6f | Y 9f | Normal | 1 | on 0.0f before, off 1.8f after | 0.40 | none | yes 2026-10-25 (gate footage) | (clip inferred from the footage) Anticipation and snap hidden by the body (locomotion f41-49); cut lands across the leg f450-452 but the flash comes at f463 | D-227, D-267; re-record |
+| `player/OneHandedSword/Basic2` | PlayerR15 | attack | 0.45 s / 27f | Y 6f | Y 3f | Y 2f | Y 2f | Y 6f | Y 9f | Normal | 1 | on 0.0f before, off 1.8f after | 0.40 | none | yes 2026-10-25 (gate footage) | (clip inferred from the footage) Flash at f283 before the blade moves; trail blob on a still blade f285-297; blade rests in the chest 4 frames before flash f302 | D-227, D-261, D-267; re-record |
+| `player/OneHandedSword/Basic3` | PlayerR15 | attack | 0.45 s / 27f | Y 6f | Y 3f | Y 2f | Y 2f | Y 6f | Y 9f | Normal | 1 | on 0.0f before, off 1.8f after | 0.60 | none | yes 2026-10-25 (gate footage) | (clip inferred from the footage) Overheads seen edge-on; flash near the top of the raise (f176, f475); trail a thick straight band ~9 frames | D-227, D-261; re-record |
+| `player/OneHandedSword/Horizontal` | PlayerR15 | attack | 1.00 s / 60f | Y 6f | Y 3f | Y 2f | Y 2f | Y 7f | Y 24f | Normal | 1 | on 0.0f before, off 2.4f after | 1.00 | none | yes 2026-10-25 (gate footage) | Hit fires on the snap's first frame (art-horizontal f73, f179), the freeze holds the blade horizontal-right 7 frames after contact (spec 6), snap/smear/settle play after the freeze behind the body; Final Dark 3 frames; trail a thin vertical ribbon, no arc; glow faint after the 3-frame flash; start pose/anticipation unreadable from behind | D-227, D-228, D-261, D-263; re-record |
+| `player/OneHandedSword/RisingArc` | PlayerR15 | attack | 1.40 s / 84f | Y 5f | Y 3f | Y 2f | Y 2f | Y 6f | Y 30f | Normal | 2 | on 0.0f before, off 2.4f after | 1.00 | none | yes 2026-10-25 (gate footage) | Hit 1 connects with the blade still in the start pose (f154, f247); freezes hold the first snap step above the kobold's head; Art B Normal hold 4 (Art A 3); rest of each snap a one-frame jump with a straight trail chord (f159, f253); trail lit between windows (one pair 0.3333/0.72); Final Dark 3 with a pose change inside; toe rise and heels-down hidden; no Launch | D-227, D-230, D-234 (Launch: D-233); re-record |
+| `player/OneHandedSword/SharpNail` | PlayerR15 | attack | 1.70 s / 102f | Y 5f | Y 3f | Y 2f | Y 2f | Y 6f | Y 36f | Normal | 3 | on 0.0f before, off 2.4f after | 2.00 | none | yes 2026-10-25 (gate footage) | Snap 1 pops in one frame (f111→112, f263→264) with the smear on 2 still frames before it; trail lit between windows 2 and 3 (one TrailOn 0.3333 / TrailOff 1.02, f132-143); draw-back raises the blade instead of laying it along the forearm (f132-141); post-motion lost: body spins 60-90° after the Final freeze (f151-153); activation flash/chime/light after being hit out of the stance (f59-61), light on 50 frames; hit 2 and cast 2 thrust hidden in the kobold | D-229, D-230, D-231, D-232; re-record |
+| `player/OneHandedSword/Vertical` | PlayerR15 | attack | 1.00 s / 60f | Y 6f | Y 3f | Y 2f | Y 2f | Y 7f | Y 24f | Normal | 1 | on 0.0f before, off 2.4f after | 0.00 | none | yes 2026-10-25 (gate footage) | Contact on first snap frame (f48, f166); blade frozen straight up 7 frames (f49-55, f167-173); whole chop in 1 frame (f56, f174); end pose/overshoot/settle hidden inside the kobold; trail a flat slab during the freeze; Dark 3 with stale first figure | D-227, D-228, D-261; re-record |
 | `player/OneHandedSword/Breathe` | PlayerR15 | loop | 3.60 s / 216f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `player/OneHandedSword/DeathFreeze` | PlayerR15 | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `player/OneHandedSword/DodgeBack` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none |  |  |  |
-| `player/OneHandedSword/DodgeForward` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none |  |  |  |
-| `player/OneHandedSword/DodgeLeft` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none |  |  |  |
-| `player/OneHandedSword/DodgeRight` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none |  |  |  |
-| `player/OneHandedSword/Draw` | PlayerR15 | one-shot | 0.88 s / 52f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/DeathFreeze` | PlayerR15 | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | Pose holds; camera tilts and pans under it (parry-spark f77-108) | D-239 (camera); re-record |
+| `player/OneHandedSword/DodgeBack` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none | yes 2026-10-25 (gate footage) | One-frame change from the Art end pose (art-vertical f91→92); camera pull-back reads like a cut (art-horizontal f116-118) | unchanged by design (D-241); judged again on the re-record |
+| `player/OneHandedSword/DodgeForward` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none | yes 2026-10-25 (gate footage) | Plays cleanly (locomotion f25-37); speed lines nearly invisible on the sky | D-265 (speed lines); re-record |
+| `player/OneHandedSword/DodgeLeft` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none | yes 2026-10-25 (gate footage) | Carries the player into the boar's flank (locomotion f250-262); whole-view whip on DodgeRight (kill-shatter f27-30) | D-237, D-240; re-record |
+| `player/OneHandedSword/DodgeRight` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none | yes 2026-10-25 (gate footage) | Carries the player into the boar's flank (locomotion f250-262); whole-view whip on DodgeRight (kill-shatter f27-30) | D-237, D-240; re-record |
+| `player/OneHandedSword/Draw` | PlayerR15 | one-shot | 0.88 s / 52f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | Not seen in locomotion; nothing obvious at kobold-overhead f196-203 |  |
 | `player/OneHandedSword/Fall` | PlayerR15 | loop | 0.80 s / 48f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/FlinchBack` | PlayerR15 | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `player/OneHandedSword/FlinchFront` | PlayerR15 | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/FlinchFront` | PlayerR15 | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | (clip inferred from the footage) Reads with a clean return (kobold-overhead f168-171); no readable flinch when hit in the Sharp Nail stance (art-sharp-nail f51-58), then a 26-frame low pose matching no SharpNail key (f63-88) | D-231; open (re-record) |
 | `player/OneHandedSword/FlinchLeft` | PlayerR15 | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/FlinchRight` | PlayerR15 | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `player/OneHandedSword/Guard` | PlayerR15 | loop | 2.00 s / 120f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/Guard` | PlayerR15 | loop | 2.00 s / 120f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | Raise over 2-3 frames, clean |  |
 | `player/OneHandedSword/GuardBreak` | PlayerR15 | one-shot | 1.20 s / 72f | - | - | - | - | - | - | - | - | - | 1.00 | none |  |  |  |
 | `player/OneHandedSword/GuardHit` | PlayerR15 | one-shot | 0.35 s / 21f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `player/OneHandedSword/Idle` | PlayerR15 | loop | 12.00 s / 720f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `player/OneHandedSword/IdleDrawn` | PlayerR15 | loop | 12.00 s / 720f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/Idle` | PlayerR15 | loop | 12.00 s / 720f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | none |  |
+| `player/OneHandedSword/IdleDrawn` | PlayerR15 | loop | 12.00 s / 720f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | Stance blade through the boar's front legs (locomotion f269-282), staging | D-237, D-259 (spacing); re-record |
 | `player/OneHandedSword/Jump` | PlayerR15 | one-shot | 0.40 s / 24f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Land` | PlayerR15 | one-shot | 0.45 s / 27f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `player/OneHandedSword/Parry` | PlayerR15 | one-shot | 0.40 s / 24f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/Parry` | PlayerR15 | one-shot | 0.40 s / 24f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | Starts after the clash and the 3-frame hold with a one-frame blade drop (parry take f1301); flick ~f1305 after the axe is gone; settle blade through the kobold's legs | D-257; re-record |
 | `player/OneHandedSword/Run` | PlayerR15 | loop | 0.60 s / 36f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/RunDrawn` | PlayerR15 | loop | 0.60 s / 36f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Sheathe` | PlayerR15 | one-shot | 0.81 s / 49f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
@@ -62,32 +62,32 @@ regeneration, matched by clip id.
 | `player/OneHandedSword/TurnRight` | PlayerR15 | one-shot | 0.40 s / 24f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/WalkBack` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/WalkBackDrawn` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `player/OneHandedSword/WalkForward` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `player/OneHandedSword/WalkForwardDrawn` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/WalkForward` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | Only 0.4 s from directly behind (locomotion f0-24), feet hidden; not judgeable | open (re-record) |
+| `player/OneHandedSword/WalkForwardDrawn` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | Short locked shuffles from behind, feet hidden; not judgeable | open (re-record) |
 | `player/OneHandedSword/WalkLeft` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `player/OneHandedSword/WalkLeftDrawn` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/WalkLeftDrawn` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | Short locked shuffles from behind, feet hidden; not judgeable | open (re-record) |
 | `player/OneHandedSword/WalkRight` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `player/OneHandedSword/WalkRightDrawn` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `enemy/Boar/Charge` | Boar | attack | 2.30 s / 138f | Y 36f | Y 3f | Y 2f | Y 3f | Y 9f | Y 63f | Normal | 1 | on 0.0f before, off 1.2f after | 0.00 | none |  |  |  |
+| `player/OneHandedSword/WalkRightDrawn` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | Short locked shuffles from behind, feet hidden; not judgeable | open (re-record) |
+| `enemy/Boar/Charge` | Boar | attack | 2.30 s / 138f | Y 36f | Y 3f | Y 2f | Y 3f | Y 9f | Y 63f | Normal | 1 | on 0.0f before, off 1.2f after | 0.00 | none | yes 2026-10-25 (gate footage) | Red crouch and wedge f8-40 read, launch f41 distinct; plate stays on the root during the rush (locomotion f51-72) | D-193 |
 | `enemy/Boar/Break` | Boar | one-shot | 3.00 s / 180f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `enemy/Boar/DeathFreeze` | Boar | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `enemy/Boar/FlinchBack` | Boar | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `enemy/Boar/FlinchFront` | Boar | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `enemy/Boar/FlinchLeft` | Boar | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `enemy/Boar/FlinchRight` | Boar | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `enemy/Boar/Idle` | Boar | loop | 4.00 s / 240f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `enemy/Boar/Idle` | Boar | loop | 4.00 s / 240f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | None; often overlapped by the player | D-237, D-259 (spacing) |
 | `enemy/Boar/Stagger` | Boar | one-shot | 1.00 s / 60f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `enemy/Boar/Walk` | Boar | loop | 0.70 s / 42f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `enemy/Kobold/Overhead` | Kobold | attack | 2.75 s / 165f | Y 78f | Y 3f | Y 2f | Y 3f | Y 9f | Y 72f | Normal | 1 | on 0.0f before, off 1.2f after | 0.00 | none |  |  |  |
+| `enemy/Boar/Walk` | Boar | loop | 0.70 s / 42f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | None seen at this size |  |
+| `enemy/Kobold/Overhead` | Kobold | attack | 2.75 s / 165f | Y 78f | Y 3f | Y 2f | Y 3f | Y 9f | Y 72f | Normal | 1 | on 0.0f before, off 1.2f after | 0.00 | none | yes 2026-10-25 (gate footage) | Yellow tell ends 18-19 frames before the chop (kobold-overhead f141 vs chop f160; parry f46 vs f65); smear on the still raised blade (f158-159), drop unsmeared in ~1 frame; trail a thin straight chord (f160-169); hold/settle/recovery hidden behind the player or cut off; cone at hip height, over the player's legs | D-229, D-252, D-253; re-record |
 | `enemy/Kobold/Break` | Kobold | one-shot | 3.00 s / 180f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `enemy/Kobold/DeathFreeze` | Kobold | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `enemy/Kobold/DeathFreeze` | Kobold | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | Body holds still src 6342-6381; camera pulls back underneath it (camera, not clip) | D-239 (camera); re-record |
 | `enemy/Kobold/FlinchBack` | Kobold | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `enemy/Kobold/FlinchFront` | Kobold | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `enemy/Kobold/FlinchFront` | Kobold | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | Barely visible under Sharp Nail hits (f111-115, f126-131), mostly hidden; not judgeable | open (re-record) |
 | `enemy/Kobold/FlinchLeft` | Kobold | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `enemy/Kobold/FlinchRight` | Kobold | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `enemy/Kobold/Idle` | Kobold | loop | 4.00 s / 240f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `enemy/Kobold/Stagger` | Kobold | one-shot | 1.00 s / 60f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `enemy/Kobold/Walk` | Kobold | loop | 0.80 s / 48f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `enemy/Kobold/Idle` | Kobold | loop | 4.00 s / 240f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | No pops; overlaps the player, later stands inside the boar (staging) | D-237, D-259 (spacing) |
+| `enemy/Kobold/Stagger` | Kobold | one-shot | 1.00 s / 60f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | One-frame jump at start (axe hip→overhead, blendIn 0.02; parry take f1301); reel ~10 frames, mostly behind the hat, upright from ~f1312; head-up reel and bent-leg catch don't read | D-257; re-record |
+| `enemy/Kobold/Walk` | Kobold | loop | 0.80 s / 48f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | No foot pops seen at this size |  |
 
 ## Summary
 

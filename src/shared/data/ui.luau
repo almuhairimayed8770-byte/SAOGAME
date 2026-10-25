@@ -97,17 +97,21 @@ local UI = {
 			iconSize = 14,
 			skullToken = "HPYellow", -- the Lucid skull beside a member in yellow
 		},
+		-- The hotbar. F17: the reel review found its labels tiny and faint (13 and 15 px at 0.25
+		-- over a 0.6 stroke); in use they are large and opaque over a dark stroke, and the stroke
+		-- fades out with the text when the list goes idle.
 		artList = {
 			bottomMargin = 36,
-			rowHeight = 22,
-			gap = 14,
-			keyTextSize = 13,
-			nameTextSize = 15,
+			rowHeight = 28,
+			gap = 18,
+			keyTextSize = 18,
+			nameTextSize = 20,
 			keyToken = "SystemCyan",
 			nameToken = "SystemWhite",
 			idleFade = 5, -- seconds of no use before the list fades (section 14)
 			fadeSeconds = 0.4,
-			restTransparency = 0.25,
+			restTransparency = 0,
+			strokeTransparency = 0.2, -- the labels' dark stroke while shown
 		},
 		lowHpTint = {
 			token = "HPRed",
@@ -167,6 +171,19 @@ local UI = {
 			nameToken = "CursorRed",
 		},
 		bossAttribute = "Boss", -- entity models the server marks as bosses get no plate
+		-- F17: plates that meet on screen lift off each other. The nearest plate stays where it
+		-- is; each farther one climbs just over the plates in front of it (gapPixels between), at
+		-- most maxLiftHeights of its own height, eased at `rate` per second (never a jump).
+		declutter = {
+			gapPixels = 4,
+			maxLiftHeights = 3,
+			rate = 16,
+			-- Which plate counts as nearer changes only when it is nearer by more than this many
+			-- studs (D-270): two enemies side by side stand as near as each other, and their drawn
+			-- bodies' noise would swap the climbing plate every few updates, see-sawing the two
+			-- plates through each other.
+			reorderStuds = 0.75,
+		},
 		poolSize = 40,
 		lightInfluence = 0,
 		folderName = "SkyspireNameplates", -- the PlayerGui folder the pooled plates live in
@@ -177,18 +194,22 @@ local UI = {
 		shatterGraceSeconds = 0.25,
 	},
 
+	-- F17: the reel review measured the death line's glyphs about 16 px tall at textSize 26, too
+	-- small for the moment; every system line is now 40 (glyphs about 25 px) with a 2 px dark edge
+	-- that holds it on a bright sky.
 	systemLine = {
 		screenGuiName = "SkyspireSystem",
 		displayOrder = 20,
-		textSize = 26,
-		largeTextSize = 40, -- the Architect's lines (CursorRed token)
+		textSize = 40,
+		largeTextSize = 56, -- the Architect's lines (CursorRed token)
 		yFraction = 0.26,
 		fadeIn = 0.15,
 		hold = 2.4,
 		fadeOut = 0.5,
 		gap = 0.2, -- seconds between queued lines
 		maxQueue = 8,
-		strokeTransparency = 0.55,
+		strokeTransparency = 0.2,
+		strokeThickness = 2, -- pixels of dark edge round the glyphs
 		defaultToken = "SystemWhite",
 		largeTokens = { CursorRed = true },
 		chimes = { default = "ui.SystemLine", WardedPurple = "ui.SystemLineWarded" },

@@ -545,3 +545,294 @@ describe("CameraController framing: what blocks the view", function()
 		expect(away).toBeLessThan((spot - ROOT).Magnitude * 0.75)
 	end)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- Close fights (F3), whips (issues 12 and 22), the death freeze (F4) and the lock's stick
+-- ------------------------------------------------------------------------------------------
+
+local CameraMath = Harness.load("src/client/camera/CameraMath")
+
+-- A boar-shaped target: a 2.4 x 2.4 x 5 root at `position` facing -Z (its snout toward -Z), or
+-- +Z when `turned`, and RigBuilder.addBlocker's footprint part over its rest silhouette
+-- (RigBuilder.footprint: 1.3 either side, 5.6 ahead of the root at the snout, 3.31 behind it at the
+-- tail).
+local BOAR_CENTRE, BOAR_SIZE = Harness.load("src/server/world/RigBuilder").footprint("Boar")
+local BOAR_HALF_X = BOAR_SIZE.X / 2
+local BOAR_FRONT, BOAR_BACK = BOAR_SIZE.Z / 2 - BOAR_CENTRE.Z, BOAR_SIZE.Z / 2 + BOAR_CENTRE.Z
+local function boar(position: Vector3, parent: Instance, turned: boolean?): Model
+	local model = Instance.new("Model")
+	model.Name = "Boar"
+	local root = part("HumanoidRootPart", position, Vector3.new(2.4, 2.4, 5), model)
+	root.CFrame = CFrame.new(position) * CFrame.Angles(0, if turned then math.pi else 0, 0)
+	model.PrimaryPart = root
+	local length = BOAR_FRONT + BOAR_BACK
+	local at = root.CFrame * CFrame.new(0, 0, (BOAR_BACK - BOAR_FRONT) / 2)
+	local footprint = part(CameraData.lock.footprintPart, at.Position, Vector3.new(BOAR_HALF_X * 2, 7, length), model)
+	footprint.CFrame = at
+	footprint.CanCollide = false
+	Instance.new("Humanoid").Parent = model
+	model.Parent = parent
+	return model
+end
+
+-- How much of the target's column the player's covers on screen (0 clear, 1 hidden).
+local function covered(camera: any, playerAt: Vector3, targetAt: Vector3): number
+	local pMinX, pMaxX = column(camera, playerAt)
+	local tMinX, tMaxX = column(camera, targetAt)
+	return math.max(0, math.min(pMaxX, tMaxX) - math.max(pMinX, tMinX)) / (tMaxX - tMinX)
+end
+
+-- Degrees the camera stands off the line behind the player (0: straight behind, on the line).
+local function offLine(camera: any, playerAt: Vector3, targetAt: Vector3): number
+	local behind = flat(playerAt - targetAt).Unit
+	local away = flat(camera.CFrame.Position - playerAt).Unit
+	return math.deg(math.acos(math.clamp(behind:Dot(away), -1, 1)))
+end
+
+-- The camera's bearing around the player (degrees), as the two-shot measures it.
+local function bearing(camera: any, playerAt: Vector3): number
+	local p: Vector3 = camera.CFrame.Position
+	return CameraMath.yawTowards({ p.X, p.Y, p.Z }, { playerAt.X, playerAt.Y, playerAt.Z })
+end
+
+describe("CameraController framing: close fights (F3)", function()
+	for _, separation in { 1.5, 2, 2.5 } do
+		it(
+			("turns a fight %.1f studs apart to a three-quarter view of both, a little lower"):format(separation),
+			function()
+				local fixture = load()
+				fixture.frames(60)
+				local targetAt = ROOT + Vector3.new(0, 0, -separation)
+				fixture.controller.setLockTarget(character("Kobold", targetAt, fixture.world))
+				fixture.frames(240)
+				local camera = fixture.camera
+				-- Off the line by about the close swing, not over the player's shoulder.
+				expect(offLine(camera, ROOT, targetAt)).toBeGreaterThanOrEqual(70)
+				expect(offLine(camera, ROOT, targetAt)).toBeLessThanOrEqual(90)
+				-- The target's body shows beside the player's, not behind it (HEAD hid 29% at 1.5).
+				expect(covered(camera, ROOT, targetAt)).toBeLessThanOrEqual(0.05)
+				-- About head height, looking gently down: under the hat's brim, never onto it.
+				expect(camera.CFrame.Position.Y - ROOT.Y).toBeLessThanOrEqual(3.1)
+				expect(lookDown(camera)).toBeLessThanOrEqual(10)
+				local pMinX, pMaxX, pMinY, pMaxY = column(camera, ROOT)
+				local tMinX, tMaxX, tMinY, tMaxY = column(camera, targetAt)
+				for _, edge in { pMinX, pMaxX, pMinY, pMaxY, tMinX, tMaxX, tMinY, tMaxY } do
+					expect(math.abs(edge)).toBeLessThan(1)
+				end
+			end
+		)
+	end
+
+	it("measures close from the target's footprint: a long boar is close at its snout", function()
+		local fixture = load()
+		fixture.frames(60)
+		-- The player at the boar's snout, head on: 6.1 studs root to root, 0.5 from the snout.
+		local boarAt = ROOT + Vector3.new(0, 0, -(BOAR_FRONT + 0.5))
+		fixture.controller.setLockTarget(boar(boarAt, fixture.world, true))
+		fixture.frames(240)
+		expect(offLine(fixture.camera, ROOT, boarAt)).toBeGreaterThanOrEqual(70)
+		-- The same separation from a small target's root is no close fight.
+		local open = load()
+		open.frames(60)
+		local koboldAt = ROOT + Vector3.new(0, 0, -(BOAR_FRONT + 0.5))
+		open.controller.setLockTarget(character("Kobold", koboldAt, open.world))
+		open.frames(240)
+		expect(offLine(open.camera, ROOT, koboldAt)).toBeLessThan(50)
+	end)
+
+	it("keeps the footprint part's name the blocker's (RigBuilder.BLOCKER_NAME)", function()
+		local RigBuilder = Harness.load("src/server/world/RigBuilder")
+		expect(CameraData.lock.footprintPart).toBe(RigBuilder.BLOCKER_NAME)
+	end)
+end)
+
+describe("CameraController framing: whips (issues 12 and 22)", function()
+	-- The fastest the camera's bearing turns in a frame, and the steepest look down, while `move`
+	-- moves the target each frame for `count` frames.
+	local function track(fixture: Fixture, count: number, move: (frame: number) -> ()): (number, number)
+		local camera = fixture.camera
+		local turn, down = 0, lookDown(camera)
+		local last = bearing(camera, ROOT)
+		for index = 1, count do
+			move(index)
+			fixture.frames(1)
+			local now = bearing(camera, ROOT)
+			turn = math.max(turn, math.abs(CameraMath.shortestDelta(last, now)))
+			down = math.max(down, lookDown(camera))
+			last = now
+		end
+		return turn, down
+	end
+	-- The bearing measured from the drawn camera also carries the follow's leash: a hair over.
+	local capPerFrame = CameraData.lock.maxTurnDegreesPerSecond * F + 0.01
+
+	it("pans, never whips, when a charging target runs past the player and stops by the lens", function()
+		for _, side in { -1.5, 0, 1.5 } do
+			for _, stopAt in { 4, 8 } do
+				local fixture = load()
+				fixture.frames(60)
+				local target = character("Boar", ROOT + Vector3.new(side, 0, -15), fixture.world)
+				fixture.controller.setLockTarget(target)
+				fixture.frames(240)
+				local targetRoot = target.PrimaryPart :: BasePart
+				local turn, down = track(fixture, 240, function(index)
+					targetRoot.Position = ROOT + Vector3.new(side, 0, math.min(-15 + 30 * index * F, stopAt))
+				end)
+				expect(turn).toBeLessThanOrEqual(capPerFrame)
+				expect(down).toBeLessThanOrEqual(15)
+			end
+		end
+	end)
+
+	it("swings to a lock behind the camera no faster than the cap", function()
+		local fixture = load()
+		fixture.frames(60)
+		fixture.controller.setLockTarget(character("Kobold", ROOT + Vector3.new(0, 0, -6), fixture.world))
+		fixture.frames(240)
+		fixture.controller.setLockTarget(character("Boar", ROOT + Vector3.new(1, 0, 9), fixture.world))
+		local turn = track(fixture, 180, function() end)
+		expect(turn).toBeLessThanOrEqual(capPerFrame)
+		-- And it gets there: the camera ends up behind the player from the new target.
+		expect(offLine(fixture.camera, ROOT, ROOT + Vector3.new(1, 0, 9))).toBeLessThan(70)
+	end)
+
+	it("never whips while two fighters circle toe to toe", function()
+		local fixture = load()
+		fixture.frames(60)
+		local target = character("Kobold", ROOT + Vector3.new(0, 0, -1.8), fixture.world)
+		fixture.controller.setLockTarget(target)
+		fixture.frames(240)
+		local targetRoot = target.PrimaryPart :: BasePart
+		local turn, down = track(fixture, 240, function(index)
+			local angle = math.rad(index * 4) -- 240 degrees a second around the player
+			targetRoot.Position = ROOT + Vector3.new(-math.sin(angle) * 1.8, 0, -math.cos(angle) * 1.8)
+		end)
+		expect(turn).toBeLessThanOrEqual(capPerFrame)
+		expect(down).toBeLessThanOrEqual(12)
+	end)
+end)
+
+describe("CameraController framing: the death freeze (F4)", function()
+	it("holds the shot still through the freeze, then eases out", function()
+		local fixture = load()
+		fixture.frames(60)
+		local target = character("Kobold", ROOT + Vector3.new(0, 0, -3), fixture.world)
+		fixture.controller.setLockTarget(target)
+		fixture.frames(240)
+		local camera = fixture.camera
+		local spot: Vector3 = camera.CFrame.Position
+		local look: Vector3 = camera.CFrame.LookVector
+		fixture.controller.holdLock(0.5)
+		expect(fixture.controller.lockLive()).toBe(false)
+		-- Frozen: the camera neither pulls back nor tilts for the whole freeze.
+		for _ = 1, 29 do
+			fixture.frames(1)
+			expect((camera.CFrame.Position - spot).Magnitude).toBeLessThan(1e-3)
+			expect(angleBetween(camera.CFrame.LookVector, look)).toBeLessThan(0.05)
+		end
+		-- Then it lets go and eases (never cuts) to the free camera.
+		local turn, slide = watch(fixture, 120)
+		expect(turn).toBeLessThanOrEqual(8)
+		expect(slide).toBeLessThanOrEqual(0.05)
+		expect((camera.CFrame.Position - spot).Magnitude).toBeGreaterThan(0.5)
+	end)
+
+	it("gives way at once to a new lock taken during the freeze", function()
+		local fixture = load()
+		fixture.frames(60)
+		fixture.controller.setLockTarget(character("Kobold", ROOT + Vector3.new(0, 0, -3), fixture.world))
+		fixture.frames(240)
+		fixture.controller.holdLock(0.5)
+		fixture.frames(5)
+		local next = character("Boar", ROOT + Vector3.new(-6, 0, -6), fixture.world)
+		fixture.controller.setLockTarget(next)
+		expect(fixture.controller.lockLive()).toBe(true)
+		fixture.frames(60)
+		-- Past the freeze the new lock still frames the new target.
+		expect(fixture.controller.lockLive()).toBe(true)
+		local _, tMaxX = column(fixture.camera, ROOT + Vector3.new(-6, 0, -6))
+		expect(tMaxX).toBeLessThan(1)
+	end)
+
+	it("holds nothing with no lock", function()
+		local fixture = load()
+		fixture.frames(60)
+		fixture.controller.holdLock(0.5)
+		expect(fixture.controller.lockLive()).toBe(false)
+		fixture.frames(60)
+		expect(fixture.controller.lockLive()).toBe(false)
+	end)
+end)
+
+describe("CameraController framing: the lock's stick", function()
+	-- Holds W for `seconds` while locked on a boar at the origin: the engine reads the stick along
+	-- the camera's flat look, and the controller (when asked) reads it in the lock's frame. The
+	-- player is a 0.5-stud circle that slides along the footprint box. Returns the closest the
+	-- player's edge came to the boar's footprint and the degrees the player went round it.
+	local PLAYER_RADIUS = 0.5
+	local function walkIn(start: Vector3): (number, number)
+		local fixture = load()
+		fixture.root.Position = ROOT + start
+		fixture.frames(30)
+		local boarAt = ROOT
+		fixture.controller.setLockTarget(boar(boarAt, fixture.world))
+		fixture.frames(60)
+		local closest, around = math.huge, 0
+		local center = Vector3.new(0, 0, (BOAR_BACK - BOAR_FRONT) / 2)
+		local hx, hz = BOAR_HALF_X + PLAYER_RADIUS, (BOAR_FRONT + BOAR_BACK) / 2 + PLAYER_RADIUS
+		local function relative(): Vector3
+			return fixture.root.Position - boarAt - center
+		end
+		local last = math.atan2(relative().X, relative().Z)
+		for _ = 1, 600 do
+			local look: Vector3 = fixture.camera.CFrame.LookVector
+			local stick = Vector3.new(look.X, 0, look.Z).Unit
+			stick = fixture.controller.lockMove(stick)
+			local rel = relative() + Vector3.new(stick.X, 0, stick.Z) * 8 * F
+			if math.abs(rel.X) < hx and math.abs(rel.Z) < hz then
+				-- Slide along the face it met (the least way out).
+				if hx - math.abs(rel.X) < hz - math.abs(rel.Z) then
+					rel = Vector3.new(math.sign(rel.X) * hx, rel.Y, rel.Z)
+				else
+					rel = Vector3.new(rel.X, rel.Y, math.sign(rel.Z) * hz)
+				end
+			end
+			fixture.root.Position = boarAt + center + rel
+			fixture.frames(1)
+			local now = relative()
+			local gap = CameraMath.footprintGap(now.X, now.Z, BOAR_HALF_X, (BOAR_FRONT + BOAR_BACK) / 2)
+			closest = math.min(closest, gap - PLAYER_RADIUS)
+			local angle = math.atan2(now.X, now.Z)
+			around += math.abs(CameraMath.shortestDelta(math.deg(last), math.deg(angle)))
+			last = angle
+		end
+		return closest, around
+	end
+
+	for _, case in
+		{
+			{ name = "the flank", start = Vector3.new(7, 0, -1) },
+			{ name = "the snout", start = Vector3.new(0, 0, -12) },
+			{ name = "the tail", start = Vector3.new(0.5, 0, 10) },
+			{ name = "a front corner", start = Vector3.new(-6, 0, -9) },
+		}
+	do
+		it(("walks W straight into a held boar's %s and touches it"):format(case.name), function()
+			local closest, around = walkIn(case.start)
+			expect(closest).toBeLessThanOrEqual(0.05)
+			-- Straight in: a slide along the face it meets at most, never a lap round the boar.
+			expect(around).toBeLessThan(120)
+		end)
+	end
+
+	it("leaves the stick alone with no live lock", function()
+		local fixture = load()
+		fixture.frames(60)
+		local stick = Vector3.new(0.6, 0, -0.8)
+		expect((fixture.controller.lockMove(stick) - stick).Magnitude).toBeLessThan(1e-9)
+		fixture.controller.setLockTarget(character("Kobold", ROOT + Vector3.new(0, 0, -6), fixture.world))
+		fixture.frames(60)
+		fixture.controller.holdLock(0.5)
+		expect((fixture.controller.lockMove(stick) - stick).Magnitude).toBeLessThan(1e-9)
+	end)
+end)

@@ -67,6 +67,9 @@ export type RushWorldTuning = {
 	turnRate: number, -- degrees per second the server's body turns onto a new leg
 	slamDazeSeconds: number, -- a body that slams into a wall staggers this long, from the front
 	fallGravity: number, -- studs a second squared the drawn body drops onto lower ground under
+	restStuds: number, -- a late root that moves less than this over restSeconds is at rest
+	restSeconds: number, -- how long a late root stays put before a client calls it at rest
+	restSpeed: number, -- studs a second at most a root at rest carries (its replicated velocity)
 }
 
 local AI = {
@@ -95,6 +98,28 @@ local AI = {
 	leash = {
 		returnSpeedMultiplier = 1.25, -- walks home a little faster than it chases
 		homeRadius = 3, -- within this of the spawn point counts as home
+	},
+
+	-- Room between enemies (D-259): no enemy stands, stops or walks inside another. Each body's
+	-- footprint is a flat capsule measured on its rig at spawn (Spacing.footprintOf: its spine along
+	-- the facing, as far ahead and behind as any part reaches, its radius the widest part's half
+	-- width), so a boar's snout and a kobold's axe count, not only the roots the engine collides.
+	-- A free enemy (one of `freePhases`: deciding or walking, never mid-attack, staggered or dead)
+	-- keeps gapStuds of clear ground to every other body: a goal inside another's room moves out to
+	-- its edge (a home a boar now stands on is reached at the boar's side), a walk that heads into a
+	-- body within gapStuds + slideStuds slides along it instead, and a body caught inside another
+	-- (a rush ran into it, it was spawned there, it stood still while the other walked up) steps
+	-- out. Two free bodies each step half the way; a busy or asleep one does not move.
+	spacing = {
+		gapStuds = 1, -- clear ground every two enemy footprints keep between them
+		slideStuds = 2, -- within the gap plus this, a walk into another body turns along it
+		-- A slide shorter than this (a goal nearly straight behind the other body) is lengthened to
+		-- it, so the walk goes round rather than creeping, while the goal is farther than it.
+		slideMinStuds = 2,
+		stepStuds = 0.5, -- a step out goes this far past the gap, so it ends clear, not on the edge
+		stepSpeedMultiplier = 0.6, -- on the def's moveSpeed: a step aside is a shuffle, not a run
+		standOffPasses = 3, -- passes over the others when one push out lands a goal in another
+		freePhases = { Idle = true, Alert = true, Chase = true, Return = true },
 	},
 
 	movement = {
@@ -145,6 +170,42 @@ local AI = {
 
 	telegraph = {
 		lineWidth = Combat.strikeLineWidth, -- the ground line is exactly as wide as the strike that follows
+		-- A blow's tell (the weapon's fill and the ground shape) stays lit past the wind-up, through the
+		-- strike, until this long before the blow lands (windUp + strike): the frames its clip's snap
+		-- takes to fall (the Kobold's Overhead snaps from 1.30 to 1.35, three 60 fps frames). The
+		-- light goes out as the blade falls, never 18 frames before it (F7). A rush's line still ends
+		-- at its launch: the run is the strike.
+		snapLeadSeconds = 0.05,
+		-- Over the parry window before the blow (combat.luau parryWindow) the fill is at its
+		-- brightest, steady, no pulse: the last glint that marks the window (F7). 0 is solid.
+		glintFillTransparency = 0,
+	},
+
+	-- An enemy's blow on the local fighter, shown on its strike's server frame (F16, D-258): the
+	-- flinch, the white flash and the hit's sound play on this client when the blow lands on the
+	-- server's clock, before the server's word, if this client sees nothing that could stop it. HP,
+	-- the number and the hit-stop still wait for the server; a word that never comes, or a guard or
+	-- parry in it, takes the flinch back. Only a blow with a known strike frame (not a rush).
+	strikePrediction = {
+		enabled = true,
+		-- The local fighter's states (CharacterController) a blow lands on as far as this client can
+		-- tell. A guard, a dodge, a stagger or a guard break waits for the server.
+		exposedStates = { Idle = true, Holding = true, Art = true, PostMotion = true, Basic = true },
+		-- A guard or a dodge let go less than this long ago may still stand on the server (the
+		-- release travels up a latency later): a tapped parry is never shown as a hit.
+		defenceGraceSeconds = 0.25,
+		-- The body must stand this far inside the blow's shape (studs off its reach and off a
+		-- line's sides, degrees off a cone's edges): the client's body is a latency ahead of the
+		-- server's, so a body near an edge waits for the server's verdict.
+		marginStuds = 1,
+		marginDegrees = 8,
+		-- A strike frame this client first sees later than this (a stall, a late message) is left to
+		-- the server's word, which is close behind.
+		lateSeconds = 0.1,
+		-- Seconds of play a shown blow waits for its HitConfirmed before the flinch is taken back.
+		confirmSeconds = 0.5,
+		-- How fast a flinch the server did not confirm fades out.
+		takeBackBlendOut = 0.08,
 	},
 
 	-- Hit-stop on an attacking enemy (D-168): a player's confirmed hit pauses the enemy's unresolved
@@ -249,6 +310,15 @@ local AI = {
 		-- steps up as it gets there), and it drops onto lower ground under this gravity (the
 		-- workspace's default, the root's own fall), studs a second squared.
 		fallGravity = 196.2,
+		-- A client calls the server's body stuck before its word comes (D-256) when its late root has
+		-- moved less than restStuds over restSeconds, carries at most restSpeed, has left its crouch
+		-- (keepUpStuds) and stands more than jamLagStuds behind the drawn body: a free run only rests
+		-- at its end. A replication stall freezes the root's place but keeps its velocity, so it is
+		-- no rest. 0.1 s is 6 frames at 60 fps: a quarter stud over it is 2.5 studs a second, where a
+		-- rush runs 28.
+		restStuds = 0.25,
+		restSeconds = 0.1,
+		restSpeed = 2.5,
 	} :: RushWorldTuning,
 
 	archetypes = {

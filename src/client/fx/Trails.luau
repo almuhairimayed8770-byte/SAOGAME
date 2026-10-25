@@ -17,11 +17,26 @@
 	A trail that lights anew is cleared first (Trail:Clear()), so it starts where its blade is: the
 	engine would otherwise join where it went out to where it lights again (issue 11).
 
+	The ribbon (D-261, review issue 8): the engine Trail takes one sample a rendered frame, so a cut
+	that sweeps most of its arc between two frames drew its chord. A rig with a blade chain (a root
+	part and joints out to the Weapon: BladeContact.chain, as ContactPredictor reads it) draws its
+	trail as a TrailRibbon instead and its engine Trail stays off. Each render step reads the
+	chain's pose and, while the trail is on, solves the blade (BladeContact.blade) at sub-steps
+	between the last frame's pose and this one (fx.luau trail.ribbon.maxStep, at most maxSubsteps),
+	so the cut draws its arc. A trail that lights starts a new stroke from the frame before (the
+	snap that opened the window), never joined to the last stroke's tail. The ribbon's ages stand
+	still while the rig's animator is in hit-stop. The chain is read again when the Weapon's joint
+	changes (WeaponMount moves the sword between the hand and the back), and that jump is never a
+	cut. A rig with no chain (a placeholder weapon) keeps the engine Trail.
+
 	`activationLight` turns the blade light on in the trail color and flashes the weapon white for
 	three rendered frames: a Highlight of the weapon part alone (fx.activationLight.flashName),
 	never the rig's outline, which would turn the whole body white like a hit (issue 5); it holds a
-	slot of the Highlight budget while it shows. A cancelled Art's light fades out over
-	fx.activationLight.cancelFadeSeconds (issue 13; the Heartbeat step eases it down).
+	slot of the Highlight budget while it shows. The blade glows with it (F13, D-263): unlit
+	camera-facing bands from the guard to the tip in the light's color at the ribbon's saturation
+	(fx.activationLight.glow), so the activation reads on a thin blade in daylight, from the
+	activation to the first damage frame. A cancelled Art's light and glow fade out over
+	fx.activationLight.cancelFadeSeconds (issue 13; the Heartbeat step eases them down).
 	`flashWhite` is the two-frame white flash on a Switch landing or a parry.
 
 	Budget: at most fx.quality[tier].maxTrails trails are enabled at once; when more rigs are
@@ -77,7 +92,10 @@ local Palette = require(Shared.data.palette)
 local Weapons = require(Shared.data.weapons)
 local Easing = require(Shared.util.Easing)
 local Assets = require(Shared.data.assets)
+local BladeContact = require(Shared.choreo.BladeContact)
+local Joints = require(Shared.choreo.Joints)
 local Engine = require(script.Parent.Engine)
+local TrailRibbon = require(script.Parent.TrailRibbon)
 local FrameClock = require(script.Parent.FrameClock)
 local FrameOrder = require(script.Parent.FrameOrder)
 local Quality = require(script.Parent.Quality)
@@ -92,6 +110,7 @@ export type Deps = {
 	onRender: (fn: StepFn) -> () -> (), -- the pose readers' render step (FrameOrder); returns its leave
 	onWatch: (fn: StepFn) -> () -> (), -- Heartbeat (runs while nothing renders); returns its disconnect
 	clear: (trail: Trail) -> (), -- Trail:Clear(): drops every segment drawn so far
+	held: (model: Instance) -> boolean, -- the rig's animator is in hit-stop (the ribbon's ages hold)
 }
 
 export type Overrides = {
@@ -99,6 +118,7 @@ export type Overrides = {
 	onRender: ((fn: StepFn) -> () -> ())?,
 	onWatch: ((fn: StepFn) -> () -> ())?,
 	clear: ((trail: Trail) -> ())?,
+	held: ((model: Instance) -> boolean)?,
 }
 
 type Entry = {
@@ -118,6 +138,7 @@ type Entry = {
 	weaponFlashCancel: (() -> ())?, -- ends the weapon flash early (a new one, detach)
 	weaponFlashSlot: (() -> ())?, -- gives back the Highlight budget slot the weapon flash holds
 	lightFade: number?, -- seconds into the cancelled Art's light fade; nil while none runs
+	glow: { Beam }?, -- the activation's glow along the blade, per fx.activationLight.glow layer
 	allowed: boolean, -- inside the budget and the distance
 	removedCancel: () -> (), -- stops watching the rig for removal
 	tip: Attachment, -- TrailEnd: the blade tip swingDirection follows
@@ -131,6 +152,21 @@ type Entry = {
 	snapFrom: Vector3?, -- the tip's last sample before the strike (its first sample when none)
 	snapSwing: Vector3?, -- the tip's chord since then, over the snap frames at most
 	snapAt: number, -- Engine.now() of the sample that measured it
+	lit: boolean, -- the trail is on (the engine Trail or the ribbon draws it)
+	chain: BladeContact.Chain?, -- the blade chain the ribbon solves; nil keeps the engine Trail
+	chainTried: boolean, -- a chain was looked for since the last swing began
+	chainPart0: BasePart?, -- the Weapon joint's Part0 when the chain was read
+	pose: BladeContact.Pose, -- this frame's chain pose
+	lastPose: BladeContact.Pose, -- the frame before's (the two tables swap)
+	hasPose: boolean, -- `pose` holds a frame read at poseAt
+	poseAt: number, -- Engine.now() of that frame
+	guardAt: Vector3, -- the blade at `pose`
+	tipAt: Vector3,
+	stroke: boolean, -- the ribbon's newest sample continues a stroke that is still drawing
+	ribbon: TrailRibbon.Ribbon?, -- while one draws or fades
+	ribbonClock: number, -- seconds the ribbon has aged (stands still in hit-stop)
+	ribbonAt: number, -- Engine.now() the clock last moved at
+	style: TrailRibbon.Style, -- reused frame to frame
 }
 
 local KIND_PRIORITY: { Kind } = { "Art", "Smear", "Basic" }
@@ -151,18 +187,41 @@ local function poseReaders(fn: StepFn): () -> ()
 	return FrameOrder.join(FrameOrder.POSE_READERS, Fx.renderOrder.poseReaders, fn) or function() end
 end
 
+-- Choreo, found on first use (it never requires this module; nil where it cannot load).
+local choreoModule: any = nil
+local choreoTried = false
+
+-- The rig's animator is in hit-stop (Choreo's isPaused): the ribbon's ages stand still.
+local function choreoHeld(model: Instance): boolean
+	if not choreoTried then
+		choreoTried = true
+		local ok, loaded = pcall(function(): any
+			return require(script.Parent.Parent.choreo.Choreo) :: any
+		end)
+		choreoModule = if ok then loaded else nil
+	end
+	local module = choreoModule
+	if module == nil or not model:IsA("Model") then
+		return false
+	end
+	local animator = module.find(model)
+	return animator ~= nil and animator:isPaused()
+end
+
 local function defaults(overrides: Overrides?): Deps
 	local deps: Deps = {
 		now = Engine.now,
 		onRender = poseReaders,
 		onWatch = Engine.onHeartbeat,
 		clear = engineClear,
+		held = choreoHeld,
 	}
 	if overrides ~= nil then
 		deps.now = overrides.now or deps.now
 		deps.onRender = overrides.onRender or deps.onRender
 		deps.onWatch = overrides.onWatch or deps.onWatch
 		deps.clear = overrides.clear or deps.clear
+		deps.held = overrides.held or deps.held
 	end
 	return deps
 end
@@ -286,6 +345,68 @@ local function ensureLight(weapon: BasePart): PointLight
 	return light
 end
 
+-- Ribbons no rig draws now, kept to be reused (every Instance is made once).
+local ribbonPool: { TrailRibbon.Ribbon } = {}
+
+local function acquireRibbon(entry: Entry): TrailRibbon.Ribbon
+	local ribbon = entry.ribbon
+	if ribbon == nil then
+		ribbon = table.remove(ribbonPool) or TrailRibbon.new()
+		entry.ribbon = ribbon
+	end
+	return ribbon :: TrailRibbon.Ribbon
+end
+
+local function releaseRibbon(entry: Entry)
+	local ribbon = entry.ribbon
+	if ribbon == nil then
+		return
+	end
+	entry.ribbon = nil
+	TrailRibbon.clear(ribbon)
+	table.insert(ribbonPool, ribbon)
+end
+
+-- The chain still stands as it was read: its root in the world, and the Weapon's own joint (the
+-- last link) on the Part0 and C0 it had (WeaponMount moves both between the hand and the back).
+local function chainHolds(entry: Entry, chain: BladeContact.Chain): boolean
+	if chain.root.Parent == nil then
+		return false
+	end
+	local last = chain.links[#chain.links]
+	if last == nil then
+		return true
+	end
+	local part0 = Joints.parts(last.joint)
+	local c0 = Joints.frames(last.joint)
+	return part0 == entry.chainPart0 and c0 == last.c0
+end
+
+-- The rig's blade chain: read again when it no longer stands; a rig that had none is looked at
+-- once a swing (`retry` on a swing's start).
+local function chainOf(entry: Entry, retry: boolean): BladeContact.Chain?
+	local chain = entry.chain
+	local stale = chain ~= nil and not chainHolds(entry, chain)
+	if stale then
+		chain = nil
+		entry.chain = nil
+		-- The pose was the old chain's: the next sample starts a new stroke.
+		entry.hasPose = false
+		entry.stroke = false
+	end
+	if chain == nil and (stale or retry or not entry.chainTried) then
+		entry.chainTried = true
+		local model = entry.model
+		chain = if model:IsA("Model") then BladeContact.chain(model) else nil
+		entry.chain = chain
+		if chain ~= nil then
+			local last = chain.links[#chain.links]
+			entry.chainPart0 = if last ~= nil then (Joints.parts(last.joint)) else nil
+		end
+	end
+	return chain
+end
+
 local function activeKind(entry: Entry): Kind?
 	for _, kind in KIND_PRIORITY do
 		if entry.active[kind] then
@@ -329,13 +450,26 @@ local function applyAppearance(entry: Entry)
 	end
 	entry.trail.Color = ColorSequence.new(color)
 	local lit = wantsTrail(entry) and entry.allowed and not stalled
-	if lit and not entry.trail.Enabled then
+	-- A rig with a blade chain draws the ribbon; its engine Trail stays off.
+	local engine = lit and entry.chain == nil
+	if engine and not entry.trail.Enabled then
 		-- Lit anew, it starts where its blade is now: the engine joins where a trail went out to
 		-- where it lights again, which drew a streak from the last window's blade on the still
 		-- frame a window opens on, and across an Art's hold between its cuts (issue 11).
 		deps.clear(entry.trail)
 	end
-	entry.trail.Enabled = lit
+	entry.trail.Enabled = engine
+	if not lit then
+		-- The ribbon's next light starts a new stroke: never joined to this one's tail (issue 11).
+		entry.stroke = false
+	end
+	entry.lit = lit
+	-- The ribbon's look: the same swing color (saturated; a Basic swing's white blend after), the
+	-- same width rule times the ribbon's thickness.
+	local style = entry.style
+	style.width = entry.baseWidth * multiplier * Fx.trail.ribbon.thickness
+	style.color = if entry.flashing then color else entry.color
+	style.whiteBlend = if not entry.flashing and swing == "Basic" then Fx.trail.basicWhiteBlend else 0
 end
 
 -- Re-ranks which active trails are allowed: nearest first, inside the tier's distance, up to maxTrails.
@@ -411,6 +545,78 @@ flashWeapon = function(entry: Entry)
 	end)
 end
 
+-- [layer]: the glow's own transparency, built once.
+local GLOW_FULL: { NumberSequence } = {}
+for index, layer in Fx.activationLight.glow.layers do
+	GLOW_FULL[index] = NumberSequence.new(layer.transparency)
+end
+
+-- The activation's glow along the blade (F13): camera-facing Beams from the guard to the tip,
+-- unlit, made on first use.
+local function ensureGlow(entry: Entry): { Beam }
+	local glow = entry.glow
+	if glow ~= nil and #glow > 0 and glow[1].Parent == entry.weapon then
+		return glow
+	end
+	local config = Fx.activationLight.glow
+	local made: { Beam } = {}
+	for index, layer in config.layers do
+		local beam = Instance.new("Beam")
+		beam.Name = config.name .. layer.name
+		beam.Attachment0 = entry.trail.Attachment0
+		beam.Attachment1 = entry.trail.Attachment1
+		beam.FaceCamera = true
+		beam.Segments = 1
+		beam.CurveSize0 = 0
+		beam.CurveSize1 = 0
+		beam.Texture = ""
+		beam.LightInfluence = 0
+		beam.LightEmission = layer.lightEmission
+		beam.ZOffset = layer.zOffset
+		beam.Width0 = layer.width
+		beam.Width1 = layer.width
+		beam.Transparency = GLOW_FULL[index]
+		beam.Enabled = false
+		beam.Parent = entry.weapon
+		made[index] = beam
+	end
+	entry.glow = made
+	return made
+end
+
+-- The glow on, at full, in the light's color at the ribbon's saturation.
+local function showGlow(entry: Entry, color: Color3)
+	local glow = ensureGlow(entry)
+	local saturated = TrailRibbon.saturate(color)
+	for index, layer in Fx.activationLight.glow.layers do
+		local beam = glow[index]
+		beam.Color = ColorSequence.new(saturated:Lerp(Palette.color3("SystemWhite"), layer.whiteBlend))
+		beam.Transparency = GLOW_FULL[index]
+		beam.Enabled = true
+	end
+end
+
+-- The glow `out` (0..1) of the way through a cancelled Art's fade.
+local function fadeGlow(entry: Entry, out: number)
+	local glow = entry.glow
+	if glow == nil then
+		return
+	end
+	for index, layer in Fx.activationLight.glow.layers do
+		glow[index].Transparency = NumberSequence.new(1 - (1 - layer.transparency) * (1 - out))
+	end
+end
+
+local function hideGlow(entry: Entry)
+	local glow = entry.glow
+	if glow == nil then
+		return
+	end
+	for _, beam in glow do
+		beam.Enabled = false
+	end
+end
+
 --- Finds (or builds) the Trail and PointLight on a rig's Weapon part; returns nil for rigs without one.
 function Trails.attach(model: Instance): boolean
 	if entries[model] ~= nil then
@@ -442,6 +648,7 @@ function Trails.attach(model: Instance): boolean
 		weaponFlashCancel = nil,
 		weaponFlashSlot = nil,
 		lightFade = nil,
+		glow = nil,
 		allowed = true,
 		removedCancel = Engine.onRemoved(model, function()
 			Trails.detach(model)
@@ -457,6 +664,21 @@ function Trails.attach(model: Instance): boolean
 		snapFrom = nil,
 		snapSwing = nil,
 		snapAt = 0,
+		lit = false,
+		chain = nil,
+		chainTried = false,
+		chainPart0 = nil,
+		pose = { root = CFrame.identity, transforms = {} },
+		lastPose = { root = CFrame.identity, transforms = {} },
+		hasPose = false,
+		poseAt = 0,
+		guardAt = Vector3.zero,
+		tipAt = Vector3.zero,
+		stroke = false,
+		ribbon = nil,
+		ribbonClock = 0,
+		ribbonAt = Engine.now(),
+		style = { color = color, whiteBlend = 0, width = width, lifetime = Fx.trail.lifetime },
 	}
 	entry.light.Color = color
 	entries[model] = entry
@@ -476,8 +698,11 @@ function Trails.detach(model: Instance)
 	end
 	endWeaponFlash(entry)
 	entry.lightFade = nil
+	hideGlow(entry)
 	entry.removedCancel()
 	entry.trail.Enabled = false
+	entry.lit = false
+	releaseRibbon(entry)
 	entry.light.Enabled = false
 	entry.light.Brightness = Fx.activationLight.brightness
 	entries[model] = nil
@@ -496,14 +721,18 @@ function Trails.setActive(model: Instance, on: boolean, kind: Kind)
 		entry.snapFrom = if entry.tipCount > 0 then entry.tips[entry.tipHead] else nil
 		entry.snapSwing = nil
 	end
+	if on then
+		-- The blade chain, before the trail lights: a rig with one draws the ribbon from the start.
+		chainOf(entry, entry.chain == nil)
+	end
 	entry.active[kind] = if on then true else nil
 	applyAppearance(entry)
 	rebalance()
 end
 
---- The activation light on the blade (range 8, brightness 2) in the trail color, plus the
---- three-frame SystemWhite flash on the weapon's own Highlight when it turns on (the weapon part
---- alone, never the body: issue 5). `fade` (a cancelled Art) fades the light out over
+--- The activation light on the blade (range 8, brightness 2) in the trail color and the blade's
+--- glow (F13), plus the three-frame SystemWhite flash on the weapon's own Highlight when it turns
+--- on (the weapon part alone, never the body: issue 5). `fade` (a cancelled Art) fades the light out over
 --- fx.activationLight.cancelFadeSeconds instead of putting it out at once (issue 13).
 function Trails.activationLight(model: Instance, on: boolean, token: string?, fade: boolean?)
 	if entries[model] == nil and not Trails.attach(model) then
@@ -524,7 +753,10 @@ function Trails.activationLight(model: Instance, on: boolean, token: string?, fa
 	entry.light.Brightness = Fx.activationLight.brightness
 	entry.light.Enabled = on
 	if on then
+		showGlow(entry, entry.light.Color)
 		flashWeapon(entry)
+	else
+		hideGlow(entry)
 	end
 end
 
@@ -549,10 +781,12 @@ local function stepFades(dt: number)
 			entry.lightFade = nil
 			entry.light.Enabled = false
 			entry.light.Brightness = Fx.activationLight.brightness
+			hideGlow(entry)
 		else
 			entry.lightFade = elapsed + dt
 			local eased = Easing.evaluate(Fx.activationLight.cancelFadeEasing, t)
 			entry.light.Brightness = Fx.activationLight.brightness * (1 - eased)
+			fadeGlow(entry, eased)
 		end
 	end
 end
@@ -583,10 +817,10 @@ function Trails.tokenOf(model: Instance): string?
 	return if entry ~= nil then entry.token else nil
 end
 
---- True when the rig's trail is currently enabled.
+--- True when the rig's trail is currently on (its engine Trail or its ribbon draws it).
 function Trails.isEnabled(model: Instance): boolean
 	local entry = entries[model]
-	return entry ~= nil and entry.trail.Enabled
+	return entry ~= nil and entry.lit
 end
 
 -- The unit direction of a tip motion; nil when it barely moved or jumped (a respawn, a teleport).
@@ -633,6 +867,89 @@ local function measureSnap(entry: Entry, position: Vector3, at: number)
 	end
 end
 
+-- Adds the blade's move since the last frame to the ribbon: sub-steps between the frame before's
+-- pose and this one (each end moving at most trail.ribbon.maxStep), born along the ribbon clock
+-- between the two frames. A stroke that starts takes the frame before's blade first (the snap that
+-- opened the window); with no frame before (a stall, a new chain) it starts where the blade is.
+local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boolean, clockBefore: number)
+	local ribbon = acquireRibbon(entry)
+	local guard, tip = entry.guardAt, entry.tipAt
+	local clock = entry.ribbonClock
+	if not hadPose then
+		TrailRibbon.push(ribbon, guard, tip, clock, false)
+		entry.stroke = true
+		return
+	end
+	local fromGuard, fromTip = BladeContact.blade(chain, entry.lastPose)
+	if not entry.stroke then
+		TrailRibbon.push(ribbon, fromGuard, fromTip, clockBefore, false)
+		entry.stroke = true
+	end
+	local config = Fx.trail.ribbon
+	local steps = BladeContact.steps(fromGuard, fromTip, guard, tip, config.maxStep, config.maxSubsteps)
+	for step = 1, steps do
+		local alpha = step / steps
+		local stepGuard, stepTip = guard, tip
+		if step < steps then
+			stepGuard, stepTip = BladeContact.blade(chain, entry.pose, entry.lastPose, alpha)
+		end
+		TrailRibbon.push(ribbon, stepGuard, stepTip, clockBefore + (clock - clockBefore) * alpha, true)
+	end
+end
+
+-- The ribbons' step (after the tip samples, in the pose readers' render step): each rig with a
+-- blade chain that is lit, or idle within accents.swing.sampleDistance (so a stroke can start from
+-- the frame before), has its pose read; a lit one adds its blade's move. Every live ribbon is laid
+-- for its clock, which stands still while the rig is in hit-stop; one that went out and faded is
+-- given back to the pool.
+local function stepRibbons(at: number, viewer: Vector3?)
+	local range = Accents.swing.sampleDistance
+	local jump = ChoreoData.stall.jumpSeconds
+	for _, entry in entries do
+		local clockBefore = entry.ribbonClock
+		local elapsed = at - entry.ribbonAt
+		entry.ribbonAt = at
+		if (entry.ribbon ~= nil or entry.lit) and elapsed > 0 and not deps.held(entry.model) then
+			entry.ribbonClock = clockBefore + elapsed
+		end
+		local weapon = entry.weapon
+		local wanted = weapon.Parent ~= nil
+			and (entry.lit or (viewer ~= nil and (weapon.Position - (viewer :: Vector3)).Magnitude <= range))
+		local chain = if wanted then chainOf(entry, false) else nil
+		if chain == nil then
+			entry.hasPose = false
+			entry.stroke = false
+			if entry.lit and entry.chain == nil and not entry.trail.Enabled then
+				-- The chain is gone (the rig was rebuilt): the engine Trail takes the trail back.
+				applyAppearance(entry)
+			end
+		else
+			if entry.trail.Enabled then
+				-- The chain was found while the engine Trail drew: the ribbon takes over.
+				entry.trail.Enabled = false
+			end
+			local hadPose = entry.hasPose and at - entry.poseAt <= jump
+			entry.pose, entry.lastPose = entry.lastPose, entry.pose
+			BladeContact.read(chain, entry.pose)
+			entry.hasPose = true
+			entry.poseAt = at
+			entry.guardAt, entry.tipAt = BladeContact.blade(chain, entry.pose)
+			if entry.lit then
+				pushBlade(entry, chain, hadPose, clockBefore)
+			else
+				entry.stroke = false
+			end
+		end
+		local ribbon = entry.ribbon
+		if ribbon ~= nil then
+			TrailRibbon.draw(ribbon, entry.ribbonClock, entry.style)
+			if not entry.lit and not TrailRibbon.live(ribbon) then
+				releaseRibbon(entry)
+			end
+		end
+	end
+end
+
 --- Records each tracked blade tip's world position in its ring (the pose readers' render step
 --- runs it, so the tip is where this frame draws it; specs call it), and remembers the direction
 --- of a rig that is swinging (a trail kind on). Only a rig whose answer can matter is read: one
@@ -676,6 +993,7 @@ function Trails.sample()
 			measureSnap(entry, position, at)
 		end
 	end
+	stepRibbons(at, viewer)
 end
 
 --- The rig's newest blade tip sample (where the last rendered frame drew its tip); nil when its
@@ -712,6 +1030,17 @@ function Trails.swingDirection(model: Instance): Vector3?
 	return current
 end
 
+--- What the rig's ribbon draws now: its live samples' points and the Beams showing (specs); nil
+--- while it draws none.
+function Trails.ribbonOf(model: Instance): TrailRibbon.View?
+	local entry = entries[model]
+	local ribbon = if entry ~= nil then entry.ribbon else nil
+	if ribbon == nil then
+		return nil
+	end
+	return TrailRibbon.view(ribbon)
+end
+
 --- Forgets every rig (a place change, specs): each one's trail and light go off, as on detach.
 function Trails.reset()
 	local models: { Instance } = {}
@@ -734,6 +1063,11 @@ local function watchStall()
 	for _, entry in entries do
 		entry.trail.Enabled = false
 		deps.clear(entry.trail)
+		-- The ribbon goes too, and nothing the blade did before the dark is drawn after it.
+		entry.lit = false
+		entry.stroke = false
+		entry.hasPose = false
+		releaseRibbon(entry)
 	end
 end
 

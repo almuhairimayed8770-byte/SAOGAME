@@ -36,6 +36,23 @@
 	later, in the settle or the recovery, lands a hit the clip never shows as a strike. Such a cell
 	is "late" (choreography to fix, like a miss).
 
+	The client must agree (fix F2, section 6: the client predicts the hit-stop at once, the server
+	decides the hit). Every swing is also drawn the way the local client draws it, at each of
+	hitMatrix.clientFps and each frame phase: a Mixer poses the same body every rendered frame as
+	Choreo does and ContactPredictor sweeps the blade those frames show. A hit the client draws
+	that the server does not count is a flash with no number (the review's Horizontal hit 2); a
+	hit the server counts that the client does not draw flashes a round trip after the cut (issue
+	13). Neither may happen at any placement, the point-blank ones at either shoulder (`bearing`,
+	`pointBlank`: inside the blade's start pose, never required to register) included. Both sides
+	see the enemy in its rest pose where the server holds it; what a live client adds (an animated
+	enemy, its drawn lag, the replicated root's lag) is outside this check.
+
+	An Art swung at an enemy the aim assist would pick (inside its cone and range: every setup but
+	the point-blank shoulders) runs with the stand-off the client plans at the release (fix F1,
+	ContactPredictor.standOff): when its first cut would start in the body, the root steps back
+	over the anticipation on the clip's clock, and the server reads that root as it reads the
+	clip's root motion. Every requirement above holds with it.
+
 	Used by tools/hit-matrix.luau (prints the matrix) and tests/server/HitMatrix.spec.luau (fails on
 	a real-fight miss). It needs the test harness (`Harness`) to load game modules, and leaves
 	CombatService and EntityService reset and HitSweep unwrapped when it returns.
@@ -65,6 +82,12 @@ export type Setup = {
 	id: string,
 	enemy: string,
 	yaw: number,
+	-- Degrees to the right of the player's look the enemy's root stands at (0 or nil: straight ahead).
+	bearing: number?,
+	-- A placement no swing is aimed at (fix F2): the enemy stands at the shoulder, outside the aim
+	-- assist's cone, so nothing turns the body to it and its hits are reported, never required. The
+	-- client and the server must still agree on every one of them.
+	pointBlank: boolean?,
 	realFight: { min: number, max: number },
 	distances: { number },
 }
@@ -97,11 +120,21 @@ export type Cell = {
 	-- after the window's snap ends, in frames after the window opened.
 	landBy: number,
 	late: boolean, -- some phase registered, but only after landBy
+	-- Not required to register: outside the setup's realFight range, or a pointBlank setup.
+	required: boolean,
+	-- The Art stand-off (fix F1) the client stepped back before the swing, in studs; nil for none.
+	standOff: number?,
+	-- Whether the local client drew this hit at each of its frame rates (dev.luau hitMatrix.clientFps)
+	-- and frame phases: ContactPredictor touched the enemy in this window while the client's own
+	-- frames posed the swing (fix F2). Nil when the run skipped the client.
+	drawn: { Drawn }?,
 	-- When some phase missed: the closest the true blade came to the enemy over the window, minus
 	-- the hit radius (<= 0: it touches), and the enemy part it came closest to.
 	clearance: number?,
 	nearestPart: string?,
 }
+
+export type Drawn = { fps: number, phase: number, hit: boolean }
 
 export type Report = {
 	attacks: { Attack },
@@ -136,6 +169,11 @@ type Context = {
 	WeaponBuilder: any,
 	PlaygroundLayout: any,
 	ReviewMarkers: any,
+	Mixer: any,
+	Joints: any,
+	ContactPredictor: any,
+	ActionLogic: any,
+	AimLogic: any,
 }
 
 export type Avatar = { model: any, root: any, rootHeight: number, base: any, top: number }
@@ -197,6 +235,11 @@ local function load(Harness: any): Context
 		WeaponBuilder = Harness.load("src/server/world/WeaponBuilder"),
 		PlaygroundLayout = Harness.load("src/server/world/PlaygroundLayout"),
 		ReviewMarkers = Harness.load("src/client/dev/ReviewMarkers"),
+		Mixer = Harness.load("src/client/choreo/Mixer"),
+		Joints = Harness.load("src/shared/choreo/Joints"),
+		ContactPredictor = Harness.load("src/client/controllers/ContactPredictor"),
+		ActionLogic = Harness.load("src/client/controllers/ActionLogic"),
+		AimLogic = Harness.load("src/client/controllers/AimLogic"),
 	}
 end
 
@@ -356,8 +399,9 @@ local function avatarBodyParts(ctx: Context, avatar: Avatar): { any }
 	return list
 end
 
--- An enemy's rig in its rest pose at a root distance in front of the player, at the height
--- PlaygroundService spawns it, turned by the setup's yaw from facing the player.
+-- An enemy's rig in its rest pose at a root distance from the player, at the setup's bearing (to
+-- the right of the player's look; straight ahead without one), at the height PlaygroundService
+-- spawns it, turned by the setup's yaw from facing the player.
 local function placeEnemy(ctx: Context, setup: Setup, distance: number): (any, any)
 	local def = ctx.Enemies.byId(setup.enemy)
 	assert(def ~= nil, "hitMatrix setup names an unknown enemy: " .. setup.enemy)
@@ -365,7 +409,9 @@ local function placeEnemy(ctx: Context, setup: Setup, distance: number): (any, a
 	local model = ctx.RigBuilder.build(def.skin)
 	local height =
 		ctx.PlaygroundLayout.rootHeight(rig.hipHeight, model.PrimaryPart.Size.Y, ctx.World.spawn.groundEpsilon)
-	local frame = CFrame.new(0, height, -distance) * CFrame.Angles(0, math.pi + math.rad(setup.yaw), 0)
+	local bearing = math.rad(setup.bearing or 0)
+	local frame = CFrame.new(math.sin(bearing) * distance, height, -math.cos(bearing) * distance)
+		* CFrame.Angles(0, math.pi - bearing + math.rad(setup.yaw), 0)
 	for name, solved in ctx.Pose.solve(model, frame, {}) do
 		local part = model:FindFirstChild(name)
 		if part ~= nil and part:IsA("BasePart") then
@@ -663,11 +709,49 @@ function HitMatrix.attacks(ctx: Context): { Attack }
 	return list
 end
 
--- Where the client has carried the root at a clip time: the start frame plus the clip's root motion.
-local function rootAt(ctx: Context, avatar: Avatar, clip: any, time: number): any
+-- Where the client has carried the root at a clip time: the start frame plus the clip's root
+-- motion, plus the Art stand-off's step (fix F1) when the swing has one.
+local function rootAt(ctx: Context, avatar: Avatar, clip: any, time: number, standOff: any?): any
 	local start = ctx.ClipSampler.rootMotionAt(clip, 0)
 	local now = ctx.ClipSampler.rootMotionAt(clip, time)
-	return avatar.base * CFrame.new(now[1] - start[1], now[2] - start[2], now[3] - start[3])
+	local frame = avatar.base * CFrame.new(now[1] - start[1], now[2] - start[2], now[3] - start[3])
+	if standOff ~= nil then
+		local easing = ctx.Combat.contact.standOff.easing
+		frame += standOff.away * ctx.AimLogic.standOffAt(standOff.distance, standOff.from, standOff.to, time, easing)
+	end
+	return frame
+end
+
+-- The Art stand-off (fix F1) the local client plans at the release against this placement, as
+-- CharacterController does: only for an Art, only when the aim assist would pick the enemy (inside
+-- its cone and range; a lock turns the body square to it the same way), from the hold pose with
+-- the root where the clip has carried it, facing ahead. Nil for a basic swing, the point-blank
+-- shoulders (outside the assist) and a start pose already clear of the body.
+local function standOffOf(
+	ctx: Context,
+	avatar: Avatar,
+	attack: Attack,
+	setup: Setup,
+	distance: number,
+	enemyModel: any
+): any?
+	local aim = ctx.Combat.aim
+	if
+		attack.artId == nil
+		or math.abs(setup.bearing or 0) > aim.assistConeDegrees / 2
+		or distance > aim.assistRange
+		or distance < aim.minFaceDistance
+	then
+		return nil
+	end
+	local hold = ctx.ActionLogic.holdClipTime(attack.clip, ctx.Combat.startPoseTime + ctx.Combat.activationHold)
+	return ctx.ContactPredictor.standOff(
+		avatar.model,
+		attack.clip,
+		hold,
+		rootAt(ctx, avatar, attack.clip, hold),
+		enemyModel
+	)
 end
 
 -- ------------------------------------------------------------------------------------------
@@ -813,7 +897,8 @@ local function swing(
 	enemyDef: any,
 	world: World,
 	phase: number,
-	attribute: boolean
+	attribute: boolean,
+	standOff: any?
 ): ({ [number]: { time: number, sub: boolean }? }, { [number]: number })
 	local clock = { t = 0 }
 	local function now(): number
@@ -875,7 +960,7 @@ local function swing(
 				break
 			end
 			clock.t = time
-			avatar.root.CFrame = rootAt(ctx, avatar, attack.clip, time)
+			avatar.root.CFrame = rootAt(ctx, avatar, attack.clip, time, standOff)
 			ctx.EntityService.tick(time - previous)
 			ctx.CombatService.tick()
 			previous = time
@@ -892,12 +977,109 @@ local function swing(
 	return results, landed
 end
 
+-- Runs one attack the way the local client draws it, at one frame rate and phase (fix F2): a Mixer
+-- poses the body every rendered frame as Choreo does (joint Transforms, the root carried by the
+-- clip's root motion) and ContactPredictor sweeps the blade that frame shows against the placed
+-- enemy, as CharacterController's render step does. Returns the windows it drew a touch of the
+-- enemy in. The hit-stop a touch starts only delays the frames after it, so the run does not hold.
+-- An Art's stand-off moves the root on the clip's clock, as CharacterController.stepStandOff does.
+local function drawSwing(
+	ctx: Context,
+	avatar: Avatar,
+	attack: Attack,
+	enemyModel: any,
+	enemyDef: any,
+	fps: number,
+	phase: number,
+	standOff: any?
+): { [number]: boolean }
+	local weapon = ctx.Weapons.byId(ctx.Playground.loadout.weapon)
+	local art = if attack.artId ~= nil then ctx.Arts.byId(attack.artId) else nil
+	local scaled = ctx.Enemies.scaled(enemyDef)
+	local me = { id = 1, model = avatar.model, kind = "Player", state = if art ~= nil then "Art" else "Basic" }
+	local enemy = {
+		id = 2,
+		model = enemyModel,
+		kind = "Enemy",
+		state = "Idle",
+		defId = enemyDef.id,
+		hp = scaled.hp,
+		maxHp = scaled.hp,
+		elite = false,
+	}
+	local targets = { me, enemy }
+	local predictor = ctx.ContactPredictor.new({
+		targets = function(): { any }
+			return targets
+		end,
+	})
+	local joints = ctx.Joints.list(avatar.model)
+	local function pose(offsets: { [string]: any }?)
+		for _, joint in joints do
+			local offset = if offsets ~= nil then offsets[joint.Name] else nil
+			joint.Transform = if offset ~= nil then ctx.ClipSampler.toCFrame(offset) else CFrame.identity
+		end
+	end
+	avatar.root.CFrame = avatar.base
+	local mixer = ctx.Mixer.new()
+	local handle = mixer:play(attack.clip)
+	local began = predictor:begin({
+		model = avatar.model,
+		clip = attack.clip,
+		artId = attack.artId,
+		finalHit = art ~= nil or (attack.chainIndex or 1) >= ctx.Combat.basicChainLength,
+		multiplier = if art ~= nil then art.multiplier else ctx.Combat.basicAttackMultiplier,
+		weaponAttack = weapon.attack,
+	})
+	assert(began, attack.id .. ": the client has no window to sweep")
+	local drawn: { [number]: boolean } = {}
+	local frame = 1 / fps
+	local last = attack.windows[#attack.windows].close + frame * 2
+	local previous, tick = 0, 0
+	local stepped = 0
+	while true do
+		local time = (phase + tick) * frame
+		if time > last then
+			break
+		end
+		if time > previous then
+			local result = mixer:step(time - previous)
+			pose(result.offsets)
+			local delta = result.rootDelta
+			avatar.root.CFrame = avatar.root.CFrame + Vector3.new(delta[1], delta[2], delta[3])
+			if standOff ~= nil then
+				local shown = ctx.AimLogic.standOffAt(
+					standOff.distance,
+					standOff.from,
+					standOff.to,
+					handle.time,
+					ctx.Combat.contact.standOff.easing
+				)
+				avatar.root.CFrame = avatar.root.CFrame + standOff.away * (shown - stepped)
+				stepped = shown
+			end
+			for _, contact in predictor:step(handle.time) do
+				if contact.targetId == enemy.id then
+					drawn[contact.windowIndex] = true
+				end
+			end
+		end
+		previous = time
+		tick += 1
+	end
+	predictor:stop()
+	pose(nil)
+	avatar.root.CFrame = avatar.base
+	return drawn
+end
+
 -- The true blade over one window, traced finely, with the root carried by root motion.
 local function bladeTrack(
 	ctx: Context,
 	avatar: Avatar,
 	attack: Attack,
-	window: { open: number, close: number }
+	window: { open: number, close: number },
+	standOff: any?
 ): { any }
 	local trailStart, trailEnd = ctx.HitSweep.trailAttachments(avatar.model)
 	local step = 1 / ctx.Dev.hitMatrix.clearanceSampleHz
@@ -907,7 +1089,7 @@ local function bladeTrack(
 		local time = window.open + (window.close - window.open) * index / count
 		local sample = ctx.HitSweep.bladeAt(
 			avatar.model,
-			rootAt(ctx, avatar, attack.clip, time),
+			rootAt(ctx, avatar, attack.clip, time, standOff),
 			attack.clip,
 			time,
 			trailStart,
@@ -944,6 +1126,8 @@ export type Options = {
 	-- Skip naming the blade sample that registered each hit (the spec only needs hit or miss); a
 	-- hit then reports frames = nil.
 	skipAttribution: boolean?,
+	-- Skip drawing each swing on the client (cells then carry no `drawn`).
+	skipClient: boolean?,
 }
 
 -- A Pose.solve made without a Pose.chain walks the rig for its joints (the live sweep reads one
@@ -994,11 +1178,15 @@ function HitMatrix.run(Harness: any, options: Options?): Report
 		end
 		-- The true blade of a window, traced the first time a miss needs it.
 		local tracks: { [string]: { any } } = {}
-		local function trackOf(attack: Attack, index: number): { any }
+		local function trackOf(attack: Attack, index: number, standOff: any?): { any }
 			local key = attack.id .. "#" .. index
+			if standOff ~= nil then
+				local step = standOff.away * standOff.distance
+				key ..= ("@%.3f,%.3f,%.3f"):format(step.X, step.Y, step.Z)
+			end
 			local track = tracks[key]
 			if track == nil then
-				track = bladeTrack(ctx, avatar, attack, attack.windows[index])
+				track = bladeTrack(ctx, avatar, attack, attack.windows[index], standOff)
 				tracks[key] = track
 			end
 			return track
@@ -1026,10 +1214,27 @@ function HitMatrix.run(Harness: any, options: Options?): Report
 					if opts.attacks ~= nil and table.find(opts.attacks, attack.id) == nil then
 						continue
 					end
-					local byPhase, landedByPhase = {}, {}
+					local standOff = standOffOf(ctx, avatar, attack, setup, distance, enemyModel)
+					local byPhase, landedByPhase, drawnByPhase = {}, {}, {}
 					for _, phase in phases do
-						byPhase[phase], landedByPhase[phase] =
-							swing(ctx, avatar, attack, enemyModel, enemyDef, world, phase, not opts.skipAttribution)
+						byPhase[phase], landedByPhase[phase] = swing(
+							ctx,
+							avatar,
+							attack,
+							enemyModel,
+							enemyDef,
+							world,
+							phase,
+							not opts.skipAttribution,
+							standOff
+						)
+						if not opts.skipClient then
+							local byFps = {}
+							for _, fps in config.clientFps do
+								byFps[fps] = drawSwing(ctx, avatar, attack, enemyModel, enemyDef, fps, phase, standOff)
+							end
+							drawnByPhase[phase] = byFps
+						end
 					end
 					for index, window in attack.windows do
 						local hz = ctx.Combat.hitSampleHz
@@ -1059,9 +1264,22 @@ function HitMatrix.run(Harness: any, options: Options?): Report
 								})
 							end
 						end
+						local drawn: { Drawn }? = nil
+						if not opts.skipClient then
+							local list: { Drawn } = {}
+							for _, fps in config.clientFps do
+								for _, phase in phases do
+									table.insert(
+										list,
+										{ fps = fps, phase = phase, hit = drawnByPhase[phase][fps][index] == true }
+									)
+								end
+							end
+							drawn = list
+						end
 						local clearance, nearest = nil, nil
 						if not all then
-							clearance, nearest = clearanceOf(ctx, trackOf(attack, index), parts, radius)
+							clearance, nearest = clearanceOf(ctx, trackOf(attack, index, standOff), parts, radius)
 						end
 						table.insert(report.cells, {
 							attack = attack.id,
@@ -1073,6 +1291,9 @@ function HitMatrix.run(Harness: any, options: Options?): Report
 							hit = all,
 							landBy = landBy,
 							late = late,
+							required = real and not setup.pointBlank,
+							standOff = if standOff ~= nil then standOff.distance else nil,
+							drawn = drawn,
 							clearance = clearance,
 							nearestPart = nearest,
 						})
@@ -1111,11 +1332,11 @@ local function distanceLabel(distance: number): string
 	return text
 end
 
---- One line per real-fight cell that did not register at every frame phase.
+--- One line per required cell (real fight, not point-blank) that did not register at every frame phase.
 function HitMatrix.misses(report: Report): { string }
 	local lines = {}
 	for _, cell in report.cells do
-		if cell.real and not cell.hit then
+		if cell.required and not cell.hit then
 			local missed = {}
 			for _, result in cell.phases do
 				if not result.hit then
@@ -1157,7 +1378,7 @@ end
 function HitMatrix.lateHits(report: Report): { string }
 	local lines = {}
 	for _, cell in report.cells do
-		if cell.real and cell.late then
+		if cell.required and cell.late then
 			local worst, phases = -math.huge, {}
 			for _, result in cell.phases do
 				if result.landed ~= nil and result.landed > cell.landBy + 1e-6 then
@@ -1177,6 +1398,93 @@ function HitMatrix.lateHits(report: Report): { string }
 				)
 			)
 		end
+	end
+	return lines
+end
+
+local function phaseList(cell: Cell, pick: (result: PhaseResult) -> boolean): string
+	local list = {}
+	for _, result in cell.phases do
+		if pick(result) then
+			table.insert(list, distanceLabel(result.phase))
+		end
+	end
+	return table.concat(list, ", ")
+end
+
+-- The client frame rates and phases at which a cell's hit was drawn (`hit` true) or not.
+local function drawnList(drawn: { Drawn }, hit: boolean): string
+	local list = {}
+	for _, entry in drawn do
+		if entry.hit == hit then
+			table.insert(list, ("%d fps phase %s"):format(entry.fps, distanceLabel(entry.phase)))
+		end
+	end
+	return table.concat(list, ", ")
+end
+
+local function anyDrawn(drawn: { Drawn }, hit: boolean): boolean
+	for _, entry in drawn do
+		if entry.hit == hit then
+			return true
+		end
+	end
+	return false
+end
+
+--- One line per cell, at every placement, where the local client draws a hit the server does not
+--- count (fix F2, section 6: the client predicts the hit-stop, the server decides the hit): some
+--- client frame rate and phase drew the touch while some server frame phase did not register it.
+--- The client's frames and the server's are not in step, so a hit drawn at any of them must
+--- register at every server phase.
+function HitMatrix.drawnNotCounted(report: Report): { string }
+	local lines = {}
+	for _, cell in report.cells do
+		local drawn = cell.drawn
+		if drawn == nil or cell.hit or not anyDrawn(drawn, true) then
+			continue
+		end
+		table.insert(
+			lines,
+			("%s vs %s at %s studs: the client draws the hit (%s), the server misses it at frame phase %s"):format(
+				labelOf(report, cell.attack, cell.window),
+				cell.setup,
+				distanceLabel(cell.distance),
+				drawnList(drawn, true),
+				phaseList(cell, function(result: PhaseResult): boolean
+					return not result.hit
+				end)
+			)
+		)
+	end
+	return lines
+end
+
+--- One line per cell where the server counts a hit the local client does not draw at some frame
+--- rate and phase: the flash then waits for HitConfirmed, a round trip after the cut (issue 13).
+function HitMatrix.countedNotDrawn(report: Report): { string }
+	local lines = {}
+	for _, cell in report.cells do
+		local drawn = cell.drawn
+		if drawn == nil or not anyDrawn(drawn, false) then
+			continue
+		end
+		local counted = false
+		for _, result in cell.phases do
+			counted = counted or result.hit
+		end
+		if not counted then
+			continue
+		end
+		table.insert(
+			lines,
+			("%s vs %s at %s studs: the server counts the hit, the client does not draw it (%s)"):format(
+				labelOf(report, cell.attack, cell.window),
+				cell.setup,
+				distanceLabel(cell.distance),
+				drawnList(drawn, false)
+			)
+		)
 	end
 	return lines
 end
@@ -1232,16 +1540,22 @@ function HitMatrix.render(report: Report): { string }
 		"deepest pass d (MISS!@p when d is past the promise); 'LATE' = registered, but some phase landed"
 	)
 	table.insert(lines, "after the first server frame past its strike's snap (in the settle or recovery). Distances in")
-	table.insert(lines, "parentheses are outside the setup's real-fight range and are not required.")
+	table.insert(lines, "parentheses are outside the setup's real-fight range and are not required; a point-blank")
+	table.insert(lines, "setup stands at the shoulder, outside the aim assist, and is never required. ' !drawn' marks")
+	table.insert(lines, "a cell the client and the server disagree on (some client frame rate or phase drew a hit")
+	table.insert(lines, "the server missed, or missed one it counted). ' <s' marks an Art swung after a stand-off of s")
+	table.insert(lines, "studs (fix F1: its first cut would have started in the body).")
 	for _, setup in report.setups do
 		local derived = report.derived[setup.id]
 		table.insert(lines, "")
 		table.insert(
 			lines,
-			("### %s (%s, yaw %d): real fight %s..%s studs"):format(
+			("### %s (%s, yaw %d, bearing %d): %s %s..%s studs"):format(
 				setup.id,
 				setup.enemy,
 				setup.yaw,
+				setup.bearing or 0,
+				if setup.pointBlank then "point-blank, reported and never required," else "real fight",
 				distanceLabel(setup.realFight.min),
 				distanceLabel(setup.realFight.max)
 			)
@@ -1318,6 +1632,19 @@ function HitMatrix.render(report: Report): { string }
 						else
 							text = ("miss %.2f"):format(clearance)
 						end
+					end
+					local drawn = found.drawn
+					if drawn ~= nil then
+						local counted = false
+						for _, result in found.phases do
+							counted = counted or result.hit
+						end
+						if (anyDrawn(drawn, true) and not found.hit) or (counted and anyDrawn(drawn, false)) then
+							text ..= " !drawn"
+						end
+					end
+					if found.standOff ~= nil then
+						text ..= (" <%s"):format(distanceLabel(found.standOff))
 					end
 					row ..= " " .. text .. " |"
 				end

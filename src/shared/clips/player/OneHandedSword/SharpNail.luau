@@ -16,8 +16,10 @@
 	  0.75-0.85  draw back for the thrust: the blade along the forearm, torso wound
 	  0.85-0.90  Snap 3: the lunge, the left leg far forward                (hit 3: 0.85-0.98)
 	  1.10-1.70  Recovery / post-motion: extended in the lunge, breathing, the point trembling
-	Each hit window opens on its snap's first frame (the trail ignites with the first), so the
-	server sweeps the whole cut, and closes in the settle.
+	Each hit window opens on its snap's first frame (its trail ignites with it), so the server
+	sweeps the whole cut, and closes in the settle; each trail goes out in its settle, so the
+	re-wind and the draw-back between the cuts draw none. Each smear lights on its snap's first
+	two moving frames, half a frame after the snap start, and is off on the third.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -322,19 +324,23 @@ local clip: Types.ClipDef = {
 		{ time = 0.15, kind = "ActivationHold", data = { hold = 0.1 } },
 		{ time = 0.27, kind = "Sfx", data = { name = "whoosh.Medium" } },
 		{ time = 0.3333, kind = "TrailOn", data = { kind = "Art" } },
-		{ time = 0.3333, kind = "SmearOn", data = { axis = "X" } },
 		{ time = 0.3333, kind = "HitWindowOpen", data = { hit = 1 } },
-		{ time = 0.3667, kind = "SmearOff" },
+		{ time = 0.3416, kind = "SmearOn", data = { axis = "X" } },
+		{ time = 0.375, kind = "SmearOff" },
 		{ time = 0.45, kind = "HitWindowClose", data = { hit = 1 } },
+		{ time = 0.49, kind = "TrailOff" },
 		{ time = 0.52, kind = "Sfx", data = { name = "whoosh.Medium" } },
-		{ time = 0.58, kind = "SmearOn", data = { axis = "X" } },
+		{ time = 0.58, kind = "TrailOn", data = { kind = "Art" } },
 		{ time = 0.58, kind = "HitWindowOpen", data = { hit = 2 } },
-		{ time = 0.6133, kind = "SmearOff" },
+		{ time = 0.5883, kind = "SmearOn", data = { axis = "X" } },
+		{ time = 0.6217, kind = "SmearOff" },
 		{ time = 0.7, kind = "HitWindowClose", data = { hit = 2 } },
+		{ time = 0.74, kind = "TrailOff" },
 		{ time = 0.79, kind = "Sfx", data = { name = "whoosh.Small" } },
-		{ time = 0.85, kind = "SmearOn", data = { axis = "Z" } },
+		{ time = 0.85, kind = "TrailOn", data = { kind = "Art" } },
 		{ time = 0.85, kind = "HitWindowOpen", data = { hit = 3 } },
-		{ time = 0.8833, kind = "SmearOff" },
+		{ time = 0.8583, kind = "SmearOn", data = { axis = "Z" } },
+		{ time = 0.8917, kind = "SmearOff" },
 		{ time = 0.98, kind = "HitWindowClose", data = { hit = 3 } },
 		{ time = 1.02, kind = "TrailOff" },
 		{ time = 1.1, kind = "PostMotionStart" },
@@ -342,7 +348,7 @@ local clip: Types.ClipDef = {
 	beats = {
 		Anticipation = { start = 0.25, finish = 0.3333 },
 		Snap = { start = 0.3333, finish = 0.3833 },
-		Smear = { start = 0.3333, finish = 0.3667 },
+		Smear = { start = 0.3416, finish = 0.375 },
 		Hold = { start = 0.3833, finish = 0.4167 },
 		Settle = { start = 0.4167, finish = 0.5167 },
 		Recovery = { start = 1.1, finish = 1.7 },

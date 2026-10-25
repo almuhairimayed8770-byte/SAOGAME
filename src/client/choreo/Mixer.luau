@@ -122,6 +122,7 @@ export type Handle = {
 	absorbSeconds: number,
 	mask: { [string]: number }?, -- PlayOptions.mask (Additive only)
 	beat: Beat?, -- the server's beat it keeps (keepBeat), nil once past the mark
+	held: boolean, -- Mixer.hold: the clock stands still (a stopped clip fading out where it was)
 }
 
 -- jumped: a render stall's gap crossed it (the step, or this handle's part of it, was a jump).
@@ -139,6 +140,7 @@ export type StepResult = {
 export type Mixer = {
 	play: (self: Mixer, clip: Types.ClipDef, opts: PlayOptions?) -> Handle,
 	stop: (self: Mixer, target: Handle | string, blendOut: number?) -> (),
+	hold: (self: Mixer, handle: Handle) -> (),
 	setWeight: (self: Mixer, handle: Handle, weight: number, immediate: boolean?) -> (),
 	setSpeed: (self: Mixer, handle: Handle, speed: number) -> (),
 	hitStop: (self: Mixer, frames: number) -> (),
@@ -150,6 +152,7 @@ export type Mixer = {
 	find: (self: Mixer, clipId: string) -> Handle?,
 	handles: (self: Mixer) -> { Handle },
 	step: (self: Mixer, dt: number) -> StepResult,
+	preview: (self: Mixer, handle: Handle, dt: number) -> number,
 	seek: (self: Mixer, handle: Handle, clipTime: number) -> { FiredEvent },
 	keepBeat: (self: Mixer, handle: Handle, untilTime: number, owed: number?) -> (),
 	shiftBeat: (self: Mixer, handle: Handle, seconds: number) -> (),
@@ -267,6 +270,7 @@ function Mixer.play(self: any, clip: Types.ClipDef, opts: PlayOptions?): Handle
 		absorbSeconds = 0,
 		mask = options.mask,
 		beat = nil,
+		held = false,
 	}
 	table.insert(self._handles, handle)
 	return handle
@@ -292,6 +296,15 @@ function Mixer.stop(self: any, target: Handle | string, blendOut: number?)
 	if handle.blendOut <= 0 then
 		handle.fade = 0
 	end
+end
+
+--- Stops a handle's clock where it is: from the next step on it shows that pose, fires no event
+--- and moves no root, while its envelope and weight move as ever. A clip cut back (stopped because
+--- the pose it was heading for is no longer wanted) fades out from where it was instead of playing
+--- on into keys meant for a state that will not come (Sheathe's blade lined up with the back mount
+--- while the sword stays in the hand).
+function Mixer.hold(_self: any, handle: Handle)
+	handle.held = true
 end
 
 function Mixer.setWeight(_self: any, handle: Handle, weight: number, immediate: boolean?)
@@ -529,25 +542,117 @@ local function visibleWeight(handle: Handle): number
 	return Easing.evaluate(ChoreoData.blendEasing, handle.fade) * handle.weight
 end
 
+-- The rule one step follows, in pieces Mixer.step and Mixer.preview share, so a caller that reads
+-- the next step's blend ahead of it never copies (and drifts from) the step's own.
+
+-- A step of `dt` with `pause` seconds of hit-stop left: the time the clocks (and envelopes and
+-- weights) of handles that keep the pause move by, whether the step is a render stall's jump, and
+-- whether the pause still holds. A hit-stop asked for during a stall that is over inside the gap
+-- holds nothing: the rest of the gap moves the clocks.
+local function clockStep(pause: number, dt: number): (number, boolean, boolean)
+	local jumped = dt > ChoreoData.stall.jumpSeconds
+	local paused = pause > ChoreoData.pauseEpsilon
+	if jumped and paused and pause < dt then
+		return dt - pause, jumped, false
+	end
+	return dt, jumped, paused
+end
+
+-- One handle's part of a step: the seconds its envelope, weight and clock move by (a handle that
+-- ignores the pause takes the whole step), and whether that part is a jump. A clip played inside a
+-- jump's gap moves only by its own age, and that is a jump only when it is one too (D-132).
+local function handleStep(handle: Handle, dt: number, clockDt: number, jumped: boolean): (number, boolean)
+	local handleDt = if handle.ignorePause then dt else clockDt
+	if jumped and handle.sinceStep > 0 then
+		handleDt = math.max(0, handleDt - handle.sinceStep)
+		return handleDt, handleDt > ChoreoData.stall.jumpSeconds
+	end
+	return handleDt, jumped
+end
+
+-- A moving handle's envelope after `handleDt`: a stopping one fades out over its blendOut, a new one
+-- fades in over its blendIn.
+local function fadeAfter(handle: Handle, handleDt: number): number
+	if handle.stopping then
+		return if handle.blendOut <= 0 then 0 else math.max(0, handle.fade - handleDt / handle.blendOut)
+	elseif handle.fade < 1 then
+		return if handle.blendIn <= 0 then 1 else math.min(1, handle.fade + handleDt / handle.blendIn)
+	end
+	return handle.fade
+end
+
+-- Whether any Base clip other than the fallback idle is live (the idle fades out under one).
+local function baseActiveOf(handles: { Handle }): boolean
+	for _, handle in handles do
+		if handle.layer == "Base" and not handle.fallback and not handle.stopping then
+			return true
+		end
+	end
+	return false
+end
+
+-- How far a handle's retargeted blend-space weight still has to go this step, or nil for one the
+-- step does not retarget (the fallback idle, a done handle, one the pause holds).
+local function moveLeft(handle: Handle, paused: boolean): number?
+	if handle.fallback or handle.done or (paused and not handle.ignorePause) then
+		return nil
+	end
+	return math.abs(handle.targetWeight - handle.weight)
+end
+
+-- The fraction of the remaining distance every weight of a layer moves when its furthest mover
+-- has `delta` to go: that one travels `dt * weightBlendRate` and the rest keep pace, so the layer's
+-- weight sum moves straight to its target sum (and holds when the two agree). It reaches 1 on the
+-- last step, so every weight lands exactly on its target.
+local function fractionFor(delta: number, dt: number): number
+	local reach = dt * ChoreoData.locomotion.weightBlendRate
+	return if delta <= reach then 1 else reach / delta
+end
+
 -- Per layer, the fraction of the remaining distance every retargeted blend-space weight moves
--- this step: the largest mover travels `dt * weightBlendRate` and the rest keep pace, so the
--- layer's weight sum moves straight to its target sum (and holds when the two agree). The
--- fraction reaches 1 on the last step, so every weight lands exactly on its target.
+-- this step (fractionFor of the layer's furthest mover).
 local function weightFractions(handles: { Handle }, dt: number, paused: boolean): { [string]: number }
 	local largest: { [string]: number } = {}
 	for _, handle in handles do
-		local frozen = paused and not handle.ignorePause
-		if not handle.fallback and not handle.done and not frozen then
-			local delta = math.abs(handle.targetWeight - handle.weight)
+		local delta = moveLeft(handle, paused)
+		if delta ~= nil then
 			largest[handle.layer] = math.max(largest[handle.layer] or 0, delta)
 		end
 	end
 	local fractions: { [string]: number } = {}
-	local reach = dt * ChoreoData.locomotion.weightBlendRate
 	for layer, delta in largest do
-		fractions[layer] = if delta <= reach then 1 else reach / delta
+		fractions[layer] = fractionFor(delta, dt)
 	end
 	return fractions
+end
+
+-- One layer's weightFractions entry, with no table.
+local function layerFraction(handles: { Handle }, layer: Types.ClipLayer, dt: number, paused: boolean): number
+	local largest = 0
+	for _, handle in handles do
+		local delta = moveLeft(handle, paused)
+		if delta ~= nil and handle.layer == layer then
+			largest = math.max(largest, delta)
+		end
+	end
+	return fractionFor(largest, dt)
+end
+
+-- A moving handle's external weight after `handleDt`: the fallback idle moves at the data rate
+-- toward 0 under a live Base clip and toward 1 without one; a retargeted weight moves its layer's
+-- `fraction` of the way.
+local function weightAfter(handle: Handle, handleDt: number, baseActive: boolean, fraction: number): number
+	if handle.fallback then
+		local target = if baseActive then 0 else 1
+		local rate = handleDt / ChoreoData.fallbackBlend
+		return handle.weight + math.clamp(target - handle.weight, -rate, rate)
+	elseif handle.weight ~= handle.targetWeight then
+		if fraction >= 1 then
+			return handle.targetWeight
+		end
+		return handle.weight + (handle.targetWeight - handle.weight) * fraction
+	end
+	return handle.weight
 end
 
 local function byPriority(a: Handle, b: Handle): boolean
@@ -684,19 +789,41 @@ local function beatStep(handle: Handle, beat: Beat, held: number, clipDt: number
 	return clipDt + gain
 end
 
-function Mixer.step(self: any, dt: number): StepResult
-	local jumped = dt > ChoreoData.stall.jumpSeconds
-	-- The time the clocks (and envelopes and weights) of handles that keep the pause move by.
-	local clockDt = dt
-	local paused = self._pause > ChoreoData.pauseEpsilon
-	if jumped and paused and self._pause < dt then
-		-- A hit-stop asked for during a render stall is over inside the gap: the rest moves the clocks.
-		clockDt = dt - self._pause
-		self._pause = 0
-		paused = false
+--- What `handle`'s limbs will show once the next step of `dt` has moved its envelope and its
+--- external weight: the eased envelope times the weight, read before that step runs, by the step's
+--- own rule (a hit-stop holds it, a render stall's jump moves it by its own part of the gap, a stop
+--- with no blend-out lands at once, a retargeted weight keeps its layer's pace). A done handle
+--- shows 0. Not foreseen: a clip whose clock reaches its end in that step and stops there with no
+--- blend-out (it shows its last pose until the step after).
+function Mixer.preview(self: any, handle: Handle, dt: number): number
+	if handle.done then
+		return 0
 	end
+	local clockDt, jumped, paused = clockStep(self._pause, dt)
+	local fade, weight = handle.fade, handle.weight
+	if not paused or handle.ignorePause then
+		local handleDt = handleStep(handle, dt, clockDt, jumped)
+		fade = fadeAfter(handle, handleDt)
+		local fraction = 1
+		if not handle.fallback and handle.weight ~= handle.targetWeight then
+			fraction = layerFraction(self._handles, handle.layer, clockDt, paused)
+		end
+		weight = weightAfter(handle, handleDt, handle.fallback and baseActiveOf(self._handles), fraction)
+	elseif handle.stopping and handle.blendOut <= 0 then
+		-- An immediate stop still lands during a pause.
+		fade = 0
+	end
+	return Easing.evaluate(ChoreoData.blendEasing, fade) * weight
+end
+
+function Mixer.step(self: any, dt: number): StepResult
+	-- The time the clocks (and envelopes and weights) of handles that keep the pause move by.
+	local clockDt, jumped, paused = clockStep(self._pause, dt)
 	if paused then
 		self._pause = self._pause - dt
+	elseif clockDt < dt then
+		-- A hit-stop asked for during a render stall is over inside the gap: the rest moves the clocks.
+		self._pause = 0
 	end
 	-- Snap the float residue of the last frame to zero so pauseRemaining agrees with the clocks.
 	if self._pause <= ChoreoData.pauseEpsilon then
@@ -705,13 +832,7 @@ function Mixer.step(self: any, dt: number): StepResult
 	local timeScale = self._timeScale
 
 	-- Fallback idle: visible only while no other Base clip is active.
-	local baseActive = false
-	for _, handle in self._handles do
-		if handle.layer == "Base" and not handle.fallback and not handle.stopping then
-			baseActive = true
-			break
-		end
-	end
+	local baseActive = baseActiveOf(self._handles)
 
 	local events: { FiredEvent } = {}
 	-- A fallback idle hidden under another Base clip fires nothing: its sounds belong to the clip
@@ -726,14 +847,7 @@ function Mixer.step(self: any, dt: number): StepResult
 	for _, handle in self._handles do
 		-- A paused handle holds everything: clock, blend envelope and blend-space weight.
 		local frozen = paused and not handle.ignorePause
-		local handleDt = if handle.ignorePause then dt else clockDt
-		-- A clip played inside a jump's gap moves only by its own age, and that is a jump only when
-		-- it is one too (D-132).
-		local handleJumped = jumped
-		if jumped and handle.sinceStep > 0 then
-			handleDt = math.max(0, handleDt - handle.sinceStep)
-			handleJumped = handleDt > ChoreoData.stall.jumpSeconds
-		end
+		local handleDt, handleJumped = handleStep(handle, dt, clockDt, jumped)
 		handle.sinceStep = 0
 		local beat = handle.beat
 		if beat ~= nil and (handle.stopping or handle.done or handle.time >= beat.untilTime) then
@@ -743,27 +857,15 @@ function Mixer.step(self: any, dt: number): StepResult
 		end
 		if not frozen then
 			-- Envelope
-			if handle.stopping then
-				handle.fade = if handle.blendOut <= 0 then 0 else math.max(0, handle.fade - handleDt / handle.blendOut)
-				if handle.fade <= 0 then
-					handle.done = true
-				end
-			elseif handle.fade < 1 then
-				handle.fade = if handle.blendIn <= 0 then 1 else math.min(1, handle.fade + handleDt / handle.blendIn)
+			handle.fade = fadeAfter(handle, handleDt)
+			if handle.stopping and handle.fade <= 0 then
+				handle.done = true
 			end
 			-- External weight (fallback idle is driven by the mixer, others by the caller)
 			if handle.fallback then
 				handle.targetWeight = if baseActive then 0 else 1
-				local rate = handleDt / ChoreoData.fallbackBlend
-				handle.weight = handle.weight + math.clamp(handle.targetWeight - handle.weight, -rate, rate)
-			elseif handle.weight ~= handle.targetWeight then
-				local fraction = fractions[handle.layer] or 1
-				if fraction >= 1 then
-					handle.weight = handle.targetWeight
-				else
-					handle.weight += (handle.targetWeight - handle.weight) * fraction
-				end
 			end
+			handle.weight = weightAfter(handle, handleDt, baseActive, fractions[handle.layer] or 1)
 		elseif handle.stopping and handle.blendOut <= 0 then
 			-- An immediate stop still lands during a pause.
 			handle.fade = 0
@@ -774,7 +876,7 @@ function Mixer.step(self: any, dt: number): StepResult
 		if not handle.done then
 			local wasEnded = handle.ended
 			local into = if handle.fallback and handle.targetWeight == 0 then hiddenEvents else events
-			local clipDt = if handle.ignorePause then handleDt else handleDt * timeScale
+			local clipDt = if handle.held then 0 elseif handle.ignorePause then handleDt else handleDt * timeScale
 			if beat ~= nil and not handle.ignorePause then
 				-- The rig's pause held it this step (all of it, or the part of a jump's gap it ended in).
 				local held = if frozen then dt else math.max(0, dt - clockDt)

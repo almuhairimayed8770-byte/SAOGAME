@@ -131,6 +131,8 @@ local RING_PITCH = { 0.98, 1.02 }
 -- The boss crack plays slowed (about 3 s of glass); the boss shatter's chime is the slow version.
 local BOSS_CRACK_PITCH = { 0.7, 0.75 }
 local SLOW_CHIME_PITCH = 0.75
+-- The boss's slow glass at its own speed: every shatter's second glass layer, the shards (F15).
+local SHARDS_PITCH = 1
 
 local function sound(volume: number, spatial: boolean, pitchRange: { number }?, note: string?): Entry
 	return {
@@ -373,6 +375,16 @@ local Sfx = {
 	mix = {
 		combatOverMusicDb = 3, -- combat SFX sit above music
 		heartbeatOverAllDb = 3, -- the HP heartbeat sits above both
+		-- A hit the local player is in punches through the low-HP heartbeat (F15): one of these
+		-- cues played as the player's own (SfxPool.asOwn: a hit they deal or take, a block, a
+		-- parry) drops the heartbeat by `db` on the cue's own call, holds it there, and eases it
+		-- back over releaseSeconds. A later hit restarts the hold.
+		heartbeatDuck = {
+			db = 12,
+			holdSeconds = 0.15,
+			releaseSeconds = 0.35,
+			cues = { "HitNormal", "HitBasic", "HitCrit", "HitFinal", "HitKill", "Block", "GuardBreak", "Parry" },
+		},
 		systemVoiceDuckDb = 8, -- the system voice ducks everything
 		mobileMusicOffsetDb = -2, -- mobile defaults music lower
 		deathDuckSeconds = 0.5, -- silence before the shatter (combat.deathFreeze mirrors this)
@@ -607,7 +619,8 @@ local Sfx = {
 					startAt = 0.22,
 					stopAt = 2.2,
 					fadeOut = 0.7,
-					volume = 0.55,
+					-- 0.55 when the review heard the shatter bass-heavy; 9 dB down under the glass (F15)
+					volume = 0.2,
 					pitch = { 1, 1 },
 				}, "a 2 s bass dive under the shatter; its own lead brings it in about 0.1 s after the slam"),
 			},
@@ -749,7 +762,7 @@ local Sfx = {
 					fadeOut = 1,
 					volume = 1,
 					pitch = table.clone(BOSS_CRACK_PITCH),
-				}, "slow version: 2.23 s of glass at 0.70 to 0.75x plays the 3 s burst"),
+				}, "slow: 2.23 s of glass at 0.70 to 0.75x plays the 3 s burst; at 1x, every shatter's shards"),
 				BossBoom = licensed(false, {
 					id = "9120769456",
 					title = "Wind Whoosh Sonic Boom Low End Impact 2 (SFX)",
@@ -758,7 +771,7 @@ local Sfx = {
 					startAt = 0.985,
 					stopAt = 2,
 					fadeOut = 0.4,
-					volume = 0.5,
+					volume = 0.18, -- 0.5 before F15: 9 dB down with the slam, under the glass
 					pitch = { 1, 1 },
 				}, "the boss shatter's low boom, level with the slam"),
 				TeleportRise = sound(0.7, true, nil, "the shatter reversed for the Gate"),
@@ -771,9 +784,11 @@ local Sfx = {
 					startAt = 0.07,
 					stopAt = 1.2,
 					fadeOut = 0.7,
-					volume = 0.9,
+					-- 0.9 when the review heard the shatter bass-heavy, the glass about 10 dB under
+					-- it: 9.5 dB down, so the glass leads (F15, sfx.shatterBalance)
+					volume = 0.3,
 					pitch = { 0.97, 1 },
-				}, "the slam after the death freeze, the loudest moment: the bass back at once under the glass"),
+				}, "the slam after the death freeze: the bass back at once under the glass"),
 			},
 		},
 
@@ -1008,12 +1023,14 @@ local Sfx = {
 			{ name = "impact.Ring", delay = 0, gainDb = 3 },
 			{ name = "impact.RingTail", delay = 0, gainDb = 0 },
 		},
-		-- The shatter after the 0.5 s silence: everything starts on the white-flash frame. The slam
-		-- (the loudest moment) brings the bass back under the glass crack, the chime rises to its
-		-- peak as the crack fades, and the bass dive comes in under it all 3 dB down.
+		-- The shatter after the 0.5 s silence: everything starts on the white-flash frame. Glass
+		-- first (F15, sfx.shatterBalance): the glass crack and the long glass break at its own
+		-- speed (the shards) over the slam that brings the bass back, the chime rising to its peak
+		-- as the crack fades, and the bass dive under it all 3 dB down.
 		Shatter = {
 			{ name = "shatter.Slam", delay = 0, gainDb = 0 },
 			{ name = "shatter.Crack", delay = 0, gainDb = 0 },
+			{ name = "shatter.BossCrack", delay = 0, gainDb = 0, pitch = SHARDS_PITCH },
 			{ name = "shatter.Chime", delay = 0, gainDb = 0 },
 			{ name = "impact.SubDrop", delay = 0, gainDb = -3 },
 		},
@@ -1022,13 +1039,16 @@ local Sfx = {
 		ShatterHeavy = {
 			{ name = "shatter.Slam", delay = 0, gainDb = 0 },
 			{ name = "shatter.Crack", delay = 0, gainDb = 0 },
+			{ name = "shatter.BossCrack", delay = 0, gainDb = 0, pitch = SHARDS_PITCH },
 			{ name = "shatter.Chime", delay = 0, gainDb = 0 },
 			{ name = "impact.SubDrop", delay = 0, gainDb = 0 },
 		},
-		-- The boss shatter on its white flash: the slow crack (its own 0.70 to 0.75x range), the
-		-- low boom in place of the slam, the chime slowed to its slow version, the full bass dive.
+		-- The boss shatter on its white flash: the slow glass (its own 0.70 to 0.75x range) with the
+		-- glass crack slowed to match, the low boom in place of the slam, the chime slowed to its
+		-- slow version, the full bass dive.
 		BossShatter = {
 			{ name = "shatter.BossCrack", delay = 0, gainDb = 0 },
+			{ name = "shatter.Crack", delay = 0, gainDb = 0, pitch = BOSS_CRACK_PITCH[1] },
 			{ name = "shatter.BossBoom", delay = 0, gainDb = 0 },
 			{ name = "shatter.Chime", delay = 0, gainDb = 0, pitch = SLOW_CHIME_PITCH },
 			{ name = "impact.SubDrop", delay = 0, gainDb = 0 },
@@ -1215,6 +1235,16 @@ local Sfx = {
 	--- a contour colors the whole SFX group, so the impact director fires ShatterBloom only for a
 	--- death near the camera (moments.luau `Death` / `BossDeath`).
 	shatterCues = { normal = "Shatter", heavy = "ShatterHeavy", boss = "BossShatter" },
+
+	--- The shatter's balance (F15). The reel review heard the shatter bass-heavy, its glass about
+	--- glassGapDb under the bass. Every shatter cue plays at least two `glass` layers, and its glass
+	--- (their summed power) over its loudest `bass` layer stands at least glassGapDb higher than it
+	--- did in the mix the review heard (tests/data/sfx.spec.luau keeps that mix).
+	shatterBalance = {
+		glassGapDb = 10,
+		glass = { "shatter.Crack", "shatter.BossCrack" },
+		bass = { "shatter.Slam", "shatter.BossBoom", "impact.SubDrop" },
+	},
 }
 
 --- One entry by family and name; errors on an unknown pair so a missing sound fails at load.

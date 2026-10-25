@@ -33,6 +33,12 @@
 	frame (and before a new plate is handed out) the folder is checked: one that left the PlayerGui
 	is put back, or rebuilt with a fresh plate for every tracked record (state, HP, the shatter's
 	"gone" and its due time carried over) and a fresh pool when the reset destroyed it.
+
+	Declutter (F17): plates that meet on screen lift off each other. Each update projects every
+	shown plate (HudLogic.declutter): the nearest keeps its place, each farther one climbs just over
+	the plates in front of it (ui.nameplates.declutter), and every frame eases the lift there
+	through BillboardGui.SizeOffset (screen space, in plate heights), which DrawnBody's offset never
+	touches. `setProjector` hands in the screen projection for specs.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -70,7 +76,15 @@ type Plate = {
 	expected: number?,
 	-- The Heartbeat that first found `expected` passed; the plate goes on a later one (D-191).
 	overdueBeat: number?,
+	-- Its declutter lift (F17), in plate heights up (BillboardGui.SizeOffset.Y): where it is now,
+	-- and where the last update wants it.
+	lift: number,
+	liftTarget: number,
 }
+
+-- Where a world point lands on the screen: x and y in pixels (y down) and its depth from the
+-- camera, all nil when it is off screen or behind the camera.
+export type Projector = (world: Vector3) -> (number?, number?, number?)
 
 local Nameplates = {}
 
@@ -88,6 +102,8 @@ local started = false
 local folder: Instance? = nil
 -- Where the folder lives: the local PlayerGui (nil under Lune, where the folder stays detached).
 local guiSource: (() -> Instance?)? = nil
+-- The screen projection the declutter reads (tests hand one in; nil is the current camera's).
+local projector: Projector? = nil
 
 local function guiParent(): Instance?
 	if guiSource ~= nil then
@@ -231,7 +247,17 @@ local function newPlate(kind: "Player" | "Enemy"): Plate
 		dueAt = nil,
 		expected = nil,
 		overdueBeat = nil,
+		lift = 0,
+		liftTarget = 0,
 	}
+end
+
+-- Puts a plate's declutter lift at `lift` plate heights (written only when it moved).
+local function setLift(plate: Plate, lift: number)
+	if lift ~= plate.lift or plate.gui.SizeOffset.Y ~= lift then
+		plate.lift = lift
+		plate.gui.SizeOffset = Vector2.new(0, lift)
+	end
 end
 
 local function acquire(kind: "Player" | "Enemy"): Plate
@@ -253,6 +279,8 @@ local function release(plate: Plate)
 	plate.dueAt = nil
 	plate.expected = nil
 	plate.overdueBeat = nil
+	plate.liftTarget = 0
+	setLift(plate, 0)
 	table.insert(pool[plate.kind], plate)
 end
 
@@ -422,6 +450,8 @@ local function keepFolder(): boolean
 		fresh.expected = old.expected
 		fresh.overdueBeat = old.overdueBeat
 		fresh.alpha = old.alpha
+		fresh.liftTarget = old.liftTarget
+		setLift(fresh, old.lift)
 		plates[id] = fresh
 		if record ~= nil then
 			adorn(fresh, record)
@@ -527,7 +557,81 @@ local function defaultHover(plate: Plate): boolean
 	return ok and result == true
 end
 
---- Fades plates by distance and shows player names on hover (called at the tier's rate).
+local function defaultProjector(world: Vector3): (number?, number?, number?)
+	local camera = Engine.camera()
+	if camera == nil then
+		return nil, nil, nil
+	end
+	local ok, x, y, depth = pcall(function()
+		local screen, visible = (camera :: any):WorldToViewportPoint(world)
+		if not visible then
+			return nil, nil, nil
+		end
+		return screen.X, screen.Y, screen.Z
+	end)
+	if not ok then
+		return nil, nil, nil
+	end
+	return x, y, depth
+end
+
+-- Scratch lists the declutter reuses each update, and the last update's near-to-far order of the
+-- plates' entity ids (a plate keeps its place in it through depth noise, D-270).
+local boxes: { HudLogic.PlateBox } = {}
+local boxPlates: { Plate } = {}
+local declutterOrder: { number }? = nil
+
+-- Where each shown plate should lift to so none sits on another on screen (F17): the nearest
+-- keeps its place, the farther ones climb over it. A plate off screen or hidden lets go.
+local function declutter()
+	local project: Projector = if projector ~= nil then projector else defaultProjector
+	local count = 0
+	for _, plate in plates do
+		local record = plate.record
+		local position = Engine.modelPosition(if record ~= nil then record.model else nil)
+		local x, y, depth = nil, nil, nil
+		if position ~= nil and plate.gui.Enabled and plate.alpha > 0 then
+			x, y, depth = project(position + lift(plate.kind))
+		end
+		if x == nil or y == nil or depth == nil then
+			plate.liftTarget = 0
+			continue
+		end
+		local config = if plate.kind == "Player" then UI.nameplates.player else UI.nameplates.enemy
+		count += 1
+		local box = boxes[count]
+		if box == nil then
+			box = { x = 0, y = 0, width = 0, height = 0, depth = 0 }
+			boxes[count] = box
+		end
+		box.x, box.y, box.width, box.height, box.depth = x, y, config.width, config.height, depth
+		box.key = if record ~= nil then record.id else nil
+		boxPlates[count] = plate
+	end
+	for index = #boxes, count + 1, -1 do
+		boxes[index] = nil
+		boxPlates[index] = nil
+	end
+	local settings = UI.nameplates.declutter
+	local lifts, order = HudLogic.declutter(boxes, settings.gapPixels, settings.maxLiftHeights, declutterOrder)
+	declutterOrder = order
+	for index, plate in boxPlates do
+		plate.liftTarget = lifts[index] / boxes[index].height
+	end
+end
+
+-- Eases every plate's lift toward its target (each frame, so the climb never jumps at the
+-- update rate).
+local function easeLifts(dt: number)
+	for _, plate in plates do
+		if plate.lift ~= plate.liftTarget then
+			setLift(plate, HudLogic.easeLift(plate.lift, plate.liftTarget, dt))
+		end
+	end
+end
+
+--- Fades plates by distance and shows player names on hover, and sets where the plates lift to so
+--- none sits on another (called at the tier's rate).
 function Nameplates.update()
 	keepFolder()
 	expireDue()
@@ -546,6 +650,7 @@ function Nameplates.update()
 		end
 		applyAlpha(plate, alpha, showName)
 	end
+	declutter()
 end
 
 --- Plates on screen right now.
@@ -567,6 +672,11 @@ function Nameplates.folder(): Instance
 	return ensureFolder()
 end
 
+--- Replaces the screen projection the declutter reads (tests); nil restores the current camera's.
+function Nameplates.setProjector(fn: Projector?)
+	projector = fn
+end
+
 --- Replaces where the plates' folder lives (tests stand in a PlayerGui); nil restores the local
 --- PlayerGui. The next check moves the folder there.
 function Nameplates.setGuiParent(source: (() -> Instance?)?)
@@ -585,6 +695,7 @@ local function heartbeat(dt: number)
 		sinceUpdate = 0
 		Nameplates.update()
 	end
+	easeLifts(dt)
 end
 
 --- Runs one frame of the Heartbeat loop by hand (tests).

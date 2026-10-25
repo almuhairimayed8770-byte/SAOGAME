@@ -28,7 +28,13 @@
 	(never the late root's, which stands lower on a rise and higher on a fall).
 
 	The drawn body never jumps (data/choreo.luau enemy.rush):
-	  Armed     before the launch: nothing is drawn (the body is on its root).
+	  Armed     before the launch: the body stands on its root, turned onto its line (D-255). The
+	            server's body holds the line through the crouch while its late root may still show
+	            the turn onto it; from the root's own look it turns at the chase's rate (ai.luau
+	            Charger turnRate), faster when the time left needs it, never faster than turnRate,
+	            so it is on the line by the launch and the launch turns nothing. A crouch that will
+	            not launch (`release`) keeps its turn until the late root has come round to it, then
+	            is on its root, or slides back onto it after settleSeconds.
 	  Run       from the launch: it starts where the root is drawn and closes on the timeline, each
 	            frame moving the timeline's own travel give or take catchUpFraction of a frame's
 	            travel at the rush speed (none on the launch frame), never backward. An offset off
@@ -38,6 +44,8 @@
 	  Settle    the timeline is done: the body still closes on its end (never backward), and waits
 	            until the root has come within settleStuds of where the server's body stopped (the
 	            last RushEnded's distance, else the run's end or limit), or settleSeconds.
+	            Before any RushEnded, a late root come to rest well short of the drawn body (ai.luau
+	            rushWorld rest*, D-256) is the server's body stuck there: a jam told early.
 	  HandBack  it slides from where it stood onto the root over handBackSeconds, longer for a longer
 	            way at the catch-up pace, on handBackEasing; then it is Done and drawn on its root.
 	  Frozen    a death: the body stays where it was drawn (the death freeze and the shatter play
@@ -54,6 +62,7 @@ local RushWorld = require(Shared.choreo.RushWorld)
 
 local TUNING = ChoreoData.enemy.rush
 local WORLD = AI.rushWorld
+local CHARGER = AI.archetypes.Charger
 
 export type Phase = "Armed" | "Run" | "Settle" | "HandBack" | "Frozen" | "Done"
 
@@ -120,6 +129,9 @@ export type State = {
 	handAt: number,
 	handSeconds: number,
 	drawn: CFrame?, -- the CFrame last drawn (Frozen keeps it)
+	released: boolean, -- an Armed crouch that will not launch (RushDraw.release)
+	restSpot: Vector3?, -- where the late root was last seen moving (flat), and when (D-256)
+	restFrom: number?,
 }
 
 local RushDraw = {}
@@ -258,6 +270,9 @@ function RushDraw.new(line: Line): State
 		handAt = 0,
 		handSeconds = 0,
 		drawn = nil,
+		released = false,
+		restSpot = nil,
+		restFrom = nil,
 	}
 end
 
@@ -473,9 +488,10 @@ function RushDraw.halt(state: State, now: number)
 	end
 end
 
---- The body stays where it is drawn for good (a death). False when nothing was drawn yet.
+--- The body stays where it is drawn for good (a death), a crouch's turn too. False when nothing was
+--- drawn yet.
 function RushDraw.freeze(state: State): boolean
-	if state.drawn == nil or state.phase == "Done" or state.phase == "Armed" then
+	if state.drawn == nil or state.phase == "Done" then
 		state.phase = "Done"
 		return false
 	end
@@ -483,7 +499,44 @@ function RushDraw.freeze(state: State): boolean
 	return true
 end
 
---- True while the body is drawn away from its root (Run, Settle, HandBack or Frozen).
+-- Starts the slide from where the body is drawn onto the root, over at least handBackSeconds (more
+-- for a longer way, at the catch-up pace).
+local function handBack(state: State, drawn: CFrame, now: number, root: CFrame?)
+	local gap = if root ~= nil then (flat(root.Position) - flat(drawn.Position)).Magnitude else 0
+	state.phase = "HandBack"
+	state.handFrom = drawn
+	state.handAt = now
+	local pace = math.max(TUNING.catchUpFraction * state.line.speed, 1e-6)
+	state.handSeconds = math.max(TUNING.handBackSeconds, gap / pace)
+end
+
+--- The rush will not run as drawn: its wind-up was dropped or cut before the server launched it (a
+--- hold, a sleep, a stagger heard before any RushStarted). A crouch's turn is kept until the late
+--- root has come round to it (Armed, D-255); a launch this client predicted and drew slides back
+--- onto the root (`root`, as it stands now). False when nothing is drawn: the body is on its root.
+function RushDraw.release(state: State, now: number, root: CFrame?): boolean
+	local drawn = state.drawn
+	local phase = state.phase
+	if phase == "Frozen" or phase == "HandBack" then
+		return true
+	end
+	if drawn == nil or phase == "Done" then
+		state.phase = "Done"
+		return false
+	end
+	if phase == "Armed" then
+		if not state.released then
+			state.released = true
+			state.settleAt = now
+		end
+		return true
+	end
+	handBack(state, drawn, now, root)
+	return true
+end
+
+--- True while the body is drawn away from its root's place (Run, Settle, HandBack or Frozen; a
+--- crouch's turn stands on its root).
 function RushDraw.drawing(state: State): boolean
 	local phase = state.phase
 	return phase == "Run" or phase == "Settle" or phase == "HandBack" or phase == "Frozen"
@@ -667,11 +720,87 @@ local function stand(state: State, root: CFrame, dt: number, ground: Ground?)
 	state.height = nextHeight
 end
 
+-- The crouch (D-255): the body on its root, turned from the root's own look onto its line by the
+-- launch at the chase's rate or the rate the time left needs, never faster than the run's turn. A
+-- released crouch keeps turning onto the line (the server's body holds it) until the late root has
+-- come round to the body (a frame's turn of the chase apart), then is on it; or after
+-- settleSeconds it slides back onto the root.
+local function armed(state: State, now: number, dt: number, root: CFrame): CFrame?
+	local goal = state.legs[1].facing
+	local look = unitFlat(root.LookVector, goal)
+	local frame = math.max(0, dt)
+	local chase = math.rad(CHARGER.turnRate)
+	if state.drawn == nil then
+		state.facing = look
+	else
+		local left = math.acos(math.clamp(state.facing:Dot(goal), -1, 1))
+		local remaining = state.line.startedAt - now
+		local rate = chase
+		if not state.released then
+			rate = if remaining > 1e-6
+				then math.clamp(left / remaining, chase, math.rad(TUNING.turnRate))
+				else math.rad(TUNING.turnRate)
+		end
+		state.facing = turnToward(state.facing, goal, rate * frame)
+	end
+	state.lastTime = now
+	local position = root.Position
+	local drawn = CFrame.lookAt(position, position + state.facing)
+	if state.released then
+		local apart = math.acos(math.clamp(look:Dot(state.facing), -1, 1))
+		if apart <= chase * frame + 1e-6 then
+			state.phase = "Done"
+			state.drawn = nil
+			return nil
+		end
+		if now - (state.settleAt or now) >= TUNING.settleSeconds then
+			handBack(state, drawn, now, root)
+		end
+	end
+	state.drawn = drawn
+	return drawn
+end
+
+-- D-256: before any RushEnded told where the server's body stopped, its late root come to rest
+-- (moved less than rushWorld.restStuds over restSeconds, carrying at most restSpeed) after leaving
+-- its crouch (keepUpStuds) and more than jamLagStuds behind the drawn body is that body stuck there:
+-- a free run rests only at its end. The jam and the rest are told as a RushEnded "Jammed" would.
+local function noticeRest(state: State, now: number, root: CFrame, velocity: Vector3?)
+	local spot = flat(root.Position)
+	local seen = state.restSpot
+	if seen == nil or (spot - seen).Magnitude > WORLD.restStuds then
+		state.restSpot = spot
+		state.restFrom = now
+		return
+	end
+	if now - (state.restFrom or now) < WORLD.restSeconds then
+		return
+	end
+	if velocity ~= nil and flat(velocity).Magnitude > WORLD.restSpeed then
+		return
+	end
+	local along = RushWorld.project(state.legs, root.Position)
+	if along < CHARGER.keepUpStuds or state.along - along <= CHARGER.jamLagStuds then
+		return
+	end
+	RushDraw.jam(state, along)
+	RushDraw.rest(state, along)
+end
+
 --- One frame: where to draw the root part at server time `now` (`dt` the frame's length) given
---- where its replicated root stands, or nil when the body is drawn on its root (before the launch,
---- and once Done). `room` asks the world how far the drawn body may move (nil: never stopped);
---- `ground` how high the ground under it stands (nil: the drawn body keeps its height).
-function RushDraw.step(state: State, now: number, dt: number, root: CFrame, room: Room?, ground: Ground?): CFrame?
+--- where its replicated root stands (and the velocity it carries, nil: unknown), or nil when the
+--- body is drawn on its root (once Done; a crouch stands on it, turned). `room` asks the world how
+--- far the drawn body may move (nil: never stopped); `ground` how high the ground under it stands
+--- (nil: the drawn body keeps its height).
+function RushDraw.step(
+	state: State,
+	now: number,
+	dt: number,
+	root: CFrame,
+	room: Room?,
+	ground: Ground?,
+	rootVelocity: Vector3?
+): CFrame?
 	local line = state.line
 	local phase = state.phase
 	local launching = false
@@ -680,10 +809,11 @@ function RushDraw.step(state: State, now: number, dt: number, root: CFrame, room
 	elseif phase == "Frozen" then
 		return state.drawn
 	elseif phase == "Armed" then
-		if now < line.startedAt then
-			return nil
+		if now < line.startedAt or state.released then
+			return armed(state, now, dt, root)
 		end
-		-- The launch: the body starts where the root is drawn, so nothing jumps.
+		-- The launch: the body starts where the root is drawn, so nothing jumps; turned as the
+		-- crouch drew it, else on the root's own look.
 		local legs = state.legs
 		local first = legs[1]
 		local along = if #legs == 1
@@ -691,7 +821,11 @@ function RushDraw.step(state: State, now: number, dt: number, root: CFrame, room
 			else RushWorld.project(legs, root.Position)
 		state.along = along
 		state.lateral = flat(root.Position) - RushWorld.pointAt(legs, along)
-		state.facing = unitFlat(root.LookVector, first.heading)
+		if state.drawn == nil then
+			state.facing = unitFlat(root.LookVector, first.heading)
+		end
+		state.restSpot = nil
+		state.restFrom = nil
 		state.height = root.Position.Y
 		state.fall = 0
 		state.lastTime = math.max(line.startedAt, now - dt)
@@ -701,6 +835,9 @@ function RushDraw.step(state: State, now: number, dt: number, root: CFrame, room
 	end
 
 	if phase == "Run" or phase == "Settle" then
+		if state.rest == nil and not launching then
+			noticeRest(state, now, root, rootVelocity)
+		end
 		local last = state.lastTime or now
 		local goal = goalAt(state, now)
 		local natural = math.max(0, goal - goalAt(state, last))
@@ -744,12 +881,7 @@ function RushDraw.step(state: State, now: number, dt: number, root: CFrame, room
 			local arrived = not guessed and (flat(root.Position) - stopped).Magnitude <= TUNING.settleStuds
 			local waited = now - (state.settleAt or now) >= TUNING.settleSeconds
 			if arrived or waited then
-				local gap = (flat(root.Position) - flat(drawn.Position)).Magnitude
-				state.phase = "HandBack"
-				state.handFrom = drawn
-				state.handAt = now
-				local pace = math.max(TUNING.catchUpFraction * line.speed, 1e-6)
-				state.handSeconds = math.max(TUNING.handBackSeconds, gap / pace)
+				handBack(state, drawn, now, root)
 			end
 		end
 		state.drawn = drawn

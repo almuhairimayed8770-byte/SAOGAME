@@ -227,3 +227,102 @@ describe("Telegraphs on the server's beat (D-172)", function()
 		Telegraphs.delay(Instance.new("Model"), 0.1)
 	end)
 end)
+
+describe("a blow's tell holds to its snap (F7)", function()
+	local Engine = Harness.load("src/client/fx/Engine")
+	local ai = Harness.load("src/shared/data/ai")
+
+	it("the Kobold's Overhead stays lit through its strike and goes out as the axe falls", function()
+		local clock = 100
+		Engine.setClock(function(): number
+			return clock
+		end)
+		local model = kobold()
+		-- windUp 1.0, strike 0.35: the axe lands 1.35 s in, its snap falls from 1.30.
+		Telegraphs.show(model, "GuardBreak", 1.0, Vector3.zero, Vector3.zAxis, nil, nil, 0.35)
+		local fill = model:FindFirstChild("TelegraphFill") :: Highlight
+		local ended: number? = nil
+		local glinted: number? = nil
+		for _ = 1, 120 do
+			clock += 1 / 60
+			Telegraphs.step()
+			if glinted == nil and fill.Enabled and near(fill.FillTransparency, ai.telegraph.glintFillTransparency) then
+				glinted = clock - 100
+			end
+			if ended == nil and not Telegraphs.isShowing(model) then
+				ended = clock - 100
+			end
+		end
+		Telegraphs.forget(model)
+		Engine.setClock(nil)
+		local snap = 1.0 + 0.35 - ai.telegraph.snapLeadSeconds
+		expect(math.abs((ended :: number) - snap) <= 1 / 60 + 1e-6).toBe(true)
+		-- The glint opens with the parry window before the blow lands.
+		local window = 1.0 + 0.35 - combat.parryWindow
+		expect(math.abs((glinted :: number) - window) <= 1 / 60 + 1e-6).toBe(true)
+	end)
+end)
+
+describe("the cone lies on the ground as triangles (F11, issue 15)", function()
+	local Engine = Harness.load("src/client/fx/Engine")
+	local TelegraphShapes = Harness.load("src/client/fx/TelegraphShapes")
+
+	-- The corners of a WedgePart's triangle (its right angle at the bottom of its back face, the
+	-- engine's wedge), in world space.
+	local function corners(part: BasePart): { Vector3 }
+		local h, d = part.Size.Y, part.Size.Z
+		return {
+			part.CFrame:PointToWorldSpace(Vector3.new(0, -h / 2, d / 2)),
+			part.CFrame:PointToWorldSpace(Vector3.new(0, -h / 2, -d / 2)),
+			part.CFrame:PointToWorldSpace(Vector3.new(0, h / 2, d / 2)),
+		}
+	end
+
+	it("every wedge drawn is its piece's triangle, flat, at the origin's height", function()
+		local clock = 100
+		Engine.setClock(function(): number
+			return clock
+		end)
+		local model = kobold()
+		local origin = Vector3.new(4, 0.5, -2)
+		local facing = Vector3.new(1, 0, 1).Unit
+		local shape = { kind = "Cone", length = 6, width = 60 }
+		Telegraphs.show(model, "GuardBreak", 1.0, origin, facing, shape :: any, 0.6)
+		local expected = TelegraphShapes.pieces(
+			shape :: any,
+			{ origin.X, origin.Y, origin.Z },
+			{ facing.X, 0, facing.Z }
+		)
+		local drawn: { BasePart } = {}
+		for _, part in Telegraphs.parts(model) do
+			expect(part:IsA("WedgePart")).toBe(true)
+			expect(part.Transparency < 1).toBe(true)
+			table.insert(drawn, part)
+		end
+		expect(#drawn).toBe(#expected)
+		local level = origin.Y + fx.telegraph.decal.groundOffset
+		for _, part in drawn do
+			-- Laid on its side: its thickness stands up.
+			expect(math.abs(part.CFrame.RightVector.Y)).toBeCloseTo(1, 1e-6)
+			local seen = corners(part)
+			local matched = false
+			for _, piece in expected do
+				local t = TelegraphShapes.triangle(piece) :: { { number } }
+				local all = true
+				for index = 1, 3 do
+					local want = Vector3.new(t[index][1], t[index][2], t[index][3])
+					if (seen[index] - want).Magnitude > 1e-4 then
+						all = false
+					end
+				end
+				matched = matched or all
+			end
+			expect(matched).toBe(true)
+			for _, corner in seen do
+				expect(corner.Y).toBeCloseTo(level, 1e-4)
+			end
+		end
+		Telegraphs.forget(model)
+		Engine.setClock(nil)
+	end)
+end)

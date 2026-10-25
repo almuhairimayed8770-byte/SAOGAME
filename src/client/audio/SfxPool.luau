@@ -46,8 +46,9 @@
 	  each layer comes lateBy sooner, and one already due plays as `playLate` would.
 	- `contour(name)` runs mix automation: eased ramps of the EQ bands and the reverb wet level on
 	  the SoundGroups in `effects.groups`. `start()` gives each of those groups one
-	  EqualizerSoundEffect and one ReverbSoundEffect, flat, dry and disabled while no contour
-	  runs. Each run owns the keys (low / mid / high / wet) its steps name on each group; a new
+	  EqualizerSoundEffect, flat and always in (so a cut lands on the hit's own call, F15), and
+	  one ReverbSoundEffect, dry and switched out while no contour runs. A step whose ramp is
+	  under sfx.playback.sameFrameSeconds lands on the call: no frame could draw it. Each run owns the keys (low / mid / high / wet) its steps name on each group; a new
 	  contour takes over only the keys it names there, and the older run keeps the rest (a
 	  bystander's reverb bloom never ends the local player's bass cut). A run whose keys are all
 	  taken stops; a run that has fired its last step eases the keys it still owns back to the
@@ -79,7 +80,9 @@
 	FloorMaterial when the clip event carries none), `loop(name, gain)` for the heartbeat and the
 	ambience beds (Looped over startAt .. stopAt; the caller's gain ramp is the fade, and stopping
 	resets Looped and the regions), `duck(db, seconds, spareOwn?)` for the system voice and the
-	death silence.
+	death silence. A cue in sfx.mix.heartbeatDuck.cues played as the local player's own (`asOwn`:
+	a hit they deal or take, a block, a parry) drops the heartbeat by its db on the cue's call,
+	holds, and eases it back on the pool's step (F15); the director's loop calls keep the duck.
 
 	The death silence's carve-out (issue 9): `start()` also makes fx.audio ownGroupName, a
 	SoundGroup beside SFX under Master at SFX's level (the SFX slider moves it too) that no duck
@@ -146,7 +149,7 @@ export type MixState = {
 	mid: number,
 	high: number,
 	wet: number,
-	enabled: boolean,
+	enabled: boolean, -- the reverb is switched in (a contour runs); the flat EQ is always in
 	running: string?, -- the newest contour running on the group, nil when none
 	owners: { [string]: string }, -- key -> the contour that owns it there
 }
@@ -167,6 +170,7 @@ type Loop = {
 	voice: Voice,
 	entry: Sfx.Entry,
 	playing: boolean,
+	gain: number, -- the caller's last gain (0..1), before the heartbeat's lift and duck
 }
 
 -- A fade to silence on one play: linear from `from` at `startsAt` to 0 at `endsAt` (real seconds).
@@ -224,6 +228,8 @@ local recent: { { name: string, position: Vector3?, time: number } } = {}
 -- shatter cue name -> when and where it last started: shatters that crack together inside one
 -- sound's reach are one sound.
 local lastShatters: { [string]: { at: number, position: Vector3? } } = {}
+-- When the newest sfx.mix.heartbeatDuck started (an own hit's cue), nil when none holds.
+local heartbeatDuckAt: number? = nil
 -- Plays asked for, played, deduped, placeholders that never play, risers skipped unloaded, and
 -- plays whose asset had not loaded yet (they start when it arrives, untimed and unfaded).
 export type Stats = {
@@ -460,6 +466,50 @@ local function volumeOf(entry: Sfx.Entry, gainDb: number): number
 	return clampVolume(entry.volume * Sfx.gainOf(gainDb))
 end
 
+-- The low-HP heartbeat's duck under an own hit (sfx.mix.heartbeatDuck) at `now`, as a gain: the
+-- full cut through the hold, then eased back to 1 over the release. Forgets a duck that is over.
+local function heartbeatDuckGain(now: number): number
+	local at = heartbeatDuckAt
+	if at == nil then
+		return 1
+	end
+	local duck = Sfx.mix.heartbeatDuck
+	local db = duck.db
+	local since = now - at
+	if since > duck.holdSeconds then
+		local t = if duck.releaseSeconds > 0 then (since - duck.holdSeconds) / duck.releaseSeconds else 1
+		if t >= 1 then
+			heartbeatDuckAt = nil
+			return 1
+		end
+		db *= 1 - Easing.get(Sfx.effects.easing)(t)
+	end
+	return MusicState.dbToGain(db)
+end
+
+-- A loop's Volume: its data volume at the caller's gain. Only the HP heartbeat sits above the mix
+-- (section 15), less its duck under an own hit; an ambience bed plays at its data level.
+local function loopVolume(name: string, loop: Loop, now: number): number
+	local above = 1
+	if name == Fx.audio.heartbeatLoop then
+		above = MusicState.dbToGain(-Sfx.mix.heartbeatOverAllDb) * heartbeatDuckGain(now)
+	end
+	return clampVolume(volumeOf(loop.entry, 0) * math.clamp(loop.gain, 0, 1) * above)
+end
+
+-- Writes the playing heartbeat's Volume for `now` (its duck moves between the director's calls).
+-- True while a duck still holds or comes back.
+local function applyHeartbeatDuck(now: number): boolean
+	local name = Fx.audio.heartbeatLoop
+	local loop = loops[name]
+	if loop ~= nil and loop.playing then
+		loop.voice.sound.Volume = loopVolume(name, loop, now)
+	else
+		heartbeatDuckGain(now)
+	end
+	return heartbeatDuckAt ~= nil
+end
+
 -- The PlaybackSpeed of one play: the cue layer's own pitch when it sets one, else a random pick in
 -- the entry's range, else 1; held inside the speeds the data may ask for (never 0, which no
 -- region length could be divided by).
@@ -622,12 +672,14 @@ local function writeValue(mix: Mix, key: string, value: number)
 	end
 end
 
+-- Switches the reverb in while a contour runs and out while idle. The EQ is never switched: it
+-- stays in, flat while idle, so a cut lands on the hit's own call with nothing switched in on
+-- that frame (F15: the FinalHit freeze kept its bass for its first frames).
 local function setEnabled(mix: Mix, enabled: boolean)
 	if mix.enabled == enabled then
 		return
 	end
 	mix.enabled = enabled
-	mix.equalizer.Enabled = enabled
 	mix.reverb.Enabled = enabled
 end
 
@@ -649,6 +701,7 @@ local function newMix(group: SoundGroup): Mix
 		writeValue(mix, key, defaultOf(key))
 	end
 	setEnabled(mix, false)
+	equalizer.Enabled = true
 	equalizer.Parent = group
 	reverb.Parent = group
 	return mix
@@ -668,9 +721,11 @@ local function valueAt(mix: Mix, key: string, time: number): number
 end
 
 -- Starts easing `key` to `target` over `ramp` seconds from `startTime`, from wherever it is then
--- (a long frame that fires two steps on one key chains them instead of starting from stale).
+-- (a long frame that fires two steps on one key chains them instead of starting from stale). A
+-- ramp under a frame (sfx.playback.sameFrameSeconds) lands at once: no step could draw it, and
+-- the first step would leave a part-cut frame under the hit (F15).
 local function rampTo(mix: Mix, key: string, target: number, ramp: number, ease: (number) -> number, startTime: number)
-	if ramp <= 0 then
+	if ramp < Sfx.playback.sameFrameSeconds then
 		mix.tweens[key] = nil
 		writeValue(mix, key, target)
 		return
@@ -795,6 +850,9 @@ end
 local function step()
 	local now = deps.now()
 	local busy = advanceFades(now)
+	if heartbeatDuckAt ~= nil and applyHeartbeatDuck(now) then
+		busy = true
+	end
 	for _, mix in mixes do
 		advance(mix, now)
 		if isBusy(mix) then
@@ -1080,6 +1138,7 @@ function SfxPool.reset()
 	stopStepper()
 	table.clear(recent)
 	table.clear(lastShatters)
+	heartbeatDuckAt = nil
 	stats = freshStats()
 	for _, list in voices do
 		for _, voice in list do
@@ -1232,6 +1291,13 @@ function SfxPool.cue(name: string, position: Vector3?, lateBy: number?)
 	local late = if lateBy ~= nil and lateBy > 0 then lateBy else 0
 	-- Carved out or not at the call (issue 9): its delayed layers follow the cue.
 	local own = carvedOut()
+	if ownDepth > 0 and table.find(Sfx.mix.heartbeatDuck.cues, name) ~= nil then
+		-- A hit the local player is in punches through the low-HP heartbeat, from this call (F15).
+		heartbeatDuckAt = deps.now()
+		if applyHeartbeatDuck(deps.now()) then
+			ensureStepper()
+		end
+	end
 	for _, layer in layers do
 		local layerName, gainDb, layerPitch = layer.name, layer.gainDb, layer.pitch
 		local wait = layer.delay - late
@@ -1342,14 +1408,13 @@ function SfxPool.loop(name: string, gain: number)
 		local entry = Sfx.get(family, entryName)
 		local voice = newVoice(entry, family, entryName)
 		parentToSoundService(voice.sound)
-		loop = { voice = voice, entry = entry, playing = false }
+		loop = { voice = voice, entry = entry, playing = false, gain = 0 }
 		loops[name] = loop
 	end
 	local resolved = loop :: Loop
 	local sound = resolved.voice.sound
-	-- Only the HP heartbeat sits above the mix (section 15); an ambience bed plays at its data level.
-	local above = if name == Fx.audio.heartbeatLoop then MusicState.dbToGain(-Sfx.mix.heartbeatOverAllDb) else 1
-	local volume = clampVolume(volumeOf(resolved.entry, 0) * math.clamp(gain, 0, 1) * above)
+	resolved.gain = gain
+	local volume = loopVolume(name, resolved, deps.now())
 	sound.Volume = volume
 	local shouldPlay = gain > Fx.audio.stemFadeFloor and not resolved.entry.placeholder
 	if shouldPlay and not resolved.playing then

@@ -118,16 +118,156 @@ describe("RushDraw's timeline (D-171)", function()
 		expect(RushDraw.isRush("Charger", Enemies.eliteAttacks.Charger)).toBe(false)
 	end)
 
-	it("draws nothing before the launch, then starts on the root and runs the timeline", function()
+	-- D-255 (item 6): the server's body holds its line through the crouch, while its late root may
+	-- still show the turn onto it. Drawn on that root it turned 60 degrees in 5 frames at the launch.
+	it("before the launch the body stands on its root, turned onto its line; the launch turns nothing", function()
 		local state = RushDraw.new(line(1))
-		expect(RushDraw.step(state, 0.99, FRAME, at(0))).toBe(nil)
+		-- The late root still faces 60 degrees off the line.
+		local off = at(0) * CFrame.Angles(0, math.rad(60), 0)
+		local first = RushDraw.step(state, 0.5, FRAME, off) :: CFrame
 		expect(state.phase).toBe("Armed")
-		local first = RushDraw.step(state, 1 + FRAME, FRAME, at(0)) :: CFrame
+		expect((first.Position - off.Position).Magnitude < EPSILON).toBe(true)
+		-- From the root's own look: nothing jumps on the frame the drawing starts.
+		expect(first.LookVector:Dot(off.LookVector)).toBeCloseTo(1, 1e-6)
+		expect(RushDraw.drawing(state)).toBe(false)
+		expect(RushDraw.running(state)).toBe(false)
+		local now, previous, worst = 0.5, first, 0
+		while now < 1 - FRAME / 2 do
+			now += FRAME
+			local drawn = RushDraw.step(state, now, FRAME, off) :: CFrame
+			expect((drawn.Position - off.Position).Magnitude < EPSILON).toBe(true)
+			worst = math.max(worst, math.acos(math.clamp(drawn.LookVector:Dot(previous.LookVector), -1, 1)))
+			previous = drawn
+		end
+		-- On its line by the launch, turned evenly over the time left (60 degrees in 0.5 s).
+		expect(previous.LookVector.Z).toBeCloseTo(-1, 1e-3)
+		expect(math.deg(worst)).toBeLessThan(60 / 0.5 * FRAME * 1.05)
+		local launch = RushDraw.step(state, 1 + FRAME, FRAME, off) :: CFrame
 		expect(state.phase).toBe("Run")
-		expect((first.Position - at(FRAME_TRAVEL).Position).Magnitude < EPSILON).toBe(true)
-		expect(first.LookVector.Z).toBeCloseTo(-1, 1e-9)
+		expect((launch.Position - at(FRAME_TRAVEL).Position).Magnitude < EPSILON).toBe(true)
+		expect(launch.LookVector.Z).toBeCloseTo(-1, 1e-6)
 		expect(RushDraw.drawing(state)).toBe(true)
 		expect(RushDraw.running(state)).toBe(true)
+	end)
+
+	it("a long crouch turns at the chase's own rate; a launch heard late still turns at the run's", function()
+		local chase = AI.archetypes.Charger.turnRate
+		local state = RushDraw.new(line(2))
+		local off = at(0) * CFrame.Angles(0, math.rad(60), 0)
+		RushDraw.step(state, 0, FRAME, off)
+		local drawn = RushDraw.step(state, FRAME, FRAME, off) :: CFrame
+		local turned = math.deg(math.acos(math.clamp(drawn.LookVector:Dot(off.LookVector), -1, 1)))
+		expect(turned).toBeCloseTo(chase * FRAME, 1e-3)
+		-- No crouch drawn (the telegraph lost or late): the launch starts on the root's look.
+		local late = RushDraw.new(line(0))
+		local launched = RushDraw.step(late, 0.1, FRAME, off) :: CFrame
+		local launchTurn = math.deg(math.acos(math.clamp(launched.LookVector:Dot(off.LookVector), -1, 1)))
+		expect(launchTurn).toBeCloseTo(TUNING.turnRate * FRAME, 1e-3)
+	end)
+
+	it("a crouch that will not launch keeps its turn until the late root has come round, then is on it", function()
+		local state = RushDraw.new(line(1))
+		local off = at(0) * CFrame.Angles(0, math.rad(40), 0)
+		local now = 0.5
+		RushDraw.step(state, now, FRAME, off)
+		for _ = 1, 6 do
+			now += FRAME
+			RushDraw.step(state, now, FRAME, off)
+		end
+		local chase = AI.archetypes.Charger.turnRate * FRAME
+		local before = state.facing
+		local lineAngle = math.acos(math.clamp(before:Dot(Vector3.new(0, 0, -1)), -1, 1))
+		expect(RushDraw.release(state, now, off)).toBe(true)
+		-- The late root still faces off: the body never turns back to it; it keeps onto its line, as
+		-- the server's body holds it.
+		now += FRAME
+		local held = RushDraw.step(state, now, FRAME, off) :: CFrame
+		expect(held ~= nil).toBe(true)
+		expect(math.deg(math.acos(math.clamp(held.LookVector:Dot(before), -1, 1)))).toBeCloseTo(chase, 1e-3)
+		expect(math.acos(math.clamp(held.LookVector:Dot(Vector3.new(0, 0, -1)), -1, 1)) < lineAngle).toBe(true)
+		-- Past the launch it was due at, it never launches.
+		while now < 1.05 do
+			now += FRAME
+			RushDraw.step(state, now, FRAME, off)
+		end
+		expect(state.along).toBe(0)
+		expect(state.phase).toBe("Armed")
+		-- The root comes round onto the line: the body, turning onto it at the chase's rate, is on
+		-- its root once they meet, with no jump and no slide.
+		local previous = (state.drawn :: CFrame).LookVector
+		local worst = 0
+		local frames = 0
+		while state.phase == "Armed" and frames < 60 do
+			now += FRAME
+			frames += 1
+			local drawn = RushDraw.step(state, now, FRAME, at(0))
+			local look = if drawn ~= nil then drawn.LookVector else at(0).LookVector
+			worst = math.max(worst, math.deg(math.acos(math.clamp(previous:Dot(look), -1, 1))))
+			previous = look
+		end
+		expect(state.phase).toBe("Done")
+		expect(worst <= chase + 1e-3).toBe(true)
+	end)
+
+	it("a crouch that will not launch slides back onto a root that never comes round", function()
+		local state = RushDraw.new(line(1))
+		local off = at(0) * CFrame.Angles(0, math.rad(40), 0)
+		local now = 0.5
+		RushDraw.step(state, now, FRAME, off)
+		for _ = 1, 10 do
+			now += FRAME
+			RushDraw.step(state, now, FRAME, off)
+		end
+		RushDraw.release(state, now, off)
+		local released = now
+		while state.phase ~= "Done" and now < released + 2 do
+			now += FRAME
+			RushDraw.step(state, now, FRAME, off)
+		end
+		expect(state.phase).toBe("Done")
+		expect(now - released <= TUNING.settleSeconds + TUNING.handBackSeconds + 2 * FRAME).toBe(true)
+		-- Nothing drawn yet: released at once.
+		local fresh = RushDraw.new(line(1))
+		expect(RushDraw.release(fresh, 0.2, off)).toBe(false)
+		expect(fresh.phase).toBe("Done")
+	end)
+
+	it("a predicted launch the server never made slides back onto the root from where it was drawn", function()
+		local state = RushDraw.new(line(0))
+		local now = 0
+		for _ = 1, 9 do
+			now += FRAME
+			RushDraw.step(state, now, FRAME, at(0))
+		end
+		local drawnAt = state.along
+		expect(drawnAt > 1).toBe(true)
+		expect(RushDraw.release(state, now, at(0))).toBe(true)
+		expect(state.phase).toBe("HandBack")
+		now += FRAME
+		local last: CFrame? = RushDraw.step(state, now, FRAME, at(0))
+		expect(((last :: CFrame).Position - at(drawnAt).Position).Magnitude <= FRAME_TRAVEL + EPSILON).toBe(true)
+		local worst = 0
+		while last ~= nil do
+			now += FRAME
+			local step = RushDraw.step(state, now, FRAME, at(0))
+			if step ~= nil then
+				worst = math.max(worst, (step.Position - (last :: CFrame).Position).Magnitude)
+			end
+			last = step
+		end
+		-- At the hand-back's pace (the catch-up's), never a jump.
+		expect(worst <= FRAME_TRAVEL + EPSILON).toBe(true)
+		expect(state.phase).toBe("Done")
+	end)
+
+	it("a death in the crouch leaves the body turned where it was drawn", function()
+		local state = RushDraw.new(line(1))
+		local off = at(0) * CFrame.Angles(0, math.rad(40), 0)
+		RushDraw.step(state, 0.5, FRAME, off)
+		local drawn = RushDraw.step(state, 0.5 + FRAME, FRAME, off) :: CFrame
+		expect(RushDraw.freeze(state)).toBe(true)
+		expect(state.phase).toBe("Frozen")
+		expect(RushDraw.step(state, 0.6, FRAME, at(0))).toBe(drawn)
 	end)
 
 	it("a launch heard late moves one frame of travel, then closes at most catchUpFraction faster", function()
@@ -319,6 +459,55 @@ describe("the world stops a drawn rush where it stops the root (D-199)", functio
 			expect(held.phase).toBe("Settle")
 			expect(held.along).toBeCloseTo(stop, EPSILON)
 		end
+	end)
+
+	-- Item 7: a RushEnded that comes late (the server's word on a stop its cast never saw) left the
+	-- body drawn down the whole run, then slid back over all of it: a jam at 6 studs drawn 16 on.
+	-- The late root has stopped well short of the drawn body: that is the server's body stuck there.
+	for _, lag in { 0.25, 0.5 } do
+		it(
+			("a root come to rest well short of the drawn body is a jam before its word (root %.2f s late)"):format(lag),
+			function()
+				local state = RushDraw.new(line(0))
+				local now = 0
+				local farthest = 0
+				while now < 3 and state.phase ~= "Done" do
+					now += FRAME
+					RushDraw.step(state, now, FRAME, at(math.clamp(SPEED * (now - lag), 0, 6)))
+					farthest = math.max(farthest, state.along)
+				end
+				-- The root reached 6 studs at 6 / speed + lag and has rested restSeconds since: the body
+				-- goes no farther than the timeline had it then.
+				local known = 6 / SPEED + lag + AI.rushWorld.restSeconds
+				expect(farthest <= RushDraw.distanceAt(line(0), known + 2 * FRAME) + EPSILON).toBe(true)
+				expect(farthest < LENGTH - 1).toBe(true)
+				-- Then back onto the stuck root.
+				expect(state.phase).toBe("Done")
+			end
+		)
+	end
+
+	it("a root still in its crouch, or one at rest at the run's end, is no jam", function()
+		-- A first move after a long stand: the root leaves its crouch 0.65 s late.
+		local state = RushDraw.new(line(0))
+		local now = 0
+		local farthest = 0
+		while now < 3 and state.phase ~= "Done" do
+			now += FRAME
+			RushDraw.step(state, now, FRAME, at(RushDraw.distanceAt(line(0), now - 0.65)))
+			farthest = math.max(farthest, state.along)
+		end
+		expect(farthest).toBeCloseTo(LENGTH, EPSILON)
+		-- A root that runs the timeline 0.3 s late comes to rest at the run's end.
+		local free = RushDraw.new(line(0))
+		now = 0
+		farthest = 0
+		while now < 3 and free.phase ~= "Done" do
+			now += FRAME
+			RushDraw.step(free, now, FRAME, at(RushDraw.distanceAt(line(0), now - 0.3)))
+			farthest = math.max(farthest, free.along)
+		end
+		expect(farthest).toBeCloseTo(LENGTH, EPSILON)
 	end)
 
 	it("a jam heard after the world stopped it draws the body neither back nor on", function()
@@ -730,6 +919,9 @@ type Frame = {
 	-- it paced the walk to (its clip speed times the rig's walkSpeed; 0 with no walk).
 	walkTarget: number,
 	gait: number,
+	root: Vector3, -- the root part's place
+	look: Vector3, -- the drawn body's look
+	charge: boolean, -- the Charge clip plays (a live handle, not fading out)
 }
 
 type Options = {
@@ -748,10 +940,14 @@ type Options = {
 	gait: boolean?, -- the real locomotion driver walks the rig (Replication.watch)
 	wallSlam: any?, -- the slam's dust (Replication's wallSlam dependency; none when nil)
 	me: Vector3?, -- where the local player's body stands (default: the world's origin)
+	-- Degrees the server's body faced off the line at server time `t` (since the launch), which the
+	-- replicated root shows `lag` late (default: on the line throughout).
+	rootYaw: ((t: number) -> number)?,
 }
 
 local WIND_UP_START = 10
 local LAUNCH = WIND_UP_START + CHARGE.windUp
+local CHARGE_CLIP = "enemy/" .. BOAR.skin .. "/" .. CHARGE.clip
 local ORIGIN = Vector3.new(10, 3, 20)
 local DIRECTION = Vector3.new(1, 0, -1).Unit
 
@@ -815,7 +1011,11 @@ local function rush(options: Options): Run
 	local root = model.PrimaryPart :: BasePart
 	root.LocalTransparencyModifier = 0
 	local function place(frame: CFrame)
-		root.CFrame = frame
+		local yaw = options.rootYaw
+		local turned = if yaw ~= nil
+			then frame * CFrame.Angles(0, math.rad(yaw(clock - options.lag - LAUNCH)), 0)
+			else frame
+		root.CFrame = turned
 		root.Position = frame.Position -- Lune keeps the two apart; the engine does not
 		root.AssemblyLinearVelocity = velocityAt(clock - options.lag, options.stopAt)
 	end
@@ -975,10 +1175,14 @@ local function rush(options: Options): Run
 		local drawn = root.CFrame * (offset or CFrame.identity)
 		local solved = solve(model, root.CFrame)
 		local walkTarget, gait = 0, 0
+		local charge = false
 		for _, handle in (animator :: any).mixer:handles() do
 			if handle.clipId == ChoreoData.rigs.Boar.walk and not handle.stopping then
 				walkTarget = handle.targetWeight
 				gait = if walkTarget > 0 then handle.speed * Rigs.Boar.walkSpeed else 0
+			end
+			if handle.clipId == CHARGE_CLIP and not handle.stopping and not handle.done then
+				charge = true
 			end
 		end
 		table.insert(frames, {
@@ -993,6 +1197,9 @@ local function rush(options: Options): Run
 			pose = drawn:PointToObjectSpace(solved.Head.Position),
 			walkTarget = walkTarget,
 			gait = gait,
+			root = root.Position,
+			look = drawn.LookVector,
+			charge = charge,
 		})
 	end
 	if options.gait then
@@ -1070,7 +1277,8 @@ describe("a Boar's rush through Replication and Choreo (D-171, item 1)", functio
 						expect(frame.hidden).toBe(TUNING.hiddenRootTransparency)
 					end
 					if frame.t < 0 then
-						expect(frame.offset).toBe(false)
+						-- Before the launch the body stands on its root (turned onto its line, D-255).
+						expect((frame.drawn - frame.root).Magnitude < EPSILON).toBe(true)
 					end
 				end
 				-- The body comes to rest where the server's body stopped.
@@ -1112,12 +1320,159 @@ describe("a Boar's rush through Replication and Choreo (D-171, item 1)", functio
 			for index = 2, #frames do
 				expect(frames[index].along - frames[index - 1].along >= -EPSILON).toBe(true)
 			end
-			-- A wind-up the client has seen launch shows no telegraph either.
+			-- A wind-up the client has seen launch shows no telegraph either, nor plays its Charge
+			-- clip from the middle of its run (item 8: its ActionStarted is as late).
 			for _, call in run.calls do
 				expect(call.module == "telegraphs" and call.fn == "show").toBe(false)
 			end
+			for _, frame in frames do
+				expect(frame.charge).toBe(false)
+			end
 			expect(frames[#frames].along).toBeCloseTo(LENGTH, EPSILON)
 		end
+	end)
+
+	-- Item 6 (D-255): recording A 10.25 to 10.30 s, the boar turned 60 degrees in a few frames at its
+	-- launch: its late root still showed the turn onto the line the server's body already held.
+	for _, latency in { 0.1, 0.25 } do
+		it(
+			("the crouch turns the body onto its line before the launch: no snap (latency %.2f s)"):format(latency),
+			function()
+				local run = rush({
+					latency = latency,
+					lag = latency + 0.15,
+					-- The server's body still turning onto its line at the wind-up's start, at the chase's
+					-- rate: its late root shows it 60 degrees off at the launch.
+					rootYaw = function(t: number): number
+						return math.clamp(60 - AI.archetypes.Charger.turnRate * (t - 0.05), 0, 60)
+					end,
+				})
+				local worst = 0
+				for index = 2, #run.frames do
+					local a, b = run.frames[index - 1].look, run.frames[index].look
+					worst = math.max(worst, math.deg(math.acos(math.clamp(a:Dot(b), -1, 1))))
+				end
+				-- Before: 12 degrees a frame (the run's 720 a second) over the launch's first 5 frames.
+				-- Now at most the turn the crouch's time left needs, about 2 degrees a frame.
+				expect(worst <= 60 / (CHARGE.windUp - latency) * FRAME + 0.2).toBe(true)
+				for _, frame in run.frames do
+					if frame.t >= 0 and frame.t < CHARGE.strike then
+						expect(frame.look:Dot(DIRECTION)).toBeCloseTo(1, 1e-3)
+					end
+				end
+				expect(run.frames[#run.frames].offset).toBe(false)
+			end
+		)
+	end
+
+	it("a Stagger in the crouch keeps the body's turn until its late root has come round: no snap back", function()
+		local chase = AI.archetypes.Charger.turnRate
+		local run = rush({
+			latency = 0.1,
+			lag = 0.25,
+			started = false,
+			stopAt = 0,
+			-- The server's body coming round onto its line late in the crouch, slower than the chase
+			-- turns: its late root still 21 degrees off when the Stagger is heard.
+			rootYaw = function(t: number): number
+				return math.clamp(60 * (-0.1 - t), 0, 60)
+			end,
+			events = {
+				{ at = -0.3, name = "StateChanged", payload = { entityId = 5, state = "Stagger", duration = 1 } },
+			},
+		})
+		local worst = 0
+		for index = 2, #run.frames do
+			local a, b = run.frames[index - 1].look, run.frames[index].look
+			worst = math.max(worst, math.deg(math.acos(math.clamp(a:Dot(b), -1, 1))))
+			expect((run.frames[index].drawn - run.frames[index].root).Magnitude < EPSILON).toBe(true)
+		end
+		expect(worst <= chase * FRAME + 0.05).toBe(true)
+		expect(run.frames[#run.frames].offset).toBe(false)
+	end)
+
+	-- Item 7 (D-256): a jam the server's cast never saw, told late: before, the body ran the whole
+	-- line (22 studs) past the stuck root at 6, then slid back over all of it.
+	for _, lag in { 0.25, 0.5 } do
+		it(
+			("a jam told after the run is over: the late root at rest stops the drawn body (root %.2f s late)"):format(
+				lag
+			),
+			function()
+				local run = rush({
+					latency = lag,
+					lag = lag,
+					stopAt = 6,
+					frames = 220,
+					events = {
+						{
+							at = 1.1,
+							name = "RushEnded",
+							payload = {
+								entityId = 5,
+								launchedAt = LAUNCH,
+								serverTime = LAUNCH + 1.1,
+								distance = 6,
+								reason = "Jammed",
+							},
+						},
+					},
+				})
+				local farthest = 0
+				for _, frame in run.frames do
+					farthest = math.max(farthest, frame.along)
+				end
+				local known = 6 / SPEED + lag + AI.rushWorld.restSeconds
+				expect(farthest <= RushDraw.distanceAt(line(0), known + 2 * FRAME) + EPSILON).toBe(true)
+				local _, ends, worst = steps(run)
+				expect(ends <= FRAME_TRAVEL + EPSILON).toBe(true)
+				expect(worst <= FRAME_TRAVEL + EPSILON).toBe(true)
+				local last = run.frames[#run.frames]
+				expect(last.offset).toBe(false)
+				expect(last.along).toBeCloseTo(6, EPSILON)
+			end
+		)
+	end
+
+	-- Item 5 (D-254): a hold or a sleep in the wind-up dropped the attack without a word, and the
+	-- client drew the launch its telegraph predicted: a phantom 22-stud rush, the tell still lit.
+	it("a wind-up the server dropped draws no rush, takes its tell down and stops its clip", function()
+		local run = rush({
+			latency = 0.1,
+			lag = 0.25,
+			started = false,
+			stopAt = 0,
+			events = {
+				{
+					at = -0.3,
+					name = "RushEnded",
+					payload = {
+						entityId = 5,
+						launchedAt = LAUNCH,
+						serverTime = LAUNCH - 0.3,
+						distance = 0,
+						reason = "Dropped",
+					},
+				},
+			},
+		})
+		local farthest = 0
+		for _, frame in run.frames do
+			farthest = math.max(farthest, math.abs(frame.along))
+			expect((frame.drawn - frame.root).Magnitude < EPSILON).toBe(true)
+			if frame.t > -0.2 + FRAME then
+				expect(frame.charge).toBe(false)
+			end
+		end
+		expect(farthest < EPSILON).toBe(true)
+		local hidden = false
+		for _, call in run.calls do
+			if call.module == "telegraphs" and call.fn == "hide" then
+				hidden = true
+			end
+		end
+		expect(hidden).toBe(true)
+		expect(run.frames[#run.frames].offset).toBe(false)
 	end)
 
 	it("a jam: the body stops being drawn ahead, then slides back onto the stuck root without a jump", function()

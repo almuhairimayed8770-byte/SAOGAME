@@ -144,9 +144,9 @@ local clip: Types.ClipDef = {
 	events = {
 		{ time = 0, kind = "Sfx", data = { name = "whoosh.Basic" } },
 		{ time = 0.1, kind = "TrailOn", data = { kind = "Basic" } },
-		{ time = 0.1, kind = "SmearOn", data = { axis = "Y" } },
 		{ time = 0.1, kind = "HitWindowOpen", data = { hit = 1 } },
-		{ time = 0.1333, kind = "SmearOff" },
+		{ time = 0.1083, kind = "SmearOn", data = { axis = "Y" } },
+		{ time = 0.1417, kind = "SmearOff" },
 		{ time = 0.24, kind = "HitWindowClose", data = { hit = 1 } },
 		{ time = 0.27, kind = "TrailOff" },
 		{ time = 0.3, kind = "PostMotionStart" },
@@ -154,7 +154,7 @@ local clip: Types.ClipDef = {
 	beats = {
 		Anticipation = { start = 0, finish = 0.1 },
 		Snap = { start = 0.1, finish = 0.15 },
-		Smear = { start = 0.1, finish = 0.1333 },
+		Smear = { start = 0.1083, finish = 0.1417 },
 		Hold = { start = 0.15, finish = 0.18 },
 		Settle = { start = 0.18, finish = 0.28 },
 		Recovery = { start = 0.3, finish = 0.45 },

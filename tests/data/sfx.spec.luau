@@ -235,7 +235,7 @@ local PICKS: { { any } } = {
 		0.22,
 		2.2,
 		0.7,
-		0.55,
+		0.2,
 		1,
 		1,
 		false,
@@ -446,7 +446,7 @@ local PICKS: { { any } } = {
 		0.07,
 		1.2,
 		0.7,
-		0.9,
+		0.3,
 		0.97,
 		1,
 		false,
@@ -474,7 +474,7 @@ local PICKS: { { any } } = {
 		0.985,
 		2,
 		0.4,
-		0.5,
+		0.18,
 		1,
 		1,
 		false,
@@ -863,10 +863,24 @@ local RECIPES: { [string]: { [string]: number } } = {
 	Parry = { ["guard.Parry"] = 0, ["guard.ParryRing"] = 0 },
 	Block = { ["guard.Block"] = 0 },
 	GuardBreak = { ["guard.GuardBreak"] = 0, ["impact.Sub"] = -6 },
-	Shatter = { ["shatter.Crack"] = 0, ["shatter.Slam"] = 0, ["shatter.Chime"] = 0, ["impact.SubDrop"] = -3 },
-	ShatterHeavy = { ["shatter.Crack"] = 0, ["shatter.Slam"] = 0, ["shatter.Chime"] = 0, ["impact.SubDrop"] = 0 },
+	-- The shatters lead with two glass takes over the bass (F15, sfx.shatterBalance).
+	Shatter = {
+		["shatter.Crack"] = 0,
+		["shatter.BossCrack"] = 0,
+		["shatter.Slam"] = 0,
+		["shatter.Chime"] = 0,
+		["impact.SubDrop"] = -3,
+	},
+	ShatterHeavy = {
+		["shatter.Crack"] = 0,
+		["shatter.BossCrack"] = 0,
+		["shatter.Slam"] = 0,
+		["shatter.Chime"] = 0,
+		["impact.SubDrop"] = 0,
+	},
 	BossShatter = {
 		["shatter.BossCrack"] = 0,
+		["shatter.Crack"] = 0,
 		["shatter.BossBoom"] = 0,
 		["shatter.Chime"] = 0,
 		["impact.SubDrop"] = 0,
@@ -894,6 +908,93 @@ local function stepOf(contourName: string, group: string, key: string, predicate
 	end
 	return nil
 end
+
+-- The mix the reel review heard (F15): the shatter bass-heavy, its glass about
+-- Sfx.shatterBalance.glassGapDb under the bass. The entry volumes and the shatter cues' gains as
+-- they were then.
+local REVIEWED_VOLUMES: { [string]: number } = {
+	["shatter.Crack"] = 1,
+	["shatter.BossCrack"] = 1,
+	["shatter.Slam"] = 0.9,
+	["shatter.BossBoom"] = 0.5,
+	["impact.SubDrop"] = 0.55,
+}
+local REVIEWED_SHATTERS: { [string]: { [string]: number } } = {
+	Shatter = { ["shatter.Crack"] = 0, ["shatter.Slam"] = 0, ["shatter.Chime"] = 0, ["impact.SubDrop"] = -3 },
+	ShatterHeavy = { ["shatter.Crack"] = 0, ["shatter.Slam"] = 0, ["shatter.Chime"] = 0, ["impact.SubDrop"] = 0 },
+	BossShatter = {
+		["shatter.BossCrack"] = 0,
+		["shatter.BossBoom"] = 0,
+		["shatter.Chime"] = 0,
+		["impact.SubDrop"] = 0,
+	},
+}
+
+-- A shatter cue's glass (its glass layers' summed power) over its loudest bass layer, in dB, from
+-- each layer's played amplitude (entry volume x 10^(gainDb / 20)).
+local function glassOverBass(layers: { [string]: number }, volumeOf: (string) -> number): number
+	local glassPower, bassPeak = 0, 0
+	for name, gainDb in layers do
+		local amplitude = volumeOf(name) * 10 ^ (gainDb / 20)
+		if table.find(Sfx.shatterBalance.glass, name) ~= nil then
+			glassPower += amplitude * amplitude
+		elseif table.find(Sfx.shatterBalance.bass, name) ~= nil then
+			bassPeak = math.max(bassPeak, amplitude)
+		end
+	end
+	expect(glassPower).toBeGreaterThan(0)
+	expect(bassPeak).toBeGreaterThan(0)
+	return 10 * math.log10(glassPower) - 20 * math.log10(bassPeak)
+end
+
+describe("sfx shatter balance (F15)", function()
+	it("lifts every shatter's glass over its bass by at least the gap the review heard", function()
+		for kind, cueName in Sfx.shatterCues do
+			local reviewed = REVIEWED_SHATTERS[cueName]
+			expect(reviewed).never.toBeNil()
+			local now: { [string]: number } = {}
+			for _, layer in Sfx.cue(cueName) do
+				now[layer.name] = layer.gainDb
+			end
+			local before = glassOverBass(reviewed, function(name: string): number
+				return REVIEWED_VOLUMES[name] or entryOf(name).volume
+			end)
+			local after = glassOverBass(now, function(name: string): number
+				return entryOf(name).volume
+			end)
+			if after - before < Sfx.shatterBalance.glassGapDb then
+				error(
+					("%s (%s): the glass gains %.2f dB over the bass, under the %s dB the review heard"):format(
+						cueName,
+						kind,
+						after - before,
+						tostring(Sfx.shatterBalance.glassGapDb)
+					),
+					0
+				)
+			end
+		end
+	end)
+
+	it("names glass and bass layers that resolve, and doubles the glass in every shatter", function()
+		for _, name in Sfx.shatterBalance.glass do
+			expect(entryOf(name)).never.toBeNil()
+		end
+		for _, name in Sfx.shatterBalance.bass do
+			expect(entryOf(name)).never.toBeNil()
+		end
+		-- The glass is doubled in every shatter: two takes, so the burst is glass first.
+		for _, cueName in Sfx.shatterCues do
+			local glass = 0
+			for _, layer in Sfx.cue(cueName) do
+				if table.find(Sfx.shatterBalance.glass, layer.name) ~= nil then
+					glass += 1
+				end
+			end
+			expect(glass).toBeGreaterThanOrEqual(2)
+		end
+	end)
+end)
 
 describe("sfx cue gains", function()
 	it("has exactly the recipes' cues, each with the recipe's layers and gains", function()
@@ -933,7 +1034,8 @@ describe("sfx cue gains", function()
 		for _, cueName in Sfx.cueNames() do
 			for _, layer in Sfx.cue(cueName) do
 				local pitched = (cueName == "HitCrit" and (layer.name == "impact.Crack" or layer.name == "impact.Ring"))
-					or (cueName == "BossShatter" and layer.name == "shatter.Chime")
+					or (cueName == "BossShatter" and (layer.name == "shatter.Chime" or layer.name == "shatter.Crack"))
+					or ((cueName == "Shatter" or cueName == "ShatterHeavy") and layer.name == "shatter.BossCrack")
 				expect(layer.pitch ~= nil).toBe(pitched)
 			end
 		end
@@ -943,8 +1045,12 @@ describe("sfx cue gains", function()
 		expect(Sfx.get("shatter", "BossCrack").pitchRange).toEqual({ 0.7, 0.75 })
 		expect(layerOf("BossShatter", "shatter.BossCrack").pitch).toBeNil()
 		expect(layerOf("BossShatter", "shatter.Chime").pitch).toBe(0.75)
-		-- No slam: the boom replaces it.
+		-- No slam: the boom replaces it. The glass crack plays slowed to the boss glass's speed.
 		expect(layerOf("BossShatter", "shatter.Slam")).toBeNil()
+		expect(layerOf("BossShatter", "shatter.Crack").pitch).toBe(0.7)
+		-- A mob's and a player's shatter play the boss glass at its own speed: the shards.
+		expect(layerOf("Shatter", "shatter.BossCrack").pitch).toBe(1)
+		expect(layerOf("ShatterHeavy", "shatter.BossCrack").pitch).toBe(1)
 	end)
 
 	it("starts every contact layer with the crack on the contact frame; only the final hold's sub waits", function()
@@ -1047,7 +1153,6 @@ local OUT_OF_SCOPE: { [string]: string } = {
 local UNPLAYED: { [string]: string } = {
 	["impact.Armor"] = "no in-scope enemy has an armored surface",
 	["impact.Construct"] = "no in-scope enemy is a construct",
-	["shatter.BossCrack"] = "Phase 0 has no boss to play BossShatter",
 	["shatter.BossBoom"] = "Phase 0 has no boss to play BossShatter",
 	["telegraph.Tick"] = "every in-scope attack telegraphs Unblockable or GuardBreak",
 }
@@ -1224,7 +1329,7 @@ describe("sfx Phase 0 coverage", function()
 			end
 		end
 		-- Names that only sit in a table nothing reads, or in the pool's own helpers, are no caller.
-		expect(sounds["shatter.BossCrack"]).toBeNil()
+		expect(sounds["shatter.BossBoom"]).toBeNil()
 		expect(sounds["telegraph.Tick"]).toBeNil()
 	end)
 
@@ -2018,7 +2123,7 @@ describe("sfx validator: cues and contours", function()
 					table.insert(data.cues.BossShatter, { name = "impact.Ring", delay = 0.1, gainDb = -6 })
 				end
 			end),
-			"sfx.cues.BossShatter has 7 layers"
+			"sfx.cues.BossShatter has 8 layers"
 		)
 	end)
 

@@ -624,3 +624,102 @@ describe("camera validator: punch and render stalls", function()
 		end
 	)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- Close fights, the bearing's turn rate, the aim's depth and the lock's stick (F3, issue 12)
+-- ------------------------------------------------------------------------------------------
+
+describe("CameraMath close fights", function()
+	it("eases the close weight from toe to toe out to apart, with no kink at either end", function()
+		expect(CameraMath.closeness(0, 1.5, 4.5)).toBe(1)
+		expect(CameraMath.closeness(1.5, 1.5, 4.5)).toBe(1)
+		expect(CameraMath.closeness(4.5, 1.5, 4.5)).toBe(0)
+		expect(CameraMath.closeness(9, 1.5, 4.5)).toBe(0)
+		expect(CameraMath.closeness(3, 1.5, 4.5)).toBeCloseTo(0.5, 1e-9)
+		local previous = 1
+		for gap = 1.5, 4.5, 0.1 do
+			local weight = CameraMath.closeness(gap, 1.5, 4.5)
+			expect(weight).toBeLessThanOrEqual(previous + 1e-12)
+			previous = weight
+		end
+		-- Flat at both ends: a step of a hundredth moves it by well under a hundredth.
+		expect(1 - CameraMath.closeness(1.51, 1.5, 4.5)).toBeLessThan(1e-3)
+		expect(CameraMath.closeness(4.49, 1.5, 4.5)).toBeLessThan(1e-3)
+	end)
+
+	it("measures the flat gap from a point to a footprint box", function()
+		expect(CameraMath.footprintGap(0, 0, 1.3, 4)).toBe(0)
+		expect(CameraMath.footprintGap(3.3, 0, 1.3, 4)).toBeCloseTo(2, 1e-9)
+		expect(CameraMath.footprintGap(0, -6, 1.3, 4)).toBeCloseTo(2, 1e-9)
+		expect(CameraMath.footprintGap(-4.3, 8, 1.3, 4)).toBeCloseTo(5, 1e-9)
+	end)
+
+	it("swings a close fight to at least its three-quarter angle, and only a close one", function()
+		local params = camera.lock
+		expect(typeof(params.closeSwingDegrees)).toBe("number")
+		for _, separation in { 0.5, 1, 1.5, 2, 2.5, 3 } do
+			local open = CameraMath.twoShot({ 0, 3, 0 }, { 0, 3, -separation }, params)
+			local close = CameraMath.twoShot({ 0, 3, 0 }, { 0, 3, -separation }, params, nil, 1)
+			expect(open.closeness).toBe(0)
+			expect(close.closeness).toBe(1)
+			expect(close.swing).toBeGreaterThanOrEqual(params.closeSwingDegrees :: number)
+			expect(close.swing).toBeGreaterThanOrEqual(open.swing)
+			expect(close.distance).toBe(open.distance)
+			local half = CameraMath.twoShot({ 0, 3, 0 }, { 0, 3, -separation }, params, nil, 0.5)
+			expect(half.swing).toBeGreaterThanOrEqual((params.closeSwingDegrees :: number) / 2 - 1e-9)
+		end
+		-- Apart, a closeness of 0 leaves the solved swing as it was.
+		local apart = CameraMath.twoShot({ 0, 3, 0 }, { 0, 3, -10 }, params, nil, 0)
+		local plain = CameraMath.twoShot({ 0, 3, 0 }, { 0, 3, -10 }, params)
+		expect(apart.swing).toBe(plain.swing)
+	end)
+
+	it("caps a whip's turn rate and leaves an ordinary ease alone", function()
+		-- A spring that moved 10 degrees in a 60 fps frame at 600 deg/s: held to 150 deg/s.
+		local position, velocity = CameraMath.capTurn(20, 30, 600, 150, 1 / 60)
+		expect(position).toBeCloseTo(22.5, 1e-9)
+		expect(velocity).toBe(150)
+		local back, backVelocity = CameraMath.capTurn(20, 10, -600, 150, 1 / 60)
+		expect(back).toBeCloseTo(17.5, 1e-9)
+		expect(backVelocity).toBe(-150)
+		local calm, calmVelocity = CameraMath.capTurn(20, 21, 60, 150, 1 / 60)
+		expect(calm).toBe(21)
+		expect(calmVelocity).toBe(60)
+	end)
+
+	it("holds the aim out at the player's depth when the target runs to the camera's side", function()
+		-- The camera 10 studs behind the player (+Z), the target ran past to 3 studs from the lens.
+		local cameraAt, player = { 0, 6.7, 10 }, { 0, 3, 0 }
+		local aim = v3(CameraMath.holdAimDepth(cameraAt, player, { 2, 4.3, 5 }, 1))
+		expect(aim.Z).toBeCloseTo(0, 1e-6)
+		expect(aim.X).toBeCloseTo(2, 1e-6)
+		expect(aim.Y).toBeCloseTo(4.3, 1e-6)
+		-- An aim already past the player stays where it is.
+		local ahead = v3(CameraMath.holdAimDepth(cameraAt, player, { 1, 4.3, -3 }, 1))
+		expect((ahead - Vector3.new(1, 4.3, -3)).Magnitude).toBeLessThan(1e-6)
+		-- The look down onto the held aim is the shallow one the player's depth gives.
+		local look = (aim - v3(cameraAt)).Unit
+		expect(math.deg(math.asin(-look.Y))).toBeLessThan(20)
+	end)
+
+	it("reads the stick in the lock's frame: forward walks at the target wherever the camera looks", function()
+		-- The camera looks 50 degrees off the line to a target straight down -Z.
+		local yaw = math.rad(50)
+		local view = { -math.sin(yaw), -0.2, -math.cos(yaw) }
+		local line = { 0, 0, -4 }
+		-- W: the engine's forward is the camera's flat look.
+		local forward = v3(CameraMath.lockMove({ view[1], 0, view[3] }, view, line))
+		expect((forward.Unit - Vector3.new(0, 0, -1)).Magnitude).toBeLessThan(1e-9)
+		-- D: the camera's flat right turns to the line's right (+X for a line down -Z).
+		local right = v3(CameraMath.lockMove({ math.cos(yaw), 0, -math.sin(yaw) }, view, line))
+		expect((right - Vector3.new(1, 0, 0)).Magnitude).toBeLessThan(1e-9)
+		-- S walks straight away, and the stick's length is kept.
+		local back = v3(CameraMath.lockMove({ math.sin(yaw) * 0.5, 0, math.cos(yaw) * 0.5 }, view, line))
+		expect((back - Vector3.new(0, 0, 0.5)).Magnitude).toBeLessThan(1e-9)
+		-- No line (the target on the player) or no flat view: unchanged.
+		local same = v3(CameraMath.lockMove({ 1, 0, 0 }, view, { 0, 2, 0 }))
+		expect((same - Vector3.new(1, 0, 0)).Magnitude).toBeLessThan(1e-9)
+		local up = v3(CameraMath.lockMove({ 1, 0, 0 }, { 0, -1, 0 }, line))
+		expect((up - Vector3.new(1, 0, 0)).Magnitude).toBeLessThan(1e-9)
+	end)
+end)

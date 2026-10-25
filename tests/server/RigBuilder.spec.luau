@@ -244,21 +244,25 @@ describe("RigBuilder.addBlocker (D-198)", function()
 	local AI = Harness.load("src/shared/data/ai")
 	local GROUPS = AI.collision
 
-	it("an upright, invisible box over the root's footprint from the floor to blockerHeight, welded on", function()
+	it("an upright, invisible box over the body's footprint from the floor to blockerHeight, welded on", function()
 		for _, rigId in { "Boar", "Kobold" } do
 			local model = RigBuilder.build(rigId)
 			local root = model.PrimaryPart :: BasePart
 			local rig = Rigs[rigId]
+			local centre, size = RigBuilder.footprint(rigId)
 			local blocker = RigBuilder.addBlocker(model) :: Part
 			expect(blocker).never.toBeNil()
 			expect(blocker.Name).toBe(RigBuilder.BLOCKER_NAME)
 			expect(blocker.Parent).toBe(model)
-			expect(near(blocker.Size, Vector3.new(root.Size.X, GROUPS.blockerHeight, root.Size.Z))).toBe(true)
+			expect(near(blocker.Size, Vector3.new(size.X, GROUPS.blockerHeight, size.Z))).toBe(true)
 			-- The root's centre stands hipHeight + half its height above the floor.
 			local floorY = root.CFrame.Position.Y - (rig.hipHeight + root.Size.Y / 2)
 			local offset = root.CFrame:ToObjectSpace(blocker.CFrame)
 			expect(
-				near(offset.Position, Vector3.new(0, GROUPS.blockerHeight / 2 - (rig.hipHeight + root.Size.Y / 2), 0))
+				near(
+					offset.Position,
+					Vector3.new(centre.X, GROUPS.blockerHeight / 2 - (rig.hipHeight + root.Size.Y / 2), centre.Z)
+				)
 			).toBe(true)
 			expect(near(offset.LookVector, Vector3.new(0, 0, -1))).toBe(true)
 			expect(blocker.CFrame.Position.Y - blocker.Size.Y / 2).toBeCloseTo(floorY, 1e-4)
@@ -278,6 +282,87 @@ describe("RigBuilder.addBlocker (D-198)", function()
 			-- No Motor6D: the animator and the joint walkers never see it.
 			expect(blocker:FindFirstChildOfClass("Motor6D")).toBeNil()
 		end
+	end)
+
+	-- The flat box over a part's corners in the root's space at rest: min X, max X, min Z, max Z.
+	local function flatBox(root: BasePart, part: BasePart): (number, number, number, number)
+		local half = part.Size / 2
+		local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
+		for _, x in { -1, 1 } do
+			for _, y in { -1, 1 } do
+				for _, z in { -1, 1 } do
+					local corner = root.CFrame:PointToObjectSpace(
+						part.CFrame:PointToWorldSpace(Vector3.new(half.X * x, half.Y * y, half.Z * z))
+					)
+					minX, maxX = math.min(minX, corner.X), math.max(maxX, corner.X)
+					minZ, maxZ = math.min(minZ, corner.Z), math.max(maxZ, corner.Z)
+				end
+			end
+		end
+		return minX, maxX, minZ, maxZ
+	end
+
+	it("covers the whole body at rest, tight on every side, but not what it holds", function()
+		-- The boar walked into head-on stopped inside its head (the root ends 2.5 studs ahead of its
+		-- centre, the snout 5.6), from behind inside its tail, and on its flank 0.1 into its side.
+		local expected = {
+			Boar = { -1.3, 1.3, -5.6, 3.314 },
+			Kobold = { -2.0, 2.0, -0.75, 0.75 },
+		}
+		for _, rigId in { "Boar", "Kobold" } do
+			local model = RigBuilder.build(rigId)
+			local root = model.PrimaryPart :: BasePart
+			local rig = Rigs[rigId]
+			local blocker = RigBuilder.addBlocker(model) :: Part
+			local bMinX, bMaxX, bMinZ, bMaxZ = flatBox(root, blocker)
+			local want = expected[rigId]
+			expect(bMinX).toBeCloseTo(want[1], 1e-3)
+			expect(bMaxX).toBeCloseTo(want[2], 1e-3)
+			expect(bMinZ).toBeCloseTo(want[3], 1e-3)
+			expect(bMaxZ).toBeCloseTo(want[4], 1e-3)
+			local touched = { minX = false, maxX = false, minZ = false, maxZ = false }
+			local held = rig.trailParts or {}
+			for partName in rig.parts do
+				local part = model:FindFirstChild(partName) :: BasePart
+				local minX, maxX, minZ, maxZ = flatBox(root, part)
+				if table.find(held, partName) ~= nil then
+					-- What it holds pokes out: a walk-in stops at the body, not the axe's head.
+					expect(minZ < bMinZ - 1 or maxZ > bMaxZ + 1 or minX < bMinX - 0.1 or maxX > bMaxX + 0.1).toBe(true)
+					continue
+				end
+				expect(minX).toBeGreaterThanOrEqual(bMinX - 1e-4)
+				expect(maxX).toBeLessThanOrEqual(bMaxX + 1e-4)
+				expect(minZ).toBeGreaterThanOrEqual(bMinZ - 1e-4)
+				expect(maxZ).toBeLessThanOrEqual(bMaxZ + 1e-4)
+				touched.minX = touched.minX or math.abs(minX - bMinX) < 1e-4
+				touched.maxX = touched.maxX or math.abs(maxX - bMaxX) < 1e-4
+				touched.minZ = touched.minZ or math.abs(minZ - bMinZ) < 1e-4
+				touched.maxZ = touched.maxZ or math.abs(maxZ - bMaxZ) < 1e-4
+			end
+			expect(touched).toEqual({ minX = true, maxX = true, minZ = true, maxZ = true })
+		end
+	end)
+
+	it("measures the same footprint wherever the enemy stands and whatever pose it holds", function()
+		local centre, size = RigBuilder.footprint("Boar")
+		local model = RigBuilder.build("Boar")
+		local root = model.PrimaryPart :: BasePart
+		-- Somewhere else, turned, with a limb out of its rest place (a clip already playing).
+		local moved = CFrame.new(40, 3, -12) * CFrame.Angles(0, 1.1, 0)
+		for _, part in model:GetChildren() do
+			if part:IsA("BasePart") and part ~= root then
+				part.CFrame = moved * root.CFrame:ToObjectSpace(part.CFrame)
+			end
+		end
+		root.CFrame = moved
+		local head = model:FindFirstChild("Head") :: BasePart
+		head.CFrame = head.CFrame * CFrame.new(0, 0, -3)
+		local blocker = RigBuilder.addBlocker(model) :: Part
+		local offset = root.CFrame:ToObjectSpace(blocker.CFrame)
+		expect(offset.Position.X).toBeCloseTo(centre.X, 1e-3)
+		expect(offset.Position.Z).toBeCloseTo(centre.Z, 1e-3)
+		expect(blocker.Size.X).toBeCloseTo(size.X, 1e-3)
+		expect(blocker.Size.Z).toBeCloseTo(size.Z, 1e-3)
 	end)
 
 	it("a model without a root or a known rig gets none", function()

@@ -202,10 +202,10 @@ local function part(name: string, position: Vector3, size: Vector3, parent: Inst
 	return created
 end
 
-local function character(name: string, position: Vector3, parent: Instance): Model
+local function character(name: string, position: Vector3, parent: Instance, size: Vector3?): Model
 	local model = Instance.new("Model")
 	model.Name = name
-	model.PrimaryPart = part("HumanoidRootPart", position, Vector3.new(2, 2, 1), model)
+	model.PrimaryPart = part("HumanoidRootPart", position, size or Vector3.new(2, 2, 1), model)
 	Instance.new("Humanoid").Parent = model
 	model.Parent = parent
 	return model
@@ -388,7 +388,9 @@ local function run(options: Options): { Row }
 	expect(plate).never.toBeNil()
 
 	-- The lock camera on the boar, and the ideal one on a stand-in standing on the drawn body.
-	local proxy = character("Proxy", root.Position, world)
+	-- The stand-in has the boar's footprint (its root's: no blocker on a client-built rig), so a
+	-- close pass frames both alike (F3: the shot turns by the gap to the target's footprint).
+	local proxy = character("Proxy", root.Position, world, root.Size)
 	local proxyRoot = proxy.PrimaryPart :: BasePart
 	local actual = makeCamera(hero, order ~= nil)
 	local ideal = makeCamera(hero)

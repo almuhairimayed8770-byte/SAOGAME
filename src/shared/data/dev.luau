@@ -17,11 +17,72 @@
 	colors are palette tokens.
 ]]
 
+-- One enemy a staged shot puts in front of the player (capture.stage, F12). Spawned fresh for the
+-- shot, so its home is where it stands (its leash never walks it off) and its HP is full.
+export type StagedEnemy = {
+	enemy: string, -- enemies.luau def id
+	distance: number, -- studs, root to root, flat, from the player
+	side: number, -- degrees off the player's facing to it (+ = left)
+	held: boolean, -- true: stands still and never attacks; false: let go as the take starts
+	hp: number?, -- its HP after staging (the kill shot), clamped to [1, maxHp] by the server
+}
+
+-- A staged shot's set-up (DevStage.server.luau): every field enemy held (never mid-attack) and
+-- moved stage.awayStuds off the stand spot (stage.area, or on top of the ledge when `open`). The
+-- staging never moves the player (D-244): one standing outside the stand ring is told to walk
+-- into it first; one inside it is healed and `enemies` spawn around where it stands and faces,
+-- held; the first one is the shot's target.
+export type ShotStage = {
+	open: boolean, -- the locomotion pass: on top of the ledge in the open, not at stage.area
+	enemies: { StagedEnemy },
+	lock: boolean, -- the take starts locked on the target (TargetController.lockOn)
+}
+
+-- What the camera does during a take: the lock camera, or one of capture.cameras.
+export type ShotCamera = "Lock" | "Side" | "ThreeQuarter" | "Behind" | "Open"
+
+-- One line of the on-screen prompt: shown from `at` seconds into the take until the next one.
+export type PromptBeat = { at: number, text: string }
+
+-- One key auto-perform presses through the real input path (InputController.handle, as the key's
+-- own binding does): `action` is an input.luau action, held `hold` seconds. It goes down `at`
+-- seconds into the take, or, with `onClip`, `lead` seconds before the HitWindowOpen of the
+-- target's next `onClip` (the parry, timed off the attack the client is drawing).
+export type Perform = {
+	action: string,
+	hold: number,
+	at: number?,
+	onClip: string?,
+	lead: number?,
+}
+
 export type Shot = {
 	id: string, -- file stem: docs/clips/phase-0/<id>.mp4
 	title: string,
-	seconds: number, -- target length of the recording
+	seconds: number, -- target length of the recording; the take stops itself there
 	notes: string, -- what the reviewer must be able to see
+	stage: ShotStage,
+	camera: ShotCamera,
+	cameraSide: number, -- 1: the camera on the player's right of the line, -1 on its left
+	prompts: { PromptBeat }, -- sorted by `at`, the first at 0
+	perform: { Perform }, -- auto-perform's presses (the toggle is off by default)
+}
+
+-- A staged view (CameraController.setStage). The camera stands `distance` studs (flat) from its
+-- anchor and `height` above it, at a bearing `degrees` off the reference toward cameraSide, and
+-- aims `lookHeight` above the point `focusBias` of the way from the player to the target. The
+-- reference: Line, 0 behind the anchor on the line between the fighters; Facing, 0 behind the
+-- anchor's own facing; World, 0 at +Z of the anchor (90 at +X). The anchor: the player's root,
+-- the target's drawn body, or the middle of the two. The aim never comes nearer the lens than the
+-- anchor, and the bearing turns no faster than camera.luau lock.maxTurnDegreesPerSecond.
+export type StageCamera = {
+	anchor: "Player" | "Target" | "Middle",
+	reference: "Line" | "Facing" | "World",
+	degrees: number,
+	distance: number,
+	height: number,
+	focusBias: number,
+	lookHeight: number,
 }
 
 local Dev = {
@@ -209,6 +270,9 @@ local Dev = {
 		-- the clip clock and the Heartbeat are not in step, so every hit is swung at each phase and
 		-- must register at all of them.
 		framePhases = { 0, 0.25, 0.5, 0.75 },
+		-- The local client's frame rates each swing is also drawn at (fix F2: the client predicts
+		-- the hit from the frames it renders; a hit it draws must register at every server phase).
+		clientFps = { 30, 60, 144 },
 		-- How finely the report traces the true blade to say how close it came to a target it missed.
 		clearanceSampleHz = 600,
 		-- Real-fight ranges are written rounded inward to this step (the spec re-derives them).
@@ -254,6 +318,52 @@ local Dev = {
 				-- stopDistance) and 4.8 where it starts its overhead (reach 6 x engageFraction 0.8).
 				realFight = { min = 1.3, max = 5.25 },
 				distances = { 1.3, 2.3, 3.5, 4.8, 5.25, 6.5 },
+			},
+			-- Point-blank (fix F2): the enemy at the player's shoulder, `bearing` degrees right of the
+			-- look (negative: left), outside the aim assist's cone (combat.aim.assistConeDegrees), so
+			-- nothing turns the body to it. 75 degrees puts it inside the blade's start pose: the
+			-- Horizontal, Sharp Nail's last cut and the first basic start with the blade out to the
+			-- right (its guard at 80 to 127 degrees), the Rising Arc's first cut to the left (-62 to
+			-- -108). Its hits are reported, never required (`pointBlank`); every hit the client
+			-- draws there must still register, and every one that registers must be drawn. The
+			-- range is derived along the bearing as above: the kobold's body touches the player's
+			-- arm at 2.55 (its head reaches 0.75 in front of its root), the side-on boar's flank at
+			-- 3.25.
+			{
+				id = "KoboldRightShoulder",
+				enemy = "KoboldAxeman",
+				yaw = 0,
+				bearing = 75,
+				pointBlank = true,
+				realFight = { min = 2.55, max = 5.25 },
+				distances = { 2.55, 3, 3.5, 4.2, 5.25 },
+			},
+			{
+				id = "KoboldLeftShoulder",
+				enemy = "KoboldAxeman",
+				yaw = 0,
+				bearing = -75,
+				pointBlank = true,
+				realFight = { min = 2.55, max = 5.25 },
+				distances = { 2.55, 3, 3.5, 4.2, 5.25 },
+			},
+			{
+				id = "BoarRightShoulder",
+				enemy = "FrenzyBoar",
+				yaw = 90,
+				bearing = 75,
+				pointBlank = true,
+				realFight = { min = 3.25, max = 5.8 },
+				distances = { 3.25, 3.75, 4.5, 5.8 },
+			},
+			{
+				id = "BoarLeftShoulder",
+				enemy = "FrenzyBoar",
+				yaw = 90,
+				bearing = -75,
+				pointBlank = true,
+				realFight = { min = 3.25, max = 5.8 },
+				distances = { 3.25, 3.75, 4.5, 5.8 },
 			},
 		},
 	},
@@ -367,6 +477,9 @@ local Dev = {
 	},
 
 	-- Gate recordings (section 20 Phase 0 gate; section 1: the capture script's on-screen prompts).
+	-- Every shot stages itself (F12): P asks the server to set it up (DevStage.server.luau, Studio
+	-- with DevCapture only), the camera takes the shot's view, a 3-2-1 runs, then the take records
+	-- with a prompt naming the move and its moment and stops itself at the target length.
 	capture = {
 		phase = "phase-0",
 		clipDirectory = "docs/clips/phase-0",
@@ -375,13 +488,21 @@ local Dev = {
 		entityTag = "SkyspireEntity", -- CollectionService tag on every fighter (ARCHITECTURE "Entities")
 		doneHoldSeconds = 4, -- how long the "shot done" line stays before the panel returns to idle
 		timeScaleReapplySeconds = 0.5, -- while slowed, re-apply the scale to animators that appeared since
+		-- K before the target length asks first (the counter says so); a second K inside this many
+		-- seconds ends the take unmarked. At or past the target, K marks it done at once.
+		confirmSeconds = 2,
+		-- Seconds the client waits for the server's staging before it gives up on the shot (the
+		-- server waits out field attacks for up to stage.holdWaitSeconds first).
+		stageTimeoutSeconds = 8,
 		hotkeys = {
-			startCountdown = "P", -- prime the shot: 3-2-1, then the panel hides and the counter runs
+			startCountdown = "P", -- stage the shot, then 3-2-1, then the panel hides and the take runs
 			nextShot = "RightBracket",
 			previousShot = "LeftBracket",
 			cycleTimeScale = "O",
 			togglePanel = "H",
 			markDone = "K",
+			autoPerform = "U", -- auto-perform on or off (off when the panel starts)
+			releaseStage = "J", -- give the field back: staged enemies gone, field holds let go
 		},
 		panel = {
 			screenGuiName = "SkyspireCapture",
@@ -407,79 +528,352 @@ local Dev = {
 		},
 		counter = {
 			-- The small frame counter shown bottom-left while a shot is being recorded (no blinking:
-			-- the HP bar is the only HUD element allowed to flash).
-			width = 240,
+			-- the HP bar is the only HUD element allowed to flash). It is as wide as its text plus
+			-- paddingX either side, and its text is written before it shows.
 			height = 28,
 			margin = 24,
+			paddingX = 10,
 			textSize = 16,
 			token = "SystemCyan",
 			backgroundToken = "OutlineInk",
 			backgroundTransparency = 0.35,
 		},
+		-- The move and its moment (the shot's prompts), just above the counter while a take runs.
+		prompt = {
+			height = 34,
+			gap = 8, -- pixels between it and the counter
+			paddingX = 12,
+			textSize = 22,
+			token = "SystemWhite",
+			backgroundToken = "OutlineInk",
+			backgroundTransparency = 0.35,
+		},
+		-- Auto-perform (the autoPerform key) presses each shot's `perform` keys through the real
+		-- input path. Only at 1x: slowed, the drawn clips run late on the server's clock.
+		perform = {
+			defaultOn = false,
+		},
+		-- The server's half (DevStage.server.luau).
+		stage = {
+			remoteName = "DevStage", -- RemoteFunction under ReplicatedStorage, made by DevStage
+			requestsPerSecond = 2, -- one player's faster requests are refused
+			-- Held field enemies nearer the stand spot than this are moved out to it: past the lock's
+			-- range (camera.luau lock.range, 60) and every aggro radius, so none joins or is locked.
+			awayStuds = 70,
+			-- The longest a field enemy's wind-up or strike is waited out before it is held (a hold
+			-- inside a wind-up leaves a rush drawn that never comes).
+			holdWaitSeconds = 3,
+			-- The stand ring (D-244: the staging never moves the player). The shot stages only once
+			-- the player's root stands within standRadius studs (flat) of the stand spot, its feet
+			-- within standHeightTolerance studs of the spot's floor (the open shot: over the ledge's
+			-- top); otherwise the reply asks for a walk into the ring. The ring is wider than the
+			-- auto-walk's let-go (capture.walk.arriveStuds): the walk lets go short of the spot and
+			-- the two-step stop carries the body on along its facing, toward and past the spot.
+			standRadius = 3,
+			standHeightTolerance = 1,
+			-- The walk the reply asks for: a route that keeps routeMarginStuds off the ledge and its
+			-- ramp and runs its last approachStuds along the spot's facing, so a body that walks it
+			-- arrives facing the shot's way (the walk turns it, AutoRotate on the move direction).
+			approachStuds = 6,
+			routeMarginStuds = 3,
+			-- Where the player stands for every shot but the open one: a ground point on the field
+			-- and a facing (degrees, 0 looks along -Z, + turns left), clear of every spawn point.
+			area = { position = { 0, 0, -10 }, facing = 0 },
+			-- The open shot's ledge (D-024: no jump, so the fall and land come off an edge). Built once,
+			-- anchored, on the first open shot. The player starts on top, standInset studs in from its
+			-- +Z edge, facing its -Z edge: a walk of size Z - standInset to the drop.
+			ledge = {
+				name = "DevStageLedge",
+				size = { 16, 6, 16 }, -- the top 6 studs over the field: a Land with weight (choreo landing)
+				position = { 0, 3, 40 }, -- its center
+				standInset = 2,
+				facing = 0,
+				colorToken = "PlaceholderSteel",
+				material = "Slate",
+				-- The way up (no jump): an anchored wedge built with the ledge, centred on it across X,
+				-- its tall end against the ledge's +Z face and as tall as the ledge, sloping down
+				-- size[3] studs away along +Z (atan(6 / 18), about 18 degrees). Behind the player's
+				-- start, out of the run off the -Z edge.
+				ramp = {
+					name = "DevStageRamp",
+					size = { 8, 6, 18 }, -- width (X), height (Y, the ledge's), length (Z)
+					colorToken = "PlaceholderSteel",
+					material = "Slate",
+				},
+			},
+		},
+		-- The client's half of the walk into the stand ring (Capture.client.luau). When a staging
+		-- asks for a walk the panel marks the ring and walks the body there itself: the walk's
+		-- direction goes to Humanoid:Move each frame from a render step at renderOrder (after the
+		-- control script's own Move at Input, before the character controller reads MoveDirection
+		-- at choreo.luau renderOrder.character), so the controller, Locomotion and the two-step stop
+		-- see the same input a held key gives. It steers to each route point until it is within
+		-- waypointStuds, and lets go within arriveStuds of the spot; once the body is slower than
+		-- restSpeed (studs per second, flat) the shot is asked for again (a root the stop carried
+		-- out of the ring gets a new walk). A
+		-- cancelKeys key (Enum.KeyCode names: the default control script's movement keys) hands the
+		-- walk to the player (the ring stays and the ask still comes once the root is in it); J, P
+		-- and timeoutSeconds (on the capture's clock) end it.
+		walk = {
+			timeoutSeconds = 15,
+			waypointStuds = 1,
+			arriveStuds = 2,
+			restSpeed = 0.5,
+			cancelKeys = { "W", "A", "S", "D", "Up", "Down", "Left", "Right" },
+			renderOrder = { base = "Input", offset = 1 },
+			-- The ring: a flat client-made disc (no collision, no query) the stand ring's size.
+			ring = {
+				name = "DevStageRing",
+				thickness = 0.2,
+				colorToken = "SystemCyan",
+				material = "Neon",
+				transparency = 0.45,
+			},
+		},
+		-- The staged views (CameraController.setStage, StageCamera). Side and ThreeQuarter frame the
+		-- Arts, the parry and the kill; Behind follows the boar's charge from behind its tail; Open
+		-- watches the locomotion pass from the player's +X, so a run along -Z crosses the screen.
+		cameras = {
+			Side = {
+				anchor = "Middle",
+				reference = "Line",
+				degrees = 90,
+				distance = 11,
+				height = 1.5,
+				focusBias = 0.5,
+				lookHeight = 1,
+			},
+			ThreeQuarter = {
+				anchor = "Player",
+				reference = "Line",
+				degrees = 50,
+				distance = 10,
+				height = 3,
+				focusBias = 0.5,
+				lookHeight = 1.3,
+			},
+			Behind = {
+				anchor = "Target",
+				reference = "Facing",
+				degrees = 15,
+				distance = 10,
+				height = 4,
+				focusBias = 0.5,
+				lookHeight = 1,
+			},
+			Open = {
+				anchor = "Player",
+				reference = "World",
+				degrees = 90,
+				distance = 16,
+				height = 2,
+				focusBias = 0,
+				lookHeight = 1,
+			},
+		} :: { [string]: StageCamera },
 		shots = {
 			{
 				id = "fight-boar-kobold",
 				title = "The fight (gate clip)",
 				seconds = 20,
 				notes = "one boar and one kobold; every attack shows the six beats; a parry spark; a kill shatter; the server registered every hit (a digit per hit)",
+				stage = {
+					open = false,
+					lock = true,
+					enemies = {
+						{ enemy = "KoboldAxeman", distance = 9, side = 0, held = false },
+						{ enemy = "FrenzyBoar", distance = 20, side = 65, held = false },
+					},
+				},
+				camera = "Lock",
+				cameraSide = 1,
+				prompts = {
+					{ at = 0, text = "Fight the kobold: basics (left mouse), Arts (Q, 2, 3, 4)" },
+					{ at = 5, text = "The overhead: guard (right mouse) as the axe drops, for the parry" },
+					{ at = 10, text = "The boar: dodge (Space) its charge, punish the skid" },
+					{ at = 15, text = "Finish one: the kill, the freeze, the shatter" },
+				},
+				perform = {},
 			},
 			{
 				id = "art-horizontal",
 				title = "Art: Horizontal",
 				seconds = 5,
 				notes = "start pose, activation glow, anticipation, snap, smear, hold, settle, post-motion",
+				stage = {
+					open = false,
+					lock = true,
+					enemies = { { enemy = "KoboldAxeman", distance = 3.5, side = 0, held = true } },
+				},
+				camera = "Side",
+				cameraSide = 1,
+				prompts = {
+					{ at = 0, text = "Horizontal (Q) at 1.0 s; stand still" },
+					{ at = 1, text = "Horizontal: Q now" },
+					{ at = 2, text = "Hold still: settle and post-motion" },
+				},
+				perform = { { action = "Art", at = 1, hold = 0.35 } },
 			},
 			{
 				id = "art-vertical",
 				title = "Art: Vertical",
 				seconds = 5,
 				notes = "the overhead cut; gauge-heavy hit; same six beats",
+				stage = {
+					open = false,
+					lock = true,
+					enemies = { { enemy = "KoboldAxeman", distance = 3.5, side = 0, held = true } },
+				},
+				camera = "Side",
+				cameraSide = 1,
+				prompts = {
+					{ at = 0, text = "Vertical (2) at 1.0 s; stand still" },
+					{ at = 1, text = "Vertical: 2 now" },
+					{ at = 2, text = "Hold still: settle and post-motion" },
+				},
+				perform = { { action = "ArtSlot2", at = 1, hold = 0.35 } },
 			},
 			{
 				id = "art-sharp-nail",
 				title = "Art: Sharp Nail",
 				seconds = 5,
 				notes = "three hits, three hit-stops, the trail on only in the windows",
+				stage = {
+					open = false,
+					lock = true,
+					enemies = { { enemy = "KoboldAxeman", distance = 3.5, side = 0, held = true } },
+				},
+				camera = "Side",
+				cameraSide = 1,
+				prompts = {
+					{ at = 0, text = "Sharp Nail (4) at 1.0 s; stand still" },
+					{ at = 1, text = "Sharp Nail: 4 now" },
+					{ at = 2.5, text = "Hold still: three hits, then the settle" },
+				},
+				perform = { { action = "ArtSlot4", at = 1, hold = 0.35 } },
 			},
 			{
 				id = "art-rising-arc",
 				title = "Art: Rising Arc",
 				seconds = 5,
 				notes = "the sunken start pose, the rise onto the toes, two hits with Normal then Final hit-stop, the trail on only in the windows",
+				stage = {
+					open = false,
+					lock = true,
+					enemies = { { enemy = "KoboldAxeman", distance = 3.5, side = 0, held = true } },
+				},
+				camera = "Side",
+				cameraSide = 1,
+				prompts = {
+					{ at = 0, text = "Rising Arc (3) at 1.0 s; stand still" },
+					{ at = 1, text = "Rising Arc: 3 now" },
+					{ at = 2.5, text = "Hold still: two hits, then the settle" },
+				},
+				perform = { { action = "ArtSlot3", at = 1, hold = 0.35 } },
 			},
 			{
 				id = "enemy-boar-charge",
 				title = "Boar: Charge telegraph and strike",
 				seconds = 5,
 				notes = "0.6 s crouch with the red line, the launch, the skid, readable from behind",
+				stage = {
+					open = false,
+					lock = false,
+					enemies = { { enemy = "FrenzyBoar", distance = 18, side = 0, held = false } },
+				},
+				camera = "Behind",
+				cameraSide = 1,
+				prompts = {
+					{ at = 0, text = "Stand still: the boar crouches (0.6 s, red line), then charges" },
+					{ at = 3, text = "Stand still: the skid and the turn" },
+				},
+				perform = {},
 			},
 			{
 				id = "enemy-kobold-overhead",
 				title = "Kobold: Overhead telegraph and strike",
 				seconds = 5,
 				notes = "1.0 s wind-up with the yellow edge, the chop, the recovery",
+				stage = {
+					open = false,
+					lock = false,
+					enemies = { { enemy = "KoboldAxeman", distance = 4.5, side = 0, held = false } },
+				},
+				camera = "ThreeQuarter",
+				cameraSide = 1,
+				prompts = {
+					{ at = 0, text = "Stand still: the 1.0 s wind-up, the yellow edge" },
+					{ at = 2.5, text = "Stand still: the chop and the recovery" },
+				},
+				perform = {},
 			},
 			{
 				id = "parry-spark",
 				title = "Parry",
 				seconds = 5,
 				notes = "guard tapped inside the window against the kobold's overhead (the boar's charge is unblockable); spark and ring; the enemy staggers",
+				stage = {
+					open = false,
+					lock = true,
+					enemies = { { enemy = "KoboldAxeman", distance = 4.5, side = 0, held = false } },
+				},
+				camera = "ThreeQuarter",
+				cameraSide = 1,
+				prompts = {
+					{ at = 0, text = "Parry: guard (right mouse) as the axe starts down" },
+					{ at = 3, text = "Hold still: the spark, the ring, the stagger" },
+				},
+				perform = {
+					{ action = "Guard", onClip = "enemy/Kobold/Overhead", lead = 0.05, hold = 0.4 },
+				},
 			},
 			{
 				id = "kill-shatter",
 				title = "Kill and shatter",
 				seconds = 5,
 				notes = "the 10-frame kill hit-stop, the 0.5 s freeze and silence, the shards rising",
+				stage = {
+					open = false,
+					lock = true,
+					enemies = { { enemy = "KoboldAxeman", distance = 3.5, side = 0, held = true, hp = 1 } },
+				},
+				camera = "Side",
+				cameraSide = 1,
+				prompts = {
+					{ at = 0, text = "Kill: one basic (left mouse) at 1.0 s" },
+					{ at = 1, text = "Basic: left mouse now" },
+					{ at = 1.5, text = "Hold still: the freeze, the silence, the shards" },
+				},
+				perform = { { action = "BasicAttack", at = 1, hold = 0.05 } },
 			},
 			{
 				id = "locomotion",
 				title = "Locomotion pass",
 				seconds = 14,
-				notes = "sheathed: walk, run, sprint with the sword on the back; lock on to draw; drawn: walk, run, sprint with the blade low and back; turn in place, skid stop, jump and land; no T-pose, no sliding foot",
+				notes = "sheathed: walk, run, sprint with the sword on the back; lock on to draw; drawn: walk, run, sprint with the blade low and back; turn in place, skid stop, fall off the ledge and land; no T-pose, no sliding foot",
+				stage = {
+					open = true,
+					lock = false,
+					-- ahead and left of the run: inside the lock's range and the Open view's cone at about 5 s
+					enemies = { { enemy = "KoboldAxeman", distance = 60, side = 20, held = true } },
+				},
+				camera = "Open",
+				cameraSide = 1,
+				prompts = {
+					{ at = 0, text = "Sheathed: walk right (D) off the ledge, fall and land" },
+					{ at = 2.5, text = "Sheathed: run, then sprint (Shift)" },
+					{ at = 5, text = "Lock on the kobold (F): the sword draws; F again" },
+					{ at = 6.5, text = "Drawn: walk, run, sprint (Shift)" },
+					{ at = 10, text = "Turn in place (A then D)" },
+					{ at = 12, text = "Run, then let go: the skid stop" },
+				},
+				perform = {
+					{ action = "LockOn", at = 5, hold = 0.05 },
+					{ action = "LockOn", at = 5.8, hold = 0.05 },
+				},
 			},
 		} :: { Shot },
 	},
-
 	-- The clip review scene (section 10 "Review loop").
 	clipLab = {
 		stageFolderName = "ClipLabStage",

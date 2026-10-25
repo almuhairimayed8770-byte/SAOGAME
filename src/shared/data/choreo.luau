@@ -280,7 +280,12 @@ local Choreo = {
 		drawCutClips = { "Guard", "GuardHit", "Parry" },
 		predictSeconds = 1.5, -- the local player shows drawn this long after sending a combat request, until the attribute lands
 		sheatheDelay = 0.3, -- Drawn must stay false this long before the Sheathe clip starts
-		stopBlend = 0.1, -- blend-out of a Draw or Sheathe that is cut short
+		stopBlend = 0.1, -- blend-out of a Draw or Sheathe that a draw-cut or a cover cuts short
+		-- Blend-out of a Draw or Sheathe the target turned away from (a lock-on mid-Sheathe, a fight
+		-- that ends mid-Draw): nothing hides the arm, so the pose comes back under drawTipSpeed and
+		-- sheatheTipSpeed (tests/choreo/SheathTip.spec.luau, the cut-back cases). At stopBlend the
+		-- blade swung back at up to 347 studs a second.
+		cutBackBlend = 0.45,
 		-- A remote rig's Drawn rise counts only after this long (SheathState.riseFilter): the
 		-- attribute can land up to three 60 Hz frames before the unreliable ActionStarted of the
 		-- attack that set it, which then draw-cuts with no Draw flashing in first.

@@ -4,14 +4,21 @@
 
 	A ground shape (Line, Cone or Circle) becomes a list of flat pieces, each a center, a yaw and
 	a size in plain numbers, so Telegraphs.luau only has to turn them into CFrames on pooled parts.
-	The alpha curves say how the decal and the weapon Highlight fill ramp in over the wind-up and
-	vanish at the strike. No Roblox datatypes, so every function runs in Lune.
+	A cone is a fan of flat triangles (each slice from the apex to its chord, cut in two along its
+	axis into right triangles a WedgePart laid on its side draws): they share their edges and
+	never overlap, so the translucent fan shows no seams where the old overlapping blocks doubled
+	their alpha (issue 15). The alpha curves say how the decal and the weapon Highlight fill ramp
+	in over the wind-up and vanish at the strike; a blow's tell holds through its strike until its
+	snap and glints over the parry window before it (`timing`, F7). No Roblox datatypes, so every
+	function runs in Lune.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage.Shared
 
 local Fx = require(Shared.data.fx)
+local AI = require(Shared.data.ai)
+local Combat = require(Shared.data.combat)
 
 export type Vec3 = { number }
 
@@ -26,6 +33,10 @@ export type Piece = {
 	yaw: number, -- radians; 0 faces -Z, positive turns left (Roblox convention)
 	size: Vec3, -- x = width, y = thickness, z = length
 	circle: boolean, -- true for a cylinder piece (a circle), false for a block
+	-- A flat right triangle (a WedgePart laid on its side) instead of a block: 1 when its leg across
+	-- runs to the right of its yaw's facing, -1 to the left. Its right angle is at the far end of its
+	-- leg along the facing, on the yaw's axis (TelegraphShapes.triangle).
+	wedge: number?,
 }
 
 local TelegraphShapes = {}
@@ -73,32 +84,81 @@ function TelegraphShapes.pieces(shape: Shape?, origin: Vec3, facing: Vec3): { Pi
 			circle = true,
 		})
 	else
-		-- Cone: a fan of slices across the arc, each a block of the cone's length whose width
-		-- covers its share of the arc at the far end (with overlap so the fan has no gaps).
+		-- Cone: a fan of slices across the arc, each the triangle from the apex to its chord, drawn
+		-- as two right triangles meeting on its axis (where the chord's midpoint is).
 		local slices = math.max(1, decal.coneSlices)
 		local arc = math.rad(math.clamp(resolved.width, 1, 360))
 		local sliceArc = arc / slices
-		local sliceWidth =
-			math.max(decal.lineMinWidth, 2 * resolved.length * math.sin(sliceArc * 0.5) * decal.coneOverlap)
-		local half = resolved.length * 0.5
+		local along = resolved.length * math.cos(sliceArc * 0.5)
+		local across = resolved.length * math.sin(sliceArc * 0.5)
 		for index = 1, slices do
 			local sliceYaw = yaw - arc * 0.5 + sliceArc * (index - 0.5)
 			local forward = forwardFromYaw(sliceYaw)
-			table.insert(pieces, {
-				center = { origin[1] + forward[1] * half, y, origin[3] + forward[3] * half },
-				yaw = sliceYaw,
-				size = { sliceWidth, thickness, resolved.length },
-				circle = false,
-			})
+			local right = { math.cos(sliceYaw), 0, -math.sin(sliceYaw) }
+			for _, side in { -1, 1 } do
+				table.insert(pieces, {
+					center = {
+						origin[1] + forward[1] * along * 0.5 + right[1] * side * across * 0.5,
+						y,
+						origin[3] + forward[3] * along * 0.5 + right[3] * side * across * 0.5,
+					},
+					yaw = sliceYaw,
+					size = { across, thickness, along },
+					circle = false,
+					wedge = side,
+				})
+			end
 		end
 	end
 	return pieces
 end
 
+--- The three corners of a wedge piece's triangle on the ground (its height the piece's centre's):
+--- the right angle on its axis at the far end, the apex end of that leg, and the end of its leg
+--- across. Nil for a block or a cylinder.
+function TelegraphShapes.triangle(piece: Piece): { Vec3 }?
+	local side = piece.wedge
+	if side == nil then
+		return nil
+	end
+	local forward = forwardFromYaw(piece.yaw)
+	local right = { math.cos(piece.yaw), 0, -math.sin(piece.yaw) }
+	local across, along = piece.size[1], piece.size[3]
+	local c = piece.center
+	local corner = {
+		c[1] + forward[1] * along * 0.5 - right[1] * side * across * 0.5,
+		c[2],
+		c[3] + forward[3] * along * 0.5 - right[3] * side * across * 0.5,
+	}
+	return {
+		corner,
+		{ corner[1] - forward[1] * along, c[2], corner[3] - forward[3] * along },
+		{ corner[1] + right[1] * side * across, c[2], corner[3] + right[3] * side * across },
+	}
+end
+
+--- When a tell ends and its glint begins, in seconds into the wind-up (F7). A blow's (`strike`, the
+--- seconds from the wind-up's end to where it lands) stays lit through the strike until its snap
+--- begins, ai.luau telegraph.snapLeadSeconds before it lands, and glints over the parry window
+--- before the landing (combat.luau parryWindow). Without a strike (a rush's line: the run is the
+--- strike) it ends with the wind-up and never glints.
+function TelegraphShapes.timing(windUp: number, strike: number?): (number, number)
+	local base = math.max(0, windUp)
+	if strike == nil or not (strike > 0) then
+		return base, base
+	end
+	local lands = base + strike
+	local ends = math.max(base, lands - AI.telegraph.snapLeadSeconds)
+	local glintFrom = math.clamp(lands - Combat.parryWindow, 0, ends)
+	return ends, glintFrom
+end
+
 --- Opacity of the ground decal `elapsed` seconds into a wind-up of `windUp` seconds at a given
---- accessibility intensity: ramps in over the fade-in fraction, holds, and is gone at the strike.
-function TelegraphShapes.decalAlpha(elapsed: number, windUp: number, intensity: number): number
-	if elapsed < 0 or elapsed >= windUp or windUp <= 0 then
+--- accessibility intensity: ramps in over the fade-in fraction, holds, and is gone at the strike
+--- (`ends`, TelegraphShapes.timing; the wind-up's end without it).
+function TelegraphShapes.decalAlpha(elapsed: number, windUp: number, intensity: number, ends: number?): number
+	local over = math.max(windUp, ends or windUp)
+	if elapsed < 0 or elapsed >= over or windUp <= 0 then
 		return 0
 	end
 	local config = Fx.telegraph
@@ -110,16 +170,28 @@ function TelegraphShapes.decalAlpha(elapsed: number, windUp: number, intensity: 
 end
 
 --- Transparency of the weapon Highlight fill at `elapsed` into the wind-up: 1 (invisible) before
---- and after, ramping to the fill transparency, with a soft pulse near the strike.
-function TelegraphShapes.fillTransparency(elapsed: number, windUp: number, intensity: number): number
-	if elapsed < 0 or elapsed >= windUp or windUp <= 0 then
+--- and after (`ends`, the wind-up's end without it), ramping to the fill transparency, with a soft
+--- pulse near the strike, and from `glintFrom` to the end the glint: steady at ai.luau
+--- telegraph.glintFillTransparency (F7).
+function TelegraphShapes.fillTransparency(
+	elapsed: number,
+	windUp: number,
+	intensity: number,
+	ends: number?,
+	glintFrom: number?
+): number
+	local over = math.max(windUp, ends or windUp)
+	if elapsed < 0 or elapsed >= over or windUp <= 0 then
 		return 1
 	end
 	local config = Fx.telegraph
+	local clampedIntensity = math.clamp(intensity, config.intensityMin, 1)
+	if glintFrom ~= nil and glintFrom < over and elapsed >= glintFrom then
+		return math.clamp(1 - (1 - AI.telegraph.glintFillTransparency) * clampedIntensity, 0, 1)
+	end
 	local fadeIn = math.max(1e-6, windUp * config.fadeInFraction)
 	local ramp = math.clamp(elapsed / fadeIn, 0, 1)
 	local eased = 1 - (1 - ramp) * (1 - ramp)
-	local clampedIntensity = math.clamp(intensity, config.intensityMin, 1)
 	local opacity = (1 - config.fillTransparency) * eased * clampedIntensity
 	local pulseFrom = windUp * config.pulseFromFraction
 	if elapsed >= pulseFrom then
@@ -129,9 +201,50 @@ function TelegraphShapes.fillTransparency(elapsed: number, windUp: number, inten
 	return math.clamp(1 - opacity, 0, 1)
 end
 
---- True once the wind-up is over (the strike has landed; the telegraph must be gone).
-function TelegraphShapes.isOver(elapsed: number, windUp: number): boolean
-	return elapsed >= windUp
+--- True when `point` stands inside a blow's strike shape by at least `marginStuds` (and, in a cone,
+--- `marginDegrees` off its edges), on the ground plane: the shape the server resolves the blow on
+--- (CombatService.enemyStrike), laid at `origin` facing `facing`. `arc` > 0 is a cone of `reach`
+--- and `arc` degrees (360 or more: a circle); `arc` <= 0 is a line of `reach` and `lineWidth`. A
+--- body this deep in cannot be judged out by the server's own copy of it (F16, D-258).
+function TelegraphShapes.deepInside(
+	reach: number,
+	arc: number,
+	lineWidth: number,
+	origin: Vec3,
+	facing: Vec3,
+	point: Vec3,
+	marginStuds: number,
+	marginDegrees: number
+): boolean
+	local dx, dz = point[1] - origin[1], point[3] - origin[3]
+	local fx, fz = facing[1], facing[3]
+	local length = math.sqrt(fx * fx + fz * fz)
+	if length < AI.flatEpsilon then
+		return false
+	end
+	fx, fz = fx / length, fz / length
+	local along = dx * fx + dz * fz
+	if arc <= 0 then
+		local across = math.abs(dx * fz - dz * fx)
+		return along >= marginStuds and along <= reach - marginStuds and across <= lineWidth / 2 - marginStuds
+	end
+	local distance = math.sqrt(dx * dx + dz * dz)
+	if distance > reach - marginStuds then
+		return false
+	end
+	if arc >= 360 then
+		return true
+	end
+	if distance < AI.flatEpsilon then
+		return true
+	end
+	local angle = math.deg(math.acos(math.clamp(along / distance, -1, 1)))
+	return angle <= arc / 2 - marginDegrees
+end
+
+--- True once the tell is over (`ends`: the wind-up's end, or TelegraphShapes.timing's for a blow).
+function TelegraphShapes.isOver(elapsed: number, ends: number): boolean
+	return elapsed >= ends
 end
 
 --- The palette token for a telegraph kind's fill and decal.
