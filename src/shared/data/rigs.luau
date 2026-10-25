@@ -23,11 +23,18 @@ local Types = require(script.Parent.Parent.types)
 
 export type PlaceholderJoint = Types.RigJoint & { c1: { pos: Types.Vec3, rot: Types.Vec3 }? }
 
+-- What a walk-in stops at on an enemy rig (RigBuilder.addBlocker, D-198, D-237, D-CH4): upright
+-- faces over the body and over each part it holds (trailParts), each the flat box over that part
+-- as it stands at rest and in every pose of `clips` (the loops it stands in), posed every
+-- sampleSeconds.
+export type BlockerDef = { clips: { string }, sampleSeconds: number }
+
 export type Rig = Types.RigDef & {
 	joints: { PlaceholderJoint },
 	parts: { [string]: { size: Types.Vec3, color: string, shape: ("Block" | "Ball" | "Cylinder")? } }?,
 	scale: { bodyHeight: number, bodyWidth: number, bodyDepth: number, head: number }?, -- player proportions
 	walkSpeed: number?,
+	blocker: BlockerDef?,
 }
 
 local Rigs: { [string]: Rig } = {
@@ -143,6 +150,9 @@ local Rigs: { [string]: Rig } = {
 		hipHeight = 1.6,
 		placeholder = true,
 		walkSpeed = 14,
+		-- Over the idle as well as the rest pose: its weight shift rolls the torso 0.12 out on the
+		-- left flank and its head bob takes the snout 0.03 farther.
+		blocker = { clips = { "enemy/Boar/Idle" }, sampleSeconds = 1 / 120 },
 		parts = {
 			HumanoidRootPart = { size = { 2.4, 2.4, 5 }, color = "PlaceholderBoar" },
 			Torso = { size = { 2.6, 2.4, 4.4 }, color = "PlaceholderBoar" },
@@ -237,6 +247,9 @@ local Rigs: { [string]: Rig } = {
 		walkSpeed = 10,
 		weaponGrip = "RightArm",
 		trailParts = { "Weapon" },
+		-- Over the idle as well as the rest pose: it idles hunched, the head 0.5 ahead of its rest
+		-- footprint and the arms out, the axe hanging 3.9 ahead at its right (its own face).
+		blocker = { clips = { "enemy/Kobold/Idle" }, sampleSeconds = 1 / 120 },
 		parts = {
 			HumanoidRootPart = { size = { 2, 2, 1 }, color = "PlaceholderKobold" },
 			Torso = { size = { 2.2, 2.4, 1.2 }, color = "PlaceholderKobold" },

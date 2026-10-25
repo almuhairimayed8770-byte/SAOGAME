@@ -2,11 +2,15 @@
 --[[
 	CaptureLogic: the capture panel's pure rules (Capture.client.luau, F12), on plain values so they
 	run in Lune: the counter's line, what K does before and at a take's target length, the prompt
-	line at a moment of the take, auto-perform's presses (a shot's timed keys, the parry's guard
-	timed off the attack clip the client is drawing, the lock presses on the staged target and the
-	let-go of the keys a stopped take holds, D-290), and the walk into the stand ring a
+	line at a moment of the take, auto-perform's presses (a shot's timed keys and stick, the
+	reactions timed off an enemy's attack clip the client is drawing and moved on by its hit-stop,
+	their chains and Art cycle, the standing rules, the stick on the camera's frame, the lock
+	presses on a staged enemy and the let-go of the keys a stopped take holds, D-290, CF), and the
+	walk into the stand ring a
 	staging asks for (D-244): the walk read off the reply, whether the feet stand in the ring, where
-	the auto-walk steers, and when the next staging may be asked.
+	the auto-walk steers and where it lets go (the stop's carry ahead of the spot along the last
+	leg), how far a body at rest is off the spot and its facing, and when the next staging may be
+	asked.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -14,11 +18,48 @@ local Types = require(ReplicatedStorage.Shared.types)
 
 local CaptureLogic = {}
 
--- One key auto-perform presses or lets go of `at` seconds into the take.
-export type Press = { at: number, action: string, down: boolean }
+-- One step of a reaction's chain (dev.luau PerformStep).
+export type PerformStep = {
+	action: string,
+	hold: number,
+	delay: number,
+	enemy: number?,
+	cycle: { string }?,
+	stick: { number }?,
+	sprint: boolean?,
+	within: number?,
+}
 
 -- One entry of a shot's perform list (dev.luau Perform).
-export type PerformEntry = { action: string, hold: number, at: number?, onClip: string?, lead: number? }
+export type PerformEntry = {
+	action: string,
+	hold: number,
+	at: number?,
+	onClip: string?,
+	lead: number?,
+	enemy: number?,
+	repeats: boolean?,
+	lock: boolean?,
+	chain: { PerformStep }?,
+	every: number?,
+	from: number?,
+	to: number?,
+	within: number?,
+	stick: { number }?,
+	sprint: boolean?,
+}
+
+-- One key auto-perform presses or lets go of `at` seconds into the take; a stick's press (the
+-- move action) carries its entry, whose stick and sprint it holds.
+export type Press = { at: number, action: string, down: boolean, entry: PerformEntry? }
+
+-- A clip-timed entry's state (CF): the take time its key goes down next (nil: none waits), the
+-- clip time of the last event heard (an earlier one starts a new play), whether this play has had
+-- its press, and how many presses it has had.
+export type Reaction = { entry: PerformEntry, at: number?, heard: number?, pressed: boolean, count: number }
+
+-- A standing rule's state (CF): its entry and the take time it last pressed.
+export type Standing = { entry: PerformEntry, last: number? }
 
 -- The walk a staging asks for (DevStage's reply, DevStageLogic.Ring plus its route): the stand
 -- ring (the spot's floor point and facing, the flat radius, how far the feet may be off the floor,
@@ -91,15 +132,17 @@ function CaptureLogic.promptAt(prompts: { { at: number, text: string } }, elapse
 	return line
 end
 
---- A shot's timed keys as presses in time order: each `at` a down and `at + hold` an up. The
---- clip-timed ones (onClip) are left out: the parry is timed when its attack is heard.
+--- A shot's timed keys as presses in time order: each `at` a down and `at + hold` an up, a
+--- stick's carrying its entry. The clip-timed ones (onClip) and the standing rules (every) are
+--- left out: a reaction is timed when its attack is heard.
 function CaptureLogic.timedPresses(perform: { PerformEntry }): { Press }
 	local presses: { Press } = {}
 	for _, entry in perform do
 		local at = entry.at
 		if at ~= nil then
-			table.insert(presses, { at = at, action = entry.action, down = true })
-			table.insert(presses, { at = at + entry.hold, action = entry.action, down = false })
+			local carried = if entry.stick ~= nil then entry else nil
+			table.insert(presses, { at = at, action = entry.action, down = true, entry = carried })
+			table.insert(presses, { at = at + entry.hold, action = entry.action, down = false, entry = carried })
 		end
 	end
 	table.sort(presses, function(a: Press, b: Press): boolean
@@ -110,6 +153,19 @@ function CaptureLogic.timedPresses(perform: { PerformEntry }): { Press }
 		return not a.down and b.down
 	end)
 	return presses
+end
+
+--- Puts `press` into `queue` (sorted) in time order: after every press at or before its moment,
+--- a let-go ahead of a press at the same moment.
+function CaptureLogic.enqueue(queue: { Press }, press: Press)
+	local index = #queue + 1
+	for position, other in queue do
+		if press.at < other.at or (press.at == other.at and not press.down and other.down) then
+			index = position
+			break
+		end
+	end
+	table.insert(queue, index, press)
 end
 
 --- Takes the presses due by `elapsed` off the front of `queue` (sorted), in order.
@@ -132,6 +188,132 @@ function CaptureLogic.parryDelay(events: { Types.ClipEvent }, eventTime: number,
 		end
 	end
 	return nil
+end
+
+--- A reaction for each clip-timed entry of a shot's perform list, in list order, none waiting.
+function CaptureLogic.reactions(perform: { PerformEntry }): { Reaction }
+	local list: { Reaction } = {}
+	for _, entry in perform do
+		if entry.onClip ~= nil then
+			table.insert(list, { entry = entry, at = nil, heard = nil, pressed = false, count = 0 })
+		end
+	end
+	return list
+end
+
+--- Hears an event `eventTime` seconds into a play of the reaction's clip (its `events`), at take
+--- time `elapsed`. An event earlier than the last heard starts a new play. Until the play's press
+--- (and on the first play only, unless the entry repeats) the press is set `lead` before the
+--- clip's hit window, from this event: each later event moves it on, since the client holds an
+--- attack's clip through its attacker's hit-stop. `early` (the client's latency lead,
+--- Telegraphs.glintLead, D-289) sets a Guard that much earlier still, as the glint comes, so it
+--- reaches the server inside the parry window as a press with no latency would (the server judges
+--- that window on its own clock); never before `elapsed`. Any other press stays on the clip as
+--- drawn (a dodge and its chain meet the body this client draws, D-CI2). A press that would come
+--- past the entry's `to` is not set (CaptureLogic.inside). True when it set the press.
+function CaptureLogic.hear(
+	reaction: Reaction,
+	events: { Types.ClipEvent },
+	eventTime: number,
+	elapsed: number,
+	early: number?
+): boolean
+	local last = reaction.heard
+	if last ~= nil and eventTime < last then
+		reaction.pressed = false
+	end
+	reaction.heard = eventTime
+	if reaction.pressed or (reaction.entry.repeats ~= true and reaction.count > 0) then
+		return false
+	end
+	local delay = CaptureLogic.parryDelay(events, eventTime, reaction.entry.lead or 0)
+	if delay == nil then
+		return false
+	end
+	local shift = if reaction.entry.action == "Guard" then math.max(early or 0, 0) else 0
+	local at = elapsed + math.max(delay - shift, 0)
+	if not CaptureLogic.inside(reaction.entry, at) then
+		reaction.at = nil
+		return false
+	end
+	reaction.at = at
+	return true
+end
+
+--- Whether a reaction's key, or a step of its chain, may go down at take time `at`: at most its
+--- entry's `to` (no limit without one), so what it launches lands before the take's cut (D-CI3).
+function CaptureLogic.inside(entry: PerformEntry, at: number): boolean
+	local to = entry.to
+	return to == nil or at <= to + 1e-9
+end
+
+--- The reaction's attacker was hit mid-attack: the server paused its attack `seconds` (HitConfirmed
+--- attackPause) and this client holds its clip as long, so a press waiting comes that much later.
+function CaptureLogic.pause(reaction: Reaction, seconds: number)
+	local at = reaction.at
+	if at ~= nil and seconds > 0 then
+		reaction.at = at + seconds
+	end
+end
+
+--- The reaction's key went down: this play has had its press, and nothing waits.
+function CaptureLogic.pressed(reaction: Reaction)
+	reaction.at = nil
+	reaction.pressed = true
+	reaction.count += 1
+end
+
+--- The standing rules (`every`) of a shot's perform list, in list order, none pressed yet.
+function CaptureLogic.standing(perform: { PerformEntry }): { Standing }
+	local list: { Standing } = {}
+	for _, entry in perform do
+		if entry.every ~= nil then
+			table.insert(list, { entry = entry, last = nil })
+		end
+	end
+	return list
+end
+
+--- Whether a standing rule may press at take time `elapsed`: inside its span (`from` to `to`, the
+--- whole take when unset) and `every` seconds or more since it last pressed.
+function CaptureLogic.standingDue(rule: Standing, elapsed: number): boolean
+	local entry = rule.entry
+	if elapsed < (entry.from or 0) or elapsed > (entry.to or math.huge) then
+		return false
+	end
+	local last = rule.last
+	return last == nil or elapsed - last >= (entry.every or 0) - 1e-9
+end
+
+--- The action a step presses the `count`-th time it comes round (from 1): its cycle's in turn,
+--- or its own action.
+function CaptureLogic.cycleAction(step: PerformStep, count: number): string
+	local cycle = step.cycle
+	if cycle == nil or #cycle == 0 then
+		return step.action
+	end
+	return cycle[(math.max(count, 1) - 1) % #cycle + 1]
+end
+
+--- A stick { right, forward } on the camera's view as Humanoid:Move's camera-relative vector
+--- (x right, z back), no longer than a full push.
+function CaptureLogic.stickMove(stick: { number }): (number, number)
+	local x, z = stick[1] or 0, -(stick[2] or 0)
+	local length = math.sqrt(x * x + z * z)
+	if length > 1 then
+		return x / length, z / length
+	end
+	return x, z
+end
+
+--- The id of staged enemy `enemy` (stage.enemies index, 1 when nil) from the staging reply's ids;
+--- the staged target alone when the reply listed none (nil past it).
+function CaptureLogic.enemyId(ids: { number }?, targetId: number?, enemy: number?): number?
+	local index = enemy or 1
+	if ids ~= nil then
+		return ids[index]
+	end
+	return if index == 1 then targetId else nil
 end
 
 --- What an auto-perform lock press does in a take that staged `stagedId` while the lock is on
@@ -250,25 +432,107 @@ function CaptureLogic.inRing(walk: Walk, x: number, floorY: number, z: number): 
 	return over == nil or (x >= over[1] and x <= over[2] and z >= over[3] and z <= over[4])
 end
 
---- The flat unit direction the auto-walk steers along from (x, z): toward the route's point at
---- `walk.index`, moving the index on past every point within `reach` studs (flat) but the last
---- (the spot), which is reached within `arrive`. Nil once the spot is reached (the walk lets go).
-function CaptureLogic.steer(walk: Walk, x: number, z: number, reach: number, arrive: number): (number?, number?)
+--- The stop's carry (studs) after the auto-walk lets go at `speed` studs per second (1x terms):
+--- none past `skidSpeed` (choreo locomotion.skidSpeedThreshold: the Skid stops the body, and the
+--- two-step stop carries nothing, D-059), else speed x carrySeconds (the two-step stop's carry
+--- through the middle of the stride).
+function CaptureLogic.stopCarry(speed: number, skidSpeed: number, carrySeconds: number): number
+	if speed > skidSpeed then
+		return 0
+	end
+	return math.max(speed, 0) * carrySeconds
+end
+
+--- The route's last leg as a flat unit direction (the point before the spot to the spot), or nil
+--- for a route of the spot alone.
+function CaptureLogic.lastLeg(walk: Walk): (number?, number?)
 	local path = walk.path
-	while walk.index <= #path do
+	if #path < 2 then
+		return nil, nil
+	end
+	local from, spot = path[#path - 1], path[#path]
+	local dx, dz = spot[1] - from[1], spot[2] - from[2]
+	local length = math.sqrt(dx * dx + dz * dz)
+	if length < 1e-6 then
+		return nil, nil
+	end
+	return dx / length, dz / length
+end
+
+--- How far (studs) the route's end is still ahead of (x, z) along the last leg (below 0: past
+--- it); for a route of the spot alone, the flat distance to it.
+function CaptureLogic.ahead(walk: Walk, x: number, z: number): number
+	local spot = walk.path[#walk.path]
+	local dx, dz = spot[1] - x, spot[2] - z
+	local ux, uz = CaptureLogic.lastLeg(walk)
+	if ux == nil or uz == nil then
+		return math.sqrt(dx * dx + dz * dz)
+	end
+	return dx * ux + dz * uz
+end
+
+--- The flat unit direction the auto-walk steers along from (x, z), or nil once it lets go. It
+--- steers for the route's point at `walk.index`, moving the index on past every point within
+--- `reach` studs (flat) up to the one before the spot. On the last leg it follows the leg's line,
+--- aiming `lookahead` studs along it past the root's foot on it (so the body comes square onto the
+--- leg and runs along the spot's facing), and lets go once the spot is no more than `letGo` studs
+--- ahead along the leg. A route of the spot alone steers straight for it and lets go within
+--- `letGo` of it.
+function CaptureLogic.steer(
+	walk: Walk,
+	x: number,
+	z: number,
+	reach: number,
+	letGo: number,
+	lookahead: number
+): (number?, number?)
+	local path = walk.path
+	while walk.index < #path do
 		local point = path[walk.index]
 		local dx, dz = point[1] - x, point[2] - z
 		local distance = math.sqrt(dx * dx + dz * dz)
-		local last = walk.index == #path
-		if distance > (if last then arrive else reach) then
+		if distance > reach then
 			return dx / distance, dz / distance
-		end
-		if last then
-			return nil, nil
 		end
 		walk.index += 1
 	end
-	return nil, nil
+	local spot = path[#path]
+	local ux, uz = CaptureLogic.lastLeg(walk)
+	if ux == nil or uz == nil then
+		local dx, dz = spot[1] - x, spot[2] - z
+		local distance = math.sqrt(dx * dx + dz * dz)
+		if distance <= letGo or distance < 1e-6 then
+			return nil, nil
+		end
+		return dx / distance, dz / distance
+	end
+	local ahead = (spot[1] - x) * ux + (spot[2] - z) * uz
+	if ahead <= letGo then
+		return nil, nil
+	end
+	-- The point `lookahead` along the leg past the root's foot on its line.
+	local aimX = spot[1] - ux * (ahead - lookahead) - x
+	local aimZ = spot[2] - uz * (ahead - lookahead) - z
+	local length = math.sqrt(aimX * aimX + aimZ * aimZ)
+	if length < 1e-6 then
+		return ux, uz
+	end
+	return aimX / length, aimZ / length
+end
+
+--- How far a body at rest at (x, z), looking along (lookX, lookZ), is off the walk's spot: the
+--- flat studs from it and the degrees from the spot's facing (as DevStageLogic.look reads it:
+--- 0 looks along -Z, + turns left).
+function CaptureLogic.restOff(walk: Walk, x: number, z: number, lookX: number, lookZ: number): (number, number)
+	local dx, dz = x - walk.x, z - walk.z
+	local studs = math.sqrt(dx * dx + dz * dz)
+	local length = math.sqrt(lookX * lookX + lookZ * lookZ)
+	if length < 1e-6 then
+		return studs, 180
+	end
+	local radians = math.rad(walk.facing)
+	local dot = (lookX * -math.sin(radians) + lookZ * -math.cos(radians)) / length
+	return studs, math.deg(math.acos(math.clamp(dot, -1, 1)))
 end
 
 --- Seconds to wait before the next request may go, the last having gone at `lastAt` (nil: none):

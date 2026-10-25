@@ -217,6 +217,15 @@ local Combat = {
 		-- A kill's word waits the same way, and its EntityDied with it (D-267 amended): the death's
 		-- freeze, silence and shatter start on the key frame, the Kill hold on the frame after.
 		wordWaitSeconds = 0.25,
+		-- A contact's hold waits for its word (D-CH1): when the server's HitConfirmed has not come
+		-- by the last frame of the contact's tier, the hold on both rigs goes on a frame at a time
+		-- until it comes, at most this many seconds from the contact frame, so the server's number
+		-- shows inside the freeze at up to about 0.15 s of latency (a 0.1 s lag, a frame of the
+		-- engine's own and a frame of the server's tick). The frame that first shows the number is
+		-- still held; a word that never comes (a refused hit, a hit past the cap) lets the rigs go
+		-- with no number. At least the Kill hold, so a kill's word that comes inside it upgrades
+		-- the hold in place, never as a second freeze.
+		wordHoldSeconds = 0.2,
 		-- The Art stand-off (fix F1): an Art whose first cut would start with the blade already in
 		-- the target's body (the review's kobold at the hip or the shoulder) steps the body straight
 		-- away from the target over the anticipation, from the hold pose to the first window's
@@ -241,6 +250,43 @@ local Combat = {
 			-- touching a wall still finds it, and the body stops this far short of what it meets. A
 			-- wall nearer than the step the target calls for takes the longest step that fits.
 			wallGapStuds = 0.05,
+			-- The keep-out (D-CH3): a swing's own motion (the clip's root motion, its pose, and the
+			-- step above) never carries the body's colliding parts (`parts`: the R15 root, torsos and
+			-- head, what the engine collides of a character) deeper into the target's blocker
+			-- (D-198: its faces, the body's `bodyFace` and one `heldFace` over each part it holds,
+			-- D-CH4) than the swing found them. The plan poses the
+			-- clip every sampleSeconds from where the swing starts to its end and steps the body
+			-- back along the stand-off's line (straight away from the target) as far as the pose
+			-- went in (to within depthEpsilon of where it started); off a held part's face (a
+			-- kobold's axe, beside a body at its front) it steps the body aside instead, square to
+			-- that line, when that is the shorter step. Never forward again, so a freeze
+			-- holds where the body stands. Every Art and every basic swing plans it against
+			-- the aimed enemy. In Studio the engine's solver pushed a body the root motion had put
+			-- 0.24-0.54 studs into a point-blank kobold's blocker back out at 0.08-0.2 studs a frame,
+			-- through the hit-stop (Rising Arc's Normal hold, item 224). maxStuds caps the step above
+			-- and the keep-out together (back and aside as one distance) and stays within
+			-- rootMotionSlack, so the anti-cheat's mid-Art
+			-- allowance covers both with any Art's own root motion (Sharp Nail's lunge at a touching
+			-- kobold needs 2.9 back: its 2 studs of root motion and the head going forward into the
+			-- thrust; and 0.2 aside off the axe beside it).
+			keepOut = {
+				parts = { "HumanoidRootPart", "LowerTorso", "UpperTorso", "Head" },
+				bodyFace = "Blocker", -- RigBuilder.BLOCKER_NAME
+				heldFace = "HeldBlocker", -- RigBuilder.HELD_BLOCKER_NAME
+				maxStuds = 3.5,
+				sampleSeconds = 1 / 60,
+				depthEpsilon = 0.005,
+				-- Passes over the faces a sample takes to settle the back and the aside steps (a
+				-- step off a held part's face can call for more back from the body's).
+				rounds = 3,
+				-- Each sample keeps out what the parts sweep from the one before (the hull of the two
+				-- poses); a part that turns bows out past that hull, so a sample whose parts turn
+				-- more than maxTurnDegrees is swept in pieces, at most maxPieces (a cut turns the torso
+				-- and head up to 64 degrees a sample, Horizontal's; 10 leaves a corner 1.5 studs out
+				-- within 0.006 of the hull).
+				maxTurnDegrees = 10,
+				maxPieces = 8,
+			},
 		},
 		-- A contact is predicted to kill only when the hit cannot do less than the enemy has left:
 		-- its least damage (the weapon's attack times the move's multiplier, less the enemy's

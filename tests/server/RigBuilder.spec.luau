@@ -242,58 +242,85 @@ end)
 
 describe("RigBuilder.addBlocker (D-198)", function()
 	local AI = Harness.load("src/shared/data/ai")
+	local Choreo = Harness.load("src/shared/data/choreo")
+	local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
 	local GROUPS = AI.collision
 
-	it("an upright, invisible box over the body's footprint from the floor to blockerHeight, welded on", function()
+	it("upright, invisible boxes over the body's footprint and what it holds, from the floor up, welded on", function()
 		for _, rigId in { "Boar", "Kobold" } do
 			local model = RigBuilder.build(rigId)
 			local root = model.PrimaryPart :: BasePart
 			local rig = Rigs[rigId]
-			local centre, size = RigBuilder.footprint(rigId)
+			local footprints = RigBuilder.footprints(rigId)
 			local blocker = RigBuilder.addBlocker(model) :: Part
 			expect(blocker).never.toBeNil()
 			expect(blocker.Name).toBe(RigBuilder.BLOCKER_NAME)
-			expect(blocker.Parent).toBe(model)
-			expect(near(blocker.Size, Vector3.new(size.X, GROUPS.blockerHeight, size.Z))).toBe(true)
-			-- The root's centre stands hipHeight + half its height above the floor.
-			local floorY = root.CFrame.Position.Y - (rig.hipHeight + root.Size.Y / 2)
-			local offset = root.CFrame:ToObjectSpace(blocker.CFrame)
-			expect(
-				near(
-					offset.Position,
-					Vector3.new(centre.X, GROUPS.blockerHeight / 2 - (rig.hipHeight + root.Size.Y / 2), centre.Z)
+			-- The body's face first (RigBuilder.footprint), then one per part it holds (D-CH4).
+			local centre, size = RigBuilder.footprint(rigId)
+			expect(footprints[1].name).toBe(RigBuilder.BLOCKER_NAME)
+			expect(near(footprints[1].centre, centre)).toBe(true)
+			expect(near(footprints[1].size, size)).toBe(true)
+			expect(#footprints).toBe(1 + #(rig.trailParts or {}))
+			for index, held in rig.trailParts or {} do
+				expect(footprints[index + 1].name).toBe(RigBuilder.HELD_BLOCKER_NAME)
+				expect(footprints[index + 1].parts).toEqual({ held })
+			end
+			local faces = {}
+			for _, child in model:GetChildren() do
+				if child.Name == RigBuilder.BLOCKER_NAME or child.Name == RigBuilder.HELD_BLOCKER_NAME then
+					table.insert(faces, child)
+				end
+			end
+			expect(#faces).toBe(#footprints)
+			for index, footprint in footprints do
+				local face = faces[index] :: Part
+				expect(face.Name).toBe(footprint.name)
+				expect(face.Parent).toBe(model)
+				expect(near(face.Size, Vector3.new(footprint.size.X, GROUPS.blockerHeight, footprint.size.Z))).toBe(
+					true
 				)
-			).toBe(true)
-			expect(near(offset.LookVector, Vector3.new(0, 0, -1))).toBe(true)
-			expect(blocker.CFrame.Position.Y - blocker.Size.Y / 2).toBeCloseTo(floorY, 1e-4)
-			expect(blocker.Transparency).toBe(1)
-			expect(blocker.CastShadow).toBe(false)
-			expect(blocker.CanTouch).toBe(false)
-			expect(blocker.CanQuery).toBe(false)
-			expect(blocker.Massless).toBe(true)
-			expect(blocker.Anchored).toBe(false)
-			-- Off until the enemy joins the enemies group (CollisionGroups.assign switches it on).
-			expect(blocker.CanCollide).toBe(false)
-			expect(blocker.CollisionGroup).toBe(GROUPS.blockers)
-			local weld = blocker:FindFirstChildOfClass("WeldConstraint") :: WeldConstraint
-			expect(weld).never.toBeNil()
-			expect(weld.Part0).toBe(root)
-			expect(weld.Part1).toBe(blocker)
-			-- No Motor6D: the animator and the joint walkers never see it.
-			expect(blocker:FindFirstChildOfClass("Motor6D")).toBeNil()
+				-- The root's centre stands hipHeight + half its height above the floor.
+				local floorY = root.CFrame.Position.Y - (rig.hipHeight + root.Size.Y / 2)
+				local offset = root.CFrame:ToObjectSpace(face.CFrame)
+				expect(
+					near(
+						offset.Position,
+						Vector3.new(
+							footprint.centre.X,
+							GROUPS.blockerHeight / 2 - (rig.hipHeight + root.Size.Y / 2),
+							footprint.centre.Z
+						)
+					)
+				).toBe(true)
+				expect(near(offset.LookVector, Vector3.new(0, 0, -1))).toBe(true)
+				expect(face.CFrame.Position.Y - face.Size.Y / 2).toBeCloseTo(floorY, 1e-4)
+				expect(face.Transparency).toBe(1)
+				expect(face.CastShadow).toBe(false)
+				expect(face.CanTouch).toBe(false)
+				expect(face.CanQuery).toBe(false)
+				expect(face.Massless).toBe(true)
+				expect(face.Anchored).toBe(false)
+				-- Off until the enemy joins the enemies group (CollisionGroups.assign switches it on).
+				expect(face.CanCollide).toBe(false)
+				expect(face.CollisionGroup).toBe(GROUPS.blockers)
+				local weld = face:FindFirstChildOfClass("WeldConstraint") :: WeldConstraint
+				expect(weld).never.toBeNil()
+				expect(weld.Part0).toBe(root)
+				expect(weld.Part1).toBe(face)
+				-- No Motor6D: the animator and the joint walkers never see it.
+				expect(face:FindFirstChildOfClass("Motor6D")).toBeNil()
+			end
 		end
 	end)
 
-	-- The flat box over a part's corners in the root's space at rest: min X, max X, min Z, max Z.
-	local function flatBox(root: BasePart, part: BasePart): (number, number, number, number)
-		local half = part.Size / 2
+	-- The flat box over a part's corners in the root's space: min X, max X, min Z, max Z.
+	local function flatBox(frame: CFrame, size: Vector3): (number, number, number, number)
+		local half = size / 2
 		local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
 		for _, x in { -1, 1 } do
 			for _, y in { -1, 1 } do
 				for _, z in { -1, 1 } do
-					local corner = root.CFrame:PointToObjectSpace(
-						part.CFrame:PointToWorldSpace(Vector3.new(half.X * x, half.Y * y, half.Z * z))
-					)
+					local corner = frame:PointToWorldSpace(Vector3.new(half.X * x, half.Y * y, half.Z * z))
 					minX, maxX = math.min(minX, corner.X), math.max(maxX, corner.X)
 					minZ, maxZ = math.min(minZ, corner.Z), math.max(maxZ, corner.Z)
 				end
@@ -302,45 +329,89 @@ describe("RigBuilder.addBlocker (D-198)", function()
 		return minX, maxX, minZ, maxZ
 	end
 
-	it("covers the whole body at rest, tight on every side, but not what it holds", function()
-		-- The boar walked into head-on stopped inside its head (the root ends 2.5 studs ahead of its
-		-- centre, the snout 5.6), from behind inside its tail, and on its flank 0.1 into its side.
-		local expected = {
-			Boar = { -1.3, 1.3, -5.6, 3.314 },
-			Kobold = { -2.0, 2.0, -0.75, 0.75 },
-		}
-		for _, rigId in { "Boar", "Kobold" } do
-			local model = RigBuilder.build(rigId)
-			local root = model.PrimaryPart :: BasePart
-			local rig = Rigs[rigId]
-			local blocker = RigBuilder.addBlocker(model) :: Part
-			local bMinX, bMaxX, bMinZ, bMaxZ = flatBox(root, blocker)
-			local want = expected[rigId]
-			expect(bMinX).toBeCloseTo(want[1], 1e-3)
-			expect(bMaxX).toBeCloseTo(want[2], 1e-3)
-			expect(bMinZ).toBeCloseTo(want[3], 1e-3)
-			expect(bMaxZ).toBeCloseTo(want[4], 1e-3)
-			local touched = { minX = false, maxX = false, minZ = false, maxZ = false }
-			local held = rig.trailParts or {}
-			for partName in rig.parts do
-				local part = model:FindFirstChild(partName) :: BasePart
-				local minX, maxX, minZ, maxZ = flatBox(root, part)
-				if table.find(held, partName) ~= nil then
-					-- What it holds pokes out: a walk-in stops at the body, not the axe's head.
-					expect(minZ < bMinZ - 1 or maxZ > bMaxZ + 1 or minX < bMinX - 0.1 or maxX > bMaxX + 0.1).toBe(true)
-					continue
+	it(
+		"covers the body, and in a box of its own what it holds, at rest and over its idle loop, tight on every side",
+		function()
+			-- The boar walked into head-on stopped inside its head (the root ends 2.5 studs ahead of its
+			-- centre, the snout 5.6), from behind inside its tail, and on its flank 0.1 into its side.
+			-- Over the rest pose alone, a kobold's idle stood its head 0.49 ahead of the face and its
+			-- arms 0.46 out, and the axe it holds hung 3.9 ahead (D-CH4). Root space, studs.
+			local expected = {
+				Boar = { Blocker = { -1.4211, 1.318, -5.6325, 3.3142 } },
+				Kobold = {
+					Blocker = { -2.4553, 2.4384, -1.2351, 1.0709 },
+					HeldBlocker = { 1.4, 2.8094, -3.8458, 0.4838 },
+				},
+			}
+			for _, rigId in { "Boar", "Kobold" } do
+				local model = RigBuilder.build(rigId)
+				local root = model.PrimaryPart :: BasePart
+				local rig = Rigs[rigId]
+				RigBuilder.addBlocker(model)
+				-- What it shows standing: the rest pose and its idle loop (choreo.luau rigs[id].idle,
+				-- the clip the animator keeps under everything) every 1/120 s.
+				local idle = Harness.load("src/shared/clips/" .. Choreo.rigs[rigId].idle)
+				local poses = { Pose.solve(model, CFrame.identity, {}) }
+				for k = 0, math.ceil(idle.duration * 120 - 1e-6) do
+					table.insert(
+						poses,
+						Pose.solve(model, CFrame.identity, ClipSampler.sample(idle, math.min(k / 120, idle.duration)))
+					)
 				end
-				expect(minX).toBeGreaterThanOrEqual(bMinX - 1e-4)
-				expect(maxX).toBeLessThanOrEqual(bMaxX + 1e-4)
-				expect(minZ).toBeGreaterThanOrEqual(bMinZ - 1e-4)
-				expect(maxZ).toBeLessThanOrEqual(bMaxZ + 1e-4)
-				touched.minX = touched.minX or math.abs(minX - bMinX) < 1e-4
-				touched.maxX = touched.maxX or math.abs(maxX - bMaxX) < 1e-4
-				touched.minZ = touched.minZ or math.abs(minZ - bMinZ) < 1e-4
-				touched.maxZ = touched.maxZ or math.abs(maxZ - bMaxZ) < 1e-4
+				local held = rig.trailParts or {}
+				for faceName, want in expected[rigId] do
+					local face = model:FindFirstChild(faceName) :: BasePart
+					expect(face).never.toBeNil()
+					local bMinX, bMaxX, bMinZ, bMaxZ = flatBox(root.CFrame:ToObjectSpace(face.CFrame), face.Size)
+					expect(bMinX).toBeCloseTo(want[1], 1e-3)
+					expect(bMaxX).toBeCloseTo(want[2], 1e-3)
+					expect(bMinZ).toBeCloseTo(want[3], 1e-3)
+					expect(bMaxZ).toBeCloseTo(want[4], 1e-3)
+					-- The body's parts stand in the body's face, what it holds in its own, in every pose;
+					-- some part reaches each side.
+					local slack = 1e-4 -- float32 sizes
+					local touched = { minX = false, maxX = false, minZ = false, maxZ = false }
+					for partName in rig.parts :: { [string]: any } do
+						local isHeld = table.find(held, partName) ~= nil
+						if isHeld ~= (faceName == RigBuilder.HELD_BLOCKER_NAME) then
+							continue
+						end
+						local part = model:FindFirstChild(partName) :: BasePart
+						for _, solved in poses do
+							local minX, maxX, minZ, maxZ = flatBox(solved[partName], part.Size)
+							expect(minX).toBeGreaterThanOrEqual(bMinX - slack)
+							expect(maxX).toBeLessThanOrEqual(bMaxX + slack)
+							expect(minZ).toBeGreaterThanOrEqual(bMinZ - slack)
+							expect(maxZ).toBeLessThanOrEqual(bMaxZ + slack)
+							touched.minX = touched.minX or math.abs(minX - bMinX) < 1e-3
+							touched.maxX = touched.maxX or math.abs(maxX - bMaxX) < 1e-3
+							touched.minZ = touched.minZ or math.abs(minZ - bMinZ) < 1e-3
+							touched.maxZ = touched.maxZ or math.abs(maxZ - bMaxZ) < 1e-3
+						end
+					end
+					expect(touched).toEqual({ minX = true, maxX = true, minZ = true, maxZ = true })
+				end
 			end
-			expect(touched).toEqual({ minX = true, maxX = true, minZ = true, maxZ = true })
 		end
+	)
+
+	it("stands on clips of its own rig that load, sampled at a positive step", function()
+		for _, rigId in RigBuilder.placeholderRigIds() do
+			local blocker = Rigs[rigId].blocker
+			if blocker == nil then
+				continue
+			end
+			expect(blocker.sampleSeconds > 0).toBe(true)
+			expect(#blocker.clips > 0).toBe(true)
+			for _, id in blocker.clips do
+				local clip = Harness.load("src/shared/clips/" .. id)
+				expect(clip.id).toBe(id)
+				expect(clip.rig).toBe(rigId)
+			end
+		end
+		-- Every enemy rig stands on its idle loop.
+		expect(table.find(Rigs.Boar.blocker.clips, Choreo.rigs.Boar.idle)).never.toBeNil()
+		expect(table.find(Rigs.Kobold.blocker.clips, Choreo.rigs.Kobold.idle)).never.toBeNil()
 	end)
 
 	it("measures the same footprint wherever the enemy stands and whatever pose it holds", function()

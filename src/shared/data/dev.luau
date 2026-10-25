@@ -24,7 +24,17 @@ export type StagedEnemy = {
 	distance: number, -- studs, root to root, flat, from the player
 	side: number, -- degrees off the player's facing to it (+ = left)
 	held: boolean, -- true: stands still and never attacks; false: let go as the take starts
-	hp: number?, -- its HP after staging (the kill shot), clamped to [1, maxHp] by the server
+	-- A let-go enemy only: let go this many seconds after the take starts, not at its start (the
+	-- server times it from the "go"; the fight's boar joins after the kobold's third overhead).
+	releaseAfter: number?,
+	-- Its HP after staging (the kill shot), clamped to [1, maxHp] by the server, and set again as
+	-- it is let go, so it comes in at this HP however long it stood held (CF).
+	hp: number?,
+	-- A released Charger only (the validator asks for it): what its first charge does to a player
+	-- standing on the spot, and what the shot's prompts tell them. "Meets": the telegraphed line
+	-- (attack reach) reaches them and the rush hits. "Passes": the line ends short of their body and
+	-- the overshoot carries the boar on over them, no hit (D-166).
+	charge: ("Meets" | "Passes")?,
 }
 
 -- A staged shot's set-up (DevStage.server.luau): every field enemy held (never mid-attack) and
@@ -44,16 +54,55 @@ export type ShotCamera = "Lock" | "Side" | "ThreeQuarter" | "Behind" | "Open"
 -- One line of the on-screen prompt: shown from `at` seconds into the take until the next one.
 export type PromptBeat = { at: number, text: string }
 
+-- One key auto-perform presses after a reaction (Perform.chain), `delay` seconds after the key
+-- before it came up (the reaction's own, then each step's): `action` held `hold` seconds, a Move
+-- held until its lock target is `within` studs (flat) or `hold` passes. `cycle` (Arts) presses
+-- the next of its actions each time the step comes round, the first being `action`. A LockOn step
+-- locks staged enemy `enemy` (stage.enemies index) and never lets a lock go.
+export type PerformStep = {
+	action: string,
+	hold: number,
+	delay: number,
+	enemy: number?,
+	cycle: { string }?,
+	stick: { number }?,
+	sprint: boolean?,
+	within: number?,
+}
+
 -- One key auto-perform presses through the real input path (InputController.handle, as the key's
--- own binding does): `action` is an input.luau action, held `hold` seconds. It goes down `at`
--- seconds into the take, or, with `onClip`, `lead` seconds before the HitWindowOpen of the
--- target's next `onClip` (the parry, timed off the attack the client is drawing).
+-- own binding does): `action` is an input.luau action, held `hold` seconds, or capture.perform's
+-- moveAction, the stick: Humanoid:Move each frame `stick` = { right, forward } on the camera's
+-- view (a length of 1 is a held key, less is a part-pushed stick: the walk), with the sprint held
+-- too when `sprint`. Exactly one of these times it:
+-- - `at`: it goes down `at` seconds into the take;
+-- - `onClip`: a reaction, `lead` seconds before the HitWindowOpen of the clip `onClip` as the
+--   client draws it on staged enemy `enemy` (stage.enemies index, 1 when nil), a Guard the
+--   client's latency lead earlier still (Telegraphs.glintLead, D-289; D-CI2): the first play only, or each
+--   one when `repeats`. Every later event of the play heard moves the moment with it (the client
+--   holds an attack's clip through its attacker's hit-stop). With `lock` the lock goes to that
+--   enemy when its clip is heard (a guard must face its attacker). Its `chain` steps follow it; a
+--   reaction heard drops the steps left of the one before it. Nothing of it, its chain included,
+--   goes down past `to` seconds into the take (D-CI3), so what it launches lands before the cut;
+-- - `every`: a standing rule, pressed every `every` seconds from `from` to `to` while no
+--   reaction waits or chain runs: a BasicAttack while the lock's target stands within `within`
+--   studs (flat; the attack in between), a LockOn on staged enemy `enemy` while the lock is off.
 export type Perform = {
 	action: string,
 	hold: number,
 	at: number?,
 	onClip: string?,
 	lead: number?,
+	enemy: number?,
+	repeats: boolean?,
+	lock: boolean?,
+	chain: { PerformStep }?,
+	every: number?,
+	from: number?,
+	to: number?,
+	within: number?,
+	stick: { number }?,
+	sprint: boolean?,
 }
 
 export type Shot = {
@@ -548,10 +597,19 @@ local Dev = {
 			backgroundToken = "OutlineInk",
 			backgroundTransparency = 0.35,
 		},
+		-- An Art launches when its key comes up (section 6), a basic when its key goes down. A timed
+		-- Art's take holds the key long enough for the lit stance to read on camera: at least this
+		-- many seconds past the start pose (combat.luau startPoseTime) before the release, and short
+		-- of the cancel. Its prompts say when to press and hold and when to let go (a beat at each),
+		-- so a human's launch lands where auto-perform's does (tools/validators/dev.luau).
+		artGlowSeconds = 0.3,
 		-- Auto-perform (the autoPerform key) presses each shot's `perform` keys through the real
-		-- input path. Only at 1x: slowed, the drawn clips run late on the server's clock.
+		-- input path. Only at 1x: slowed, the drawn clips run late on the server's clock. A perform
+		-- entry whose action is moveAction is the stick, not a key: it goes to Humanoid:Move from
+		-- the walk's render step (walk.renderOrder), as the control script's keys would.
 		perform = {
 			defaultOn = false,
+			moveAction = "Move",
 		},
 		-- The server's half (DevStage.server.luau).
 		stage = {
@@ -567,8 +625,8 @@ local Dev = {
 			-- the player's root stands within standRadius studs (flat) of the stand spot, its feet
 			-- within standHeightTolerance studs of the spot's floor (the open shot: over the ledge's
 			-- top); otherwise the reply asks for a walk into the ring. The ring is wider than the
-			-- auto-walk's let-go (capture.walk.arriveStuds): the walk lets go short of the spot and
-			-- the two-step stop carries the body on along its facing, toward and past the spot.
+			-- auto-walk's rest target (capture.walk.restStuds): the walk lets go short of the spot by
+			-- the stop's carry and the body comes to rest on it.
 			standRadius = 3,
 			standHeightTolerance = 1,
 			-- The walk the reply asks for: a route that keeps routeMarginStuds off the ledge and its
@@ -607,18 +665,34 @@ local Dev = {
 		-- direction goes to Humanoid:Move each frame from a render step at renderOrder (after the
 		-- control script's own Move at Input, before the character controller reads MoveDirection
 		-- at choreo.luau renderOrder.character), so the controller, Locomotion and the two-step stop
-		-- see the same input a held key gives. It steers to each route point until it is within
-		-- waypointStuds, and lets go within arriveStuds of the spot; once the body is slower than
-		-- restSpeed (studs per second, flat) the shot is asked for again (a root the stop carried
-		-- out of the ring gets a new walk). A
-		-- cancelKeys key (Enum.KeyCode names: the default control script's movement keys) hands the
-		-- walk to the player (the ring stays and the ask still comes once the root is in it); J, P
-		-- and timeoutSeconds (on the capture's clock) end it.
+		-- see the same input a held key gives. The walk holds input.luau's sprintAction through the
+		-- input path (as the key does), so it runs at the sprint and its stop is the Skid's: above
+		-- choreo locomotion.skidSpeedThreshold the two-step stop (D-059) carries nothing, and the
+		-- body stops where the walk lets go. It steers to each route point until it is within
+		-- waypointStuds; on the last leg (the approach along the spot's facing) it follows the
+		-- leg's line, aiming lookaheadStuds past the root's foot on it, so the body runs square to
+		-- the shot's way, and lets go when the spot is the stop's carry ahead: none at the sprint,
+		-- the walk's speed x carrySeconds below the Skid's threshold (the two-step stop's carry
+		-- at run speed, 1.8 to 4.2 studs by where the stride is, 3.0 in the middle: 0.186 s at 16
+		-- studs per second), or the carry the last sprint stop was seen to make when the engine
+		-- slid it on. Once the body is slower than restSpeed (studs per second, flat) it is at
+		-- rest: more than restStuds (flat) off the spot or restDegrees off its facing, it walks
+		-- the last leg again (at most secondWalks times), and otherwise the shot is asked for
+		-- again (a root outside the ring gets a new walk). A cancelKeys key (Enum.KeyCode names:
+		-- the default control script's movement keys), pressed or held at any point after P, hands
+		-- the walk to the player until P: the walk lets go of the sprint and never moves the body
+		-- again (the ring stays and the ask comes once the root stands in it at rest); J, P and
+		-- timeoutSeconds (on the capture's clock) end it.
 		walk = {
 			timeoutSeconds = 15,
 			waypointStuds = 1,
-			arriveStuds = 2,
+			lookaheadStuds = 1.5,
+			sprintAction = "Sprint",
+			carrySeconds = 0.186,
 			restSpeed = 0.5,
+			restStuds = 1,
+			restDegrees = 5,
+			secondWalks = 2,
 			cancelKeys = { "W", "A", "S", "D", "Up", "Down", "Left", "Right" },
 			renderOrder = { base = "Input", offset = 1 },
 			-- The ring: a flat client-made disc (no collision, no query) the stand ring's size.
@@ -630,9 +704,12 @@ local Dev = {
 				transparency = 0.45,
 			},
 		},
-		-- The staged views (CameraController.setStage, StageCamera). Side and ThreeQuarter frame the
-		-- Arts, the parry and the kill; Behind follows the boar's charge from behind its tail; Open
-		-- watches the locomotion pass from the player's +X, so a run along -Z crosses the screen.
+		-- The staged views (CameraController.setStage, StageCamera). Side frames the Arts and the
+		-- kill; ThreeQuarter the kobold's overhead and the parry, from wide on the side of its axe
+		-- hand (those shots take cameraSide -1), so the player never stands between the lens and the
+		-- kobold or its axe (tests/client/CameraStageFraming.spec.luau); Behind follows the boar's
+		-- charge from behind its tail; Open watches the locomotion pass from the player's +X, so a
+		-- run along -Z crosses the screen.
 		cameras = {
 			Side = {
 				anchor = "Middle",
@@ -646,11 +723,11 @@ local Dev = {
 			ThreeQuarter = {
 				anchor = "Player",
 				reference = "Line",
-				degrees = 50,
-				distance = 10,
+				degrees = 75,
+				distance = 14,
 				height = 3,
 				focusBias = 0.5,
-				lookHeight = 1.3,
+				lookHeight = 1,
 			},
 			Behind = {
 				anchor = "Target",
@@ -682,18 +759,88 @@ local Dev = {
 					lock = true,
 					enemies = {
 						{ enemy = "KoboldAxeman", distance = 9, side = 0, held = false },
-						{ enemy = "FrenzyBoar", distance = 20, side = 65, held = false },
+						-- Off the player's left shoulder, out of the swings at the kobold, held until the
+						-- kobold's third overhead has been parried: its crouch comes in the kobold's
+						-- stagger, its line across the player's back step, and its skid is the kill.
+						-- One basic's HP (combat basic damage on it): the kill lands in the half
+						-- second between its skid and the kobold's next overhead.
+						{
+							enemy = "FrenzyBoar",
+							distance = 12,
+							side = 100,
+							held = false,
+							releaseAfter = 8.6,
+							charge = "Meets",
+							hp = 4,
+						},
 					},
 				},
 				camera = "Lock",
 				cameraSide = 1,
 				prompts = {
-					{ at = 0, text = "Fight the kobold: basics (left mouse), Arts (Q, 2, 3, 4)" },
-					{ at = 5, text = "The overhead: guard (right mouse) as the axe drops, for the parry" },
-					{ at = 10, text = "The boar: dodge (Space) its charge, punish the skid" },
-					{ at = 15, text = "Finish one: the kill, the freeze, the shatter" },
+					{
+						at = 0,
+						text = "Fight the kobold: basics (left mouse) in reach; guard (right mouse) as its axe drops for the parry, then Q",
+					},
+					{ at = 5, text = "The next overhead: guard for the parry, then 2" },
+					{
+						at = 8.6,
+						text = "The boar is let go: the crouch, the red line, then it charges into you: dodge (Space) back across it",
+					},
+					{
+						at = 9.8,
+						text = "Lock the boar (F), sprint at its skid (Shift+W), basics: the kill, the freeze, the shatter",
+					},
+					{ at = 11.5, text = "Lock the kobold (F): guard each overhead for the parry, then 4, then 3" },
 				},
-				perform = {},
+				-- Auto-perform reacts to what this client draws (CF): a guard on each of the kobold's
+				-- overheads (the parry), then the next Art; a dodge on the boar's crouch, the lock on it
+				-- and a sprint at its skid; between, basics on the lock's target in reach and the lock
+				-- back on the kobold once the boar is gone.
+				perform = {
+					{
+						action = "Guard",
+						onClip = "enemy/Kobold/Overhead",
+						enemy = 1,
+						repeats = true,
+						lock = true,
+						-- As parry-spark's: the latency lead comes on top (D-CI2).
+						lead = 0.04,
+						hold = 0.3,
+						-- The fifth parry still comes; its Art (down at about 19.2 s, launched about
+						-- 19.7 s) would land after the 20 s cut, where its number is never seen (D-CI3).
+						to = 19,
+						chain = {
+							{
+								action = "Art",
+								delay = 0.15,
+								hold = 0.5,
+								cycle = { "Art", "ArtSlot2", "ArtSlot4", "ArtSlot3" },
+							},
+						},
+					},
+					{
+						action = "Dodge",
+						onClip = "enemy/Boar/Charge",
+						enemy = 2,
+						repeats = true,
+						lead = 0.3,
+						hold = 0.05,
+						chain = {
+							{ action = "LockOn", enemy = 2, delay = 0.6, hold = 0.05 },
+							{
+								action = "Move",
+								stick = { 0, 1 },
+								sprint = true,
+								within = 4.5,
+								delay = 0.25,
+								hold = 1.2,
+							},
+						},
+					},
+					{ action = "BasicAttack", every = 0.4, from = 0.3, to = 19.5, within = 5.5, hold = 0.05 },
+					{ action = "LockOn", enemy = 1, every = 0.2, hold = 0.05 },
+				},
 			},
 			{
 				id = "art-horizontal",
@@ -707,12 +854,14 @@ local Dev = {
 				},
 				camera = "Side",
 				cameraSide = 1,
+				-- An Art launches on its key's release: down at 0.5 s, lit from 0.65 s, up (the cut) at 1.0 s.
 				prompts = {
-					{ at = 0, text = "Horizontal (Q) at 1.0 s; stand still" },
-					{ at = 1, text = "Horizontal: Q now" },
+					{ at = 0, text = "Horizontal (Q): press and hold Q at 0.5 s, let go at 1.0 s; stand still" },
+					{ at = 0.5, text = "Hold Q: the start pose, then the glow" },
+					{ at = 1, text = "Let go of Q now: the cut" },
 					{ at = 2, text = "Hold still: settle and post-motion" },
 				},
-				perform = { { action = "Art", at = 1, hold = 0.35 } },
+				perform = { { action = "Art", at = 0.5, hold = 0.5 } },
 			},
 			{
 				id = "art-vertical",
@@ -727,11 +876,12 @@ local Dev = {
 				camera = "Side",
 				cameraSide = 1,
 				prompts = {
-					{ at = 0, text = "Vertical (2) at 1.0 s; stand still" },
-					{ at = 1, text = "Vertical: 2 now" },
+					{ at = 0, text = "Vertical (2): press and hold 2 at 0.5 s, let go at 1.0 s; stand still" },
+					{ at = 0.5, text = "Hold 2: the start pose, then the glow" },
+					{ at = 1, text = "Let go of 2 now: the overhead cut" },
 					{ at = 2, text = "Hold still: settle and post-motion" },
 				},
-				perform = { { action = "ArtSlot2", at = 1, hold = 0.35 } },
+				perform = { { action = "ArtSlot2", at = 0.5, hold = 0.5 } },
 			},
 			{
 				id = "art-sharp-nail",
@@ -746,11 +896,12 @@ local Dev = {
 				camera = "Side",
 				cameraSide = 1,
 				prompts = {
-					{ at = 0, text = "Sharp Nail (4) at 1.0 s; stand still" },
-					{ at = 1, text = "Sharp Nail: 4 now" },
-					{ at = 2.5, text = "Hold still: three hits, then the settle" },
+					{ at = 0, text = "Sharp Nail (4): press and hold 4 at 0.5 s, let go at 1.0 s; stand still" },
+					{ at = 0.5, text = "Hold 4: the start pose, then the glow" },
+					{ at = 1, text = "Let go of 4 now: three hits, three hit-stops" },
+					{ at = 2.5, text = "Hold still: the settle and post-motion" },
 				},
-				perform = { { action = "ArtSlot4", at = 1, hold = 0.35 } },
+				perform = { { action = "ArtSlot4", at = 0.5, hold = 0.5 } },
 			},
 			{
 				id = "art-rising-arc",
@@ -765,11 +916,12 @@ local Dev = {
 				camera = "Side",
 				cameraSide = 1,
 				prompts = {
-					{ at = 0, text = "Rising Arc (3) at 1.0 s; stand still" },
-					{ at = 1, text = "Rising Arc: 3 now" },
-					{ at = 2.5, text = "Hold still: two hits, then the settle" },
+					{ at = 0, text = "Rising Arc (3): press and hold 3 at 0.5 s, let go at 1.0 s; stand still" },
+					{ at = 0.5, text = "Hold 3: the sunken start pose, then the glow" },
+					{ at = 1, text = "Let go of 3 now: the rise, two hits" },
+					{ at = 2.5, text = "Hold still: the settle and post-motion" },
 				},
-				perform = { { action = "ArtSlot3", at = 1, hold = 0.35 } },
+				perform = { { action = "ArtSlot3", at = 0.5, hold = 0.5 } },
 			},
 			{
 				id = "enemy-boar-charge",
@@ -779,13 +931,14 @@ local Dev = {
 				stage = {
 					open = false,
 					lock = false,
-					enemies = { { enemy = "FrenzyBoar", distance = 18, side = 0, held = false } },
+					-- Inside its line (reach 14): the charge meets the player, then the overshoot runs on.
+					enemies = { { enemy = "FrenzyBoar", distance = 12, side = 0, held = false, charge = "Meets" } },
 				},
 				camera = "Behind",
 				cameraSide = 1,
 				prompts = {
-					{ at = 0, text = "Stand still: the boar crouches (0.6 s, red line), then charges" },
-					{ at = 3, text = "Stand still: the skid and the turn" },
+					{ at = 0, text = "Stand still: the boar crouches (0.6 s, red line), then charges into you" },
+					{ at = 1.5, text = "Stand still: it runs on past you, the skid and the turn" },
 				},
 				perform = {},
 			},
@@ -800,7 +953,7 @@ local Dev = {
 					enemies = { { enemy = "KoboldAxeman", distance = 4.5, side = 0, held = false } },
 				},
 				camera = "ThreeQuarter",
-				cameraSide = 1,
+				cameraSide = -1, -- the kobold holds its axe in its right hand: the lens on that side
 				prompts = {
 					{ at = 0, text = "Stand still: the 1.0 s wind-up, the yellow edge" },
 					{ at = 2.5, text = "Stand still: the chop and the recovery" },
@@ -818,13 +971,16 @@ local Dev = {
 					enemies = { { enemy = "KoboldAxeman", distance = 4.5, side = 0, held = false } },
 				},
 				camera = "ThreeQuarter",
-				cameraSide = 1,
+				cameraSide = -1, -- the kobold holds its axe in its right hand: the lens on that side
 				prompts = {
 					{ at = 0, text = "Parry: guard (right mouse) as the axe starts down" },
 					{ at = 3, text = "Hold still: the spark, the ring, the stagger" },
 				},
+				-- The guard leaves `lead` before the hit window and the latency lead earlier still
+				-- (Telegraphs.glintLead, D-289): 0.04 parries at 0 to 100 ms on Studio's link and a
+				-- live one with at least 18 ms to spare (tests/client/ParryGlint.spec.luau, D-CI2).
 				perform = {
-					{ action = "Guard", onClip = "enemy/Kobold/Overhead", lead = 0.05, hold = 0.4 },
+					{ action = "Guard", onClip = "enemy/Kobold/Overhead", lead = 0.04, hold = 0.4 },
 				},
 			},
 			{
@@ -839,9 +995,10 @@ local Dev = {
 				},
 				camera = "Side",
 				cameraSide = 1,
+				-- A basic swings on its click: the click's beat is the swing's.
 				prompts = {
-					{ at = 0, text = "Kill: one basic (left mouse) at 1.0 s" },
-					{ at = 1, text = "Basic: left mouse now" },
+					{ at = 0, text = "Kill: one click (left mouse) at 1.0 s; the basic swings on the click" },
+					{ at = 1, text = "Click now (left mouse): the kill" },
 					{ at = 1.5, text = "Hold still: the freeze, the silence, the shards" },
 				},
 				perform = { { action = "BasicAttack", at = 1, hold = 0.05 } },
@@ -860,16 +1017,36 @@ local Dev = {
 				camera = "Open",
 				cameraSide = 1,
 				prompts = {
-					{ at = 0, text = "Sheathed: walk right (D) off the ledge, fall and land" },
-					{ at = 2.5, text = "Sheathed: run, then sprint (Shift)" },
-					{ at = 5, text = "Lock on the kobold (F): the sword draws; F again" },
-					{ at = 6.5, text = "Drawn: walk, run, sprint (Shift)" },
-					{ at = 10, text = "Turn in place (A then D)" },
-					{ at = 12, text = "Run, then let go: the skid stop" },
+					-- Every run names its key: under the Open view D runs to screen right and A to screen
+					-- left, across the frame (W and S run at and away from the lens). The walk is a
+					-- part-pushed stick (there is no walk key; auto-perform pushes it half way). Turn in
+					-- place is the lock turning a body that stands still (LocomotionState): the keys only
+					-- move it.
+					{ at = 0, text = "Sheathed: walk right (D) on a half-pushed stick, off the ledge: fall and land" },
+					{ at = 2.5, text = "Sheathed: run right (D), then sprint (Shift+D)" },
+					{ at = 5, text = "Let go; lock on the kobold (F): the sword draws; F again" },
+					{ at = 6.5, text = "Drawn: walk left (A) half-pushed, run (A), then sprint (Shift+A)" },
+					{ at = 8.8, text = "Let go and stand" },
+					{
+						at = 10,
+						text = "Lock on the kobold behind you (F): the turn in place; F again",
+					},
+					{ at = 12, text = "Sprint right (Shift+D), then let go: the skid stop" },
 				},
+				-- The stick on the Open view's frame (CF): { right, forward }, D is right. Half pushed
+				-- walks (8 studs a second), full runs, the sprint held with it sprints.
 				perform = {
+					{ action = "Move", at = 0, hold = 2.5, stick = { 0.5, 0 } },
+					{ action = "Move", at = 2.5, hold = 1, stick = { 1, 0 } },
+					{ action = "Move", at = 3.5, hold = 1.3, stick = { 1, 0 }, sprint = true },
 					{ action = "LockOn", at = 5, hold = 0.05 },
 					{ action = "LockOn", at = 5.8, hold = 0.05 },
+					{ action = "Move", at = 6.5, hold = 0.8, stick = { -0.5, 0 } },
+					{ action = "Move", at = 7.3, hold = 0.8, stick = { -1, 0 } },
+					{ action = "Move", at = 8.1, hold = 0.7, stick = { -1, 0 }, sprint = true },
+					{ action = "LockOn", at = 10.2, hold = 0.05 },
+					{ action = "LockOn", at = 11.2, hold = 0.05 },
+					{ action = "Move", at = 12, hold = 1.2, stick = { 1, 0 }, sprint = true },
 				},
 			},
 		} :: { Shot },

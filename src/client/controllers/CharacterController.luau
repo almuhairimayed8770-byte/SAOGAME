@@ -180,6 +180,8 @@ local assistTargetId: number? = nil
 local standOff: ContactPredictor.StandOff? = nil
 local standOffHandle: any = nil
 local standOffShown = 0
+-- How much of the keep-out's aside (D-CH4) the root already shows; planStandOff starts it at 0.
+local standOffSideShown = 0
 local STAND_OFF_EASING: string = Combat.contact.standOff.easing
 local lastPredictAt: number? = nil
 local lastParryAt: number? = nil
@@ -398,12 +400,19 @@ local function aimedTarget(): Model?
 	return record.model
 end
 
--- Plans the Art stand-off (fix F1) for a launched Art's clip `handle`, whose request faces
--- `facing`: the body steps away from the aimed enemy over the anticipation when the first cut's
--- start pose would sit in its body (ContactPredictor.standOff), never into the world behind it
--- (the body's own world cast, D-235 amended). The root carries it in step().
-local function planStandOff(handle: any, facing: { number })
-	standOff, standOffHandle, standOffShown = nil, nil, 0
+-- The swing whose stand-off was last asked for: a basic swing asks on its first frame (D-CH3).
+local standOffAsked: any = nil
+
+-- Plans the stand-off for a swing's clip `handle`, whose request faces `facing`: for a launched
+-- Art, the body steps away from the aimed enemy over the anticipation when the first cut's start
+-- pose would sit in its body (fix F1); for every swing, an Art's or a basic's (`basic`, no such
+-- step), the keep-out (D-CH3) holds the body back as far as the clip's own motion would carry its
+-- colliding parts into the enemy's blocker, so the engine never pushes it out through a freeze
+-- (and aside off the face over a part the enemy holds, D-CH4). None of it goes into the world
+-- behind or beside (the body's own world cast, D-235 amended). The root carries it in step().
+local function planStandOff(handle: any, facing: { number }, basic: boolean?)
+	standOff, standOffHandle, standOffShown, standOffSideShown = nil, nil, 0, 0
+	standOffAsked = handle
 	local model, rootPart = character, root
 	if model == nil or rootPart == nil or typeof(handle) ~= "table" then
 		return
@@ -419,26 +428,54 @@ local function planStandOff(handle: any, facing: { number })
 	local position = rootPart.Position
 	local rootCFrame = CFrame.lookAt(position, position + look.Unit)
 	local world = ContactPredictor.worldCast(model :: Model)
-	standOff = ContactPredictor.standOff(model :: Model, handle.clip, handle.time, rootCFrame, target :: Model, world)
+	standOff = ContactPredictor.standOff(
+		model :: Model,
+		handle.clip,
+		handle.time,
+		rootCFrame,
+		target :: Model,
+		world,
+		{ keepOut = true, step = basic ~= true }
+	)
 	standOffHandle = if standOff ~= nil then handle else nil
 end
 
 -- Moves the root on along a planned stand-off to where the clip's clock puts it (AimLogic.
--- standOffAt), no farther than the world behind leaves room (the plan's room, cast from where the
--- root stands now: the clip's root motion moved it too), and forgets the plan once it is done or
--- the Art is gone. What a wall takes off a frame's share is not made up later.
+-- standOffAt, plus the keep-out at that clip time, and aside the keep-out's aside), no farther than
+-- the world behind or beside leaves room (the plan's room and roomSide, cast from where the root
+-- stands now: the clip's root motion moved it too), and
+-- forgets the plan once it is done or the swing is gone. A frozen clip (a hit-stop) holds its
+-- clock, so the root holds too. What a wall takes off a frame's share is not made up later. A
+-- basic swing's plan is asked for here, on its first frame (the clip has taken one step, and the
+-- root faces where the request turned it).
 local function stepStandOff(rootPart: BasePart)
+	local current = predicted
+	if
+		standOff == nil
+		and state == "Basic"
+		and current ~= nil
+		and current.action == "Basic"
+		and current.handle ~= standOffAsked
+	then
+		planStandOff(current.handle, facingTable(), true)
+	end
 	local plan = standOff
 	if plan == nil then
 		return
 	end
-	local current = predicted
 	local handle = standOffHandle
-	if state ~= "Art" or current == nil or current.handle ~= handle or typeof(handle.time) ~= "number" then
+	if
+		(state ~= "Art" and state ~= "Basic")
+		or current == nil
+		or current.handle ~= handle
+		or typeof(handle.time) ~= "number"
+	then
 		standOff, standOffHandle = nil, nil
 		return
 	end
+	local keep = plan.keep
 	local shown = AimLogic.standOffAt(plan.distance, plan.from, plan.to, handle.time, STAND_OFF_EASING)
+		+ (if keep ~= nil then keep(handle.time) else 0)
 	local by = shown - standOffShown
 	if by ~= 0 then
 		local room = plan.room
@@ -446,7 +483,18 @@ local function stepStandOff(rootPart: BasePart)
 		rootPart.CFrame = rootPart.CFrame + plan.away * move
 		standOffShown = shown
 	end
-	if handle.time >= plan.to then
+	local side, keepSide = plan.side, plan.keepSide
+	if side ~= nil and keepSide ~= nil then
+		local aside = keepSide(handle.time)
+		local sideBy = aside - standOffSideShown
+		if sideBy ~= 0 then
+			local roomSide = plan.roomSide
+			local move = if sideBy > 0 and roomSide ~= nil then roomSide(rootPart.CFrame, sideBy) else sideBy
+			rootPart.CFrame = rootPart.CFrame + side * move
+			standOffSideShown = aside
+		end
+	end
+	if handle.time >= math.max(plan.to, plan.keepUntil or plan.to) then
 		standOff, standOffHandle = nil, nil
 	end
 end
@@ -1287,7 +1335,7 @@ local function clearCharacter()
 	lastAutoRotate = nil
 	yawHistory = AimLogic.newHistory()
 	snap = nil
-	standOff, standOffHandle, standOffShown = nil, nil, 0
+	standOff, standOffHandle, standOffShown, standOffSideShown, standOffAsked = nil, nil, 0, 0, nil
 	assistTargetId = nil
 	lastPredictAt = nil
 	fallTracker = { airborneSince = nil, peakY = 0 }

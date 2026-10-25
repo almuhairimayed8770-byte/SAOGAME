@@ -188,8 +188,8 @@ local AI = {
 		-- light goes out as the blade falls, never 18 frames before it (F7). A rush's line still ends
 		-- at its launch: the run is the strike.
 		snapLeadSeconds = 0.05,
-		-- Over the parry window before the blow (combat.luau parryWindow) the fill is at its
-		-- brightest, steady, no pulse: the last glint that marks the window (F7). 0 is solid.
+		-- For the parry glint, a few frames on the parry window before the blow (fx.luau
+		-- telegraph.glintFrames, D-CP1), the fill is at its brightest, steady, no pulse (F7). 0 is solid.
 		glintFillTransparency = 0,
 	},
 

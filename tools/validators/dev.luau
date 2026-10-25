@@ -27,13 +27,29 @@
 
 	The capture's shots (F12, tests/data/devCapture.spec.luau): every shot stages at least one
 	enemy the game has (a positive distance, a side within a half turn, held a boolean, hp above 0
-	and at most the enemy's own), takes the Lock camera only when it locks on or else a
+	and at most the enemy's own, a `releaseAfter` only on one let go, inside the take, under a
+	prompt beat at that moment), takes the Lock camera only when it locks on or else a
 	capture.cameras view, has a cameraSide of 1 or -1, prompt beats from 0 in order inside the take,
-	and a perform list of input.luau actions each held a positive time and timed by exactly one of
-	`at` (letting go inside the take) and `onClip` (a clip with a HitWindowOpen, led by 0 or more and
-	under combat.parryWindow); an Art press is held past the start pose and activation and short of
-	the cancel time. The staged views name a known anchor and reference, degrees in [0, 180], a
-	positive distance, a height of 0 or more and a focusBias in [0, 1]. The hotkeys are distinct,
+	and a perform list (CF). Each press, an entry or a chain step, is an input.luau action or
+	capture.perform.moveAction (the stick: a name no input action has), held a positive time; a
+	Move holds a stick {right, forward} of length (0, 1] and only a Move has a stick or a sprint;
+	`enemy` names a staged enemy by index; an Art press is held past the start pose and activation
+	and short of the cancel time. Each entry is timed by exactly one of `at` (letting go inside
+	the take; timed Moves never overlap), `onClip` (a reaction: an attack clip, with a
+	HitWindowOpen, of the staged enemy it names, which the shot lets go; led by 0 or more and under
+	combat.parryWindow for a Guard, at most the wind-up after the clip's first event for any other
+	press; `repeats` and `lock` booleans; an optional `to` above 0 and inside the take, past which
+	nothing of it goes down (D-CI3); a `chain` of steps each a `delay` of 0 or more after the
+	one before, timed by nothing else, a `cycle` of Art actions starting with its own, `within`
+	only on a Move step) and `every` (a standing rule: BasicAttack with a positive `within`, or
+	LockOn, inside 0 <= from < to <= the take). A timed attack lands where its prompts say: an Art launches on its release, so
+	a prompt beat comes up at its press (hold) and one at its release (let go), and it is held at
+	least capture.artGlowSeconds past the start pose so the lit stance reads; a basic swings on its
+	press, which a beat marks. A released Charger says what its first charge does to a player standing on the
+	spot (`charge`, from inside the charge band): Meets (the line's reach covers the root) or Passes
+	(the line ends short of the body); no other entry has one. The staged views name a known anchor
+	and reference, degrees in [0, 180], a positive distance, a height of 0 or more and a focusBias in
+	[0, 1]. The hotkeys are distinct,
 	off input.luau's keyboard bindings, never a function key, autoPerform and releaseStage among
 	them, and no walk cancel key; auto-perform starts off. The stage: a plain remote name, positive
 	request rate, away distance (past camera.luau lock.range) and hold wait (under
@@ -44,8 +60,15 @@
 	than standHeightTolerance, palette-coloured, a real material, transparency in [0, 1).
 
 	The capture's walk into the stand ring (D-244: the staging never moves the player):
-	- capture.stage's ring numbers are positive, and the ring is wider than the auto-walk's let-go
-	  (capture.walk.arriveStuds), so the let-go lands inside it;
+	- capture.stage's ring numbers are positive, and the ring is wider than the auto-walk's rest
+	  target (capture.walk.restStuds), so a body at rest on the spot stands inside it;
+	  walk.restDegrees is under a right angle and walk.secondWalks a whole number of 0 or more;
+	- walk.sprintAction is an input.luau action whose speed (combat.luau
+	  maxSpeedStudsPerSecond) is past choreo.luau locomotion.skidSpeedThreshold, so the walk's stop
+	  is the Skid's and carries nothing (D-059);
+	- walk.lookaheadStuds is shorter than the last leg (stage.approachStuds), and the let-go below
+	  the Skid's threshold (walk.carrySeconds at locomotion runSpeed) is on it too;
+	  walk.carrySeconds is under locomotion.stopStepsSeconds, the two-step stop's longest carry;
 	- capture.walk.restSpeed is under choreo.luau locomotion.stopEndSpeed (the two-step stop has
 	  ended when the body is that slow);
 	- the ledge's ramp is as tall as the ledge, no wider, and no steeper than a Humanoid walks
@@ -142,10 +165,23 @@ return function(ctx: Context): { string }
 				problem(("capture.stage.%s must be a positive number"):format(key))
 			end
 		end
-		for _, key in { "timeoutSeconds", "waypointStuds", "arriveStuds", "restSpeed" } do
+		for _, key in
+			{
+				"timeoutSeconds",
+				"waypointStuds",
+				"lookaheadStuds",
+				"carrySeconds",
+				"restSpeed",
+				"restStuds",
+				"restDegrees",
+			}
+		do
 			if not isNumber(walk[key]) or walk[key] <= 0 then
 				problem(("capture.walk.%s must be a positive number"):format(key))
 			end
+		end
+		if not isNumber(walk.secondWalks) or walk.secondWalks < 0 or walk.secondWalks % 1 ~= 0 then
+			problem("capture.walk.secondWalks must be a whole number of 0 or more")
 		end
 		local ledge = stage.ledge
 		local ramp = if typeof(ledge) == "table" and typeof(ledge.ramp) == "table" then ledge.ramp.size else nil
@@ -155,11 +191,52 @@ return function(ctx: Context): { string }
 		if #problems == walkProblems then
 			local choreo = ctx.load("src/shared/data/choreo")
 			local logic = ctx.load("src/server/dev/DevStageLogic")
-			if walk.arriveStuds >= stage.standRadius then
+			local input = ctx.load("src/shared/data/input")
+			local locomotion = choreo.locomotion
+			if walk.restStuds >= stage.standRadius then
 				problem(
-					("capture.walk.arriveStuds (%g) must be under capture.stage.standRadius (%g): the auto-walk lets go inside the ring"):format(
-						walk.arriveStuds,
+					("capture.walk.restStuds (%g) must be under capture.stage.standRadius (%g): a body at rest on the spot stands in the ring"):format(
+						walk.restStuds,
 						stage.standRadius
+					)
+				)
+			end
+			if walk.restDegrees >= 90 then
+				problem(("capture.walk.restDegrees (%g) must be under 90"):format(walk.restDegrees))
+			end
+			if typeof(walk.sprintAction) ~= "string" or table.find(input.actions, walk.sprintAction) == nil then
+				problem(
+					("capture.walk.sprintAction (%s) must be an input.luau action"):format(tostring(walk.sprintAction))
+				)
+			elseif combat.maxSpeedStudsPerSecond <= locomotion.skidSpeedThreshold then
+				problem(
+					("capture.walk.sprintAction: the sprint (combat maxSpeedStudsPerSecond %g) must be past choreo locomotion.skidSpeedThreshold (%g), so the walk's stop carries nothing"):format(
+						combat.maxSpeedStudsPerSecond,
+						locomotion.skidSpeedThreshold
+					)
+				)
+			end
+			if walk.lookaheadStuds >= stage.approachStuds then
+				problem(
+					("capture.walk.lookaheadStuds (%g) must be under capture.stage.approachStuds (%g): the walk follows the last leg's line"):format(
+						walk.lookaheadStuds,
+						stage.approachStuds
+					)
+				)
+			end
+			if walk.carrySeconds >= locomotion.stopStepsSeconds then
+				problem(
+					("capture.walk.carrySeconds (%g) must be under choreo locomotion.stopStepsSeconds (%g), the two-step stop's longest carry"):format(
+						walk.carrySeconds,
+						locomotion.stopStepsSeconds
+					)
+				)
+			elseif walk.carrySeconds * locomotion.runSpeed >= stage.approachStuds then
+				problem(
+					("capture.walk.carrySeconds (%g) lets go %.2f studs short of the spot at run speed, off the last leg (capture.stage.approachStuds %g)"):format(
+						walk.carrySeconds,
+						walk.carrySeconds * locomotion.runSpeed,
+						stage.approachStuds
 					)
 				)
 			end
@@ -250,9 +327,310 @@ return function(ctx: Context): { string }
 		local enemies = ctx.load("src/shared/data/enemies")
 		local palette = ctx.load("src/shared/data/palette")
 		local logic = ctx.load("src/server/dev/DevStageLogic")
+		local ai = ctx.load("src/shared/data/ai")
+		local rigs = ctx.load("src/shared/data/rigs")
 		local cameras = if typeof(capture.cameras) == "table" then capture.cameras else {}
 		local artHoldMin = combat.startPoseTime + combat.activationHold
 		local artHoldMax = input.art.cancelTime
+		-- A timed Art's lit stance on camera: from the end of its start pose to its release.
+		local artGlow: number? = nil
+		if not isNumber(capture.artGlowSeconds) or capture.artGlowSeconds <= 0 then
+			problem("capture.artGlowSeconds must be a positive number of seconds")
+		elseif combat.startPoseTime + capture.artGlowSeconds >= artHoldMax then
+			problem(
+				("capture.artGlowSeconds (%g) past the start pose (%g s) must end short of the cancel time (%g s)"):format(
+					capture.artGlowSeconds,
+					combat.startPoseTime,
+					artHoldMax
+				)
+			)
+		else
+			artGlow = capture.artGlowSeconds
+		end
+		-- The player's body radius for a hit (HitSweep.bodyRadius: half the root's wider flat side),
+		-- the root as the hit matrix builds it, scaled by PlayerR15's proportions.
+		local rootSize = dev.hitMatrix.avatar.parts.HumanoidRootPart
+		local proportions = rigs.PlayerR15.scale
+		local playerRadius = math.max(rootSize[1] * proportions.bodyWidth, rootSize[3] * proportions.bodyDepth) / 2
+		local function rushOf(def: any): any
+			if def.archetype ~= "Charger" then
+				return nil
+			end
+			for _, attack in def.attacks do
+				if attack.arc == 0 or attack.groundShape == "Line" then
+					return attack
+				end
+			end
+			return nil
+		end
+
+		-- Auto-perform's vocabulary (CF): a press of capture.perform.moveAction holds the stick, not
+		-- a key, so it is never an input.luau action itself.
+		local moveAction: string? = nil
+		if
+			typeof(capture.perform) ~= "table"
+			or typeof(capture.perform.moveAction) ~= "string"
+			or capture.perform.moveAction == ""
+			or table.find(input.actions, capture.perform.moveAction) ~= nil
+		then
+			problem(
+				"capture.perform.moveAction must be a name that is not an input.luau action: a press of it holds the stick"
+			)
+		else
+			moveAction = capture.perform.moveAction
+		end
+		local function isArt(action: string): boolean
+			return action == "Art" or action:match("^ArtSlot") ~= nil
+		end
+		-- What every press of a perform list is, an entry or a chain step: a real action held a
+		-- positive time; a Move holds a stick {right, forward} of length (0, 1], and only a Move has
+		-- a stick or a sprint; `enemy` names a staged enemy by its index; an Art is held past the
+		-- start pose and activation and short of the cancel time. False when the press is no press.
+		local function checkPress(pressLabel: string, press: any, staged: { any }): boolean
+			if
+				typeof(press.action) ~= "string"
+				or (table.find(input.actions, press.action) == nil and press.action ~= moveAction)
+			then
+				problem(
+					("%s.action '%s' is not an input.luau action nor capture.perform.moveAction"):format(
+						pressLabel,
+						tostring(press.action)
+					)
+				)
+				return false
+			end
+			if not isNumber(press.hold) or press.hold <= 0 then
+				problem(pressLabel .. ".hold must be a positive number of seconds")
+				return false
+			end
+			local move = press.action == moveAction
+			if move then
+				local stick = press.stick
+				local whole = typeof(stick) == "table" and #stick == 2 and isNumber(stick[1]) and isNumber(stick[2])
+				local length = if whole then math.sqrt(stick[1] * stick[1] + stick[2] * stick[2]) else 0
+				if length <= 0 or length > 1 + 1e-9 then
+					problem(pressLabel .. ".stick must be {right, forward} with a length above 0 and at most 1")
+				end
+			elseif press.stick ~= nil then
+				problem(pressLabel .. ".stick is only for a capture.perform.moveAction press")
+			end
+			if press.sprint ~= nil then
+				if typeof(press.sprint) ~= "boolean" then
+					problem(pressLabel .. ".sprint must be true or false")
+				elseif not move then
+					problem(pressLabel .. ".sprint is only for a capture.perform.moveAction press")
+				end
+			end
+			if press.enemy ~= nil and (not isWhole(press.enemy) or press.enemy < 1 or press.enemy > #staged) then
+				problem(("%s.enemy must name one of the shot's staged enemies (1 to %d)"):format(pressLabel, #staged))
+			end
+			if isArt(press.action) and (press.hold <= artHoldMin or press.hold >= artHoldMax) then
+				problem(
+					("%s: an Art press is held past the start pose and activation (%g s) and short of the cancel time (%g s); got %g s"):format(
+						pressLabel,
+						artHoldMin,
+						artHoldMax,
+						press.hold
+					)
+				)
+			end
+			return true
+		end
+		-- A reaction (`onClip`): the clip this client draws for one of the shot's staged enemies
+		-- (`enemy`, the first by default), an attack of that enemy, which the shot lets go; the
+		-- press `lead` ahead of the clip's hit window: a guard inside the parry window, any other
+		-- press after the clip's first event (the client hears the clip from it on). It may
+		-- repeat on each play, lock the enemy on hearing it, and chain presses after it.
+		local function checkReaction(pressLabel: string, press: any, staged: { any }, seconds: number?)
+			local ok, clip = pcall(ctx.load, CLIPS .. tostring(press.onClip))
+			local window: number? = nil
+			local first: number? = nil
+			if ok and typeof(clip) == "table" and typeof(clip.events) == "table" then
+				for _, event in clip.events do
+					if typeof(event) ~= "table" or not isNumber(event.time) then
+						continue
+					end
+					first = math.min(first or event.time, event.time)
+					if event.kind == "HitWindowOpen" and window == nil then
+						window = event.time
+					end
+				end
+			end
+			if window == nil then
+				problem(
+					("%s.onClip '%s' must name a clip with a HitWindowOpen event"):format(
+						pressLabel,
+						tostring(press.onClip)
+					)
+				)
+			end
+			local index = if isWhole(press.enemy) then press.enemy else 1
+			local entry = staged[index]
+			local def = if typeof(entry) == "table" then enemies.byId(entry.enemy) else nil
+			if def ~= nil then
+				local names = {}
+				local found = false
+				for _, attack in def.attacks do
+					local id = ("enemy/%s/%s"):format(tostring(def.skin), tostring(attack.clip))
+					table.insert(names, id)
+					found = found or id == press.onClip
+				end
+				if not found then
+					problem(
+						("%s.onClip '%s' must be an attack clip of the enemy it reacts to (stage.enemies[%d]: %s)"):format(
+							pressLabel,
+							tostring(press.onClip),
+							index,
+							table.concat(names, ", ")
+						)
+					)
+				end
+				if entry.held == true then
+					problem(
+						("%s reacts to an enemy the shot holds (stage.enemies[%d]): a held enemy never attacks"):format(
+							pressLabel,
+							index
+						)
+					)
+				end
+			end
+			if not isNumber(press.lead) then
+				problem(pressLabel .. ".lead must say how far ahead of the hit window the press comes")
+			elseif press.action == "Guard" then
+				if press.lead < 0 or press.lead >= combat.parryWindow then
+					problem(
+						("%s.lead (%g) must be 0 or more and under combat.parryWindow (%g)"):format(
+							pressLabel,
+							press.lead,
+							combat.parryWindow
+						)
+					)
+				end
+			else
+				local most = if window ~= nil and first ~= nil then window - first else math.huge
+				if press.lead < 0 or press.lead > most + 1e-9 then
+					problem(
+						("%s.lead (%g) must be 0 or more and at most the clip's wind-up after its first event (%g s): the press comes after this client hears the clip"):format(
+							pressLabel,
+							press.lead,
+							most
+						)
+					)
+				end
+			end
+			for _, key in { "repeats", "lock" } do
+				if press[key] ~= nil and typeof(press[key]) ~= "boolean" then
+					problem(("%s.%s must be true or false"):format(pressLabel, key))
+				end
+			end
+			-- `to` (D-CI3): nothing of the reaction, its chain included, goes down past it, so what
+			-- it launches lands before the take's cut.
+			if
+				press.to ~= nil
+				and (not isNumber(press.to) or press.to <= 0 or (seconds ~= nil and press.to > seconds))
+			then
+				problem(
+					("%s.to (%s) must be above 0 and at most the take (%s s): nothing of the reaction goes down past it"):format(
+						pressLabel,
+						tostring(press.to),
+						tostring(seconds)
+					)
+				)
+			end
+			if press.chain == nil then
+				return
+			end
+			if typeof(press.chain) ~= "table" or #press.chain == 0 then
+				problem(pressLabel .. ".chain must list at least one step")
+				return
+			end
+			-- Each step a press `delay` after the step before it lets go; a Move step lets go at
+			-- `within` studs of the lock's target or at its hold; an Art step may cycle Arts, one per
+			-- play of the reaction.
+			for stepIndex, step in press.chain do
+				local stepLabel = ("%s.chain[%d]"):format(pressLabel, stepIndex)
+				if typeof(step) ~= "table" then
+					problem(stepLabel .. " must be a table")
+					continue
+				end
+				if not checkPress(stepLabel, step, staged) then
+					continue
+				end
+				if not isNumber(step.delay) or step.delay < 0 then
+					problem(stepLabel .. ".delay must be 0 or more seconds after the step before it")
+				end
+				for _, key in { "at", "onClip", "every", "lead", "repeats", "lock", "chain", "from", "to" } do
+					if step[key] ~= nil then
+						problem(("%s.%s: a chain step is timed by its delay alone"):format(stepLabel, key))
+					end
+				end
+				if step.cycle ~= nil then
+					local cycle = step.cycle
+					if typeof(cycle) ~= "table" or #cycle == 0 or cycle[1] ~= step.action then
+						problem(stepLabel .. ".cycle must start with the step's own action")
+					end
+					if typeof(cycle) == "table" then
+						for _, action in cycle do
+							if
+								typeof(action) ~= "string"
+								or table.find(input.actions, action) == nil
+								or not isArt(action)
+							then
+								problem(
+									stepLabel .. ".cycle must list Art actions (input.luau Art and ArtSlot actions)"
+								)
+								break
+							end
+						end
+					end
+				end
+				if step.within ~= nil then
+					if step.action ~= moveAction then
+						problem(stepLabel .. ".within is only for a standing BasicAttack or a Move chain step")
+					elseif not isNumber(step.within) or step.within <= 0 then
+						problem(stepLabel .. ".within must be a positive number of studs")
+					end
+				end
+			end
+		end
+		-- A standing rule (`every`): a basic on the lock's target in reach (`within`) or the lock
+		-- (when it is off), every so often from `from` (0) to `to` (the take's end), never while a
+		-- reaction waits or its chain runs.
+		local function checkStanding(pressLabel: string, press: any, seconds: number?)
+			if press.action ~= "BasicAttack" and press.action ~= "LockOn" then
+				problem(pressLabel .. ": a standing rule (`every`) presses only BasicAttack or LockOn")
+			end
+			if not isNumber(press.every) or press.every <= 0 then
+				problem(pressLabel .. ".every must be a positive number of seconds")
+			end
+			local from = if press.from == nil then 0 else press.from
+			local to = if press.to == nil then seconds else press.to
+			if
+				not isNumber(from)
+				or (to ~= nil and not isNumber(to))
+				or from < 0
+				or (to ~= nil and from >= to)
+				or (to ~= nil and seconds ~= nil and to > seconds)
+			then
+				problem(
+					("%s must run 0 <= from < to <= the take (%s s); got from %s, to %s"):format(
+						pressLabel,
+						tostring(seconds),
+						tostring(press.from),
+						tostring(press.to)
+					)
+				)
+			end
+			if press.action == "BasicAttack" then
+				if press.within == nil then
+					problem(pressLabel .. ": a standing BasicAttack presses only in reach: `within`, in studs")
+				elseif not isNumber(press.within) or press.within <= 0 then
+					problem(pressLabel .. ".within must be a positive number of studs")
+				end
+			elseif press.within ~= nil then
+				problem(pressLabel .. ".within is only for a standing BasicAttack or a Move chain step")
+			end
+		end
 
 		-- The staged views.
 		for name, view in cameras do
@@ -349,6 +727,86 @@ return function(ctx: Context): { string }
 							)
 						)
 					end
+					-- Let go partway through the take (CF): when, inside the take, under the prompt beat
+					-- that says so.
+					if entry.releaseAfter ~= nil then
+						if entry.held ~= false then
+							problem(entryLabel .. ".releaseAfter is only for an enemy the shot lets go (held = false)")
+						elseif
+							not isNumber(entry.releaseAfter)
+							or entry.releaseAfter < 0
+							or (seconds ~= nil and entry.releaseAfter >= seconds)
+						then
+							problem(
+								("%s.releaseAfter (%s) must be 0 or more and inside the take (%s s)"):format(
+									entryLabel,
+									tostring(entry.releaseAfter),
+									tostring(seconds)
+								)
+							)
+						else
+							local beat = false
+							if typeof(shot.prompts) == "table" then
+								for _, prompt in shot.prompts do
+									beat = beat
+										or (
+											typeof(prompt) == "table"
+											and isNumber(prompt.at)
+											and math.abs(prompt.at - entry.releaseAfter) < 1e-6
+										)
+								end
+							end
+							if not beat then
+								problem(
+									("%s.releaseAfter (%g s) needs a prompt beat at that moment, saying it is let go"):format(
+										entryLabel,
+										entry.releaseAfter
+									)
+								)
+							end
+						end
+					end
+					-- A released Charger's first charge, against a player standing on the spot (CS7).
+					local rush = rushOf(def)
+					if rush == nil or entry.held ~= false then
+						if entry.charge ~= nil then
+							problem(entryLabel .. ".charge is only for a released Charger")
+						end
+					elseif entry.charge ~= "Meets" and entry.charge ~= "Passes" then
+						problem(
+							entryLabel
+								.. ".charge must say what the first charge does to the player on the spot: Meets or Passes"
+						)
+					elseif isNumber(entry.distance) then
+						local tuning = ai.tuningFor("Charger")
+						if entry.distance < tuning.minChargeDistance or entry.distance > tuning.maxChargeDistance then
+							problem(
+								("%s.distance (%g) must be inside the charge band [%g, %g]: it crouches from where it stands as the take starts"):format(
+									entryLabel,
+									entry.distance,
+									tuning.minChargeDistance,
+									tuning.maxChargeDistance
+								)
+							)
+						elseif entry.charge == "Meets" and entry.distance > rush.reach then
+							problem(
+								("%s: a charge that Meets needs the line (reach %g) to reach the player's root; distance %g"):format(
+									entryLabel,
+									rush.reach,
+									entry.distance
+								)
+							)
+						elseif entry.charge == "Passes" and entry.distance - playerRadius <= rush.reach then
+							problem(
+								("%s: a charge that Passes needs the line (reach %g) to end short of the player's body (radius %.2f); distance %g"):format(
+									entryLabel,
+									rush.reach,
+									playerRadius,
+									entry.distance
+								)
+							)
+						end
+					end
 				end
 			end
 			if shot.camera == "Lock" then
@@ -393,75 +851,137 @@ return function(ctx: Context): { string }
 					end
 				end
 			end
-			-- Auto-perform: real actions, each timed by exactly one of a moment and a clip.
+			-- Auto-perform (CF): real actions, each timed by exactly one of a moment (`at`), a clip
+			-- this client draws (`onClip`, a reaction) and a standing rule (`every`).
 			local perform = shot.perform
 			if typeof(perform) ~= "table" then
 				problem(label .. ".perform must be a list (empty for none)")
 				continue
 			end
+			local staged = if shotStage ~= nil and typeof(shotStage.enemies) == "table" then shotStage.enemies else {}
+			local moves: { { index: number, at: number, hold: number } } = {}
 			for pressIndex, press in perform do
 				local pressLabel = ("%s.perform[%d]"):format(label, pressIndex)
 				if typeof(press) ~= "table" then
 					problem(pressLabel .. " must be a table")
 					continue
 				end
-				if typeof(press.action) ~= "string" or table.find(input.actions, press.action) == nil then
-					problem(("%s.action '%s' is not an input.luau action"):format(pressLabel, tostring(press.action)))
+				if not checkPress(pressLabel, press, staged) then
 					continue
 				end
-				if not isNumber(press.hold) or press.hold <= 0 then
-					problem(pressLabel .. ".hold must be a positive number of seconds")
-					continue
-				end
-				if (press.at ~= nil) == (press.onClip ~= nil) then
-					problem(pressLabel .. " must be timed by exactly one of `at` and `onClip`")
+				local timings = (if press.at ~= nil then 1 else 0)
+					+ (if press.onClip ~= nil then 1 else 0)
+					+ (if press.every ~= nil then 1 else 0)
+				if timings ~= 1 then
+					problem(
+						pressLabel
+							.. " must be timed by exactly one of `at` and `onClip`, or by `every` (a standing rule)"
+					)
 				elseif press.at ~= nil then
 					if not isNumber(press.at) or press.at < 0 then
 						problem(pressLabel .. ".at must be 0 or more")
-					elseif seconds ~= nil and press.at + press.hold >= seconds then
-						problem(("%s must let go inside the take (%g s)"):format(pressLabel, seconds))
-					end
-				else
-					local ok, clip = pcall(ctx.load, CLIPS .. tostring(press.onClip))
-					local window = false
-					if ok and typeof(clip) == "table" and typeof(clip.events) == "table" then
-						for _, event in clip.events do
-							if typeof(event) == "table" and event.kind == "HitWindowOpen" then
-								window = true
-							end
+					else
+						if seconds ~= nil and press.at + press.hold >= seconds then
+							problem(("%s must let go inside the take (%g s)"):format(pressLabel, seconds))
+						end
+						if press.action == moveAction then
+							table.insert(moves, { index = pressIndex, at = press.at, hold = press.hold })
 						end
 					end
-					if not window then
-						problem(
-							("%s.onClip '%s' must name a clip with a HitWindowOpen event"):format(
-								pressLabel,
-								tostring(press.onClip)
-							)
-						)
-					end
-					if not isNumber(press.lead) then
-						problem(pressLabel .. ".lead must say how far ahead of the hit window the press comes")
-					elseif press.lead < 0 or press.lead >= combat.parryWindow then
-						problem(
-							("%s.lead (%g) must be 0 or more and under combat.parryWindow (%g)"):format(
-								pressLabel,
-								press.lead,
-								combat.parryWindow
-							)
-						)
+				elseif press.onClip ~= nil then
+					checkReaction(pressLabel, press, staged, seconds)
+				else
+					checkStanding(pressLabel, press, seconds)
+				end
+				-- Each timing's own fields only.
+				if press.onClip == nil then
+					for _, key in { "repeats", "lock", "chain" } do
+						if press[key] ~= nil then
+							problem(("%s.%s is only for a clip-timed press"):format(pressLabel, key))
+						end
 					end
 				end
-				if press.action == "Art" or press.action:match("^ArtSlot") ~= nil then
-					if press.hold <= artHoldMin or press.hold >= artHoldMax then
+				if press.every == nil then
+					if press.from ~= nil or (press.to ~= nil and press.onClip == nil) then
 						problem(
-							("%s: an Art press is held past the start pose and activation (%g s) and short of the cancel time (%g s); got %g s"):format(
-								pressLabel,
-								artHoldMin,
-								artHoldMax,
-								press.hold
-							)
+							pressLabel
+								.. ".from and .to are only for a standing rule (`every`); a reaction (`onClip`) may end at a `to`"
 						)
 					end
+					if press.within ~= nil then
+						problem(pressLabel .. ".within is only for a standing BasicAttack or a Move chain step")
+					end
+				end
+				local art = isArt(press.action)
+				-- A timed attack lands where its prompts say (CS5): an Art launches on its release, so
+				-- a beat tells the player to press and hold at `at` and one to let go at `at + hold`,
+				-- the lit stance between long enough to read; a basic swings on its press.
+				if isNumber(press.at) and (art or press.action == "BasicAttack") then
+					local function beatAt(at: number): boolean
+						if typeof(prompts) ~= "table" then
+							return false
+						end
+						for _, beat in prompts do
+							if typeof(beat) == "table" and isNumber(beat.at) and math.abs(beat.at - at) < 1e-6 then
+								return true
+							end
+						end
+						return false
+					end
+					if not art then
+						if not beatAt(press.at) then
+							problem(
+								("%s: a basic needs a prompt beat at its press (%g s), where it swings"):format(
+									pressLabel,
+									press.at
+								)
+							)
+						end
+					else
+						if not beatAt(press.at) then
+							problem(
+								("%s: a timed Art needs a prompt beat at its press (%g s), telling the player to hold the key"):format(
+									pressLabel,
+									press.at
+								)
+							)
+						end
+						if not beatAt(press.at + press.hold) then
+							problem(
+								("%s: a timed Art needs a prompt beat at its release (%g s), where it launches"):format(
+									pressLabel,
+									press.at + press.hold
+								)
+							)
+						end
+						if artGlow ~= nil and press.hold - combat.startPoseTime < artGlow - 1e-6 then
+							problem(
+								("%s: a timed Art holds its glow at least capture.artGlowSeconds (%g s) on camera, past the start pose (%g s); got %g s"):format(
+									pressLabel,
+									artGlow,
+									combat.startPoseTime,
+									press.hold - combat.startPoseTime
+								)
+							)
+						end
+					end
+				end
+			end
+			-- Timed Move presses never overlap: one stick at a time.
+			table.sort(moves, function(a, b): boolean
+				return a.at < b.at
+			end)
+			for order = 2, #moves do
+				local before, this = moves[order - 1], moves[order]
+				if this.at < before.at + before.hold - 1e-6 then
+					problem(
+						("%s.perform[%d] overlaps the Move before it (perform[%d], held to %g s): one stick at a time"):format(
+							label,
+							this.index,
+							before.index,
+							before.at + before.hold
+						)
+					)
 				end
 			end
 		end

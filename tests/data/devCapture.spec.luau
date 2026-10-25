@@ -4,9 +4,9 @@
 	enemies, their distance and side, held or let go), its camera, its prompt beats and the keys
 	auto-perform presses; the hotkeys stay off the game's own bindings and the function keys; the
 	staging's spots stand on the field, clear of the ledge and of the field's spawn points. The
-	staging never moves the player (D-244): the stand ring is wider than the auto-walk's let-go,
-	the ledge's ramp is a walkable way up behind the run, and the walk into the ring fits its
-	timeout.
+	staging never moves the player (D-244): the stand ring is wider than the auto-walk's rest
+	target, the walk sprints (its stop the Skid's, no carry) and follows the last leg's line, the
+	ledge's ramp is a walkable way up behind the run, and the walk into the ring fits its timeout.
 ]]
 
 local Dev = Harness.load("src/shared/data/dev")
@@ -73,6 +73,68 @@ describe("dev.luau capture shots", function()
 		end
 	end)
 
+	it("a released Charger's charge meets or passes the player on the spot, and the prompts say which (CS7)", function()
+		local AI = Harness.load("src/shared/data/ai")
+		local tuning = AI.tuningFor("Charger")
+		local any = false
+		for _, shot in Capture.shots do
+			for _, entry in shot.stage.enemies do
+				local def = Enemies.byId(entry.enemy) :: any
+				if def.archetype ~= "Charger" or entry.held then
+					expect(entry.charge).toBe(nil)
+					continue
+				end
+				any = true
+				local reach = def.attacks[1].reach
+				expect(entry.distance).toBeGreaterThanOrEqual(tuning.minChargeDistance)
+				expect(entry.distance).toBeLessThanOrEqual(tuning.maxChargeDistance)
+				local said = false
+				for _, beat in shot.prompts do
+					said = said
+						or beat.text:find(if entry.charge == "Meets" then "into you" else "past you", 1, true)
+							~= nil
+				end
+				expect(said).toBe(true)
+				if entry.charge == "Meets" then
+					expect(entry.distance).toBeLessThanOrEqual(reach)
+				else
+					expect(entry.charge).toBe("Passes")
+					expect(entry.distance - 1).toBeGreaterThan(reach) -- past the line's end by a body
+				end
+			end
+		end
+		expect(any).toBe(true)
+	end)
+
+	it("the open shot's runs name the key that crosses the Open view (D or A), never W or S (CS8)", function()
+		local Cameras = Capture.cameras
+		local checked = 0
+		for _, shot in Capture.shots do
+			if shot.camera ~= "Open" then
+				continue
+			end
+			-- The Open view looks along -X from the player's +X (World, 90): D runs -Z, screen right.
+			expect(Cameras.Open.reference).toBe("World")
+			expect(Cameras.Open.degrees).toBe(90)
+			for _, beat in shot.prompts do
+				local text = beat.text:lower()
+				local moves = text:find("walk", 1, true) ~= nil
+					or text:find("run", 1, true) ~= nil
+					or text:find("sprint", 1, true) ~= nil
+				if moves then
+					checked += 1
+					local named = beat.text:find("(D)", 1, true) ~= nil
+						or beat.text:find("(A)", 1, true) ~= nil
+						or beat.text:find("Shift+D", 1, true) ~= nil
+						or beat.text:find("Shift+A", 1, true) ~= nil
+					expect(named).toBe(true)
+					expect(beat.text:find("(W)", 1, true) == nil and beat.text:find("(S)", 1, true) == nil).toBe(true)
+				end
+			end
+		end
+		expect(checked).toBeGreaterThan(0)
+	end)
+
 	it("prompt beats start at 0, run in order and all show inside the take", function()
 		for _, shot in Capture.shots do
 			expect(shot.prompts[1].at).toBe(0)
@@ -81,21 +143,6 @@ describe("dev.luau capture shots", function()
 				expect(beat.at).toBeLessThan(shot.seconds)
 				if index > 1 then
 					expect(beat.at).toBeGreaterThan(shot.prompts[index - 1].at)
-				end
-			end
-		end
-	end)
-
-	it("auto-perform presses real input actions, each timed by a moment or by a clip", function()
-		for _, shot in Capture.shots do
-			for _, entry in shot.perform do
-				expect(isAction(entry.action)).toBe(true)
-				expect(entry.hold).toBeGreaterThan(0)
-				-- Exactly one of a moment and a clip.
-				expect((entry.at ~= nil) ~= (entry.onClip ~= nil)).toBe(true)
-				if entry.at ~= nil then
-					expect(entry.at).toBeGreaterThanOrEqual(0)
-					expect(entry.at + entry.hold).toBeLessThan(shot.seconds)
 				end
 			end
 		end
@@ -113,28 +160,271 @@ describe("dev.luau capture shots", function()
 		end
 	end)
 
-	it("a clip-timed press names a clip with a hit window, and leads it inside the parry window", function()
+	-- CS5: an Art launches on its release, a basic on its press. The prompts mark both moments.
+	it("a timed attack's prompts mark when to press, hold and let go, and the glow holds on camera (CS5)", function()
+		local function beatAt(shot: any, at: number): any
+			for _, beat in shot.prompts do
+				if math.abs(beat.at - at) < 1e-6 then
+					return beat
+				end
+			end
+			return nil
+		end
+		local checked = 0
+		for _, shot in Capture.shots do
+			for _, entry in shot.perform do
+				local art = entry.action == "Art" or entry.action:match("^ArtSlot") ~= nil
+				if entry.at == nil or (not art and entry.action ~= "BasicAttack") then
+					continue
+				end
+				checked += 1
+				local press = beatAt(shot, entry.at)
+				expect(press ~= nil).toBe(true)
+				if art then
+					local release = beatAt(shot, entry.at + entry.hold)
+					expect(release ~= nil).toBe(true)
+					expect(press.text:lower():find("hold", 1, true)).never.toBeNil()
+					expect(release.text:lower():find("let go", 1, true)).never.toBeNil()
+					-- The first line names both moments.
+					local first = shot.prompts[1].text
+					expect(first:find(("%.1f s"):format(entry.at), 1, true)).never.toBeNil()
+					expect(first:find(("%.1f s"):format(entry.at + entry.hold), 1, true)).never.toBeNil()
+					-- Lit from the end of the start pose to the release, for long enough to read.
+					expect(entry.hold - Combat.startPoseTime).toBeGreaterThan(Capture.artGlowSeconds - 1e-6)
+				else
+					expect(press.text:lower():find("now", 1, true)).never.toBeNil()
+					expect(shot.prompts[1].text:find(("%.1f s"):format(entry.at), 1, true)).never.toBeNil()
+				end
+			end
+		end
+		expect(checked).toBe(5)
+		-- The glow fits between the start pose and the cancel.
+		expect(Combat.startPoseTime + Capture.artGlowSeconds).toBeLessThan(Input.art.cancelTime)
+	end)
+
+	it(
+		"auto-perform presses real input actions or the stick, each timed by a moment, a clip or a standing rule (CF)",
+		function()
+			local moveAction = Capture.perform.moveAction
+			-- the stick is no key: never an input action
+			expect(typeof(moveAction)).toBe("string")
+			expect(isAction(moveAction)).toBe(false)
+			local function pressOk(entry: any)
+				expect(isAction(entry.action) or entry.action == moveAction).toBe(true)
+				expect(entry.hold).toBeGreaterThan(0)
+				if entry.action == moveAction then
+					local length = math.sqrt(entry.stick[1] ^ 2 + entry.stick[2] ^ 2)
+					expect(length).toBeGreaterThan(0)
+					expect(length).toBeLessThanOrEqual(1)
+				else
+					expect(entry.stick).toBeNil()
+					expect(entry.sprint).toBeNil()
+				end
+			end
+			for _, shot in Capture.shots do
+				for _, entry in shot.perform do
+					pressOk(entry)
+					-- Exactly one of a moment, a clip and a standing rule.
+					local timings = (if entry.at ~= nil then 1 else 0)
+						+ (if entry.onClip ~= nil then 1 else 0)
+						+ (if entry.every ~= nil then 1 else 0)
+					expect(timings).toBe(1)
+					if entry.at ~= nil then
+						expect(entry.at).toBeGreaterThanOrEqual(0)
+						expect(entry.at + entry.hold).toBeLessThan(shot.seconds)
+					elseif entry.every ~= nil then
+						expect(entry.every).toBeGreaterThan(0)
+						expect(entry.action == "BasicAttack" or entry.action == "LockOn").toBe(true)
+						local from, to = entry.from or 0, entry.to or shot.seconds
+						expect(from).toBeGreaterThanOrEqual(0)
+						expect(from).toBeLessThan(to)
+						expect(to).toBeLessThanOrEqual(shot.seconds)
+					end
+					for _, step in entry.chain or {} do
+						expect(entry.onClip ~= nil).toBe(true)
+						pressOk(step)
+						expect(step.delay).toBeGreaterThanOrEqual(0)
+						expect(step.at == nil and step.onClip == nil and step.every == nil).toBe(true)
+					end
+				end
+			end
+		end
+	)
+
+	it("a reaction names an attack clip of a staged enemy let go, and leads its hit window (CF)", function()
 		local any = false
 		for _, shot in Capture.shots do
 			for _, entry in shot.perform do
-				if entry.onClip ~= nil then
-					any = true
-					local clip = ClipLibrary.get(entry.onClip)
-					expect(clip ~= nil).toBe(true)
-					local window = false
-					for _, event in (clip :: any).events do
-						if event.kind == "HitWindowOpen" then
-							window = true
-						end
+				if entry.onClip == nil then
+					continue
+				end
+				any = true
+				local clip = ClipLibrary.get(entry.onClip)
+				expect(clip ~= nil).toBe(true)
+				local window: number? = nil
+				local first = math.huge
+				for _, event in (clip :: any).events do
+					first = math.min(first, event.time)
+					if event.kind == "HitWindowOpen" and window == nil then
+						window = event.time
 					end
-					expect(window).toBe(true)
-					expect(entry.lead ~= nil).toBe(true)
-					expect(entry.lead :: number).toBeGreaterThanOrEqual(0)
+				end
+				expect(window ~= nil).toBe(true)
+				-- the clip is an attack of the enemy it reacts to, which the shot lets go
+				local staged = shot.stage.enemies[entry.enemy or 1]
+				expect(staged.held).toBe(false)
+				local def = Enemies.byId(staged.enemy) :: any
+				local attack = false
+				for _, row in def.attacks do
+					attack = attack or entry.onClip == ("enemy/%s/%s"):format(def.skin, row.clip)
+				end
+				expect(attack).toBe(true)
+				expect(entry.lead ~= nil).toBe(true)
+				expect(entry.lead :: number).toBeGreaterThanOrEqual(0)
+				if entry.action == "Guard" then
+					-- the guard lands inside the parry window
 					expect(entry.lead :: number).toBeLessThan(Combat.parryWindow)
+				else
+					-- any other press comes after the client hears the clip
+					expect(entry.lead :: number).toBeLessThanOrEqual((window :: number) - first)
 				end
 			end
 		end
 		expect(any).toBe(true)
+	end)
+
+	it(
+		"the fight reacts: a parry on each overhead then the next Art, a dodge on the charge then the lock and a sprint at the skid (CF)",
+		function()
+			local shot = nil
+			for _, candidate in Capture.shots do
+				if candidate.id == "fight-boar-kobold" then
+					shot = candidate
+				end
+			end
+			assert(shot ~= nil, "no fight shot")
+			local kobold, boar = nil, nil
+			for index, entry in shot.stage.enemies do
+				if entry.enemy == "KoboldAxeman" then
+					kobold = index
+				elseif entry.enemy == "FrenzyBoar" then
+					boar = index
+				end
+			end
+			assert(kobold ~= nil and boar ~= nil, "the fight stages a kobold and a boar")
+			local guard, dodge, basics, relock = nil, nil, nil, nil
+			for _, entry in shot.perform do
+				if entry.action == "Guard" and entry.onClip == "enemy/Kobold/Overhead" then
+					guard = entry
+				elseif entry.action == "Dodge" and entry.onClip == "enemy/Boar/Charge" then
+					dodge = entry
+				elseif entry.action == "BasicAttack" and entry.every ~= nil then
+					basics = entry
+				elseif entry.action == "LockOn" and entry.every ~= nil then
+					relock = entry
+				end
+			end
+			assert(guard ~= nil and dodge ~= nil and basics ~= nil and relock ~= nil, "the fight's four rules")
+			-- each overhead: the guard, the lock on the kobold, then one Art of all four in turn
+			expect(guard.enemy or 1).toBe(kobold)
+			expect(guard.repeats).toBe(true)
+			expect(guard.lock).toBe(true)
+			local cycle = guard.chain[1].cycle
+			for _, action in { "Art", "ArtSlot2", "ArtSlot3", "ArtSlot4" } do
+				expect(table.find(cycle, action) ~= nil).toBe(true)
+			end
+			-- the charge: the dodge, the lock on the boar, a sprint at it that lets go in a basic's reach
+			expect(dodge.enemy).toBe(boar)
+			local lockStep, runStep = dodge.chain[1], dodge.chain[2]
+			expect(lockStep.action).toBe("LockOn")
+			expect(lockStep.enemy).toBe(boar)
+			expect(runStep.action).toBe(Capture.perform.moveAction)
+			expect(runStep.sprint).toBe(true)
+			expect(runStep.stick[2]).toBeGreaterThan(0) -- at the lock's target
+			expect(runStep.within).toBeLessThan(basics.within)
+			-- the lock back on the kobold once the boar is gone
+			expect(relock.enemy or 1).toBe(kobold)
+			-- the boar comes in after the kobold's first parries, at a beat that says it is let go
+			local release = shot.stage.enemies[boar].releaseAfter
+			expect(release ~= nil).toBe(true)
+			expect(release).toBeGreaterThan(0)
+		end
+	)
+
+	it(
+		"the locomotion pass: a sheathed walk, run and sprint, the draw, the same drawn, a turn in place, a sprint to the skid (CF)",
+		function()
+			local shot = nil
+			for _, candidate in Capture.shots do
+				if candidate.id == "locomotion" then
+					shot = candidate
+				end
+			end
+			assert(shot ~= nil, "no locomotion shot")
+			local moveAction = Capture.perform.moveAction
+			local moves, locks = {}, {}
+			for _, entry in shot.perform do
+				if entry.action == moveAction then
+					table.insert(moves, entry)
+				elseif entry.action == "LockOn" then
+					table.insert(locks, entry)
+				end
+			end
+			local function length(entry: any): number
+				return math.sqrt(entry.stick[1] ^ 2 + entry.stick[2] ^ 2)
+			end
+			local function kinds(from: number, to: number): { string }
+				local list = {}
+				for _, entry in moves do
+					if entry.at >= from and entry.at < to then
+						table.insert(
+							list,
+							if entry.sprint then "sprint" elseif length(entry) < 0.75 then "walk" else "run"
+						)
+					end
+				end
+				return list
+			end
+			-- two lock pairs: the draw (F, F again) and the turn in place
+			expect(#locks).toBe(4)
+			expect(kinds(0, locks[1].at)).toEqual({ "walk", "run", "sprint" })
+			expect(kinds(locks[2].at, locks[3].at)).toEqual({ "walk", "run", "sprint" })
+			expect(kinds(locks[4].at, shot.seconds)).toEqual({ "sprint" })
+			-- the turn in place: no stick held from before its lock to after its let-go
+			for _, entry in moves do
+				local ends = entry.at + entry.hold
+				expect(ends <= locks[3].at or entry.at >= locks[4].at).toBe(true)
+			end
+			-- the stick lets go before the take ends: the skid plays on camera
+			local last = moves[#moves]
+			expect(last.at + last.hold).toBeLessThan(shot.seconds - 0.5)
+			-- the runs cross the Open view: sideways on its frame, never at or away from the lens
+			for _, entry in moves do
+				expect(entry.stick[2]).toBe(0)
+			end
+		end
+	)
+
+	it("an enemy let go partway through the take is let go under the beat that says so (CF)", function()
+		local checked = 0
+		for _, shot in Capture.shots do
+			for _, entry in shot.stage.enemies do
+				if entry.releaseAfter == nil then
+					continue
+				end
+				checked += 1
+				expect(entry.held).toBe(false)
+				expect(entry.releaseAfter).toBeGreaterThanOrEqual(0)
+				expect(entry.releaseAfter).toBeLessThan(shot.seconds)
+				local said = false
+				for _, beat in shot.prompts do
+					said = said
+						or (math.abs(beat.at - entry.releaseAfter) < 1e-6 and beat.text:find("let go", 1, true) ~= nil)
+				end
+				expect(said).toBe(true)
+			end
+		end
+		expect(checked).toBeGreaterThan(0)
 	end)
 end)
 
@@ -225,9 +515,13 @@ describe("dev.luau capture staging", function()
 end)
 
 describe("dev.luau capture stand ring and walk (D-244)", function()
-	it("the ring is wider than the auto-walk's let-go, and tells the ledge's top from the field", function()
-		expect(Walk.arriveStuds).toBeGreaterThan(0)
-		expect(Stage.standRadius).toBeGreaterThan(Walk.arriveStuds)
+	it("the ring is wider than the auto-walk's rest target, and tells the ledge's top from the field", function()
+		expect(Walk.restStuds).toBeGreaterThan(0)
+		expect(Stage.standRadius).toBeGreaterThan(Walk.restStuds)
+		expect(Walk.restDegrees).toBeGreaterThan(0)
+		expect(Walk.restDegrees).toBeLessThan(90)
+		expect(Walk.secondWalks).toBeGreaterThanOrEqual(0)
+		expect(Walk.secondWalks % 1).toBe(0)
 		expect(Walk.waypointStuds).toBeGreaterThan(0)
 		expect(Stage.standHeightTolerance).toBeGreaterThan(0)
 		expect(Stage.standHeightTolerance).toBeLessThan(Stage.ledge.size[2])
@@ -236,6 +530,21 @@ describe("dev.luau capture stand ring and walk (D-244)", function()
 		expect(Walk.restSpeed).toBeLessThan(Choreo.locomotion.stopEndSpeed)
 		expect(Stage.routeMarginStuds).toBeGreaterThan(0)
 	end)
+
+	it(
+		"the walk sprints, so its stop is the Skid's with no carry; below it the let-go stays on the last leg",
+		function()
+			expect(table.find(Input.actions, Walk.sprintAction) ~= nil).toBe(true)
+			expect(Input.keyboard[Walk.sprintAction] ~= nil).toBe(true)
+			-- The sprint is past the two-step stop's top speed (D-059): the Skid stops it, no carry.
+			expect(Combat.maxSpeedStudsPerSecond).toBeGreaterThan(Choreo.locomotion.skidSpeedThreshold)
+			expect(Walk.lookaheadStuds).toBeGreaterThan(0)
+			expect(Walk.lookaheadStuds).toBeLessThan(Stage.approachStuds)
+			expect(Walk.carrySeconds).toBeGreaterThan(0)
+			expect(Walk.carrySeconds).toBeLessThan(Choreo.locomotion.stopStepsSeconds)
+			expect(Walk.carrySeconds * Choreo.locomotion.runSpeed).toBeLessThan(Stage.approachStuds)
+		end
+	)
 
 	it("the ramp rises the ledge's height, no wider than it, at a slope a Humanoid walks", function()
 		local ledge = Stage.ledge

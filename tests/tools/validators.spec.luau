@@ -1117,6 +1117,8 @@ describe("data validators on the real tables", function()
 			"world",
 			"camera",
 			"dev",
+			"contact",
+			"telegraph",
 		}
 	do
 		it(name .. " is clean", function()
@@ -2376,11 +2378,19 @@ describe("camera, dev capture and sfx shatter rules", function()
 	local function sfx(mutate: ((any) -> ())?): { string }
 		return runWith("sfx", "src/shared/data/sfx", mutate)
 	end
+	local function contact(dataPath: string, mutate: ((any) -> ())?): { string }
+		return runWith("contact", dataPath, mutate)
+	end
+	local function telegraph(dataPath: string, mutate: ((any) -> ())?): { string }
+		return runWith("telegraph", dataPath, mutate)
+	end
 
 	it("each is clean on a copy of the real table", function()
 		expect(camera()).toEqual({})
 		expect(dev()).toEqual({})
 		expect(sfx()).toEqual({})
+		expect(contact("src/shared/data/combat")).toEqual({})
+		expect(telegraph("src/shared/data/fx")).toEqual({})
 	end)
 
 	it("camera: the close shot opens from closeGap to openGap, both positive", function()
@@ -2558,6 +2568,134 @@ describe("camera, dev capture and sfx shatter rules", function()
 		)).toBe(true)
 	end)
 
+	it("dev: a released Charger says whether its first charge meets or passes the player on the spot (CS7)", function()
+		-- A released Charger that does `charge`; with none in dev.luau (every take's charge Meets
+		-- since CF), a released one made to say it (the rule is checked on the copy).
+		local function charger(copy: any, charge: string): any
+			local released = nil
+			for _, shot in copy.capture.shots do
+				for _, entry in shot.stage.enemies do
+					if entry.charge == charge then
+						return entry
+					end
+					released = released or (if entry.charge ~= nil then entry else nil)
+				end
+			end
+			if released == nil then
+				error("no released Charger in dev.luau")
+			end
+			released.charge = charge
+			return released
+		end
+		local reach = Harness.load("src/shared/data/enemies").byId("FrenzyBoar").attacks[1].reach
+		expect(hasProblem(
+			dev(function(copy)
+				charger(copy, "Meets").charge = nil
+			end),
+			".charge must say what the first charge does to the player on the spot"
+		)).toBe(true)
+		-- the line ends short of the player: the boar runs over them unhurt (the 18-stud take)
+		expect(hasProblem(
+			dev(function(copy)
+				charger(copy, "Meets").distance = reach + 4
+			end),
+			"a charge that Meets needs the line"
+		)).toBe(true)
+		-- the line's end grazes the body: neither a clean hit nor a clean pass
+		expect(hasProblem(
+			dev(function(copy)
+				charger(copy, "Passes").distance = reach + 0.5
+			end),
+			"a charge that Passes needs the line"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				charger(copy, "Meets").distance = 6
+			end),
+			"must be inside the charge band"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				charger(copy, "Meets").held = true
+			end),
+			".charge is only for a released Charger"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.shots[2].stage.enemies[1].charge = "Meets"
+			end),
+			".charge is only for a released Charger"
+		)).toBe(true)
+	end)
+
+	it(
+		"dev: a timed attack has a prompt beat at its press, an Art one at its release, and the glow reads (CS5)",
+		function()
+			local function shotOf(copy: any, action: string): any
+				for _, shot in copy.capture.shots do
+					for _, press in shot.perform do
+						if press.action == action and press.at ~= nil then
+							return shot, press
+						end
+					end
+				end
+				error("no timed " .. action .. " press in dev.luau")
+			end
+			local function dropBeat(shot: any, at: number)
+				for index, beat in shot.prompts do
+					if math.abs(beat.at - at) < 1e-6 then
+						table.remove(shot.prompts, index)
+						return
+					end
+				end
+				error("no beat at " .. at)
+			end
+			expect(hasProblem(dev(function() end), "needs a prompt beat")).toBe(false)
+			-- The snapshot's take: "Q now" at 1.0 s, the key held 0.35 s, so it launched at 1.35 s
+			-- under that same line.
+			expect(hasProblem(
+				dev(function(copy)
+					local shot, press = shotOf(copy, "Art")
+					dropBeat(shot, press.at + press.hold)
+				end),
+				"a timed Art needs a prompt beat at its release"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					local _, press = shotOf(copy, "Art")
+					press.at += 0.1
+				end),
+				"a timed Art needs a prompt beat at its press"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					local shot, press = shotOf(copy, "BasicAttack")
+					dropBeat(shot, press.at)
+				end),
+				"a basic needs a prompt beat at its press"
+			)).toBe(true)
+			-- Past the start pose and activation, yet lit too briefly to read on camera.
+			expect(hasProblem(
+				dev(function(copy)
+					local shot, press = shotOf(copy, "ArtSlot2")
+					dropBeat(shot, press.at + press.hold)
+					press.hold = 0.3
+					table.insert(shot.prompts, { at = press.at + press.hold, text = "Let go" })
+					table.sort(shot.prompts, function(a: any, b: any): boolean
+						return a.at < b.at
+					end)
+				end),
+				"holds its glow at least capture.artGlowSeconds"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					copy.capture.artGlowSeconds = 0
+				end),
+				"capture.artGlowSeconds must be a positive number"
+			)).toBe(true)
+		end
+	)
+
 	it("dev: a clip-timed press names a clip with a hit window and leads it inside the parry window", function()
 		local function clipPress(copy: any): any
 			for _, shot in copy.capture.shots do
@@ -2587,6 +2725,392 @@ describe("camera, dev capture and sfx shatter rules", function()
 				clipPress(copy).onClip = "player/OneHandedSword/Idle"
 			end),
 			"'player/OneHandedSword/Idle' must name a clip with a HitWindowOpen event"
+		)).toBe(true)
+	end)
+
+	-- The reactive auto-perform (CF): a Move press holds the stick, reactions to an enemy's clip,
+	-- chains after them, standing rules, and an enemy let go partway through the take.
+	local function shotNamed(copy: any, id: string): any
+		for _, shot in copy.capture.shots do
+			if shot.id == id then
+				return shot
+			end
+		end
+		error("no shot " .. id .. " in dev.luau")
+	end
+	local function entryWith(shot: any, check: (any) -> boolean): any
+		for _, entry in shot.perform do
+			if check(entry) then
+				return entry
+			end
+		end
+		error("no such perform entry in " .. shot.id)
+	end
+	local function moveEntry(copy: any): any
+		return entryWith(shotNamed(copy, "locomotion"), function(entry: any): boolean
+			return entry.action == "Move"
+		end)
+	end
+	local function timedLock(copy: any): any
+		return entryWith(shotNamed(copy, "locomotion"), function(entry: any): boolean
+			return entry.action == "LockOn" and entry.at ~= nil
+		end)
+	end
+	local function guardReaction(copy: any): any
+		return entryWith(shotNamed(copy, "fight-boar-kobold"), function(entry: any): boolean
+			return entry.action == "Guard" and entry.onClip ~= nil
+		end)
+	end
+	local function dodgeReaction(copy: any): any
+		return entryWith(shotNamed(copy, "fight-boar-kobold"), function(entry: any): boolean
+			return entry.action == "Dodge" and entry.onClip ~= nil
+		end)
+	end
+	local function standingBasic(copy: any): any
+		return entryWith(shotNamed(copy, "fight-boar-kobold"), function(entry: any): boolean
+			return entry.action == "BasicAttack" and entry.every ~= nil
+		end)
+	end
+	local function lateRelease(copy: any): any
+		for _, entry in shotNamed(copy, "fight-boar-kobold").stage.enemies do
+			if entry.releaseAfter ~= nil then
+				return entry
+			end
+		end
+		error("no enemy let go partway through the fight")
+	end
+
+	it("dev: a Move press holds a stick of length (0, 1]; only it has a stick or a sprint (CF)", function()
+		for _, bad in { {}, { 0, 0 }, { 1, 1 }, { "1", 0 } } do
+			expect(hasProblem(
+				dev(function(copy)
+					moveEntry(copy).stick = bad
+				end),
+				".stick must be {right, forward} with a length above 0 and at most 1"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			dev(function(copy)
+				moveEntry(copy).stick = nil
+			end),
+			".stick must be {right, forward} with a length above 0 and at most 1"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				timedLock(copy).stick = { 1, 0 }
+			end),
+			".stick is only for a capture.perform.moveAction press"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				moveEntry(copy).sprint = "yes"
+			end),
+			".sprint must be true or false"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				timedLock(copy).sprint = true
+			end),
+			".sprint is only for a capture.perform.moveAction press"
+		)).toBe(true)
+		for _, bad: any in { "LockOn", 3 } do
+			expect(hasProblem(
+				dev(function(copy)
+					copy.capture.perform.moveAction = bad
+				end),
+				"capture.perform.moveAction must be a name that is not an input.luau action"
+			)).toBe(true)
+		end
+		-- Move is the stick, not a key: never an input action itself.
+		expect(hasProblem(dev(), "'Move' is not an input.luau action")).toBe(false)
+	end)
+
+	it("dev: timed Move presses never overlap: one stick at a time (CF)", function()
+		expect(hasProblem(
+			dev(function(copy)
+				local shot = shotNamed(copy, "locomotion")
+				local moves = {}
+				for _, entry in shot.perform do
+					if entry.action == "Move" then
+						table.insert(moves, entry)
+					end
+				end
+				moves[2].at = moves[1].at + moves[1].hold - 0.1
+			end),
+			"overlaps the Move before it"
+		)).toBe(true)
+	end)
+
+	it("dev: an entry is timed by exactly one of a moment, a clip and a standing rule (CF)", function()
+		expect(hasProblem(
+			dev(function(copy)
+				standingBasic(copy).at = 1
+			end),
+			"must be timed by exactly one of `at` and `onClip`, or by `every`"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				standingBasic(copy).every = nil
+			end),
+			"must be timed by exactly one of `at` and `onClip`, or by `every`"
+		)).toBe(true)
+	end)
+
+	it("dev: a reaction names a staged enemy that is let go, and one of its attack clips (CF)", function()
+		for _, bad in { 3, 0, 1.5 } do
+			expect(hasProblem(
+				dev(function(copy)
+					guardReaction(copy).enemy = bad
+				end),
+				".enemy must name one of the shot's staged enemies (1 to 2)"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			dev(function(copy)
+				guardReaction(copy).enemy = 2
+			end),
+			"must be an attack clip of the enemy it reacts to"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				dodgeReaction(copy).onClip = "enemy/Kobold/Overhead"
+			end),
+			"must be an attack clip of the enemy it reacts to"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				shotNamed(copy, "fight-boar-kobold").stage.enemies[1].held = true
+			end),
+			"reacts to an enemy the shot holds"
+		)).toBe(true)
+		-- the single-clip parry shot reacts to its only enemy, the kobold, unnamed
+		expect(hasProblem(dev(), "parry-spark")).toBe(false)
+	end)
+
+	it("dev: a reaction's lead: a guard's under the parry window, another's inside the wind-up heard (CF)", function()
+		-- The Charge's first event (its voice) comes 0.5 s before its hit window.
+		for _, bad in { 0.55, -0.1 } do
+			expect(hasProblem(
+				dev(function(copy)
+					dodgeReaction(copy).lead = bad
+				end),
+				"must be 0 or more and at most the clip's wind-up after its first event"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			dev(function(copy)
+				dodgeReaction(copy).lead = 0.45
+			end),
+			"lead"
+		)).toBe(false)
+		expect(hasProblem(
+			dev(function(copy)
+				guardReaction(copy).lead = 0.2
+			end),
+			"must be 0 or more and under combat.parryWindow"
+		)).toBe(true)
+	end)
+
+	it("dev: repeats and lock are true or false, and only on a reaction (CF)", function()
+		expect(hasProblem(
+			dev(function(copy)
+				guardReaction(copy).repeats = "yes"
+			end),
+			".repeats must be true or false"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				guardReaction(copy).lock = 1
+			end),
+			".lock must be true or false"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				timedLock(copy).lock = true
+			end),
+			".lock is only for a clip-timed press"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				standingBasic(copy).repeats = true
+			end),
+			".repeats is only for a clip-timed press"
+		)).toBe(true)
+	end)
+
+	it(
+		"dev: a chain step comes a delay after the step before it, presses a real action and cycles Arts (CF)",
+		function()
+			expect(hasProblem(
+				dev(function(copy)
+					guardReaction(copy).chain[1].delay = -1
+				end),
+				".delay must be 0 or more seconds"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					guardReaction(copy).chain[1].at = 1
+				end),
+				"a chain step is timed by its delay alone"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					guardReaction(copy).chain[1].action = "Fly"
+				end),
+				"chain[1].action 'Fly' is not an input.luau action"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					guardReaction(copy).chain[1].hold = 0
+				end),
+				"chain[1].hold must be a positive number of seconds"
+			)).toBe(true)
+			local combatData = Harness.load("src/shared/data/combat")
+			expect(hasProblem(
+				dev(function(copy)
+					guardReaction(copy).chain[1].hold = combatData.startPoseTime
+				end),
+				"an Art press is held past the start pose and activation"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					guardReaction(copy).chain[1].cycle = { "ArtSlot2", "Art" }
+				end),
+				".cycle must start with the step's own action"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					guardReaction(copy).chain[1].cycle = { "Art", "Dodge" }
+				end),
+				".cycle must list Art actions"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					local step = dodgeReaction(copy).chain[2]
+					step.within = 0
+				end),
+				".within must be a positive number of studs"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					dodgeReaction(copy).chain[2].stick = nil
+				end),
+				".stick must be {right, forward} with a length above 0 and at most 1"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					dodgeReaction(copy).chain[1].enemy = 5
+				end),
+				".enemy must name one of the shot's staged enemies"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					standingBasic(copy).chain = { { action = "Dodge", delay = 0, hold = 0.05 } }
+				end),
+				".chain is only for a clip-timed press"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					guardReaction(copy).chain = {}
+				end),
+				".chain must list at least one step"
+			)).toBe(true)
+		end
+	)
+
+	it("dev: a standing rule presses a basic in reach or the lock, every so often inside the take (CF)", function()
+		expect(hasProblem(
+			dev(function(copy)
+				standingBasic(copy).every = 0
+			end),
+			".every must be a positive number of seconds"
+		)).toBe(true)
+		for _, window in { { 0, 25 }, { 10, 5 }, { -1, 5 } } do
+			expect(hasProblem(
+				dev(function(copy)
+					local rule = standingBasic(copy)
+					rule.from = window[1]
+					rule.to = window[2]
+				end),
+				"must run 0 <= from < to <= the take"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			dev(function(copy)
+				standingBasic(copy).within = nil
+			end),
+			"a standing BasicAttack presses only in reach: `within`"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				standingBasic(copy).action = "Guard"
+			end),
+			"a standing rule (`every`) presses only BasicAttack or LockOn"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				timedLock(copy).from = 1
+			end),
+			".from and .to are only for a standing rule"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				timedLock(copy).within = 4
+			end),
+			".within is only for a standing BasicAttack or a Move chain step"
+		)).toBe(true)
+	end)
+
+	it("dev: a reaction may end at a `to` inside the take, and has no `from` (D-CI3)", function()
+		local function aboutTo(problems: any): boolean
+			return hasProblem(problems, ".from and .to are only for a standing rule")
+				or hasProblem(problems, "nothing of the reaction goes down past it")
+		end
+		expect(aboutTo(dev(function(copy)
+			guardReaction(copy).to = 19
+		end))).toBe(false)
+		for _, bad in { 25, 0, -1, "19" } :: { any } do
+			expect(hasProblem(
+				dev(function(copy)
+					guardReaction(copy).to = bad
+				end),
+				"nothing of the reaction goes down past it"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			dev(function(copy)
+				guardReaction(copy).from = 1
+			end),
+			".from and .to are only for a standing rule"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				timedLock(copy).to = 6
+			end),
+			".from and .to are only for a standing rule"
+		)).toBe(true)
+	end)
+
+	it("dev: an enemy let go partway through says when, inside the take, under a prompt beat (CF)", function()
+		for _, bad in { 20, -1 } do
+			expect(hasProblem(
+				dev(function(copy)
+					lateRelease(copy).releaseAfter = bad
+				end),
+				"must be 0 or more and inside the take"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			dev(function(copy)
+				lateRelease(copy).held = true
+			end),
+			".releaseAfter is only for an enemy the shot lets go (held = false)"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				lateRelease(copy).releaseAfter += 0.2
+			end),
+			"needs a prompt beat at that moment"
 		)).toBe(true)
 	end)
 
@@ -2662,6 +3186,58 @@ describe("camera, dev capture and sfx shatter rules", function()
 		)).toBe(true)
 	end)
 
+	it("dev: the walk rests inside the ring, sprints to a stop with no carry and follows the last leg (CS2)", function()
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.restStuds = copy.capture.stage.standRadius
+			end),
+			"capture.walk.restStuds (3) must be under capture.stage.standRadius"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.restDegrees = 90
+			end),
+			"capture.walk.restDegrees (90) must be under 90"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.restStuds = 0
+			end),
+			"capture.walk.restStuds must be a positive number"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.secondWalks = 1.5
+			end),
+			"capture.walk.secondWalks must be a whole number"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.sprintAction = "Run"
+			end),
+			"capture.walk.sprintAction (Run) must be an input.luau action"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.lookaheadStuds = copy.capture.stage.approachStuds
+			end),
+			"capture.walk.lookaheadStuds (6) must be under capture.stage.approachStuds"
+		)).toBe(true)
+		local locomotion = Harness.load("src/shared/data/choreo").locomotion
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.carrySeconds = locomotion.stopStepsSeconds
+			end),
+			"must be under choreo locomotion.stopStepsSeconds"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.carrySeconds = copy.capture.stage.approachStuds / locomotion.runSpeed
+			end),
+			"off the last leg"
+		)).toBe(true)
+	end)
+
 	it("dev: the stage's spots stand on the field, its enemies off the ledge, the ledge off the spawns", function()
 		local playground = Harness.load("src/shared/data/playground")
 		expect(hasProblem(
@@ -2730,4 +3306,152 @@ describe("camera, dev capture and sfx shatter rules", function()
 			"over its loudest bass layer, under shatterBalance.glassGapDb"
 		)).toBe(true)
 	end)
+
+	it("contact: the word's hold covers the Kill hold; the keep-out fits the slack (D-CH1, D-CH3)", function()
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.wordHoldSeconds = 0.1
+			end),
+			"wordHoldSeconds (0.1) must be at least the Kill hold"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.maxStuds = copy.rootMotionSlack + 0.5
+			end),
+			"must be within rootMotionSlack"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.maxStuds = copy.contact.standOff.maxStuds - 0.5
+			end),
+			"must be at least standOff.maxStuds"
+		)).toBe(true)
+	end)
+
+	it("contact: the keep-out stays out of the faces RigBuilder builds, with the body's own parts (D-CH4)", function()
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.bodyFace = "Body"
+			end),
+			"bodyFace 'Body' must be RigBuilder's BLOCKER_NAME"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.heldFace = "Blocker"
+			end),
+			"heldFace 'Blocker' must be RigBuilder's HELD_BLOCKER_NAME"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				table.insert(copy.contact.standOff.keepOut.parts, "Sword")
+			end),
+			"'Sword' is not a PlayerR15 part"
+		)).toBe(true)
+		local plan = contact("src/shared/data/combat", function(copy)
+			local keepOut = copy.contact.standOff.keepOut
+			keepOut.sampleSeconds = 0
+			keepOut.maxTurnDegrees = 0
+			keepOut.rounds = 1.5
+			keepOut.maxPieces = 0
+		end)
+		expect(hasProblem(plan, "keepOut.sampleSeconds must be above 0")).toBe(true)
+		expect(hasProblem(plan, "keepOut.maxTurnDegrees must be above 0")).toBe(true)
+		expect(hasProblem(plan, "keepOut.rounds must be a whole number")).toBe(true)
+		expect(hasProblem(plan, "keepOut.maxPieces must be a whole number")).toBe(true)
+	end)
+
+	it("contact: a rig's blocker poses its own rig's clips, every one there (D-CH4)", function()
+		expect(hasProblem(
+			contact("src/shared/data/rigs", function(copy)
+				copy.Kobold.blocker.clips = { "enemy/Boar/Idle" }
+			end),
+			"rigs.Kobold.blocker.clips[1] 'enemy/Boar/Idle' must be one of the rig's own clips"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/rigs", function(copy)
+				copy.Boar.blocker.clips = { "enemy/Boar/NoSuchIdle" }
+			end),
+			"'enemy/Boar/NoSuchIdle' is not a clip file"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/rigs", function(copy)
+				copy.Boar.blocker.sampleSeconds = 0
+			end),
+			"rigs.Boar.blocker.sampleSeconds must be above 0"
+		)).toBe(true)
+	end)
+
+	it("telegraph: the glint's own numbers, and never on an Unblockable blow (D-CP1, D-CP2, D-289)", function()
+		local shape = telegraph("src/shared/data/fx", function(copy)
+			copy.telegraph.glintFrames = 2.5
+			copy.telegraph.glintAimFrames = -1
+			copy.telegraph.glintToken = "NoSuchToken"
+			copy.telegraph.glintLeadMax = -0.1
+			copy.telegraph.glintLeadSamples = 0
+		end)
+		expect(hasProblem(shape, "glintFrames must be a whole number of at least 1")).toBe(true)
+		expect(hasProblem(shape, "glintAimFrames must be 0 or more")).toBe(true)
+		expect(hasProblem(shape, "glintToken 'NoSuchToken' is not a palette token")).toBe(true)
+		expect(hasProblem(shape, "glintLeadMax must be 0 or more")).toBe(true)
+		expect(hasProblem(shape, "glintLeadSamples must be a whole number of at least 1")).toBe(true)
+		expect(hasProblem(
+			telegraph("src/shared/data/fx", function(copy)
+				copy.telegraph.glintKinds.Unblockable = true
+			end),
+			"glintKinds must not hold Unblockable"
+		)).toBe(true)
+		expect(hasProblem(
+			telegraph("src/shared/data/fx", function(copy)
+				copy.telegraph.glintKinds.Heavy = true
+			end),
+			"glintKinds.Heavy is not a telegraph kind"
+		)).toBe(true)
+		expect(hasProblem(
+			telegraph("src/shared/data/fx", function(copy)
+				copy.telegraph.glintDecalAlpha = copy.telegraph.decal.alpha
+			end),
+			"must be above decal.alpha"
+		)).toBe(true)
+		expect(hasProblem(
+			telegraph("src/shared/data/fx", function(copy)
+				copy.telegraph.glintDecalAlpha = 1.2
+			end),
+			"must be above decal.alpha (0.55) and at most 1"
+		)).toBe(true)
+	end)
+
+	it(
+		"telegraph: every blow that glints glints wholly on its parry window, before its tell goes out (D-CP1)",
+		function()
+			-- Longer than the window, earlier than its open, past the tell's end: each puts a blow's
+			-- glint frames where a press on them cannot parry.
+			expect(hasProblem(
+				telegraph("src/shared/data/fx", function(copy)
+					copy.telegraph.glintFrames = 10
+				end),
+				"KoboldAxeman.Overhead: its glint"
+			)).toBe(true)
+			expect(hasProblem(
+				telegraph("src/shared/data/fx", function(copy)
+					copy.telegraph.glintAimFrames = 6
+				end),
+				"(the parry window, to the tell's end)"
+			)).toBe(true)
+			expect(hasProblem(
+				telegraph("src/shared/data/ai", function(copy)
+					copy.telegraph.snapLeadSeconds = 0.12
+				end),
+				"KoboldAxeman.Overhead: its glint"
+			)).toBe(true)
+			-- An Unblockable blow and a rush never glint, so the rule leaves them be.
+			for _, problem in
+				telegraph("src/shared/data/fx", function(copy)
+					copy.telegraph.glintFrames = 10
+				end)
+			do
+				expect(problem:find("FrenzyBoar.Charge", 1, true)).toBeNil()
+				expect(problem:find("elite Charger.Trample", 1, true)).toBeNil()
+			end
+		end
+	)
 end)

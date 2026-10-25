@@ -51,7 +51,11 @@
 	the point-blank shoulders) runs with the stand-off the client plans at the release (fix F1,
 	ContactPredictor.standOff): when its first cut would start in the body, the root steps back
 	over the anticipation on the clip's clock, and the server reads that root as it reads the
-	clip's root motion. Every requirement above holds with it.
+	clip's root motion. Every requirement above holds with it. Every swing at such an enemy, an
+	Art's or a basic's, also runs with the keep-out the client plans with it (D-CH3, D-CH4): the
+	enemy stands with its blocker faces (RigBuilder.addBlocker, never seen by a blade or a query),
+	and the root gives way back and aside as far as the clip's own motion would carry the body's
+	colliding parts deeper into them, as CharacterController.stepStandOff applies it.
 
 	Used by tools/hit-matrix.luau (prints the matrix) and tests/server/HitMatrix.spec.luau (fails on
 	a real-fight miss). It needs the test harness (`Harness`) to load game modules, and leaves
@@ -124,6 +128,9 @@ export type Cell = {
 	required: boolean,
 	-- The Art stand-off (fix F1) the client stepped back before the swing, in studs; nil for none.
 	standOff: number?,
+	-- The most the keep-out (D-CH3, D-CH4) moved the root over the swing, back and aside as one
+	-- distance, in studs; nil for none.
+	keepOut: number?,
 	-- Whether the local client drew this hit at each of its frame rates (dev.luau hitMatrix.clientFps)
 	-- and frame phases: ContactPredictor touched the enemy in this window while the client's own
 	-- frames posed the swing (fix F2). Nil when the run skipped the client.
@@ -180,6 +187,7 @@ type Context = {
 	ContactPredictor: any,
 	ActionLogic: any,
 	AimLogic: any,
+	AI: any,
 }
 
 export type Avatar = { model: any, root: any, rootHeight: number, base: any, top: number }
@@ -246,6 +254,7 @@ local function load(Harness: any): Context
 		ContactPredictor = Harness.load("src/client/controllers/ContactPredictor"),
 		ActionLogic = Harness.load("src/client/controllers/ActionLogic"),
 		AimLogic = Harness.load("src/client/controllers/AimLogic"),
+		AI = Harness.load("src/shared/data/ai"),
 	}
 end
 
@@ -424,7 +433,15 @@ local function placeEnemy(ctx: Context, setup: Setup, distance: number): (any, a
 			part.CFrame = solved
 		end
 	end
+	-- Its blocker faces, as a live enemy stands with them (D-198, D-CH4): what the keep-out keeps
+	-- the player's body out of. No blade and no query meets them (CanQuery and CanCollide off).
+	ctx.RigBuilder.addBlocker(model)
 	return model, def
+end
+
+-- Whether a part is one of an enemy's blocker faces (the blockers group): no body part.
+local function isFace(ctx: Context, part: any): boolean
+	return part.CollisionGroup == ctx.AI.collision.blockers
 end
 
 -- The enemy's body: every part but the weapon it holds (rigs.luau trailParts).
@@ -434,17 +451,17 @@ local function enemyBodyParts(ctx: Context, model: any, setup: Setup): { any }
 	local held = rig.trailParts or {}
 	local list = {}
 	for _, part in model:GetChildren() do
-		if part:IsA("BasePart") and table.find(held, part.Name) == nil then
+		if part:IsA("BasePart") and table.find(held, part.Name) == nil and not isFace(ctx, part) then
 			table.insert(list, part)
 		end
 	end
 	return list
 end
 
-local function enemyParts(model: any): { any }
+local function enemyParts(ctx: Context, model: any): { any }
 	local list = {}
 	for _, part in model:GetDescendants() do
-		if part:IsA("BasePart") then
+		if part:IsA("BasePart") and not isFace(ctx, part) then
 			table.insert(list, part)
 		end
 	end
@@ -715,24 +732,40 @@ function HitMatrix.attacks(ctx: Context): { Attack }
 	return list
 end
 
+-- How far a stand-off plan has moved the root at a clip time: along `away`, the Art's step (fix F1)
+-- plus the keep-out's back (D-CH3), and along `side` the keep-out's aside (D-CH4), as
+-- CharacterController.stepStandOff applies them.
+local function standOffShift(ctx: Context, standOff: any, time: number): any
+	local easing = ctx.Combat.contact.standOff.easing
+	local back = ctx.AimLogic.standOffAt(standOff.distance, standOff.from, standOff.to, time, easing)
+	if standOff.keep ~= nil then
+		back += standOff.keep(time)
+	end
+	local shift = standOff.away * back
+	if standOff.side ~= nil and standOff.keepSide ~= nil then
+		shift += standOff.side * standOff.keepSide(time)
+	end
+	return shift
+end
+
 -- Where the client has carried the root at a clip time: the start frame plus the clip's root
--- motion, plus the Art stand-off's step (fix F1) when the swing has one.
+-- motion, plus the stand-off's step and keep-out when the swing has a plan.
 local function rootAt(ctx: Context, avatar: Avatar, clip: any, time: number, standOff: any?): any
 	local start = ctx.ClipSampler.rootMotionAt(clip, 0)
 	local now = ctx.ClipSampler.rootMotionAt(clip, time)
 	local frame = avatar.base * CFrame.new(now[1] - start[1], now[2] - start[2], now[3] - start[3])
 	if standOff ~= nil then
-		local easing = ctx.Combat.contact.standOff.easing
-		frame += standOff.away * ctx.AimLogic.standOffAt(standOff.distance, standOff.from, standOff.to, time, easing)
+		frame += standOffShift(ctx, standOff, time)
 	end
 	return frame
 end
 
--- The Art stand-off (fix F1) the local client plans at the release against this placement, as
--- CharacterController does: only for an Art, only when the aim assist would pick the enemy (inside
--- its cone and range; a lock turns the body square to it the same way), from the hold pose with
--- the root where the clip has carried it, facing ahead. Nil for a basic swing, the point-blank
--- shoulders (outside the assist) and a start pose already clear of the body.
+-- The stand-off the local client plans against this placement, as CharacterController does: only
+-- when the aim assist would pick the enemy (inside its cone and range; a lock turns the body square
+-- to it the same way), facing ahead. An Art's plans at the release, from the hold pose with the root
+-- where the clip has carried it: the blade step (fix F1) and the keep-out (D-CH3, D-CH4); a basic's
+-- from its first frame, the keep-out alone. Nil for the point-blank shoulders (outside the
+-- assist) and a swing that needs neither.
 local function standOffOf(
 	ctx: Context,
 	avatar: Avatar,
@@ -743,21 +776,43 @@ local function standOffOf(
 ): any?
 	local aim = ctx.Combat.aim
 	if
-		attack.artId == nil
-		or math.abs(setup.bearing or 0) > aim.assistConeDegrees / 2
+		math.abs(setup.bearing or 0) > aim.assistConeDegrees / 2
 		or distance > aim.assistRange
 		or distance < aim.minFaceDistance
 	then
 		return nil
 	end
-	local hold = ctx.ActionLogic.holdClipTime(attack.clip, ctx.Combat.startPoseTime + ctx.Combat.activationHold)
+	local isArt = attack.artId ~= nil
+	local from = if isArt
+		then ctx.ActionLogic.holdClipTime(attack.clip, ctx.Combat.startPoseTime + ctx.Combat.activationHold)
+		else 0
 	return ctx.ContactPredictor.standOff(
 		avatar.model,
 		attack.clip,
-		hold,
-		rootAt(ctx, avatar, attack.clip, hold),
-		enemyModel
+		from,
+		rootAt(ctx, avatar, attack.clip, from),
+		enemyModel,
+		nil,
+		{ keepOut = true, step = isArt }
 	)
+end
+
+-- The most a plan's keep-out moves the root over a swing (back and aside as one distance), nil
+-- when it never moves it.
+local function keepOutMost(ctx: Context, standOff: any?, attack: Attack): number?
+	if standOff == nil or standOff.keep == nil then
+		return nil
+	end
+	local most = 0
+	local step = ctx.Combat.contact.standOff.keepOut.sampleSeconds
+	local time = standOff.from
+	while time <= attack.clip.duration + 1e-9 do
+		local back = standOff.keep(time)
+		local aside = if standOff.keepSide ~= nil then standOff.keepSide(time) else 0
+		most = math.max(most, math.sqrt(back * back + aside * aside))
+		time += step
+	end
+	return if most > 0 then most else nil
 end
 
 -- ------------------------------------------------------------------------------------------
@@ -1042,7 +1097,7 @@ local function drawSwing(
 	local frame = 1 / fps
 	local last = attack.windows[#attack.windows].close + frame * 2
 	local previous, tick = 0, 0
-	local stepped = 0
+	local stepped = Vector3.zero
 	while true do
 		local time = (phase + tick) * frame
 		if time > last then
@@ -1054,14 +1109,8 @@ local function drawSwing(
 			local delta = result.rootDelta
 			avatar.root.CFrame = avatar.root.CFrame + Vector3.new(delta[1], delta[2], delta[3])
 			if standOff ~= nil then
-				local shown = ctx.AimLogic.standOffAt(
-					standOff.distance,
-					standOff.from,
-					standOff.to,
-					handle.time,
-					ctx.Combat.contact.standOff.easing
-				)
-				avatar.root.CFrame = avatar.root.CFrame + standOff.away * (shown - stepped)
+				local shown = standOffShift(ctx, standOff, handle.time)
+				avatar.root.CFrame = avatar.root.CFrame + (shown - stepped)
 				stepped = shown
 			end
 			for _, contact in predictor:step(handle.time) do
@@ -1186,11 +1235,12 @@ function HitMatrix.run(Harness: any, options: Options?): Report
 		end
 		-- The true blade of a window, traced the first time a miss needs it.
 		local tracks: { [string]: { any } } = {}
-		local function trackOf(attack: Attack, index: number, standOff: any?): { any }
+		local function trackOf(attack: Attack, index: number, standOff: any?, placement: string): { any }
 			local key = attack.id .. "#" .. index
 			if standOff ~= nil then
+				-- The keep-out depends on the placement as well as the step.
 				local step = standOff.away * standOff.distance
-				key ..= ("@%.3f,%.3f,%.3f"):format(step.X, step.Y, step.Z)
+				key ..= ("@%.3f,%.3f,%.3f@%s"):format(step.X, step.Y, step.Z, placement)
 			end
 			local track = tracks[key]
 			if track == nil then
@@ -1212,7 +1262,7 @@ function HitMatrix.run(Harness: any, options: Options?): Report
 					continue
 				end
 				local enemyModel, enemyDef = placeEnemy(ctx, setup, distance)
-				local parts = enemyParts(enemyModel)
+				local parts = enemyParts(ctx, enemyModel)
 				local worldParts = table.clone(parts)
 				table.insert(worldParts, field)
 				for _, part in avatar.model:GetDescendants() do
@@ -1292,7 +1342,7 @@ function HitMatrix.run(Harness: any, options: Options?): Report
 						if not all then
 							clearance, nearest = clearanceOf(
 								ctx,
-								trackOf(attack, index, standOff),
+								trackOf(attack, index, standOff, ("%s/%.3f"):format(setup.id, distance)),
 								parts,
 								if beside then report.besideRadius else radius
 							)
@@ -1308,7 +1358,8 @@ function HitMatrix.run(Harness: any, options: Options?): Report
 							landBy = landBy,
 							late = late,
 							required = real and not setup.pointBlank,
-							standOff = if standOff ~= nil then standOff.distance else nil,
+							standOff = if standOff ~= nil and standOff.distance > 0 then standOff.distance else nil,
+							keepOut = keepOutMost(ctx, standOff, attack),
 							drawn = drawn,
 							clearance = clearance,
 							nearestPart = nearest,

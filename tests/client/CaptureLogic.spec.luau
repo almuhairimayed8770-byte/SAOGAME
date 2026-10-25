@@ -129,6 +129,241 @@ describe("CaptureLogic auto-perform", function()
 	end)
 end)
 
+-- CF: the fight's perform reacts to what the client draws (a guard on each kobold overhead, a
+-- dodge on the boar's crouch, the keys that follow each) and presses its standing rules between
+-- (basics on the lock's target in reach, the lock back on the kobold once it is lost); the
+-- locomotion pass holds the stick (a part-pushed stick walks) and the sprint.
+describe("CaptureLogic reactions, chains, standing rules and the stick (CF)", function()
+	local Charge = Harness.load("src/shared/clips/enemy/Boar/Charge")
+
+	local function openOf(clip: any): number
+		for _, event in clip.events do
+			if event.kind == "HitWindowOpen" then
+				return event.time
+			end
+		end
+		error("no hit window in " .. clip.id)
+	end
+
+	local function eventOf(clip: any, kind: string): any
+		for _, event in clip.events do
+			if event.kind == kind then
+				return event
+			end
+		end
+		error("no " .. kind .. " in " .. clip.id)
+	end
+
+	it("carries a stick's entry on its presses; standing rules and reactions are no timed presses", function()
+		local walk = { action = "Move", at = 0, hold = 2.5, stick = { 0.5, 0 } }
+		local presses = Logic.timedPresses({
+			walk :: any,
+			{ action = "BasicAttack", every = 0.4, from = 0.3, to = 19, within = 5.5, hold = 0.05 },
+			{ action = "Dodge", onClip = Charge.id, enemy = 2, lead = 0.3, hold = 0.05 },
+		})
+		expect(#presses).toBe(2)
+		expect(presses[1].action).toBe("Move")
+		expect(presses[1].down).toBe(true)
+		expect(presses[1].entry).toBe(walk)
+		expect(presses[2].down).toBe(false)
+		expect(presses[2].at).toBeCloseTo(2.5, 1e-9)
+		expect(presses[2].entry).toBe(walk)
+	end)
+
+	it("queues a reaction's let-go among the timed presses in time order", function()
+		local queue = Logic.timedPresses({
+			{ action = "LockOn", at = 5, hold = 0.05 },
+			{ action = "Art", at = 1, hold = 0.5 },
+		})
+		-- At the parry snapshot the guard's let-go went on the end, behind presses due before it.
+		Logic.enqueue(queue, { at = 1.2, action = "Guard", down = false })
+		Logic.enqueue(queue, { at = 1.5, action = "Dodge", down = true })
+		local order = {}
+		for _, entry in queue do
+			table.insert(order, ("%s%s@%g"):format(entry.action, if entry.down then "+" else "-", entry.at))
+		end
+		-- A let-go comes before a press at the same moment.
+		expect(table.concat(order, " ")).toBe("Art+@1 Guard-@1.2 Art-@1.5 Dodge+@1.5 LockOn+@5 LockOn-@5.05")
+	end)
+
+	it("keeps one reaction per clip-timed entry, in list order", function()
+		local guard = { action = "Guard", onClip = Overhead.id, lead = 0.08, hold = 0.3, repeats = true }
+		local dodge = { action = "Dodge", onClip = Charge.id, enemy = 2, lead = 0.3, hold = 0.05 }
+		local reactions = Logic.reactions({ { action = "Art", at = 1, hold = 0.5 }, guard :: any, dodge :: any })
+		expect(#reactions).toBe(2)
+		expect(reactions[1].entry).toBe(guard)
+		expect(reactions[2].entry).toBe(dodge)
+		expect(reactions[1].at).toBeNil()
+		expect(reactions[1].count).toBe(0)
+	end)
+
+	it(
+		"sets the press `lead` before the hit window from the event heard, and moves it on with each later one",
+		function()
+			local reaction = Logic.reactions({
+				{ action = "Guard", onClip = Overhead.id, lead = 0.08, hold = 0.3, repeats = true },
+			})[1]
+			local open = openOf(Overhead)
+			local voice = Overhead.events[1]
+			-- Heard 2 s into the take at the voice line: the guard goes down open - voice - lead later.
+			expect(Logic.hear(reaction, Overhead.events, voice.time, 2)).toBe(true)
+			expect(reaction.at).toBeCloseTo(2 + open - voice.time - 0.08, 1e-9)
+			-- The whoosh comes 0.2 s late (the kobold's hit-stop held the clip): the guard moves with it.
+			local whoosh = eventOf(Overhead, "Sfx")
+			local heardAt = 2 + (whoosh.time - voice.time) + 0.2
+			expect(Logic.hear(reaction, Overhead.events, whoosh.time, heardAt)).toBe(true)
+			expect(reaction.at).toBeCloseTo(heardAt + open - whoosh.time - 0.08, 1e-9)
+			-- The window itself is too late to move it.
+			local before = reaction.at
+			expect(Logic.hear(reaction, Overhead.events, open, heardAt + 0.2)).toBe(false)
+			expect(reaction.at).toBe(before)
+		end
+	)
+
+	it("sets the press the client's latency lead earlier still, never before the moment heard (D-289)", function()
+		local reaction = Logic.reactions({
+			{ action = "Guard", onClip = Overhead.id, lead = 0.05, hold = 0.4, repeats = true },
+		})[1]
+		local open = openOf(Overhead)
+		local voice = Overhead.events[1]
+		-- The press leaves 0.06 s early, as the glint shows: it reaches the server as one with no
+		-- latency would.
+		expect(Logic.hear(reaction, Overhead.events, voice.time, 2, 0.06)).toBe(true)
+		expect(reaction.at).toBeCloseTo(2 + open - voice.time - 0.05 - 0.06, 1e-9)
+		-- Heard later than the lead allows: it goes at once, never before the moment it was heard.
+		local late = open - 0.07
+		expect(Logic.hear(reaction, Overhead.events, late, 3, 0.06)).toBe(true)
+		expect(reaction.at).toBeCloseTo(3, 1e-9)
+		-- Only a guard leaves early (the server judges the parry window on its clock); a dodge
+		-- stays on the clip as drawn, where its chain meets the drawn body.
+		local dodge = Logic.reactions({ { action = "Dodge", onClip = Overhead.id, lead = 0.05, hold = 0.05 } })[1]
+		expect(Logic.hear(dodge, Overhead.events, voice.time, 2, 0.06)).toBe(true)
+		expect(dodge.at).toBeCloseTo(2 + open - voice.time - 0.05, 1e-9)
+	end)
+
+	it("sets no press past the reaction's `to`, and keeps a chain's steps inside it (CF, D-CI3)", function()
+		local reaction = Logic.reactions({
+			{ action = "Guard", onClip = Overhead.id, lead = 0.04, hold = 0.3, repeats = true, to = 10 },
+		})[1]
+		local open = openOf(Overhead)
+		local voice = Overhead.events[1]
+		-- Heard so its press comes at 10 - 0.5: set.
+		local heardAt = 10 - 0.5 - (open - voice.time - 0.04)
+		expect(Logic.hear(reaction, Overhead.events, voice.time, heardAt)).toBe(true)
+		expect(reaction.at).toBeCloseTo(9.5, 1e-9)
+		-- The next play heard so its press would come past `to`: nothing waits.
+		Logic.pressed(reaction)
+		Logic.hear(reaction, Overhead.events, open, heardAt + 1)
+		expect(Logic.hear(reaction, Overhead.events, voice.time, heardAt + 1.5)).toBe(false)
+		expect(reaction.at).toBeNil()
+		-- A chain step goes down at or before its reaction's `to`, never after.
+		expect(Logic.inside(reaction.entry, 10)).toBe(true)
+		expect(Logic.inside(reaction.entry, 10.01)).toBe(false)
+		expect(Logic.inside({ action = "Guard", hold = 0.3 }, 1e6)).toBe(true)
+	end)
+
+	it("presses once a play: the rest of a pressed play is not heard, the next play is (repeats)", function()
+		local reaction = Logic.reactions({
+			{ action = "Guard", onClip = Overhead.id, lead = 0.08, hold = 0.3, repeats = true },
+		})[1]
+		local voice = Overhead.events[1]
+		local whoosh = eventOf(Overhead, "Sfx")
+		Logic.hear(reaction, Overhead.events, voice.time, 1)
+		Logic.pressed(reaction)
+		expect(reaction.at).toBeNil()
+		expect(reaction.count).toBe(1)
+		-- Still the same play: an event before the window heard after the press moves nothing.
+		expect(Logic.hear(reaction, Overhead.events, whoosh.time, 2)).toBe(false)
+		expect(reaction.at).toBeNil()
+		Logic.hear(reaction, Overhead.events, openOf(Overhead), 2.2)
+		-- The next play starts over at its voice line.
+		expect(Logic.hear(reaction, Overhead.events, voice.time, 5)).toBe(true)
+		expect(reaction.at).never.toBeNil()
+	end)
+
+	it("moves a waiting press on by its attacker's hit-stop pause, and nothing else", function()
+		local reaction = Logic.reactions({
+			{ action = "Guard", onClip = Overhead.id, lead = 0.08, hold = 0.3, repeats = true },
+		})[1]
+		Logic.pause(reaction, 0.2)
+		expect(reaction.at).toBeNil()
+		Logic.hear(reaction, Overhead.events, Overhead.events[1].time, 2)
+		local at = reaction.at :: number
+		Logic.pause(reaction, 0.2)
+		expect(reaction.at).toBeCloseTo(at + 0.2, 1e-9)
+	end)
+
+	it("presses on the first play only unless it repeats", function()
+		local reaction = Logic.reactions({ { action = "Guard", onClip = Overhead.id, lead = 0.05, hold = 0.4 } })[1]
+		local voice = Overhead.events[1]
+		expect(Logic.hear(reaction, Overhead.events, voice.time, 1)).toBe(true)
+		Logic.pressed(reaction)
+		Logic.hear(reaction, Overhead.events, openOf(Overhead), 2.2)
+		expect(Logic.hear(reaction, Overhead.events, voice.time, 5)).toBe(false)
+		expect(reaction.at).toBeNil()
+	end)
+
+	it("dodges the boar's crouch `lead` before its launch", function()
+		local reaction = Logic.reactions({
+			{ action = "Dodge", onClip = Charge.id, enemy = 2, lead = 0.3, hold = 0.05, repeats = true },
+		})[1]
+		local first = Charge.events[1]
+		expect(Logic.hear(reaction, Charge.events, first.time, 9)).toBe(true)
+		expect(reaction.at).toBeCloseTo(9 + openOf(Charge) - first.time - 0.3, 1e-9)
+	end)
+
+	it("presses a standing rule every `every` seconds inside its span", function()
+		local rule = Logic.standing({
+			{ action = "Art", at = 1, hold = 0.5 },
+			{ action = "BasicAttack", every = 0.4, from = 0.3, to = 19, within = 5.5, hold = 0.05 },
+		})
+		expect(#rule).toBe(1)
+		local basics = rule[1]
+		expect(Logic.standingDue(basics, 0.2)).toBe(false)
+		expect(Logic.standingDue(basics, 0.3)).toBe(true)
+		basics.last = 0.3
+		expect(Logic.standingDue(basics, 0.6)).toBe(false)
+		expect(Logic.standingDue(basics, 0.7)).toBe(true)
+		basics.last = 18.9
+		expect(Logic.standingDue(basics, 19.3)).toBe(false)
+		-- With no span it stands for the whole take.
+		local keep = Logic.standing({ { action = "LockOn", every = 0.2, hold = 0.05 } })[1]
+		expect(Logic.standingDue(keep, 0)).toBe(true)
+		expect(Logic.standingDue(keep, 1000)).toBe(true)
+	end)
+
+	it("presses the next action of a step's cycle each time it comes round", function()
+		local step = { action = "Art", hold = 0.5, delay = 0.15, cycle = { "Art", "ArtSlot2", "ArtSlot4", "ArtSlot3" } }
+		expect(Logic.cycleAction(step :: any, 1)).toBe("Art")
+		expect(Logic.cycleAction(step :: any, 2)).toBe("ArtSlot2")
+		expect(Logic.cycleAction(step :: any, 4)).toBe("ArtSlot3")
+		expect(Logic.cycleAction(step :: any, 5)).toBe("Art")
+		expect(Logic.cycleAction({ action = "Dodge", hold = 0.05, delay = 0 } :: any, 3)).toBe("Dodge")
+	end)
+
+	it("turns a stick on the camera's view into Humanoid:Move's camera-relative vector", function()
+		-- Right is +X, forward is -Z (Humanoid:Move relative to the camera).
+		local x, z = Logic.stickMove({ 0.5, 0 })
+		expect(x).toBeCloseTo(0.5, 1e-9)
+		expect(z).toBeCloseTo(0, 1e-9)
+		x, z = Logic.stickMove({ 0, 1 })
+		expect(x).toBeCloseTo(0, 1e-9)
+		expect(z).toBeCloseTo(-1, 1e-9)
+		-- Never past a full push.
+		x, z = Logic.stickMove({ 3, 4 })
+		expect(math.sqrt(x * x + z * z)).toBeCloseTo(1, 1e-9)
+	end)
+
+	it("names a staged enemy by its index, the staged target when the reply listed none", function()
+		expect(Logic.enemyId({ 21, 22 }, 21, 2)).toBe(22)
+		expect(Logic.enemyId({ 21, 22 }, 21, nil)).toBe(21)
+		expect(Logic.enemyId({ 21 }, 21, 2)).toBeNil()
+		expect(Logic.enemyId(nil, 21, 1)).toBe(21)
+		expect(Logic.enemyId(nil, 21, 2)).toBeNil()
+		expect(Logic.enemyId(nil, nil, nil)).toBeNil()
+	end)
+end)
+
 describe("CaptureLogic walk into the stand ring (D-244)", function()
 	local StageLogic = Harness.load("src/server/dev/DevStageLogic")
 	local Stage = Dev.capture.stage
@@ -188,28 +423,93 @@ describe("CaptureLogic walk into the stand ring (D-244)", function()
 		end
 	end)
 
-	it("steers along the route, past each point within reach, and lets go within arrive of the spot", function()
-		local walk = Logic.walkFrom(reply(true, 0, -10)) :: any
-		local path = walk.path
-		local dx, dz = Logic.steer(walk, 0, -10, 1.5, 2)
-		expect(math.abs(math.sqrt((dx :: number) ^ 2 + (dz :: number) ^ 2) - 1)).toBeLessThan(1e-9)
-		expect(walk.index).toBe(1)
-		-- At the first point: on to the second.
-		Logic.steer(walk, path[1][1] + 1, path[1][2], 1.5, 2)
-		expect(walk.index).toBe(2)
-		-- Near the approach: on to the spot, heading along the facing.
-		local approach = path[#path - 1]
-		walk.index = #path - 1
-		dx, dz = Logic.steer(walk, approach[1], approach[2] + 1, 1.5, 2)
-		expect(walk.index).toBe(#path)
+	it(
+		"steers along the route, past each point within reach, follows the last leg's line, lets go the carry short",
+		function()
+			local walk = Logic.walkFrom(reply(true, 0, -10)) :: any
+			local path = walk.path
+			local dx, dz = Logic.steer(walk, 0, -10, 1.5, 2, 1.5)
+			expect(math.abs(math.sqrt((dx :: number) ^ 2 + (dz :: number) ^ 2) - 1)).toBeLessThan(1e-9)
+			expect(walk.index).toBe(1)
+			-- At the first point: on to the second.
+			Logic.steer(walk, path[1][1] + 1, path[1][2], 1.5, 2, 1.5)
+			expect(walk.index).toBe(2)
+			-- Near the approach, a stud off the leg's line: on to the last leg, aiming 1.5 studs along it
+			-- past the root's foot on the line, back toward it.
+			local approach = path[#path - 1]
+			local spot = path[#path]
+			local lx, lz = StageLogic.look(walk.facing)
+			walk.index = #path - 1
+			local sideX, sideZ = -lz, lx
+			dx, dz = Logic.steer(walk, approach[1] + sideX, approach[2] + sideZ, 1.5, 2, 1.5)
+			expect(walk.index).toBe(#path)
+			expect((dx :: number) * lx + (dz :: number) * lz).toBeCloseTo(math.cos(math.atan(1 / 1.5)), 1e-9)
+			expect((dx :: number) * sideX + (dz :: number) * sideZ).toBeLessThan(0)
+			-- On the line: straight along the spot's facing.
+			dx, dz = Logic.steer(walk, spot[1] - lx * 4, spot[2] - lz * 4, 1.5, 2, 1.5)
+			expect((dx :: number) * lx + (dz :: number) * lz).toBeGreaterThan(1 - 1e-9)
+			-- The spot no more than letGo ahead along the leg: let go, wherever across the line the root
+			-- stands (and asked again, still let go); past the spot too.
+			expect(Logic.steer(walk, spot[1] - lx * 1.9, spot[2] - lz * 1.9, 1.5, 2, 1.5)).toBeNil()
+			expect(Logic.steer(walk, spot[1] - lx * 1.9 + sideX, spot[2] - lz * 1.9 + sideZ, 1.5, 2, 1.5)).toBeNil()
+			expect(Logic.steer(walk, spot[1] + lx, spot[2] + lz, 1.5, 2, 1.5)).toBeNil()
+			-- Pushed back off it: steers for it again.
+			expect(Logic.steer(walk, spot[1] - lx * 3, spot[2] - lz * 3, 1.5, 2, 1.5)).never.toBeNil()
+		end
+	)
+
+	it("steers straight for the spot on a route of the spot alone, and lets go within letGo of it", function()
+		local walk = Logic.walkFrom({
+			ok = false,
+			walk = { x = 0, y = 0, z = -10, facing = 0, radius = 3, tolerance = 1 },
+		}) :: any
+		expect(Logic.lastLeg(walk)).toBeNil()
+		local dx, dz = Logic.steer(walk, 4, -10, 1.5, 0.5, 1.5)
+		expect(dx).toBeCloseTo(-1, 1e-9)
+		expect(dz).toBeCloseTo(0, 1e-9)
+		expect(Logic.steer(walk, 0.4, -10, 1.5, 0.5, 1.5)).toBeNil()
+		expect(Logic.ahead(walk, 3, -6)).toBeCloseTo(5, 1e-9)
+	end)
+
+	it("reads the last leg and how far the spot is still ahead along it", function()
+		local walk = Logic.walkFrom(reply(false, 25, 30)) :: any
 		local lx, lz = StageLogic.look(walk.facing)
-		expect((dx :: number) * lx + (dz :: number) * lz).toBeGreaterThan(0.999)
-		-- Within arrive of the spot: let go (and asked again, still let go).
-		local spot = path[#path]
-		expect(Logic.steer(walk, spot[1], spot[2] + 1.9, 1.5, 2)).toBeNil()
-		expect(Logic.steer(walk, spot[1], spot[2] + 1.9, 1.5, 2)).toBeNil()
-		-- Pushed back off it: steers for it again.
-		expect(Logic.steer(walk, spot[1], spot[2] + 3, 1.5, 2)).never.toBeNil()
+		local ux, uz = Logic.lastLeg(walk)
+		expect(ux).toBeCloseTo(lx, 1e-9)
+		expect(uz).toBeCloseTo(lz, 1e-9)
+		local spot = walk.path[#walk.path]
+		expect(Logic.ahead(walk, spot[1] - lx * 2.5, spot[2] - lz * 2.5)).toBeCloseTo(2.5, 1e-9)
+		-- Across the line counts nothing; past the spot is below 0.
+		expect(Logic.ahead(walk, spot[1] - lx * 2.5 - lz, spot[2] - lz * 2.5 + lx)).toBeCloseTo(2.5, 1e-9)
+		expect(Logic.ahead(walk, spot[1] + lx, spot[2] + lz)).toBeCloseTo(-1, 1e-9)
+	end)
+
+	it("lets go the stop's carry short: none past the Skid's threshold, speed x carrySeconds below it", function()
+		expect(Logic.stopCarry(24, 18, 0.186)).toBe(0)
+		expect(Logic.stopCarry(18.5, 18, 0.186)).toBe(0)
+		expect(Logic.stopCarry(16, 18, 0.186)).toBeCloseTo(16 * 0.186, 1e-9)
+		expect(Logic.stopCarry(0, 18, 0.186)).toBe(0)
+	end)
+
+	it("reads how far a body at rest is off the spot and its facing", function()
+		local walk = Logic.walkFrom(reply(false, 25, 30)) :: any
+		local lx, lz = StageLogic.look(walk.facing)
+		local studs, degrees = Logic.restOff(walk, walk.x, walk.z, lx, lz)
+		expect(studs).toBeCloseTo(0, 1e-9)
+		expect(degrees).toBeCloseTo(0, 1e-6)
+		studs, degrees = Logic.restOff(walk, walk.x + 0.6, walk.z - 0.8, -lz * 3, lx * 3)
+		expect(studs).toBeCloseTo(1, 1e-9)
+		expect(degrees).toBeCloseTo(90, 1e-6)
+		studs, degrees = Logic.restOff(walk, walk.x, walk.z, -lx, -lz)
+		expect(degrees).toBeCloseTo(180, 1e-6)
+		local turned = math.rad(4)
+		local tx = lx * math.cos(turned) - lz * math.sin(turned)
+		local tz = lx * math.sin(turned) + lz * math.cos(turned)
+		studs, degrees = Logic.restOff(walk, walk.x, walk.z, tx, tz)
+		expect(degrees).toBeCloseTo(4, 1e-6)
+		-- No look (a root with no facing): as far off as it gets.
+		studs, degrees = Logic.restOff(walk, walk.x, walk.z, 0, 0)
+		expect(degrees).toBe(180)
 	end)
 
 	it("waits out the server's rate before the next ask", function()

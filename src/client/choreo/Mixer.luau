@@ -13,7 +13,9 @@
 
 	The clock: every handle has its own time and speed; the mixer has a time scale (Tempo,
 	Quickness) and a pause (hit-stop: a frame count at 1/60 s during which no clock advances and
-	the rig holds its pose: no blend envelope or blend-space weight moves either). A handle started
+	the rig holds its pose: no blend envelope or blend-space weight moves either, and the
+	procedural channels (lean, foot IK) stay as the last frame before the pause showed them, D-CH3,
+	whatever their owner hands in meanwhile). A handle started
 	with a server time jumps to the matching position. Handles that ignore the pause (the death
 	tremor) run on the unscaled frame time, so a time scale of zero freezes everything but them.
 
@@ -204,6 +206,9 @@ function Mixer.new(): Mixer
 	local self = setmetatable({
 		_handles = {} :: { Handle },
 		_procedural = {} :: { [string]: { offsets: Offsets, weight: number } },
+		-- The procedural channels as the last step outside a pause added them (D-CH3), in order.
+		_heldChannels = {} :: { { offsets: Offsets, weight: number } },
+		_heldCount = -1, -- -1: no step has added them yet
 		_pause = 0,
 		_timeScale = 1,
 		_last = {} :: Offsets,
@@ -430,7 +435,39 @@ end
 function Mixer.clear(self: any)
 	table.clear(self._handles)
 	table.clear(self._procedural)
+	self._heldCount = -1
 	self._pause = 0
+end
+
+-- Copies a procedural channel into slot `index` of `held` (D-CH3), reusing the slot's tables: the
+-- channel's owner may change its offsets table in place while a pause holds the copy.
+local function holdChannel(
+	held: { { offsets: Offsets, weight: number } },
+	index: number,
+	offsets: Offsets,
+	weight: number
+)
+	local slot = held[index]
+	if slot == nil then
+		slot = { offsets = {}, weight = weight }
+		held[index] = slot
+	end
+	slot.weight = weight
+	local copy = slot.offsets
+	for name in copy do
+		if offsets[name] == nil then
+			copy[name] = nil
+		end
+	end
+	for name, offset in offsets do
+		local into = copy[name]
+		if into == nil then
+			into = { pos = { 0, 0, 0 }, rot = { 0, 0, 0 } }
+			copy[name] = into
+		end
+		into.pos[1], into.pos[2], into.pos[3] = offset.pos[1], offset.pos[2], offset.pos[3]
+		into.rot[1], into.rot[2], into.rot[3] = offset.rot[1], offset.rot[2], offset.rot[3]
+	end
 end
 
 -- Where a hidden fallback idle's crossed events go: dropped, cleared every step.
@@ -931,10 +968,23 @@ function Mixer.step(self: any, dt: number): StepResult
 			composeOverrideLayer(result, layerHandles)
 		end
 	end
-	for _, channel in self._procedural do
-		if channel.weight > 0 then
+	if paused and self._heldCount >= 0 then
+		-- A hit-stop holds the procedural channels too (D-CH3): what the last moving frame showed.
+		local held = self._heldChannels
+		for index = 1, self._heldCount do
+			local channel = held[index]
 			addInto(result, channel.offsets, channel.weight)
 		end
+	else
+		local count = 0
+		for _, channel in self._procedural do
+			if channel.weight > 0 then
+				addInto(result, channel.offsets, channel.weight)
+				count += 1
+				holdChannel(self._heldChannels, count, channel.offsets, channel.weight)
+			end
+		end
+		self._heldCount = count
 	end
 
 	-- Drop finished handles

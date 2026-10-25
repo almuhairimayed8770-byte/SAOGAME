@@ -160,72 +160,101 @@ describe("TelegraphShapes", function()
 		expect(dipped).toBeLessThan(1)
 	end)
 
-	-- F7 (issue 9): a blow's tell stays lit past the wind-up until its snap begins, the strike's
-	-- landing less ai.luau telegraph.snapLeadSeconds, and glints over the parry window before it.
-	it("a blow's tell holds through the strike to the snap and glints over the parry window", function()
+	-- F7 (issue 9) and D-CP1: a blow's tell stays lit past the wind-up until its snap begins (the
+	-- strike's landing less ai.luau telegraph.snapLeadSeconds). Its glint is fx.luau
+	-- telegraph.glintFrames frames centred on the parry window's middle, glintAimFrames early: the
+	-- frames a press seen on it reaches the server inside the window from, a frame or two later.
+	it("a blow's tell holds through the strike to the snap and glints a few frames on the parry window", function()
 		local AI = Harness.load("src/shared/data/ai")
 		local combat = Harness.load("src/shared/data/combat")
-		local windUp, strike = 1.0, 0.35
-		local ends, glintFrom = TelegraphShapes.timing(windUp, strike)
-		expect(ends).toBeCloseTo(windUp + strike - AI.telegraph.snapLeadSeconds, 1e-9)
-		expect(glintFrom).toBeCloseTo(windUp + strike - combat.parryWindow, 1e-9)
-		-- Past the wind-up it is still lit, the ground shape at its full alpha.
-		expect(TelegraphShapes.decalAlpha(windUp + 0.1, windUp, 1, ends)).toBeCloseTo(Fx.telegraph.decal.alpha)
-		expect(TelegraphShapes.fillTransparency(windUp + 0.1, windUp, 1, ends, glintFrom)).toBeLessThan(1)
-		expect(TelegraphShapes.isOver(windUp + 0.1, ends)).toBe(false)
-		-- The glint: the fill at its brightest through the parry window, to the snap.
-		local glint = AI.telegraph.glintFillTransparency
-		expect(TelegraphShapes.fillTransparency(glintFrom + 0.01, windUp, 1, ends, glintFrom)).toBeCloseTo(glint)
-		expect(TelegraphShapes.fillTransparency(ends - 0.01, windUp, 1, ends, glintFrom)).toBeCloseTo(glint)
-		expect(glint).toBeLessThan(Fx.telegraph.fillTransparency)
-		-- Gone on the snap.
-		expect(TelegraphShapes.isOver(ends, ends)).toBe(true)
-		expect(TelegraphShapes.decalAlpha(ends, windUp, 1, ends)).toBe(0)
-		expect(TelegraphShapes.fillTransparency(ends, windUp, 1, ends, glintFrom)).toBe(1)
-		-- The accessibility floor dims the glint too, never below visible.
-		local dim = TelegraphShapes.fillTransparency(ends - 0.01, windUp, 0, ends, glintFrom)
-		expect(dim).toBeCloseTo(1 - (1 - glint) * Fx.telegraph.intensityMin)
-		-- A rush's line (no strike given) still ends at its launch, with no glint.
-		local rushEnds, rushGlint = TelegraphShapes.timing(0.6, nil)
-		expect(rushEnds).toBe(0.6)
-		expect(rushGlint).toBe(0.6)
-	end)
-
-	-- D-289: the client's press reaches the server its one-way latency late, so the glint opens and
-	-- closes that much earlier (`lead`, capped by fx.luau telegraph.glintLeadMax): a press at it
-	-- reaches the server inside the parry window. The tell itself still holds to the snap.
-	it("a lead moves the whole glint earlier, capped, and the tell still holds to the snap", function()
-		local AI = Harness.load("src/shared/data/ai")
-		local combat = Harness.load("src/shared/data/combat")
+		local F = combat.hitStopFrameSeconds
 		local windUp, strike = 1.0, 0.35
 		local lands = windUp + strike
-		local plainEnds, plainFrom = TelegraphShapes.timing(windUp, strike)
+		local ends, glintFrom, glintUntil = TelegraphShapes.timing(windUp, strike)
+		expect(ends).toBeCloseTo(lands - AI.telegraph.snapLeadSeconds, 1e-9)
+		local centre = lands - combat.parryWindow / 2 - Fx.telegraph.glintAimFrames * F
+		expect(glintFrom).toBeCloseTo(centre - Fx.telegraph.glintFrames * F / 2, 1e-9)
+		expect(glintUntil).toBeCloseTo(centre + Fx.telegraph.glintFrames * F / 2, 1e-9)
+		-- Inside the parry window, and over before the snap.
+		expect(glintFrom >= lands - combat.parryWindow).toBe(true)
+		expect(glintUntil <= ends).toBe(true)
+		local function decal(at: number, level: number?): number
+			return TelegraphShapes.decalAlpha(at, windUp, level or 1, ends, glintFrom, glintUntil)
+		end
+		local function fill(at: number, level: number?): number
+			return TelegraphShapes.fillTransparency(at, windUp, level or 1, ends, glintFrom, glintUntil)
+		end
+		local function glinting(at: number): boolean
+			return TelegraphShapes.glinting(at, ends, glintFrom, glintUntil)
+		end
+		-- Past the wind-up it is still lit, the ground shape at its full alpha.
+		expect(decal(windUp + 0.1)).toBeCloseTo(Fx.telegraph.decal.alpha)
+		expect(fill(windUp + 0.1)).toBeLessThan(1)
+		expect(glinting(windUp + 0.1)).toBe(false)
+		expect(TelegraphShapes.isOver(windUp + 0.1, ends)).toBe(false)
+		-- The glint: the fill at its brightest and the ground brighter, from glintFrom to glintUntil.
+		local glint = AI.telegraph.glintFillTransparency
+		local mid = (glintFrom + glintUntil) / 2
+		expect(glinting(glintFrom - 1e-3)).toBe(false)
+		expect(glinting(glintFrom)).toBe(true)
+		expect(glinting(mid)).toBe(true)
+		expect(glinting(glintUntil)).toBe(false)
+		expect(fill(mid)).toBeCloseTo(glint)
+		expect(glint).toBeLessThan(Fx.telegraph.fillTransparency)
+		expect(decal(mid)).toBeCloseTo(Fx.telegraph.glintDecalAlpha)
+		-- After it, to the snap: the plain lit tell again.
+		local after = (glintUntil + ends) / 2
+		expect(glinting(after)).toBe(false)
+		expect(fill(after)).never.toBeCloseTo(glint)
+		expect(fill(after)).toBeLessThan(1)
+		expect(decal(after)).toBeCloseTo(Fx.telegraph.decal.alpha)
+		-- Gone on the snap.
+		expect(TelegraphShapes.isOver(ends, ends)).toBe(true)
+		expect(decal(ends)).toBe(0)
+		expect(fill(ends)).toBe(1)
+		expect(glinting(ends)).toBe(false)
+		-- The accessibility floor dims the glint too, never below visible.
+		expect(fill(mid, 0)).toBeCloseTo(1 - (1 - glint) * Fx.telegraph.intensityMin)
+		expect(decal(mid, 0)).toBeCloseTo(Fx.telegraph.glintDecalAlpha * Fx.telegraph.intensityMin)
+		-- A rush's line (no strike given) still ends at its launch, with no glint.
+		local rushEnds, rushFrom, rushUntil = TelegraphShapes.timing(0.6, nil)
+		expect(rushEnds).toBe(0.6)
+		expect(rushFrom).toBe(0.6)
+		expect(rushUntil).toBe(0.6)
+		expect(TelegraphShapes.glinting(0.3, rushEnds, rushFrom, rushUntil)).toBe(false)
+	end)
+
+	-- D-289: the client's press reaches the server its one-way latency late, so the glint comes that
+	-- much earlier (`lead`, capped by fx.luau telegraph.glintLeadMax): a press at it reaches the
+	-- server inside the parry window. The tell itself still holds to the snap.
+	it("a lead moves the whole glint earlier, capped, and the tell still holds to the snap", function()
+		local AI = Harness.load("src/shared/data/ai")
+		local windUp, strike = 1.0, 0.35
+		local plainEnds, plainFrom, plainUntil = TelegraphShapes.timing(windUp, strike)
 		local ends, glintFrom, glintUntil = TelegraphShapes.timing(windUp, strike, 0.08)
 		expect(ends).toBeCloseTo(plainEnds, 1e-9)
-		expect(glintFrom).toBeCloseTo(lands - combat.parryWindow - 0.08, 1e-9)
-		expect(glintUntil).toBeCloseTo(ends - 0.08, 1e-9)
-		-- No lead (or none given, or a negative one): the glint runs from the window to the snap.
+		expect(glintFrom).toBeCloseTo(plainFrom - 0.08, 1e-9)
+		expect(glintUntil).toBeCloseTo(plainUntil - 0.08, 1e-9)
+		-- No lead (or a negative one): the glint where it is with none.
 		for _, lead in { 0, -0.2 } do
 			local e, f, u = TelegraphShapes.timing(windUp, strike, lead)
 			expect(e).toBeCloseTo(plainEnds, 1e-9)
 			expect(f).toBeCloseTo(plainFrom, 1e-9)
-			expect(u).toBeCloseTo(plainEnds, 1e-9)
+			expect(u).toBeCloseTo(plainUntil, 1e-9)
 		end
-		local _, _, untilNone = TelegraphShapes.timing(windUp, strike)
-		expect(untilNone).toBeCloseTo(plainEnds, 1e-9)
 		-- A lead past the cap moves it by the cap alone.
 		local cap = Fx.telegraph.glintLeadMax
 		local _, cappedFrom, cappedUntil = TelegraphShapes.timing(windUp, strike, 1)
-		expect(cappedFrom).toBeCloseTo(lands - combat.parryWindow - cap, 1e-9)
-		expect(cappedUntil).toBeCloseTo(ends - cap, 1e-9)
+		expect(cappedFrom).toBeCloseTo(plainFrom - cap, 1e-9)
+		expect(cappedUntil).toBeCloseTo(plainUntil - cap, 1e-9)
 		-- The fill glints from glintFrom to glintUntil, then is the plain lit fill to the snap.
 		local glint = AI.telegraph.glintFillTransparency
 		local function fill(at: number): number
 			return TelegraphShapes.fillTransparency(at, windUp, 1, ends, glintFrom, glintUntil)
 		end
 		expect(fill(glintFrom - 0.01)).never.toBeCloseTo(glint)
-		expect(fill(glintFrom + 0.01)).toBeCloseTo(glint)
-		expect(fill(glintUntil - 0.01)).toBeCloseTo(glint)
+		expect(fill(glintFrom + 0.001)).toBeCloseTo(glint)
+		expect(fill(glintUntil - 0.001)).toBeCloseTo(glint)
 		local after = fill(glintUntil + 0.01)
 		expect(after).never.toBeCloseTo(glint)
 		expect(after).toBeLessThan(1)
@@ -237,12 +266,83 @@ describe("TelegraphShapes", function()
 		expect(rushUntil).toBe(0.6)
 	end)
 
-	it("maps kinds to the three telegraph tokens", function()
+	it("a glint never starts before the wind-up nor runs past the snap", function()
+		for _, windUp in { 0, 0.05, 0.4, 1.2 } do
+			for _, strike in { 0.01, 0.1, 0.2, 0.5 } do
+				for _, lead in { 0, 0.05, 1 } do
+					local ends, from, untilAt = TelegraphShapes.timing(windUp, strike, lead)
+					expect(from >= 0 and from <= untilAt and untilAt <= ends).toBe(true)
+				end
+			end
+		end
+	end)
+
+	it("maps kinds to the three telegraph tokens, and a glint to its own", function()
 		expect(TelegraphShapes.token("Normal")).toBe("TelegraphWhite")
 		expect(TelegraphShapes.token("Unblockable")).toBe("TelegraphRed")
 		expect(TelegraphShapes.token("GuardBreak")).toBe("TelegraphYellow")
 		expect(TelegraphShapes.token("Nonsense")).toBe("TelegraphWhite")
+		expect(TelegraphShapes.token("GuardBreak", true)).toBe(Fx.telegraph.glintToken)
+		expect(TelegraphShapes.token("GuardBreak", false)).toBe("TelegraphYellow")
+		-- Only a blow that can be parried glints (D-CP2): an Unblockable one must be dodged.
+		expect(TelegraphShapes.glints("Normal")).toBe(true)
+		expect(TelegraphShapes.glints("GuardBreak")).toBe(true)
+		expect(TelegraphShapes.glints("Unblockable")).toBe(false)
+		expect(TelegraphShapes.glints("Nonsense")).toBe(false)
 	end)
+
+	it(
+		"the glint's numbers: whole frames, a palette token, brighter than the tell, never on an Unblockable blow",
+		function()
+			local Palette = Harness.load("src/shared/data/palette")
+			local combat = Harness.load("src/shared/data/combat")
+			local Enemies = Harness.load("src/shared/data/enemies")
+			local Bosses = Harness.load("src/shared/data/bosses")
+			local t = Fx.telegraph
+			expect(typeof(t.glintFrames) == "number" and t.glintFrames >= 1).toBe(true)
+			expect(t.glintFrames == math.floor(t.glintFrames)).toBe(true)
+			expect(typeof(t.glintAimFrames) == "number" and t.glintAimFrames >= 0).toBe(true)
+			expect(Palette.tokens[t.glintToken]).never.toBeNil()
+			expect(t.glintDecalAlpha > t.decal.alpha and t.glintDecalAlpha <= 1).toBe(true)
+			expect(t.glintKinds.Normal).toBe(true)
+			expect(t.glintKinds.GuardBreak).toBe(true)
+			expect(t.glintKinds.Unblockable).toBeNil()
+			expect(t.glintLeadMax >= 0).toBe(true)
+			expect(t.glintLeadSamples >= 1 and t.glintLeadSamples == math.floor(t.glintLeadSamples)).toBe(true)
+			-- Every blow that glints, an enemy's or a boss's, glints whole, inside its parry window
+			-- (no lead) and before its snap.
+			local F = combat.hitStopFrameSeconds
+			local blows = 0
+			local function check(attack: any)
+				if
+					typeof(attack.strike) ~= "number"
+					or not (attack.strike > 0)
+					or not t.glintKinds[attack.telegraph]
+				then
+					return
+				end
+				blows += 1
+				local ends, from, untilAt = TelegraphShapes.timing(attack.windUp, attack.strike)
+				local lands = attack.windUp + attack.strike
+				expect(untilAt - from).toBeCloseTo(t.glintFrames * F, 1e-9)
+				expect(from >= lands - combat.parryWindow - 1e-9).toBe(true)
+				expect(untilAt <= ends + 1e-9).toBe(true)
+			end
+			for _, def in Enemies.list() do
+				for _, attack in def.attacks do
+					check(attack)
+				end
+			end
+			for _, boss in Bosses.list() do
+				for _, phase in boss.phases or {} do
+					for _, attack in phase.attacks or {} do
+						check(attack)
+					end
+				end
+			end
+			expect(blows > 0).toBe(true)
+		end
+	)
 end)
 
 -- F16 (D-258): a body is shown struck before the server's word only this deep in the blow's shape.

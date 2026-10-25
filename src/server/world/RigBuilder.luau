@@ -24,13 +24,16 @@
 	  fx.luau placeholder fractions (guard near the grip, tip at the far end);
 	- the CollectionService tag Placeholder and the attribute Rig = rig id.
 
-	addBlocker (D-198) gives an enemy its blocker: what a player bumps into instead of the root, one
-	upright, invisible box over the body's footprint (footprint: the flat box over its rest pose,
-	every part but the ones it holds) from the floor (HipHeight below the root's bottom) to
+	addBlocker (D-198) gives an enemy its blocker: what a player bumps into instead of the root,
+	upright, invisible boxes from the floor (HipHeight below the root's bottom) to
 	ai.collision.blockerHeight, welded to the root, massless, in the blockers group and switched off
-	until CollisionGroups.assign puts the enemy in the enemies group. Over the whole body, not the
-	root alone, so a walk-in stops where the player touches it on every side: at the boar's snout
-	and tail as at its flank, never inside its head.
+	until CollisionGroups.assign puts the enemy in the enemies group. One face over the body's
+	footprint (footprint: the flat box over every part but the ones it holds), and one over each
+	part it holds (D-CH4), each over the part as it stands at rest and in every pose of the loops it
+	stands in (rigs.luau `blocker`: its idle). Over the whole body, not the root alone, and over
+	what it shows standing, so a walk-in stops where the player touches it on every side: at the
+	boar's snout and tail as at its flank, never inside its head, a kobold's hunched head and arms
+	or the axe it holds; the axe's own face leaves a player who walks in head-on at the chest.
 
 	Everything here runs under Lune's Instance implementation, so the shape of every rig is tested.
 ]]
@@ -44,6 +47,7 @@ local Palette = require(Shared.data.palette)
 local Fx = require(Shared.data.fx)
 local WeaponModels = require(Shared.data.weaponModels)
 local Pose = require(Shared.choreo.Pose)
+local ClipSampler = require(Shared.choreo.ClipSampler)
 local AI = require(Shared.data.ai)
 
 export type Frame = { pos: Types.Vec3, rot: Types.Vec3 }
@@ -62,9 +66,16 @@ local PART_SHAPES: { [string]: Enum.PartType } = {
 -- The root part's RootPriority: one above every limb's default, so it is the assembly root.
 local ROOT_PRIORITY = 1
 
--- The name of an enemy's blocker part (addBlocker, D-198).
+-- The name of an enemy's blocker part over its body (addBlocker, D-198).
 local BLOCKER_NAME = "Blocker"
 RigBuilder.BLOCKER_NAME = BLOCKER_NAME
+-- The name of the blocker part over each part an enemy holds (addBlocker, D-CH4).
+local HELD_BLOCKER_NAME = "HeldBlocker"
+RigBuilder.HELD_BLOCKER_NAME = HELD_BLOCKER_NAME
+
+--- One blocker face in its root's space: the part's name (BLOCKER_NAME or HELD_BLOCKER_NAME), the
+--- flat box's centre and size (Y 0), and the rig parts it stands over.
+export type Footprint = { name: string, centre: Vector3, size: Vector3, parts: { string } }
 
 local function toVector3(v: Types.Vec3): Vector3
 	return Vector3.new(v[1], v[2], v[3])
@@ -256,28 +267,71 @@ function RigBuilder.build(rigId: string, name: string?): Model
 	return model
 end
 
--- The flat box over a built model's rest pose in its root's space: every rigs.luau part but the
--- rig's trailParts (what it holds: a blade or an axe is not the body), corners and all. Returns
--- its centre and size with Y 0. The root is one of the parts, so it always covers the root's own
--- footprint.
-local function restFootprint(model: Model, rig: Rigs.Rig): (Vector3, Vector3)
-	local held = rig.trailParts or {}
-	local solved = Pose.solve(model, CFrame.identity, {})
-	local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
-	for partName in rig.parts :: { [string]: any } do
-		local part = model:FindFirstChild(partName)
-		local solvedFrame: CFrame? = solved[partName]
-		if table.find(held, partName) ~= nil or solvedFrame == nil or part == nil or not part:IsA("BasePart") then
+-- A clip by id ("enemy/Kobold/Idle") under Shared.clips, or nil.
+local function clipById(id: string): Types.ClipDef?
+	local node: Instance? = Shared:FindFirstChild("clips")
+	for segment in id:gmatch("[^/]+") do
+		if node == nil then
+			return nil
+		end
+		node = (node :: Instance):FindFirstChild(segment)
+	end
+	if node == nil or not (node :: Instance):IsA("ModuleScript") then
+		return nil
+	end
+	local ok, clip = pcall(require, node :: ModuleScript)
+	if not ok or typeof(clip) ~= "table" then
+		return nil
+	end
+	return clip :: Types.ClipDef
+end
+
+-- The poses a built model stands in, every part's frame in its root's space: the rest pose, then
+-- every pose of the rig's blocker clips (rigs.luau `blocker`) at its sampleSeconds, each clip's end
+-- included. A clip that does not load is left out, with a warning.
+local function standingPoses(model: Model, rig: Rigs.Rig): { { [string]: CFrame } }
+	local poses = { Pose.solve(model, CFrame.identity, {}) }
+	local blocker = rig.blocker
+	if blocker == nil then
+		return poses
+	end
+	local step = blocker.sampleSeconds
+	for _, id in blocker.clips do
+		local clip = clipById(id)
+		if clip == nil or step <= 0 then
+			warn(("RigBuilder: rig '%s' stands in clip '%s', which does not load"):format(rig.id, id))
 			continue
 		end
-		local frame = solvedFrame :: CFrame
-		local half = part.Size / 2
-		for _, x in { -1, 1 } do
-			for _, y in { -1, 1 } do
-				for _, z in { -1, 1 } do
-					local corner = frame:PointToWorldSpace(Vector3.new(half.X * x, half.Y * y, half.Z * z))
-					minX, maxX = math.min(minX, corner.X), math.max(maxX, corner.X)
-					minZ, maxZ = math.min(minZ, corner.Z), math.max(maxZ, corner.Z)
+		local count = math.max(1, math.ceil(clip.duration / step - 1e-6))
+		for k = 0, count do
+			local time = math.min(k * step, clip.duration)
+			table.insert(poses, Pose.solve(model, CFrame.identity, ClipSampler.sample(clip, time)))
+		end
+	end
+	return poses
+end
+
+-- The flat box over `names` in every pose (root space), corners and all: centre and size, Y 0.
+local function flatHull(model: Model, names: { string }, poses: { { [string]: CFrame } }): (Vector3, Vector3)
+	local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
+	for _, partName in names do
+		local part = model:FindFirstChild(partName)
+		if part == nil or not part:IsA("BasePart") then
+			continue
+		end
+		local half = (part :: BasePart).Size / 2
+		for _, solved in poses do
+			local frame: CFrame? = solved[partName]
+			if frame == nil then
+				continue
+			end
+			for _, x in { -1, 1 } do
+				for _, y in { -1, 1 } do
+					for _, z in { -1, 1 } do
+						local corner = frame:PointToWorldSpace(Vector3.new(half.X * x, half.Y * y, half.Z * z))
+						minX, maxX = math.min(minX, corner.X), math.max(maxX, corner.X)
+						minZ, maxZ = math.min(minZ, corner.Z), math.max(maxZ, corner.Z)
+					end
 				end
 			end
 		end
@@ -285,23 +339,68 @@ local function restFootprint(model: Model, rig: Rigs.Rig): (Vector3, Vector3)
 	return Vector3.new((minX + maxX) / 2, 0, (minZ + maxZ) / 2), Vector3.new(maxX - minX, 0, maxZ - minZ)
 end
 
---- The footprint of a rig's body at rest in its root's space (the blocker's, addBlocker): the
---- centre and size, Y 0, of the flat box over every part but its trailParts. Builds the rig to
---- measure it (specs, tools).
-function RigBuilder.footprint(rigId: string): (Vector3, Vector3)
-	local model = RigBuilder.build(rigId)
-	local centre, size = restFootprint(model, RigBuilder.definition(rigId))
-	model:Destroy()
-	return centre, size
+-- A rig's blocker faces, measured once per rig (the geometry is the rig's, wherever and however a
+-- model of it stands).
+local measured: { [string]: { Footprint } } = {}
+
+-- The faces of a built model's rig: the body (every rigs.luau part but its trailParts) first, then
+-- one per part it holds that the model has, each over the poses it stands in. The root is one of
+-- the body's parts, so the body's face always covers the root's own footprint.
+local function footprintsOf(model: Model, rig: Rigs.Rig): { Footprint }
+	local known = measured[rig.id]
+	if known ~= nil then
+		return known
+	end
+	local held: { string } = rig.trailParts or {}
+	local body: { string } = {}
+	for partName in rig.parts :: { [string]: any } do
+		if table.find(held, partName) == nil then
+			table.insert(body, partName)
+		end
+	end
+	table.sort(body)
+	local poses = standingPoses(model, rig)
+	local centre, size = flatHull(model, body, poses)
+	local faces: { Footprint } = { { name = BLOCKER_NAME, centre = centre, size = size, parts = body } }
+	for _, partName in held do
+		local part = model:FindFirstChild(partName)
+		if part ~= nil and part:IsA("BasePart") then
+			local heldCentre, heldSize = flatHull(model, { partName }, poses)
+			table.insert(
+				faces,
+				{ name = HELD_BLOCKER_NAME, centre = heldCentre, size = heldSize, parts = { partName } }
+			)
+		end
+	end
+	measured[rig.id] = faces
+	return faces
 end
 
---- Gives an enemy model its blocker (D-198) and returns it, or nil when the model has no root or no
---- rig rigs.luau knows (the Rig attribute). Over the body's footprint at rest (RigBuilder.footprint:
---- every part but the ones it holds, along the root's own axes), from the floor the Humanoid holds
---- the root's bottom HipHeight above, up to ai.collision.blockerHeight; welded to the root and
---- massless, so the body and its Humanoid move as before. Invisible, casts no shadow and touches
---- nothing; it collides with nothing until CollisionGroups.assign puts the enemy in the enemies
---- group, and with players only then.
+--- A rig's blocker faces in its root's space (addBlocker): the body's first (RigBuilder.footprint),
+--- then one per part it holds, each the flat box over its parts at rest and in every pose of the
+--- rig's blocker clips. Builds the rig to measure it the first time (specs, tools).
+function RigBuilder.footprints(rigId: string): { Footprint }
+	local model = RigBuilder.build(rigId)
+	local faces = footprintsOf(model, RigBuilder.definition(rigId))
+	model:Destroy()
+	return faces
+end
+
+--- The footprint of a rig's body in its root's space (the body's blocker face, addBlocker): the
+--- centre and size, Y 0, of the flat box over every part but its trailParts, at rest and in every
+--- pose of its blocker clips.
+function RigBuilder.footprint(rigId: string): (Vector3, Vector3)
+	local body = RigBuilder.footprints(rigId)[1]
+	return body.centre, body.size
+end
+
+--- Gives an enemy model its blocker (D-198) and returns the body's face, or nil when the model has
+--- no root or no rig rigs.luau knows (the Rig attribute). One face over the body's footprint
+--- (RigBuilder.footprint) and one over each part it holds (HELD_BLOCKER_NAME, D-CH4), along the
+--- root's own axes, each from the floor the Humanoid holds the root's bottom HipHeight above, up to
+--- ai.collision.blockerHeight; welded to the root and massless, so the body and its Humanoid move
+--- as before. Invisible, casts no shadow and touches nothing; it collides with nothing until
+--- CollisionGroups.assign puts the enemy in the enemies group, and with players only then.
 function RigBuilder.addBlocker(model: Model): Part?
 	local root = model.PrimaryPart
 	local rigId = model:GetAttribute(RigBuilder.RIG_ATTRIBUTE)
@@ -311,25 +410,31 @@ function RigBuilder.addBlocker(model: Model): Part?
 	end
 	local height = AI.collision.blockerHeight
 	local floorBelowCenter = rig.hipHeight + root.Size.Y / 2
-	local centre, size = restFootprint(model, rig)
-	local blocker = Instance.new("Part")
-	blocker.Name = BLOCKER_NAME
-	blocker.Size = Vector3.new(size.X, height, size.Z)
-	blocker.CFrame = root.CFrame * CFrame.new(centre.X, height / 2 - floorBelowCenter, centre.Z)
-	blocker.Transparency = 1
-	blocker.CastShadow = false
-	blocker.CanCollide = false
-	blocker.CanQuery = false
-	blocker.CanTouch = false
-	blocker.Massless = true
-	blocker.Anchored = false
-	blocker.CollisionGroup = AI.collision.blockers
-	local weld = Instance.new("WeldConstraint")
-	weld.Part0 = root
-	weld.Part1 = blocker
-	weld.Parent = blocker
-	blocker.Parent = model
-	return blocker
+	local bodyFace: Part? = nil
+	for _, footprint in footprintsOf(model, rig) do
+		local centre, size = footprint.centre, footprint.size
+		local blocker = Instance.new("Part")
+		blocker.Name = footprint.name
+		blocker.Size = Vector3.new(size.X, height, size.Z)
+		blocker.CFrame = root.CFrame * CFrame.new(centre.X, height / 2 - floorBelowCenter, centre.Z)
+		blocker.Transparency = 1
+		blocker.CastShadow = false
+		blocker.CanCollide = false
+		blocker.CanQuery = false
+		blocker.CanTouch = false
+		blocker.Massless = true
+		blocker.Anchored = false
+		blocker.CollisionGroup = AI.collision.blockers
+		local weld = Instance.new("WeldConstraint")
+		weld.Part0 = root
+		weld.Part1 = blocker
+		weld.Parent = blocker
+		blocker.Parent = model
+		if bodyFace == nil then
+			bodyFace = blocker
+		end
+	end
+	return bodyFace
 end
 
 --- Number of parts and Motor6Ds a rig builds to (budgeting and tests).

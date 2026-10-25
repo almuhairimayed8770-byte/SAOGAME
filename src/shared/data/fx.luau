@@ -301,11 +301,25 @@ local Fx = {
 			GuardBreak = "telegraph.GuardBreak",
 		},
 		intensityMin = 0.5, -- the accessibility slider's floor: still visible
-		-- The parry glint opens this client's one-way latency early (D-289): the server judges a parry
-		-- on when the press reaches it, so a press at the glint must leave that much before the
-		-- window. The latency is the least lateness (lateBy) of the last glintLeadSamples tells heard
-		-- (jitter only adds to it), and the shift never passes glintLeadMax seconds: a path slower
-		-- than that glints at the cap and parries a little late. Client only; the server is unchanged.
+		-- The parry glint (D-CP1): a blow's tell (fill and ground) goes glintToken for glintFrames
+		-- frames, the fill at ai.luau telegraph.glintFillTransparency and the ground at
+		-- glintDecalAlpha, then back to its kind's color until the snap. The glint is centred on the
+		-- middle of the parry window (combat.luau parryWindow before the blow lands), glintAimFrames
+		-- earlier: a press is read a frame or two after the frame that showed it, and the server reads
+		-- it on its next frame. Three frames is as long as it can be with a press at its first frame
+		-- and at its last both inside the window on Studio's link and a live one (D-CP1 margins: 18 ms
+		-- each side; four frames leave 2). Only the kinds in glintKinds glint: an Unblockable blow
+		-- cannot be parried (section 6), so it never shows the cue to press (D-CP2).
+		glintFrames = 3,
+		glintAimFrames = 1,
+		glintToken = "TelegraphWhite",
+		glintDecalAlpha = 0.9,
+		glintKinds = { Normal = true, GuardBreak = true } :: { [string]: boolean },
+		-- The glint comes this client's one-way latency early (D-289): the server judges a parry on
+		-- when the press reaches it, so a press at the glint must leave that much before the window.
+		-- The latency is the least lateness (lateBy) of the last glintLeadSamples tells heard (jitter
+		-- only adds to it), and the shift never passes glintLeadMax seconds: a path slower than that
+		-- glints at the cap and parries a little late. Client only; the server is unchanged.
 		glintLeadMax = 0.15,
 		glintLeadSamples = 8,
 	},

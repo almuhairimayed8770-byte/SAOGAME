@@ -328,6 +328,65 @@ describe("CameraController staged views (F12)", function()
 		end
 	end)
 
+	it("Open holds the whole locomotion take: the lock at 5 s and its release never take the view (CS8)", function()
+		local fixture = load()
+		-- The locomotion pass's beats along D (screen right, -Z under the Open view): run, sprint,
+		-- the lock on the kobold at 5 s (ahead and to the left), its release at 5.8, the drawn
+		-- sprint, a stand, the last sprint. The view's flat look stays square to the run.
+		local kobold = character("Kobold", ROOT + Vector3.new(-20, 0, -110), fixture.world, 0)
+		fixture.controller.setStage(CAMERAS.Open, kobold, 1)
+		fixture.frames(60)
+		local beats = {
+			{ till = 2.5, speed = 16 },
+			{ till = 5, speed = 24 },
+			{ till = 5.8, speed = 24, lock = true },
+			{ till = 10, speed = 24 },
+			{ till = 12, speed = 0 },
+			{ till = 14, speed = 24 },
+		}
+		local run = Vector3.new(0, 0, -1)
+		local t = 0
+		local worstSquare, worstBearing, worstX = 0, 0, 0
+		local lockedFrames = 0
+		for _, beat in beats do
+			while t < beat.till do
+				t += F
+				if beat.lock == true and not fixture.controller.lockLive() then
+					fixture.controller.setLockTarget(kobold)
+				elseif beat.lock ~= true and fixture.controller.lockLive() then
+					fixture.controller.setLockTarget(nil)
+				end
+				if fixture.controller.lockLive() then
+					lockedFrames += 1
+				end
+				place(fixture.root, CFrame.new(fixture.root.Position + run * beat.speed * F))
+				fixture.frames(1)
+				expect(fixture.controller.staged()).toBe(true)
+				local look: Vector3 = fixture.camera.CFrame.LookVector
+				worstSquare = math.max(worstSquare, math.abs(angleBetween(look, run) - 90))
+				local position: Vector3 = fixture.camera.CFrame.Position
+				worstBearing =
+					math.max(worstBearing, angleBetween(position - fixture.root.Position, Vector3.new(1, 0, 0)))
+				local x, y, depth = onScreen(fixture.camera, fixture.root.Position)
+				expect(depth).toBeGreaterThan(0)
+				expect(math.abs(y)).toBeLessThan(0.5)
+				worstX = math.max(worstX, math.abs(x))
+			end
+		end
+		print(
+			("  Open under the lock: %d locked frames; the look at most %.3f degrees off square to the run, the camera at most %.2f degrees off the player's +X, the player at most %.2f of the half-frame off centre"):format(
+				lockedFrames,
+				worstSquare,
+				worstBearing,
+				worstX
+			)
+		)
+		expect(lockedFrames).toBeGreaterThan(40)
+		expect(worstSquare).toBeLessThan(1)
+		expect(worstBearing).toBeLessThan(15)
+		expect(worstX).toBeLessThan(0.5)
+	end)
+
 	it("keeps a target that died where it last stood (the kill's shatter)", function()
 		local fixture = load()
 		local kobold = character("Kobold", ROOT + Vector3.new(0, 0, -3.5), fixture.world, 180)

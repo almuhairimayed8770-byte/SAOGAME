@@ -999,6 +999,49 @@ describe("A stopped rush never carries a player (D-190)", function()
 		expect(met).toBeGreaterThan(100)
 	end)
 
+	it("blockerClear meets every face: a kobold's axe face counts as its body's does (D-281, D-CH4)", function()
+		fresh()
+		local koboldId = EnemyService.spawn("KoboldAxeman", CFrame.new(0, 3, 0))
+		local boarId = EnemyService.spawn("FrenzyBoar", CFrame.new(40, 3, 0))
+		EnemyService.setHeld(koboldId, true)
+		EnemyService.setHeld(boarId, true)
+		local kobold, boar = EnemyService.modelOf(koboldId) :: Model, EnemyService.modelOf(boarId) :: Model
+		local body, axe = kobold:FindFirstChild("Blocker") :: BasePart, kobold:FindFirstChild("HeldBlocker") :: BasePart
+		expect(body).never.toBeNil()
+		expect(axe).never.toBeNil()
+		expect(axe.CanCollide).toBe(true)
+		local boarFace = boar:FindFirstChild("Blocker") :: BasePart
+		-- The boar side-on beside the kobold's axe face, clear of its body face: its blocker over the
+		-- axe's alone, then a stud past it.
+		local function place(position: Vector3)
+			EnemyService.applyFacing(boar, Vector3.new(1, 0, 0))
+			bodies[boar].position = position
+			placeParts(boar, bodies[boar])
+		end
+		local function partsOverlap(a: BasePart, b: BasePart): boolean
+			local offset = b.CFrame:PointToObjectSpace(a.CFrame.Position)
+			local reach = a.Size / 2
+			local half = b.Size / 2
+			return math.abs(offset.X) < half.X + reach.Z and math.abs(offset.Z) < half.Z + reach.X
+		end
+		local axeAt = axe.CFrame.Position
+		local bodyAt = body.CFrame.Position
+		local away = Vector3.new(axeAt.X - bodyAt.X, 0, axeAt.Z - bodyAt.Z).Unit
+		local found = false
+		for step = 0, 40 do
+			place(Vector3.new(axeAt.X, 3, axeAt.Z) + away * (step * 0.25))
+			if partsOverlap(boarFace, axe) and not partsOverlap(boarFace, body) then
+				found = true
+				break
+			end
+		end
+		expect(found).toBe(true)
+		expect(EnemyService.blockerClear(boar)).toBe(false)
+		-- Moved off the axe's face too, it is clear.
+		place(Vector3.new(axeAt.X, 3, axeAt.Z) + away * 20)
+		expect(EnemyService.blockerClear(boar)).toBe(true)
+	end)
+
 	it(
 		"a slam's body waits to rejoin from the stop that ends its rush, never from the slam's report (D-210)",
 		function()

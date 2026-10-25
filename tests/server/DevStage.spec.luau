@@ -3,8 +3,9 @@
 	The capture's staging (src/server/dev/DevStage.server.luau, F12), loaded the way Studio runs it:
 	a fresh copy of the Script with a fake EnemyService (spawn, despawn, the hold, brains whose
 	phase a test sets), a fake EntityService (heal, setHp, fromPlayer), a fake RunService and
-	Workspace for the gate, and a fake clock behind task.wait and os.clock. The RemoteFunction it
-	makes is called the way the client's InvokeServer arrives.
+	Workspace for the gate, and a fake clock behind task.wait, task.delay and os.clock (a delayed
+	function runs once the clock has moved past its moment). The RemoteFunction it makes is called
+	the way the client's InvokeServer arrives.
 
 	The staging never moves the player (D-244): it requires no anti-cheat, never pivots the
 	player's character, and stages only around a root that already stands in the shot's ring;
@@ -98,6 +99,23 @@ local function load(options: Options): World
 	local world: World = nil :: any
 	local clock = { now = 100 }
 	local nextId = 10
+	-- task.delay's functions, each run once the clock moves past its moment.
+	local timers: { { at: number, fn: () -> () } } = {}
+	local function runTimers()
+		while true do
+			local due: number? = nil
+			for index, timer in timers do
+				if timer.at <= clock.now + 1e-9 and (due == nil or timer.at < timers[due :: number].at) then
+					due = index
+				end
+			end
+			if due == nil then
+				return
+			end
+			local timer = table.remove(timers, due) :: any
+			timer.fn()
+		end
+	end
 	local enemies: { [number]: Enemy } = {}
 	local order: { { kind: string, id: number?, seconds: number? } } = {}
 	local holdNew = { on = false }
@@ -222,6 +240,7 @@ local function load(options: Options): World
 				return nil
 			end
 			enemy.hp = math.clamp(hp, 1, enemy.maxHp)
+			table.insert(order, { kind = "setHp", id = id })
 			return enemy.hp
 		end,
 	}
@@ -271,10 +290,14 @@ local function load(options: Options): World
 		wait = function(seconds: number?): number
 			local dt = if seconds ~= nil and seconds > 0 then seconds else FRAME
 			clock.now += dt
+			runTimers()
 			if world.onWait ~= nil then
 				(world.onWait :: (number) -> ())(clock.now)
 			end
 			return dt
+		end,
+		delay = function(seconds: number, fn: () -> ())
+			table.insert(timers, { at = clock.now + math.max(seconds, 0), fn = fn })
 		end,
 	}
 	env.os = {
@@ -303,6 +326,7 @@ local function load(options: Options): World
 		invoke = function(action: any, shotId: any): any
 			-- Requests come no faster than the rate limit unless a test says otherwise.
 			clock.now += 1 / STAGE.requestsPerSecond
+			runTimers()
 			return world.remote().OnServerInvoke(player, action, shotId)
 		end,
 		standAt = function(x: number, feetY: number, z: number, facing: number)
@@ -320,6 +344,7 @@ local function load(options: Options): World
 		end,
 		advance = function(seconds: number)
 			clock.now += seconds
+			runTimers()
 		end,
 		ledge = function(): any
 			for _, instance in created do
@@ -543,6 +568,12 @@ describe("DevStage: a shot stages itself (F12)", function()
 		end
 		local go = world.invoke("go")
 		expect(go.ok).toBe(true)
+		-- One let go partway through the take (CF) is still held as it starts.
+		for index, id in reply.ids do
+			local entry = fight.stage.enemies[index]
+			expect(world.enemies[id].held).toBe(entry.held or entry.releaseAfter ~= nil)
+		end
+		world.advance(fight.seconds)
 		for index, id in reply.ids do
 			expect(world.enemies[id].held).toBe(fight.stage.enemies[index].held)
 		end
@@ -551,6 +582,73 @@ describe("DevStage: a shot stages itself (F12)", function()
 		world.invoke("go")
 		expect(world.enemies[art.targetId].held).toBe(true)
 	end)
+
+	it(
+		"lets go an enemy staged with releaseAfter that long after the take starts, unless it ends first (CF)",
+		function()
+			local fight = shotById("fight-boar-kobold")
+			local late: number? = nil
+			for index, entry in fight.stage.enemies do
+				if entry.releaseAfter ~= nil then
+					late = index
+				end
+			end
+			assert(late ~= nil, "the fight lets an enemy go partway through")
+			local after = fight.stage.enemies[late].releaseAfter :: number
+			local world = load({ studio = true, capture = true })
+			local reply = world.invoke("stage", fight.id)
+			local id = reply.ids[late]
+			local go = world.invoke("go")
+			-- the reply says who comes later, and when
+			expect(table.find(go.released, id)).toBeNil()
+			expect(#go.scheduled).toBe(1)
+			expect(go.scheduled[1].id).toBe(id)
+			expect(go.scheduled[1].after).toBe(after)
+			world.advance(after - 0.05)
+			expect(world.enemies[id].held).toBe(true)
+			-- Its staged HP set again as it is let go (EntityService.setHp restarts the regen wait), so
+			-- the HP the take staged is the HP it has when it comes in (CF).
+			world.enemies[id].hp = fight.stage.enemies[late].hp + 3
+			table.clear(world.order)
+			world.advance(0.1)
+			expect(world.enemies[id].held).toBe(false)
+			local letGo = indexOf(world.order, "release", id)
+			local hpAgain = indexOf(world.order, "setHp", id)
+			expect(letGo ~= nil and hpAgain ~= nil and (hpAgain :: number) > (letGo :: number)).toBe(true)
+			expect(world.enemies[id].hp).toBe(fight.stage.enemies[late].hp)
+			-- a second "go" schedules nothing again
+			expect(#world.invoke("go").scheduled).toBe(0)
+
+			-- The take ends ("hold") before the moment: it stays held.
+			local held = load({ studio = true, capture = true })
+			local heldReply = held.invoke("stage", fight.id)
+			held.invoke("go")
+			held.advance(after / 2)
+			held.invoke("hold")
+			held.advance(after)
+			expect(held.enemies[heldReply.ids[late]].held).toBe(true)
+
+			-- The field given back, or the next shot staged, before the moment: nothing of it is let go.
+			for _, next in { "release", "stage" } do
+				local other = load({ studio = true, capture = true })
+				local otherReply = other.invoke("stage", fight.id)
+				other.invoke("go")
+				other.advance(after / 2)
+				other.invoke(next, if next == "stage" then "art-horizontal" else nil)
+				local before = {}
+				for enemyId, enemy in other.enemies do
+					before[enemyId] = enemy.held
+				end
+				table.clear(other.order)
+				other.advance(after)
+				expect(other.enemies[otherReply.ids[late]]).toBeNil()
+				expect(indexOf(other.order, "release")).toBeNil()
+				for enemyId, enemy in other.enemies do
+					expect(enemy.held).toBe(before[enemyId])
+				end
+			end
+		end
+	)
 
 	it("removes the last staging's enemies when the next shot stages", function()
 		local world = load({ studio = true, capture = true })
@@ -665,6 +763,59 @@ describe("DevStage: a shot stages itself (F12)", function()
 		-- Held before the staging (the dev hook, a cutscene): left held.
 		expect(world.enemies[alreadyHeld].held).toBe(true)
 		expect(world.holdNew.on).toBe(false)
+	end)
+
+	it("holds the take's enemies when it ends: every staged enemy held, the take's release list dropped", function()
+		local world = load({ studio = true, capture = true })
+		local fight = shotById("fight-boar-kobold")
+		local reply = world.invoke("stage", fight.id)
+		world.invoke("go")
+		-- past the boar's late release (CF)
+		world.advance(fight.seconds - 1)
+		for _, id in reply.ids do
+			expect(world.enemies[id].held).toBe(false)
+		end
+		-- The boar is mid-rush, the kobold mid-swing as the take ends: held all the same (the hold
+		-- drops a wind-up, D-254, and stops a launched rush where it is).
+		world.enemies[reply.ids[1]].phase = "Strike"
+		world.enemies[reply.ids[2]].phase = "WindUp"
+		table.clear(world.order)
+		local held = world.invoke("hold")
+		expect(held.ok).toBe(true)
+		for _, id in reply.ids do
+			expect(world.enemies[id].held).toBe(true)
+			expect(indexOf(world.order, "hold", id)).never.toBeNil()
+		end
+		-- A late "go" lets nobody go now.
+		local late = world.invoke("go")
+		expect(#late.released).toBe(0)
+		for _, id in reply.ids do
+			expect(world.enemies[id].held).toBe(true)
+		end
+		-- Nothing staged: a hold is a no-op that still answers ok.
+		world.invoke("release")
+		expect(world.invoke("hold").ok).toBe(true)
+	end)
+
+	it("clears the last take's enemies on the first stage request, even one that asks for a walk", function()
+		local world = load({ studio = true, capture = true })
+		local first = world.invoke("stage", "enemy-boar-charge")
+		world.invoke("go")
+		-- Off the ring: the reply is a walk, and the boar is already gone.
+		world.standAt(STAGE.area.position[1] + 20, STAGE.area.position[2], STAGE.area.position[3], 0)
+		local walk = world.invoke("stage", "enemy-kobold-overhead")
+		expect(walk.walk ~= nil).toBe(true)
+		expect(world.enemies[first.targetId]).toBeNil()
+		-- A player killed by a leftover between takes: the request is refused, the leftovers gone.
+		local area = STAGE.area
+		world.standAt(area.position[1], area.position[2], area.position[3], area.facing)
+		local second = world.invoke("stage", "fight-boar-kobold")
+		world.invoke("go")
+		world.record.state = "Dead"
+		expect(world.invoke("stage", "art-horizontal").ok).toBe(false)
+		for _, id in second.ids do
+			expect(world.enemies[id]).toBeNil()
+		end
 	end)
 
 	it("refuses an unknown shot or action, a dead player, and requests faster than the rate", function()

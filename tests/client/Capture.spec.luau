@@ -16,11 +16,13 @@
 	And the walk into the stand ring (D-244: the staging never moves the player): a staging reply
 	that asks for a walk marks the ring with a disc and walks the body along the reply's route
 	through Humanoid:Move from a render step bound between the control script's input and the
-	character controller, then asks for the shot again (at the server's rate) once the body is at
-	rest; a movement key hands the walk over, J and P end it, and the timeout ends it with a note.
-	The character is a fake body that moves at a set speed along each frame's Move, on the field,
-	the ledge's top or its ramp, and the staging server's fake stages by the real ring rule
-	(DevStageLogic).
+	character controller, holding the sprint through the input path, walks the last leg again when
+	the stop left the body off the spot, then asks for the shot again (at the server's rate) once
+	the body is at rest; a movement key hands the walk over, J and P end it, and the timeout ends
+	it with a note. The character is a fake body that moves at run speed along each frame's Move
+	(at the sprint's while the sprint is held), on the field, the ledge's top or its ramp, and the
+	staging server's fake stages by the real ring rule (DevStageLogic). The real body's stop runs
+	in tests/client/CaptureWalk.spec.luau.
 ]]
 
 local luau = require("@lune/luau")
@@ -28,8 +30,10 @@ local luau = require("@lune/luau")
 local Signal = Harness.load("src/shared/util/Signal")
 local Dev = Harness.load("src/shared/data/dev")
 local Overhead = Harness.load("src/shared/clips/enemy/Kobold/Overhead")
+local Charge = Harness.load("src/shared/clips/enemy/Boar/Charge")
 local World = Harness.load("src/shared/data/world")
 local StageLogic = Harness.load("src/server/dev/DevStageLogic")
+local Combat = Harness.load("src/shared/data/combat")
 
 local NODE = "src/client/dev/Capture"
 local FILE = "src/client/dev/Capture.client.luau"
@@ -42,6 +46,7 @@ local HIP = 2 -- the player's Humanoid.HipHeight in this world
 local ROOT_SIZE = Vector3.new(2, 2, 1)
 local ROOT_OFFSET = HIP + ROOT_SIZE.Y / 2 + World.spawn.groundEpsilon
 local SPEED = 16 -- studs per second the fake body moves along a Move
+local SPRINT = Combat.maxSpeedStudsPerSecond -- the same while the sprint is held
 
 local function shotIndex(id: string): number
 	for index, shot in CAPTURE.shots do
@@ -68,8 +73,9 @@ type Server = {
 }
 
 -- The local character as the walk meets it: a root that moves SPEED studs a second along each
--- frame's Humanoid:Move (none: it stops, after `carry` studs more along its last move if set),
--- standing on the field, the ledge's top or its ramp; `stuck` keeps it where it is.
+-- frame's Humanoid:Move (SPRINT while the sprint is held; none: it stops, after `carry` studs more
+-- along its last move once, and `slide` studs more after every stop), standing on the field, the
+-- ledge's top or its ramp; `stuck` keeps it where it is.
 type Body = {
 	root: any,
 	humanoid: any,
@@ -77,6 +83,9 @@ type Body = {
 	pending: Vector3?,
 	lastDirection: Vector3?,
 	carry: number,
+	slide: number,
+	coast: number,
+	sprinting: boolean,
 	stuck: boolean,
 	trail: { Vector3 },
 }
@@ -102,6 +111,8 @@ type World = {
 	input: any,
 	userInput: any,
 	replication: any,
+	-- The client's latency lead the fake Telegraphs reports (Telegraphs.glintLead, D-289).
+	lead: { seconds: number },
 	key: (name: string) -> (),
 	frames: (count: number) -> (),
 	seconds: (seconds: number) -> (),
@@ -109,6 +120,7 @@ type World = {
 	untilRecording: () -> (),
 	firstShown: { text: string? },
 	kobold: any,
+	boar: any,
 	body: Body,
 	ring: () -> any,
 	-- Stands the body with its feet on the floor under (x, z).
@@ -138,17 +150,26 @@ local function stepBody(body: Body, dt: number)
 	local direction = body.pending
 	body.pending = nil
 	local step = Vector3.zero
+	local speed = if body.sprinting then SPRINT else SPEED
 	if direction ~= nil and not body.stuck then
 		local flat = Vector3.new(direction.X, 0, direction.Z)
-		step = if flat.Magnitude > 0 then flat.Unit * SPEED * dt else Vector3.zero
+		step = if flat.Magnitude > 0 then flat.Unit * speed * dt else Vector3.zero
 		body.lastDirection = flat
-	elseif direction == nil and body.carry > 0 and body.lastDirection ~= nil then
-		local distance = math.min(body.carry, SPEED * dt)
-		body.carry -= distance
+		body.coast = body.slide
+	elseif direction == nil and body.carry + body.coast > 0 and body.lastDirection ~= nil then
+		local distance = math.min(body.carry + body.coast, speed * dt)
+		local fromCarry = math.min(body.carry, distance)
+		body.carry -= fromCarry
+		body.coast -= distance - fromCarry
 		step = (body.lastDirection :: Vector3).Unit * distance
 	end
 	local x, z = root.Position.X + step.X, root.Position.Z + step.Z
 	root.Position = Vector3.new(x, floorAt(x, z) + ROOT_OFFSET, z)
+	-- Turned to its move (AutoRotate), and still facing the same way at rest.
+	local facing = body.lastDirection
+	root.CFrame = if facing ~= nil and facing.Magnitude > 0
+		then CFrame.lookAt(root.Position, root.Position + facing)
+		else root.CFrame.Rotation + root.Position
 	root.AssemblyLinearVelocity = step / dt
 	table.insert(body.trail, root.Position)
 end
@@ -168,7 +189,18 @@ local function load(options: Options?): World
 			return if name == "PlayerGui" then playerGui else nil
 		end,
 	}
-	local kobold = { id = 21, kind = "Enemy", model = { Name = "Kobold" } }
+	-- The staged target 9 studs ahead of the stand spot (the fight's kobold), and a second staged
+	-- enemy (the fight's boar) out to the side; a test moves their roots.
+	local kobold = {
+		id = 21,
+		kind = "Enemy",
+		model = { Name = "Kobold", PrimaryPart = { Position = Vector3.new(0, 3, -19) } },
+	}
+	local boar = {
+		id = 22,
+		kind = "Enemy",
+		model = { Name = "Boar", PrimaryPart = { Position = Vector3.new(-12, 3, -10) } },
+	}
 	local invokes: { { action: string, shotId: string?, at: number } } = {}
 	local reply: { [string]: any } = { ok = true, targetId = 21, ids = { 21 } }
 	local server: Server = { paced = false, stagingSeconds = 0, busyUntil = -math.huge, released = 0 }
@@ -219,13 +251,21 @@ local function load(options: Options?): World
 			return nil
 		end,
 	}
-	local userInput = { InputBegan = inputBegan, MouseIconEnabled = true }
+	-- The keys this spec presses are taps: none is still down by the next frame.
+	local userInput = {
+		InputBegan = inputBegan,
+		MouseIconEnabled = true,
+		IsKeyDown = function(_self: any, _code: Enum.KeyCode): boolean
+			return false
+		end,
+	}
 	local stages: { { view: any, target: any, side: number? } } = {}
 	local steps: { { name: string, priority: number, fn: (number) -> () } } = {}
 	local body: Body = nil :: any
 	body = {
 		root = {
 			Position = Vector3.zero,
+			CFrame = CFrame.new(),
 			Size = ROOT_SIZE,
 			AssemblyLinearVelocity = Vector3.zero,
 		},
@@ -240,6 +280,9 @@ local function load(options: Options?): World
 		pending = nil,
 		lastDirection = nil,
 		carry = 0,
+		slide = 0,
+		coast = 0,
+		sprinting = false,
 		stuck = false,
 		trail = {},
 	}
@@ -275,18 +318,29 @@ local function load(options: Options?): World
 	local input = {
 		handle = function(action: string, state: any, _object: any)
 			table.insert(handled, { action = action, state = state.Name, at = clock.now })
+			if action == WALK.sprintAction then
+				body.sprinting = state == Enum.UserInputState.Begin
+			end
 		end,
 	}
 	local tracker = {
 		get = function(id: number): any
-			return if id == kobold.id then kobold else nil
+			return if id == kobold.id then kobold elseif id == boar.id then boar else nil
 		end,
 	}
-	local replication = { clipEvent = Signal.new() }
+	local replication = { clipEvent = Signal.new(), hit = Signal.new() }
+	local lead = { seconds = 0 }
+	local telegraphs = {
+		glintLead = function(): number
+			return lead.seconds
+		end,
+	}
 	local clipLibrary = {
 		get = function(id: string): any
 			if id == Overhead.id then
 				return Overhead
+			elseif id == Charge.id then
+				return Charge
 			end
 			error("no clip " .. id)
 		end,
@@ -317,6 +371,7 @@ local function load(options: Options?): World
 		InputController = input,
 		EntityTracker = tracker,
 		Replication = replication,
+		Telegraphs = telegraphs,
 		ClipLibrary = clipLibrary,
 		Siblings = siblings,
 	}
@@ -414,6 +469,7 @@ local function load(options: Options?): World
 		input = input,
 		userInput = userInput,
 		replication = replication,
+		lead = lead,
 		key = function(name: string)
 			inputBegan:Fire(
 				{ UserInputType = Enum.UserInputType.Keyboard, KeyCode = (Enum.KeyCode :: any)[name] },
@@ -451,12 +507,14 @@ local function load(options: Options?): World
 		end,
 		firstShown = firstShown,
 		kobold = kobold,
+		boar = boar,
 		body = body,
 		ring = function(): any
 			return workspaceFolder:FindFirstChild(WALK.ring.name)
 		end,
 		standAt = function(x: number, z: number)
 			body.root.Position = Vector3.new(x, floorAt(x, z) + ROOT_OFFSET, z)
+			body.root.CFrame = body.root.CFrame.Rotation + body.root.Position
 			body.root.AssemblyLinearVelocity = Vector3.zero
 		end,
 		steps = steps,
@@ -588,6 +646,96 @@ describe("Capture: staging a shot (F12)", function()
 	end)
 end)
 
+-- Every ask of `action` after the clock time `from`, in order.
+local function asksOf(world: World, action: string, from: number?): { { action: string, shotId: string?, at: number } }
+	local list = {}
+	for _, entry in world.invokes do
+		if entry.action == action and entry.at >= (from or -math.huge) then
+			table.insert(list, entry)
+		end
+	end
+	return list
+end
+
+describe("Capture: between takes (CS1)", function()
+	it("holds the take's enemies the frame it ends, by itself at its length or on K", function()
+		local world = load()
+		local shot = CAPTURE.shots[shotIndex("enemy-boar-charge")]
+		goTo(world, shot.id)
+		world.key(KEYS.startCountdown)
+		world.untilRecording()
+		local started = world.clock.now
+		expect(#asksOf(world, "hold")).toBe(0)
+		world.seconds(shot.seconds + 0.05)
+		local holds = asksOf(world, "hold")
+		expect(#holds).toBe(1)
+		-- Asked on the frame the take stopped, not later.
+		expect(holds[1].at - started).toBeGreaterThan(shot.seconds - 1e-6)
+		expect(holds[1].at - started).toBeLessThan(shot.seconds + 2 / 60)
+		-- Stopped short with K, K: held at once too.
+		local again = load()
+		goTo(again, shot.id)
+		again.key(KEYS.startCountdown)
+		again.untilRecording()
+		again.seconds(1)
+		again.key(KEYS.markDone)
+		again.frames(1)
+		local stopAt = again.clock.now
+		again.key(KEYS.markDone)
+		local stopped = asksOf(again, "hold")
+		expect(#stopped).toBe(1)
+		expect(stopped[1].at).toBeCloseTo(stopAt, 1e-9)
+	end)
+
+	it("asks for the hold again at the server's rate until the server holds them", function()
+		local world = load()
+		world.server.paced = true
+		local shot = CAPTURE.shots[shotIndex("enemy-boar-charge")]
+		goTo(world, shot.id)
+		world.key(KEYS.startCountdown)
+		world.untilRecording()
+		-- Stopped 0.1 s after the "go": the first hold is too soon for the rate.
+		world.seconds(0.05)
+		world.key(KEYS.markDone)
+		world.frames(1)
+		world.key(KEYS.markDone)
+		world.seconds(1)
+		local holds = asksOf(world, "hold")
+		expect(#holds).toBeGreaterThan(1)
+		-- The last one got through: the server's own rule says so.
+		local last = holds[#holds]
+		local go = asksOf(world, "go")[1]
+		expect(last.at - go.at).toBeGreaterThan(1 / STAGE.requestsPerSecond - 1e-9)
+		local count = #holds
+		world.seconds(2)
+		expect(#asksOf(world, "hold")).toBe(count)
+	end)
+
+	it("stages the next shot at once on P after a take, the ask waiting out the server's rate", function()
+		local world = load()
+		world.server.paced = true
+		goTo(world, "enemy-boar-charge")
+		world.key(KEYS.startCountdown)
+		world.untilRecording()
+		world.seconds(1)
+		world.key(KEYS.markDone)
+		world.frames(1)
+		world.key(KEYS.markDone)
+		-- Straight away: P stages (and is not refused for the rate).
+		local pressed = world.clock.now
+		world.key(KEYS.startCountdown)
+		world.seconds(0.6)
+		local stages = asksOf(world, "stage", pressed)
+		expect(#stages).toBe(1)
+		expect(world.status():find("too many", 1, true)).toBeNil()
+		world.untilRecording()
+		expect(world.counter().Visible).toBe(true)
+		-- The hold's asking stopped once P took the field.
+		local holdsAfter = asksOf(world, "hold", stages[1].at)
+		expect(#holdsAfter).toBe(0)
+	end)
+end)
+
 describe("Capture: the take (F12)", function()
 	it("writes the counter's text before it shows, and fits its box to the text", function()
 		local world = load()
@@ -664,6 +812,25 @@ describe("Capture: the take (F12)", function()
 	end)
 end)
 
+-- The take seconds of a shot's timed lock presses, in order.
+local function lockPresses(shot: any): { number }
+	local list = {}
+	for _, entry in shot.perform do
+		if entry.action == "LockOn" and entry.at ~= nil then
+			table.insert(list, entry.at)
+		end
+	end
+	table.sort(list)
+	return list
+end
+
+-- Runs frames until `seconds` of the take that started at `started` have passed.
+local function untilElapsed(world: World, started: number, seconds: number)
+	while world.clock.now - started < seconds - 1e-9 do
+		world.frames(1)
+	end
+end
+
 describe("Capture: auto-perform (F12)", function()
 	it("is off by default: a take presses nothing", function()
 		local world = load()
@@ -690,6 +857,82 @@ describe("Capture: auto-perform (F12)", function()
 		expect(world.handled[1].at - started).toBeCloseTo(perform.at, 2 * FRAME)
 		expect(world.handled[2].state).toBe("End")
 		expect(world.handled[2].at - world.handled[1].at).toBeCloseTo(perform.hold, 2 * FRAME)
+	end)
+
+	-- CS5: an Art launches on its key's release (CharacterController.releaseArt sends ArtRequest),
+	-- a basic on its press. At the snapshot the prompt said "Q now" at 1.0 s and the key came up
+	-- (the launch) at 1.35 s, under that same line; a human tapping on "now" never held the glow.
+	it("lands each attack on the beat that says so: hold on the press, let go on the launch (CS5)", function()
+		local Combat = Harness.load("src/shared/data/combat")
+		local checked = 0
+		for _, shot in CAPTURE.shots do
+			local entry = shot.perform[1]
+			if entry == nil or entry.at == nil then
+				continue
+			end
+			local art = entry.action == "Art" or entry.action:match("^ArtSlot") ~= nil
+			if not art and entry.action ~= "BasicAttack" then
+				continue
+			end
+			local world = load()
+			goTo(world, shot.id)
+			world.key(KEYS.autoPerform)
+			world.key(KEYS.startCountdown)
+			world.untilRecording()
+			local started = world.clock.now
+			-- The prompt line and its beat on the frame each key moved.
+			local seen: { { state: string, at: number, text: string } } = {}
+			while world.clock.now - started < shot.seconds - 0.5 do
+				local before = #world.handled
+				world.frames(1)
+				for index = before + 1, #world.handled do
+					table.insert(seen, {
+						state = world.handled[index].state,
+						at = world.handled[index].at - started,
+						text = world.prompt().Text.Text,
+					})
+				end
+			end
+			local function beatOf(text: string): number
+				for _, beat in shot.prompts do
+					if beat.text == text then
+						return beat.at
+					end
+				end
+				error("no beat shows " .. text)
+			end
+			local down, up = seen[1], seen[2]
+			print(
+				("[CS5] %s: press %.3f s (%q), release %.3f s (%q)"):format(shot.id, down.at, down.text, up.at, up.text)
+			)
+			expect(down.state).toBe("Begin")
+			expect(up.state).toBe("End")
+			-- Each key moves on the frame its own beat comes up.
+			expect(math.abs(beatOf(down.text) - down.at)).toBeLessThan(1.5 * FRAME)
+			if art then
+				expect(down.text:lower():find("hold", 1, true)).never.toBeNil()
+				-- The release is the launch: its beat says let go, and comes up with it.
+				expect(math.abs(beatOf(up.text) - up.at)).toBeLessThan(1.5 * FRAME)
+				expect(up.text:lower():find("let go", 1, true)).never.toBeNil()
+				-- The blade lights at the clip's hold pose and stays lit until the release.
+				local clip = Harness.load(
+					"src/shared/clips/player/OneHandedSword/" .. shot.title:gsub("^Art: ", ""):gsub(" ", "")
+				)
+				local lit = Combat.startPoseTime + Combat.activationHold
+				for _, event in clip.events do
+					if event.kind == "ActivationHold" then
+						lit = math.min(lit, event.time)
+					end
+				end
+				local glow = up.at - (down.at + lit)
+				print(("[CS5] %s: glow %.3f s"):format(shot.id, glow))
+				expect(glow).toBeGreaterThan(CAPTURE.artGlowSeconds - FRAME)
+			else
+				expect(down.text:lower():find("now", 1, true)).never.toBeNil()
+			end
+			checked += 1
+		end
+		expect(checked).toBe(5)
 	end)
 
 	it("presses nothing slowed (the drawn clips run late on the server's clock)", function()
@@ -734,6 +977,35 @@ describe("Capture: auto-perform (F12)", function()
 		expect(guardAt).toBeCloseTo(open - first.time - perform.lead, 2 * FRAME)
 		expect(world.handled[2].action).toBe("Guard")
 		expect(world.handled[2].state).toBe("End")
+	end)
+
+	-- A press reaches the server a latency after it leaves: it leaves the client's latency lead
+	-- early (Telegraphs.glintLead, D-289), as the glint shows, so the guard is down on the server
+	-- `lead` before the window at any latency the lead has learnt (S-CP3(b)).
+	it("guards the client's latency lead earlier still, as the glint comes (D-289)", function()
+		local world = load()
+		local shot = CAPTURE.shots[shotIndex("parry-spark")]
+		goTo(world, shot.id)
+		world.key(KEYS.autoPerform)
+		world.key(KEYS.startCountdown)
+		world.untilRecording()
+		world.seconds(0.5)
+		world.lead.seconds = 0.1
+		local first = Overhead.events[1]
+		local heardAt = world.clock.now
+		world.replication.clipEvent:Fire(world.kobold, Overhead.id, first, false)
+		world.seconds(2)
+		local open = 0
+		for _, event in Overhead.events do
+			if event.kind == "HitWindowOpen" then
+				open = event.time
+				break
+			end
+		end
+		expect(world.handled[1].action).toBe("Guard")
+		expect(world.handled[1].state).toBe("Begin")
+		local guardAt = world.handled[1].at - heardAt
+		expect(guardAt).toBeCloseTo(open - first.time - shot.perform[1].lead - 0.1, 2 * FRAME)
 	end)
 
 	it("lets go of a key it holds when the take ends early", function()
@@ -802,26 +1074,24 @@ describe("Capture: auto-perform (F12)", function()
 	end)
 
 	-- D-290: the locomotion pass's lock presses act on the staged target alone; the lock key's
-	-- own cycle could step the second press on to a field enemy nearer than it.
-	it("locks the staged target on the locomotion pass's first lock press and lets it go on the second", function()
+	-- own cycle could step the second press on to a field enemy nearer than it. The pass locks on
+	-- twice (the draw, then the turn in place, CF), each lock let go by the press after it.
+	it("locks the staged target on each of the locomotion pass's lock presses and lets it go on the next", function()
 		local world = load()
 		local shot = CAPTURE.shots[shotIndex("locomotion")]
-		local presses = {}
-		for _, entry in shot.perform do
-			if entry.action == "LockOn" then
-				table.insert(presses, entry.at)
-			end
-		end
-		expect(#presses).toBe(2)
+		local presses = lockPresses(shot)
+		expect(#presses >= 2).toBe(true)
+		expect(#presses % 2).toBe(0)
 		goTo(world, shot.id)
 		world.key(KEYS.autoPerform)
 		world.key(KEYS.startCountdown)
 		world.untilRecording()
+		local started = world.clock.now
 		expect(world.locked.id).toBeNil()
-		world.seconds(presses[1] + 0.1)
-		expect(world.locked.id).toBe(world.kobold.id)
-		world.seconds(presses[2] - presses[1])
-		expect(world.locked.id).toBeNil()
+		for index, at in presses do
+			untilElapsed(world, started, at + 0.1)
+			expect(world.locked.id).toBe(if index % 2 == 1 then world.kobold.id else nil)
+		end
 		-- Never through the lock key's path, which would cycle on to whatever ranks next.
 		local keyed = count(world.handled, function(entry: any): boolean
 			return entry.action == "LockOn"
@@ -832,7 +1102,7 @@ describe("Capture: auto-perform (F12)", function()
 	it("takes the staged target from a field enemy the lock is on, never cycling past it", function()
 		local world = load()
 		local shot = CAPTURE.shots[shotIndex("locomotion")]
-		local first = shot.perform[1].at :: number
+		local first = lockPresses(shot)[1]
 		goTo(world, shot.id)
 		world.key(KEYS.autoPerform)
 		world.key(KEYS.startCountdown)
@@ -854,7 +1124,364 @@ describe("Capture: auto-perform (F12)", function()
 		local downs = count(world.handled, function(entry: any): boolean
 			return entry.action == "LockOn" and entry.state == "Begin"
 		end)
-		expect(downs).toBe(2)
+		expect(downs).toBe(#lockPresses(shot))
+	end)
+end)
+
+-- CF: the fight's auto-perform reacts to what this client draws through the real input path: a
+-- guard `lead` before each of the kobold's overheads (the parry), the Arts that follow it in
+-- turn, a dodge on the boar's crouch with the lock, the run at its skid and the sprint after it,
+-- and between them basics on the lock's target in reach and the lock back on the kobold once it
+-- is lost. At the snapshot the fight's perform list was empty: a take pressed nothing.
+local function fightEntry(predicate: (any) -> boolean): any
+	for _, entry in CAPTURE.shots[shotIndex("fight-boar-kobold")].perform do
+		if predicate(entry) then
+			return entry
+		end
+	end
+	error("no such entry in the fight's perform list")
+end
+
+local function openOf(clip: any): number
+	for _, event in clip.events do
+		if event.kind == "HitWindowOpen" then
+			return event.time
+		end
+	end
+	error("no hit window in " .. clip.id)
+end
+
+-- The fight staged (its kobold and its boar), auto-perform on, the take running.
+local function fightTake(): (World, number)
+	local world = load()
+	world.reply.ids = { world.kobold.id, world.boar.id }
+	goTo(world, "fight-boar-kobold")
+	world.key(KEYS.autoPerform)
+	world.key(KEYS.startCountdown)
+	world.untilRecording()
+	return world, world.clock.now
+end
+
+local function handledOf(world: World, action: string, state: string, from: number?): { any }
+	local list = {}
+	for _, entry in world.handled do
+		if entry.action == action and entry.state == state and entry.at >= (from or -math.huge) then
+			table.insert(list, entry)
+		end
+	end
+	return list
+end
+
+-- The kobold's root `studs` (flat) ahead of the player's.
+local function koboldAt(world: World, studs: number)
+	local root = world.body.root.Position
+	world.kobold.model.PrimaryPart.Position = Vector3.new(root.X, 3, root.Z - studs)
+end
+
+describe("Capture: the fight's auto-perform (CF)", function()
+	it("guards `lead` before each of the kobold's overheads, then presses the next Art of its cycle", function()
+		local world = fightTake()
+		koboldAt(world, 20) -- out of the basics' reach: only the reactions press
+		local guard = fightEntry(function(entry: any): boolean
+			return entry.onClip == Overhead.id
+		end)
+		expect(guard.action).toBe("Guard")
+		expect(guard.repeats).toBe(true)
+		local art = guard.chain[1]
+		local voice = Overhead.events[1]
+		local open = openOf(Overhead)
+		local heard = {}
+		for _ = 1, 2 do
+			world.seconds(0.5)
+			table.insert(heard, world.clock.now)
+			world.replication.clipEvent:Fire(world.kobold, Overhead.id, voice, false)
+			-- Another fighter's overhead is not the kobold's.
+			world.replication.clipEvent:Fire({ id = 99 }, Overhead.id, voice, false)
+			world.seconds(open - voice.time + 1.5)
+			-- The rest of the play is heard too: the window and its close move nothing.
+			for _, event in Overhead.events do
+				if event.time >= open then
+					world.replication.clipEvent:Fire(world.kobold, Overhead.id, event, false)
+				end
+			end
+			world.seconds(0.5)
+		end
+		local downs = handledOf(world, "Guard", "Begin")
+		local ups = handledOf(world, "Guard", "End")
+		expect(#downs).toBe(2)
+		expect(#ups).toBe(2)
+		for play = 1, 2 do
+			expect(downs[play].at - heard[play]).toBeCloseTo(open - voice.time - guard.lead, 2 * FRAME)
+			expect(ups[play].at - downs[play].at).toBeCloseTo(guard.hold, 2 * FRAME)
+			-- The Art of the cycle in turn, `delay` after the guard came up, held its hold.
+			local action = art.cycle[play]
+			local artDown = handledOf(world, action, "Begin", ups[play].at)[1]
+			expect(artDown).never.toBeNil()
+			expect(artDown.at - ups[play].at).toBeCloseTo(art.delay, 2 * FRAME)
+			local artUp = handledOf(world, action, "End", artDown.at)[1]
+			expect(artUp.at - artDown.at).toBeCloseTo(art.hold, 2 * FRAME)
+		end
+	end)
+
+	-- The take cuts at its length: a press past the guard's `to` (the chain's Art included) would
+	-- land its hit after the cut, where the review never sees its number (D-CI3).
+	it("presses nothing of a reaction past its `to`: the guard inside it, the chain's Art never after", function()
+		local world, start = fightTake()
+		koboldAt(world, 20)
+		local guard = fightEntry(function(entry: any): boolean
+			return entry.onClip == Overhead.id
+		end)
+		expect(guard.to).never.toBeNil()
+		local art = guard.chain[1]
+		local voice = Overhead.events[1]
+		local open = openOf(Overhead)
+		-- The overhead heard so the guard goes down 0.1 s before `to`: the guard presses, its Art
+		-- (`delay` after the guard comes up) would go down past `to` and never does.
+		local guardIn = open - voice.time - guard.lead
+		world.seconds(guard.to - 0.1 - guardIn)
+		world.replication.clipEvent:Fire(world.kobold, Overhead.id, voice, false)
+		world.seconds(guardIn + guard.hold + art.delay + art.hold + 0.5)
+		local downs = handledOf(world, "Guard", "Begin")
+		expect(#downs).toBe(1)
+		expect(downs[1].at - start).toBeLessThanOrEqual(guard.to + 1e-6)
+		for _, action in art.cycle do
+			for _, entry in handledOf(world, action, "Begin") do
+				expect(entry.at - start).toBeLessThanOrEqual(guard.to + 1e-6)
+			end
+		end
+		expect(#handledOf(world, art.cycle[1], "Begin", downs[1].at)).toBe(0)
+	end)
+
+	-- A hit on the kobold mid-wind-up pauses its attack on the server (attackPause, at most
+	-- ai.luau hitStop.maxPausePerAttack) and this client holds its clip as long: the strike comes
+	-- that much later. The guard moves with the pause, and with each later event of the play.
+	it("moves the guard on by the kobold's hit-stop pause, and with each later event of the play", function()
+		local world = fightTake()
+		koboldAt(world, 20)
+		local guard = fightEntry(function(entry: any): boolean
+			return entry.onClip == Overhead.id
+		end)
+		local open = openOf(Overhead)
+		local voice = Overhead.events[1]
+		local whoosh = nil :: any
+		for _, event in Overhead.events do
+			if event.kind == "Sfx" and event.time < open then
+				whoosh = event
+				break
+			end
+		end
+		world.seconds(0.5)
+		local voiceAt = world.clock.now
+		world.replication.clipEvent:Fire(world.kobold, Overhead.id, voice, false)
+		-- A basic lands 0.3 s in: the attack pauses 0.25 s. Another enemy's pause moves nothing.
+		world.seconds(0.3)
+		world.replication.hit:Fire({ targetId = world.boar.id, attackPause = 0.25 })
+		world.replication.hit:Fire({ targetId = world.kobold.id, attackPause = 0.25 })
+		world.seconds(whoosh.time - voice.time - 0.3 + 0.25)
+		-- Not yet: unpaused, it would have gone down by now.
+		expect(#handledOf(world, "Guard", "Begin")).toBe(0)
+		local heardAt = world.clock.now
+		world.replication.clipEvent:Fire(world.kobold, Overhead.id, whoosh, false)
+		world.seconds(1)
+		local downs = handledOf(world, "Guard", "Begin")
+		expect(#downs).toBe(1)
+		expect(downs[1].at - heardAt).toBeCloseTo(open - whoosh.time - guard.lead, 2 * FRAME)
+		expect(downs[1].at - voiceAt).toBeCloseTo(open - voice.time - guard.lead + 0.25, 2 * FRAME)
+	end)
+
+	it("moves the guard on by the hit-stop pause with no later event heard", function()
+		local world = fightTake()
+		koboldAt(world, 20)
+		local guard = fightEntry(function(entry: any): boolean
+			return entry.onClip == Overhead.id
+		end)
+		local voice = Overhead.events[1]
+		world.seconds(0.5)
+		local voiceAt = world.clock.now
+		world.replication.clipEvent:Fire(world.kobold, Overhead.id, voice, false)
+		world.seconds(0.3)
+		world.replication.hit:Fire({ targetId = world.kobold.id, attackPause = 0.2 })
+		world.seconds(1.5)
+		local downs = handledOf(world, "Guard", "Begin")
+		expect(#downs).toBe(1)
+		expect(downs[1].at - voiceAt).toBeCloseTo(openOf(Overhead) - voice.time - guard.lead + 0.2, 2 * FRAME)
+	end)
+
+	it("takes the lock to the kobold when its overhead is heard, so the guard faces it", function()
+		local world = fightTake()
+		koboldAt(world, 20)
+		world.locked.id = world.boar.id
+		world.seconds(0.2)
+		world.replication.clipEvent:Fire(world.kobold, Overhead.id, Overhead.events[1], false)
+		expect(world.locked.id).toBe(world.kobold.id)
+	end)
+
+	it("dodges the boar's crouch, locks the boar and sprints at it, letting go in reach", function()
+		local world, started = fightTake()
+		koboldAt(world, 20)
+		local dodge = fightEntry(function(entry: any): boolean
+			return entry.onClip == Charge.id
+		end)
+		expect(dodge.action).toBe("Dodge")
+		local lock, run = dodge.chain[1], dodge.chain[2]
+		expect(lock.action).toBe("LockOn")
+		expect(run.action).toBe(CAPTURE.perform.moveAction)
+		world.seconds(1)
+		local first = Charge.events[1]
+		local heardAt = world.clock.now
+		-- The kobold's crouch is not the boar's: only the boar's own clip is heard.
+		world.replication.clipEvent:Fire(world.kobold, Charge.id, first, false)
+		world.replication.clipEvent:Fire(world.boar, Charge.id, first, false)
+		world.seconds(openOf(Charge) - first.time)
+		local dodges = handledOf(world, "Dodge", "Begin")
+		expect(#dodges).toBe(1)
+		expect(dodges[1].at - heardAt).toBeCloseTo(openOf(Charge) - first.time - dodge.lead, 2 * FRAME)
+		local up = handledOf(world, "Dodge", "End")[1]
+		-- The lock on the boar, `delay` after the dodge's key came up.
+		untilElapsed(world, started, up.at - started + lock.delay + 2 * FRAME)
+		expect(world.locked.id).toBe(world.boar.id)
+		-- Then the run: the stick forward through Humanoid:Move, on the camera's view, and the sprint.
+		local before = #world.body.moves
+		world.seconds(run.delay + 0.2)
+		local sprints = handledOf(world, "Sprint", "Begin")
+		expect(#sprints).toBe(1)
+		expect(#world.body.moves > before).toBe(true)
+		local move = world.body.moves[#world.body.moves]
+		expect(move.relative).toBe(true)
+		expect(move.direction.X).toBeCloseTo(0, 1e-6)
+		expect(move.direction.Z).toBeCloseTo(-1, 1e-6)
+		expect(#handledOf(world, "Sprint", "End")).toBe(0)
+		-- The boar's root in reach: the stick and the sprint let go.
+		local root = world.body.root.Position
+		world.boar.model.PrimaryPart.Position = Vector3.new(root.X + run.within - 0.5, 3, root.Z)
+		world.seconds(0.1)
+		expect(#handledOf(world, "Sprint", "End")).toBe(1)
+		local moves = #world.body.moves
+		world.seconds(0.5)
+		expect(#world.body.moves).toBe(moves)
+	end)
+
+	it("lets the run go at its hold when the boar never comes in reach", function()
+		local world = fightTake()
+		koboldAt(world, 20)
+		local dodge = fightEntry(function(entry: any): boolean
+			return entry.onClip == Charge.id
+		end)
+		local run = dodge.chain[2]
+		world.seconds(1)
+		world.replication.clipEvent:Fire(world.boar, Charge.id, Charge.events[1], false)
+		world.seconds(3)
+		local begin = handledOf(world, "Sprint", "Begin")[1]
+		local stop = handledOf(world, "Sprint", "End")[1]
+		expect(begin).never.toBeNil()
+		expect(stop).never.toBeNil()
+		expect(stop.at - begin.at).toBeCloseTo(run.hold, 2 * FRAME)
+	end)
+
+	it("presses basics on the lock's target in reach between reactions, never while one waits", function()
+		local world = fightTake()
+		local basics = fightEntry(function(entry: any): boolean
+			return entry.action == "BasicAttack" and entry.every ~= nil
+		end)
+		expect(world.locked.id).toBe(world.kobold.id)
+		koboldAt(world, basics.within - 1)
+		world.seconds(2)
+		local pressed = #handledOf(world, "BasicAttack", "Begin")
+		expect(pressed >= math.floor(2 / basics.every) - 1).toBe(true)
+		expect(pressed <= math.ceil(2 / basics.every) + 1).toBe(true)
+		-- The overhead heard: no basic until its guard has gone down and come up.
+		local heardAt = world.clock.now
+		world.replication.clipEvent:Fire(world.kobold, Overhead.id, Overhead.events[1], false)
+		world.seconds(openOf(Overhead))
+		local guard = handledOf(world, "Guard", "Begin")[1]
+		expect(guard).never.toBeNil()
+		expect(#handledOf(world, "BasicAttack", "Begin", heardAt + FRAME / 2)).toBe(0)
+		-- Out of reach: none.
+		koboldAt(world, basics.within + 3)
+		world.seconds(3)
+		local after = world.clock.now
+		world.seconds(1)
+		expect(#handledOf(world, "BasicAttack", "Begin", after)).toBe(0)
+	end)
+
+	it("locks the kobold again once the lock is lost (the boar shattered)", function()
+		local world = fightTake()
+		koboldAt(world, 20)
+		local keep = fightEntry(function(entry: any): boolean
+			return entry.action == "LockOn" and entry.every ~= nil
+		end)
+		world.seconds(0.5)
+		world.locked.id = nil
+		world.seconds(keep.every + 2 * FRAME)
+		expect(world.locked.id).toBe(world.kobold.id)
+		-- It never takes a lock that is on: the boar stays locked.
+		world.locked.id = world.boar.id
+		world.seconds(1)
+		expect(world.locked.id).toBe(world.boar.id)
+	end)
+
+	it("lets go of the stick and the sprint when the take stops mid-run", function()
+		local world = fightTake()
+		koboldAt(world, 20)
+		world.seconds(1)
+		world.replication.clipEvent:Fire(world.boar, Charge.id, Charge.events[1], false)
+		for _ = 1, 240 do
+			world.frames(1)
+			if #handledOf(world, "Sprint", "Begin") > 0 then
+				break
+			end
+		end
+		expect(#handledOf(world, "Sprint", "Begin")).toBe(1)
+		world.key(KEYS.markDone)
+		world.key(KEYS.markDone)
+		expect(#handledOf(world, "Sprint", "End")).toBe(1)
+		local moves = #world.body.moves
+		world.seconds(0.5)
+		expect(#world.body.moves).toBe(moves)
+	end)
+end)
+
+-- CF: the locomotion pass holds the stick through the walk's render step (after the control
+-- script's Move, before the character controller reads MoveDirection): a part-pushed stick for
+-- the walks, a full one for the runs, the sprint held with it. At the snapshot its perform held
+-- two lock presses: the body stood still for the whole take.
+describe("Capture: the locomotion pass's auto-perform (CF)", function()
+	it("holds each move's stick on the camera's view, and the sprint with the sprints", function()
+		local world = load()
+		local shot = CAPTURE.shots[shotIndex("locomotion")]
+		local moves = {}
+		for _, entry in shot.perform do
+			if entry.action == CAPTURE.perform.moveAction then
+				table.insert(moves, entry)
+			end
+		end
+		expect(#moves >= 4).toBe(true)
+		goTo(world, shot.id)
+		world.key(KEYS.autoPerform)
+		world.key(KEYS.startCountdown)
+		world.untilRecording()
+		local started = world.clock.now
+		local Logic = Harness.load("src/client/dev/CaptureLogic")
+		table.sort(moves, function(a: any, b: any): boolean
+			return a.at < b.at
+		end)
+		for _, entry in moves do
+			untilElapsed(world, started, entry.at + entry.hold / 2)
+			local last = world.body.moves[#world.body.moves]
+			expect(last.at > world.clock.now - 1.5 * FRAME).toBe(true)
+			expect(last.relative).toBe(true)
+			local x, z = Logic.stickMove(entry.stick)
+			expect(last.direction.X).toBeCloseTo(x, 1e-6)
+			expect(last.direction.Z).toBeCloseTo(z, 1e-6)
+			expect(world.body.sprinting).toBe(entry.sprint == true)
+		end
+		-- After the last move lets go, the stick is the player's again: no Move, no sprint.
+		local final = moves[#moves]
+		untilElapsed(world, started, final.at + final.hold + 0.1)
+		local count = #world.body.moves
+		world.seconds(0.3)
+		expect(#world.body.moves).toBe(count)
+		expect(world.body.sprinting).toBe(false)
 	end)
 end)
 
@@ -949,10 +1576,22 @@ describe("Capture: the walk into the stand ring (D-244)", function()
 			expect(move.direction.Y).toBe(0)
 			expect(move.direction.Magnitude).toBeCloseTo(1, 1e-5)
 		end
-		-- Its last leg starts within waypointStuds of the approach's point on the facing line.
+		-- Its last leg follows the facing line: the last move runs the shot's way within restDegrees.
 		local lx, lz = StageLogic.look(facing)
-		local off = math.atan(WALK.waypointStuds / (STAGE.approachStuds - WALK.arriveStuds))
-		expect(moves[#moves].direction:Dot(Vector3.new(lx, 0, lz))).toBeGreaterThan(math.cos(off))
+		expect(moves[#moves].direction:Dot(Vector3.new(lx, 0, lz))).toBeGreaterThan(
+			math.cos(math.rad(WALK.restDegrees))
+		)
+		-- At the sprint (its stop carries nothing), let go and at rest on the spot.
+		local sprints = 0
+		for _, entry in world.handled do
+			if entry.action == WALK.sprintAction then
+				sprints += 1
+				expect(entry.state).toBe(if sprints % 2 == 1 then "Begin" else "End")
+			end
+		end
+		expect(sprints).toBe(2)
+		local at = world.body.root.Position
+		expect(Vector3.new(at.X - x, 0, at.Z - z).Magnitude).toBeLessThan(WALK.restStuds)
 		-- Asked again once in the ring at rest: staged, the ring gone, the shot framed.
 		expect(#stageAsks(world)).toBe(2)
 		expect(inRing(world, false)).toBe(true)
@@ -1090,15 +1729,48 @@ describe("Capture: the walk into the stand ring (D-244)", function()
 		expect(world.status():find("too many", 1, true)).toBeNil()
 	end)
 
-	it("asks again where the let-go carried the body out of the ring, and walks again", function()
+	it("walks the last leg again when the stop carried the body off the spot, and stages on it", function()
 		local world = load()
 		ringServer(world)
 		world.standAt(25, 30)
-		-- The two-step stop carries the body on past the ring once.
-		world.body.carry = STAGE.standRadius + WALK.arriveStuds + 1
+		-- The stop carries the body on past the ring once.
+		world.body.carry = STAGE.standRadius * 2
 		world.key(KEYS.startCountdown)
 		expect(untilCountdown(world, WALK.timeoutSeconds)).toBe(true)
-		expect(#stageAsks(world)).toBe(3)
-		expect(inRing(world, false)).toBe(true)
+		-- No ask from outside the ring: the last leg again brought it back first.
+		expect(#stageAsks(world)).toBe(2)
+		local at = world.body.root.Position
+		local x, _, z = StageLogic.standSpot(false, STAGE.area, STAGE.ledge)
+		expect(Vector3.new(at.X - x, 0, at.Z - z).Magnitude).toBeLessThan(WALK.restStuds)
+	end)
+
+	it("asks from where the second walks left it once they are spent: outside, it walks the new route", function()
+		local world = load()
+		ringServer(world)
+		world.standAt(25, 30)
+		-- Every stop slides on past the ring's far side: no let-go lands in it.
+		world.body.slide = STAGE.standRadius * 3
+		world.key(KEYS.startCountdown)
+		for _ = 1, math.ceil(WALK.timeoutSeconds / FRAME) do
+			world.frames(1)
+			if #stageAsks(world) >= 2 then
+				break
+			end
+		end
+		expect(#stageAsks(world)).toBe(2)
+		-- One let-go for the walk and one for each second walk before the ask.
+		local lets = 0
+		for _, entry in world.handled do
+			if entry.action == WALK.sprintAction and entry.state == "End" then
+				lets += 1
+			end
+		end
+		expect(lets).toBe(1 + WALK.secondWalks)
+		-- Never staged outside the ring: the reply walks it again.
+		expect(inRing(world, false)).toBe(false)
+		expect(world.ring() ~= nil).toBe(true)
+		local walked = #world.body.moves
+		world.frames(5)
+		expect(#world.body.moves).toBeGreaterThan(walked)
 	end)
 end)

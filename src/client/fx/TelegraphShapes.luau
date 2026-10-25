@@ -9,8 +9,8 @@
 	never overlap, so the translucent fan shows no seams where the old overlapping blocks doubled
 	their alpha (issue 15). The alpha curves say how the decal and the weapon Highlight fill ramp
 	in over the wind-up and vanish at the strike; a blow's tell holds through its strike until its
-	snap and glints over the parry window before it (`timing`, F7). No Roblox datatypes, so every
-	function runs in Lune.
+	snap (F7) and glints white for a few frames on the parry window before it (`timing`, D-CP1).
+	No Roblox datatypes, so every function runs in Lune.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -137,48 +137,81 @@ function TelegraphShapes.triangle(piece: Piece): { Vec3 }?
 	}
 end
 
---- When a tell ends and its glint begins, in seconds into the wind-up (F7). A blow's (`strike`, the
---- seconds from the wind-up's end to where it lands) stays lit through the strike until its snap
---- begins, ai.luau telegraph.snapLeadSeconds before it lands, and glints over the parry window
---- before the landing (combat.luau parryWindow). Without a strike (a rush's line: the run is the
---- strike) it ends with the wind-up and never glints.
---- `lead` (D-289): seconds the glint opens and closes early, this client's one-way latency (a
---- press reaches the server that late); capped by fx.luau telegraph.glintLeadMax, none when nil or
---- negative. The third result is when the glint closes (`ends` with no lead); the tell itself still
---- holds to `ends`.
+--- When a tell ends and its glint begins and ends, in seconds into the wind-up (F7, D-CP1). A
+--- blow's (`strike`, the seconds from the wind-up's end to where it lands) stays lit through the
+--- strike until its snap begins, ai.luau telegraph.snapLeadSeconds before it lands. Its glint is
+--- fx.luau telegraph.glintFrames frames centred on the middle of the parry window before the
+--- landing (combat.luau parryWindow), glintAimFrames earlier: a press is read a frame or two after
+--- the frame that showed the glint and the server reads it on its next frame, so a press at the
+--- glint's first frame and at its last both reach the server inside the window. Without a strike
+--- (a rush's line: the run is the strike) it ends with the wind-up and never glints.
+--- `lead` (D-289): seconds the glint comes early, this client's one-way latency (a press reaches
+--- the server that late); capped by fx.luau telegraph.glintLeadMax, none when nil or negative. The
+--- glint never starts before the wind-up nor runs past `ends`; the tell itself holds to `ends`.
 function TelegraphShapes.timing(windUp: number, strike: number?, lead: number?): (number, number, number)
 	local base = math.max(0, windUp)
 	if strike == nil or not (strike > 0) then
 		return base, base, base
 	end
+	local config = Fx.telegraph
+	local frame = Combat.hitStopFrameSeconds
 	local lands = base + strike
 	local ends = math.max(base, lands - AI.telegraph.snapLeadSeconds)
-	local shift = math.clamp(lead or 0, 0, Fx.telegraph.glintLeadMax)
-	local glintUntil = math.clamp(ends - shift, 0, ends)
-	local glintFrom = math.clamp(lands - Combat.parryWindow - shift, 0, glintUntil)
+	local shift = math.clamp(lead or 0, 0, config.glintLeadMax)
+	local centre = lands - Combat.parryWindow / 2 - config.glintAimFrames * frame - shift
+	local half = config.glintFrames * frame / 2
+	local glintFrom = math.clamp(centre - half, 0, ends)
+	local glintUntil = math.clamp(centre + half, glintFrom, ends)
 	return ends, glintFrom, glintUntil
+end
+
+--- True while a tell `elapsed` seconds into its wind-up shows its glint: from `glintFrom` to
+--- `glintUntil` (TelegraphShapes.timing), never at or past its end (`ends`).
+function TelegraphShapes.glinting(elapsed: number, ends: number, glintFrom: number?, glintUntil: number?): boolean
+	if glintFrom == nil then
+		return false
+	end
+	local closes = math.min(ends, glintUntil or ends)
+	return glintFrom < closes and elapsed >= glintFrom and elapsed < closes and elapsed >= 0
+end
+
+--- True when a telegraph of this kind glints before its blow (fx.luau telegraph.glintKinds): only a
+--- blow that can be parried shows the cue to press (D-CP2).
+function TelegraphShapes.glints(kind: string): boolean
+	return Fx.telegraph.glintKinds[kind] == true
 end
 
 --- Opacity of the ground decal `elapsed` seconds into a wind-up of `windUp` seconds at a given
 --- accessibility intensity: ramps in over the fade-in fraction, holds, and is gone at the strike
---- (`ends`, TelegraphShapes.timing; the wind-up's end without it).
-function TelegraphShapes.decalAlpha(elapsed: number, windUp: number, intensity: number, ends: number?): number
+--- (`ends`, TelegraphShapes.timing; the wind-up's end without it). From `glintFrom` to `glintUntil`
+--- it glints: steady at fx.luau telegraph.glintDecalAlpha (D-CP1).
+function TelegraphShapes.decalAlpha(
+	elapsed: number,
+	windUp: number,
+	intensity: number,
+	ends: number?,
+	glintFrom: number?,
+	glintUntil: number?
+): number
 	local over = math.max(windUp, ends or windUp)
 	if elapsed < 0 or elapsed >= over or windUp <= 0 then
 		return 0
 	end
 	local config = Fx.telegraph
+	local clampedIntensity = math.clamp(intensity, config.intensityMin, 1)
+	if TelegraphShapes.glinting(elapsed, over, glintFrom, glintUntil) then
+		return math.clamp(config.glintDecalAlpha * clampedIntensity, 0, 1)
+	end
 	local fadeIn = math.max(1e-6, windUp * config.fadeInFraction)
 	local ramp = math.clamp(elapsed / fadeIn, 0, 1)
 	local eased = 1 - (1 - ramp) * (1 - ramp)
-	local clampedIntensity = math.clamp(intensity, config.intensityMin, 1)
 	return config.decal.alpha * eased * clampedIntensity
 end
 
 --- Transparency of the weapon Highlight fill at `elapsed` into the wind-up: 1 (invisible) before
 --- and after (`ends`, the wind-up's end without it), ramping to the fill transparency, with a soft
 --- pulse near the strike, and from `glintFrom` to `glintUntil` (the end without it) the glint:
---- steady at ai.luau telegraph.glintFillTransparency (F7, D-289).
+--- steady at ai.luau telegraph.glintFillTransparency (F7, D-CP1).
 function TelegraphShapes.fillTransparency(
 	elapsed: number,
 	windUp: number,
@@ -193,8 +226,7 @@ function TelegraphShapes.fillTransparency(
 	end
 	local config = Fx.telegraph
 	local clampedIntensity = math.clamp(intensity, config.intensityMin, 1)
-	local closes = math.min(over, glintUntil or over)
-	if glintFrom ~= nil and glintFrom < closes and elapsed >= glintFrom and elapsed < closes then
+	if TelegraphShapes.glinting(elapsed, over, glintFrom, glintUntil) then
 		return math.clamp(1 - (1 - AI.telegraph.glintFillTransparency) * clampedIntensity, 0, 1)
 	end
 	local fadeIn = math.max(1e-6, windUp * config.fadeInFraction)
@@ -255,8 +287,12 @@ function TelegraphShapes.isOver(elapsed: number, ends: number): boolean
 	return elapsed >= ends
 end
 
---- The palette token for a telegraph kind's fill and decal.
-function TelegraphShapes.token(kind: string): string
+--- The palette token for a telegraph kind's fill and decal; while it glints (`glinting`), the
+--- glint's own (fx.luau telegraph.glintToken, D-CP1).
+function TelegraphShapes.token(kind: string, glinting: boolean?): string
+	if glinting then
+		return Fx.telegraph.glintToken
+	end
 	return Fx.telegraph.fillToken[kind] or Fx.telegraph.fillToken.Normal
 end
 

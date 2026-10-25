@@ -27,22 +27,44 @@
 	walks the body there itself through the input path a held key takes: each frame a render step
 	after the control script's (dev.luau capture.walk.renderOrder) hands the route's direction to
 	Humanoid:Move, before the character controller reads MoveDirection, so the walk, Locomotion and
-	the two-step stop run as they do under the keys. The route's last leg runs along the spot's
-	facing, so the walk turns the body the shot's way. Within arriveStuds of the spot it lets go;
-	once the body is at rest the ring goes and the shot is asked for again (no faster than the
-	server's rate): a root in the ring stages, one outside gets a new walk. A movement key hands the
-	walk to the player (the ring stays, the ask comes once the root stands in it at rest), J ends it
-	with the field given back, P stages afresh, and walk.timeoutSeconds on the capture's clock ends
-	it with a note naming what failed.
+	the two-step stop run as they do under the keys. It holds the sprint (walk.sprintAction, through
+	InputController.handle as the key's binding does), so its stop is the Skid's: past the two-step
+	stop's top speed the body carries nothing (D-059). The route's last leg runs along the spot's
+	facing and the walk follows that line, so it turns the body the shot's way; it lets go when the
+	spot is the stop's carry ahead (none at the sprint, the two-step stop's middle carry below it,
+	or the carry the last sprint stop was seen to make where the engine slides one on). At rest
+	more than walk.restStuds off the spot or walk.restDegrees off its facing, it walks the last leg
+	again (walk.secondWalks times at most); then the ring goes and the shot is asked for again (no
+	faster than the server's rate): a root in the ring stages, one outside gets a new walk. A
+	movement key pressed after P, or held as the walk would steer, hands the walk to the player
+	until P: the sprint lets go, the walk never moves the body again, the ring stays and the ask
+	comes once the root stands in it at rest (a key during an ask between walks hands it over too).
+	J ends it with the field given back (the body stops as a let-go key stops it), P stages afresh,
+	and walk.timeoutSeconds on the capture's clock ends it with a note naming what failed.
 
-	Auto-perform (U, off by default) presses the shot's keys through the real input path
-	(InputController.handle, as a key's binding does): an Art at its moment, the kill's basic, the
-	locomotion pass's lock on and off, and the parry's guard `lead` seconds before the hit window of
-	the target's overhead as the client draws it. Only at 1x. A lock press in a staged take acts on
-	the staged target alone (D-290: it locks it, or lets it go when the lock is on it), never the
-	lock key's cycle, which could step on to a field enemy nearer than it. A take that stops lets
-	go of every key it holds without acting: a held Art is cancelled before its key comes up, so
-	the release launches nothing.
+	A take that ends (at its length or by K) asks the server to hold its enemies where they stand
+	(CS1), so nothing of the take acts between takes; the next staging clears them first.
+
+	Auto-perform (U, off by default) plays the shot's perform list (dev.luau Perform, CF) through
+	the real input path (InputController.handle, as a key's binding does), only at 1x:
+	- a timed press (`at`): a key held `hold` seconds; a Move press holds the stick instead
+	  (capture.perform.moveAction: Humanoid:Move on the camera's frame from this script's render
+	  step, after the control script's, half pushed to walk), with the sprint key when it sprints;
+	- a reaction (`onClip`): the press `lead` seconds before the hit window of a staged enemy's
+	  attack clip as this client draws it (Replication.clipEvent; each later event of the clip sets
+	  it again, and its attacker's hit-stop, HitConfirmed attackPause, moves it on as the client
+	  holds the clip as long), a guard the client's latency lead earlier still, as the glint comes
+	  (Telegraphs.glintLead, D-289), so it reaches the server as a press with no latency would;
+	  on each play when it repeats, never past its `to` (nor its chain's steps, D-CI3); it may
+	  lock that enemy on hearing it,
+	  and a chain of presses follows it, each `delay` after the one before (the next Art of a cycle,
+	  the lock on another enemy, a sprint that lets go in a basic's reach of the lock's target);
+	- a standing rule (`every`): a basic on the lock's target in reach, or the lock back on an
+	  enemy when it is off, every so often, never while a reaction waits or its chain runs.
+	A lock press in a staged take acts on the staged enemy it names alone (D-290: it locks it, or
+	lets it go when the lock is on it), never the lock key's cycle, which could step on to a field
+	enemy nearer than it. A take that stops lets go of every key and the stick without acting: a
+	held Art is cancelled before its key comes up, so the release launches nothing.
 
 	A time-scale toggle (1x / 0.5x / 0.25x) slows every Choreo animator on this client and asks the
 	server (dev remote, dev places only) to publish the scale as a workspace attribute for anything
@@ -79,7 +101,9 @@ local EntityTracker = require(Client.controllers.EntityTracker)
 local Replication = require(Client.controllers.Replication)
 local ClipLibrary = require(Client.choreo.ClipLibrary)
 local FrameOrder = require(Client.fx.FrameOrder)
+local Telegraphs = require(Client.fx.Telegraphs)
 local World = require(Shared.data.world)
+local ChoreoData = require(Shared.data.choreo)
 
 local Choreo, hasChoreo = Siblings.load(Client, "choreo.Choreo")
 local CharacterController = Siblings.load(Client, "controllers.CharacterController")
@@ -123,13 +147,26 @@ local stageToken = 0
 local targetId: number? = nil
 -- K short of the target: a second K before this clock ends the take unmarked.
 local confirmUntil: number? = nil
--- Auto-perform: on or off, the take's timed presses left, the keys it holds down, and the parry.
+-- Auto-perform: on or off, the take's timed presses left, the keys it holds down, its reactions
+-- (clip-timed entries) and standing rules, the reaction's chain running (the step it is on, when
+-- that goes down, and its Move while held), how often each cycling step has pressed, and the
+-- entry or step whose stick the walk's render step holds (CF).
 local autoOn = Capture.perform.defaultOn
 local performing = false
 local presses: { CaptureLogic.Press } = {}
 local heldKeys: { [string]: boolean } = {}
-local parry: Dev.Perform? = nil
-local parryAt: number? = nil
+local reactions: { CaptureLogic.Reaction } = {}
+local standing: { CaptureLogic.Standing } = {}
+type Chain = { steps: { CaptureLogic.PerformStep }, index: number, at: number?, entry: CaptureLogic.PerformEntry }
+local chain: Chain? = nil
+local chainMove: CaptureLogic.PerformStep? = nil
+local chainMoveUntil = 0
+local stepCounts: { [CaptureLogic.PerformStep]: number } = {}
+type Stick = { stick: { number }?, sprint: boolean? }
+local stickHeld: Stick? = nil
+local MOVE_ACTION = Capture.perform.moveAction
+-- Every staged enemy by stage.enemies index (the staging reply's ids), the target first.
+local stagedIds: { number }? = nil
 -- The mouse cursor as it was before the take hid it.
 local cursorBefore: boolean? = nil
 -- The walk into the stand ring a staging asked for, who walks it, how long it has run (on the
@@ -139,6 +176,14 @@ local walkMode: WalkMode = "Auto"
 local walkElapsed = 0
 local ringPart: BasePart? = nil
 local lastAskAt: number? = nil
+-- Whether the auto-walk holds the sprint now, the walks of the last leg it has left this staging,
+-- how far the spot was ahead when it let go and whether that let-go was a sprint's, and the carry
+-- the last sprint stop was seen to make (nil until one was: an engine that slides a stop on).
+local walkSprint = false
+local secondWalksLeft = 0
+local letGoAhead: number? = nil
+local letGoSprint = false
+local learnedCarry: number? = nil
 
 -- ---------------------------------------------------------------------------------------------
 -- Panel
@@ -524,14 +569,37 @@ local function startWalk(asked: CaptureLogic.Walk)
 	refreshPanel()
 end
 
+-- Holds or lets go of the walk's sprint through the input path (as the sprint key's binding does).
+local function holdSprint(on: boolean)
+	if walkSprint == on then
+		return
+	end
+	walkSprint = on
+	InputController.handle(
+		WalkData.sprintAction,
+		if on then Enum.UserInputState.Begin else Enum.UserInputState.End,
+		nil
+	)
+end
+
 local function stopWalk()
 	walk = nil
+	holdSprint(false)
 	removeRing()
 end
 
 -- Asks the server to stage `shot` and frames it, or walks into its ring when it says so.
 local function runStaging(shot: Dev.Shot, token: number)
 	task.spawn(function()
+		-- No faster than the server's rate: P straight after a take (its hold just asked) stages,
+		-- never "too many requests".
+		local wait = CaptureLogic.askWait(lastAskAt, os.clock(), Capture.stage.requestsPerSecond)
+		if wait > 0 then
+			task.wait(wait)
+			if not stillStaging(token) then
+				return
+			end
+		end
 		local reply = ask("stage", shot.id)
 		if not stillStaging(token) then
 			return
@@ -551,6 +619,7 @@ local function runStaging(shot: Dev.Shot, token: number)
 			statusNote = "No staging here (Studio only): set the shot up by hand"
 		end
 		targetId = if reply ~= nil then reply.targetId else nil
+		stagedIds = if reply ~= nil and typeof(reply.ids) == "table" then reply.ids else nil
 		local record = waitForTarget(targetId)
 		if not stillStaging(token) then
 			return
@@ -571,6 +640,8 @@ local function startCountdown()
 	stageToken += 1
 	walkMode = "Auto"
 	walkElapsed = 0
+	secondWalksLeft = WalkData.secondWalks
+	letGoAhead = nil
 	refreshPanel()
 	runStaging(shot, stageToken)
 end
@@ -585,14 +656,59 @@ local function lockedId(): number?
 	return if current ~= nil then current.id else nil
 end
 
-local function press(action: string, down: boolean)
-	-- A lock press in a staged take acts on the staged target alone (D-290); its key-up does nothing.
+-- How far (studs, flat) the lock's target stands from the local root, or nil with no lock.
+local function lockDistance(): number?
+	local id = lockedId()
+	local record: any = if id ~= nil then EntityTracker.get(id) else nil
+	local model = if record ~= nil then record.model else nil
+	local part = if model ~= nil then model.PrimaryPart else nil
+	local character = player.Character
+	local root = if character ~= nil then character.PrimaryPart else nil
+	if part == nil or root == nil then
+		return nil
+	end
+	local offset = part.Position - root.Position
+	return math.sqrt(offset.X * offset.X + offset.Z * offset.Z)
+end
+
+-- Whether the lock's target stands within `studs` (flat); no limit is anywhere.
+local function lockWithin(studs: number?): boolean
+	if studs == nil then
+		return true
+	end
+	local distance = lockDistance()
+	return distance ~= nil and distance <= studs
+end
+
+-- One key down or up through the input path, as its binding does. The move action is the stick:
+-- `stick` is the entry or step it holds (its sprint held with it). A lock press in a staged take
+-- acts on staged enemy `enemy` alone (D-290: it locks it, or lets it go when the lock is on it,
+-- never with `keep`); its key-up does nothing.
+local function press(action: string, down: boolean, stick: Stick?, enemy: number?, keep: boolean?)
+	if action == MOVE_ACTION then
+		if down then
+			stickHeld = stick
+			if stick ~= nil and stick.sprint == true then
+				press(WalkData.sprintAction, true)
+			end
+		elseif stickHeld == stick then
+			stickHeld = nil
+			if stick ~= nil and stick.sprint == true then
+				press(WalkData.sprintAction, false)
+			end
+		end
+		return
+	end
 	if action == "LockOn" then
-		local how = CaptureLogic.lockPress(targetId, lockedId())
+		local id = CaptureLogic.enemyId(stagedIds, targetId, enemy)
+		if id == nil and targetId ~= nil then
+			return -- staged, but not that enemy
+		end
+		local how = CaptureLogic.lockPress(id, lockedId())
 		if how ~= "Key" then
 			if down and how == "Lock" then
-				TargetController.lockOn(targetId)
-			elseif down then
+				TargetController.lockOn(id)
+			elseif down and keep ~= true then
 				TargetController.clear()
 			end
 			return
@@ -608,8 +724,11 @@ end
 
 -- Lets go of every key auto-perform holds, none acting on the way up (D-290): a held Art's hold is
 -- cancelled first, so its key's release launches nothing; the key still comes up through the input
--- path, so the hold there ends too.
+-- path, so the hold there ends too. The stick lets go with them.
 local function releaseKeys()
+	stickHeld = nil
+	chain = nil
+	chainMove = nil
 	for _, key in CaptureLogic.letGo(heldKeys, InputData.artSlot) do
 		if key.slot ~= nil then
 			Siblings.call(CharacterController, "cancelArt", key.slot)
@@ -622,14 +741,100 @@ end
 local function armPerform(shot: Dev.Shot)
 	performing = CaptureLogic.performs(autoOn, Steps[timeScaleIndex])
 	presses = if performing then CaptureLogic.timedPresses(shot.perform) else {}
-	parry = nil
-	parryAt = nil
-	if performing then
-		for _, entry in shot.perform do
-			if entry.onClip ~= nil then
-				parry = entry
-			end
+	reactions = if performing then CaptureLogic.reactions(shot.perform) else {}
+	standing = if performing then CaptureLogic.standing(shot.perform) else {}
+	chain = nil
+	chainMove = nil
+	stickHeld = nil
+	table.clear(stepCounts)
+end
+
+-- A reaction heard drops the chain running: the stick it holds lets go, its keys already down
+-- come up at their time.
+local function dropChain()
+	local move = chainMove
+	if move ~= nil then
+		chainMove = nil
+		press(MOVE_ACTION, false, move)
+	end
+	chain = nil
+end
+
+-- Whether a reaction waits for its moment or a chain runs: the standing rules wait.
+local function busy(): boolean
+	if chain ~= nil then
+		return true
+	end
+	for _, reaction in reactions do
+		if reaction.at ~= nil then
+			return true
 		end
+	end
+	return false
+end
+
+-- A key down now and up `hold` from now.
+local function tap(action: string, hold: number, enemy: number?, keep: boolean?)
+	press(action, true, nil, enemy, keep)
+	if action ~= "LockOn" then
+		CaptureLogic.enqueue(presses, { at = elapsed + hold, action = action, down = false })
+	end
+end
+
+-- The chain on to its next step `delay` after now, or done.
+local function nextStep(running: Chain)
+	running.index += 1
+	local step = running.steps[running.index]
+	if step == nil then
+		chain = nil
+	else
+		running.at = elapsed + step.delay
+	end
+end
+
+local function stepChain()
+	local running = chain
+	if running == nil then
+		return
+	end
+	local move = chainMove
+	if move ~= nil then
+		if elapsed >= chainMoveUntil or (move.within ~= nil and lockWithin(move.within)) then
+			chainMove = nil
+			press(MOVE_ACTION, false, move)
+			nextStep(running)
+		end
+		return
+	end
+	local at = running.at
+	if at == nil or elapsed < at then
+		return
+	end
+	-- Nothing of the reaction goes down past its `to` (D-CI3): the rest of the chain is dropped.
+	if not CaptureLogic.inside(running.entry, elapsed) then
+		dropChain()
+		return
+	end
+	local step = running.steps[running.index]
+	if step.action == MOVE_ACTION then
+		chainMove = step
+		chainMoveUntil = elapsed + step.hold
+		running.at = nil
+		press(MOVE_ACTION, true, step)
+		return
+	end
+	local count = (stepCounts[step] or 0) + 1
+	stepCounts[step] = count
+	tap(CaptureLogic.cycleAction(step, count), step.hold, step.enemy, true)
+	-- The next step counts its delay from this key's let-go.
+	running.index += 1
+	local following = running.steps[running.index]
+	if following == nil then
+		-- Done once the key is up: the standing rules wait for it.
+		running.at = elapsed + step.hold
+		running.steps = {}
+	else
+		running.at = elapsed + step.hold + following.delay
 	end
 end
 
@@ -638,35 +843,114 @@ local function stepPerform()
 		return
 	end
 	for _, due in CaptureLogic.due(presses, elapsed) do
-		press(due.action, due.down)
+		press(due.action, due.down, due.entry)
 	end
-	local at = parryAt
-	local entry = parry
-	if at ~= nil and entry ~= nil and elapsed >= at then
-		parryAt = nil
-		parry = nil -- one parry a take
-		press(entry.action, true)
-		table.insert(presses, { at = elapsed + entry.hold, action = entry.action, down = false })
+	local running = chain
+	if running ~= nil and #running.steps == 0 and elapsed >= (running.at or 0) then
+		chain = nil
+	end
+	for _, reaction in reactions do
+		local at = reaction.at
+		if at ~= nil and elapsed >= at then
+			local entry = reaction.entry
+			if not CaptureLogic.inside(entry, elapsed) then
+				-- Moved past its `to` by its attacker's hit-stop: it waits no more.
+				reaction.at = nil
+				continue
+			end
+			CaptureLogic.pressed(reaction)
+			dropChain()
+			tap(entry.action, entry.hold, entry.enemy, true)
+			local steps = entry.chain
+			if steps ~= nil and #steps > 0 then
+				chain = { steps = steps, index = 1, at = elapsed + entry.hold + steps[1].delay, entry = entry }
+			end
+		end
+	end
+	stepChain()
+	if busy() then
+		return
+	end
+	for _, rule in standing do
+		if not CaptureLogic.standingDue(rule, elapsed) then
+			continue
+		end
+		local entry = rule.entry
+		if entry.action == "LockOn" then
+			-- The lock back on its enemy once it is lost; a lock that is on stays.
+			if lockedId() == nil then
+				rule.last = elapsed
+				tap("LockOn", entry.hold, entry.enemy, true)
+			end
+		elseif lockWithin(entry.within) then
+			rule.last = elapsed
+			tap(entry.action, entry.hold)
+		end
 	end
 end
 
--- The target's attack as this client draws it: the parry's guard goes down `lead` before its hit
--- window (heard from whichever event of the clip comes first).
+-- The stick auto-perform holds, each frame of the take from the walk's render step: after the
+-- control script's Move and before the character controller reads MoveDirection, as a held key's.
+local function stickStep()
+	local held = stickHeld
+	local stick = if held ~= nil then held.stick else nil
+	if not performing or stick == nil then
+		return
+	end
+	local character = player.Character
+	local humanoid = if character ~= nil then character:FindFirstChildOfClass("Humanoid") else nil
+	if humanoid == nil then
+		return
+	end
+	local x, z = CaptureLogic.stickMove(stick)
+	humanoid:Move(Vector3.new(x, 0, z), true)
+end
+
+-- What this client draws: each reaction hears its clip on its staged enemy, and sets its key
+-- `lead` before the clip's hit window from whichever event comes (each later one moves it on),
+-- a guard the client's latency lead earlier still (Telegraphs.glintLead, D-289): it reaches the
+-- server a latency after it leaves, so it leaves as early as the glint shows. One heard drops the
+-- chain running; with `lock` the lock goes to its enemy.
 Replication.clipEvent:Connect(function(record: any, clipId: string, event: any, jumped: boolean)
-	local entry = parry
-	if phase ~= "Recording" or entry == nil or parryAt ~= nil or jumped then
+	if phase ~= "Recording" or not performing or jumped or record == nil then
 		return
 	end
-	if record == nil or record.id ~= targetId or clipId ~= entry.onClip then
+	local clip: any = nil
+	for _, reaction in reactions do
+		local entry = reaction.entry
+		if entry.onClip ~= clipId or record.id ~= CaptureLogic.enemyId(stagedIds, targetId, entry.enemy) then
+			continue
+		end
+		if clip == nil then
+			local ok, found = pcall(ClipLibrary.get, clipId)
+			if not ok or found == nil then
+				return
+			end
+			clip = found
+		end
+		if CaptureLogic.hear(reaction, clip.events, event.time, elapsed, Telegraphs.glintLead()) then
+			dropChain()
+			if entry.lock == true and lockedId() ~= record.id then
+				TargetController.lockOn(record.id)
+			end
+		end
+	end
+end)
+
+-- A hit on a reaction's enemy mid-attack: the server paused its attack (attackPause) and this
+-- client holds its clip as long, so the press waiting for it moves on with it.
+Replication.hit:Connect(function(payload: any)
+	if phase ~= "Recording" or not performing or typeof(payload) ~= "table" then
 		return
 	end
-	local ok, clip = pcall(ClipLibrary.get, clipId)
-	if not ok or clip == nil then
+	local pause = payload.attackPause
+	if typeof(pause) ~= "number" or pause <= 0 then
 		return
 	end
-	local delay = CaptureLogic.parryDelay(clip.events, event.time, entry.lead or 0)
-	if delay ~= nil then
-		parryAt = elapsed + delay
+	for _, reaction in reactions do
+		if payload.targetId == CaptureLogic.enemyId(stagedIds, targetId, reaction.entry.enemy) then
+			CaptureLogic.pause(reaction, pause)
+		end
 	end
 end)
 
@@ -704,7 +988,32 @@ local function startRecording()
 	task.spawn(ask, "go")
 end
 
--- Ends the take: marked done, or stopped short and unmarked.
+-- The take is over: the server holds its enemies where they stand (CS1), so nothing of it acts
+-- between takes. A refusal (the rate, right after the "go") is asked again at the rate, for up to
+-- stageTimeoutSeconds; a newer staging (P) or J owns the field from then and ends the asking.
+local function holdTake(token: number)
+	local deadline = os.clock() + Capture.stageTimeoutSeconds
+	while true do
+		local reply = ask("hold")
+		if token ~= stageToken or reply == nil or reply.ok == true then
+			return
+		end
+		if os.clock() >= deadline then
+			statusNote = ("The take's enemies were not held: %s; press %s to clear them"):format(
+				tostring(reply.error),
+				keys.releaseStage
+			)
+			refreshPanel()
+			return
+		end
+		task.wait(1 / Capture.stage.requestsPerSecond)
+		if token ~= stageToken then
+			return
+		end
+	end
+end
+
+-- Ends the take: marked done, or stopped short and unmarked. Its enemies stop at once (CS1).
 local function finish(marked: boolean)
 	if phase ~= "Recording" then
 		return
@@ -713,8 +1022,8 @@ local function finish(marked: boolean)
 	releaseKeys()
 	performing = false
 	presses = {}
-	parry = nil
-	parryAt = nil
+	reactions = {}
+	standing = {}
 	restoreCursor()
 	prompt.Visible = false
 	counter.Visible = false
@@ -731,6 +1040,7 @@ local function finish(marked: boolean)
 	end
 	setPanelVisible(true)
 	refreshPanel()
+	task.spawn(holdTake, stageToken)
 end
 
 local function markDone()
@@ -851,16 +1161,30 @@ for _, name in WalkData.cancelKeys do
 	end
 end
 
--- A movement key hands the walk to the player: the ring stays and the shot is asked for once the
--- root stands in it at rest, with the whole timeout from now.
+-- A movement key hands the walk to the player until P: the sprint lets go, the ring stays and the
+-- shot is asked for once the root stands in it at rest, with the whole timeout from now. A key
+-- during an ask (P's, or one between walks) hands over the walk its reply asks for.
 local function takeOver()
-	if phase ~= "Walking" or walkMode == "Manual" then
+	if (phase ~= "Walking" and phase ~= "Staging") or walkMode == "Manual" then
 		return
 	end
 	walkMode = "Manual"
 	walkElapsed = 0
-	statusNote = walkNote()
-	refreshPanel()
+	holdSprint(false)
+	if phase == "Walking" then
+		statusNote = walkNote()
+		refreshPanel()
+	end
+end
+
+-- Whether a movement key is down now (one held from before the walk began hands it over too).
+local function walkKeyDown(): boolean
+	for code in walkKeys do
+		if UserInputService:IsKeyDown(code) then
+			return true
+		end
+	end
+	return false
 end
 
 UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
@@ -961,23 +1285,63 @@ local function walkStep(dt: number)
 	if root == nil or humanoid == nil then
 		return
 	end
+	if walkMode ~= "Manual" and walkKeyDown() then
+		takeOver()
+	end
 	local at = root.Position
+	local velocity = root.AssemblyLinearVelocity
+	local speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
 	if walkMode == "Auto" then
-		local dx, dz = CaptureLogic.steer(current, at.X, at.Z, WalkData.waypointStuds, WalkData.arriveStuds)
+		-- The stop's carry at the walk's speed (in 1x terms: the slowed body stops as far), and half
+		-- of this frame's step, so the body comes to rest within half a step of the spot.
+		local skid = ChoreoData.locomotion.skidSpeedThreshold
+		local sprint = speed / Steps[timeScaleIndex] > skid
+		local carry = if sprint and learnedCarry ~= nil
+			then learnedCarry :: number
+			else CaptureLogic.stopCarry(speed / Steps[timeScaleIndex], skid, WalkData.carrySeconds)
+		local dx, dz = CaptureLogic.steer(
+			current,
+			at.X,
+			at.Z,
+			WalkData.waypointStuds,
+			carry + speed * dt / 2,
+			WalkData.lookaheadStuds
+		)
 		if dx ~= nil and dz ~= nil then
+			holdSprint(true)
 			humanoid:Move(Vector3.new(dx, 0, dz), false)
 			return
 		end
-		-- At the spot: let go, and the two-step stop brings the body to rest.
+		-- The spot is the stop's carry ahead: let go, and the stop brings the body to rest.
+		letGoAhead = CaptureLogic.ahead(current, at.X, at.Z)
+		letGoSprint = sprint
+		holdSprint(false)
 		walkMode = "Settle"
 	end
-	local velocity = root.AssemblyLinearVelocity
-	if Vector3.new(velocity.X, 0, velocity.Z).Magnitude > WalkData.restSpeed then
+	if speed > WalkData.restSpeed then
 		return
 	end
 	local feet = at.Y - (humanoid.HipHeight + root.Size.Y / 2 + World.spawn.groundEpsilon)
 	if walkMode == "Manual" and not CaptureLogic.inRing(current, at.X, feet, at.Z) then
 		return
+	end
+	if walkMode == "Settle" then
+		local seen = letGoAhead
+		letGoAhead = nil
+		if seen ~= nil and letGoSprint then
+			-- How far this sprint stop carried the body on (none but the engine's own slide): the
+			-- next let-go allows for it, up to the ring's radius.
+			learnedCarry = math.clamp(seen - CaptureLogic.ahead(current, at.X, at.Z), 0, current.radius)
+		end
+		local look = root.CFrame.LookVector
+		local studs, degrees = CaptureLogic.restOff(current, at.X, at.Z, look.X, look.Z)
+		if (studs > WalkData.restStuds or degrees > WalkData.restDegrees) and secondWalksLeft > 0 then
+			-- Off the spot or its facing: the last leg again, from the point before the spot.
+			secondWalksLeft -= 1
+			current.index = math.max(1, #current.path - 1)
+			walkMode = "Auto"
+			return
+		end
 	end
 	if CaptureLogic.askWait(lastAskAt, os.clock(), Capture.stage.requestsPerSecond) > 0 then
 		return
@@ -991,8 +1355,17 @@ local function walkStep(dt: number)
 	runStaging(currentShot(), stageToken)
 end
 
+-- The walk's render step: the walk into the ring, or auto-perform's stick while a take records.
+local function inputStep(dt: number)
+	if phase == "Recording" then
+		stickStep()
+	else
+		walkStep(dt)
+	end
+end
+
 pcall(function()
-	RunService:BindToRenderStep(WALK_STEP_NAME, FrameOrder.priority(WalkData.renderOrder), walkStep)
+	RunService:BindToRenderStep(WALK_STEP_NAME, FrameOrder.priority(WalkData.renderOrder), inputStep)
 end)
 
 player.CharacterAdded:Connect(function()

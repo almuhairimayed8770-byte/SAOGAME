@@ -264,6 +264,13 @@ type Prediction = {
 	-- attack (nil when it paused none).
 	allowance: number,
 	attack: Attack?,
+	-- Seconds of hold this contact asked of the local rig so far: its tier's, and every frame it
+	-- held on for the word (D-CH1). Less what the rig has left, it is what the hold has shown.
+	asked: number,
+	-- True while its hold may still hold on for the word: until the word comes, the hold has run
+	-- contact.wordHoldSeconds from the contact, a later hold's run began, or a word for a later
+	-- window of the same swing says the server did not count this one.
+	waiting: boolean,
 }
 -- An enemy's attack this client knows of (D-172): when its wind-up began on the server's clock,
 -- its beats, the pause the server gave it so far (or a contact's provisional share), the attack
@@ -297,6 +304,9 @@ local releasing: any = nil
 local heldDeaths: { any } = {}
 -- The death being let go now (it is not held again).
 local releasingDeath: any = nil
+-- The contact frame (on the clock) of the kill whose word lets its held death go now: the death's
+-- silence and shatter keep that contact's beat (D-CH2).
+local releasingContactAt: number? = nil
 -- The runs of holds on the local fighter's rig: a hold put on while none runs starts a new run,
 -- one put on while one runs joins it (the same cut's other targets, a blow taken inside the
 -- hold). A confirmation's stronger tier runs on only its own contact's run, so the word for an
@@ -310,6 +320,10 @@ local holdEnds = -math.huge
 local playSeconds = 0
 local playWall: number? = nil
 local playTicking = false
+-- The clock at the last Heartbeat and the length of the step it closed (D-CH1): a hold that holds
+-- on for its word goes on one such step at a time, so it ends on the frame the word comes.
+local beatAt: number? = nil
+local beatStep: number = ChoreoData.frameSeconds
 -- The newest death owns the silence: how many deaths came so far, and when the silence a death
 -- started ends (nil while none holds).
 local deathCount = 0
@@ -731,6 +745,85 @@ local function expirePredictions(seen: number)
 			giveBack(prediction)
 		elseif age > Combat.contact.allowanceSeconds and prediction.allowance ~= 0 then
 			giveBack(prediction)
+		end
+	end
+end
+
+-- True when a hold with `left` seconds still to run freezes the next step of `step` seconds (the
+-- Mixer's rule, D-228 amended: at least half of the step is owed).
+local function holdsNext(left: number, step: number): boolean
+	return left > ChoreoData.pauseEpsilon and left + ChoreoData.pauseEpsilon >= step * 0.5
+end
+
+-- Holds a rig on for one more step of `step` seconds unless what it holds already freezes it;
+-- returns the seconds this added to its hold.
+local function holdOneStep(animator: any, step: number): number
+	local left = pauseOf(animator)
+	if left ~= nil and holdsNext(left, step) then
+		return 0
+	end
+	animator:hitStop(step / ChoreoData.frameSeconds)
+	return math.max(0, step - (left or 0))
+end
+
+-- A contact's hold waits for its word (D-CH1). Every Heartbeat, after the render step: while a
+-- contact of the hold now running on the local rig still waits for the server's HitConfirmed, has
+-- held less than contact.wordHoldSeconds from its contact frame and the hold would let go on the
+-- next frame, both rigs hold one more step. The word then lets them go (HitConfirmed: the frame
+-- that first shows its number is still held, a stronger tier runs on in place); a word that never
+-- comes lets them go at the cap with no number.
+local function holdForWords(step: number)
+	if #predictions == 0 then
+		return
+	end
+	local d = dependencies()
+	local localId = d.localId()
+	local attacker = if localId ~= nil then d.entities.get(localId) else nil
+	local now = clock()
+	local waiting: { Prediction } = {}
+	for _, prediction in predictions do
+		if not prediction.waiting then
+			continue
+		end
+		-- The next frame would take it past the cap (a hair over: a 60 fps clock sums short).
+		if prediction.run ~= holdRun or now + step - prediction.at > Combat.contact.wordHoldSeconds + 1e-6 then
+			prediction.waiting = false
+		else
+			table.insert(waiting, prediction)
+		end
+	end
+	if #waiting == 0 or attacker == nil then
+		return
+	end
+	local animator = animatorOf(attacker)
+	if animator == nil then
+		return
+	end
+	local added = holdOneStep(animator, step)
+	if added > 0 then
+		holdEnds = math.max(holdEnds, now + step)
+		for _, prediction in waiting do
+			prediction.asked += added
+		end
+	end
+	-- The target holds on with it, unless it is in an attack the server may still pause: that keeps
+	-- the server's beat (D-172), which pauses it for the hit's own hold and no more.
+	local held: { [any]: boolean } = {}
+	for _, prediction in waiting do
+		local target = d.entities.get(prediction.targetId)
+		local attack = if target ~= nil then attacks[target.id] else nil
+		if
+			target ~= nil
+			and target ~= attacker
+			and not held[target]
+			and not rushRunning(target.id)
+			and not (attack ~= nil and attackOpen(attack))
+		then
+			held[target] = true
+			local targetAnimator = animatorOf(target)
+			if targetAnimator ~= nil then
+				holdOneStep(targetAnimator, step)
+			end
 		end
 	end
 end
@@ -1569,6 +1662,19 @@ function handlers.HitConfirmed(payload: any)
 		expirePredictions(seen)
 		dropStale(earlyConfirms, seen)
 		predicted = takeMatch(predictions, payload.targetId, payload.hitIndex, payload.artId, payload.swing)
+		-- The server counts a swing's windows in order: a word for a later window of the swing says
+		-- an earlier one still waiting was not counted, and its hold waits no more (D-CH1).
+		for _, other in predictions do
+			if
+				other.waiting
+				and typeof(payload.hitIndex) == "number"
+				and other.windowIndex < payload.hitIndex
+				and other.artId == payload.artId
+				and (other.swing == nil or payload.swing == nil or other.swing == payload.swing)
+			then
+				other.waiting = false
+			end
+		end
 		if predicted == nil and payload ~= releasing and waitsForKey(payload) then
 			-- Before the blade showed the key: the hold starts on the key frame (D-267), and a kill's
 			-- freeze, silence and shatter with it (its EntityDied came just before it).
@@ -1586,9 +1692,11 @@ function handlers.HitConfirmed(payload: any)
 			})
 		end
 	end
-	-- A death held for this word plays first, as it came (D-267 amended).
+	-- A death held for this word plays first, as it came (D-267 amended), on its contact's beat.
 	if #heldDeaths > 0 then
+		releasingContactAt = if predicted ~= nil then predicted.at else nil
 		releaseDeaths(payload.targetId)
+		releasingContactAt = nil
 	end
 	-- An enemy's blow on the local fighter shown on its strike frame (D-258): this word brings the
 	-- number and what it adds; one that guards or parries took the flinch back.
@@ -1605,22 +1713,31 @@ function handlers.HitConfirmed(payload: any)
 		else 0
 
 	if predicted ~= nil then
-		if upgrade > 0 and attacker ~= nil and predicted.run == holdRun then
-			-- The contact's hold, while it is still on, runs on to the stronger tier's length from
-			-- the contact, never restarted. One that already let go is not stopped again: a hit
-			-- holds once (issue 6), and a later cut's hold is that cut's own; the stronger tier
-			-- still sounds and shows below.
+		if attacker ~= nil and predicted.run == holdRun then
+			-- The contact's hold, while it is still on or waits for this word (D-CH1), runs on to the
+			-- stronger tier's length from the contact, never restarted: a Kill that comes inside a
+			-- Normal's hold, or while the hold waits for it, is one unbroken freeze. One that already
+			-- let go is not stopped again: a hit holds once (issue 6), and a later cut's hold is
+			-- that cut's own; the stronger tier still sounds and shows below.
 			local animator = animatorOf(attacker)
-			local predictedSeconds = heldFrames(Combat.hitStopFrames[predicted.tier]) * ChoreoData.frameSeconds
-			local remaining = holdRemaining(animator, predictedSeconds, predicted.at)
-			if remaining > 0 then
-				local held = math.max(0, predictedSeconds - remaining)
-				local left = heldFrames(frames) - held / ChoreoData.frameSeconds
-				if left > 0 then
-					animator:hitStop(left)
-					holdEnds = math.max(holdEnds, clock() + left * ChoreoData.frameSeconds)
-					if target ~= nil and target ~= attacker and not rushRunning(target.id) then
-						animatorOf(target):hitStop(left)
+			local remaining = holdRemaining(animator, predicted.asked, predicted.at)
+			if remaining > 0 or predicted.waiting then
+				-- What the hold has shown since the contact: all it asked for, less what is left.
+				local held = math.max(0, predicted.asked - remaining)
+				local upgraded = if upgrade > 0 then heldFrames(frames) * ChoreoData.frameSeconds - held else 0
+				-- The frame that first shows the number is held, whether the word came before this
+				-- frame's render step or after it, on every rig that held on for the word.
+				local wordFrame = if predicted.waiting then beatStep else 0
+				local left = math.max(upgraded, wordFrame)
+				if left > remaining + ChoreoData.pauseEpsilon then
+					animator:hitStop(left / ChoreoData.frameSeconds)
+					holdEnds = math.max(holdEnds, clock() + left)
+				end
+				if target ~= nil and target ~= attacker and not rushRunning(target.id) then
+					local attack = attacks[target.id]
+					local targetLeft = if attack ~= nil and attackOpen(attack) then upgraded else left
+					if targetLeft > 0 then
+						animatorOf(target):hitStop(targetLeft / ChoreoData.frameSeconds)
 					end
 				end
 			end
@@ -1860,7 +1977,24 @@ function handlers.EntityDied(payload: any)
 	-- silence waits the kill's hit-stop so the kill's crack and impact frames are heard first; the
 	-- shatter and the line move by the same lead. Only the newest death ducks and restores: a
 	-- death after this one brings its own silence, which this one's shatter never cuts short.
+	-- A kill the local blade already touched counts its hit-stop from that contact frame (D-CH2):
+	-- its word came a latency later, inside the hold, so the silence and the shatter keep the
+	-- contact's beat, as they do when the word comes first.
 	local lead = Moments.deathDuckDelay()
+	local function fromContact(at: number)
+		local since = diedAt - at
+		if since >= 0 and since < Moments.deathDuckDelay() then
+			lead = math.min(lead, Moments.deathDuckDelay() - since)
+		end
+	end
+	if releasingContactAt ~= nil then
+		fromContact(releasingContactAt :: number)
+	end
+	for _, prediction in predictions do
+		if prediction.targetId == payload.entityId then
+			fromContact(prediction.at)
+		end
+	end
 	d.schedule(lead, function()
 		if death ~= deathCount then
 			return
@@ -2051,6 +2185,9 @@ function Replication.contact(contact: any): boolean
 		moment = if typeof(moment) == "string" then moment else nil,
 		allowance = allowance,
 		attack = attack,
+		asked = heldFrames(frames) * ChoreoData.frameSeconds,
+		-- Its hold waits for its word only on a client that ticks Heartbeat (holdForWords).
+		waiting = playTicking,
 	})
 	-- The server's word for this hit, held for its key (D-267), plays on it now: it finds the
 	-- contact just played and adds only what its tier adds.
@@ -2357,15 +2494,27 @@ function Replication.bind(newDeps: Deps)
 	holdEnds = -math.huge
 	playSeconds = 0
 	playWall = nil
+	beatAt = nil
+	beatStep = ChoreoData.frameSeconds
 	playTicking = typeof(newDeps.onHeartbeat) == "function"
 	if playTicking then
 		local onHeartbeat = newDeps.onHeartbeat :: any
-		onHeartbeat(function()
+		onHeartbeat(function(dt: number?)
+			-- The step this Heartbeat closes: the engine's, else the clock's since the last one.
+			local now = clock()
+			local last = beatAt
+			beatStep = if typeof(dt) == "number" and dt > 0
+				then dt
+				elseif last ~= nil and now > last then now - last
+				else ChoreoData.frameSeconds
+			beatAt = now
 			tickPlay()
 			-- Enemy blows on the local fighter, judged on their strike frames (D-258).
 			Replication.stepStrikes()
 			-- The server's words held for their strike's key (D-267).
 			Replication.stepWords()
+			-- Contacts' holds waiting for their words (D-CH1).
+			holdForWords(beatStep)
 		end)
 	end
 	deathCount = 0

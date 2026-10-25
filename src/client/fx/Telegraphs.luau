@@ -6,13 +6,16 @@
 	parts, textured when the decal assets exist) that fades in over the wind-up and vanishes at the
 	strike. The ground shape lies on the ground the caller names (Replication grounds the root's
 	origin, F11): under the fighters' feet, never across their legs. A blow's tell (`strike` given)
-	holds through its strike until its snap and glints over the parry window (F7). The
-	accessibility intensity comes from the HUD setting; its floor is still visible.
+	holds through its strike until its snap (F7). The accessibility intensity comes from the HUD
+	setting; its floor is still visible.
 
-	The glint leads by this client's latency (D-289): the server judges a parry on when the press
-	reaches it, so the glint opens and closes the least lateness of the last few tells heard
-	earlier (fx.luau telegraph.glintLeadSamples, capped by glintLeadMax). The tell still holds to
-	its snap; only the glint moves. The server is unchanged.
+	The parry glint (D-CP1): for a few frames on the parry window (TelegraphShapes.timing) a blow
+	that can be parried turns its fill and its ground shape the glint's color (fx.luau
+	telegraph.glintToken) at their brightest, then its kind's color again until the snap. An
+	Unblockable blow never glints (D-CP2). The glint leads by this client's latency (D-289): the
+	server judges a parry on when the press reaches it, so the glint comes the least lateness of the
+	last few tells heard earlier (fx.luau telegraph.glintLeadSamples, capped by glintLeadMax). The
+	tell still holds to its snap; only the glint moves. The server is unchanged.
 
 	A rig with no weapon part (the boar: its tusks are its body) is filled whole through its own
 	outline Highlight (OutlineManager.tint), never a second Highlight on the same model: the engine
@@ -44,11 +47,13 @@ type Active = {
 	kind: string,
 	windUp: number,
 	ends: number, -- seconds into the wind-up the tell goes out (TelegraphShapes.timing)
-	glintFrom: number, -- seconds into the wind-up its glint begins
-	glintUntil: number, -- and ends (its lead before the snap, D-289)
+	glintFrom: number, -- seconds into the wind-up its glint begins (`ends` for a kind that never glints)
+	glintUntil: number, -- and ends (D-CP1, early by its lead, D-289)
 	start: number,
 	highlight: Highlight?, -- the weapon's fill; nil when the rig's own outline is tinted instead
-	color: Color3,
+	color: Color3, -- its kind's
+	glintColor: Color3, -- the glint's
+	glinting: boolean, -- drawn in the glint's color now
 	release: () -> (),
 	pieces: { BasePart },
 }
@@ -212,10 +217,31 @@ local function placePiece(part: BasePart, piece: TelegraphShapes.Piece, color: C
 	end
 end
 
+-- Paints the fill and the ground shape one color (its kind's, or the glint's while it glints).
+local function paint(active: Active, color: Color3)
+	local highlight = active.highlight
+	if highlight ~= nil then
+		highlight.FillColor = color
+	end
+	for _, part in active.pieces do
+		part.Color = color
+		local decal = part:FindFirstChild("Decal")
+		if decal ~= nil and decal:IsA("Decal") and decal.Texture ~= "" then
+			decal.Color3 = color
+		end
+	end
+end
+
 local function applyAlpha(active: Active, now: number)
 	local elapsed = now - active.start
 	local level = currentIntensity()
-	local alpha = TelegraphShapes.decalAlpha(elapsed, active.windUp, level, active.ends)
+	local glinting = TelegraphShapes.glinting(elapsed, active.ends, active.glintFrom, active.glintUntil)
+	if glinting ~= active.glinting then
+		active.glinting = glinting
+		paint(active, if glinting then active.glintColor else active.color)
+	end
+	local alpha =
+		TelegraphShapes.decalAlpha(elapsed, active.windUp, level, active.ends, active.glintFrom, active.glintUntil)
 	for _, part in active.pieces do
 		part.Transparency = 1 - alpha
 		local decal = part:FindFirstChild("Decal")
@@ -241,7 +267,7 @@ local function applyAlpha(active: Active, now: number)
 	if highlight ~= nil then
 		highlight.FillTransparency = fill
 	else
-		OutlineManager.tint(active.model, active.color, fill)
+		OutlineManager.tint(active.model, if glinting then active.glintColor else active.color, fill)
 	end
 end
 
@@ -273,8 +299,8 @@ end
 --- Draws the wind-up for an enemy: weapon fill plus a ground shape at `origin` (on the ground)
 --- facing `facing`. `lateBy`: seconds since the server began the wind-up (the telegraph is that far
 --- into it). `strike`: a blow's seconds from the wind-up's end to where it lands; its tell holds to
---- its snap and glints over the parry window (TelegraphShapes.timing). Nil (a rush's line): it ends
---- with the wind-up.
+--- its snap and, unless its kind cannot be parried, glints on the parry window
+--- (TelegraphShapes.timing, D-CP1). Nil (a rush's line): it ends with the wind-up.
 function Telegraphs.show(
 	model: Instance,
 	kind: string,
@@ -325,6 +351,9 @@ function Telegraphs.show(
 		latenessNext = latenessNext % samples + 1
 	end
 	local ends, glintFrom, glintUntil = TelegraphShapes.timing(windUp, strike, Telegraphs.glintLead())
+	if not TelegraphShapes.glints(kind) then
+		glintFrom, glintUntil = ends, ends
+	end
 	local active: Active = {
 		model = model,
 		kind = kind,
@@ -335,6 +364,8 @@ function Telegraphs.show(
 		start = now - math.max(0, lateBy or 0),
 		highlight = highlight,
 		color = color,
+		glintColor = Palette.color3(TelegraphShapes.token(kind, true) :: any),
+		glinting = false,
 		release = releaseSlot,
 		pieces = pieces,
 	}

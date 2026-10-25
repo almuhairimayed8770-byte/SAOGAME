@@ -236,6 +236,35 @@ local function angled(meet: number, ahead: number): Shape
 	return plane(Vector3.new(0, 0, -ahead), Vector3.new(math.cos(r), 0, math.sin(r)))
 end
 
+describe("RushWorld: the body is its parts, never its blocker faces (D-CH4)", function()
+	it("reads a boar that carries its blocker as the boar the server measured at spawn", function()
+		-- The server measures the body as built, before addBlocker (EnemyService.spawn); the client
+		-- reads the replicated model, faces and all (Replication's rush draw). The faces stand over
+		-- the idle's poses (rigs.luau blocker), a little past the rest pose, so a profile that read
+		-- them would stop the drawn snout short of the server's at a wall and pass a pillar wider.
+		for _, rigId in { "Boar", "Kobold" } do
+			local built = RigBuilder.build(rigId)
+			local bare = RushWorld.profileOf(built)
+			RigBuilder.addBlocker(built)
+			local faces = 0
+			for _, child in built:GetChildren() do
+				if child:IsA("BasePart") and child.CollisionGroup == AI.collision.blockers then
+					faces += 1
+				end
+			end
+			expect(faces).toBeGreaterThan(0)
+			local carried = RushWorld.profileOf(built)
+			expect(RushWorld.front(carried)).toBeCloseTo(RushWorld.front(bare), 1e-6)
+			for _, direction in { Vector3.xAxis, -Vector3.xAxis, Vector3.zAxis, -Vector3.zAxis } do
+				expect(RushWorld.support(carried, FORWARD, direction)).toBeCloseTo(
+					RushWorld.support(bare, FORWARD, direction),
+					1e-6
+				)
+			end
+		end
+	end)
+end)
+
 describe("RushWorld: what the world is to a rushing body (D-209)", function()
 	it("a face within groundSlopeDegrees of flat is ground; steeper, or named no way, is a wall", function()
 		local slope = AI.collision.groundSlopeDegrees

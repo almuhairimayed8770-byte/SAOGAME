@@ -154,8 +154,19 @@ type Options = {
 	renderOrder: string?,
 	-- What the fake ContactPredictor.standOff answers (fix F1): step this far along `away`, to
 	-- the clip time `to`, from the clip time the controller asks from, with `room` the world it
-	-- leaves (D-235 amended). Nil: no stand-off.
-	standOff: { distance: number, away: Vector3, to: number, room: ((CFrame, number) -> number)? }?,
+	-- leaves (D-235 amended), and `keep` the keep-out at each clip time (D-CH3), with `keepSide`
+	-- along `side` off a held part's face (D-CH4) and `roomSide` the world aside. Nil: no stand-off.
+	standOff: {
+		distance: number,
+		away: Vector3,
+		to: number,
+		room: ((CFrame, number) -> number)?,
+		keep: ((number) -> number)?,
+		keepUntil: number?,
+		side: Vector3?,
+		keepSide: ((number) -> number)?,
+		roomSide: ((CFrame, number) -> number)?,
+	}?,
 }
 
 local IMPACT_CALLS = { "guardRaise", "dodge", "release", "cancelActivation", "activation" }
@@ -294,16 +305,40 @@ local function load(options: Options?): Rig
 	end
 	local fakes: { [string]: any } = {
 		ContactPredictor = {
-			standOff = function(model: any, clip: any, from: number, rootCFrame: CFrame, target: any, cast: any): any
-				table.insert(
-					contactLog.standOffs,
-					{ model = model, clip = clip, from = from, root = rootCFrame, target = target, cast = cast }
-				)
+			standOff = function(
+				model: any,
+				clip: any,
+				from: number,
+				rootCFrame: CFrame,
+				target: any,
+				cast: any,
+				options: any
+			): any
+				table.insert(contactLog.standOffs, {
+					model = model,
+					clip = clip,
+					from = from,
+					root = rootCFrame,
+					target = target,
+					cast = cast,
+					options = options,
+				})
 				local plan = opts.standOff
 				if plan == nil then
 					return nil
 				end
-				return { distance = plan.distance, away = plan.away, from = from, to = plan.to, room = plan.room }
+				return {
+					distance = plan.distance,
+					away = plan.away,
+					from = from,
+					to = plan.to,
+					room = plan.room,
+					keep = plan.keep,
+					keepUntil = plan.keepUntil,
+					side = plan.side,
+					keepSide = plan.keepSide,
+					roomSide = plan.roomSide,
+				}
 			end,
 			-- The world the stand-off may not step into (D-235 amended): a marker the plan is asked with.
 			worldCast = function(model: any): any
@@ -1290,6 +1325,199 @@ describe("CharacterController: the Art stand-off (fix F1)", function()
 			expect(share > 0 and share < plan.distance).toBe(true)
 		end
 	end)
+
+	it("keeps the body out on the clip's clock and holds it still through a freeze (item 224, D-CH3)", function()
+		local away = Vector3.new(0, 0, 1)
+		-- A keep-out alone (no blade step): 1.5 studs a second of clip time past 0.3.
+		local function keep(t: number): number
+			return math.max(0, t - 0.3) * 1.5
+		end
+		local plan = { distance = 0, away = away, to = 0, keep = keep, keepUntil = 10 }
+		local rig = load({ choreo = true, impact = true, standOff = plan })
+		local twin = load({ choreo = true, impact = true })
+		local function frame()
+			rig.frame(STILL)
+			twin.frame(STILL)
+		end
+		for _ = 1, 40 do
+			frame()
+		end
+		rig.setLock(Vector3.new(0, 0, -1.6))
+		twin.setLock(Vector3.new(0, 0, -1.6))
+		local art = rig.controller.slots()[1]
+		rig.controller.beginArt(1)
+		twin.controller.beginArt(1)
+		for _ = 1, 12 do
+			frame()
+		end
+		rig.controller.releaseArt(1, 12 * FRAME)
+		twin.controller.releaseArt(1, 12 * FRAME)
+		-- Asked once, at release, for the keep-out with the blade step.
+		expect(#rig.contacts.standOffs).toBe(1)
+		local options = rig.contacts.standOffs[1].options
+		expect(options ~= nil and options.keepOut == true and options.step ~= false).toBe(true)
+		local handle = rig.animator.mixer:find(art.clip)
+		local function apart(): number
+			return (rig.root.Position - twin.root.Position):Dot(away)
+		end
+		for _ = 1, 120 do
+			frame()
+			if handle.time > 0.45 then
+				break
+			end
+		end
+		expect(handle.time > 0.45).toBe(true)
+		expect(apart()).toBeCloseTo(keep(handle.time), 1e-4)
+		-- A freeze: the clip holds, and the body with it, every frame of it.
+		rig.animator:hitStop(6)
+		twin.animator:hitStop(6)
+		local held = handle.time
+		local at = rig.root.Position
+		local frozen = 0
+		for _ = 1, 20 do
+			frame()
+			if handle.time ~= held then
+				break
+			end
+			frozen += 1
+			expect((rig.root.Position - at).Magnitude < 1e-9).toBe(true)
+		end
+		expect(frozen >= 5).toBe(true)
+		-- Then the body goes on with the clip.
+		for _ = 1, 5 do
+			frame()
+		end
+		expect(apart()).toBeCloseTo(keep(handle.time), 1e-4)
+		expect(apart() > keep(held) + 1e-3).toBe(true)
+	end)
+
+	it("a basic swing asks for its keep-out on its first frame, with no blade step (D-CH3)", function()
+		local away = Vector3.new(0, 0, 1)
+		local function keep(t: number): number
+			return math.max(0, t - 0.05) * 2
+		end
+		local plan = { distance = 0, away = away, to = 0, keep = keep, keepUntil = 10 }
+		local rig = load({ choreo = true, impact = true, standOff = plan })
+		local twin = load({ choreo = true, impact = true })
+		local function frame()
+			rig.frame(STILL)
+			twin.frame(STILL)
+		end
+		for _ = 1, 40 do
+			frame()
+		end
+		rig.setLock(Vector3.new(0, 0, -1.6))
+		twin.setLock(Vector3.new(0, 0, -1.6))
+		rig.controller.basicAttack()
+		twin.controller.basicAttack()
+		expect(rig.controller.state()).toBe("Basic")
+		expect(#rig.contacts.standOffs).toBe(0)
+		frame()
+		expect(#rig.contacts.standOffs).toBe(1)
+		local asked = rig.contacts.standOffs[1]
+		expect(asked.options ~= nil and asked.options.keepOut == true and asked.options.step == false).toBe(true)
+		expect(asked.target.PrimaryPart.Position).toBe(Vector3.new(0, 0, -1.6))
+		local handle = rig.animator.mixer:find(asked.clip.id)
+		expect(asked.from).toBeCloseTo(handle.time, 1e-6)
+		local function apart(): number
+			return (rig.root.Position - twin.root.Position):Dot(away)
+		end
+		for _ = 1, 10 do
+			frame()
+			expect(apart()).toBeCloseTo(keep(handle.time), 1e-4)
+		end
+		expect(apart() > 0.1).toBe(true)
+		-- Asked once for the swing.
+		expect(#rig.contacts.standOffs).toBe(1)
+	end)
+
+	it(
+		"holds the body aside off a held part's face as the plan says, through a freeze and up to the world (D-CH4)",
+		function()
+			local away = Vector3.new(0, 0, 1)
+			local side = Vector3.new(1, 0, 0)
+			local function keep(t: number): number
+				return math.max(0, t - 0.3) * 0.5
+			end
+			-- Aside 1 stud a second of clip time past 0.32; the world aside leaves 0.12 of it.
+			local function keepSide(t: number): number
+				return math.max(0, t - 0.32)
+			end
+			local asked: { number } = {}
+			local roomLeft = 0.12
+			local function roomSide(_at: CFrame, distance: number): number
+				table.insert(asked, distance)
+				local move = math.min(distance, roomLeft)
+				roomLeft -= move
+				return move
+			end
+			local plan = {
+				distance = 0,
+				away = away,
+				to = 0,
+				keep = keep,
+				keepUntil = 10,
+				side = side,
+				keepSide = keepSide,
+				roomSide = roomSide,
+			}
+			local rig = load({ choreo = true, impact = true, standOff = plan })
+			local twin = load({ choreo = true, impact = true })
+			local function frame()
+				rig.frame(STILL)
+				twin.frame(STILL)
+			end
+			for _ = 1, 40 do
+				frame()
+			end
+			rig.setLock(Vector3.new(0, 0, -1.6))
+			twin.setLock(Vector3.new(0, 0, -1.6))
+			local art = rig.controller.slots()[1]
+			rig.controller.beginArt(1)
+			twin.controller.beginArt(1)
+			for _ = 1, 12 do
+				frame()
+			end
+			rig.controller.releaseArt(1, 12 * FRAME)
+			twin.controller.releaseArt(1, 12 * FRAME)
+			local handle = rig.animator.mixer:find(art.clip)
+			local function offset(): Vector3
+				return rig.root.Position - twin.root.Position
+			end
+			for _ = 1, 120 do
+				frame()
+				if handle.time > 0.38 then
+					break
+				end
+			end
+			expect(handle.time > 0.38).toBe(true)
+			expect(offset():Dot(away)).toBeCloseTo(keep(handle.time), 1e-4)
+			expect(offset():Dot(side)).toBeCloseTo(keepSide(handle.time), 1e-4)
+			-- A freeze holds it, aside as back.
+			rig.animator:hitStop(6)
+			twin.animator:hitStop(6)
+			local held = handle.time
+			local at = rig.root.Position
+			local frozen = 0
+			for _ = 1, 20 do
+				frame()
+				if handle.time ~= held then
+					break
+				end
+				frozen += 1
+				expect((rig.root.Position - at).Magnitude < 1e-9).toBe(true)
+			end
+			expect(frozen >= 5).toBe(true)
+			-- Then on, aside no farther than the world leaves: what it took off is not made up.
+			for _ = 1, 30 do
+				frame()
+			end
+			expect(handle.time > 0.32 + 0.12 + 0.05).toBe(true)
+			expect(offset():Dot(side)).toBeCloseTo(0.12, 1e-4)
+			expect(offset():Dot(away)).toBeCloseTo(keep(handle.time), 1e-4)
+			expect(#asked >= 3).toBe(true)
+		end
+	)
 end)
 
 describe("CharacterController: the body holds its facing while a clip owns it (issue 16)", function()

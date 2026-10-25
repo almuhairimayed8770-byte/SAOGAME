@@ -228,45 +228,129 @@ describe("Telegraphs on the server's beat (D-172)", function()
 	end)
 end)
 
-describe("a blow's tell holds to its snap (F7)", function()
+describe("a blow's tell holds to its snap and glints white (F7, D-CP1)", function()
 	local Engine = Harness.load("src/client/fx/Engine")
 	local ai = Harness.load("src/shared/data/ai")
+	local F = combat.hitStopFrameSeconds
 
-	it("the Kobold's Overhead stays lit through its strike and goes out as the axe falls", function()
-		-- No latency heard before it (D-289): the glint sits on the parry window itself.
+	-- Shows a 1.0 s wind-up and 0.35 s strike of `kind` on `model` (heard on time, no lead) and
+	-- steps it at 60 fps. Returns each lit frame as the run of looks it showed ("kind" in the
+	-- kind's color, "glint" at the glint's brightness in the glint's color), the first and last
+	-- glinting frames and when the tell went out (seconds since the wind-up began).
+	local function watch(model: Model, kind: string, look: () -> string): ({ string }, number?, number?, number?)
 		Telegraphs.resetLatency()
 		local clock = 100
 		Engine.setClock(function(): number
 			return clock
 		end)
-		local model = kobold()
-		-- windUp 1.0, strike 0.35: the axe lands 1.35 s in, its snap falls from 1.30.
-		Telegraphs.show(model, "GuardBreak", 1.0, Vector3.zero, Vector3.zAxis, nil, nil, 0.35)
-		local fill = model:FindFirstChild("TelegraphFill") :: Highlight
+		Telegraphs.show(model, kind, 1.0, Vector3.zero, Vector3.zAxis, nil, nil, 0.35)
+		local runs: { string } = {}
+		local firstGlint: number? = nil
+		local lastGlint: number? = nil
 		local ended: number? = nil
-		local glinted: number? = nil
 		for _ = 1, 120 do
 			clock += 1 / 60
 			Telegraphs.step()
-			if glinted == nil and fill.Enabled and near(fill.FillTransparency, ai.telegraph.glintFillTransparency) then
-				glinted = clock - 100
-			end
-			if ended == nil and not Telegraphs.isShowing(model) then
+			if Telegraphs.isShowing(model) then
+				local seen = look()
+				if seen == "glint" then
+					firstGlint = firstGlint or clock - 100
+					lastGlint = clock - 100
+				end
+				if runs[#runs] ~= seen then
+					table.insert(runs, seen)
+				end
+			elseif ended == nil then
 				ended = clock - 100
 			end
 		end
 		Telegraphs.forget(model)
 		Engine.setClock(nil)
+		return runs, firstGlint, lastGlint, ended
+	end
+
+	local function same(a: Color3, b: Color3): boolean
+		return near(a.R, b.R) and near(a.G, b.G) and near(a.B, b.B)
+	end
+
+	it("the Kobold's Overhead stays lit to the axe's snap and goes white, fill and ground, for its glint", function()
+		local model = kobold()
+		local white = palette.color3(fx.telegraph.glintToken)
+		local yellow = palette.color3(fx.telegraph.fillToken.GuardBreak)
+		local fill: Highlight? = nil
+		local runs, firstGlint, lastGlint, ended = watch(model, "GuardBreak", function(): string
+			fill = fill or model:FindFirstChild("TelegraphFill") :: Highlight
+			local highlight = fill :: Highlight
+			local glinting = near(highlight.FillTransparency, ai.telegraph.glintFillTransparency)
+			local color = if glinting then white else yellow
+			if not same(highlight.FillColor, color) then
+				return "other"
+			end
+			for _, part in Telegraphs.parts(model) do
+				if not same(part.Color, color) then
+					return "other"
+				end
+			end
+			return if glinting then "glint" else "kind"
+		end)
+		-- Yellow, white for the glint, yellow again to the snap, then out.
+		expect(runs).toEqual({ "kind", "glint", "kind" })
 		local snap = 1.0 + 0.35 - ai.telegraph.snapLeadSeconds
-		expect(math.abs((ended :: number) - snap) <= 1 / 60 + 1e-6).toBe(true)
-		-- The glint opens with the parry window before the blow lands.
-		local window = 1.0 + 0.35 - combat.parryWindow
-		expect(math.abs((glinted :: number) - window) <= 1 / 60 + 1e-6).toBe(true)
+		expect(math.abs((ended :: number) - snap) <= F + 1e-6).toBe(true)
+		-- The glint: glintFrames frames on the parry window's middle, glintAimFrames early.
+		local centre = 1.0 + 0.35 - combat.parryWindow / 2 - fx.telegraph.glintAimFrames * F
+		local opens = centre - fx.telegraph.glintFrames * F / 2
+		local closes = centre + fx.telegraph.glintFrames * F / 2
+		expect(math.abs((firstGlint :: number) - opens) <= F + 1e-6).toBe(true)
+		expect((lastGlint :: number) < closes + 1e-6 and (lastGlint :: number) >= closes - F - 1e-6).toBe(true)
+	end)
+
+	it("a rig with no weapon part glints white through its outline tint", function()
+		local model = boar()
+		OutlineManager.register(model)
+		local white = palette.color3(fx.telegraph.glintToken)
+		local yellow = palette.color3(fx.telegraph.fillToken.GuardBreak)
+		local runs = watch(model, "GuardBreak", function(): string
+			local outline = wholeRigHighlights(model)[1]
+			if near(outline.FillTransparency, ai.telegraph.glintFillTransparency) then
+				return if same(outline.FillColor, white) then "glint" else "other"
+			end
+			return if same(outline.FillColor, yellow) then "kind" else "other"
+		end)
+		expect(runs).toEqual({ "kind", "glint", "kind" })
+		OutlineManager.unregister(model)
+	end)
+
+	it("an Unblockable blow never glints: it must be dodged (D-CP2)", function()
+		local model = kobold()
+		local red = palette.color3(fx.telegraph.fillToken.Unblockable)
+		local fill: Highlight? = nil
+		local runs, firstGlint, _, ended = watch(model, "Unblockable", function(): string
+			fill = fill or model:FindFirstChild("TelegraphFill") :: Highlight
+			local highlight = fill :: Highlight
+			if near(highlight.FillTransparency, ai.telegraph.glintFillTransparency) then
+				return "glint"
+			end
+			if not same(highlight.FillColor, red) then
+				return "other"
+			end
+			for _, part in Telegraphs.parts(model) do
+				if not same(part.Color, red) then
+					return "other"
+				end
+			end
+			return "kind"
+		end)
+		expect(runs).toEqual({ "kind" })
+		expect(firstGlint).toBeNil()
+		-- It still holds to the snap.
+		local snap = 1.0 + 0.35 - ai.telegraph.snapLeadSeconds
+		expect(math.abs((ended :: number) - snap) <= F + 1e-6).toBe(true)
 	end)
 end)
 
 -- D-289: the server judges a parry on when the press reaches it, the client's one-way latency
--- after the press. The glint opens that much earlier (the least lateness of the last few tells
+-- after the press. The glint comes that much earlier (the least lateness of the last few tells
 -- heard, fx.luau telegraph.glintLeadSamples, capped by glintLeadMax), so a press at any glinting
 -- frame reaches the server inside the parry window. The server is unchanged.
 describe("the glint leads by the client's latency, so a press at it parries (D-289)", function()
@@ -275,6 +359,7 @@ describe("the glint leads by the client's latency, so a press at it parries (D-2
 	local WIND_UP, STRIKE = 1.0, 0.35
 	local LANDS = WIND_UP + STRIKE
 	local STEP = 1 / 240
+	local GLINT = fx.telegraph.glintFrames * combat.hitStopFrameSeconds
 
 	-- Hears `heard` earlier tells at those latenesses, then one blow heard `lateBy` late; returns
 	-- each glinting moment (seconds on the server's clock since its wind-up began).
@@ -318,11 +403,10 @@ describe("the glint leads by the client's latency, so a press at it parries (D-2
 	end
 
 	it("a press at any glinting frame parries, from no latency to the cap", function()
-		local glintSpan = combat.parryWindow - ai.telegraph.snapLeadSeconds
 		for _, latency in { 0, 0.05, 0.067, 0.1, 0.15 } do
 			local moments = glintOf({ latency, latency, latency }, latency)
-			-- Still a whole glint to see (to a frame of the step), only earlier.
-			expect(#moments * STEP >= glintSpan - 2 * STEP).toBe(true)
+			-- Still the whole glint to see (to a step), only earlier.
+			expect(math.abs(#moments * STEP - GLINT) <= 2 * STEP).toBe(true)
 			expect(allParry(moments, latency)).toBe(true)
 		end
 	end)
@@ -334,7 +418,7 @@ describe("the glint leads by the client's latency, so a press at it parries (D-2
 		expect(allParry(moments, 0.08)).toBe(true)
 		expect(allParry(moments, 0.12)).toBe(true)
 		-- Only the last few count: a path that got slower is learned again.
-		local samples = Harness.load("src/shared/data/fx").telegraph.glintLeadSamples
+		local samples = fx.telegraph.glintLeadSamples
 		local heard: { number } = {}
 		for _ = 1, samples do
 			table.insert(heard, 0.02)
@@ -354,10 +438,11 @@ describe("the glint leads by the client's latency, so a press at it parries (D-2
 	end)
 
 	it("never leads by more than the cap", function()
-		local cap = Harness.load("src/shared/data/fx").telegraph.glintLeadMax
+		local cap = fx.telegraph.glintLeadMax
 		local moments = glintOf({ 0.3, 0.3 }, 0.3)
 		expect(math.abs(Telegraphs.glintLead() - cap)).toBeLessThan(1e-9)
-		local opens = LANDS - combat.parryWindow - cap
+		local centre = LANDS - combat.parryWindow / 2 - fx.telegraph.glintAimFrames * combat.hitStopFrameSeconds
+		local opens = centre - GLINT / 2 - cap
 		expect(math.abs(moments[1] - opens) <= STEP + 1e-6).toBe(true)
 	end)
 end)

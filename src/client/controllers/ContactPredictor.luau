@@ -67,6 +67,8 @@ local World = require(Shared.data.world)
 local Types = require(Shared.types)
 local BladeContact = require(Shared.choreo.BladeContact)
 local ClipSampler = require(Shared.choreo.ClipSampler)
+local Joints = require(Shared.choreo.Joints)
+local AimLogic = require(script.Parent.AimLogic)
 
 export type Tier = "Normal" | "Final" | "Kill"
 
@@ -136,6 +138,25 @@ export type StandOff = {
 	from: number,
 	to: number,
 	room: ((rootCFrame: CFrame, distance: number) -> number)?,
+	-- The keep-out (D-CH3, StandOffOptions.keepOut): how much farther along `away` the body stands
+	-- at a clip time than the step above puts it, and the clip time past which that changes no more.
+	keep: ((clipTime: number) -> number)?,
+	keepUntil: number?,
+	-- And how far the keep-out holds the body aside at a clip time, along `side` (flat, unit, square
+	-- to `away`), off the face over a part the target holds (D-CH4); `roomSide` is `room` along it.
+	-- Nil when the target holds nothing the body stands beside.
+	side: Vector3?,
+	keepSide: ((clipTime: number) -> number)?,
+	roomSide: ((rootCFrame: CFrame, distance: number) -> number)?,
+}
+
+--- What a stand-off plan covers (ContactPredictor.standOff). With neither field it is the Art's
+--- blade step alone.
+export type StandOffOptions = {
+	-- Plan the keep-out too (D-CH3): a plan comes back whenever the target has a blocker.
+	keepOut: boolean?,
+	-- false: no blade step (a basic swing; its first cut is the key rule's alone).
+	step: boolean?,
 }
 
 --- A box cast for the stand-off: how far the box `size` at `start` moves along `vector` before it
@@ -178,6 +199,7 @@ local MIN_FACE_DISTANCE: number = Combat.aim.minFaceDistance
 local PROMISE: number = RADIUS - MAX_STEP / 2
 -- Samples of a damage window the stand-off checks the cut still reaches the body at.
 local REACH_SAMPLES: number = STAND_OFF.reachSamples
+local KEEP_OUT = STAND_OFF.keepOut
 -- What the stand-off keeps between the root's box and the world (D-235 amended).
 local WALL_GAP: number = STAND_OFF.wallGapStuds
 local FIGHTER_FOLDERS: { string } = { World.playground.folders.enemies, World.playground.folders.entities }
@@ -613,51 +635,22 @@ function ContactPredictor.room(
 	return math.clamp(hit - 2 * WALL_GAP, 0, distance)
 end
 
---- The Art stand-off (fix F1): a target already inside the blade's start pose for the first
---- damage window would be cut before the swing moves (the review's "sword raised, pause, pop"), so
---- the body steps straight away from it over the anticipation, from clip time `from` (the hold
---- pose the Art is released from) to the window's open: the least multiple of standOff.stepStuds
---- that leaves the start pose's blade standOff.clearStuds from every part of `target` it may
---- wound (BladeContact.hurtbox: not the weapon it holds), at most standOff.maxStuds. `rootCFrame` is the root at `from`, facing where the Art cuts; the
---- clip's own root motion carries it on to the open. Nil when the start pose already clears the
---- body, when no step within maxStuds clears it, or when a window's cut that passed within the
---- sweep's promise (the hit radius less half of sweepMaxTipStep) would then pass shallower: a
---- stand-off never costs a hit. With `cast` (ContactPredictor.worldCast) the step never goes into
---- the world (D-235 amended): the root's box is cast back along it, and a wall or a pillar nearer
---- than the step the target calls for takes the longest whole step that keeps standOff.
---- wallGapStuds from it (none when even one step does not fit); the plan's `room` holds that
---- world for the frames that take the step. Pure apart from `cast`: it poses the clip itself and
---- reads only the parts' boxes.
-function ContactPredictor.standOff(
+-- The Art's blade step (fix F1, ContactPredictor.standOff): the step along `away` that leaves the
+-- first cut's start pose clear of `parts`, nil for none (see standOff).
+local function bladeStep(
 	model: Model,
 	clip: Types.ClipDef,
 	from: number,
 	rootCFrame: CFrame,
-	target: Model,
-	cast: BoxCast?
-): StandOff?
+	parts: { BasePart },
+	away: Vector3,
+	room: ((at: CFrame, distance: number) -> number)?
+): number?
 	local window = ClipSampler.hitWindows(clip)[1]
 	local chain = BladeContact.chain(model)
-	local targetRoot = target.PrimaryPart
-	if window == nil or chain == nil or targetRoot == nil or window.open <= from then
+	if window == nil or chain == nil or window.open <= from or #parts == 0 then
 		return nil
 	end
-	local parts: { BasePart } = {}
-	for _, descendant in target:GetDescendants() do
-		if descendant:IsA("BasePart") and BladeContact.hurtbox(descendant :: BasePart) then
-			table.insert(parts, descendant :: BasePart)
-		end
-	end
-	if #parts == 0 then
-		return nil
-	end
-	-- Straight away from the target; from one too close to give a direction (combat.luau
-	-- aim.minFaceDistance), straight back from where the Art faces.
-	local offset = rootCFrame.Position - targetRoot.CFrame.Position
-	local flat = Vector3.new(offset.X, 0, offset.Z)
-	local away = if flat.Magnitude >= MIN_FACE_DISTANCE
-		then flat.Unit
-		else -Vector3.new(rootCFrame.LookVector.X, 0, rootCFrame.LookVector.Z).Unit
 	local start = ClipSampler.rootMotionAt(clip, from)
 	local pose: BladeContact.Pose = { root = rootCFrame, transforms = {} }
 	-- The nearest the blade comes to the body at clip time `time` with the body stepped `back`.
@@ -677,15 +670,6 @@ function ContactPredictor.standOff(
 	local clear: number = STAND_OFF.clearStuds
 	if gap(window.open, 0) >= clear then
 		return nil
-	end
-	-- How far the world behind lets the body go (the root's own box, cast back along the step).
-	local room: ((at: CFrame, distance: number) -> number)? = nil
-	local rootPart = model.PrimaryPart
-	if cast ~= nil and rootPart ~= nil then
-		local size = rootPart.Size
-		room = function(at: CFrame, distance: number): number
-			return ContactPredictor.room(at, size, away, distance, cast)
-		end
 	end
 	local stepStuds: number = STAND_OFF.stepStuds
 	local most = math.floor(STAND_OFF.maxStuds / stepStuds + 1e-6)
@@ -718,7 +702,468 @@ function ContactPredictor.standOff(
 			return nil
 		end
 	end
-	return { distance = need :: number, away = away, from = from, to = window.open, room = room }
+	return need
+end
+
+-- How deep two boxes overlap: the least push along any of the fifteen axes that can part two
+-- boxes; 0 or less when they are apart.
+local function boxDepth(a: CFrame, aSize: Vector3, b: CFrame, bSize: Vector3): number
+	local aX, aY, aZ = a.RightVector, a.UpVector, a.LookVector
+	local bX, bY, bZ = b.RightVector, b.UpVector, b.LookVector
+	local aHalf, bHalf = aSize * 0.5, bSize * 0.5
+	local between = b.Position - a.Position
+	local least = math.huge
+	local function along(axis: Vector3)
+		local length = axis.Magnitude
+		if length < 1e-6 then
+			return
+		end
+		local unit = axis / length
+		local reach = math.abs(aX:Dot(unit)) * aHalf.X
+			+ math.abs(aY:Dot(unit)) * aHalf.Y
+			+ math.abs(aZ:Dot(unit)) * aHalf.Z
+			+ math.abs(bX:Dot(unit)) * bHalf.X
+			+ math.abs(bY:Dot(unit)) * bHalf.Y
+			+ math.abs(bZ:Dot(unit)) * bHalf.Z
+		least = math.min(least, reach - math.abs(between:Dot(unit)))
+	end
+	for _, u in { aX, aY, aZ } do
+		along(u)
+		for _, v in { bX, bY, bZ } do
+			along(u:Cross(v))
+		end
+	end
+	along(bX)
+	along(bY)
+	along(bZ)
+	return least
+end
+
+-- The least step at or past `from` along `away` (flat, unit) that leaves the box `aSize` as it
+-- passes from `a0` to `a1` (the hull of the two: what a part sweeps between two poses), both moved
+-- by `shift` first, at most `allowed` deep in the box `b` (`bSize`), math.huge for none. Two convex shapes are that far apart
+-- along an axis once their centres stand both reaches less `allowed` apart along it, and past that
+-- point a further step only parts them more along it; the hull's reach along an axis is the span
+-- of the two boxes' together. The axes are both boxes' own, b's and each crossed with b's: apart
+-- along any of them is apart, so the step is never short (with a0 = a1 it is exact).
+local function stepOut(
+	a0: CFrame,
+	a1: CFrame,
+	aSize: Vector3,
+	b: CFrame,
+	bSize: Vector3,
+	away: Vector3,
+	from: number,
+	allowed: number,
+	shift: Vector3
+): number
+	local aHalf, bHalf = aSize * 0.5, bSize * 0.5
+	local bX, bY, bZ = b.RightVector, b.UpVector, b.LookVector
+	local bPosition = b.Position
+	local p0, p1 = a0.Position + shift, a1.Position + shift
+	local x0, y0, z0 = a0.RightVector, a0.UpVector, a0.LookVector
+	local x1, y1, z1 = a1.RightVector, a1.UpVector, a1.LookVector
+	local least = math.huge
+	local function along(axis: Vector3)
+		local length = axis.Magnitude
+		if length < 1e-6 or least <= from then
+			return
+		end
+		local unit = axis / length
+		local r0 = math.abs(x0:Dot(unit)) * aHalf.X
+			+ math.abs(y0:Dot(unit)) * aHalf.Y
+			+ math.abs(z0:Dot(unit)) * aHalf.Z
+		local r1 = math.abs(x1:Dot(unit)) * aHalf.X
+			+ math.abs(y1:Dot(unit)) * aHalf.Y
+			+ math.abs(z1:Dot(unit)) * aHalf.Z
+		local c0, c1 = p0:Dot(unit), p1:Dot(unit)
+		local low, high = math.min(c0 - r0, c1 - r1), math.max(c0 + r0, c1 + r1)
+		local reach = (high - low) / 2
+			+ math.abs(bX:Dot(unit)) * bHalf.X
+			+ math.abs(bY:Dot(unit)) * bHalf.Y
+			+ math.abs(bZ:Dot(unit)) * bHalf.Z
+			- allowed
+		-- Stepped `t` along `away`, the centres stand `centre - t * slope` apart along the axis.
+		local centre = bPosition:Dot(unit) - (low + high) / 2
+		local slope = away:Dot(unit)
+		if math.abs(centre - from * slope) >= reach then
+			least = from
+		elseif math.abs(slope) > 1e-6 then
+			least = math.min(least, (centre + (if slope > 0 then reach else -reach)) / slope)
+		end
+	end
+	for _, v in { bX, bY, bZ } do
+		along(v)
+	end
+	for _, u in { x0, y0, z0, x1, y1, z1 } do
+		along(u)
+		for _, v in { bX, bY, bZ } do
+			along(u:Cross(v))
+		end
+	end
+	return least
+end
+
+-- One part of the body the engine collides (combat.contact.standOff.keepOut.parts): its size and
+-- the joints from the root part out to it.
+type BodyPart = { size: Vector3, links: { BladeContact.Link } }
+
+-- The body's colliding parts the model has, each with its joint path from the root part (a part
+-- no joint path reaches is left out; the root part itself has none).
+local function bodyParts(model: Model): { BodyPart }
+	local root = model.PrimaryPart
+	local list: { BodyPart } = {}
+	if root == nil then
+		return list
+	end
+	local resolved = Joints.collect(model)
+	local placing: { [BasePart]: Joints.Resolved } = {}
+	for _, each in resolved do
+		if placing[each.part1] == nil then
+			placing[each.part1] = each
+		end
+	end
+	for _, name in KEEP_OUT.parts :: { string } do
+		local found = model:FindFirstChild(name)
+		if found == nil or not found:IsA("BasePart") then
+			continue
+		end
+		local part = found :: BasePart
+		local reversed: { BladeContact.Link } = {}
+		local at: BasePart = part
+		while at ~= root and #reversed <= #resolved do
+			local joint = placing[at]
+			if joint == nil then
+				break
+			end
+			table.insert(reversed, { joint = joint.joint, c0 = joint.c0, c1Inverse = joint.c1:Inverse() })
+			at = joint.part0
+		end
+		if at == root then
+			local links: { BladeContact.Link } = {}
+			for index = #reversed, 1, -1 do
+				table.insert(links, reversed[index])
+			end
+			table.insert(list, { size = part.Size, links = links })
+		end
+	end
+	return list
+end
+
+-- A keep-out plan (keepOutOf): how far back along `away`, and aside along `side`, the body stands
+-- at a clip time.
+type KeepOut = {
+	keep: (clipTime: number) -> number,
+	side: Vector3?,
+	keepSide: ((clipTime: number) -> number)?,
+}
+
+-- The keep-out (D-CH3) of a swing whose body stands at `rootCFrame` at clip time `from` and steps
+-- `distance` along `away` by clip time `to` (the blade step): how much farther along `away` the
+-- body stands at each clip time, and how far aside, so that no colliding part goes deeper into the
+-- target's blocker (as its faces stood when the plan was made) than at `from`. The body's face
+-- (keepOut.bodyFace) holds the body back along `away`. A face over a part the target holds
+-- (keepOut.heldFace, D-CH4: a kobold's axe, which hangs beside a body at its front) holds it back
+-- or aside, whichever is the shorter step: aside along `side`, square to `away` and off the held
+-- face nearest the root (a lean into an axe beside the body is undone by a step off it, not by
+-- backing past its far end). Both only ever grow, so a freeze holds where the body stands, and the
+-- step, the back and the aside together stay within keepOut.maxStuds. The clip is posed every
+-- sampleSeconds, each clip time once, as the swing first asks for it (a frame pays for one pose,
+-- not the release for the whole clip); each sample keeps out what every part sweeps from the
+-- sample before (the hull of the two poses), and a clip time between two samples reads one sample
+-- ahead, so the body is back before the pose goes in; a sample whose parts turn fast (a spin) is
+-- swept in pieces, none turning more than maxTurnDegrees, so the hulls hold the arc. Nil when the
+-- target has no blocker.
+local function keepOutOf(
+	model: Model,
+	clip: Types.ClipDef,
+	from: number,
+	rootCFrame: CFrame,
+	target: Model,
+	away: Vector3,
+	distance: number,
+	to: number
+): KeepOut?
+	-- The faces as they stand now: a frame, a size and whether it is over a held part, each.
+	local faceFrames: { CFrame } = {}
+	local faceSizes: { Vector3 } = {}
+	local faceHeld: { boolean } = {}
+	for _, child in target:GetChildren() do
+		if child:IsA("BasePart") and (child.Name == KEEP_OUT.bodyFace or child.Name == KEEP_OUT.heldFace) then
+			table.insert(faceFrames, (child :: BasePart).CFrame)
+			table.insert(faceSizes, (child :: BasePart).Size)
+			table.insert(faceHeld, child.Name == KEEP_OUT.heldFace)
+		end
+	end
+	if #faceFrames == 0 then
+		return nil
+	end
+	local parts = bodyParts(model)
+	local budget: number = KEEP_OUT.maxStuds
+	local most = math.max(0, budget - distance)
+	if #parts == 0 or most <= 0 then
+		return nil
+	end
+	-- Aside: square to `away`, off the held face nearest the root (none when the root stands square
+	-- in front of it).
+	local side: Vector3? = nil
+	local nearest = math.huge
+	local square = Vector3.new(-away.Z, 0, away.X)
+	for face, faceFrame in faceFrames do
+		if faceHeld[face] then
+			local offset = faceFrame:PointToObjectSpace(rootCFrame.Position)
+			local half = faceSizes[face] * 0.5
+			local gap =
+				Vector3.new(math.max(math.abs(offset.X) - half.X, 0), 0, math.max(math.abs(offset.Z) - half.Z, 0))
+			local lean = (rootCFrame.Position - faceFrame.Position):Dot(square)
+			if gap.Magnitude < nearest and math.abs(lean) > 1e-6 then
+				nearest = gap.Magnitude
+				side = if lean > 0 then square else -square
+			end
+		end
+	end
+	local start = ClipSampler.rootMotionAt(clip, from)
+	local frames: { CFrame } = table.create(#parts)
+	-- The parts as the sample before stood, then as each piece of the way between the two stands
+	-- (what each sweeps through: chain[1] to chain[pieces + 1], the last the sample itself).
+	local before: { CFrame } = table.create(#parts)
+	local chain: { { CFrame } } = { before }
+	local pieces = 1
+	-- Poses the colliding parts at clip time `time` (the clip's root motion and the blade step)
+	-- into `into`.
+	local function pose(time: number, into: { CFrame })
+		local motion = ClipSampler.rootMotionAt(clip, time)
+		local stepped = AimLogic.standOffAt(distance, from, to, time, STAND_OFF.easing)
+		local rootFrame = rootCFrame * CFrame.new(motion[1] - start[1], motion[2] - start[2], motion[3] - start[3])
+			+ away * stepped
+		local offsets = ClipSampler.sample(clip, time)
+		for index, body in parts do
+			local frame = rootFrame
+			for _, link in body.links do
+				local offset = offsets[link.joint.Name]
+				local transform = if offset ~= nil then ClipSampler.toCFrame(offset) else CFrame.identity
+				frame = frame * link.c0 * transform * link.c1Inverse
+			end
+			into[index] = frame
+		end
+	end
+	pose(from, frames)
+	local deepest = 0
+	for index, body in parts do
+		for face, faceFrame in faceFrames do
+			deepest = math.max(deepest, boxDepth(frames[index], body.size, faceFrame, faceSizes[face]))
+		end
+	end
+	local allowed = deepest + KEEP_OUT.depthEpsilon
+	local step: number = KEEP_OUT.sampleSeconds
+	local count = math.max(0, math.ceil((clip.duration - from) / step - 1e-6))
+	-- back[k + 1], aside[k + 1]: the keep-out at sample k (clip time from + k * step); sample 0 is
+	-- the start.
+	local back: { number } = { 0 }
+	local aside: { number } = { 0 }
+	local currentBack, currentAside = 0, 0
+	local done = false
+	-- The least step along `direction` at or past `at` that leaves every part's sweep clear of the
+	-- face (`shift`: where the other keep-out already put it).
+	local function stepOf(face: number, direction: Vector3, at: number, shift: Vector3): number
+		local need = at
+		for piece = 1, pieces do
+			local fromFrames, toFrames = chain[piece], chain[piece + 1]
+			for index, body in parts do
+				need = math.max(
+					need,
+					stepOut(
+						fromFrames[index],
+						toFrames[index],
+						body.size,
+						faceFrames[face],
+						faceSizes[face],
+						direction,
+						at,
+						allowed,
+						shift
+					)
+				)
+			end
+		end
+		return need
+	end
+	-- The most any part turns between two poses (its axes' largest angle), in degrees: a part that
+	-- turns sweeps out past the hull of its two boxes, by a hair for a small turn.
+	local function turnOf(a: { CFrame }, b: { CFrame }): number
+		local most = 1
+		for index in parts do
+			local x, y = a[index], b[index]
+			most = math.min(
+				most,
+				x.RightVector:Dot(y.RightVector),
+				x.UpVector:Dot(y.UpVector),
+				x.LookVector:Dot(y.LookVector)
+			)
+		end
+		return math.deg(math.acos(math.clamp(most, -1, 1)))
+	end
+	local function fill(last: number)
+		for k = #back, math.min(last, count) do
+			if not done then
+				table.move(frames, 1, #parts, 1, before)
+				local time = math.min(from + k * step, clip.duration)
+				local previous = math.min(from + (k - 1) * step, clip.duration)
+				pose(time, frames)
+				-- A fast turn (a spin) is cut into pieces no part turns more than maxTurnDegrees in.
+				pieces = math.clamp(math.ceil(turnOf(before, frames) / KEEP_OUT.maxTurnDegrees), 1, KEEP_OUT.maxPieces)
+				for piece = 1, pieces - 1 do
+					local into = chain[piece + 1]
+					if into == nil or into == frames then
+						into = table.create(#parts)
+						chain[piece + 1] = into
+					end
+					pose(previous + (time - previous) * piece / pieces, into)
+				end
+				chain[pieces + 1] = frames
+				local b, a = currentBack, currentAside
+				-- Out of the body's face first, then the held ones, then the body's again for what an
+				-- aside step changed: a few rounds settle it.
+				for _ = 1, KEEP_OUT.rounds do
+					local wasBack, wasAside = b, a
+					for face in faceFrames do
+						local sideways = if side ~= nil then side * a else Vector3.zero
+						local backward = stepOf(face, away, b, sideways)
+						if faceHeld[face] and side ~= nil then
+							local sideStep = stepOf(face, side, a, away * b)
+							if sideStep - a < backward - b then
+								a = sideStep
+								continue
+							end
+						end
+						b = backward
+					end
+					if b == wasBack and a == wasAside then
+						break
+					end
+				end
+				-- Back and aside are square to each other: together with the step, one distance.
+				local backMost = math.sqrt(math.max(budget * budget - currentAside * currentAside, 0)) - distance
+				currentBack = math.max(currentBack, math.min(b, backMost))
+				local asideMost = math.sqrt(math.max(budget * budget - (distance + currentBack) ^ 2, 0))
+				currentAside = math.max(currentAside, math.min(a, asideMost))
+				done = (distance + currentBack) ^ 2 + currentAside * currentAside >= budget * budget - 1e-6
+			end
+			back[k + 1] = currentBack
+			aside[k + 1] = currentAside
+		end
+	end
+	-- A series read at a clip time, a sample ahead.
+	local function reader(series: { number }): (clipTime: number) -> number
+		return function(clipTime: number): number
+			if clipTime <= from then
+				return 0
+			end
+			local position = math.min((clipTime - from) / step + 1, count)
+			local index = math.floor(position)
+			fill(index + 1)
+			if index >= count then
+				return series[count + 1]
+			end
+			local below = series[index + 1]
+			return below + (series[index + 2] - below) * (position - index)
+		end
+	end
+	return {
+		keep = reader(back),
+		side = side,
+		keepSide = if side ~= nil then reader(aside) else nil,
+	}
+end
+
+--- The Art stand-off (fix F1): a target already inside the blade's start pose for the first
+--- damage window would be cut before the swing moves (the review's "sword raised, pause, pop"), so
+--- the body steps straight away from it over the anticipation, from clip time `from` (the hold
+--- pose the Art is released from) to the window's open: the least multiple of standOff.stepStuds
+--- that leaves the start pose's blade standOff.clearStuds from every part of `target` it may
+--- wound (BladeContact.hurtbox: not the weapon it holds), at most standOff.maxStuds. `rootCFrame` is the root at `from`, facing where the Art cuts; the
+--- clip's own root motion carries it on to the open. Nil when the start pose already clears the
+--- body, when no step within maxStuds clears it, or when a window's cut that passed within the
+--- sweep's promise (the hit radius less half of sweepMaxTipStep) would then pass shallower: a
+--- stand-off never costs a hit. With `cast` (ContactPredictor.worldCast) the step never goes into
+--- the world (D-235 amended): the root's box is cast back along it, and a wall or a pillar nearer
+--- than the step the target calls for takes the longest whole step that keeps standOff.
+--- wallGapStuds from it (none when even one step does not fit); the plan's `room` holds that
+--- world for the frames that take the step. Pure apart from `cast`: it poses the clip itself and
+--- reads only the parts' boxes.
+---
+--- With `options.keepOut` the plan also keeps the body out of the target (D-CH3): `keep` says how
+--- much farther along `away` the body stands at each clip time, and `keepSide` how far along
+--- `side` (off a part the target holds, D-CH4), so that the swing's own motion never carries a
+--- colliding part (standOff.keepOut.parts) deeper into the target's blocker than the swing found
+--- it (posed lazily, a sample a frame as the clip gets there), and a plan comes back whenever the
+--- target has a blocker (`distance` 0 for a keep-out alone; `keep` may stay 0).
+--- `options.step` false plans no blade step (a basic swing).
+function ContactPredictor.standOff(
+	model: Model,
+	clip: Types.ClipDef,
+	from: number,
+	rootCFrame: CFrame,
+	target: Model,
+	cast: BoxCast?,
+	options: StandOffOptions?
+): StandOff?
+	local targetRoot = target.PrimaryPart
+	if targetRoot == nil then
+		return nil
+	end
+	local parts: { BasePart } = {}
+	for _, descendant in target:GetDescendants() do
+		if descendant:IsA("BasePart") and BladeContact.hurtbox(descendant :: BasePart) then
+			table.insert(parts, descendant :: BasePart)
+		end
+	end
+	-- Straight away from the target; from one too close to give a direction (combat.luau
+	-- aim.minFaceDistance), straight back from where the Art faces.
+	local offset = rootCFrame.Position - targetRoot.CFrame.Position
+	local flat = Vector3.new(offset.X, 0, offset.Z)
+	local away = if flat.Magnitude >= MIN_FACE_DISTANCE
+		then flat.Unit
+		else -Vector3.new(rootCFrame.LookVector.X, 0, rootCFrame.LookVector.Z).Unit
+	-- How far the world behind lets the body go (the root's own box, cast back along the step).
+	local room: ((at: CFrame, distance: number) -> number)? = nil
+	local rootPart = model.PrimaryPart
+	if cast ~= nil and rootPart ~= nil then
+		local size = rootPart.Size
+		room = function(at: CFrame, distance: number): number
+			return ContactPredictor.room(at, size, away, distance, cast)
+		end
+	end
+	local opts: StandOffOptions = options or {}
+	local distance = if opts.step == false then nil else bladeStep(model, clip, from, rootCFrame, parts, away, room)
+	local window = ClipSampler.hitWindows(clip)[1]
+	local to = if distance ~= nil and window ~= nil then window.open else from
+	local keepOut = if opts.keepOut == true
+		then keepOutOf(model, clip, from, rootCFrame, target, away, distance or 0, to)
+		else nil
+	if distance == nil and keepOut == nil then
+		return nil
+	end
+	local side = if keepOut ~= nil then keepOut.side else nil
+	local roomSide: ((at: CFrame, distance: number) -> number)? = nil
+	if side ~= nil and cast ~= nil and rootPart ~= nil then
+		local size = rootPart.Size
+		roomSide = function(at: CFrame, distance: number): number
+			return ContactPredictor.room(at, size, side, distance, cast)
+		end
+	end
+	return {
+		distance = distance or 0,
+		away = away,
+		from = from,
+		to = to,
+		room = room,
+		keep = if keepOut ~= nil then keepOut.keep else nil,
+		keepUntil = if keepOut ~= nil then clip.duration else nil,
+		side = side,
+		keepSide = if keepOut ~= nil then keepOut.keepSide else nil,
+		roomSide = roomSide,
+	}
 end
 
 -- The point of `parts` nearest the blade from `guard` to `tip`, or `fallback` with no parts.

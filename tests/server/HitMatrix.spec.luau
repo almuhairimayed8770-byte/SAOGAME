@@ -165,6 +165,27 @@ describe("HitMatrix: the server counts every hit the client draws (F2)", functio
 		expect(inside).toBe(true)
 	end)
 
+	it("swings with the client's keep-out at every assisted enemy, basics included (D-CH3, D-CH4)", function()
+		-- CharacterController keeps the root out of the body over an Art and a basic alike; the
+		-- matrix swings from where the keep-out stands the root, never from where the clip alone
+		-- would carry it, so a hit it shows is a hit the real client draws.
+		local art, basic = false, false
+		for _, cell in matrix().cells do
+			local keepOut = cell.keepOut
+			if keepOut ~= nil then
+				expect(keepOut).toBeGreaterThan(0)
+				expect(keepOut).toBeLessThanOrEqual(Combat.contact.standOff.keepOut.maxStuds + 1e-6)
+				if string.sub(cell.attack, 1, 5) == "Basic" then
+					basic = true
+				else
+					art = true
+				end
+			end
+		end
+		expect(art).toBe(true)
+		expect(basic).toBe(true)
+	end)
+
 	it("draws every swing on the client at every frame rate and phase", function()
 		for _, cell in matrix().cells do
 			expect(cell.drawn).never.toBeNil()

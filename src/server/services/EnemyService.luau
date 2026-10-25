@@ -841,14 +841,16 @@ local function rushTurned(entry: Entry, rush: Brain.Rush, contact: RushWorld.Con
 	})
 end
 
--- An enemy's blocker (D-198): the part of its model in the blockers group, or nil.
-local function blockerOf(model: Model): BasePart?
+-- An enemy's blocker faces (D-198, D-CH4): every part of its model in the blockers group, the
+-- body's and one over each part it holds (a kobold's axe); empty when it has none.
+local function blockersOf(model: Model): { BasePart }
+	local faces: { BasePart } = {}
 	for _, child in model:GetChildren() do
 		if child:IsA("BasePart") and child.CollisionGroup == AI.collision.blockers then
-			return child
+			table.insert(faces, child)
 		end
 	end
-	return nil
+	return faces
 end
 
 -- Whether two upright boxes overlap (separating axes: the vertical, then each box's two horizontal
@@ -877,19 +879,26 @@ end
 --- meets other enemies' roots and blockers, so a stopped rush whose body stands over a packmate's
 --- would be pushed out of it the moment it turned solid. A blocker covers its body's whole
 --- footprint, root included, from the floor up past every root's top, so blocker against blocker
---- settles root against blocker too. Judged on the parts' own boxes: the engine's queries never see
---- a blocker (CanQuery off). A model with no blocker is clear.
+--- settles root against blocker too. Every face counts, on both sides: the body's and the one over
+--- each part an enemy holds (D-CH4: a kobold's axe face is solid with its body's). Judged on the
+--- parts' own boxes: the engine's queries never see a blocker (CanQuery off). A model with no
+--- blocker is clear.
 function EnemyService.blockerClear(model: Model): boolean
-	local own = blockerOf(model)
-	if own == nil then
+	local own = blockersOf(model)
+	if #own == 0 then
 		return true
 	end
 	for _, entry in entries do
 		local other = entry.model
 		if other ~= model then
-			local theirs = blockerOf(other)
-			if theirs ~= nil and theirs.CanCollide and uprightBoxesOverlap(own, theirs) then
-				return false
+			for _, theirs in blockersOf(other) do
+				if theirs.CanCollide then
+					for _, face in own do
+						if uprightBoxesOverlap(face, theirs) then
+							return false
+						end
+					end
+				end
 			end
 		end
 	end
@@ -1563,8 +1572,10 @@ local function humanoidOf(model: Model): Humanoid?
 end
 
 --- How far a model's body reaches ahead of (`front`) and behind (`back`) its root along the root's
---- look, over every corner of every BasePart as the parts stand now (spawn() measures the rig as
---- built, at its rest pose). A rush strikes where the snout is (D-166). (0, 0) without a root.
+--- look, over every corner of every BasePart of its body as the parts stand now (spawn() measures
+--- the rig as built, at its rest pose). A rush strikes where the snout is (D-166). Its blocker
+--- faces (the blockers group, D-198) are not its body: they stand over its idle and what it holds
+--- (D-CH4), so a live enemy reaches as far as the rig spawn() measured. (0, 0) without a root.
 function EnemyService.bodyExtents(model: Model): (number, number)
 	local root = model.PrimaryPart
 	if root == nil then
@@ -1573,7 +1584,7 @@ function EnemyService.bodyExtents(model: Model): (number, number)
 	local rootFrame = root.CFrame
 	local front, back = 0, 0
 	for _, part in model:GetDescendants() do
-		if not part:IsA("BasePart") then
+		if not part:IsA("BasePart") or part.CollisionGroup == AI.collision.blockers then
 			continue
 		end
 		local half = part.Size / 2

@@ -31,7 +31,20 @@
 		                    around where its root stands and faces, at their distance and side, facing
 		                    the player, held; `hp` sets one's HP (the kill shot). The first is the
 		                    shot's target.
-		"go"             lets go the staged enemies whose `held` is false (the take has started)
+		                 Step 1 runs before any other check: the first stage request the rate lets
+		                 through after a take (a dead player's too, one that only asks for a walk)
+		                 leaves nothing of that take on the field.
+		"go"             lets go the staged enemies whose `held` is false (the take has started);
+		                 one with a `releaseAfter` (CF) is let go that many seconds later instead,
+		                 unless the take ends ("hold"), the field is given back or another shot is
+		                 staged first. One staged with `hp` is set to it again as it is let go
+		                 (EntityService.setHp restarts the out-of-combat regen wait), so it comes in
+		                 at the HP the shot staged, however long it was held. It replies
+		                 { ok, released, scheduled = { { id, after } } }
+		"hold"           the take has ended (CS1): every staged enemy still standing is held where it
+		                 is (EnemyService.setHeld: Idle at once; a wind-up is dropped, D-254, and a
+		                 launched rush stops where it is), and a late "go" lets nobody go, so nothing
+		                 of the take acts between takes
 		"release"        gives the field back: the staged enemies are despawned, every field enemy
 		                 this staging held is let go and hold-new goes back to what it was
 
@@ -66,9 +79,16 @@ local Capture = Dev.capture
 local Stage = Capture.stage
 local Shots = Capture.shots
 
--- The enemies the last staging spawned, and those of them the take lets go.
+-- The enemies the last staging spawned, those of them the take lets go as it starts, and those
+-- it lets go partway through (dev.luau StagedEnemy.releaseAfter).
 local staged: { number } = {}
 local toRelease: { number } = {}
+local scheduled: { { id: number, after: number } } = {}
+-- The HP each staged enemy was set to (dev.luau StagedEnemy.hp), set again as it is let go.
+local stagedHp: { [number]: number } = {}
+-- Moves on whenever the take's late releases are called off (the take ends, the field is given
+-- back, another shot stages): a delayed release made under an older one lets nobody go.
+local releaseToken = 0
 -- The field as it was before the first staging: hold-new, and the enemies already held (by the
 -- dev hook, a cutscene); nil while the field is not this script's.
 local holdNewBefore: boolean? = nil
@@ -96,6 +116,9 @@ local function clearStaged(): number
 	end
 	table.clear(staged)
 	table.clear(toRelease)
+	table.clear(scheduled)
+	table.clear(stagedHp)
+	releaseToken += 1
 	return removed
 end
 
@@ -208,16 +231,23 @@ local function spawnStaged(shot: Dev.Shot, x: number, z: number, facing: number)
 		table.insert(staged, id)
 		table.insert(ids, id)
 		if not entry.held then
-			table.insert(toRelease, id)
+			if entry.releaseAfter ~= nil then
+				table.insert(scheduled, { id = id, after = entry.releaseAfter })
+			else
+				table.insert(toRelease, id)
+			end
 		end
 		if entry.hp ~= nil then
 			EntityService.setHp(id, entry.hp)
+			stagedHp[id] = entry.hp
 		end
 	end
 	return ids, nil
 end
 
 local function stageShot(player: Player, shotId: unknown): Reply
+	-- The last take's enemies go before anything else, whatever this request comes to (CS1).
+	clearStaged()
 	local index = DevStageLogic.shotIndex(Shots, shotId)
 	if index == nil then
 		return fail(("unknown shot %s"):format(tostring(shotId)))
@@ -227,7 +257,6 @@ local function stageShot(player: Player, shotId: unknown): Reply
 	if record == nil or record.state == "Dead" then
 		return fail("the player has no living entity (respawning?)")
 	end
-	clearStaged()
 	local waiting = holdField()
 	if #waiting > 0 then
 		local names = {}
@@ -271,15 +300,55 @@ local function stageShot(player: Player, shotId: unknown): Reply
 	return { ok = true, shot = shot.id, targetId = ids[1], ids = ids, moved = moved }
 end
 
+-- Lets a staged enemy go at the HP its shot staged (setHp restarts the regen wait): true when it
+-- was let go.
+local function letGo(id: number): boolean
+	if not EnemyService.setHeld(id, false) then
+		return false
+	end
+	local hp = stagedHp[id]
+	if hp ~= nil then
+		EntityService.setHp(id, hp)
+	end
+	return true
+end
+
 local function go(): Reply
 	local released: { number } = {}
 	for _, id in toRelease do
-		if EnemyService.setHeld(id, false) then
+		if letGo(id) then
 			table.insert(released, id)
 		end
 	end
 	table.clear(toRelease)
-	return { ok = true, released = released }
+	-- The late ones, each once, unless the take is called off first.
+	local token = releaseToken
+	local later: { { id: number, after: number } } = {}
+	for _, entry in scheduled do
+		local id = entry.id
+		task.delay(entry.after, function()
+			if releaseToken == token and isStaged(id) then
+				letGo(id)
+			end
+		end)
+		table.insert(later, { id = id, after = entry.after })
+	end
+	table.clear(scheduled)
+	return { ok = true, released = released, scheduled = later }
+end
+
+-- The take is over: its enemies stop where they stand (CS1).
+local function holdTake(): Reply
+	local held: { number } = {}
+	for _, id in staged do
+		if EnemyService.setHeld(id, true) then
+			table.insert(held, id)
+		end
+	end
+	table.clear(toRelease)
+	table.clear(scheduled)
+	releaseToken += 1
+	return { ok = true, held = held }
 end
 
 local function release(): Reply
@@ -302,6 +371,9 @@ local HANDLERS: { [string]: (player: Player, shotId: unknown) -> Reply } = {
 	stage = stageShot,
 	go = function(): Reply
 		return go()
+	end,
+	hold = function(): Reply
+		return holdTake()
 	end,
 	release = function(): Reply
 		return release()
