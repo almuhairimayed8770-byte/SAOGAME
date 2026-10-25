@@ -215,3 +215,228 @@ describe("BladeContact geometry", function()
 		expect(BladeContact.queryable(p)).toBe(false)
 	end)
 end)
+
+describe("BladeContact: a fighter beside the swing is cut only by the blade itself", function()
+	local function part(position: Vector3, size: Vector3): any
+		local created = Instance.new("Part")
+		created.Size = size
+		created.CFrame = CFrame.new(position)
+		return created
+	end
+
+	-- A point `distance` studs flat from `origin` at `degrees` from -Z (+ = left, the sign of a
+	-- CFrame.Angles yaw), raised by `height`.
+	local function at(origin: Vector3, degrees: number, distance: number, height: number?): Vector3
+		local look = CFrame.Angles(0, math.rad(degrees), 0).LookVector
+		return origin + look * distance + Vector3.new(0, height or 0, 0)
+	end
+
+	it("is beside outside half the cone either side of the facing, flat; in front inside it or on top", function()
+		local origin = Vector3.new(4, 3, -2)
+		local facing = Vector3.new(0, 0, -1)
+		for _, degrees in { 0, 39, -39, 39.9 } do
+			expect(BladeContact.beside(origin, facing, at(origin, degrees, 5), 80, 0.5)).toBe(false)
+		end
+		for _, degrees in { 41, -41, 60, -90, 135, 180 } do
+			expect(BladeContact.beside(origin, facing, at(origin, degrees, 5), 80, 0.5)).toBe(true)
+		end
+		-- Height is ignored, and so is the facing's tilt.
+		expect(BladeContact.beside(origin, Vector3.new(0, -0.9, -0.3), at(origin, 30, 5, 10), 80, 0.5)).toBe(false)
+		-- Any facing: the cone turns with it.
+		local turned = CFrame.Angles(0, math.rad(70), 0).LookVector
+		expect(BladeContact.beside(origin, turned, at(origin, 100, 6), 80, 0.5)).toBe(false)
+		expect(BladeContact.beside(origin, turned, at(origin, 20, 6), 80, 0.5)).toBe(true)
+		-- On top of the origin there is no bearing: in front.
+		expect(BladeContact.beside(origin, facing, origin + Vector3.new(0.3, 2, 0.2), 80, 0.5)).toBe(false)
+		-- A facing with no flat part gives no cone: every fighter is in front.
+		expect(BladeContact.beside(origin, Vector3.new(0, -1, 0), at(origin, 120, 5), 80, 0.5)).toBe(false)
+	end)
+
+	it("a swept blade touches a box it passes through between two far-apart blades, on the box", function()
+		-- A thin post (0.2 wide) the blade sweeps across: the blade lies along Z at x = -3, then x = 3.
+		local post = part(Vector3.new(0, 0, -4), Vector3.new(0.2, 4, 0.2))
+		local a0, b0 = Vector3.new(-3, 0, -2), Vector3.new(-3, 0, -6)
+		local a1, b1 = Vector3.new(3, 0, -2), Vector3.new(3, 0, -6)
+		expect((BladeContact.touch(a0, b0, { post }, 0.2))).toBe(false)
+		expect((BladeContact.touch(a1, b1, { post }, 0.2))).toBe(false)
+		local hit, point = BladeContact.sweptTouch(a0, b0, a1, b1, { post }, 0.2, 0.2)
+		expect(hit).toBe(true)
+		expect(math.abs((point :: Vector3).X) <= 0.1 + 1e-6).toBe(true)
+		expect(math.abs((point :: Vector3).Z + 4) <= 0.1 + 1e-6).toBe(true)
+		-- However long the move, and whichever way it goes.
+		local far = Vector3.new(30, 0, 0)
+		local hitBack = BladeContact.sweptTouch(a1 + far, b1 + far, a0 - far, b0 - far, { post }, 0.2, 0.2)
+		expect(hitBack).toBe(true)
+	end)
+
+	it("a swept blade that stops short of a box touches it only within the radius", function()
+		local box = part(Vector3.new(2, 0, -4), Vector3.new(2, 2, 2)) -- its -X face at x = 1
+		local a0, b0 = Vector3.new(-3, 0, -2), Vector3.new(-3, 0, -6)
+		local function stopAt(x: number): boolean
+			return (BladeContact.sweptTouch(a0, b0, Vector3.new(x, 0, -2), Vector3.new(x, 0, -6), { box }, 0.2, 0.2))
+		end
+		expect(stopAt(1 - 0.25)).toBe(false)
+		expect(stopAt(1 - 0.15)).toBe(true)
+		-- A stud short: the hit radius would reach it, the blade does not.
+		expect(stopAt(0)).toBe(false)
+		expect((BladeContact.touch(Vector3.new(0, 0, -2), Vector3.new(0, 0, -6), { box }, 1.2))).toBe(true)
+	end)
+
+	it("does not test the blade it starts from: that one was tested as the last move's end", function()
+		local box = part(Vector3.new(0, 0, -4), Vector3.new(2, 2, 2)) -- its +X face at x = 1
+		-- Starting 0.1 off the face, inside the radius, and moving straight away: only the start
+		-- touches (the first step is 0.196 farther out).
+		local a0, b0 = Vector3.new(1.1, 0, -3), Vector3.new(1.1, 0, -5)
+		local a1, b1 = Vector3.new(6, 0, -3), Vector3.new(6, 0, -5)
+		expect((BladeContact.touch(a0, b0, { box }, 0.2))).toBe(true)
+		expect((BladeContact.sweptTouch(a0, b0, a1, b1, { box }, 0.2, 0.2))).toBe(false)
+		-- A blade that does not move is the overlap test's alone.
+		expect((BladeContact.sweptTouch(a0, b0, a0, b0, { box }, 0.2, 0.2))).toBe(false)
+	end)
+
+	-- A blade turning flat about a guard at the origin, 4 studs long: at `degrees` from -Z.
+	local function turning(degrees: number): (Vector3, Vector3)
+		return Vector3.zero, CFrame.Angles(0, math.rad(degrees), 0).LookVector * 4
+	end
+	local function solveTurn(from: number, to: number): (t: number) -> (Vector3?, Vector3?)
+		return function(t: number): (Vector3?, Vector3?)
+			return turning(from + (to - from) * t)
+		end
+	end
+
+	it("follows the drawn arc between two far samples: a box the arc cuts and the chord misses", function()
+		-- The tip sweeps -60 to +60 degrees; between, the chord's tip passes 2 studs out, the arc 4.
+		local post = part(Vector3.new(0, 0, -3.8), Vector3.new(0.2, 2, 0.2))
+		local a0, b0 = turning(-60)
+		local a1, b1 = turning(60)
+		expect((BladeContact.sweptTouch(a0, b0, a1, b1, { post }, 0.15, 0.15))).toBe(false)
+		local hit, point, spent =
+			BladeContact.followTouch(a0, b0, 0, a1, b1, 1, { post }, 0.15, 0.3, solveTurn(-60, 60), 16)
+		expect(hit).toBe(true)
+		-- On the post's box, nearest the blade.
+		expect(math.abs((point :: Vector3).X) <= 0.1 + 1e-5).toBe(true)
+		expect(math.abs((point :: Vector3).Z + 3.8) <= 0.1 + 1e-5).toBe(true)
+		expect(spent > 0 and spent <= 16).toBe(true)
+		-- With no splits left, or no solver, the move is taken straight: the chord's verdict.
+		expect((BladeContact.followTouch(a0, b0, 0, a1, b1, 1, { post }, 0.15, 0.3, solveTurn(-60, 60), 0))).toBe(false)
+		expect((BladeContact.followTouch(a0, b0, 0, a1, b1, 1, { post }, 0.15, 0.3, nil, 16))).toBe(false)
+		-- A solver that cannot pose the middle falls back to the chord, spending the split.
+		local function lost(_t: number): (Vector3?, Vector3?)
+			return nil, nil
+		end
+		local lostHit, _, lostSpent = BladeContact.followTouch(a0, b0, 0, a1, b1, 1, { post }, 0.15, 0.3, lost, 16)
+		expect(lostHit).toBe(false)
+		expect(lostSpent).toBe(1)
+	end)
+
+	it("cuts only within its radius of the arc, and does not test the blade it starts from", function()
+		local a0, b0 = turning(-60)
+		local a1, b1 = turning(60)
+		local function postAt(z: number): any
+			return part(Vector3.new(0, 0, z), Vector3.new(0.2, 2, 0.2)) -- its +Z face at z + 0.1
+		end
+		-- The arc's tip passes 0.1 studs short of the post's face at -4.1; its chords would pass 2 short.
+		local function cut(z: number, radius: number): boolean
+			return (BladeContact.followTouch(a0, b0, 0, a1, b1, 1, { postAt(z) }, radius, 0.3, solveTurn(-60, 60), 16))
+		end
+		expect(cut(-4.2, 0.15)).toBe(true)
+		expect(cut(-4.2, 0.05)).toBe(false)
+		expect(cut(-4.5, 0.15)).toBe(false)
+		-- Starting inside the radius and turning away: only the start touches, and it is not tested.
+		local behind = part(CFrame.Angles(0, math.rad(-63), 0).LookVector * 3, Vector3.new(0.1, 2, 0.1))
+		expect((BladeContact.touch(a0, b0, { behind }, 0.15))).toBe(true)
+		expect((BladeContact.followTouch(a0, b0, 0, a1, b1, 1, { behind }, 0.15, 0.3, solveTurn(-60, 60), 16))).toBe(
+			false
+		)
+	end)
+
+	it("spends no split on a move that passes far from the body, and stops at its budget", function()
+		local a0, b0 = turning(-60)
+		local a1, b1 = turning(60)
+		local far = part(Vector3.new(30, 0, 30), Vector3.new(2, 2, 2))
+		local hit, _, spent = BladeContact.followTouch(a0, b0, 0, a1, b1, 1, { far }, 0.15, 0.3, solveTurn(-60, 60), 16)
+		expect(hit).toBe(false)
+		expect(spent).toBe(0)
+		-- A box just past the arc's reach on its far side keeps it splitting near it, never past the budget.
+		local near = part(Vector3.new(0, 0, -4.6), Vector3.new(0.2, 2, 0.2))
+		local nearHit, _, nearSpent =
+			BladeContact.followTouch(a0, b0, 0, a1, b1, 1, { near }, 0.15, 0.01, solveTurn(-60, 60), 5)
+		expect(nearHit).toBe(false)
+		expect(nearSpent <= 5).toBe(true)
+	end)
+
+	it("carries the root between two samples along its clip's root motion, not the chord", function()
+		local clip = Harness.load("src/shared/clips/player/OneHandedSword/Basic3")
+		local window = ClipSampler.hitWindows(clip)[1]
+		local from, to = window.open, window.close
+		-- Zero at both ends and for an empty span.
+		expect(BladeContact.rootBow(clip, from, to, from, CFrame.identity).Magnitude < 1e-6).toBe(true)
+		expect(BladeContact.rootBow(clip, from, to, to, CFrame.identity).Magnitude < 1e-6).toBe(true)
+		expect(BladeContact.rootBow(clip, to, from, (from + to) / 2, CFrame.identity).Magnitude).toBe(0)
+		-- Between them: the clip's root motion less the straight line, in the root's frame.
+		local middle = (from + to) / 2
+		local a, b, m =
+			ClipSampler.rootMotionAt(clip, from),
+			ClipSampler.rootMotionAt(clip, to),
+			ClipSampler.rootMotionAt(clip, middle)
+		local expected = Vector3.new(m[1] - (a[1] + b[1]) / 2, m[2] - (a[2] + b[2]) / 2, m[3] - (a[3] + b[3]) / 2)
+		local bow = BladeContact.rootBow(clip, from, to, middle, CFrame.identity)
+		expect((bow - expected).Magnitude < 1e-5).toBe(true)
+		expect(bow.Magnitude > 0.1).toBe(true) -- Basic3's lunge eases: 0.2 studs off its chord here
+		-- Turned with the root.
+		local turned = CFrame.Angles(0, math.rad(90), 0)
+		local turnedBow = BladeContact.rootBow(clip, from, to, middle, turned)
+		expect((turnedBow - turned:VectorToWorldSpace(expected)).Magnitude < 1e-5).toBe(true)
+	end)
+end)
+
+describe("BladeContact: a held weapon clashes, it never wounds (D-277)", function()
+	local RigBuilder = Harness.load("src/server/world/RigBuilder")
+	local Rigs = Harness.load("src/shared/data/rigs")
+
+	it("a part a rigged fighter holds (its rig's trailParts) is not its body", function()
+		local checked = 0
+		for rigId, rig in Rigs do
+			if rig.parts == nil then
+				continue -- engine-built (the player's R15): its sword is not under a rig part
+			end
+			local built = RigBuilder.build(rigId)
+			local heldNames = rig.trailParts or {}
+			for _, descendant in built:GetDescendants() do
+				if descendant:IsA("BasePart") then
+					local isHeld = table.find(heldNames, descendant.Name) ~= nil
+					expect(BladeContact.held(descendant)).toBe(isHeld)
+					expect(BladeContact.hurtbox(descendant)).toBe(BladeContact.queryable(descendant) and not isHeld)
+					checked += 1
+				end
+			end
+			built:Destroy()
+		end
+		expect(checked > 0).toBe(true)
+		-- The kobold's club, by name.
+		local kobold = RigBuilder.build("Kobold")
+		expect(BladeContact.held(kobold:FindFirstChild("Weapon"))).toBe(true)
+		expect(BladeContact.hurtbox(kobold:FindFirstChild("Weapon"))).toBe(false)
+		expect(BladeContact.hurtbox(kobold:FindFirstChild("Torso"))).toBe(true)
+		kobold:Destroy()
+	end)
+
+	it("only a rig's own list counts: no rig, an unknown rig or a body part keep the engine's rule", function()
+		local model = Instance.new("Model")
+		local weapon = Instance.new("Part")
+		weapon.Name = "Weapon"
+		weapon.Parent = model
+		expect(BladeContact.held(weapon)).toBe(false)
+		expect(BladeContact.hurtbox(weapon)).toBe(true)
+		model:SetAttribute("Rig", "NoSuchRig")
+		expect(BladeContact.held(weapon)).toBe(false)
+		model:SetAttribute("Rig", "Kobold")
+		expect(BladeContact.held(weapon)).toBe(true)
+		-- A part with no parent, or one the engine's query never sees, is no hurtbox either way.
+		local loose = Instance.new("Part")
+		expect(BladeContact.held(loose)).toBe(false)
+		weapon.Name = "Torso"
+		weapon.CanCollide, weapon.CanQuery = false, false
+		expect(BladeContact.hurtbox(weapon)).toBe(false)
+	end)
+end)

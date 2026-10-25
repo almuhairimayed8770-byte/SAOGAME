@@ -6,9 +6,9 @@
 
 		lune run tools/gaitgen.luau [--check] [Gait ...]
 
-	Run it from the repo root. With no gait named it rewrites every clip it owns except the
-	DRIFTED ones in tools/gaitgen/GaitGen.luau (Run and Sprint, whose upper bodies were re-keyed by
-	hand after generation); name gaits (WalkForward RunDrawn ...) to rewrite only those. The files it
+	Run it from the repo root. With no gait named it rewrites every clip it owns except any
+	DRIFTED ones in tools/gaitgen/GaitGen.luau (none now: Run's and Sprint's hand-keyed upper bodies
+	are pinned sources); name gaits (WalkForward RunDrawn ...) to rewrite only those. The files it
 	writes are already StyLua-formatted. --check writes nothing: it regenerates every clip it checks
 	(or the named ones) in memory and exits 1 when any differs from the committed file, byte for
 	byte; tests/tools/gaitgen.spec.luau runs the same check so a hand edit that drifts from the

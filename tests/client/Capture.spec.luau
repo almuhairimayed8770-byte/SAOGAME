@@ -94,7 +94,11 @@ type World = {
 	stages: { { view: any, target: any, side: number? } },
 	lockOns: { any },
 	clears: number,
+	-- The lock as the fake TargetController holds it (TargetController.current), by id.
+	locked: { id: number? },
 	handled: { { action: string, state: string, at: number } },
+	-- Each CharacterController.cancelArt: its slot and how many input-path calls came before it.
+	cancels: { { slot: number, handledBefore: number } },
 	input: any,
 	userInput: any,
 	replication: any,
@@ -246,7 +250,9 @@ local function load(options: Options?): World
 		end,
 	} :: any
 	local lockOns: { any } = {}
+	local locked: { id: number? } = { id = nil }
 	local handled: { { action: string, state: string, at: number } } = {}
+	local cancels: { { slot: number, handledBefore: number } } = {}
 	local camera = {
 		setStage = function(view: any, target: any, side: number?)
 			table.insert(stages, { view = view, target = target, side = side })
@@ -255,10 +261,15 @@ local function load(options: Options?): World
 	local target = {
 		lockOn = function(id: number?): boolean
 			table.insert(lockOns, id or "nil")
+			locked.id = id
 			return true
 		end,
 		clear = function()
 			world.clears += 1
+			locked.id = nil
+		end,
+		current = function(): any
+			return if locked.id ~= nil then { id = locked.id } else nil
 		end,
 	}
 	local input = {
@@ -283,6 +294,9 @@ local function load(options: Options?): World
 	local character = {
 		setCaptureTimeScale = function(_scale: number): boolean
 			return true
+		end,
+		cancelArt = function(slot: number)
+			table.insert(cancels, { slot = slot, handledBefore = #handled })
 		end,
 	}
 	local siblings = {
@@ -394,7 +408,9 @@ local function load(options: Options?): World
 		stages = stages,
 		lockOns = lockOns,
 		clears = 0,
+		locked = locked,
 		handled = handled,
+		cancels = cancels,
 		input = input,
 		userInput = userInput,
 		replication = replication,
@@ -731,6 +747,114 @@ describe("Capture: auto-perform (F12)", function()
 		world.key(KEYS.markDone)
 		world.key(KEYS.markDone)
 		expect(world.handled[#world.handled].state).toBe("End")
+	end)
+
+	-- D-290: the Art key a stopped take still holds comes up with its hold cancelled first, so the
+	-- release launches nothing (at HEAD the key's End launched the Art after the take had ended).
+	it("cancels a held Art before its key comes up when the take stops, so nothing launches", function()
+		local Input = Harness.load("src/shared/data/input")
+		local world = load()
+		local shot = CAPTURE.shots[shotIndex("art-horizontal")]
+		local perform = shot.perform[1]
+		goTo(world, shot.id)
+		world.key(KEYS.autoPerform)
+		world.key(KEYS.startCountdown)
+		world.untilRecording()
+		world.seconds(perform.at + 0.05)
+		expect(world.handled[#world.handled].state).toBe("Begin")
+		local before = #world.handled
+		world.key(KEYS.markDone)
+		world.key(KEYS.markDone)
+		expect(#world.cancels).toBe(1)
+		expect(world.cancels[1].slot).toBe(Input.artSlot(perform.action))
+		-- Cancelled, then the key comes up (the input path's hold ends too), once.
+		expect(world.cancels[1].handledBefore).toBe(before)
+		expect(#world.handled).toBe(before + 1)
+		expect(world.handled[before + 1].action).toBe(perform.action)
+		expect(world.handled[before + 1].state).toBe("End")
+		-- Nothing more after the stop: its timed let-go never comes.
+		world.seconds(1)
+		expect(#world.handled).toBe(before + 1)
+	end)
+
+	it("lets a key that is not an Art come up without a cancel", function()
+		local world = load()
+		local shot = CAPTURE.shots[shotIndex("parry-spark")]
+		goTo(world, shot.id)
+		world.key(KEYS.autoPerform)
+		world.key(KEYS.startCountdown)
+		world.untilRecording()
+		world.seconds(0.5)
+		world.replication.clipEvent:Fire(world.kobold, Overhead.id, Overhead.events[1], false)
+		-- Until the guard is down, then stop the take while it is.
+		for _ = 1, 120 do
+			world.frames(1)
+			if #world.handled > 0 then
+				break
+			end
+		end
+		expect(world.handled[1].action).toBe("Guard")
+		world.key(KEYS.markDone)
+		world.key(KEYS.markDone)
+		expect(#world.cancels).toBe(0)
+		expect(world.handled[#world.handled].action).toBe("Guard")
+		expect(world.handled[#world.handled].state).toBe("End")
+	end)
+
+	-- D-290: the locomotion pass's lock presses act on the staged target alone; the lock key's
+	-- own cycle could step the second press on to a field enemy nearer than it.
+	it("locks the staged target on the locomotion pass's first lock press and lets it go on the second", function()
+		local world = load()
+		local shot = CAPTURE.shots[shotIndex("locomotion")]
+		local presses = {}
+		for _, entry in shot.perform do
+			if entry.action == "LockOn" then
+				table.insert(presses, entry.at)
+			end
+		end
+		expect(#presses).toBe(2)
+		goTo(world, shot.id)
+		world.key(KEYS.autoPerform)
+		world.key(KEYS.startCountdown)
+		world.untilRecording()
+		expect(world.locked.id).toBeNil()
+		world.seconds(presses[1] + 0.1)
+		expect(world.locked.id).toBe(world.kobold.id)
+		world.seconds(presses[2] - presses[1])
+		expect(world.locked.id).toBeNil()
+		-- Never through the lock key's path, which would cycle on to whatever ranks next.
+		local keyed = count(world.handled, function(entry: any): boolean
+			return entry.action == "LockOn"
+		end)
+		expect(keyed).toBe(0)
+	end)
+
+	it("takes the staged target from a field enemy the lock is on, never cycling past it", function()
+		local world = load()
+		local shot = CAPTURE.shots[shotIndex("locomotion")]
+		local first = shot.perform[1].at :: number
+		goTo(world, shot.id)
+		world.key(KEYS.autoPerform)
+		world.key(KEYS.startCountdown)
+		world.untilRecording()
+		-- The player locked a field enemy before the press.
+		world.locked.id = 99
+		world.seconds(first + 0.1)
+		expect(world.locked.id).toBe(world.kobold.id)
+	end)
+
+	it("presses the lock key through the input path when the take staged no target", function()
+		local world = load({ remote = false, capture = true })
+		local shot = CAPTURE.shots[shotIndex("locomotion")]
+		goTo(world, shot.id)
+		world.key(KEYS.autoPerform)
+		world.key(KEYS.startCountdown)
+		world.untilRecording()
+		world.seconds(shot.seconds - 1)
+		local downs = count(world.handled, function(entry: any): boolean
+			return entry.action == "LockOn" and entry.state == "Begin"
+		end)
+		expect(downs).toBe(2)
 	end)
 end)
 

@@ -97,6 +97,19 @@ describe("combat data: the server hit sweep", function()
 		expect(combat.sweepMaxSubdivisions).toBe(12)
 	end)
 
+	it("a fighter beside the swing is cut by the blade itself: its edge in the body (D-275)", function()
+		expect(combat.besideHitRadius).toBe(0.15)
+		local blade = Harness.load("src/shared/data/weaponModels").categories.OneHandedSword.blade
+		-- No wider than half the blade: the drawn edge reaches the body before it counts.
+		expect(combat.besideHitRadius <= blade.width / 2).toBe(true)
+		expect(combat.besideHitRadius > 0).toBe(true)
+		-- The test follows the drawn arc closely: a chord of the follow step strays from an arc
+		-- around the shoulder (3 studs or more) by far less than the radius.
+		expect(combat.besideFollowStep).toBe(0.3)
+		expect(combat.besideFollowStep ^ 2 / (8 * 3)).toBeLessThan(combat.besideHitRadius / 10)
+		expect(combat.besideMaxSubdivisions).toBe(16)
+	end)
+
 	it("a root has jumped past 90 studs a second over the time and the lag, 1.25 x honest travel", function()
 		expect(combat.sweepMaxRootSpeed).toBe(90)
 		expect(combat.sweepRootSpeedMargin).toBe(1.25)
@@ -243,9 +256,15 @@ describe("combat data: aim (D-112)", function()
 		expect(combat.aim.snapDegrees).toBe(40)
 		expect(combat.aim.replicationMarginDegrees).toBe(9)
 		expect(combat.aim.assistRange).toBe(10.5)
-		expect(combat.aim.assistConeDegrees).toBe(90)
+		expect(combat.aim.assistConeDegrees).toBe(80) -- D-275: was 90
 		expect(combat.aim.assistAngleWeightStuds).toBe(6)
 		expect(combat.aim.minFaceDistance).toBe(0.5)
+	end)
+
+	it("an enemy the assist picks is one the snap turns the body all the way onto (D-275)", function()
+		-- The Play-test: a boar 45 degrees off was picked (cone 90) but the snap turned 40, and the
+		-- cut stopped 5 short of it. Half the cone is no wider than the snap.
+		expect(combat.aim.assistConeDegrees / 2).toBeLessThanOrEqual(combat.aim.snapDegrees)
 	end)
 
 	it("the snap and the replication margin stay inside the server's facing acceptance", function()

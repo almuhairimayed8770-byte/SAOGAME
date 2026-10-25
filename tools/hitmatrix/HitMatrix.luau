@@ -132,6 +132,9 @@ export type Cell = {
 	-- the hit radius (<= 0: it touches), and the enemy part it came closest to.
 	clearance: number?,
 	nearestPart: string?,
+	-- The enemy stands beside the swing (its bearing outside the aim assist's cone, D-275): only the
+	-- blade itself cuts it, so its clearance is from combat.besideHitRadius.
+	beside: boolean?,
 }
 
 export type Drawn = { fps: number, phase: number, hit: boolean }
@@ -148,6 +151,9 @@ export type Report = {
 	-- radius less half of combat.luau sweepMaxTipStep (every point the blade passes lies within half
 	-- a step of a sample). A miss shallower than this is a graze; a deeper one is a server fault.
 	promise: number,
+	-- The same beside the swing (D-275): combat.besideHitRadius, and half of it (its own step).
+	besideRadius: number,
+	besidePromise: number,
 }
 
 type Context = {
@@ -1171,6 +1177,8 @@ function HitMatrix.run(Harness: any, options: Options?): Report
 		weaponReach = ctx.Weapons.byId(ctx.Playground.loadout.weapon).reach,
 		radius = radius,
 		promise = radius - ctx.Combat.sweepMaxTipStep / 2,
+		besideRadius = ctx.Combat.besideHitRadius,
+		besidePromise = ctx.Combat.besideHitRadius / 2,
 	}
 	local ok, err = pcall(function()
 		for _, setup in config.setups do
@@ -1195,6 +1203,9 @@ function HitMatrix.run(Harness: any, options: Options?): Report
 			if opts.setups ~= nil and table.find(opts.setups, setup.id) == nil then
 				continue
 			end
+			-- D-275: the player faces straight ahead, so an enemy whose bearing is outside the aim
+			-- assist's cone stands beside every swing.
+			local beside = math.abs(setup.bearing or 0) > ctx.Combat.aim.assistConeDegrees / 2
 			for _, distance in setup.distances do
 				local real = distance >= setup.realFight.min - 1e-9 and distance <= setup.realFight.max + 1e-9
 				if opts.realOnly and not real then
@@ -1279,7 +1290,12 @@ function HitMatrix.run(Harness: any, options: Options?): Report
 						end
 						local clearance, nearest = nil, nil
 						if not all then
-							clearance, nearest = clearanceOf(ctx, trackOf(attack, index, standOff), parts, radius)
+							clearance, nearest = clearanceOf(
+								ctx,
+								trackOf(attack, index, standOff),
+								parts,
+								if beside then report.besideRadius else radius
+							)
 						end
 						table.insert(report.cells, {
 							attack = attack.id,
@@ -1296,6 +1312,7 @@ function HitMatrix.run(Harness: any, options: Options?): Report
 							drawn = drawn,
 							clearance = clearance,
 							nearestPart = nearest,
+							beside = beside,
 						})
 					end
 				end
@@ -1344,7 +1361,8 @@ function HitMatrix.misses(report: Report): { string }
 				end
 			end
 			local clearance = cell.clearance or math.huge
-			local why = if clearance <= -report.promise
+			local promise = if cell.beside then report.besidePromise else report.promise
+			local why = if clearance <= -promise
 				then ("the blade passes %.2f deep into %s, past the sweep's promise: a server miss"):format(
 					-clearance,
 					tostring(cell.nearestPart)
@@ -1352,7 +1370,7 @@ function HitMatrix.misses(report: Report): { string }
 				elseif clearance <= 0 then ("the blade's rim grazes %s (%.2f deep, the sweep promises %.2f)"):format(
 					tostring(cell.nearestPart),
 					-clearance,
-					report.promise
+					promise
 				)
 				else ("the blade passes %.2f studs clear (nearest %s)"):format(
 					clearance,
@@ -1541,7 +1559,17 @@ function HitMatrix.render(report: Report): { string }
 	)
 	table.insert(lines, "after the first server frame past its strike's snap (in the settle or recovery). Distances in")
 	table.insert(lines, "parentheses are outside the setup's real-fight range and are not required; a point-blank")
-	table.insert(lines, "setup stands at the shoulder, outside the aim assist, and is never required. ' !drawn' marks")
+	table.insert(
+		lines,
+		"setup stands at the shoulder, outside the aim assist, and is never required: beside the swing,"
+	)
+	table.insert(
+		lines,
+		("only the blade itself cuts it (D-275), so its depths are from %.2f and its promise is %.3f. ' !drawn' marks"):format(
+			report.besideRadius,
+			report.besidePromise
+		)
+	)
 	table.insert(lines, "a cell the client and the server disagree on (some client frame rate or phase drew a hit")
 	table.insert(lines, "the server missed, or missed one it counted). ' <s' marks an Art swung after a stand-off of s")
 	table.insert(lines, "studs (fix F1: its first cut would have started in the body).")
@@ -1619,13 +1647,14 @@ function HitMatrix.render(report: Report): { string }
 							end
 						end
 						local clearance = found.clearance or math.huge
+						local promise = if found.beside then report.besidePromise else report.promise
 						if hitSome then
 							text = ("%s@%s %.2f"):format(
-								if clearance <= -report.promise then "MISS!" else "miss",
+								if clearance <= -promise then "MISS!" else "miss",
 								table.concat(missed, ","),
 								-clearance
 							)
-						elseif clearance <= -report.promise then
+						elseif clearance <= -promise then
 							text = ("MISS! %.2f"):format(-clearance)
 						elseif clearance <= 0 then
 							text = ("graze %.2f"):format(-clearance)

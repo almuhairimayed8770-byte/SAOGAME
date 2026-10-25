@@ -858,6 +858,61 @@ the sweep.
   - SpeedLines: each pooled line carries a UIStroke ink edge with its own UIGradient; lay() writes the edge's transparency with the core's.
 - **Data tables:** combat.luau hitStopShaveFrames and contact (keyEpsilon, wordWaitSeconds, standOff); camera.luau lock keys; ai.luau telegraph, strikePrediction, rushWorld rest keys and spacing; fx.luau trail.ribbon, activationLight.glow and wallSlam; sfx.luau mix.heartbeatDuck, playback.sameFrameSeconds and shatterBalance; ui.luau systemLine, hud.artList and nameplates.declutter; accents.luau speedLines edge; choreo.luau sheath.cutBackBlend; dev.luau capture staging and hitMatrix.clientFps.
 
+### Gate shot fixes, second round (D-271 to D-296)
+
+- **Hit path (client):**
+  - Mixer: a pause ends at the frame nearest its length. `owes(pause, dt)` is false once what is left is under half of dt. combat.hitStopShaveFrames is 0, so Replication.heldFrames passes holds through whole (D-271).
+  - Replication: a kill's HitConfirmed is held for its strike key like any other word (D-267), and the kill's EntityDied waits with it (deaths kept per entity: takeDeaths, releaseDeaths, playDeath). The death freeze, silence and shatter start on the key frame (D-272).
+  - Trails and TrailRibbon: a stroke starts at its window's open instant. The sub-steps between rendered frames are the clip's own poses at those times (residualsOf, followSource, bladeAt), not chords (D-273).
+  - ContactPredictor:
+    - worldCast(model, blockcast?, exclude?) → BoxCast, room(...) and fighters(model, scene?, players?) give the stand-off's world limit.
+    - standOff(model, clip, time, rootCFrame, target, cast?) returns a plan with room(rootCFrame, distance) → number, which CharacterController.stepStandOff applies every frame (D-276).
+    - A fighter judged beside the swing when a window opens (besideSwing; per-window aims and beside sets) is tested with the blade only (D-275).
+    - Contacts use BladeContact.hurtbox (D-277).
+- **BladeContact (shared by HitSweep, ContactPredictor and tools/hitmatrix):**
+  - held(part) and hurtbox(part): a part named in its rig's trailParts, under a Model whose Rig attribute names a rigs.luau rig, is a weapon and never a hurtbox (D-277).
+  - beside(...) judges a fighter outside the assist cone. sweptTouch, followTouch and rootBow test it along the drawn arc with besideHitRadius (D-275).
+- **HitSweep and CombatService (server):**
+  - The beside sweep (sweepBeside, nearBlade, besideOf) runs alongside the aimed sweep.
+  - A cast that meets a held weapon excludes only that part and goes on.
+  - CombatService keeps per-window aimOrigin and besideIds, and its traces use hurtbox (D-275, D-277).
+- **Enemies (server):**
+  - EnemyService movers (D-278, D-279, D-295):
+    - snoutWalk returns the room and the face's normal, and snoutRoom slides a slanted walk along that face.
+    - snoutAhead and canFace judge a turn where the body stands.
+    - A rush stop within ai.movement.haltLeadSeconds is made exact through Engine.halt.
+  - Brain.turnStep turns the short way unless context.canFace refuses. A free body then turns the long way (turnSense) until it is through the half turn; an attack's turn never does (D-295). Brain gains moveDirect and halt.
+  - Charger: blocked(brain, rush, now, progress) is the blocked-step jam (archetypes.Charger runningFraction, blockedFraction, blockedSeconds; D-280).
+  - EnemyService.blockerClear(model) runs a separating-axis test (uprightBoxesOverlap) between the model's blocker and every other entry's colliding blocker. The rejoin needs it as well as CollisionGroups.clear. ai.collision.apart no longer keeps blockers apart from enemies or from blockers (D-281).
+  - EnemyService's endedPayload builds RushEnded as Types.RushEndedPayload, and Types.RushEndedReason is the wire's reason union (D-282).
+- **Camera:**
+  - CharacterController.step calls CameraController.lockMove right after reading Humanoid.MoveDirection, and writes a turned stick back with Humanoid:Move (D-284).
+  - holdLock(seconds) holds for seconds + camera.lock.riseHoldSeconds with the framed point frozen (D-285).
+  - The two-shot measures each shoulder's reach (reachLeft) and takes the open side once (CameraMath.takesOpenSide; D-286). A target that left the view raises the turn cap (turnCap, CameraMath.acrossView; D-287).
+  - shake(tier, scale?) scales the tier's amplitude, and CameraMath.falloff(distance, full, radius) gives the scale. Replication.slamCue calls shake(tier, falloff(...)) and requires client/camera/CameraMath (D-288, D-296).
+- **Telegraphs (D-289):**
+  - Telegraphs keeps a ring of the last fx.telegraph.glintLeadSamples lateBy values. glintLead() is their minimum, capped by glintLeadMax. resetLatency() is for specs.
+  - TelegraphShapes.timing(windUp, strike?, lead?) → (ends, glintFrom, glintUntil); fillTransparency(elapsed, windUp, intensity, ends?, glintFrom?, glintUntil?).
+- **Dev capture (D-290):**
+  - CaptureLogic.lockPress(stagedId, lockedId) → "Lock" | "Release" | "Key"; letGo(held, slotOf) → { action, slot? } in name order.
+  - Capture.client routes LockOn presses through lockPress and stops a take through letGo, calling CharacterController.cancelArt before the key's End.
+- **Animation:**
+  - Locomotion: on the local rig (holdsCutAttacks true), an attack clip let go before its first HitWindowOpen, TrailOn or SmearOn is held (holdCutAttacks → Mixer.hold) and fades where it stood. Locomotion.attach (remote players) sets holdsCutAttacks false (D-294).
+  - Flinch clips are impact frames: the hit pose is on key 0 and held to 0.04 s (D-294).
+  - LocomotionState.heldShare(speed, input, walkSpeed): the walks play alone at walkSpeed when the move is held, and a run hands back over choreo locomotion.stride.heldRiseSeconds (D-292).
+  - tools/gaitgen generates all 12 gait clips, Run and Sprint from sources/Run.luau and sources/Sprint.luau; GaitGen.DRIFTED is empty (D-291).
+- **Validators (D-283):**
+  - camera: close-shot and aim rules, footprintPart = RigBuilder.BLOCKER_NAME.
+  - dev: capture cameras, shots, prompts, perform lists, hotkeys, ledge and ring geometry.
+  - sfx: the shatter balance.
+  - ai: haltLeadSeconds and snoutSlackStuds bounds.
+- **Data tables:**
+  - combat.luau: aim.assistConeDegrees 80, besideHitRadius, besideFollowStep, besideMaxSubdivisions, contact.standOff.wallGapStuds, hitStopShaveFrames 0.
+  - ai.luau: movement.haltLeadSeconds, movement.snoutSlackStuds, archetypes.Charger runningFraction / blockedFraction / blockedSeconds, collision.apart.
+  - camera.luau: lock riseHoldSeconds, wallBlockedFraction, wallGainFraction, catchUpDegreesPerSecond, catchUpMostDegrees, catchUpMargin, catchUpEase.
+  - fx.luau: wallSlam.shakeFullRadius, telegraph.glintLeadMax and glintLeadSamples.
+  - choreo.luau: sheath.movingTipShare, locomotion.stride.heldRiseSeconds.
+
 ## Data tables (src/shared/data)
 
 | File | Holds |

@@ -46,6 +46,16 @@
 	own side or a dying enemy on the blade's path never uses up the window's target cap, and the
 	blade passes through them.
 
+	A fighter beside the swing (CastOptions.beside: its root outside the aim assist's cone around
+	the run's facing, BladeContact.beside, D-275) is cut only where the blade itself crosses its
+	body: the overlap test grows the blade by combat.besideHitRadius for it instead of the hit
+	radius, the hit radius's casts pass through it, and between two samples the blade is moved
+	straight from one to the other in steps no longer than that radius and tested at each
+	(BladeContact.sweptTouch, the client's rule too). One broad-phase query per sample still serves
+	both: it reaches back over the blade's move from the sample before. The hit radius is for the
+	enemy the swing is aimed at, which the snap turned the body onto: it forgives the blade's reach
+	to that body, not a cut that ends a stud short of a fighter to the side.
+
 	Every solve of one frame can share one read of the rig's joints (Pose.chain): bladeAt, bladePath
 	and solver take it as their last argument, and read the rig themselves without it.
 
@@ -110,6 +120,18 @@ export type CastOptions = {
 	-- castBladePath: samples[1] is the previous call's last sample, already overlap-tested; the
 	-- sweep starts from it without testing it again.
 	continued: boolean?,
+	-- castBladePath: whether this fighter stands beside the swing (D-275). One that does is cut only
+	-- where the blade itself reaches it, grown by `besideRadius` (BladeContact.followTouch between
+	-- samples); the hit radius's overlap test and casts pass through it. Asked at most once per
+	-- fighter per call, and only of a fighter the blade may damage. Nil: none is beside.
+	beside: ((targetId: number) -> boolean)?,
+	besideRadius: number?, -- default combat.besideHitRadius
+	-- castBladePath: poses the blade between two samples (followArc's solver, from a root between
+	-- theirs along `clip`'s root motion), so the beside test follows the drawn arc
+	-- (combat.besideFollowStep), at most combat.besideMaxSubdivisions splits per call. Nil, or a
+	-- sample without its root: the move is taken straight.
+	solve: BladeSolver?,
+	clip: Types.ClipDef?,
 }
 
 export type Candidate = { id: number, position: Vector3, radius: number? }
@@ -316,10 +338,17 @@ end
 -- The root a sub-sample is solved from, `alpha` of the way from `a` to `b`: the body moves between
 -- two frames the way the replicated root did, so a root that moved with the clip's root motion is
 -- spread over the interval instead of landing as one jump that no clip-time split can shrink.
-local function rootBetween(a: BladeSample, b: BladeSample, alpha: number): CFrame?
+-- Given the swing's `clip`, the root follows the clip's own root motion between the two
+-- (BladeContact.rootBow, D-275: a lunge accelerates through the interval), the rest straight.
+local function rootBetween(a: BladeSample, b: BladeSample, alpha: number, clip: Types.ClipDef?): CFrame?
 	local from, to = a.root, b.root
 	if from ~= nil and to ~= nil then
-		return from:Lerp(to, alpha)
+		local root = from:Lerp(to, alpha)
+		if clip ~= nil then
+			local time = a.time + (b.time - a.time) * alpha
+			root += BladeContact.rootBow(clip, a.time, b.time, time, root.Rotation)
+		end
+		return root
 	end
 	return to or from
 end
@@ -332,11 +361,13 @@ end
 --- samples are kept in order (the first and last stay first and last); a blade that never moves
 --- more than `maxStep` gets the same path back and `solve` is never called. Returns the refined
 --- path and how many sub-samples it added. A sub-sample `solve` cannot place ends the refinement.
+--- With the swing's `clip`, a sub-sample's root follows the clip's root motion (rootBetween).
 function HitSweep.followArc(
 	path: { BladeSample },
 	solve: BladeSolver,
 	maxStep: number?,
-	maxSubdivisions: number?
+	maxSubdivisions: number?,
+	clip: Types.ClipDef?
 ): ({ BladeSample }, number)
 	local limit = maxStep or Combat.sweepMaxTipStep
 	local budget = maxSubdivisions or Combat.sweepMaxSubdivisions
@@ -371,7 +402,7 @@ function HitSweep.followArc(
 		end
 		local before, after = refined[worstIndex - 1], refined[worstIndex]
 		local time = before.time + (after.time - before.time) * 0.5
-		local sample = solve(time, rootBetween(before, after, 0.5))
+		local sample = solve(time, rootBetween(before, after, 0.5, clip))
 		if sample == nil then
 			break
 		end
@@ -487,9 +518,11 @@ end
 
 -- The engine's query rule: spatial queries skip a part when both CanQuery and CanCollide are off
 -- (CanQuery takes effect only on a part that does not collide), and, run as Default, a part whose
--- group does not collide with Default (an enemy's blocker, D-198): BladeContact.queryable.
+-- group does not collide with Default (an enemy's blocker, D-198): BladeContact.queryable. Of
+-- those, a weapon a fighter holds (the kobold's club) is no hurtbox: a blade that meets it clashes,
+-- never wounds (D-277, BladeContact.hurtbox).
 local function isQueryable(part: BasePart): boolean
-	return BladeContact.queryable(part)
+	return BladeContact.hurtbox(part)
 end
 
 local function isExcluded(part: Instance, model: Model, exclude: { Instance }): boolean
@@ -518,6 +551,27 @@ local function always(_targetId: number): boolean
 	return true
 end
 
+local function never(_targetId: number): boolean
+	return false
+end
+
+-- options.beside, asked at most once per fighter for one call (none is beside without it).
+local function besideOf(options: CastOptions): (number) -> boolean
+	local beside = options.beside
+	if beside == nil then
+		return never
+	end
+	local known: { [number]: boolean } = {}
+	return function(targetId: number): boolean
+		local answer = known[targetId]
+		if answer == nil then
+			answer = beside(targetId)
+			known[targetId] = answer
+		end
+		return answer
+	end
+end
+
 -- options.eligible, asked at most once per fighter for one call (every fighter without it).
 local function eligibilityOf(options: CastOptions): (number) -> boolean
 	local eligible = options.eligible
@@ -535,27 +589,58 @@ local function eligibilityOf(options: CastOptions): (number) -> boolean
 	end
 end
 
--- The overlap test: every fighter the blade (segment start -> finish grown by `radius`) touches
--- right now. The broad phase gathers nearby parts; only parts of fighters the blade may damage and
--- has not hit yet this window are measured, so the floor, a pillar, the attacker's own body or a
--- teammate is never a hit, and nothing blocks.
+-- The broad phase of one sample: the parts near its blade (segment start -> finish grown by
+-- `radius`), and with `previous` given (fighters may stand beside the swing) also near the blade's
+-- move from that sample, grown by `besideRadius`: every blade the move's arc passes lies within the
+-- move's travel of one of its two ends (BladeContact.followTouch).
+local function nearBlade(
+	start: Vector3,
+	finish: Vector3,
+	previous: BladeSample?,
+	radius: number,
+	besideRadius: number,
+	options: CastOptions,
+	overlap: Overlapper
+): { BasePart }
+	local center = start:Lerp(finish, 0.5)
+	local reach = (finish - start).Magnitude * 0.5 + radius
+	if previous ~= nil then
+		local travel = math.max((start - previous.start).Magnitude, (finish - previous.finish).Magnitude)
+		reach = math.max(
+			reach,
+			math.max(
+				(previous.start - center).Magnitude,
+				(previous.finish - center).Magnitude,
+				(finish - start).Magnitude * 0.5
+			)
+				+ travel
+				+ besideRadius
+		)
+	end
+	return overlap(center, reach, options.exclude)
+end
+
+-- The overlap test: every fighter the blade (segment start -> finish grown by `radius`, or by
+-- `besideRadius` for a fighter beside the swing) touches right now, among `near` (nearBlade's
+-- parts). Only parts of fighters the blade may damage and has not hit yet this window are measured,
+-- so the floor, a pillar, the attacker's own body or a teammate is never a hit, and nothing blocks.
 local function overlapBlade(
 	start: Vector3,
 	finish: Vector3,
 	radius: number,
+	near: { BasePart },
 	options: CastOptions,
 	alreadyHit: { [number]: boolean },
 	hits: { Hit },
 	budget: number,
-	overlap: Overlapper,
-	eligible: (number) -> boolean
+	eligible: (number) -> boolean,
+	beside: (number) -> boolean,
+	besideRadius: number
 )
 	if #hits >= budget then
 		return
 	end
-	local center = start:Lerp(finish, 0.5)
-	local reach = (finish - start).Magnitude * 0.5 + radius
-	for _, part in overlap(center, reach, options.exclude) do
+	for _, part in near do
 		if not part:IsA("BasePart") or not isQueryable(part) then
 			continue
 		end
@@ -568,12 +653,13 @@ local function overlapBlade(
 		end
 		local cframe = part.CFrame
 		local size = part.Size
+		local reach = if beside(targetId) then besideRadius else radius
 		-- Cheap reject: the part's bounding sphere does not reach the blade.
-		if pointSegmentDistance(cframe.Position, start, finish) > radius + size.Magnitude * 0.5 then
+		if pointSegmentDistance(cframe.Position, start, finish) > reach + size.Magnitude * 0.5 then
 			continue
 		end
 		local distance, contact = HitSweep.segmentBoxDistance(start, finish, cframe, size)
-		if distance <= radius then
+		if distance <= reach then
 			alreadyHit[targetId] = true
 			table.insert(hits, { targetId = targetId, position = contact })
 			if #hits >= budget then
@@ -585,7 +671,8 @@ end
 
 -- Casts one segment repeatedly, excluding every entity it already touched, until nothing new is
 -- hit, an obstacle stops the blade, or the target cap is reached. Like the engine's cast, it sees
--- nothing the sphere overlaps at `origin`; the overlap test covers that.
+-- nothing the sphere overlaps at `origin`; the overlap test covers that. A fighter beside the swing
+-- is never a hit here (the hit radius is not its rule): the cast passes through it.
 local function castSegment(
 	origin: Vector3,
 	direction: Vector3,
@@ -596,7 +683,8 @@ local function castSegment(
 	hits: { Hit },
 	budget: number,
 	cast: Caster,
-	eligible: (number) -> boolean
+	eligible: (number) -> boolean,
+	beside: (number) -> boolean
 )
 	if direction.Magnitude < MIN_CAST_LENGTH then
 		return
@@ -605,26 +693,38 @@ local function castSegment(
 	-- window already hit, or one the blade may not damage. A fighter met twice means the caster
 	-- ignored the exclude list, so the loop stops there instead of spinning.
 	local met: { [number]: boolean } = {}
+	local clashed: { [Instance]: boolean } = {}
 	while #hits < budget do
 		local result = cast(origin, radius, direction, exclude)
 		if result == nil then
 			return
 		end
-		local targetId, targetModel = options.resolve(result.Instance)
+		local instance = result.Instance
+		local targetId, targetModel = options.resolve(instance)
 		if targetId == nil or targetModel == nil then
 			-- Something that is not a fighter (a pillar, the floor): the blade stops here.
 			return
+		end
+		if instance:IsA("BasePart") and BladeContact.held(instance) then
+			-- A weapon the fighter holds (D-277): no wound, and its body behind it is still cut. Only
+			-- that part leaves the later casts; one met twice means the caster ignored the list.
+			if clashed[instance] then
+				return
+			end
+			clashed[instance] = true
+			table.insert(exclude, instance)
+			continue
 		end
 		if met[targetId] then
 			return
 		end
 		met[targetId] = true
-		if not alreadyHit[targetId] and eligible(targetId) then
+		if not alreadyHit[targetId] and eligible(targetId) and not beside(targetId) then
 			alreadyHit[targetId] = true
 			table.insert(hits, { targetId = targetId, position = result.Position })
 		end
 		-- Every fighter met is excluded from the later casts, so one never blocks another and the
-		-- blade passes through a fighter it may not damage.
+		-- blade passes through a fighter it may not damage or that stands beside the swing.
 		if table.find(exclude, targetModel) == nil then
 			table.insert(exclude, targetModel)
 		end
@@ -647,13 +747,28 @@ function HitSweep.castPath(points: { Vector3 }, options: CastOptions): { Hit }
 	local exclude = table.clone(options.exclude)
 	local eligible = eligibilityOf(options)
 
-	overlapBlade(points[1], points[1], radius, options, alreadyHit, hits, budget, overlap, eligible)
+	if #hits < budget then
+		local near = nearBlade(points[1], points[1], nil, radius, radius, options, overlap)
+		overlapBlade(points[1], points[1], radius, near, options, alreadyHit, hits, budget, eligible, never, radius)
+	end
 	for index = 2, #points do
 		if #hits >= budget then
 			break
 		end
 		local origin = points[index - 1]
-		castSegment(origin, points[index] - origin, radius, exclude, options, alreadyHit, hits, budget, cast, eligible)
+		castSegment(
+			origin,
+			points[index] - origin,
+			radius,
+			exclude,
+			options,
+			alreadyHit,
+			hits,
+			budget,
+			cast,
+			eligible,
+			never
+		)
 	end
 	return hits
 end
@@ -670,11 +785,96 @@ local function castLongChord(
 	hits: { Hit },
 	budget: number,
 	cast: Caster,
-	eligible: (number) -> boolean
+	eligible: (number) -> boolean,
+	beside: (number) -> boolean
 )
 	local chord = to - from
 	if chord.Magnitude > Combat.sweepMaxTipStep then
-		castSegment(from, chord, radius, exclude, options, alreadyHit, hits, budget, cast, eligible)
+		castSegment(from, chord, radius, exclude, options, alreadyHit, hits, budget, cast, eligible, beside)
+	end
+end
+
+-- The blade's move from one sample to the next against every fighter beside the swing (D-275):
+-- along the drawn arc (options.solve, from a root between the two samples' roots) while an end
+-- moves farther than combat.besideFollowStep, then straight in steps of `besideRadius`, each grown
+-- by it (BladeContact.followTouch), spending `arcs.left` splits. `near` is the later sample's broad
+-- phase, which reaches back over the move (nearBlade); the original exclude list keeps the
+-- attacker out (the casts' list also holds the fighters they passed through).
+local function sweepBeside(
+	from: BladeSample,
+	to: BladeSample,
+	besideRadius: number,
+	near: { BasePart },
+	options: CastOptions,
+	alreadyHit: { [number]: boolean },
+	hits: { Hit },
+	budget: number,
+	eligible: (number) -> boolean,
+	beside: (number) -> boolean,
+	arcs: { left: number }
+)
+	if #hits >= budget then
+		return
+	end
+	local partsOf: { [number]: { BasePart } } = {}
+	local order: { number } = {}
+	for _, part in near do
+		if not part:IsA("BasePart") or not isQueryable(part) then
+			continue
+		end
+		local targetId, targetModel = options.resolve(part)
+		if targetId == nil or targetModel == nil or alreadyHit[targetId] or not eligible(targetId) then
+			continue
+		end
+		if isExcluded(part, targetModel, options.exclude) or not beside(targetId) then
+			continue
+		end
+		local list = partsOf[targetId]
+		if list == nil then
+			list = {}
+			partsOf[targetId] = list
+			table.insert(order, targetId)
+		end
+		table.insert(list, part)
+	end
+	if #order == 0 then
+		return
+	end
+	local follow: ((time: number) -> (Vector3?, Vector3?))? = nil
+	local solve = options.solve
+	if solve ~= nil and from.root ~= nil and to.root ~= nil and to.time > from.time then
+		local solver: BladeSolver = solve
+		local clip = options.clip
+		follow = function(time: number): (Vector3?, Vector3?)
+			local sample = solver(time, rootBetween(from, to, (time - from.time) / (to.time - from.time), clip))
+			if sample == nil then
+				return nil, nil
+			end
+			return sample.start, sample.finish
+		end
+	end
+	for _, targetId in order do
+		local touched, at, spent = BladeContact.followTouch(
+			from.start,
+			from.finish,
+			from.time,
+			to.start,
+			to.finish,
+			to.time,
+			partsOf[targetId],
+			besideRadius,
+			Combat.besideFollowStep,
+			follow,
+			arcs.left
+		)
+		arcs.left -= spent
+		if touched and at ~= nil then
+			alreadyHit[targetId] = true
+			table.insert(hits, { targetId = targetId, position = at })
+			if #hits >= budget then
+				return
+			end
+		end
 	end
 end
 
@@ -685,27 +885,47 @@ end
 --- which the tip or the guard still moves more than combat.sweepMaxTipStep (followArc's cap ran out)
 --- also casts that end's chord. Each fighter the blade may damage counts once per window
 --- (`alreadyHit`), up to the window's target cap; the others are passed through (`eligible`).
+--- A fighter beside the swing (`beside`) is cut only by the blade itself (sweepBeside).
 function HitSweep.castBladePath(samples: { BladeSample }, options: CastOptions): { Hit }
 	local hits: { Hit } = {}
 	if #samples == 0 then
 		return hits
 	end
 	local radius = options.radius or Combat.hitSphereRadius
+	local besideRadius = options.besideRadius or Combat.besideHitRadius
 	local alreadyHit = options.alreadyHit or {}
 	local budget = budgetOf(options, alreadyHit)
 	local cast = options.cast or defaultCaster
 	local overlap = options.overlap or defaultOverlap
 	local exclude = table.clone(options.exclude)
 	local eligible = eligibilityOf(options)
+	local beside = besideOf(options)
+	local arcs = { left = Combat.besideMaxSubdivisions }
 
 	for index, sample in samples do
 		if #hits >= budget then
 			break
 		end
+		-- This sample's broad phase, queried once when first needed: by the move before it (beside
+		-- fighters) or by its own overlap test.
+		local near: { BasePart }? = nil
+		local reachBack: BladeSample? = if index > 1 and options.beside ~= nil then samples[index - 1] else nil
 		if index > 1 then
 			local previous = samples[index - 1]
 			local origin = previous.mid
-			castSegment(origin, sample.mid - origin, radius, exclude, options, alreadyHit, hits, budget, cast, eligible)
+			castSegment(
+				origin,
+				sample.mid - origin,
+				radius,
+				exclude,
+				options,
+				alreadyHit,
+				hits,
+				budget,
+				cast,
+				eligible,
+				beside
+			)
 			castLongChord(
 				previous.finish,
 				sample.finish,
@@ -716,7 +936,8 @@ function HitSweep.castBladePath(samples: { BladeSample }, options: CastOptions):
 				hits,
 				budget,
 				cast,
-				eligible
+				eligible,
+				beside
 			)
 			castLongChord(
 				previous.start,
@@ -728,11 +949,41 @@ function HitSweep.castBladePath(samples: { BladeSample }, options: CastOptions):
 				hits,
 				budget,
 				cast,
-				eligible
+				eligible,
+				beside
 			)
+			if reachBack ~= nil and #hits < budget then
+				local around = nearBlade(sample.start, sample.finish, reachBack, radius, besideRadius, options, overlap)
+				near = around
+				sweepBeside(
+					previous,
+					sample,
+					besideRadius,
+					around,
+					options,
+					alreadyHit,
+					hits,
+					budget,
+					eligible,
+					beside,
+					arcs
+				)
+			end
 		end
-		if index > 1 or not options.continued then
-			overlapBlade(sample.start, sample.finish, radius, options, alreadyHit, hits, budget, overlap, eligible)
+		if (index > 1 or not options.continued) and #hits < budget then
+			overlapBlade(
+				sample.start,
+				sample.finish,
+				radius,
+				near or nearBlade(sample.start, sample.finish, reachBack, radius, besideRadius, options, overlap),
+				options,
+				alreadyHit,
+				hits,
+				budget,
+				eligible,
+				beside,
+				besideRadius
+			)
 		end
 	end
 	return hits

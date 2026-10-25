@@ -389,8 +389,13 @@ describe("Rush messages (D-169)", function()
 	it(
 		"a body that falls behind the clock is reported Jammed once, and the strike runs its time to the skid",
 		function()
-			local boarId, launchAt = launched()
+			-- Held from before the launch, so it never runs and no pass shows it blocked (D-280): only
+			-- the jam lag tells it.
+			fresh()
+			local boarId = EnemyService.spawn("FrenzyBoar", CFrame.new(0, 3, 0))
+			spawnPlayer(Vector3.new(0, 3, -12))
 			jammed = true
+			local launchAt = untilLaunch(boarId)
 			while phaseOf(boarId) == "Strike" do
 				tick()
 			end
@@ -404,6 +409,28 @@ describe("Rush messages (D-169)", function()
 			local after = ended[1].serverTime - launchAt
 			expect(SPEED * after).toBeGreaterThan(lag + ended[1].distance)
 			expect(SPEED * (after - TICK)).toBeLessThanOrEqual(lag + ended[1].distance + 1e-6)
+			expect(phaseOf(boarId)).toBe("Recover")
+		end
+	)
+
+	it(
+		"a running body that stops dead is reported Jammed once its passes show it blocked, long before the jam lag (D-280)",
+		function()
+			local boarId, launchAt = launched()
+			jammed = true -- it ran the launch tick's run, and moves no more from here
+			local stoppedAt = clock.t
+			while phaseOf(boarId) == "Strike" do
+				tick()
+			end
+			local ended = payloadsOf("RushEnded")
+			expect(#ended).toBe(1)
+			expect(ended[1].reason).toBe("Jammed")
+			expect(ended[1].distance).toBeGreaterThan(0)
+			local tuning = AI.archetypes.Charger
+			local told = ended[1].serverTime - stoppedAt
+			expect(told).toBeGreaterThanOrEqual(tuning.blockedSeconds - 1e-6)
+			expect(told).toBeLessThanOrEqual(tuning.blockedSeconds + 2 * TICK + 1e-6)
+			expect(SPEED * (ended[1].serverTime - launchAt)).toBeLessThan(tuning.jamLagStuds + ended[1].distance)
 			expect(phaseOf(boarId)).toBe("Recover")
 		end
 	)

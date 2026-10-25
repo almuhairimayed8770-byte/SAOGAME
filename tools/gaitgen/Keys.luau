@@ -28,12 +28,19 @@ export type SwingPoint = { t: number, x: number, y: number, z: number, pitch: nu
 --- lift-off solution to the strike solution.
 export type SwingJoint = { t: number, hip: number, knee: number, ankle: number }
 
+--- The toe-off of a fast gait: for `duration` s after the lift the foot keeps going back with the
+--- ground while the pivot rises `rise` studs and the foot rolls `angle` degrees further (both eased
+--- in from the lift), so the toe leaves the field moving with it instead of stopping under the
+--- root and skating forward. Keys inside it are solved by IK; one must fall at its end.
+export type Peel = { duration: number, rise: number, angle: number }
+
 --- One foot's cycle. It strikes at `ts` on `strikePivot` tipped `strikeAngle` degrees, rolls flat
 --- by `flatFrom`, stays flat to `flatTo`, and leaves by `tl` rolled `liftAngle` about `liftPivot`
---- (eased by `liftPower` when set, smoothstep otherwise). (`x`, `z`) is where the flat sole center
---- sits at the strike; while planted it moves against the root's travel. The swing between `tl`
---- and the next strike follows `swing` points (a Hermite path solved by IK) or, key by key,
---- `swingJoints`.
+--- (eased by `liftPower` when set, smoothstep otherwise), then peels off the field (`peel`) when
+--- set. (`x`, `z`) is where the flat sole center sits at the strike; while planted it moves against
+--- the root's travel. The swing from the lift (or the peel's end) to the next strike follows
+--- `swing` points (a Hermite path solved by IK) or `swingJoints`: hand-set keys, and between them
+--- (a key the plan does not set) the leg as the clip would play it without that key.
 export type Plan = {
 	x: number,
 	z: number,
@@ -46,6 +53,7 @@ export type Plan = {
 	liftPivot: Pivot,
 	liftAngle: number,
 	liftPower: number?,
+	peel: Peel?,
 	swing: { SwingPoint }?,
 	swingJoints: { SwingJoint }?,
 }

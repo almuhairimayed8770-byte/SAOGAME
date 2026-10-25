@@ -230,10 +230,10 @@ local clip: Types.ClipDef = {
 	events = {
 		{ time = 0.1, kind = "Voice", data = { name = "enemy.ChargerWindUp" } },
 		{ time = 0.6, kind = "TrailOn", data = { kind = "Basic" } },
-		{ time = 0.6, kind = "SmearOn", data = { axis = "Z" } },
 		{ time = 0.6, kind = "Voice", data = { name = "enemy.ChargerStrike" } },
 		{ time = 0.6, kind = "HitWindowOpen", data = { hit = 1 } },
-		{ time = 0.6333, kind = "SmearOff" },
+		{ time = 0.6083, kind = "SmearOn", data = { axis = "Z" } },
+		{ time = 0.6417, kind = "SmearOff" },
 		{ time = 0.72, kind = "Footstep", data = { foot = "FrontLeft" } },
 		{ time = 0.97, kind = "Footstep", data = { foot = "FrontRight" } },
 		{ time = 1.2, kind = "HitWindowClose", data = { hit = 1 } },
@@ -244,7 +244,7 @@ local clip: Types.ClipDef = {
 	beats = {
 		Anticipation = { start = 0, finish = 0.6 },
 		Snap = { start = 0.6, finish = 0.65 },
-		Smear = { start = 0.6, finish = 0.6333 },
+		Smear = { start = 0.6083, finish = 0.6417 },
 		Hold = { start = 0.65, finish = 0.7 },
 		Settle = { start = 0.7, finish = 0.85 },
 		Recovery = { start = 1.25, finish = 2.3 },

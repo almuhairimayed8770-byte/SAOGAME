@@ -2,9 +2,9 @@
 --[[
 	CollisionGroups (D-167) under Lune: a PhysicsService stand-in records what register asks for, an
 	overlap stand-in answers clear's query. A rushing body passes through players and enemies and
-	runs on the world; a player bumps into an enemy's blocker, never its root (D-198), and the
-	blocker touches nothing else; every other pair keeps colliding; a stopped rush rejoins only when
-	clear.
+	runs on the world; a player bumps into an enemy's blocker, never its root (D-198), and so do
+	other enemies' roots and blockers (D-281), never the world or a rush; every other pair keeps
+	colliding; a stopped rush rejoins only when clear.
 ]]
 
 local CollisionGroups = Harness.load("src/server/world/CollisionGroups")
@@ -46,7 +46,7 @@ local function part(name: string, parent: Instance?, group: string?, canCollide:
 end
 
 describe("CollisionGroups (D-167)", function()
-	it("registers the four groups; a rushing body passes players and enemies; players meet blockers only", function()
+	it("registers the four groups; a rushing body passes players and enemies; blockers meet fighters", function()
 		local fake = physics()
 		expect(CollisionGroups.register(fake)).toBe(true)
 		expect(#CollisionGroups.names()).toBe(4)
@@ -60,13 +60,14 @@ describe("CollisionGroups (D-167)", function()
 		expect(fake.collides(GROUPS.players, GROUPS.players)).toBe(true)
 		expect(fake.collides(GROUPS.enemies, GROUPS.enemies)).toBe(true)
 		expect(fake.collides(GROUPS.enemies, "Default")).toBe(true)
-		-- D-198: a player meets an enemy's blocker, not its root; the blocker meets nothing else.
+		-- D-198: a player meets an enemy's blocker, not its root. D-281: another enemy's root and its
+		-- blocker meet it too, so no enemy stands inside another; the world and a rush never do.
 		expect(fake.collides(GROUPS.players, GROUPS.enemies)).toBe(false)
 		expect(fake.collides(GROUPS.blockers, GROUPS.players)).toBe(true)
 		expect(fake.collides(GROUPS.blockers, "Default")).toBe(false)
-		expect(fake.collides(GROUPS.blockers, GROUPS.enemies)).toBe(false)
+		expect(fake.collides(GROUPS.blockers, GROUPS.enemies)).toBe(true)
 		expect(fake.collides(GROUPS.blockers, GROUPS.rushing)).toBe(false)
-		expect(fake.collides(GROUPS.blockers, GROUPS.blockers)).toBe(false)
+		expect(fake.collides(GROUPS.blockers, GROUPS.blockers)).toBe(true)
 		-- A second call registers nothing twice.
 		expect(CollisionGroups.register(fake)).toBe(true)
 		expect(fake.registerCalls).toBe(4)
@@ -142,7 +143,7 @@ describe("CollisionGroups (D-167)", function()
 		expect(CollisionGroups.clear(Instance.new("Model"), overlap)).toBe(true)
 	end)
 
-	it("clear: a blocker overlapping a player is not clear; another enemy's blocker is (D-198)", function()
+	it("clear: a blocker overlapping a player is not clear; other enemies are EnemyService's (D-198, D-281)", function()
 		local boar = Instance.new("Model")
 		local root = part("HumanoidRootPart", boar, GROUPS.rushing)
 		boar.PrimaryPart = root
@@ -159,7 +160,9 @@ describe("CollisionGroups (D-167)", function()
 		-- A player over the blocker but clear of the root (a head above the root's top).
 		byProbe[blocker] = { part("Head", nil, GROUPS.players) }
 		expect(CollisionGroups.clear(boar, overlap)).toBe(false)
-		-- Another enemy's root or blocker inside this blocker pushes nobody.
+		-- Another enemy's root or blocker inside this blocker is left to EnemyService.blockerClear
+		-- (D-281), which judges blocker against blocker on the parts' own boxes: the engine's query
+		-- never sees a blocker (CanQuery off), and a blocker covers its body's root.
 		byProbe[blocker] = { part("HumanoidRootPart", nil, GROUPS.enemies), part("Blocker", nil, GROUPS.blockers) }
 		expect(CollisionGroups.clear(boar, overlap)).toBe(true)
 	end)

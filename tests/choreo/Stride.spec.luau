@@ -439,6 +439,9 @@ type Case = {
 	velocity: ((t: number) -> any)?,
 	stick: any?,
 	readRoot: boolean?,
+	-- A slowed capture's own body (D-127): the clips and the root both run at this scale, and
+	-- Locomotion hears it as clockScale.
+	clockScale: number?,
 }
 
 type TrackSample = { t: number, net: any }
@@ -477,6 +480,10 @@ local function simulate(case: Case): Result
 	if case.start ~= nil then
 		case.start(animator)
 	end
+	local scale = case.clockScale or 1
+	if case.clockScale ~= nil then
+		animator.mixer:setTimeScale(scale)
+	end
 	local dt = 1 / Stride.measureHz
 	local position = Vector3.zero
 	local open: { [string]: Contact? } = {}
@@ -487,7 +494,7 @@ local function simulate(case: Case): Result
 	for frame = 1, math.floor(case.duration * Stride.measureHz + 0.5) do
 		local t = frame * dt
 		now = t
-		local speed = case.speed(t, dt, locomotion)
+		local speed = case.speed(t, dt, locomotion) * scale
 		local velocity = if case.velocity ~= nil then case.velocity(t) else case.direction * speed
 		position += velocity * dt
 		model.PrimaryPart.CFrame = CFrame.new(position)
@@ -500,6 +507,7 @@ local function simulate(case: Case): Result
 			drawn = case.drawn(t),
 			turning = 0,
 			verticalVelocity = 0,
+			clockScale = case.clockScale,
 		}
 		if case.velocity ~= nil then
 			if case.readRoot then
@@ -625,6 +633,39 @@ local function owned(result: Result): (number, number)
 		end
 	end
 	return plant, drag
+end
+
+-- Each counted plant's slide (its contact corner's farthest from where it was at the Footstep),
+-- and their median.
+local function plantMedian(result: Result, from: number, to: number): (number, number)
+	local slides: { number } = {}
+	for _, contact in result.contacts do
+		if #contact.steps == 0 then
+			continue
+		end
+		local plantFrom = math.max(contact.start, contact.steps[1])
+		if plantFrom < from or plantFrom > to then
+			continue
+		end
+		local base: any = nil
+		local worst = 0
+		for _, sample in contact.track do
+			if sample.t >= plantFrom - 1e-9 then
+				base = base or sample.net
+				worst = math.max(worst, (sample.net - base).Magnitude)
+			end
+		end
+		table.insert(slides, worst)
+	end
+	table.sort(slides)
+	local count = #slides
+	if count == 0 then
+		return math.huge, 0
+	end
+	local median = if count % 2 == 1
+		then slides[(count + 1) // 2]
+		else (slides[count // 2] + slides[count // 2 + 1]) / 2
+	return median, count
 end
 
 -- A steady move, measured from 1.5 s (the weights have settled) for at least 4 studs of travel.
@@ -836,6 +877,50 @@ describe("paced to the root's speed (Locomotion and the animator at measureHz)",
 		expect(table.concat(problems, "; ")).toBe("")
 	end)
 
+	it("the drawn gaits as the game drives them: each plant's median slide under slideBar, at 1x and slowed", function()
+		-- Run and Sprint unlocked at their speeds; the four walks at the walk speed a lock or Guard
+		-- holds the body to, the facing held (D-112): each gait carries its move alone. Slowed, the
+		-- capture's own body (D-127): the clips and the root at a quarter speed.
+		local shape = body()
+		local cases = {
+			{ name = "WalkForwardDrawn", direction = shape.forward, speed = Config.walkSpeed },
+			{ name = "WalkBackDrawn", direction = -shape.forward, speed = Config.walkSpeed },
+			{ name = "WalkLeftDrawn", direction = -shape.right, speed = Config.walkSpeed },
+			{ name = "WalkRightDrawn", direction = shape.right, speed = Config.walkSpeed },
+			{ name = "RunDrawn", direction = shape.forward, speed = Config.runSpeed },
+			{ name = "SprintDrawn", direction = shape.forward, speed = Config.sprintSpeed, sprinting = true },
+		}
+		local problems = {}
+		for _, row in cases do
+			for _, scale in { 1, 0.25 } do
+				local settle = 1.5 / scale
+				local duration = settle + math.max(2, 8 / row.speed) / scale
+				local result = simulate({
+					direction = row.direction,
+					speed = function(): number
+						return row.speed
+					end,
+					drawn = always(true),
+					sprinting = row.sprinting,
+					duration = duration,
+					measureFrom = settle,
+					clockScale = if scale ~= 1 then scale else nil,
+				})
+				local label = ("%s at %.1f, %.2fx"):format(row.name, row.speed, scale)
+				if (result.shown[row.name] or 0) < 0.99 then
+					table.insert(problems, ("%s: not alone (%.2f)"):format(label, result.shown[row.name] or 0))
+				end
+				local median, count = plantMedian(result, settle, duration)
+				if count < 4 then
+					table.insert(problems, ("%s: %d plants"):format(label, count))
+				elseif median >= Stride.slideBar then
+					table.insert(problems, ("%s: median slide %.3f over %d plants"):format(label, median, count))
+				end
+			end
+		end
+		expect(table.concat(problems, "; ")).toBe("")
+	end)
+
 	it("Guard at walkSpeed: the drawn walk under the Guard clip", function()
 		local result = simulate({
 			direction = forward(),
@@ -880,7 +965,10 @@ describe("paced to the root's speed (Locomotion and the animator at measureHz)",
 	it("a lock-on strafe at walkSpeed, square and a little off, both sets: plants as the forward walk's", function()
 		-- The facing held to a lock (D-112: turning 0, a slow yaw) while the stick strafes at the
 		-- walk speed the lock holds the body to. The lock turn lags a moving target, so the move
-		-- is a few degrees off square as often as on it.
+		-- is a few degrees off square as often as on it. Each plant slides no more than the
+		-- forward walk's worst does, or slideBar where that is less: the forward walk at
+		-- walkSpeed is its walk alone (D-292), a strafe the side walk with a part of a forward or
+		-- back walk.
 		local shape = body()
 		local problems = {}
 		for _, drawn in { false, true } do
@@ -891,7 +979,7 @@ describe("paced to the root's speed (Locomotion and the animator at measureHz)",
 				local label = ("strafe %d %s at %.1f"):format(degrees, drawnLabel(drawn), Config.walkSpeed)
 				local result = simulate(steady(direction, Config.walkSpeed, drawn))
 				local _, drag = owned(result)
-				checkPlants(problems, label, result, walk.slide, drag + Stride.slideBar)
+				checkPlants(problems, label, result, math.max(walk.slide, Stride.slideBar), drag + Stride.slideBar)
 			end
 		end
 		expect(table.concat(problems, "; ")).toBe("")
@@ -899,8 +987,8 @@ describe("paced to the root's speed (Locomotion and the animator at measureHz)",
 
 	it("a lock-on forward walk at walkSpeed, square and a little off, both sets: within transientBar", function()
 		-- The lock holds the body to walkSpeed with the facing on the target (D-112), so the
-		-- forward walk blends with Run by cadence, and a stick a few degrees off the facing adds a
-		-- side walk's share (D-129). Every plant and swing holds the ground.
+		-- forward walk carries it alone (D-292), and a stick a few degrees off the facing adds a
+		-- side walk's share. Every plant and swing holds the ground.
 		local shape = body()
 		local problems = {}
 		for _, drawn in { false, true } do

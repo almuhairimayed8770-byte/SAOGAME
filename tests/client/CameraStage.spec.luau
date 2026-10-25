@@ -365,3 +365,28 @@ describe("CameraController staged views (F12)", function()
 		expect(worst).toBeLessThan(2)
 	end)
 end)
+
+describe("CameraController staged views and the lock's stick (D-238)", function()
+	it("leaves the stick alone while a staged view holds the camera, even under a live lock", function()
+		local fixture = load()
+		-- A kobold ahead and to the right: the lock's frame is not the camera's.
+		local kobold = character("Kobold", ROOT + Vector3.new(4, 0, -3), fixture.world, 180)
+		fixture.controller.setLockTarget(kobold)
+		fixture.frames(60)
+		local stick = Vector3.new(0.6, 0, -0.8)
+		-- Unstaged, the live lock turns the stick into its frame.
+		expect((fixture.controller.lockMove(stick) - stick).Magnitude).toBeGreaterThan(0.05)
+		-- Staged (the locomotion pass locks on under the fixed Open view), the keys walk the way
+		-- the staged view shows them.
+		fixture.controller.setStage(CAMERAS.Open, nil, 1)
+		fixture.frames(60)
+		expect((fixture.controller.lockMove(stick) - stick).Magnitude).toBeLessThan(1e-9)
+		fixture.controller.setStage(CAMERAS.Side, kobold, 1)
+		fixture.frames(60)
+		expect((fixture.controller.lockMove(stick) - stick).Magnitude).toBeLessThan(1e-9)
+		-- The stage gone, the lock's frame is back.
+		fixture.controller.setStage(nil)
+		fixture.frames(60)
+		expect((fixture.controller.lockMove(stick) - stick).Magnitude).toBeGreaterThan(0.05)
+	end)
+end)

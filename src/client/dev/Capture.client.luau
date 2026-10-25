@@ -38,7 +38,11 @@
 	Auto-perform (U, off by default) presses the shot's keys through the real input path
 	(InputController.handle, as a key's binding does): an Art at its moment, the kill's basic, the
 	locomotion pass's lock on and off, and the parry's guard `lead` seconds before the hit window of
-	the target's overhead as the client draws it. Only at 1x.
+	the target's overhead as the client draws it. Only at 1x. A lock press in a staged take acts on
+	the staged target alone (D-290: it locks it, or lets it go when the lock is on it), never the
+	lock key's cycle, which could step on to a field enemy nearer than it. A take that stops lets
+	go of every key it holds without acting: a held Art is cancelled before its key comes up, so
+	the release launches nothing.
 
 	A time-scale toggle (1x / 0.5x / 0.25x) slows every Choreo animator on this client and asks the
 	server (dev remote, dev places only) to publish the scale as a workspace attribute for anything
@@ -58,6 +62,7 @@ local UserInputService = game:GetService("UserInputService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Dev = require(Shared.data.dev)
+local InputData = require(Shared.data.input)
 
 if workspace:GetAttribute(Dev.attributes.capture) ~= true then
 	return
@@ -574,7 +579,25 @@ end
 -- Auto-perform: the shot's keys through the real input path
 -- ---------------------------------------------------------------------------------------------
 
+-- The enemy the lock is on now, by id.
+local function lockedId(): number?
+	local current = TargetController.current()
+	return if current ~= nil then current.id else nil
+end
+
 local function press(action: string, down: boolean)
+	-- A lock press in a staged take acts on the staged target alone (D-290); its key-up does nothing.
+	if action == "LockOn" then
+		local how = CaptureLogic.lockPress(targetId, lockedId())
+		if how ~= "Key" then
+			if down and how == "Lock" then
+				TargetController.lockOn(targetId)
+			elseif down then
+				TargetController.clear()
+			end
+			return
+		end
+	end
 	if down then
 		heldKeys[action] = true
 	else
@@ -583,9 +606,15 @@ local function press(action: string, down: boolean)
 	InputController.handle(action, if down then Enum.UserInputState.Begin else Enum.UserInputState.End, nil)
 end
 
+-- Lets go of every key auto-perform holds, none acting on the way up (D-290): a held Art's hold is
+-- cancelled first, so its key's release launches nothing; the key still comes up through the input
+-- path, so the hold there ends too.
 local function releaseKeys()
-	for action in heldKeys do
-		InputController.handle(action, Enum.UserInputState.End, nil)
+	for _, key in CaptureLogic.letGo(heldKeys, InputData.artSlot) do
+		if key.slot ~= nil then
+			Siblings.call(CharacterController, "cancelArt", key.slot)
+		end
+		InputController.handle(key.action, Enum.UserInputState.End, nil)
 	end
 	table.clear(heldKeys)
 end

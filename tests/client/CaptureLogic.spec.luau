@@ -219,3 +219,37 @@ describe("CaptureLogic walk into the stand ring (D-244)", function()
 		expect(Logic.askWait(10, 11, 2)).toBe(0)
 	end)
 end)
+
+-- D-290: auto-perform's lock presses in a staged take act on the staged target alone. The lock
+-- key's own path (TargetController.toggle) cycles best, next one down, then off, so the
+-- locomotion pass's second press could lock a field enemy nearer than the staged one.
+describe("CaptureLogic auto-perform's lock press (D-290)", function()
+	it("locks the staged target when the lock is off or on another enemy, lets it go when on it", function()
+		expect(Logic.lockPress(21, nil)).toBe("Lock")
+		expect(Logic.lockPress(21, 99)).toBe("Lock")
+		expect(Logic.lockPress(21, 21)).toBe("Release")
+	end)
+
+	it("takes the lock key's own path when the take staged no target (outside Studio)", function()
+		expect(Logic.lockPress(nil, nil)).toBe("Key")
+		expect(Logic.lockPress(nil, 99)).toBe("Key")
+	end)
+end)
+
+-- D-290: a take that stops lets go of every key auto-perform holds, and none acts on the way up:
+-- an Art key's hold is cancelled before its key comes up (the release would launch the Art).
+describe("CaptureLogic letting go at a stop (D-290)", function()
+	local Input = Harness.load("src/shared/data/input")
+
+	it("lists each held key once, in name order, an Art key with its slot to cancel first", function()
+		local keys = Logic.letGo({ Guard = true, ArtSlot2 = true, Art = true }, Input.artSlot)
+		expect(#keys).toBe(3)
+		expect(keys[1].action).toBe("Art")
+		expect(keys[1].slot).toBe(Input.artSlot("Art"))
+		expect(keys[2].action).toBe("ArtSlot2")
+		expect(keys[2].slot).toBe(2)
+		expect(keys[3].action).toBe("Guard")
+		expect(keys[3].slot).toBeNil()
+		expect(#Logic.letGo({}, Input.artSlot)).toBe(0)
+	end)
+end)

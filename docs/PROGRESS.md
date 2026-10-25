@@ -666,6 +666,63 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   - A jam still overruns 9–14 studs at 0.25–0.5 s of lag. The trail's first segment can show one frame of wind-up. The slam shake has no falloff.
   - Studio items 221–262, then the gate shots recorded again.
 
+## Gate shot fixes, second round (2026-10-25, D-271 to D-296)
+
+- **Hits (D-271 to D-277):**
+  - Holds end on the frame nearest their length at any refresh rate. They are still exactly 3/6/10 frames at 60 Hz, and 120/144/240 Hz now hold about 50/100/167 ms (HEAD 41.7 ms for a Normal hit).
+  - A kill's word and its death wait for the strike key. No kill freezes before the key at 30/60/144 fps and 0–100 ms (HEAD: up to 30 of 30).
+  - The trail starts at the window's open on the blade's own path (within 0.03 studs; HEAD up to 5.8). Boar/Charge's smear is on its moving frames.
+  - A free swing turns onto an enemy within 40° of the look. A fighter outside that cone is cut only by the drawn blade, so the server no longer counts blades a stud short of a fighter to the side.
+  - The Art stand-off never steps into a wall or a pillar. A blade meeting the kobold's axe is a clash, never a wound.
+- **Enemies (D-278 to D-283, D-295):**
+  - A slam rests exactly where RushEnded says, at the wall: 0 studs in during the rush and at most 0.10 after the daze (HEAD 0.5 and up to 3.1).
+  - A walk or turn never puts the snout into a wall, and an enemy by a wall still finds its way round and attacks.
+  - A blocked rush is told Jammed in 0.033–0.067 s (HEAD 0.10–0.134), which cuts the drawn overrun by about 2 studs at low latency.
+  - Blockers collide between enemies, and a stopped rush turns solid only once its blocker is clear.
+  - RushEnded is typed, and the validators carry the camera, capture and shatter-balance rules.
+- **Camera and capture (D-284 to D-290, D-296):**
+  - Walking under a lock reads the lock's frame: walking at a flank walks in (1.80 studs) instead of orbiting.
+  - The kill shot holds still through the shard rise (1.30 s).
+  - The lock takes the open shoulder by a wall.
+  - A boar rushing past is off screen for at most 12 frames (HEAD 24), at most 7.7° a frame.
+  - The wall-slam shake falls off from 26 to 32 studs on the real path.
+  - The parry glint leads by the client's latency: a press on the glint parries up to 150 ms one way (HEAD 50).
+  - Auto-perform's F acts on the staged target only, and stopping a take never launches a held Art.
+- **Animation (D-291 to D-294):**
+  - The Draw keeps under the tip cap over every gait (worst 74.6 studs/s at 240 Hz over 12 cycle points, about 1.32 studs a frame in Studio).
+  - Run and Sprint are generated with a foot peel. Drawn run and sprint plants slide 0.035–0.044 median (HEAD 0.086–0.153), and a held walk plays the walks alone.
+  - A hit out of a stance shows the flinch on the strike frame, and the taken-away stance no longer runs its clock into its sound, trail and smear.
+- **Checks (final tree, after the id renumbering):**
+  - 2955 specs pass in 160 files, 0 failed (HEAD: 2845 in 156), in about 6.5 minutes.
+  - tools/lint.sh --offline is ALL GREEN: stylua, selene with 0 errors, the suite, the 32 validators with 0 problems, and the rojo builds of the game, ClipLab and Playground.
+  - The hit matrix exits 0: every required placement registers at every frame phase, and the client draws exactly what the server counts.
+  - The animation review is current (64 clips). gaitgen matches all 12 gait clips.
+  - luau-lsp (old solver) shows 812 messages in src on both HEAD and the tree, none new. The tests have 19 new type messages in five new or changed specs (open).
+  - The verifiers found and fixed two breaks: enemies stalled facing walls after the snout guard (D-295), and the slam falloff was never called (D-296).
+  - Verified with no change needed: wall stop and jam under 30/45/60 fps jitter; the RushEnded wire; kill words in both wire orders; lock walk, death and rush camera, wall side, glint, Capture lock; trail first segment; drawn gait slide; stance flinch.
+- **Open:**
+  - Holds at 30 fps: under jitter a Normal hold holds 1 frame in about half the hits (HEAD always 2). It needs a once-per-hold frame count with ties going to the longer hold.
+  - Beside rule:
+    - The server sweeps from the live root, which lags the drawn body. At 90° mid-snap it still counts a Basic drawn 0.2 studs off the boar at 0.11 s of lag.
+    - Client and server can disagree near the ±40° edge.
+    - A 45° enemy now needs a lock (owner to confirm).
+  - Death and remote rigs:
+    - TargetController keys off State "Dead", which arrives before the held EntityDied.
+    - A remote player's Art keeps playing on observers after the server staggers it.
+    - CharacterController still lights and chimes an Art whose strike was already shown.
+  - Enemies:
+    - A boar's rear can swing 0.77 studs into a wall on a Recover turn.
+    - Corpse blockers stay solid for 4 s and blockerClear skips them.
+    - A steep slope ends Jammed with no Wall told.
+    - Overrun at 0.5 s of lag is still 11–15 studs (message latency).
+  - Camera: shoulder swaps past alternating pillars have no dwell time. Look input waits about 1.47 s after a kill under lock. A boss's longer shatter rise would outlast riseHoldSeconds. There is no glint lead before the first telegraph heard.
+  - Sprint Draw at 240 Hz passes the 0.92 moving cap in 3 of 288 cases when sampled at 48 cycle points (the spec samples 12). Drawn slide at 12 studs/s is 0.147–0.189.
+  - Missing:
+    - Validator rules for the new combat, camera, fx and choreo keys.
+    - A clash spark or sound when a blade meets a held weapon.
+    - The FlinchFront review row stays open (re-record).
+  - Studio items 263–283, then the ten gate shots recorded again.
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and

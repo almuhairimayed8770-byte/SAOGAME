@@ -238,6 +238,7 @@ local Remotes: { [string]: RemoteDef } = {
 	-- D-254: "Dropped" is any enemy's attack a sleep or a hold dropped before it landed or launched
 	-- (a blow's wind-up or strike, a rush's wind-up): `launchedAt` is the beat its wind-up ended or
 	-- was due to end, `distance` 0. Clients drop the swing, the tell and the launch they predicted.
+	-- Types.RushEndedPayload is this payload, Types.RushEndedReason these reasons.
 	RushEnded = {
 		kind = "Event",
 		direction = "ServerToClient",

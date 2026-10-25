@@ -20,14 +20,37 @@
 	measured as its box (segmentBoxDistance, the server's math), after a cheap bounding-sphere
 	reject. `queryable(part)` is the engine's query rule the server's broad phase follows (CanQuery
 	or CanCollide, and a group that collides with Default, which the queries run as: an enemy's
-	blocker, D-198, is never seen).
+	blocker, D-198, is never seen). `hurtbox(part)` is what a blade may wound: a queryable part that
+	is not a weapon its fighter holds (`held`: a part of a rigged model named in its rig's
+	trailParts, the kobold's club). A blade that meets a held weapon clashes with it; it never
+	wounds the fighter through it, and the server's sweep and the client's prediction both pass it
+	by (D-277).
+
+	A fighter beside the swing (`beside`: its root outside the aim assist's cone around the swing's
+	facing, combat.aim.assistConeDegrees) is cut only by the blade itself (D-275): `followTouch`
+	follows the blade's drawn arc from one sample to the next (split at the middle, posed by the
+	caller's solver, while an end moves farther than combat.besideFollowStep and the body is near)
+	and `sweptTouch` takes each short piece straight in steps no end travels farther than `step`,
+	testing each against the parts grown by combat.besideHitRadius, so a blade that passes through
+	the body between two samples touches it and one that stops short of it does not, whichever
+	samples it starts from. The server's sweep and the client's prediction both use these, so they
+	agree on it. Both pose a blade between two samples from a root between theirs that moves the way
+	the swing's clip carries the body (`rootBow`), not along the chord: a lunge's root motion
+	accelerates through a frame, and a straight root put a 30 fps client's blade 0.06 studs off the
+	one the server's 60 Hz samples drew.
 
 	Pure apart from reading the Instances it is handed: no engine service, no clock, so Lune runs
 	it on real rigs.
 ]]
 
 local Joints = require(script.Parent.Joints)
+local ClipSampler = require(script.Parent.ClipSampler)
+local Types = require(script.Parent.Parent.types)
 local AI = require(script.Parent.Parent.data.ai)
+local Rigs = require(script.Parent.Parent.data.rigs)
+
+-- The rig id attribute a built model carries (RigBuilder.RIG_ATTRIBUTE; Choreo reads it too).
+local RIG_ATTRIBUTE = "Rig"
 
 export type Link = { joint: Joints.Joint, c0: CFrame, c1Inverse: CFrame }
 
@@ -256,6 +279,26 @@ function BladeContact.queryable(part: BasePart): boolean
 	return (part.CanQuery or part.CanCollide) and not unseen[part.CollisionGroup]
 end
 
+--- Whether `part` is a weapon its fighter holds, not its body (D-277): a child of a rigged model
+--- (the "Rig" attribute RigBuilder sets) named in that rig's trailParts (rigs.luau). A blade that
+--- meets it clashes with it; it never wounds.
+function BladeContact.held(part: BasePart): boolean
+	local model = part.Parent
+	if model == nil or not model:IsA("Model") then
+		return false
+	end
+	local rigId = model:GetAttribute(RIG_ATTRIBUTE)
+	local rig = if typeof(rigId) == "string" then Rigs[rigId] else nil
+	local names = if rig ~= nil then rig.trailParts else nil
+	return names ~= nil and table.find(names, part.Name) ~= nil
+end
+
+--- Whether a blade touching `part` may wound its fighter: the engine's query sees it (queryable)
+--- and it is the fighter's body, not a weapon it holds (held).
+function BladeContact.hurtbox(part: BasePart): boolean
+	return BladeContact.queryable(part) and not BladeContact.held(part)
+end
+
 --- Whether the blade (start -> finish grown by `radius`) touches any of `parts`, and where: the
 --- point of the nearest touched part's box nearest the blade.
 function BladeContact.touch(start: Vector3, finish: Vector3, parts: { BasePart }, radius: number): (boolean, Vector3?)
@@ -274,6 +317,149 @@ function BladeContact.touch(start: Vector3, finish: Vector3, parts: { BasePart }
 		end
 	end
 	return at ~= nil, at
+end
+
+--- Whether a fighter whose root stands at `target` is beside a swing from `origin` facing `facing`:
+--- flat, its bearing from the facing is more than half of `coneDegrees` either way. One within
+--- `minDistance` (flat) of the origin gives no bearing, and a facing with no flat part gives no
+--- cone: both are in front.
+function BladeContact.beside(
+	origin: Vector3,
+	facing: Vector3,
+	target: Vector3,
+	coneDegrees: number,
+	minDistance: number
+): boolean
+	local flatFacing = Vector3.new(facing.X, 0, facing.Z)
+	local offset = Vector3.new(target.X - origin.X, 0, target.Z - origin.Z)
+	local distance = offset.Magnitude
+	if flatFacing.Magnitude < 1e-6 or distance < math.max(minDistance, 1e-6) then
+		return false
+	end
+	return offset:Dot(flatFacing.Unit) < distance * math.cos(math.rad(coneDegrees / 2))
+end
+
+--- Whether the blade, moving straight from (a0, b0) (the guard and the tip) to (a1, b1), passes
+--- within `radius` of any of `parts`: tested at every step along the move, no end travelling
+--- farther than `step` between two (so a box the blade passes through lies within half a step of
+--- one of them), from the first step after (a0, b0), which the move before tested as its end, to
+--- (a1, b1) itself. The first touch's point: of the nearest touched part's box, nearest the blade.
+function BladeContact.sweptTouch(
+	a0: Vector3,
+	b0: Vector3,
+	a1: Vector3,
+	b1: Vector3,
+	parts: { BasePart },
+	radius: number,
+	step: number
+): (boolean, Vector3?)
+	local travel = math.max((a1 - a0).Magnitude, (b1 - b0).Magnitude)
+	if travel < 1e-9 then
+		return false, nil
+	end
+	local count = if step > 0 then math.max(1, math.ceil(travel / step)) else 1
+	for index = 1, count do
+		local alpha = index / count
+		local touched, at = BladeContact.touch(a0:Lerp(a1, alpha), b0:Lerp(b1, alpha), parts, radius)
+		if touched then
+			return true, at
+		end
+	end
+	return false, nil
+end
+
+--- How far the clip's own root motion at clip time `time` bows off its straight line from `from` to
+--- `to`, turned into the world by `rotation` (the root's facing). Added to a root interpolated
+--- between the roots at `from` and `to`, it carries the body between two samples the way its clip
+--- does instead of along the chord; zero at both ends, and when `to` is not after `from`.
+function BladeContact.rootBow(clip: Types.ClipDef, from: number, to: number, time: number, rotation: CFrame): Vector3
+	if to <= from then
+		return Vector3.zero
+	end
+	local alpha = math.clamp((time - from) / (to - from), 0, 1)
+	local a = ClipSampler.rootMotionAt(clip, from)
+	local b = ClipSampler.rootMotionAt(clip, to)
+	local m = ClipSampler.rootMotionAt(clip, time)
+	return rotation:VectorToWorldSpace(
+		Vector3.new(
+			m[1] - (a[1] + (b[1] - a[1]) * alpha),
+			m[2] - (a[2] + (b[2] - a[2]) * alpha),
+			m[3] - (a[3] + (b[3] - a[3]) * alpha)
+		)
+	)
+end
+
+-- The least distance from the blade (start -> finish) to the boxes of `parts`.
+local function nearestOf(start: Vector3, finish: Vector3, parts: { BasePart }): number
+	local best = math.huge
+	for _, part in parts do
+		local cframe = part.CFrame
+		local size = part.Size
+		if pointSegmentDistance(cframe.Position, start, finish) - size.Magnitude * 0.5 >= best then
+			continue
+		end
+		best = math.min(best, (BladeContact.segmentBoxDistance(start, finish, cframe, size)))
+	end
+	return best
+end
+
+--- Whether the blade, moving from (a0, b0) at parameter `t0` to (a1, b1) at `t1` along the path
+--- `solve` poses (the guard and the tip at a parameter between; nil where it cannot), touches any
+--- of `parts` grown by `radius`. The move is split at its middle parameter while an end still
+--- travels farther than `fine` and the body is near enough to touch, at most `budget` splits; a
+--- move short enough (or the budget spent, or no solver) is taken straight in steps of `radius`
+--- (sweptTouch). A move whose nearer end is farther from the body than `radius` plus its travel is
+--- skipped: no blade between bows that far (an arc is never twice its chord). So it follows the
+--- drawn arc to within the sagitta of a `fine` chord, whatever samples it starts from. The blade
+--- at `t0` is not tested (the move before ended on it). Returns the touch, its point (as
+--- sweptTouch) and the splits spent.
+function BladeContact.followTouch(
+	a0: Vector3,
+	b0: Vector3,
+	t0: number,
+	a1: Vector3,
+	b1: Vector3,
+	t1: number,
+	parts: { BasePart },
+	radius: number,
+	fine: number,
+	solve: ((t: number) -> (Vector3?, Vector3?))?,
+	budget: number
+): (boolean, Vector3?, number)
+	local spent = 0
+	local function follow(
+		guard0: Vector3,
+		tip0: Vector3,
+		from: number,
+		guard1: Vector3,
+		tip1: Vector3,
+		to: number
+	): (boolean, Vector3?)
+		local travel = math.max((guard1 - guard0).Magnitude, (tip1 - tip0).Magnitude)
+		if travel < 1e-9 then
+			return false, nil
+		end
+		local near = math.min(nearestOf(guard0, tip0, parts), nearestOf(guard1, tip1, parts))
+		if near - travel > radius then
+			return false, nil
+		end
+		if travel <= fine or solve == nil or spent >= budget then
+			return BladeContact.sweptTouch(guard0, tip0, guard1, tip1, parts, radius, radius)
+		end
+		local middle = (from + to) * 0.5
+		local guard, tip = solve(middle)
+		spent += 1
+		if guard == nil or tip == nil then
+			return BladeContact.sweptTouch(guard0, tip0, guard1, tip1, parts, radius, radius)
+		end
+		local touched, at = follow(guard0, tip0, from, guard, tip, middle)
+		if touched then
+			return true, at
+		end
+		return follow(guard, tip, middle, guard1, tip1, to)
+	end
+	local touched, at = follow(a0, b0, t0, a1, b1, t1)
+	return touched, at, spent
 end
 
 --- How many sub-samples split the blade's move from (a0, b0) to (a1, b1) so neither end moves

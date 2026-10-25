@@ -400,7 +400,8 @@ end
 
 -- Plans the Art stand-off (fix F1) for a launched Art's clip `handle`, whose request faces
 -- `facing`: the body steps away from the aimed enemy over the anticipation when the first cut's
--- start pose would sit in its body (ContactPredictor.standOff). The root carries it in step().
+-- start pose would sit in its body (ContactPredictor.standOff), never into the world behind it
+-- (the body's own world cast, D-235 amended). The root carries it in step().
 local function planStandOff(handle: any, facing: { number })
 	standOff, standOffHandle, standOffShown = nil, nil, 0
 	local model, rootPart = character, root
@@ -417,12 +418,15 @@ local function planStandOff(handle: any, facing: { number })
 	end
 	local position = rootPart.Position
 	local rootCFrame = CFrame.lookAt(position, position + look.Unit)
-	standOff = ContactPredictor.standOff(model :: Model, handle.clip, handle.time, rootCFrame, target :: Model)
+	local world = ContactPredictor.worldCast(model :: Model)
+	standOff = ContactPredictor.standOff(model :: Model, handle.clip, handle.time, rootCFrame, target :: Model, world)
 	standOffHandle = if standOff ~= nil then handle else nil
 end
 
 -- Moves the root on along a planned stand-off to where the clip's clock puts it (AimLogic.
--- standOffAt), and forgets the plan once it is done or the Art is gone.
+-- standOffAt), no farther than the world behind leaves room (the plan's room, cast from where the
+-- root stands now: the clip's root motion moved it too), and forgets the plan once it is done or
+-- the Art is gone. What a wall takes off a frame's share is not made up later.
 local function stepStandOff(rootPart: BasePart)
 	local plan = standOff
 	if plan == nil then
@@ -437,7 +441,9 @@ local function stepStandOff(rootPart: BasePart)
 	local shown = AimLogic.standOffAt(plan.distance, plan.from, plan.to, handle.time, STAND_OFF_EASING)
 	local by = shown - standOffShown
 	if by ~= 0 then
-		rootPart.CFrame = rootPart.CFrame + plan.away * by
+		local room = plan.room
+		local move = if by > 0 and room ~= nil then room(rootPart.CFrame, by) else by
+		rootPart.CFrame = rootPart.CFrame + plan.away * move
 		standOffShown = shown
 	end
 	if handle.time >= plan.to then
@@ -1149,6 +1155,14 @@ local function step(dt: number)
 	local fallHeight = ActionLogic.fallStep(fallTracker, grounded, rootPart.Position.Y, t)
 	local look = rootPart.CFrame.LookVector
 	local moveDir = hum.MoveDirection
+	-- Under a live lock the stick walks the lock's frame, not the camera's (D-238): forward closes
+	-- on the target and sideways circles it wherever the two-shot stands. The Humanoid walks the
+	-- turned stick (this Move after the control script's), and so do the stop and Locomotion.
+	local turned = CameraController.lockMove(moveDir)
+	if turned ~= moveDir then
+		moveDir = turned
+		hum:Move(turned)
+	end
 	-- The two-step stop: after the stick lets go the root slows to a stop along its last move
 	-- direction (the control script's Move ran earlier this frame; this one overrides it).
 	local gait: ActionLogic.StopGait? = nil

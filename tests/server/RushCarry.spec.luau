@@ -786,7 +786,25 @@ describe("A stopped rush never carries a player (D-190)", function()
 			end
 			local at = solidAt(boar)
 			expect(at).never.toBeNil()
-			expect(phaseOf(boarId)).toBe("Recover")
+			-- Solid again before it moves off: still in its attack, standing where it jammed. A jam told
+			-- by a blocked step (D-280) starts the rejoin wait soon enough that it may still be in Strike.
+			local phase = phaseOf(boarId)
+			expect(phase == "Strike" or phase == "Recover").toBe(true)
+			local jam: number? = nil
+			for _, entry in sentOf("RushEnded") do
+				if entry.payload.reason == "Jammed" then
+					jam = entry.time
+				end
+			end
+			expect(jam).never.toBeNil()
+			local first: Vector3? = nil
+			for _, sample in bodies[boar].history do
+				if sample.t >= (jam :: number) + FRAME - 1e-9 and sample.t <= (at :: number) + 1e-9 then
+					first = first or sample.position
+					expect((sample.position - (first :: Vector3)).Magnitude).toBeLessThan(0.05)
+				end
+			end
+			expect(first).never.toBeNil()
 			expect(drawnInside(boar, player, at :: number, launch.direction)).toBe(false)
 		end
 	end)
@@ -814,6 +832,172 @@ describe("A stopped rush never carries a player (D-190)", function()
 			expect((at :: number) - clearFrom).toBeLessThan(GROUPS.rejoinClearSeconds + TICK + FRAME)
 		end
 	)
+
+	it(
+		"a body that stops over a packmate's footprint turns solid only once the two blockers stand apart (D-281)",
+		function()
+			-- A held boar stands down the line, facing the same way, just past where the run ends (reach
+			-- + overshoot = 22 studs): the roots never meet, but the rusher's snout stands over the held
+			-- boar's haunches. Solid there, the two blockers would meet inside each other and the engine
+			-- would push them apart. The player steps on, far down the line, so the rusher keeps facing
+			-- it (and the packmate) through its recovery.
+			local boarId, boar, player, launch = launched(14)
+			movePlayer(player, launch.origin + launch.direction * 60)
+			local ahead = 6.5
+			local restAt = launch.origin + launch.direction * (22 + ahead)
+			local heldId = EnemyService.spawn("FrenzyBoar", CFrame.lookAt(restAt, restAt + launch.direction))
+			expect(EnemyService.setHeld(heldId, true)).toBe(true)
+			local held = EnemyService.modelOf(heldId) :: Model
+			local function blockerOf(model: Model): BasePart
+				for _, part in model:GetDescendants() do
+					if part:IsA("BasePart") and part.CollisionGroup == GROUPS.blockers then
+						return part
+					end
+				end
+				error("no blocker")
+			end
+			local own, theirs = blockerOf(boar), blockerOf(held)
+			expect(theirs.CanCollide).toBe(true)
+			local ended = launch.at + launch.duration
+			while clock.t < ended + GROUPS.rejoinClearSeconds + 0.5 do
+				frame()
+			end
+			expect(phaseOf(boarId)).toBe("Recover")
+			-- At rest where the run ended: roots apart, footprints over each other.
+			expect(overlaps(boar.PrimaryPart :: BasePart, held.PrimaryPart :: BasePart)).toBe(false)
+			expect(overlaps(own, theirs)).toBe(true)
+			expect(solidAt(boar)).toBeNil()
+			expect(own.CanCollide).toBe(false)
+			-- The packmate steps aside: the rusher turns solid one clear window later.
+			EnemyService.setHeld(heldId, false)
+			EnemyService.setHeld(heldId, true)
+			local aside = restAt + Vector3.new(12, 0, 0)
+			bodies[held].position = aside
+			placeParts(held, bodies[held])
+			expect(overlaps(own, theirs)).toBe(false)
+			local clearFrom = clock.t
+			while solidAt(boar) == nil and clock.t < clearFrom + 2 do
+				frame()
+			end
+			local at = solidAt(boar)
+			expect(at).never.toBeNil()
+			expect((at :: number) - clearFrom).toBeGreaterThan(GROUPS.rejoinClearSeconds - TICK - FRAME)
+			expect((at :: number) - clearFrom).toBeLessThan(GROUPS.rejoinClearSeconds + TICK + FRAME)
+			expect(drawnInside(boar, player, at :: number, launch.direction)).toBe(false)
+		end
+	)
+
+	it("blockerClear judges the blockers' own boxes: turned, side by side, stacked, or switched off (D-281)", function()
+		fresh()
+		local aId = EnemyService.spawn("FrenzyBoar", CFrame.new(0, 3, 0))
+		local bId = EnemyService.spawn("FrenzyBoar", CFrame.new(40, 3, 0))
+		EnemyService.setHeld(aId, true)
+		EnemyService.setHeld(bId, true)
+		local a, b = EnemyService.modelOf(aId) :: Model, EnemyService.modelOf(bId) :: Model
+		local function blockerOf(model: Model): BasePart
+			for _, part in model:GetDescendants() do
+				if part:IsA("BasePart") and part.CollisionGroup == GROUPS.blockers then
+					return part
+				end
+			end
+			error("no blocker")
+		end
+		local blockerA, blockerB = blockerOf(a), blockerOf(b)
+		local function pose(model: Model, position: Vector3, degrees: number)
+			local yaw = math.rad(degrees)
+			EnemyService.applyFacing(model, Vector3.new(-math.sin(yaw), 0, -math.cos(yaw)))
+			bodies[model].position = position
+			placeParts(model, bodies[model])
+		end
+		-- The oracle: two footprints (convex quads) overlap when an edge of one crosses an edge of the
+		-- other or one holds a corner of the other, and the two spans overlap in height.
+		local function corners(part: BasePart): { Vector2 }
+			local half = part.Size / 2
+			local list = {}
+			for _, c in { { -1, -1 }, { 1, -1 }, { 1, 1 }, { -1, 1 } } do
+				local p = part.CFrame:PointToWorldSpace(Vector3.new(half.X * c[1], 0, half.Z * c[2]))
+				table.insert(list, Vector2.new(p.X, p.Z))
+			end
+			return list
+		end
+		local function cross(o: Vector2, p: Vector2, q: Vector2): number
+			return (p.X - o.X) * (q.Y - o.Y) - (p.Y - o.Y) * (q.X - o.X)
+		end
+		local function inside(point: Vector2, quad: { Vector2 }): boolean
+			for i = 1, 4 do
+				if cross(quad[i], quad[i % 4 + 1], point) <= 0 then
+					return false
+				end
+			end
+			return true
+		end
+		local function crosses(p1: Vector2, p2: Vector2, q1: Vector2, q2: Vector2): boolean
+			local d1, d2 = cross(q1, q2, p1), cross(q1, q2, p2)
+			local d3, d4 = cross(p1, p2, q1), cross(p1, p2, q2)
+			return ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0))
+		end
+		local function oracle(): boolean
+			local ya, yb = blockerA.CFrame.Position.Y, blockerB.CFrame.Position.Y
+			if math.abs(ya - yb) >= (blockerA.Size.Y + blockerB.Size.Y) / 2 then
+				return false
+			end
+			local qa, qb = corners(blockerA), corners(blockerB)
+			-- Wind both counter-clockwise for `inside`.
+			for _, quad in { qa, qb } do
+				if cross(quad[1], quad[2], quad[3]) < 0 then
+					quad[2], quad[4] = quad[4], quad[2]
+				end
+			end
+			for i = 1, 4 do
+				-- Corners, and points along each edge (an edge lying along the other's edge holds none of
+				-- the other's corners strictly inside, and crosses none of its edges).
+				for _, t in { 0, 0.25, 0.5, 0.75 } do
+					if inside(qa[i]:Lerp(qa[i % 4 + 1], t), qb) or inside(qb[i]:Lerp(qb[i % 4 + 1], t), qa) then
+						return true
+					end
+				end
+				for j = 1, 4 do
+					if crosses(qa[i], qa[i % 4 + 1], qb[j], qb[j % 4 + 1]) then
+						return true
+					end
+				end
+			end
+			return false
+		end
+		pose(a, Vector3.new(0, 3, 0), 0)
+		local width = blockerA.Size.X
+		-- Side by side: a hair apart is clear, a hair over is not.
+		pose(b, Vector3.new(width + 0.2, 3, 0), 0)
+		expect(EnemyService.blockerClear(a)).toBe(true)
+		pose(b, Vector3.new(width - 0.2, 3, 0), 0)
+		expect(EnemyService.blockerClear(a)).toBe(false)
+		expect(EnemyService.blockerClear(b)).toBe(false)
+		-- Stacked out of reach in height, or switched off (rushing), it is clear.
+		pose(b, Vector3.new(width - 0.2, 3 + blockerA.Size.Y + 0.1, 0), 0)
+		expect(EnemyService.blockerClear(a)).toBe(true)
+		pose(b, Vector3.new(width - 0.2, 3, 0), 0)
+		blockerB.CanCollide = false
+		expect(EnemyService.blockerClear(a)).toBe(true)
+		blockerB.CanCollide = true
+		-- Turned: the boxes themselves, not their bounding boxes, against the oracle.
+		local apart, met = 0, 0
+		for _, degrees in { 0, 30, 45, 60, 90, 135 } do
+			for x = -10, 10, 1.25 do
+				for z = -14, 14, 1.25 do
+					pose(b, Vector3.new(x, 3, z), degrees)
+					local expected = not oracle()
+					expect(EnemyService.blockerClear(a)).toBe(expected)
+					if expected then
+						apart += 1
+					else
+						met += 1
+					end
+				end
+			end
+		end
+		expect(apart).toBeGreaterThan(100)
+		expect(met).toBeGreaterThan(100)
+	end)
 
 	it(
 		"a slam's body waits to rejoin from the stop that ends its rush, never from the slam's report (D-210)",

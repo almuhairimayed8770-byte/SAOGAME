@@ -69,17 +69,10 @@ GaitGen.NAMES = {
 }
 
 --- Committed clips the generator does not reproduce, and why. --check skips them and a plain run
---- leaves them alone; naming one on the command line rewrites it and loses the hand edits below.
-GaitGen.DRIFTED = {
-	-- After generation the upper body was re-keyed by hand for the back mount (D-050, D-055): the
-	-- waist twists about 8 degrees instead of 10, the head is in line with the torso (Neck X about
-	-- 2 to 3.5 instead of 16 to 20: tipped back it meets the hilt), the elbows go out at the back
-	-- (LeftShoulder / RightShoulder Z), and the header says so. Root and legs still match.
-	Run = "upper body re-keyed by hand for the back mount (Waist Y, Neck, shoulder Z, header); root and legs match",
-	-- The same re-key as Run: Waist Y about 8.4 instead of 12, Neck X about 2 instead of 22 to 26,
-	-- the left arm 2 to 6 degrees wider (D-055), the header longer. Root and legs match.
-	Sprint = "upper body re-keyed by hand for the back mount (Waist Y, Neck, shoulder Z, header); root and legs match",
-}
+--- leaves them alone; naming one on the command line rewrites it and loses its hand edits. None
+--- now: Run's and Sprint's upper bodies, re-keyed by hand for the back mount (D-050, D-055), are
+--- pinned in sources/Run.luau and sources/Sprint.luau and sampled like the drawn set's.
+GaitGen.DRIFTED = {} :: { [string]: string }
 
 local MISS = 0.01 -- a stance key whose foot is further than this from its plan is reported (studs)
 local EASING = "SineInOut"
@@ -195,6 +188,40 @@ local function stanceCF(body: Body, gait: Gait, plan: Plan, t: number): CFrame
 	return CFrame.new(at) * rotation * CFrame.new(-pivot)
 end
 
+-- When the foot is off the field: the lift, or the end of its peel.
+local function liftEnd(plan: Plan): number
+	local peel = plan.peel
+	return plan.tl + (if peel then peel.duration else 0)
+end
+
+-- The peeling foot's frame at time t (plan.tl < t <= liftEnd): still going back with the field,
+-- the lift pivot rising and the roll going on, both eased in from the lift.
+local function peelCF(body: Body, gait: Gait, plan: Plan, peel: Keys.Peel, t: number): CFrame
+	local a = math.clamp((t - plan.tl) / peel.duration, 0, 1)
+	local eased = a * a
+	local travel = gait.dir * gait.speed * (t - plan.ts)
+	local flat = Vector3.new(plan.x, body.ground, plan.z) - travel
+	local pivot = body.pivots[plan.liftPivot]
+	local at = flat + (pivot - body.sole) + Vector3.new(0, peel.rise * eased, 0)
+	local angle = plan.liftAngle + peel.angle * eased
+	local rotation
+	if plan.liftPivot == "left" or plan.liftPivot == "right" then
+		rotation = CFrame.Angles(0, 0, math.rad(angle))
+	else
+		rotation = CFrame.Angles(math.rad(angle), 0, 0)
+	end
+	return CFrame.new(at) * rotation * CFrame.new(-pivot)
+end
+
+-- The foot's frame from the strike to the end of its peel.
+local function groundCF(body: Body, gait: Gait, plan: Plan, t: number): CFrame
+	local peel = plan.peel
+	if peel and t > plan.tl + EDGE then
+		return peelCF(body, gait, plan, peel, t)
+	end
+	return stanceCF(body, gait, plan, t)
+end
+
 local function hermite(p0: number, m0: number, p1: number, m1: number, u: number, h: number): number
 	local u2, u3 = u * u, u * u * u
 	local h00 = 2 * u3 - 3 * u2 + 1
@@ -206,19 +233,21 @@ end
 
 type PathPoint = { t: number, s: FootState }
 
--- The foot's frame at any time: planted, or on the swing path (a Hermite curve through the lift
--- state, the swing points and the next strike state, its end tangents matching the stance's).
+-- The foot's frame at any time: planted or peeling, or on the swing path (a Hermite curve through
+-- the lift state, the swing points and the next strike state, its end tangents matching the
+-- stance's).
 local function footCF(body: Body, gait: Gait, plan: Plan, time: number): CFrame
 	local T = gait.duration
 	local t = wrap(time, plan.ts, T)
-	if t <= plan.tl + EDGE then
-		return stanceCF(body, gait, plan, t)
+	local off = liftEnd(plan)
+	if t <= off + EDGE then
+		return groundCF(body, gait, plan, t)
 	end
-	local lift = cfState(body, stanceCF(body, gait, plan, plan.tl))
-	local liftBefore = cfState(body, stanceCF(body, gait, plan, plan.tl - EPS))
+	local lift = cfState(body, groundCF(body, gait, plan, off))
+	local liftBefore = cfState(body, groundCF(body, gait, plan, off - EPS))
 	local strike = cfState(body, stanceCF(body, gait, plan, plan.ts))
 	local strikeAfter = cfState(body, stanceCF(body, gait, plan, plan.ts + EPS))
-	local points: { PathPoint } = { { t = plan.tl, s = lift } }
+	local points: { PathPoint } = { { t = off, s = lift } }
 	local swing = plan.swing
 	if swing then
 		for _, p in swing do
@@ -397,24 +426,84 @@ local function solveKeys(body: Body, gait: Gait): ({ Emit.ClipKey }, number, { s
 			error("gaitgen: a plan's lift and strike need keys")
 		end
 		local lifted: LegAngles, struck: LegAngles = liftAngles, strikeAngles
-		-- swing keys: set by hand (hip Y/Z and ankle Z blend lift to strike), or by IK to the path
+		-- peel keys by IK, in time order from the lift (seeded from the lift's solution)
+		local off = liftEnd(plan)
+		local function inPeel(kt: number): boolean
+			local w = wrap(kt, plan.ts, T)
+			return w > plan.tl + EDGE and w <= off + EDGE
+		end
+		local offAngles: LegAngles = lifted
+		if plan.peel then
+			local order: { number } = {}
+			for index, kt in gait.keyTimes do
+				if inPeel(kt) then
+					table.insert(order, index)
+				end
+			end
+			table.sort(order, function(a: number, b: number): boolean
+				return wrap(gait.keyTimes[a], plan.tl, T) < wrap(gait.keyTimes[b], plan.tl, T)
+			end)
+			seeds[side] = lifted
+			local peeled: LegAngles? = nil
+			for _, index in order do
+				local kt = gait.keyTimes[index]
+				local x, miss = legIK(body, keyOffsets[index], side, footCF(body, gait, plan, kt), seeds[side])
+				seeds[side] = x
+				solution[index] = x
+				worst = math.max(worst, miss)
+				if miss > MISS then
+					table.insert(misses, ("%s foot misses its peel by %.3f at %.4f s"):format(side, miss, kt))
+				end
+				if same(kt, off) then
+					peeled = x
+				end
+			end
+			if peeled == nil then
+				error("gaitgen: a plan's peel needs a key at its end")
+			end
+			offAngles = peeled :: LegAngles
+		end
+		-- swing keys: set by hand (hip Y/Z and ankle Z blend from the lift, or the peel's end, to
+		-- the strike) with the keys between them where the clip would play the leg without them,
+		-- or by IK to the path
+		local entries: { Keys.SwingJoint } = plan.swingJoints or {}
+		type Anchor = { t: number, x: LegAngles }
+		local anchors: { Anchor } = { { t = off, x = offAngles } }
+		local span = plan.ts + T - off
+		for _, e in entries do
+			local at = wrap(e.t, off, T)
+			local frac = (at - off) / span
+			local function mix(i: number): number
+				return offAngles[i] + (struck[i] - offAngles[i]) * frac
+			end
+			table.insert(anchors, { t = at, x = { e.hip, mix(2), mix(3), e.knee, e.ankle, mix(6) } })
+		end
+		table.insert(anchors, { t = plan.ts + T, x = struck })
+		table.sort(anchors, function(a: Anchor, b: Anchor): boolean
+			return a.t < b.t
+		end)
 		for index, kt in gait.keyTimes do
-			if not inStance(plan, kt) then
-				local entry: Keys.SwingJoint? = nil
-				local swingJoints = plan.swingJoints
-				if swingJoints then
-					for _, e in swingJoints do
-						if same(e.t, kt) then
-							entry = e
+			if not inStance(plan, kt) and not inPeel(kt) then
+				if #entries > 0 then
+					local at = wrap(kt, off, T)
+					local x: LegAngles? = nil
+					for i = 1, #anchors - 1 do
+						local a, b = anchors[i], anchors[i + 1]
+						if at >= a.t - SAME and at <= b.t + SAME then
+							local u = math.clamp((at - a.t) / (b.t - a.t), 0, 1)
+							local eased = -(math.cos(math.pi * u) - 1) / 2 -- SineInOut, as the clip plays it
+							local mixed: LegAngles = {}
+							for f = 1, 6 do
+								mixed[f] = a.x[f] + (b.x[f] - a.x[f]) * eased
+							end
+							x = mixed
+							break
 						end
 					end
-				end
-				if entry then
-					local frac = (wrap(kt, plan.tl, T) - plan.tl) / (plan.ts + T - plan.tl)
-					local function mix(i: number): number
-						return lifted[i] + (struck[i] - lifted[i]) * frac
+					if x == nil then
+						error(("gaitgen: no swing anchor around %.4f s"):format(kt))
 					end
-					solution[index] = { entry.hip, mix(2), mix(3), entry.knee, entry.ankle, mix(6) }
+					solution[index] = x :: LegAngles
 				else
 					local x = legIK(body, keyOffsets[index], side, footCF(body, gait, plan, kt), seeds[side])
 					seeds[side] = x

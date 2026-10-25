@@ -14,7 +14,13 @@
 	counts the hit (the client's touch, less the hit-stops the client held so far) and heard
 	`latency` later, then Heartbeat after each rendered frame. No hold starts before its strike's
 	key, every word the server sent holds the rig once, and a word with nothing to wait for (a
-	swing that stopped, a kill, one past its wait) plays when it comes.
+	swing that stopped, one past its wait) plays when it comes.
+
+	A kill's word waits too, with its EntityDied (D-267 amended): before, a kill's word played when
+	it came, and its death with it, so the Kill hold and the death freeze started inside the snap,
+	before the key (30 kills each at 30, 60 and 144 fps: 29, 30 and 30 at 0 ms, 8, 8 and 8 at 67
+	ms, still 8, 6 and 3 at 100 ms). Now the death plays on the key frame and the hold from the
+	frame after, at 30, 60 and 144 fps and 0 to 100 ms, with the same wait and the same release.
 ]]
 
 local fs = require("@lune/fs")
@@ -141,6 +147,13 @@ local function play(
 				enemyMixer:hitStop(frames)
 			end,
 			play = function() end,
+			stop = function() end,
+			-- EntityDied freezes the dying rig (time scale 0): the frame its death plays.
+			setTimeScale = function(_self: any, scale: number)
+				if scale == 0 and opts.deathFrame == nil then
+					opts.deathFrame = opts.frame
+				end
+			end,
 		},
 	}
 	local scaled = Enemies.scaled(def)
@@ -223,6 +236,9 @@ local function play(
 		end,
 		-- CharacterController.awaitsKey, as Replication.start binds it.
 		keyAhead = function(windowIndex: number, artId: string?, swing: number?): boolean
+			if opts.keyNever then
+				return true
+			end
 			local method = predictor ~= nil and predictor.awaitsKey or nil
 			return method ~= nil and method(predictor, windowIndex, artId, swing) == true
 		end,
@@ -253,6 +269,15 @@ local function play(
 	local held = 0
 	local function send(index: number, at: number, killed: boolean?)
 		sent[index] = true
+		if killed then
+			-- The server kills before it confirms: EntityDied (and the Dead state) come just before
+			-- the kill's HitConfirmed.
+			table.insert(words, {
+				at = at,
+				death = true,
+				payload = { entityId = 5, shatter = "Beast", position = { 0, 3, -2 }, name = "Boar", byPlayer = true },
+			})
+		end
 		table.insert(words, {
 			at = at,
 			payload = {
@@ -277,13 +302,29 @@ local function play(
 	local last = handle.time
 	while not handle.done and frame < 600 do
 		frame += 1
+		opts.frame = frame
 		local dt = 1 / fps
 		clock += dt
+		-- `loneDeathFrame`: another fighter's kill, an EntityDied no word of this fighter's follows.
+		if opts.loneDeathFrame == frame then
+			table.insert(words, {
+				at = clock,
+				death = true,
+				payload = { entityId = 5, shatter = "Beast", position = { 0, 3, -2 }, name = "Boar", byPlayer = true },
+			})
+		end
 		-- The words heard by this frame (before the render step).
 		local index = 1
 		while index <= #words do
 			if clock >= words[index].at - 1e-9 then
-				handlers.HitConfirmed(table.remove(words, index).payload)
+				local word = table.remove(words, index)
+				if word.death then
+					opts.deathCame = opts.deathCame or frame
+					records[5].state = "Dead"
+					handlers.EntityDied(word.payload)
+				else
+					handlers.HitConfirmed(word.payload)
+				end
 			else
 				index += 1
 			end
@@ -304,14 +345,17 @@ local function play(
 		local contacts = predictor:step(handle.time)
 		-- The server counts a hit on the frame this client's blade first touches it, on its own
 		-- clock: ahead of this client by the hit-stops held so far.
+		-- `killAt`: the server's sweep kills on that window, and counts nothing after it.
 		for _, entry in predictor.pending do
-			if not sent[entry.windowIndex] then
-				send(entry.windowIndex, clock - held + latency)
+			if not sent[entry.windowIndex] and not opts.dead then
+				opts.dead = opts.killAt == entry.windowIndex
+				send(entry.windowIndex, clock - held + latency, opts.dead)
 			end
 		end
 		for _, contact in contacts do
-			if not sent[contact.windowIndex] then
-				send(contact.windowIndex, clock - held + latency)
+			if not sent[contact.windowIndex] and not opts.dead then
+				opts.dead = opts.killAt == contact.windowIndex
+				send(contact.windowIndex, clock - held + latency, opts.dead)
 			end
 			Replication.contact(contact)
 		end
@@ -424,12 +468,100 @@ describe("the server's word waits for the strike's key (D-267)", function()
 		end
 	end)
 
-	it("a kill's word plays when it comes (its death comes with it)", function()
+	it("a kill's word waits for the key with its death: the kill freeze starts on the key frame", function()
 		local enemy, def = place("Kobold", 9, 0)
-		local result = play("Horizontal", enemy, def, 60, 0, { wordAtOpen = 1, killed = true })
-		local window = result[1]
+		for _, fps in { 30, 60, 144 } do
+			for _, latency in { 0, 1 / 60 } do
+				local opts: any = { wordAtOpen = 1, killed = true }
+				local window = play("Horizontal", enemy, def, fps, latency, opts)[1]
+				expect(opts.deathCame ~= nil).toBe(true)
+				expect(opts.deathCame <= (window.keyFrame :: number)).toBe(true)
+				-- The death plays on the key frame (its freeze, silence and shatter start there) and
+				-- the Kill hold from the frame after: the key pose is what freezes.
+				expect(opts.deathFrame).toBe(window.keyFrame)
+				expect(window.holdFrame).toBe((window.keyFrame :: number) + 1)
+			end
+		end
+	end)
+
+	it("no kill freezes before its strike's key, at 30, 60, 144 fps and 0 to 100 ms of latency", function()
+		local kills = 0
+		for _, placement in PLACES do
+			local enemy, def = place(placement.setup, placement.distance, placement.bearing)
+			for _, name in MOVES_SHORT do
+				clipOf(name)
+				for killAt in WINDOWS_OF[name] do
+					for _, fps in { 30, 60, 144 } do
+						for _, latency in { 0, 0.05, 0.1 } do
+							local opts: any = { killAt = killAt }
+							local window = play(name, enemy, def, fps, latency, opts)[killAt]
+							if not (window :: any).sent then
+								continue
+							end
+							kills += 1
+							local where = ("%s %s@%.1f %d fps %d ms, kill on window %d"):format(
+								name,
+								placement.setup,
+								placement.distance,
+								fps,
+								latency * 1000,
+								killAt
+							)
+							if window.hold == nil or (window.hold :: number) < window.key - 1e-4 then
+								error(where .. ": the Kill hold started before the key")
+							end
+							local keyFrame = window.keyFrame :: number
+							-- The death plays on the key frame when it came before it, else when it comes.
+							local want = math.max(keyFrame, opts.deathCame :: number)
+							if opts.deathFrame ~= want then
+								error(
+									("%s: the death came on frame %d and played on %s, the key frame is %d"):format(
+										where,
+										opts.deathCame,
+										tostring(opts.deathFrame),
+										keyFrame
+									)
+								)
+							end
+						end
+					end
+				end
+			end
+		end
+		expect(kills > #PLACES * #MOVES_SHORT * 3).toBe(true)
+	end)
+
+	it("a death no word holds plays on the frame it comes", function()
+		local enemy, def = place("Kobold", 9, 0)
+		local opts: any = { loneDeathFrame = 4 }
+		play("Horizontal", enemy, def, 60, 0, opts)
+		expect(opts.deathCame).toBe(4)
+		expect(opts.deathFrame).toBe(4)
+	end)
+
+	it("a kill's word for a swing that stopped plays when it comes, with its death", function()
+		local enemy, def = place("Kobold", 9, 0)
+		clipOf("Horizontal")
+		local open = WINDOWS_OF.Horizontal[1].open
+		local opts: any = { wordAtOpen = 1, killed = true, stopAt = open }
+		local window = play("Horizontal", enemy, def, 60, 2 / 60, opts)[1]
 		expect(window.hold ~= nil).toBe(true)
 		expect((window.hold :: number) < window.key - 1e-4).toBe(true)
+		expect(opts.deathFrame).toBe(opts.deathCame)
+	end)
+
+	it("a kill's word and its death wait at most combat.contact.wordWaitSeconds", function()
+		local enemy, def = place("Kobold", 9, 0)
+		for _, fps in { 30, 60, 144 } do
+			-- A key that never comes: the word and its death play once the wait runs out.
+			local opts: any = { wordAtOpen = 1, killed = true, keyNever = true }
+			local window = play("Horizontal", enemy, def, fps, 0, opts)[1]
+			expect(window.hold ~= nil).toBe(true)
+			local waited = (opts.deathFrame - opts.deathCame) / fps
+			expect(waited >= Combat.contact.wordWaitSeconds - 1e-9).toBe(true)
+			expect(waited <= Combat.contact.wordWaitSeconds + 1 / fps + 1e-9).toBe(true)
+			expect(window.holdFrame).toBe(opts.deathFrame + 1)
+		end
 	end)
 
 	it("a word for a swing that stopped plays when it comes", function()

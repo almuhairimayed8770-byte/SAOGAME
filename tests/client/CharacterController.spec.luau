@@ -100,6 +100,11 @@ type Rig = {
 	setEnemies: (enemies: { { id: number, position: Vector3 } }) -> (),
 	-- The last input the controller handed Locomotion.update.
 	locomotionInput: () -> any,
+	-- What the fake CameraController.lockMove does to the stick it is handed (D-238): nil hands
+	-- it back untouched (no live lock), as the real one does.
+	setLockMove: (turn: ((Vector3) -> Vector3)?) -> (),
+	-- Every direction the controller handed CameraController.lockMove, in order.
+	lockMoves: { Vector3 },
 	-- Every scale the controller handed the animator's setTimeScale, in order (options.animator).
 	timeScales: { number },
 	-- The root motion the animator hands out each frame (options.animator), in the root's space.
@@ -148,8 +153,9 @@ type Options = {
 	-- "connections" (Choreo's RenderStepped connection).
 	renderOrder: string?,
 	-- What the fake ContactPredictor.standOff answers (fix F1): step this far along `away`, to
-	-- the clip time `to`, from the clip time the controller asks from. Nil: no stand-off.
-	standOff: { distance: number, away: Vector3, to: number }?,
+	-- the clip time `to`, from the clip time the controller asks from, with `room` the world it
+	-- leaves (D-235 amended). Nil: no stand-off.
+	standOff: { distance: number, away: Vector3, to: number, room: ((CFrame, number) -> number)? }?,
 }
 
 local IMPACT_CALLS = { "guardRaise", "dodge", "release", "cancelActivation", "activation" }
@@ -199,6 +205,8 @@ local function load(options: Options?): Rig
 	local lockRecord: any = nil
 	local enemies: { { id: number, position: Vector3 } } = {}
 	local lastInput: any = nil
+	local lockTurn: ((Vector3) -> Vector3)? = nil
+	local lockMoves: { Vector3 } = {}
 	local model = {
 		WaitForChild = function(_self: any, name: string): any
 			return if name == "Humanoid" then humanoid else root
@@ -280,22 +288,30 @@ local function load(options: Options?): Rig
 	-- ContactPredictor (issue 4): a recording fake. Its steps note the clip time asked for, the root
 	-- at that moment and how many times the rig had stepped by then.
 	local contactLog: any =
-		{ begins = {}, steps = {}, stops = 0, queue = {}, active = false, deps = nil, standOffs = {} }
+		{ begins = {}, steps = {}, stops = 0, queue = {}, active = false, deps = nil, standOffs = {}, worldCasts = {} }
 	local rigStepCount: () -> number = function(): number
 		return 0
 	end
 	local fakes: { [string]: any } = {
 		ContactPredictor = {
-			standOff = function(model: any, clip: any, from: number, rootCFrame: CFrame, target: any): any
+			standOff = function(model: any, clip: any, from: number, rootCFrame: CFrame, target: any, cast: any): any
 				table.insert(
 					contactLog.standOffs,
-					{ model = model, clip = clip, from = from, root = rootCFrame, target = target }
+					{ model = model, clip = clip, from = from, root = rootCFrame, target = target, cast = cast }
 				)
 				local plan = opts.standOff
 				if plan == nil then
 					return nil
 				end
-				return { distance = plan.distance, away = plan.away, from = from, to = plan.to }
+				return { distance = plan.distance, away = plan.away, from = from, to = plan.to, room = plan.room }
+			end,
+			-- The world the stand-off may not step into (D-235 amended): a marker the plan is asked with.
+			worldCast = function(model: any): any
+				local cast = function(): number?
+					return nil
+				end
+				table.insert(contactLog.worldCasts, { model = model, cast = cast })
+				return cast
 			end,
 			new = function(deps: any): any
 				contactLog.deps = deps
@@ -365,6 +381,11 @@ local function load(options: Options?): Rig
 		CameraController = {
 			fovKick = function(...: any)
 				table.insert(log, { kind = "camera", name = "fovKick", args = { ... } })
+			end,
+			lockMove = function(direction: Vector3): Vector3
+				table.insert(lockMoves, direction)
+				local turn = lockTurn
+				return if turn ~= nil then turn(direction) else direction
 			end,
 		},
 		Siblings = {
@@ -568,6 +589,10 @@ local function load(options: Options?): Rig
 		locomotionInput = function(): any
 			return lastInput
 		end,
+		setLockMove = function(turn: ((Vector3) -> Vector3)?)
+			lockTurn = turn
+		end,
+		lockMoves = lockMoves,
 		timeScales = timeScales,
 		setRootMotion = function(delta: Vector3)
 			rootMotion = delta
@@ -1199,6 +1224,71 @@ describe("CharacterController: the Art stand-off (fix F1)", function()
 			locked.frame(STILL)
 		end
 		expect(locked.controller.state()).never.toBe("Holding")
+	end)
+
+	it("plans against the world, and the frames that take the step stop where it leaves room (D-235)", function()
+		local away = Vector3.new(0, 0, 1)
+		local wall: number? = nil -- how far along `away` the world lets the root go, once known
+		local asked: { number } = {}
+		local plan = {
+			distance = 0.8,
+			away = away,
+			to = 0.35,
+			room = function(at: CFrame, distance: number): number
+				table.insert(asked, distance)
+				local free = (wall :: number) - at.Position:Dot(away)
+				return math.clamp(free, 0, distance)
+			end,
+		}
+		local rig = load({ choreo = true, impact = true, standOff = plan })
+		local twin = load({ choreo = true, impact = true })
+		local function frame()
+			rig.frame(STILL)
+			twin.frame(STILL)
+		end
+		for _ = 1, 40 do
+			frame()
+		end
+		rig.setLock(Vector3.new(0, 0, -1.6))
+		twin.setLock(Vector3.new(0, 0, -1.6))
+		rig.controller.beginArt(1)
+		twin.controller.beginArt(1)
+		for _ = 1, 12 do
+			frame()
+		end
+		local before = rig.root.Position
+		wall = before:Dot(away) + 0.3
+		rig.controller.releaseArt(1, 12 * FRAME)
+		twin.controller.releaseArt(1, 12 * FRAME)
+		-- The plan is asked with the body's own world cast.
+		expect(#rig.contacts.worldCasts).toBe(1)
+		expect(rig.contacts.worldCasts[1].model).toBe(rig.model)
+		expect(rig.contacts.standOffs[1].cast).toBe(rig.contacts.worldCasts[1].cast)
+		local handle = rig.animator.mixer:find(rig.controller.slots()[1].clip)
+		local reached = -math.huge
+		for _ = 1, 60 do
+			frame()
+			-- Never past the wall, on any frame.
+			reached = math.max(reached, rig.root.Position:Dot(away))
+			expect(reached <= (wall :: number) + 1e-6).toBe(true)
+			if handle.time >= plan.to then
+				break
+			end
+		end
+		-- It stepped up to the wall and no farther: short of the plan, what it lost not made up.
+		expect(reached).toBeCloseTo(wall :: number, 1e-4)
+		local apart = (rig.root.Position - twin.root.Position):Dot(away)
+		expect(apart > 0.05).toBe(true)
+		expect(apart < plan.distance - 0.1).toBe(true)
+		for _ = 1, 10 do
+			frame()
+		end
+		expect((rig.root.Position - twin.root.Position):Dot(away)).toBeCloseTo(apart, 1e-4)
+		-- Each frame asked only for its own share.
+		expect(#asked >= 3).toBe(true)
+		for _, share in asked do
+			expect(share > 0 and share < plan.distance).toBe(true)
+		end
 	end)
 end)
 
@@ -2680,5 +2770,66 @@ describe("CharacterController swing sequence numbers (item 4)", function()
 				expect(swing).toBe(swings[index - 1] % Combat.contact.swingSequenceMax + 1)
 			end
 		end
+	end)
+end)
+
+describe("CharacterController: under a live lock the stick walks the lock's frame (D-238)", function()
+	-- The fake lock's turn: a quarter turn left, so the stick held forward walks along -X.
+	local function quarterLeft(direction: Vector3): Vector3
+		return Vector3.new(direction.Z, direction.Y, -direction.X)
+	end
+	local LEFT = Vector3.new(-1, 0, 0)
+
+	it("hands the Humanoid, Locomotion, the two-step stop and the dodge the turned stick", function()
+		local rig = load()
+		rig.setLockMove(quarterLeft)
+		for _ = 1, 10 do
+			rig.frame(FORWARD)
+		end
+		-- The controller asked about the stick the control script set this frame.
+		local asked = rig.lockMoves[#rig.lockMoves]
+		expect(asked.Z).toBeCloseTo(FORWARD.Z, 1e-6)
+		-- The Humanoid walks the turned stick, and so does the body.
+		expect(rig.humanoid.MoveDirection.X).toBeCloseTo(LEFT.X, 1e-6)
+		expect(rig.humanoid.MoveDirection.Z).toBeCloseTo(0, 1e-6)
+		expect(rig.root.Position.X < -1).toBe(true)
+		expect(math.abs(rig.root.Position.Z) < 1e-6).toBe(true)
+		-- Locomotion is told the same direction the Humanoid walks.
+		local input = rig.locomotionInput()
+		expect(input.moveDir.X).toBeCloseTo(LEFT.X, 1e-6)
+		expect(input.moveDir.Z).toBeCloseTo(0, 1e-6)
+		-- A dodge with the stick held goes where the body walks.
+		local dodging = load()
+		dodging.setLockMove(quarterLeft)
+		for _ = 1, 10 do
+			dodging.frame(FORWARD)
+		end
+		dodging.controller.dodge()
+		local direction = lastDodge(dodging) :: Vector3
+		expect(direction.X).toBeCloseTo(LEFT.X, 1e-6)
+		expect(direction.Z).toBeCloseTo(0, 1e-6)
+		-- The stick lets go: the two-step stop carries the body on the way it walked (D-059).
+		rig.frame(STILL)
+		rig.frame(STILL)
+		expect(rig.humanoid.MoveDirection.X).toBeCloseTo(LEFT.X, 1e-6)
+		expect(rig.humanoid.MoveDirection.Z).toBeCloseTo(0, 1e-6)
+	end)
+
+	it("adds no Humanoid write when the stick comes back untouched (no live lock)", function()
+		local free = load()
+		local turned = load()
+		turned.setLockMove(quarterLeft)
+		for _ = 1, 10 do
+			free.frame(FORWARD)
+			turned.frame(FORWARD)
+		end
+		local freeFrom, turnedFrom = #free.writes + 1, #turned.writes + 1
+		free.frame(FORWARD)
+		turned.frame(FORWARD)
+		-- Free: only the control script's Move. Locked: the controller's Move after it.
+		expect(#writesOf(free, "MoveDirection", freeFrom)).toBe(1)
+		expect(#writesOf(turned, "MoveDirection", turnedFrom)).toBe(2)
+		expect(#free.lockMoves > 0).toBe(true)
+		expect(free.humanoid.MoveDirection.Z).toBeCloseTo(FORWARD.Z, 1e-6)
 	end)
 end)

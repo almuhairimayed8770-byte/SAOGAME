@@ -207,9 +207,11 @@ describe("Walking into an enemy meets one upright face (D-198)", function()
 			expect(face.Size.Z).toBeGreaterThanOrEqual(root.Size.Z)
 			expect(face.CFrame.UpVector:Dot(Vector3.yAxis)).toBeCloseTo(1, 1e-6)
 			expect(face.Transparency).toBe(1)
-			-- It meets nothing but players: not the world, not an enemy, not a rush.
+			-- It meets players, and other standing enemies and their blockers, so two bodies at rest
+			-- never stand inside each other (D-281); not the world, not a rush.
 			expect(collides(face.CollisionGroup, "Default")).toBe(false)
-			expect(collides(face.CollisionGroup, GROUPS.enemies)).toBe(false)
+			expect(collides(face.CollisionGroup, GROUPS.enemies)).toBe(true)
+			expect(collides(face.CollisionGroup, GROUPS.blockers)).toBe(true)
 			expect(collides(face.CollisionGroup, GROUPS.rushing)).toBe(false)
 		end
 	end)

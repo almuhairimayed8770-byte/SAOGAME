@@ -129,6 +129,20 @@ describe("Remotes", function()
 		expect(Remotes.RushEnded.schema(ended)).toBe(false)
 	end)
 
+	it("RushEnded carries every RushEndedReason, and a dropped attack with no contact (D-254)", function()
+		-- The server builds this payload as a Types.RushEndedPayload: these are Types.RushEndedReason.
+		local reasons = { "Jammed", "Interrupted", "Died", "Stopped", "Wall", "Dropped" }
+		local ended: any = { entityId = 4, launchedAt = 120.5, serverTime = 120.8, distance = 0, reason = "Dropped" }
+		for _, reason in reasons do
+			ended.reason = reason
+			expect(Remotes.RushEnded.schema(ended)).toBe(true)
+		end
+		for _, reason in { "Done", "Dropped ", "jammed", "" } do
+			ended.reason = reason
+			expect(Remotes.RushEnded.schema(ended)).toBe(false)
+		end
+	end)
+
 	it("a slam ends a rush with where the body meets the face (D-208)", function()
 		local ended: any = {
 			entityId = 4,

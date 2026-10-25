@@ -61,11 +61,12 @@
 	The launch and an early stop go to EnemyService (rushStarted / rushEnded, D-169): it switches the
 	body's collision group so the rush passes through players and other enemies (D-167), and tells
 	the clients so they draw the rush on the server's timeline. A body that falls more than
-	jamLagStuds behind that timeline for a reason the cast does not see reports "Jammed" (the clients
-	stop drawing it ahead of the body) and stops where it is; an interrupt, a death or a sleep reports
-	why it stopped, after a "Jammed" or a "Wall" too (D-210), so every client hands the body back where
-	the server's stopped. EnemyService puts every stopped body back in the enemies group only once it
-	has stayed clear of every player and enemy for longer than the clients draw it late.
+	jamLagStuds behind that timeline for a reason the cast does not see, or that ran and then shows
+	itself blocked pass after pass (D-280), reports "Jammed" (the clients stop drawing it ahead of the
+	body) and stops where it is; an interrupt, a death or a sleep reports why it stopped, after a
+	"Jammed" or a "Wall" too (D-210), so every client hands the body back where the server's stopped.
+	EnemyService puts every stopped body back in the enemies group only once it has stayed clear of
+	every player and enemy for longer than the clients draw it late.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -78,6 +79,8 @@ local Brain = require(script.Parent.Brain)
 
 local tuning: AI.ChargerTuning = AI.archetypes.Charger
 local WORLD = AI.rushWorld
+-- Two passes this close in time are one moment (the tick's and the frame's); float noise, not tuning.
+local EPSILON = 1e-6
 
 local Charger: Brain.Archetype = {
 	name = "Charger",
@@ -143,9 +146,9 @@ local function slam(brain: Brain.Brain, rush: Brain.Rush, contact: RushWorld.Con
 	memory.rushDazeAt = timelineAt(rush, stop)
 	brain:rushEnded(rush, "Wall", stop, contact)
 	if stop > progress then
-		brain:moveDirect(RushWorld.pointAt(rush.legs, stop) + Vector3.new(0, rush.origin.Y, 0), rush.speed)
+		brain:moveDirect(RushWorld.pointAt(rush.legs, stop) + Vector3.new(0, rush.origin.Y, 0), rush.speed, true)
 	else
-		brain.context.stop()
+		brain:halt()
 	end
 end
 
@@ -289,6 +292,8 @@ function Charger.onCancel(brain: Brain.Brain, reason: Types.RushEndReason)
 		local distance = progressOf(brain, rush)
 		if memory.rushDazing == true and stop ~= nil then
 			distance = math.max(distance, stop) -- the daze: the body carries on to its stop
+		else
+			brain:halt() -- it rests where this end tells every client it stopped, no skid past (D-210)
 		end
 		brain:rushEnded(rush, reason, distance)
 	end
@@ -388,6 +393,11 @@ function Charger.onStrikeStart(brain: Brain.Brain, _target: Brain.Target?)
 	memory.rushSwept = nil
 	memory.rushLooked = nil
 	memory.rushResolved = nil
+	memory.rushStepAt = nil
+	memory.rushStepFrom = nil
+	memory.rushRunning = false
+	memory.rushBlockedFor = 0
+	memory.rushBlockedPasses = 0
 	memory.rushHit = {}
 	brain:moveDirect(rush.origin + rush.direction * length, speed)
 	brain:rushStarted(rush)
@@ -404,16 +414,55 @@ function Charger.strikeFrame(brain: Brain.Brain): (Vector3, Vector3)
 	return brain:position(), brain:getFacing()
 end
 
+-- A blocked step (D-280): the body's run since the last pass against the rush's pace over the same
+-- time (or what is left of the run, when less). A body that has once made runningFraction of it and
+-- now makes less than blockedFraction on every pass for blockedSeconds, over two passes at least, has
+-- met something the world cast missed. Two passes of one moment (the tick's and the frame's) count
+-- once; a body within a pass's run of its run's end (arriving) is never blocked.
+local function blocked(brain: Brain.Brain, rush: Brain.Rush, now: number, progress: number): boolean
+	local memory = brain.memory
+	local at: number? = memory.rushStepAt
+	local from: number? = memory.rushStepFrom
+	if at ~= nil and now - at <= EPSILON then
+		return false
+	end
+	memory.rushStepAt = now
+	memory.rushStepFrom = progress
+	if at == nil or from == nil then
+		return false
+	end
+	local seconds = now - at
+	local pace = rush.speed * seconds
+	local made = progress - from
+	if rush.length - from < pace then
+		memory.rushBlockedFor = 0
+		memory.rushBlockedPasses = 0
+		return false
+	end
+	if made >= tuning.runningFraction * pace then
+		memory.rushRunning = true
+	end
+	if memory.rushRunning ~= true or made >= tuning.blockedFraction * pace then
+		memory.rushBlockedFor = 0
+		memory.rushBlockedPasses = 0
+		return false
+	end
+	memory.rushBlockedFor = (memory.rushBlockedFor or 0) + seconds
+	memory.rushBlockedPasses = (memory.rushBlockedPasses or 0) + 1
+	return memory.rushBlockedPasses >= 2 and memory.rushBlockedFor >= tuning.blockedSeconds - EPSILON
+end
+
 --- Keeps the rush going and resolves what the body swept since the last pass (every server frame,
 --- D-184); it is over when its time has run, so the skid starts on the clip's beat. The body runs
 --- its path leg by leg, turning onto each new leg at rushWorld.turnRate. A slam the cast sees has
 --- already ended it in the sweep (D-202, D-205): the body runs to its stop and waits there until the
 --- timeline brings its snout to the face, and is dazed then (D-208), however late that is. A body that
---- fell jamLagStuds behind the clock for a reason the cast misses (a ledge) stops there and waits out
---- the time (D-190), and its line ends at its snout (D-195). The line resolves on the launch beat's
---- clock (startedAt, what the clients draw) as far as the body keeps up; the body's own run (its jam
---- check and its end) on the frame it started (bodyStartedAt), so a launch noticed up to a frame late
---- neither cuts the run short nor reads as a jam.
+--- fell jamLagStuds behind the clock for a reason the cast misses (a ledge), or whose passes show it
+--- blocked (D-280), stops there and waits out the time (D-190), and its line ends at its snout
+--- (D-195). The line resolves on the launch beat's clock (startedAt, what the clients draw) as far as
+--- the body keeps up; the body's own run (its jam check and its end) on the frame it started
+--- (bodyStartedAt), so a launch noticed up to a frame late neither cuts the run short nor reads as a
+--- jam.
 function Charger.onStrike(brain: Brain.Brain, dt: number, _phaseElapsed: number): boolean
 	local memory = brain.memory
 	local rush: Brain.Rush? = memory.rush
@@ -437,7 +486,7 @@ function Charger.onStrike(brain: Brain.Brain, dt: number, _phaseElapsed: number)
 		brain:daze(WORLD.slamDazeSeconds)
 		memory.rushDazing = false
 		if brain:getPhase() ~= "Strike" or memory.rushing ~= true then
-			brain:moveDirect(stop + Vector3.new(0, rush.origin.Y, 0), rush.speed)
+			brain:moveDirect(stop + Vector3.new(0, rush.origin.Y, 0), rush.speed, true)
 			return true
 		end
 	end
@@ -451,13 +500,14 @@ function Charger.onStrike(brain: Brain.Brain, dt: number, _phaseElapsed: number)
 	if memory.rushWalled == true then
 		return false -- slam() sent the body to its stop; it waits there for the daze
 	end
-	if memory.rushJammed ~= true and rush.speed * ran - progress > tuning.jamLagStuds then
+	local stuck = blocked(brain, rush, now, progress)
+	if memory.rushJammed ~= true and (stuck or rush.speed * ran - progress > tuning.jamLagStuds) then
 		-- The line ends here (D-195) and the clients stop drawing it ahead; the body stops where it
 		-- jammed (D-190): sent on, it ran past its clock's end still at full speed, and turned solid
 		-- in the middle of the player it had just run through.
 		memory.rushJammed = true
 		brain:rushEnded(rush, "Jammed", progress)
-		brain.context.stop()
+		brain:halt()
 	end
 	if memory.rushJammed ~= true then
 		-- Down the leg it runs, and onto the next one when it would reach the bend before the next

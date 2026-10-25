@@ -21,13 +21,20 @@
 	time, posed as the clip has it there, and one that closes it stops at its close time.
 
 	At each sub-sample the blade, grown by combat.hitSphereRadius, is tested against the box of
-	every queryable part (CanQuery or CanCollide) of every fighter it may damage, the server's
+	every queryable part (CanQuery or CanCollide) of every fighter it may damage but the weapon it
+	holds (BladeContact.hurtbox: the kobold's club clashes, it never wounds, D-277), the server's
 	overlap rule: never the local character's own rig, a player (no PvP, as the server's
 	mayDamage), a dead fighter, or one this swing already predicted dead. A fighter counts once per
 	window, and a window touches at most combat.maxTargetsPerWindow of them. A hit the server
 	already confirmed before the blade got there (`confirmed`) is not predicted again. A part the
 	body is drawn away from (`hidden`: the root a rush draws the body ahead of, D-171) is not where
-	the body shows, and is not tested.
+	the body shows, and is not tested. A fighter beside the swing (D-275: its root outside the aim
+	assist's cone, combat.aim.assistConeDegrees, around the body's look as the window opens) is
+	touched only where the drawn blade itself crosses its body, as the server's sweep counts it:
+	the blade grown by combat.besideHitRadius instead, following the drawn arc between two
+	sub-samples (split while an end moves farther than combat.besideFollowStep, at most
+	combat.besideMaxSubdivisions a frame, BladeContact.followTouch), so a cut that ends short of an
+	enemy at its side never plays a hit the server would not count, at 30 fps as at 144.
 
 	Each touch is a Contact: the fighter, the window, the swing's sequence number (the request
 	carried it and HitConfirmed echoes it), the hit point, and the hit-stop tier the server will
@@ -50,11 +57,13 @@
 	drive it on real rigs in Lune.
 ]]
 
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage.Shared
 
 local Combat = require(Shared.data.combat)
 local Enemies = require(Shared.data.enemies)
+local World = require(Shared.data.world)
 local Types = require(Shared.types)
 local BladeContact = require(Shared.choreo.BladeContact)
 local ClipSampler = require(Shared.choreo.ClipSampler)
@@ -118,8 +127,24 @@ type Sweep = {
 type Sample = { alpha: number, guard: Vector3, tip: Vector3 }
 
 --- The Art stand-off (fix F1, ContactPredictor.standOff): step the body `distance` studs along
---- `away` (flat, unit) between clip times `from` and `to` (AimLogic.standOffAt).
-export type StandOff = { distance: number, away: Vector3, from: number, to: number }
+--- `away` (flat, unit) between clip times `from` and `to` (AimLogic.standOffAt). `room`, when the
+--- plan was made against the world: how far of a further `distance` the root at `rootCFrame` may
+--- still step before the world (ContactPredictor.room), for the frames that take the step.
+export type StandOff = {
+	distance: number,
+	away: Vector3,
+	from: number,
+	to: number,
+	room: ((rootCFrame: CFrame, distance: number) -> number)?,
+}
+
+--- A box cast for the stand-off: how far the box `size` at `start` moves along `vector` before it
+--- meets the world, nil when it never does (ContactPredictor.worldCast).
+export type BoxCast = (start: CFrame, size: Vector3, vector: Vector3) -> number?
+
+--- The engine's Blockcast as worldCast makes it: through every part that can collide, never one
+--- under `exclude`; like the engine's, it never meets a part the box starts in.
+export type Blockcast = (start: CFrame, size: Vector3, vector: Vector3, exclude: { Instance }) -> number?
 
 export type Predictor = {
 	begin: (self: Predictor, swing: Swing) -> boolean,
@@ -134,6 +159,12 @@ ContactPredictor.__index = ContactPredictor
 
 local NONE: { Contact } = table.freeze({}) :: any
 local RADIUS: number = Combat.hitSphereRadius
+-- D-275: the reach, and the step, of the blade against a fighter beside the swing, and how closely
+-- its test follows the drawn arc between two sub-samples.
+local BESIDE_RADIUS: number = Combat.besideHitRadius
+local BESIDE_FOLLOW_STEP: number = Combat.besideFollowStep
+local BESIDE_MAX_SUBDIVISIONS: number = Combat.besideMaxSubdivisions
+local ASSIST_CONE: number = Combat.aim.assistConeDegrees
 local MAX_STEP: number = Combat.sweepMaxTipStep
 local MAX_SUBDIVISIONS: number = Combat.contact.maxSubdivisions
 local MAX_TARGETS: number = Combat.maxTargetsPerWindow
@@ -147,6 +178,9 @@ local MIN_FACE_DISTANCE: number = Combat.aim.minFaceDistance
 local PROMISE: number = RADIUS - MAX_STEP / 2
 -- Samples of a damage window the stand-off checks the cut still reaches the body at.
 local REACH_SAMPLES: number = STAND_OFF.reachSamples
+-- What the stand-off keeps between the root's box and the world (D-235 amended).
+local WALL_GAP: number = STAND_OFF.wallGapStuds
+local FIGHTER_FOLDERS: { string } = { World.playground.folders.enemies, World.playground.folders.entities }
 
 -- ------------------------------------------------------------------ rules (pure)
 
@@ -213,6 +247,8 @@ function ContactPredictor.new(deps: Deps): Predictor
 		time = nil :: number?,
 		windowHits = {} :: { [number]: { [number]: boolean } },
 		windowCounts = {} :: { [number]: number },
+		aims = {} :: { [number]: CFrame }, -- D-275: per window, the root as it opened
+		beside = {} :: { [number]: { [number]: boolean } }, -- D-275: per window, per fighter
 		killed = {} :: { [number]: boolean },
 		pending = {} :: { Pending },
 		parts = (setmetatable({}, { __mode = "k" }) :: any) :: { [Instance]: { BasePart } },
@@ -272,6 +308,8 @@ function ContactPredictor.stop(self: any)
 	self.time = nil
 	table.clear(self.windowHits)
 	table.clear(self.windowCounts)
+	table.clear(self.aims)
+	table.clear(self.beside)
 	table.clear(self.killed)
 	table.clear(self.pending)
 	table.clear(self.parts)
@@ -302,13 +340,14 @@ function ContactPredictor.awaitsKey(self: any, windowIndex: number, artId: strin
 	return time == nil or time < window.key - KEY_EPSILON
 end
 
--- The queryable parts of a fighter's model (read once per swing).
+-- The parts of a fighter's model a blade may wound (read once per swing): queryable, and not a
+-- weapon it holds (BladeContact.hurtbox, D-277).
 local function partsOf(self: any, model: Model): { BasePart }
 	local list = self.parts[model]
 	if list == nil then
 		list = {}
 		for _, descendant in model:GetDescendants() do
-			if descendant:IsA("BasePart") and BladeContact.queryable(descendant :: BasePart) then
+			if descendant:IsA("BasePart") and BladeContact.hurtbox(descendant :: BasePart) then
 				table.insert(list, descendant :: BasePart)
 			end
 		end
@@ -347,6 +386,25 @@ local function candidatesNear(self: any, center: Vector3, reach: number): { Cand
 		end
 	end
 	return found
+end
+
+-- D-275: whether `record` stands beside window `index` of the swing: its root outside the aim
+-- assist's cone around `aim` (the root as the window opened). Judged once per window and kept, as
+-- the server's sweep judges it.
+local function besideSwing(self: any, index: number, aim: CFrame, record: any): boolean
+	local judged = self.beside[index]
+	if judged == nil then
+		judged = {}
+		self.beside[index] = judged
+	end
+	local known = judged[record.id]
+	if known == nil then
+		local root = record.model.PrimaryPart
+		known = root ~= nil
+			and BladeContact.beside(aim.Position, aim.LookVector, root.CFrame.Position, ASSIST_CONE, MIN_FACE_DISTANCE)
+		judged[record.id] = known
+	end
+	return known
 end
 
 -- Plays one touch of window `index` into `contacts`: nothing when the server already confirmed it;
@@ -399,7 +457,7 @@ end
 
 -- The blade `alpha` of the way through this frame (0 the last frame's pose, 1 this one's): between
 -- the two, the clip posed at that clip time with the frames' residuals carried across, from the
--- root interpolated between the frames (fix F2).
+-- root interpolated between the frames (fix F2) along the clip's own root motion (D-275).
 local function arcBlade(
 	self: any,
 	chain: BladeContact.Chain,
@@ -421,11 +479,15 @@ local function arcBlade(
 	end
 	local pose: BladeContact.Pose = self.arcPose
 	local transforms = pose.transforms
-	clipTransforms(chain, clip, sweep.from + (sweep.to - sweep.from) * alpha, transforms)
+	local time = sweep.from + (sweep.to - sweep.from) * alpha
+	clipTransforms(chain, clip, time, transforms)
 	for index in chain.links do
 		transforms[index] = transforms[index] * sweep.residualFrom[index]:Lerp(sweep.residualTo[index], alpha)
 	end
-	pose.root = previous.root:Lerp(current.root, alpha)
+	-- The root between the frames moves the way the clip carries it (D-275: a lunge accelerates
+	-- through a frame), the rest of its travel (a stand-off, a slide) straight.
+	local root = previous.root:Lerp(current.root, alpha)
+	pose.root = root + BladeContact.rootBow(clip, sweep.from, sweep.to, time, root.Rotation)
 	return BladeContact.blade(chain, pose)
 end
 
@@ -464,22 +526,115 @@ local function arcSamples(
 	return samples, spent
 end
 
+local castParams: RaycastParams? = nil
+
+-- workspace:Blockcast through every part that can collide (a trail, an effect or a trigger is not
+-- a wall), never one under `exclude`.
+local function engineBlockcast(start: CFrame, size: Vector3, vector: Vector3, exclude: { Instance }): number?
+	local params = castParams
+	if params == nil then
+		local created = RaycastParams.new()
+		created.FilterType = Enum.RaycastFilterType.Exclude
+		created.RespectCanCollide = true
+		castParams = created
+		params = created
+	end
+	local query = params :: RaycastParams
+	query.FilterDescendantsInstances = exclude
+	local result = workspace:Blockcast(start, size, vector, query)
+	return if result ~= nil then result.Distance else nil
+end
+
+--- What the stand-off's world cast never meets (D-235 amended): the body `model` itself, the
+--- fighters' folders under `scene` (workspace by default; world.luau playground.folders enemies
+--- and entities) and every player's character (`players`, Players:GetPlayers() by default). A
+--- fighter is not a wall: the stand-off steps away from it, and the server's body collision
+--- settles the rest.
+function ContactPredictor.fighters(model: Model, scene: Instance?, players: { any }?): { Instance }
+	local list: { Instance } = { model }
+	local root: Instance = scene or workspace
+	for _, name in FIGHTER_FOLDERS do
+		local folder = root:FindFirstChild(name)
+		if folder ~= nil then
+			table.insert(list, folder)
+		end
+	end
+	local everyone = players
+	if everyone == nil then
+		local ok, listed = pcall(function(): { any }
+			return Players:GetPlayers()
+		end)
+		everyone = if ok and typeof(listed) == "table" then listed else {}
+	end
+	for _, player in everyone :: { any } do
+		local character = player.Character
+		if typeof(character) == "Instance" and character ~= model then
+			table.insert(list, character)
+		end
+	end
+	return list
+end
+
+--- The world the stand-off of `model` may not step into: `blockcast` (the engine's Blockcast by
+--- default) through every part that can collide, leaving out `exclude` (ContactPredictor.fighters
+--- by default, read once here: a plan lasts one anticipation).
+function ContactPredictor.worldCast(model: Model, blockcast: Blockcast?, exclude: { Instance }?): BoxCast
+	local cast: Blockcast = blockcast or engineBlockcast
+	local leave = exclude or ContactPredictor.fighters(model)
+	return function(start: CFrame, size: Vector3, vector: Vector3): number?
+		return cast(start, size, vector, leave)
+	end
+end
+
+--- How far a body whose root's box is `size` at `rootCFrame` may step along `away` (flat, unit),
+--- at most `distance`, and still stand combat.contact.standOff.wallGapStuds short of the world
+--- `cast` meets: the box is cast shrunk by that gap on every side, so a body already touching a
+--- wall (or a hair into it) still finds it, and the step stops the gap short of where the box
+--- would touch. 0 when there is no room at all.
+function ContactPredictor.room(
+	rootCFrame: CFrame,
+	size: Vector3,
+	away: Vector3,
+	distance: number,
+	cast: BoxCast
+): number
+	if distance <= 0 then
+		return 0
+	end
+	local shrunk = Vector3.new(
+		math.max(size.X - 2 * WALL_GAP, WALL_GAP),
+		math.max(size.Y - 2 * WALL_GAP, WALL_GAP),
+		math.max(size.Z - 2 * WALL_GAP, WALL_GAP)
+	)
+	local hit = cast(rootCFrame, shrunk, away * (distance + 2 * WALL_GAP))
+	if hit == nil then
+		return distance
+	end
+	return math.clamp(hit - 2 * WALL_GAP, 0, distance)
+end
+
 --- The Art stand-off (fix F1): a target already inside the blade's start pose for the first
 --- damage window would be cut before the swing moves (the review's "sword raised, pause, pop"), so
 --- the body steps straight away from it over the anticipation, from clip time `from` (the hold
 --- pose the Art is released from) to the window's open: the least multiple of standOff.stepStuds
---- that leaves the start pose's blade standOff.clearStuds from every queryable part of `target`,
---- at most standOff.maxStuds. `rootCFrame` is the root at `from`, facing where the Art cuts; the
+--- that leaves the start pose's blade standOff.clearStuds from every part of `target` it may
+--- wound (BladeContact.hurtbox: not the weapon it holds), at most standOff.maxStuds. `rootCFrame` is the root at `from`, facing where the Art cuts; the
 --- clip's own root motion carries it on to the open. Nil when the start pose already clears the
 --- body, when no step within maxStuds clears it, or when a window's cut that passed within the
 --- sweep's promise (the hit radius less half of sweepMaxTipStep) would then pass shallower: a
---- stand-off never costs a hit. Pure: it poses the clip itself and reads only the parts' boxes.
+--- stand-off never costs a hit. With `cast` (ContactPredictor.worldCast) the step never goes into
+--- the world (D-235 amended): the root's box is cast back along it, and a wall or a pillar nearer
+--- than the step the target calls for takes the longest whole step that keeps standOff.
+--- wallGapStuds from it (none when even one step does not fit); the plan's `room` holds that
+--- world for the frames that take the step. Pure apart from `cast`: it poses the clip itself and
+--- reads only the parts' boxes.
 function ContactPredictor.standOff(
 	model: Model,
 	clip: Types.ClipDef,
 	from: number,
 	rootCFrame: CFrame,
-	target: Model
+	target: Model,
+	cast: BoxCast?
 ): StandOff?
 	local window = ClipSampler.hitWindows(clip)[1]
 	local chain = BladeContact.chain(model)
@@ -489,7 +644,7 @@ function ContactPredictor.standOff(
 	end
 	local parts: { BasePart } = {}
 	for _, descendant in target:GetDescendants() do
-		if descendant:IsA("BasePart") and BladeContact.queryable(descendant :: BasePart) then
+		if descendant:IsA("BasePart") and BladeContact.hurtbox(descendant :: BasePart) then
 			table.insert(parts, descendant :: BasePart)
 		end
 	end
@@ -523,15 +678,27 @@ function ContactPredictor.standOff(
 	if gap(window.open, 0) >= clear then
 		return nil
 	end
+	-- How far the world behind lets the body go (the root's own box, cast back along the step).
+	local room: ((at: CFrame, distance: number) -> number)? = nil
+	local rootPart = model.PrimaryPart
+	if cast ~= nil and rootPart ~= nil then
+		local size = rootPart.Size
+		room = function(at: CFrame, distance: number): number
+			return ContactPredictor.room(at, size, away, distance, cast)
+		end
+	end
 	local stepStuds: number = STAND_OFF.stepStuds
+	local most = math.floor(STAND_OFF.maxStuds / stepStuds + 1e-6)
+	local fits = if room ~= nil then math.floor(room(rootCFrame, most * stepStuds) / stepStuds + 1e-6) else most
 	local need: number? = nil
-	for k = 1, math.floor(STAND_OFF.maxStuds / stepStuds + 1e-6) do
+	for k = 1, most do
 		if gap(window.open, k * stepStuds) >= clear then
-			need = k * stepStuds
+			-- Past what the world leaves: the longest step that fits, the cut as clear as it gets.
+			need = math.min(k, fits) * stepStuds
 			break
 		end
 	end
-	if need == nil then
+	if need == nil or need <= 0 then
 		return nil
 	end
 	-- The body stays stepped for the rest of the Art, so every window that cut within the promise
@@ -551,7 +718,7 @@ function ContactPredictor.standOff(
 			return nil
 		end
 	end
-	return { distance = need :: number, away = away, from = from, to = window.open }
+	return { distance = need :: number, away = away, from = from, to = window.open, room = room }
 end
 
 -- The point of `parts` nearest the blade from `guard` to `tip`, or `fallback` with no parts.
@@ -621,6 +788,11 @@ function ContactPredictor.step(self: any, clipTime: number, jumped: boolean?): {
 		end
 	end
 	local budget = MAX_SUBDIVISIONS
+	-- D-275: the beside test's arc splits left this frame, and the blade posed between the frames.
+	local arcsLeft = BESIDE_MAX_SUBDIVISIONS
+	local function arcAt(alpha: number): (Vector3?, Vector3?)
+		return arcBlade(self, chain, current, previous, alpha)
+	end
 	for index, window in self.windows do
 		local lo = math.max(t0, window.open)
 		local hi = math.min(clipTime, window.close)
@@ -636,6 +808,10 @@ function ContactPredictor.step(self: any, clipTime: number, jumped: boolean?): {
 			continue
 		end
 		local alphaLo, alphaHi = (lo - t0) / span, (hi - t0) / span
+		-- Where the body stands and looks as the window opens (D-275): the root interpolated to the
+		-- open, or this frame's start when the predictor came in after it.
+		local aim: CFrame = self.aims[index] or previous.root:Lerp(current.root, alphaLo)
+		self.aims[index] = aim
 		local guardLo, tipLo = arcBlade(self, chain, current, previous, alphaLo)
 		local guardHi, tipHi = arcBlade(self, chain, current, previous, alphaHi)
 		-- Everything this stretch of the swing can reach: the four ends, the arc's bulge (taken as
@@ -673,7 +849,31 @@ function ContactPredictor.step(self: any, clipTime: number, jumped: boolean?): {
 				if hits[id] or self.killed[id] then
 					continue
 				end
-				local touched, at = BladeContact.touch(guard, tip, candidate.parts, RADIUS)
+				local touched: boolean, at: Vector3?
+				if not besideSwing(self, index, aim, record) then
+					touched, at = BladeContact.touch(guard, tip, candidate.parts, RADIUS)
+				elseif k == 1 then
+					-- The window's open instant, beside the swing: the blade itself (D-275).
+					touched, at = BladeContact.touch(guard, tip, candidate.parts, BESIDE_RADIUS)
+				else
+					-- Beside the swing: the blade's move from the sample before, along the drawn arc.
+					local before = samples[k - 1]
+					local arcsSpent
+					touched, at, arcsSpent = BladeContact.followTouch(
+						before.guard,
+						before.tip,
+						before.alpha,
+						guard,
+						tip,
+						samples[k].alpha,
+						candidate.parts,
+						BESIDE_RADIUS,
+						BESIDE_FOLLOW_STEP,
+						arcAt,
+						arcsLeft
+					)
+					arcsLeft -= arcsSpent
+				end
 				if not touched or at == nil then
 					continue
 				end

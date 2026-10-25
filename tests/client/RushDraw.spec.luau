@@ -45,6 +45,7 @@ local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
 local Locomotion = Harness.load("src/client/choreo/Locomotion")
 local Rigs = Harness.load("src/shared/data/rigs")
 local Fx = Harness.load("src/shared/data/fx")
+local CameraMath = Harness.load("src/client/camera/CameraMath")
 
 local FRAME = 1 / 60
 local TUNING = ChoreoData.enemy.rush
@@ -1935,6 +1936,42 @@ describe("a Boar's slam drawn through Replication and Choreo (D-205, D-208, D-21
 				end
 			)
 		end
+	end
+
+	-- The slam's shake fades with distance (D-288): the whole Kill tier up to shakeFullRadius from
+	-- the contact, CameraMath.falloff beyond it, so a slam just inside shakeRadius no longer shakes
+	-- as hard as one at the player's feet.
+	for _, distance in { Fx.wallSlam.shakeFullRadius - 2, Fx.wallSlam.shakeFullRadius + 3, Fx.wallSlam.shakeRadius - 1 } do
+		it(("scales the slam's shake by its falloff %.0f studs from the contact"):format(distance), function()
+			local SLAM = Fx.wallSlam
+			local face = 8
+			local contact = ORIGIN + DIRECTION * face
+			local run = watched({
+				latency = 0,
+				lag = 0,
+				stopAt = face - FRONT,
+				wall = face,
+				events = slam(face),
+				wallSlam = {
+					slam = function(_point: Vector3, _normal: Vector3): number
+						return 0
+					end,
+				},
+				me = contact - DIRECTION * distance,
+			})
+			local shakes = {}
+			for _, call in run.calls do
+				if call.module == "camera" and call.fn == "shake" then
+					table.insert(shakes, call)
+				end
+			end
+			expect(#shakes).toBe(1)
+			expect(shakes[1].args[1]).toBe(SLAM.shakeTier)
+			local scale: number = if shakes[1].args[2] ~= nil then shakes[1].args[2] else 1
+			local want = CameraMath.falloff(distance, SLAM.shakeFullRadius, SLAM.shakeRadius)
+			expect(scale).toBeCloseTo(want, 1e-3)
+			expect(scale).toBeGreaterThan(0)
+		end)
 	end
 
 	-- The slam's "Wall" is unreliable (D-210): lost, or heard after the daze's Stagger (StateChanged is

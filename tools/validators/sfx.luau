@@ -36,6 +36,11 @@
 	volume, and that lifted volume is at or under limits.maxPlayVolume too.
 	music.stemIds holds one rbxassetid:// id per music.stems name and nothing else (MusicDirector
 	makes a stem's Sound only for a real id).
+	The shatter's balance (F15, sfx.shatterBalance): glassGapDb is positive, the glass and bass
+	lists name entries that resolve and share none, and every shatter cue (sfx.shatterCues) plays
+	at least two glass layers and a bass layer, its glass (the glass layers' summed power) standing
+	at least glassGapDb over its loudest bass layer. tests/data/sfx.spec.luau also holds the lift
+	against the mix the reel review heard.
 ]]
 
 type Context = {
@@ -772,6 +777,100 @@ return function(ctx: Context): { string }
 			problem("sfx.shatterCues.%s must name the cue SfxPool.shatter plays", kind)
 		elseif typeof(cues[cueName]) ~= "table" then
 			problem("sfx.shatterCues.%s '%s' is not in sfx.cues", kind, cueName)
+		end
+	end
+
+	-- The shatter's balance (F15): glass and bass layers that resolve and never overlap, a positive
+	-- gap, and every shatter cue with its glass doubled and leading its loudest bass layer by the gap
+	-- (each layer's played amplitude: entry volume x 10^(gainDb / 20); the glass summed in power).
+	local balance = Sfx.shatterBalance
+	if typeof(balance) ~= "table" then
+		problem("sfx.shatterBalance must hold glassGapDb and the glass and bass layer lists")
+	else
+		local gapOk = typeof(balance.glassGapDb) == "number" and balance.glassGapDb > 0
+		if not gapOk then
+			problem("sfx.shatterBalance.glassGapDb must be a positive number of dB")
+		end
+		local listsOk = true
+		for _, key in { "glass", "bass" } do
+			local list = balance[key]
+			if typeof(list) ~= "table" or #list == 0 then
+				problem("sfx.shatterBalance.%s must list at least one 'family.Name'", key)
+				listsOk = false
+				continue
+			end
+			for index, name in list do
+				if typeof(resolve(name)) ~= "table" then
+					problem(
+						"sfx.shatterBalance.%s[%d] '%s' is not a sfx.luau 'family.Name'",
+						key,
+						index,
+						tostring(name)
+					)
+					listsOk = false
+				end
+			end
+		end
+		if listsOk then
+			for _, name in balance.glass do
+				if table.find(balance.bass, name) ~= nil then
+					problem("sfx.shatterBalance names '%s' both glass and bass", tostring(name))
+					listsOk = false
+				end
+			end
+		end
+		if listsOk then
+			for _, kind in { "normal", "heavy", "boss" } do
+				local cueName = shatterCues[kind]
+				local layers = if typeof(cueName) == "string" then cues[cueName] else nil
+				if typeof(layers) ~= "table" then
+					continue -- reported above
+				end
+				local glassCount, glassPower, bassPeak = 0, 0, 0
+				for _, layer in layers do
+					local entry = if typeof(layer) == "table" then resolve(layer.name) else nil
+					if
+						typeof(entry) ~= "table"
+						or typeof(entry.volume) ~= "number"
+						or typeof(layer.gainDb) ~= "number"
+					then
+						continue -- the cue checks report it
+					end
+					local amplitude = entry.volume * 10 ^ (layer.gainDb / 20)
+					if table.find(balance.glass, layer.name) ~= nil then
+						glassCount += 1
+						glassPower += amplitude * amplitude
+					elseif table.find(balance.bass, layer.name) ~= nil then
+						bassPeak = math.max(bassPeak, amplitude)
+					end
+				end
+				if glassCount < 2 then
+					problem(
+						"sfx.cues.%s (shatterCues.%s) must play at least two glass layers (sfx.shatterBalance.glass); it plays %d",
+						cueName,
+						kind,
+						glassCount
+					)
+				end
+				if bassPeak <= 0 then
+					problem(
+						"sfx.cues.%s (shatterCues.%s) must play a bass layer (sfx.shatterBalance.bass)",
+						cueName,
+						kind
+					)
+				elseif gapOk and glassPower > 0 then
+					local over = 10 * math.log10(glassPower) - 20 * math.log10(bassPeak)
+					if over < balance.glassGapDb then
+						problem(
+							"sfx.cues.%s (shatterCues.%s): its glass stands %.2f dB over its loudest bass layer, under shatterBalance.glassGapDb (%s dB)",
+							cueName,
+							kind,
+							over,
+							tostring(balance.glassGapDb)
+						)
+					end
+				end
+			end
 		end
 	end
 

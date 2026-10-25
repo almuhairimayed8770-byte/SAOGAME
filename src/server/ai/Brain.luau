@@ -76,7 +76,8 @@ export type Rush = {
 }
 
 -- Why a rush stopped: "Done" when it ran its time, "Wall" when it slammed into one (D-205, D-208),
--- else one of the early reasons the clients hear.
+-- else one of the early reasons. Every one but "Done" is told on the wire as itself
+-- (Types.RushEndedReason, which adds the "Dropped" of an attack that never launched, D-254).
 export type RushEnd = "Done" | "Wall" | Types.RushEndReason
 
 export type Target = {
@@ -96,13 +97,21 @@ export type Context = {
 	position: () -> Vector3,
 	facing: () -> Vector3, -- the body's facing when the brain is created
 	-- `direct`: a strike's own movement (the rush, any lunge) goes straight at the point, never along
-	-- a path (D-183). Nil or false: the mover may pathfind past a wall or a long way.
-	moveTo: (position: Vector3, speed: number, direct: boolean?) -> (),
+	-- a path (D-183). Nil or false: the mover may pathfind past a wall or a long way. `exact` (direct
+	-- only): the point is where the body stops (a slam's stop), and it stops dead on it, no skid past.
+	moveTo: (position: Vector3, speed: number, direct: boolean?, exact: boolean?) -> (),
 	stop: () -> (),
+	-- Stops the body dead where it stands, no skid (a jammed or cancelled rush rests where its end was
+	-- told, D-210). Nil: stop.
+	halt: (() -> ())?,
 	-- Where the body may stand nearest `point` with its room to every other enemy (D-259: a home
 	-- another body now stands on is reached at its side). Nil: the point itself.
 	standOff: ((point: Vector3) -> Vector3)?,
 	face: (direction: Vector3) -> (),
+	-- Whether the body may turn to face `direction` (flat, unit) now: false when the turn would swing
+	-- its snout into a wall (EnemyService). A refused turn step is not taken; the facing holds. Nil:
+	-- every turn is taken.
+	canFace: ((direction: Vector3) -> boolean)?,
 	telegraph: (attack: Types.EnemyAttackDef, origin: Vector3, facing: Vector3, shape: Types.TelegraphShape?) -> (),
 	strike: (
 		attack: Types.EnemyAttackDef,
@@ -174,6 +183,9 @@ type Fields = {
 	turnGoal: Vector3?,
 	turnRate: number,
 	turnedAt: number,
+	-- A free body turning the long way round (D-295): the way it turns (1 or -1) until it is
+	-- through. Nil: the short way.
+	turnSense: number?,
 	framed: boolean, -- the frame pass runs this brain: turns spread over frames
 }
 
@@ -287,6 +299,7 @@ function Brain.new(context: Context, archetype: Archetype): Brain
 		turnGoal = nil,
 		turnRate = 0,
 		turnedAt = now,
+		turnSense = nil,
 		framed = false,
 	}
 	return setmetatable(self, Brain)
@@ -350,19 +363,54 @@ function Brain.angleTo(self: Brain, direction: Vector3): number
 	return math.abs(Brain.signedAngle(self.facingDir, flat))
 end
 
--- Turns the facing toward `goal` by at most `maxStep` degrees and publishes it when it moved.
--- Returns the unsigned angle still remaining.
-local function stepFacing(self: Brain, goal: Vector3, maxStep: number): number
+-- Whether the body may turn to `facing` (context.canFace): a turn that would swing its snout into a
+-- wall is not taken.
+local function mayFace(self: Brain, facing: Vector3): boolean
+	local canFace = self.context.canFace
+	return canFace == nil or canFace(facing)
+end
+
+-- Turns the facing toward `goal` by at most `maxStep` degrees, the short way round; true when it
+-- moved. A step that would swing the snout into a wall (mayFace) is not taken. A free body
+-- (ai.spacing.freePhases: deciding or walking) then turns the long way round instead, away from the
+-- wall, and keeps turning that way until it is through the half turn (turnSense, D-295): the short
+-- way's next step, back where it came from, is open again, and taking it would rock the body on the
+-- spot facing the wall for good. An attack's turn never goes the long way: it is the line shown.
+local function turnStep(self: Brain, goal: Vector3, maxStep: number): boolean
 	local angle = Brain.signedAngle(self.facingDir, goal)
-	local step = math.clamp(angle, -maxStep, maxStep)
-	if step ~= 0 then
-		local turned = Brain.horizontal(Brain.rotateY(self.facingDir, step))
-		if turned ~= nil then
+	local short = if angle >= 0 then 1 else -1
+	local free = AI.spacing.freePhases[self.phase] == true
+	local long = self.turnSense
+	self.turnSense = nil
+	if angle == 0 or maxStep <= 0 then
+		return false
+	end
+	if not free or long == short then
+		long = nil -- busy, or through the half turn: the long way is now the short way
+	end
+	local first = long or short
+	for attempt = 1, if free then 2 else 1 do
+		local sense = if attempt == 1 then first else -first
+		local span = if sense == short then math.abs(angle) else 360 - math.abs(angle)
+		local turned = Brain.horizontal(Brain.rotateY(self.facingDir, sense * math.min(maxStep, span)))
+		if turned ~= nil and mayFace(self, turned) then
 			self.facingDir = turned
-			self.context.face(self.facingDir)
+			if sense ~= short and span > maxStep then
+				self.turnSense = sense
+			end
+			return true
 		end
 	end
-	return math.abs(angle - step)
+	return false
+end
+
+-- Turns the facing toward `goal` by at most `maxStep` degrees (turnStep) and publishes it when it
+-- moved. Returns the unsigned angle still remaining.
+local function stepFacing(self: Brain, goal: Vector3, maxStep: number): number
+	if turnStep(self, goal, maxStep) then
+		self.context.face(self.facingDir)
+	end
+	return math.abs(Brain.signedAngle(self.facingDir, goal))
 end
 
 --- The frame-rate turn (D-185): turns the facing toward the tick's turn goal at its rate for the
@@ -403,17 +451,9 @@ function Brain.turnToward(self: Brain, direction: Vector3, rateDegreesPerSecond:
 		self.turnRate = rateDegreesPerSecond
 		return math.abs(Brain.signedAngle(self.facingDir, flat))
 	end
-	local angle = Brain.signedAngle(self.facingDir, flat)
-	local maxStep = rateDegreesPerSecond * dt
-	local step = math.clamp(angle, -maxStep, maxStep)
-	if step ~= 0 then
-		local turned = Brain.horizontal(Brain.rotateY(self.facingDir, step))
-		if turned ~= nil then
-			self.facingDir = turned
-		end
-	end
+	turnStep(self, flat, rateDegreesPerSecond * dt)
 	self.context.face(self.facingDir)
-	return math.abs(angle - step)
+	return math.abs(Brain.signedAngle(self.facingDir, flat))
 end
 
 --- Walks along the facing: the goal sits moveAheadStuds ahead of the body.
@@ -427,9 +467,20 @@ function Brain.moveToward(self: Brain, position: Vector3, speed: number)
 end
 
 --- A strike's own movement (the rush, any lunge): straight at the point, never along a path or a
---- waypoint behind the body (D-183).
-function Brain.moveDirect(self: Brain, position: Vector3, speed: number)
-	self.context.moveTo(position, speed, true)
+--- waypoint behind the body (D-183). `exact`: the point is where the body stops (a slam's stop), and
+--- it stops dead on it, no skid past.
+function Brain.moveDirect(self: Brain, position: Vector3, speed: number, exact: boolean?)
+	self.context.moveTo(position, speed, true, exact)
+end
+
+--- Stops the body dead where it stands, no skid (context.halt; a plain stop without one).
+function Brain.halt(self: Brain)
+	local halt = self.context.halt
+	if halt ~= nil then
+		halt()
+	else
+		self.context.stop()
+	end
 end
 
 --- Studs the body reaches ahead of and behind its root along its facing (0, 0 when unknown).
@@ -648,6 +699,7 @@ end
 function Brain.enter(self: Brain, phase: Phase, now: number)
 	if phase ~= "Chase" then
 		self.turnGoal = nil
+		self.turnSense = nil
 	end
 	self.phase = phase
 	self.phaseStart = now
@@ -805,6 +857,7 @@ function Brain.die(self: Brain)
 	self.targetId = nil
 	self.lastTarget = nil
 	self.turnGoal = nil
+	self.turnSense = nil
 	self.context.stop()
 	self.phase = "Dead"
 end
@@ -837,6 +890,7 @@ function Brain.sleep(self: Brain)
 	self.targetId = nil
 	self.lastTarget = nil
 	self.turnGoal = nil
+	self.turnSense = nil
 	if self.phase ~= "Interrupted" then
 		self:enterIdle(self.context.now())
 	else

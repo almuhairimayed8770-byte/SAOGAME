@@ -4,7 +4,8 @@
 
 	The engine Trail takes one sample a rendered frame, so a cut that sweeps most of its arc
 	between two frames drew a straight chord or a slab. Trails solves the blade at sub-steps
-	between the frames it renders (BladeContact.blade) and pushes each one here: a sample is the
+	between the frames it renders (BladeContact.blade, posed from the clip that lit the stroke at
+	its own clock where that clip is known, D-269) and pushes each one here: a sample is the
 	guard and the tip in world space and the ribbon-clock time it stands for. A ribbon draws the
 	samples younger than fx.luau trail.lifetime as one chain of camera-facing Beams per layer
 	(fx.luau trail.ribbon.layers: the colored body through the blade's middle, a narrow glowing core

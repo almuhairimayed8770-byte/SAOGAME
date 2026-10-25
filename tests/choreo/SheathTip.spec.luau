@@ -58,6 +58,7 @@ Choreo.configure({
 	end,
 })
 local Locomotion = Harness.load("src/client/choreo/Locomotion")
+local LocomotionState = Harness.load("src/client/choreo/LocomotionState")
 local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
 local Joints = Harness.load("src/shared/choreo/Joints")
 local Pose = Harness.load("src/shared/choreo/Pose")
@@ -114,7 +115,16 @@ type Worst = {
 -- back on the first step that finds the clip's clock at or past it: a lock-on (or any combat
 -- request) that wants the sword while the Sheathe still holds it, or a fight that ends while the
 -- Draw has not taken it yet.
-local function run(drawing: boolean, speed: number, hz: number, hitchAfter: number?, backAt: number?): Worst
+local function run(
+	drawing: boolean,
+	speed: number,
+	hz: number,
+	hitchAfter: number?,
+	backAt: number?,
+	lead: number?
+): Worst
+	-- `lead` more seconds in the start state put the flip at another point of the gait's cycle.
+	local settle = Tip.settle + (lead or 0)
 	local avatar = HitMatrix.standing(Harness)
 	local model = avatar.model
 	model:SetAttribute("Rig", "PlayerR15")
@@ -139,7 +149,7 @@ local function run(drawing: boolean, speed: number, hz: number, hitchAfter: numb
 	local clipId = PREFIX .. (if drawing then Sheath.clips.draw else Sheath.clips.sheathe)
 	local clip = ClipLibrary.get(clipId)
 	local wait = if drawing then 0 else Sheath.sheatheDelay
-	local seconds = Tip.settle + wait + clip.duration + (clip.blendOut or ChoreoData.blendOut) + Tip.after
+	local seconds = settle + wait + clip.duration + (clip.blendOut or ChoreoData.blendOut) + Tip.after
 	if backAt ~= nil then
 		-- Long enough for the clip the target turns back to as well (a Draw cut back with the sword
 		-- in the hand sheathes it again).
@@ -173,7 +183,7 @@ local function run(drawing: boolean, speed: number, hz: number, hitchAfter: numb
 		end
 		local t = frame * frameDt + extra
 		clock += dt
-		local drawn = if t > Tip.settle then drawing else not drawing
+		local drawn = if t > settle then drawing else not drawing
 		if backAt ~= nil then
 			local live = animator.mixer:find(clipId)
 			if wentBack or (live ~= nil and not live.stopping and live.time >= backAt - 1e-9) then
@@ -208,16 +218,15 @@ local function run(drawing: boolean, speed: number, hz: number, hitchAfter: numb
 		if handle ~= nil and not handle.done then
 			clipSteps += 1
 		end
-		if lastTip ~= nil and t > Tip.settle then
+		if lastTip ~= nil and t > settle then
 			local clipTime = if handle ~= nil then handle.time else nil
 			local tipSpeed = (tip - lastTip).Magnitude / dt
 			local turnRate = math.deg(math.acos(math.clamp(line:Dot(lastLine), -1, 1))) / dt
 			if tipSpeed > worst.tip then
-				worst.tip, worst.tipStep, worst.tipAt, worst.tipClip = tipSpeed, tipSpeed * dt, t - Tip.settle, clipTime
+				worst.tip, worst.tipStep, worst.tipAt, worst.tipClip = tipSpeed, tipSpeed * dt, t - settle, clipTime
 			end
 			if turnRate > worst.turn then
-				worst.turn, worst.turnStep, worst.turnAt, worst.turnClip =
-					turnRate, turnRate * dt, t - Tip.settle, clipTime
+				worst.turn, worst.turnStep, worst.turnAt, worst.turnClip = turnRate, turnRate * dt, t - settle, clipTime
 			end
 		end
 		lastTip, lastLine = tip, line
@@ -248,24 +257,52 @@ end
 -- over the clip's clock, so every third frame finds its worst.
 local BACK_STRIDE = 3
 
+-- Points of the gait's cycle the "phases" cases flip the target at, spread over the longest gait
+-- clip's cycle (at least one whole cycle of every gait at every speed): a moving base's torso
+-- adds its own swing to the arm's, most where the two line up.
+local PHASES = 12
+local function longestCycle(): number
+	local longest = 0
+	for _, gait in LocomotionState.gaits() do
+		longest = math.max(longest, gait.duration)
+	end
+	return longest
+end
+
 -- Every case of one clip: each speed at each step rate, then (`mode` "hitches") each speed at the
 -- hitch's frame rate with the long frame after each of the clip's first `steps` steps, or (`mode`
--- "back") each speed at the first step rate with the target turning back at every BACK_STRIDE-th
+-- "phases") each moving speed at each step rate with the flip at PHASES points of the gait's cycle,
+-- held to the cap times sheath.movingTipShare (the margin Studio's reading needs over this one), or
+-- (`mode` "back") each speed at the first step rate with the target turning back at every BACK_STRIDE-th
 -- frame of the clip's clock while the sword is in the hand: a Sheathe before its WeaponSheathe (the
 -- lock-on mid-Sheathe), a Draw after its WeaponDraw (the fight over mid-Draw). Nothing else moves
 -- the arm then, so the drawn pose comes back under the Draw's limits, or the sword goes back to
 -- the sheath under the Sheathe's. (A Draw cut back before its WeaponDraw leaves the blade on the
 -- back; a Sheathe cut back after its WeaponSheathe plays the Draw at once.)
-local function check(drawing: boolean, mode: ("hitches" | "back")?): ()
-	local name = (if drawing then "Draw" else "Sheathe") .. (if mode == "back" then " cut back" else "")
+local function check(drawing: boolean, mode: ("hitches" | "back" | "phases")?): ()
+	local name = (if drawing then "Draw" else "Sheathe")
+		.. (if mode == "back" then " cut back" elseif mode == "phases" then " over the gait's cycle" else "")
 	local tipLimit = if drawing ~= (mode == "back") then Sheath.drawTipSpeed else Sheath.sheatheTipSpeed
+	if mode == "phases" then
+		tipLimit *= Sheath.movingTipShare
+	end
 	local problems: { string } = {}
 	local fastest, sharpest = 0, 0
 	local cases = 0
-	local runs: { { speed: number, hz: number, hitchAfter: number?, backAt: number? } } = {}
+	local runs: { { speed: number, hz: number, hitchAfter: number?, backAt: number?, lead: number? } } = {}
 	local expected = 0
 	for _, speed in Tip.speeds do
-		if mode == "hitches" then
+		if mode == "phases" then
+			if speed > 0 then
+				local span = longestCycle()
+				for _, hz in Tip.stepHz do
+					for point = 0, PHASES - 1 do
+						table.insert(runs, { speed = speed, hz = hz, lead = point * span / PHASES })
+						expected += 1
+					end
+				end
+			end
+		elseif mode == "hitches" then
 			for after = 1, Tip.hitch.steps do
 				table.insert(runs, { speed = speed, hz = Tip.hitch.hz, hitchAfter = after })
 			end
@@ -287,7 +324,7 @@ local function check(drawing: boolean, mode: ("hitches" | "back")?): ()
 	end
 	for _, each in runs do
 		local speed, hz = each.speed, each.hz
-		local worst = run(drawing, speed, hz, each.hitchAfter, each.backAt)
+		local worst = run(drawing, speed, hz, each.hitchAfter, each.backAt, each.lead)
 		cases += 1
 		-- The sword must actually change place, or the case measured nothing of the swap; a Sheathe
 		-- cut back keeps it in the hand.
@@ -300,6 +337,9 @@ local function check(drawing: boolean, mode: ("hitches" | "back")?): ()
 		end
 		if each.backAt ~= nil then
 			case ..= (", the target back at clip %.3f s"):format(each.backAt)
+		end
+		if each.lead ~= nil then
+			case ..= (", flipped %.3f s into the cycle"):format(each.lead)
 		end
 		if worst.tip > tipLimit then
 			table.insert(
@@ -328,7 +368,7 @@ local function check(drawing: boolean, mode: ("hitches" | "back")?): ()
 			)
 		end
 	end
-	if mode == "back" then
+	if mode == "back" or mode == "phases" then
 		expect(cases).toBe(expected)
 		expect(cases).toBeGreaterThan(#Tip.speeds)
 	else
@@ -355,6 +395,10 @@ describe("Draw and Sheathe move the blade as a whip on the client's own path", f
 
 	it("Sheathe: the tip under sheath.sheatheTipSpeed and the blade under sheath.bladeTurnRate", function()
 		check(false)
+	end)
+
+	it("Draw over a walk, a run and a sprint, at every point of their cycle: the tip under the moving cap", function()
+		check(true, "phases")
 	end)
 
 	it("Draw: a hitch early in the clip moves the tip no faster on the frames after it", function()

@@ -23,8 +23,16 @@
 	trail as a TrailRibbon instead and its engine Trail stays off. Each render step reads the
 	chain's pose and, while the trail is on, solves the blade (BladeContact.blade) at sub-steps
 	between the last frame's pose and this one (fx.luau trail.ribbon.maxStep, at most maxSubsteps),
-	so the cut draws its arc. A trail that lights starts a new stroke from the frame before (the
-	snap that opened the window), never joined to the last stroke's tail. The ribbon's ages stand
+	so the cut draws its arc. Where the clip that lit the trail is known (the rig's Choreo animator
+	plays it: the handle whose clock crossed the TrailOn, HitWindowOpen or SmearOn), each sub-step
+	poses the blade from that clip at its own clock between the two frames (D-269 amended): the
+	clip's pose at that time, with what the frames show on top of the clip (a blend, a procedural
+	layer) carried across the frame, the clip's share by its shown weight (Mixer.preview). A trail
+	that lights starts a new stroke at the clip time the window opened, never joined to the last
+	stroke's tail: the frame before shows the wind-up, which points back along the cut, and the
+	window opens between it and this frame. With no such clip (a flash, a rig no animator plays),
+	the sub-steps interpolate the two frames' poses and a stroke starts from the frame before. The
+	ribbon's ages stand
 	still while the rig's animator is in hit-stop. The chain is read again when the Weapon's joint
 	changes (WeaponMount moves the sword between the hand and the back), and that jump is never a
 	cut. A rig with no chain (a placeholder weapon) keeps the engine Trail.
@@ -93,6 +101,7 @@ local Weapons = require(Shared.data.weapons)
 local Easing = require(Shared.util.Easing)
 local Assets = require(Shared.data.assets)
 local BladeContact = require(Shared.choreo.BladeContact)
+local ClipSampler = require(Shared.choreo.ClipSampler)
 local Joints = require(Shared.choreo.Joints)
 local Engine = require(script.Parent.Engine)
 local TrailRibbon = require(script.Parent.TrailRibbon)
@@ -111,6 +120,8 @@ export type Deps = {
 	onWatch: (fn: StepFn) -> () -> (), -- Heartbeat (runs while nothing renders); returns its disconnect
 	clear: (trail: Trail) -> (), -- Trail:Clear(): drops every segment drawn so far
 	held: (model: Instance) -> boolean, -- the rig's animator is in hit-stop (the ribbon's ages hold)
+	-- The rig's Choreo animator (its `mixer` plays the clip that lights the trail), nil for none.
+	animator: (model: Instance) -> any,
 }
 
 export type Overrides = {
@@ -119,6 +130,7 @@ export type Overrides = {
 	onWatch: ((fn: StepFn) -> () -> ())?,
 	clear: ((trail: Trail) -> ())?,
 	held: ((model: Instance) -> boolean)?,
+	animator: ((model: Instance) -> any)?,
 }
 
 type Entry = {
@@ -163,6 +175,17 @@ type Entry = {
 	guardAt: Vector3, -- the blade at `pose`
 	tipAt: Vector3,
 	stroke: boolean, -- the ribbon's newest sample continues a stroke that is still drawing
+	source: any, -- the Mixer handle whose clip lit the stroke (its sub-steps sample it); nil: none
+	sourceMixer: any, -- the mixer that plays it
+	sourceTime: number, -- its clock at `pose`
+	fromTime: number, -- its clock at `lastPose`
+	sourceWeight: number, -- its share of the limbs this frame (0..1)
+	sourceOffsets: ClipSampler.Offsets?, -- its clip sampled at sourceTime
+	lastOffsets: ClipSampler.Offsets?, -- its clip at the clock `lastPose` showed
+	linkNames: { string }, -- each chain link's joint name (the clip's keys), read with the chain
+	residuals: { CFrame? }, -- per link, what `lastPose` shows on top of the clip (nil: no key)
+	nextResiduals: { CFrame? }, -- the same at `pose`
+	between: BladeContact.Pose, -- the in-between pose a sub-step solves (reused)
 	ribbon: TrailRibbon.Ribbon?, -- while one draws or fades
 	ribbonClock: number, -- seconds the ribbon has aged (stands still in hit-stop)
 	ribbonAt: number, -- Engine.now() the clock last moved at
@@ -191,8 +214,8 @@ end
 local choreoModule: any = nil
 local choreoTried = false
 
--- The rig's animator is in hit-stop (Choreo's isPaused): the ribbon's ages stand still.
-local function choreoHeld(model: Instance): boolean
+-- The rig's Choreo animator, nil when none plays it.
+local function choreoAnimator(model: Instance): any
 	if not choreoTried then
 		choreoTried = true
 		local ok, loaded = pcall(function(): any
@@ -202,9 +225,14 @@ local function choreoHeld(model: Instance): boolean
 	end
 	local module = choreoModule
 	if module == nil or not model:IsA("Model") then
-		return false
+		return nil
 	end
-	local animator = module.find(model)
+	return module.find(model)
+end
+
+-- The rig's animator is in hit-stop (Choreo's isPaused): the ribbon's ages stand still.
+local function choreoHeld(model: Instance): boolean
+	local animator = choreoAnimator(model)
 	return animator ~= nil and animator:isPaused()
 end
 
@@ -215,6 +243,7 @@ local function defaults(overrides: Overrides?): Deps
 		onWatch = Engine.onHeartbeat,
 		clear = engineClear,
 		held = choreoHeld,
+		animator = choreoAnimator,
 	}
 	if overrides ~= nil then
 		deps.now = overrides.now or deps.now
@@ -222,6 +251,7 @@ local function defaults(overrides: Overrides?): Deps
 		deps.onWatch = overrides.onWatch or deps.onWatch
 		deps.clear = overrides.clear or deps.clear
 		deps.held = overrides.held or deps.held
+		deps.animator = overrides.animator or deps.animator
 	end
 	return deps
 end
@@ -399,9 +429,13 @@ local function chainOf(entry: Entry, retry: boolean): BladeContact.Chain?
 		local model = entry.model
 		chain = if model:IsA("Model") then BladeContact.chain(model) else nil
 		entry.chain = chain
+		table.clear(entry.linkNames)
 		if chain ~= nil then
 			local last = chain.links[#chain.links]
 			entry.chainPart0 = if last ~= nil then (Joints.parts(last.joint)) else nil
+			for index, link in chain.links do
+				entry.linkNames[index] = (link.joint :: any).Name
+			end
 		end
 	end
 	return chain
@@ -675,6 +709,17 @@ function Trails.attach(model: Instance): boolean
 		guardAt = Vector3.zero,
 		tipAt = Vector3.zero,
 		stroke = false,
+		source = nil,
+		sourceMixer = nil,
+		sourceTime = 0,
+		fromTime = 0,
+		sourceWeight = 1,
+		sourceOffsets = nil,
+		lastOffsets = nil,
+		linkNames = {},
+		residuals = {},
+		nextResiduals = {},
+		between = { root = CFrame.identity, transforms = {} },
 		ribbon = nil,
 		ribbonClock = 0,
 		ribbonAt = Engine.now(),
@@ -867,10 +912,139 @@ local function measureSnap(entry: Entry, position: Vector3, at: number)
 	end
 end
 
--- Adds the blade's move since the last frame to the ribbon: sub-steps between the frame before's
--- pose and this one (each end moving at most trail.ribbon.maxStep), born along the ribbon clock
--- between the two frames. A stroke that starts takes the frame before's blade first (the snap that
--- opened the window); with no frame before (a stall, a new chain) it starts where the blade is.
+-- The clip events that light a trail (Replication.routeClipEvent and ClipLab route them so).
+local LIGHTS: { [string]: boolean } = { TrailOn = true, HitWindowOpen = true, SmearOn = true }
+
+-- The clip that lit a stroke on this frame: of the rig's playing clips, the handle whose clock
+-- crossed a lighting event in the step this frame shows (Mixer handle.lastTime to its time), its
+-- mixer, and the event's clip time (the earliest crossed). Nil when no clip lit it in that step (a
+-- flash, a rig no animator plays, a trail that lit while out of the budget).
+local function lighting(entry: Entry): (any, any, number?)
+	local animator = deps.animator(entry.model)
+	local mixer = if typeof(animator) == "table" then animator.mixer else nil
+	if typeof(mixer) ~= "table" or typeof(mixer.handles) ~= "function" then
+		return nil, nil, nil
+	end
+	local found: any, opened: number? = nil, nil
+	for _, handle in mixer:handles() do
+		local from, to = handle.lastTime, handle.time
+		if handle.done or typeof(from) ~= "number" or typeof(to) ~= "number" or to <= from then
+			continue
+		end
+		for _, event in handle.clip.events do
+			if LIGHTS[event.kind] and event.time > from and event.time <= to then
+				if opened == nil or event.time < (opened :: number) then
+					found, opened = handle, event.time
+				end
+			end
+		end
+	end
+	return found, if found ~= nil then mixer else nil, opened
+end
+
+-- What `pose` shows on top of the clip sampled at `offsets`, per link (Transform = clip * this):
+-- a blend with another clip, a procedural layer. Nil for a link the clip has no key for.
+local function residualsOf(entry: Entry, pose: BladeContact.Pose, offsets: ClipSampler.Offsets, into: { CFrame? })
+	table.clear(into)
+	for index, name in entry.linkNames do
+		local offset = offsets[name]
+		local transform: CFrame? = pose.transforms[index]
+		if offset ~= nil and transform ~= nil then
+			into[index] = ClipSampler.toCFrame(offset):Inverse() * transform
+		end
+	end
+end
+
+-- The clip's share of the limbs (Mixer.preview with no time to move: its eased envelope times its
+-- weight, as the step that showed this frame left it), 0..1.
+local function shownWeight(entry: Entry): number
+	local mixer, source = entry.sourceMixer, entry.source
+	if typeof(mixer) ~= "table" or typeof(mixer.preview) ~= "function" then
+		return 1
+	end
+	return math.clamp(mixer:preview(source, 0), 0, 1)
+end
+
+-- Follows the stroke's clip across this frame: a new stroke looks for the clip that lit it (and
+-- answers the fraction of the frame where it lit), a stroke under way keeps its clip. Samples the
+-- clip at both frames' clocks and what each frame shows on top of it. A clip that is gone (or
+-- whose clock went back) leaves the stroke to the two frames' poses.
+local function followSource(entry: Entry, starting: boolean): number?
+	local opened: number? = nil
+	if starting then
+		local handle, mixer, at = lighting(entry)
+		entry.source = handle
+		entry.sourceMixer = mixer
+		if handle ~= nil then
+			entry.sourceTime = handle.lastTime
+			entry.sourceOffsets = nil
+			opened = at
+		end
+	end
+	local source = entry.source
+	if source == nil then
+		return nil
+	end
+	local from, to = entry.sourceTime, source.time
+	if source.done or to < from then
+		entry.source = nil
+		return nil
+	end
+	local before = entry.sourceOffsets or ClipSampler.sample(source.clip, from)
+	local after = if to == from then before else ClipSampler.sample(source.clip, to)
+	entry.lastOffsets = before
+	entry.sourceOffsets = after
+	entry.fromTime = from
+	entry.sourceTime = to
+	entry.sourceWeight = shownWeight(entry)
+	residualsOf(entry, entry.lastPose, before, entry.residuals)
+	residualsOf(entry, entry.pose, after, entry.nextResiduals)
+	if opened == nil then
+		return nil
+	end
+	return if to > from then math.clamp(((opened :: number) - from) / (to - from), 0, 1) else 1
+end
+
+-- The blade `alpha` (0..1) of the way from the frame before's pose to this one. With the stroke's
+-- clip: the clip at its clock that far between the frames, what the frames show on top of it
+-- carried across (each link's residual interpolated), by the clip's shown weight over the two
+-- frames' interpolated pose. Without: the two frames' poses interpolated (BladeContact.blade).
+local function bladeAt(entry: Entry, chain: BladeContact.Chain, alpha: number): (Vector3, Vector3)
+	if alpha >= 1 then
+		return entry.guardAt, entry.tipAt
+	end
+	local source = entry.source
+	local weight = entry.sourceWeight
+	if source == nil or weight <= 0 then
+		return BladeContact.blade(chain, entry.pose, entry.lastPose, alpha)
+	end
+	local sampled = ClipSampler.sample(source.clip, entry.fromTime + (entry.sourceTime - entry.fromTime) * alpha)
+	local pose, lastPose, between = entry.pose, entry.lastPose, entry.between
+	between.root = lastPose.root:Lerp(pose.root, alpha)
+	local transforms = between.transforms
+	local residuals, nextResiduals = entry.residuals, entry.nextResiduals
+	for index in chain.links do
+		local after = pose.transforms[index] or CFrame.identity
+		local before = lastPose.transforms[index] or after
+		local linear = before:Lerp(after, alpha)
+		local offset = sampled[entry.linkNames[index]]
+		local r0, r1 = residuals[index], nextResiduals[index]
+		if offset ~= nil and r0 ~= nil and r1 ~= nil then
+			local clipped = ClipSampler.toCFrame(offset) * r0:Lerp(r1, alpha)
+			transforms[index] = if weight >= 1 then clipped else linear:Lerp(clipped, weight)
+		else
+			transforms[index] = linear
+		end
+	end
+	return BladeContact.blade(chain, between)
+end
+
+-- Adds the blade's move since the last frame to the ribbon: sub-steps from the frame before's pose
+-- to this one (each end moving at most trail.ribbon.maxStep), born along the ribbon clock between
+-- the two frames, posed from the stroke's clip where it is known (bladeAt). A stroke that starts
+-- on a frame its clip lit takes its first sample at the clip time the window opened (the frame
+-- before is the wind-up, D-269); one with no such clip starts from the frame before's blade, and
+-- one with no frame before (a stall, a new chain) where the blade is.
 local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boolean, clockBefore: number)
 	local ribbon = acquireRibbon(entry)
 	local guard, tip = entry.guardAt, entry.tipAt
@@ -878,30 +1052,38 @@ local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boole
 	if not hadPose then
 		TrailRibbon.push(ribbon, guard, tip, clock, false)
 		entry.stroke = true
+		entry.source = nil
 		return
 	end
-	local fromGuard, fromTip = BladeContact.blade(chain, entry.lastPose)
-	if not entry.stroke then
-		TrailRibbon.push(ribbon, fromGuard, fromTip, clockBefore, false)
+	local starting = not entry.stroke
+	local start = followSource(entry, starting) or 0
+	local fromGuard, fromTip
+	if start > 0 then
+		fromGuard, fromTip = bladeAt(entry, chain, start)
+	else
+		fromGuard, fromTip = BladeContact.blade(chain, entry.lastPose)
+	end
+	if starting then
+		TrailRibbon.push(ribbon, fromGuard, fromTip, clockBefore + (clock - clockBefore) * start, false)
 		entry.stroke = true
 	end
 	local config = Fx.trail.ribbon
 	local steps = BladeContact.steps(fromGuard, fromTip, guard, tip, config.maxStep, config.maxSubsteps)
 	for step = 1, steps do
-		local alpha = step / steps
+		local alpha = start + (1 - start) * step / steps
 		local stepGuard, stepTip = guard, tip
 		if step < steps then
-			stepGuard, stepTip = BladeContact.blade(chain, entry.pose, entry.lastPose, alpha)
+			stepGuard, stepTip = bladeAt(entry, chain, alpha)
 		end
 		TrailRibbon.push(ribbon, stepGuard, stepTip, clockBefore + (clock - clockBefore) * alpha, true)
 	end
 end
 
 -- The ribbons' step (after the tip samples, in the pose readers' render step): each rig with a
--- blade chain that is lit, or idle within accents.swing.sampleDistance (so a stroke can start from
--- the frame before), has its pose read; a lit one adds its blade's move. Every live ribbon is laid
--- for its clock, which stands still while the rig is in hit-stop; one that went out and faded is
--- given back to the pool.
+-- blade chain that is lit, or idle within accents.swing.sampleDistance (so a stroke that lights
+-- has the frame before to start between), has its pose read; a lit one adds its blade's move.
+-- Every live ribbon is laid for its clock, which stands still while the rig is in hit-stop; one
+-- that went out and faded is given back to the pool.
 local function stepRibbons(at: number, viewer: Vector3?)
 	local range = Accents.swing.sampleDistance
 	local jump = ChoreoData.stall.jumpSeconds

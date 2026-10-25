@@ -907,6 +907,40 @@ describe("HitSweep.castBladePath", function()
 		expect(#HitSweep.castBladePath(samples, world.options({ overlap = careless }))).toBe(1)
 	end)
 
+	it("a fighter's held weapon is never a hit and never blocks its body behind it (D-277)", function()
+		-- A kobold-rigged target: its body at z -5, its club (rigs.luau trailParts) held out at z -3.
+		local target = makeTarget(1, Vector3.new(0, 3, -6), 1)
+		target.model:SetAttribute("Rig", "Kobold")
+		local club = Instance.new("Part")
+		club.Name = "Weapon"
+		club.Size = Vector3.new(0.6, 0.6, 2)
+		club.CFrame = CFrame.new(0, 3, -3)
+		club.Parent = target.model
+		local world = fakeWorld({ target }, nil, { club })
+		-- The overlap test: a blade through the club alone wounds nothing; one that also reaches the
+		-- body lands on the body.
+		local onClub = { bladeSample(0, Vector3.new(-1, 3, -2.5), Vector3.new(1, 3, -2.5)) }
+		expect(#HitSweep.castBladePath(onClub, world.options({ radius = 0.2 }))).toBe(0)
+		local through = { bladeSample(0, Vector3.new(0, 3, -2), Vector3.new(0, 3, -6)) }
+		local hits = HitSweep.castBladePath(through, world.options({ radius = 0.2 }))
+		expect(#hits).toBe(1)
+		expect(hits[1].position.Z <= -5 + 1e-4).toBe(true)
+		-- A cast that meets the club first passes it and meets the body.
+		local function clubFirst(origin, radius, direction, exclude)
+			if not isUnder(club, exclude) then
+				return { Instance = club, Position = club.CFrame.Position }
+			end
+			return world.cast(origin, radius, direction, exclude)
+		end
+		local cast = HitSweep.castPath(
+			{ Vector3.new(0, 3, -1), Vector3.new(0, 3, -9) },
+			world.options({ cast = clubFirst, overlap = noOverlap })
+		)
+		expect(#cast).toBe(1)
+		expect(cast[1].targetId).toBe(1)
+		expect(cast[1].position.Z < -3.5).toBe(true)
+	end)
+
 	it("the overlap test reaches exactly the hit radius from a part's box, and lands on the box", function()
 		local radius = Combat.hitSphereRadius
 		-- A 2-stud box (x -1..1, y 2..4, z -5..-3); the blade runs past its +X face, parallel to it.
@@ -985,6 +1019,119 @@ describe("HitSweep.castBladePath", function()
 		for id = 1, 5 do
 			expect(asked[id]).toBe(1)
 		end
+	end)
+end)
+
+describe("HitSweep.castBladePath: a fighter beside the swing (D-275)", function()
+	local R = Combat.besideHitRadius
+	local function besideAll(_targetId: number): boolean
+		return true
+	end
+
+	it("cuts a fighter beside the swing only where the blade itself reaches it", function()
+		-- A 2-stud box (x -1..1); the blade rests along Z past its +X face.
+		local target = makeTarget(1, Vector3.new(0, 3, -4), 1)
+		local world = fakeWorld({ target })
+		local function restAt(x: number, beside: boolean): number
+			local blade = { bladeSample(0, Vector3.new(x, 3, -2), Vector3.new(x, 3, -6)) }
+			return #HitSweep.castBladePath(blade, world.options({ beside = if beside then besideAll else nil }))
+		end
+		-- 0.8 studs off: the hit radius reaches it in front, the blade does not beside.
+		expect(restAt(1.8, false)).toBe(1)
+		expect(restAt(1.8, true)).toBe(0)
+		expect(restAt(1 + R - 0.02, true)).toBe(1)
+		expect(restAt(1 + R + 0.02, true)).toBe(0)
+	end)
+
+	it("a cut that ends a stud short of a fighter beside it misses; one through it, between samples, cuts", function()
+		local target = makeTarget(1, Vector3.new(0, 3, -4), 1) -- its +X face at x = 1
+		local world = fakeWorld({ target })
+		local function sweepTo(x: number, beside: boolean): number
+			local samples = {
+				bladeSample(0, Vector3.new(6, 3, -2), Vector3.new(6, 3, -6)),
+				bladeSample(1 / 60, Vector3.new(x, 3, -2), Vector3.new(x, 3, -6)),
+			}
+			return #HitSweep.castBladePath(samples, world.options({ beside = if beside then besideAll else nil }))
+		end
+		-- Ends 1 stud short of the face: the cast's hit radius reaches it, the blade does not.
+		expect(sweepTo(2, false)).toBe(1)
+		expect(sweepTo(2, true)).toBe(0)
+		-- Swept clean through between two samples six studs apart: cut.
+		expect(sweepTo(-6, true)).toBe(1)
+	end)
+
+	it("a fighter beside the swing never stops a cast: one in front behind it is still cut", function()
+		local beside = makeTarget(1, Vector3.new(2, 3, -4), 0.3)
+		local front = makeTarget(2, Vector3.new(-2, 3, -4), 0.3)
+		local world = fakeWorld({ beside, front })
+		local samples = {
+			bladeSample(0, Vector3.new(4, 3, -3.5), Vector3.new(4, 3, -4.5)),
+			bladeSample(1 / 60, Vector3.new(-4, 3, -3.5), Vector3.new(-4, 3, -4.5)),
+		}
+		local asked = {}
+		local hits = HitSweep.castBladePath(
+			samples,
+			world.options({
+				beside = function(targetId: number): boolean
+					asked[targetId] = (asked[targetId] or 0) + 1
+					return targetId == 1
+				end,
+			})
+		)
+		-- The blade passes through both: the one beside is cut by the blade, the one in front too.
+		local ids = {}
+		for _, hit in hits do
+			table.insert(ids, hit.targetId)
+		end
+		table.sort(ids)
+		expect(ids).toEqual({ 1, 2 })
+		expect(asked[1]).toBe(1)
+		expect(asked[2]).toBe(1)
+	end)
+
+	it("a fighter beside the swing the blade passes a stud from is passed by, and no cast stops on it", function()
+		local beside = makeTarget(1, Vector3.new(0, 3, -4), 0.3)
+		local behind = makeTarget(2, Vector3.new(-3, 3, -4), 0.3)
+		local world = fakeWorld({ beside, behind })
+		-- The blade's midpoint path runs 0.8 studs past the one beside (inside the cast's radius).
+		local samples = {
+			bladeSample(0, Vector3.new(4, 3.9, -3.5), Vector3.new(4, 3.9, -4.5)),
+			bladeSample(1 / 60, Vector3.new(-4, 3.9, -3.5), Vector3.new(-4, 3.9, -4.5)),
+		}
+		local hits = HitSweep.castBladePath(
+			samples,
+			world.options({
+				beside = function(targetId: number): boolean
+					return targetId == 1
+				end,
+			})
+		)
+		expect(#hits).toBe(1)
+		expect(hits[1].targetId).toBe(2)
+	end)
+
+	it("never asks about a fighter the blade may not damage, and counts the beside cut toward the cap", function()
+		local a = makeTarget(1, Vector3.new(0, 3, -3), 0.3)
+		local b = makeTarget(2, Vector3.new(0, 3, -5), 0.3)
+		local world = fakeWorld({ a, b })
+		local blade = { bladeSample(0, Vector3.new(0, 3, -2), Vector3.new(0, 3, -6)) }
+		local asked = {}
+		local hits = HitSweep.castBladePath(
+			blade,
+			world.options({
+				maxTargets = 1,
+				eligible = function(targetId: number): boolean
+					return targetId == 2
+				end,
+				beside = function(targetId: number): boolean
+					asked[targetId] = true
+					return true
+				end,
+			})
+		)
+		expect(#hits).toBe(1)
+		expect(hits[1].targetId).toBe(2)
+		expect(asked[1]).toBe(nil)
 	end)
 end)
 

@@ -267,6 +267,35 @@ function CameraMath.twoShot(
 	}
 end
 
+--- How much of a shake reaches a camera `distance` studs from where it struck: all of it up to
+--- `full`, none from `radius` out, and a smooth fade between (smoothstep), so no step anywhere.
+function CameraMath.falloff(distance: number, full: number, radius: number): number
+	if distance <= full then
+		return 1
+	end
+	if distance >= radius then
+		return 0
+	end
+	-- 1 - smoothstep(t), written as (1 - t)^2 (1 + 2t).
+	local t = (distance - full) / (radius - full)
+	return (1 - t) * (1 - t) * (1 + 2 * t)
+end
+
+--- How far across the view a point `offset` from the camera (looking along `look`, `right` its
+--- right) stands: 0 on the centre line, 1 at the screen's left or right edge, past 1 off it, and
+--- math.huge behind the camera. `tanHalfWidth` is the tangent of half the view's width
+--- (tan(fov / 2) * aspect).
+function CameraMath.acrossView(offset: Vec, look: Vec, right: Vec, tanHalfWidth: number): number
+	local ox, oy, oz = unpack3(offset)
+	local lx, ly, lz = unpack3(look)
+	local rx, ry, rz = unpack3(right)
+	local depth = ox * lx + oy * ly + oz * lz
+	if depth <= 0 or tanHalfWidth <= 0 then
+		return math.huge
+	end
+	return math.abs(ox * rx + oy * ry + oz * rz) / (depth * tanHalfWidth)
+end
+
 --- A turn capped at `maxRate` degrees per second over `span` seconds: from `previous` (where the
 --- angle was before the step) to `position` (where its spring put it), with the spring's
 --- `velocity`. Returns the capped position and velocity; a turn under the cap is unchanged, so
@@ -380,6 +409,13 @@ function CameraMath.stageReference(reference: string, anchor: string, player: Ve
 		return CameraMath.yawTowards(target, player)
 	end
 	return CameraMath.yawTowards(player, target)
+end
+
+--- Whether the two-shot should swing over to the other shoulder: its own spot (`here`, the
+--- fraction of its reach a wall leaves it) is under `blocked`, and the other's (`there`) opens at
+--- least `gain` more. Between two walls neither opens enough, and the shot stays.
+function CameraMath.takesOpenSide(here: number, there: number, blocked: number, gain: number): boolean
+	return here < blocked and there >= here + gain
 end
 
 --- Which side of the line the two-shot camera keeps (1 right of the player, -1 left), given the

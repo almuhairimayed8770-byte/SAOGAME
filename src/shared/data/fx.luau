@@ -267,6 +267,11 @@ local Fx = {
 		-- the review's 20 studs behind the root plus the boar's snout (5.6 ahead of it) fits, with
 		-- room; 24 left that player out, so the shake never fired there.
 		shakeRadius = 32,
+		-- The shake's falloff (CameraMath.falloff): full up to this many studs from the contact,
+		-- fading smoothly to nothing at shakeRadius, so a slam just inside the radius no longer
+		-- shakes as hard as one at the player's feet. The review's 25.6 studs keep it all: from
+		-- there the shake only just reads over the lock camera's ease.
+		shakeFullRadius = 26,
 	},
 
 	-- Telegraphs (section 11): Highlight fill on the weapon plus a flat ground decal.
@@ -296,6 +301,13 @@ local Fx = {
 			GuardBreak = "telegraph.GuardBreak",
 		},
 		intensityMin = 0.5, -- the accessibility slider's floor: still visible
+		-- The parry glint opens this client's one-way latency early (D-289): the server judges a parry
+		-- on when the press reaches it, so a press at the glint must leave that much before the
+		-- window. The latency is the least lateness (lateBy) of the last glintLeadSamples tells heard
+		-- (jitter only adds to it), and the shift never passes glintLeadMax seconds: a path slower
+		-- than that glints at the cap and parries a little late. Client only; the server is unchanged.
+		glintLeadMax = 0.15,
+		glintLeadSamples = 8,
 	},
 
 	-- Switch window (section 11): a thin SystemCyan ring expanding from the hit point.

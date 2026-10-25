@@ -391,8 +391,10 @@ describe("Charger", function()
 			return w.phase() == "Strike"
 		end, 2)
 		local launchAt = w.time - w.brain:phaseElapsed()
+		-- Held dead still for one tick: two passes in a row that find a running body still would be a
+		-- blocked step, a jam (D-280).
 		w.blocked = true
-		w.step(2)
+		w.step(1)
 		w.blocked = false
 		w.stepUntil(function()
 			return w.phase() == "Recover"

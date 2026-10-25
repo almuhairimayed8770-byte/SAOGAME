@@ -2,8 +2,9 @@
 --[[
 	CaptureLogic: the capture panel's pure rules (Capture.client.luau, F12), on plain values so they
 	run in Lune: the counter's line, what K does before and at a take's target length, the prompt
-	line at a moment of the take, auto-perform's presses (a shot's timed keys, and the parry's
-	guard timed off the attack clip the client is drawing), and the walk into the stand ring a
+	line at a moment of the take, auto-perform's presses (a shot's timed keys, the parry's guard
+	timed off the attack clip the client is drawing, the lock presses on the staged target and the
+	let-go of the keys a stopped take holds, D-290), and the walk into the stand ring a
 	staging asks for (D-244): the walk read off the reply, whether the feet stand in the ring, where
 	the auto-walk steers, and when the next staging may be asked.
 ]]
@@ -131,6 +132,37 @@ function CaptureLogic.parryDelay(events: { Types.ClipEvent }, eventTime: number,
 		end
 	end
 	return nil
+end
+
+--- What an auto-perform lock press does in a take that staged `stagedId` while the lock is on
+--- `lockedId` (D-290): it acts on the staged target alone, never the lock key's cycle (best, next
+--- one down, then off), which could step on to a field enemy nearer than the staged one. "Lock" it
+--- when the lock is off or on another enemy, "Release" it when the lock is on it, and "Key" (the
+--- lock key's own path) when the take staged no target (outside Studio).
+function CaptureLogic.lockPress(stagedId: number?, lockedId: number?): "Lock" | "Release" | "Key"
+	if stagedId == nil then
+		return "Key"
+	end
+	return if lockedId == stagedId then "Release" else "Lock"
+end
+
+-- One key a stopped take lets go of: its action, and its Art slot when it is an Art key.
+export type LetGo = { action: string, slot: number? }
+
+--- The keys auto-perform still holds as a take stops (`held`, by action), each to come up without
+--- acting (D-290): in name order, an Art key with its slot (`slotOf`, input.luau artSlot), whose
+--- hold is cancelled before the key comes up, so the release launches nothing.
+function CaptureLogic.letGo(held: { [string]: boolean }, slotOf: (string) -> number?): { LetGo }
+	local keys: { LetGo } = {}
+	for action, down in held do
+		if down then
+			table.insert(keys, { action = action, slot = slotOf(action) })
+		end
+	end
+	table.sort(keys, function(a: LetGo, b: LetGo): boolean
+		return a.action < b.action
+	end)
+	return keys
 end
 
 --- Whether auto-perform presses this take: on, and at 1x (slowed, the drawn clips run late on the

@@ -33,6 +33,8 @@ type Fixture = {
 	subject: Model,
 	root: BasePart,
 	frames: (count: number) -> (),
+	-- One frame `dt` seconds long (a 30 fps frame, say).
+	frameOf: (dt: number) -> (),
 }
 
 local function part(name: string, position: Vector3, size: Vector3, parent: Instance): BasePart
@@ -112,6 +114,8 @@ local function load(): Fixture
 	local camera = {
 		CFrame = CFrame.new(0, 10, 20),
 		FieldOfView = 70,
+		-- The screen the projections below assume (ASPECT): the lock's catch-up reads it.
+		ViewportSize = Vector2.new(1920, 1080),
 		CameraType = nil,
 		Focus = CFrame.new(),
 	}
@@ -196,6 +200,12 @@ local function load(): Fixture
 				for _, step in state.steps do
 					step.fn(F)
 				end
+			end
+		end,
+		frameOf = function(dt: number)
+			state.clock += dt
+			for _, step in state.steps do
+				step.fn(dt)
 			end
 		end,
 	}
@@ -696,6 +706,118 @@ describe("CameraController framing: whips (issues 12 and 22)", function()
 		expect(offLine(fixture.camera, ROOT, ROOT + Vector3.new(1, 0, 9))).toBeLessThan(70)
 	end)
 
+	it("catches a boar that ran past off the screen's side back quickly, never past 7 degrees a frame", function()
+		local lock = CameraData.lock
+		for _, case in
+			{
+				{ side = 1.8, dt = F, most = 12 },
+				{ side = 2.5, dt = F, most = 12 },
+				{ side = 4, dt = F, most = 12 },
+				{ side = 1.8, dt = 2 * F, most = 8 },
+			}
+		do
+			local fixture = load()
+			fixture.frames(60)
+			local target = character("Boar", ROOT + Vector3.new(case.side, 0, -20), fixture.world)
+			fixture.controller.setLockTarget(target)
+			fixture.frames(240)
+			local targetRoot = target.PrimaryPart :: BasePart
+			local camera = fixture.camera
+			local last = bearing(camera, ROOT)
+			local turn, run, longest, elapsed = 0, 0, 0, 0
+			while elapsed < 4 do
+				elapsed += case.dt
+				-- 30 studs a second straight past the player's right, on past the camera.
+				targetRoot.Position = ROOT + Vector3.new(case.side, 0, -20 + 30 * elapsed)
+				fixture.frameOf(case.dt)
+				local now = bearing(camera, ROOT)
+				turn = math.max(turn, math.abs(CameraMath.shortestDelta(last, now)))
+				last = now
+				local x = project(camera, targetRoot.Position)
+				local ahead = (targetRoot.Position - camera.CFrame.Position):Dot(camera.CFrame.LookVector) > 0
+				if not ahead or math.abs(x) > 1 then
+					run += 1
+					longest = math.max(longest, run)
+				else
+					run = 0
+				end
+			end
+			-- Off the screen no longer than the shot took before the 150 degree cap (D-240: 12
+			-- frames; the cap alone left it off for 24), and never a whip past the catch-up's step.
+			expect(longest).toBeLessThanOrEqual(case.most)
+			expect(turn).toBeLessThanOrEqual(lock.catchUpMostDegrees + 0.01)
+		end
+	end)
+
+	-- A wall along the player's right, `x` studs out and 60 long: the right shoulder's spot is behind it.
+	local function wallRight(fixture: Fixture, x: number): BasePart
+		return part("Wall", ROOT + Vector3.new(x, 0, 0), Vector3.new(1, 12, 60), fixture.world)
+	end
+	-- Which side of the player the camera stands on: 1 right (+X), -1 left, 0 on the line.
+	local function sideOf(camera: any): number
+		local x = (camera.CFrame.Position :: Vector3).X - ROOT.X
+		return if x > 0.05 then 1 elseif x < -0.05 then -1 else 0
+	end
+	-- The flat distance the two-shot stands out at for a target `separation` studs away.
+	local function shotDistance(separation: number): number
+		local lock = CameraData.lock
+		return math.clamp(
+			lock.baseDistance + lock.distancePerSeparation * separation,
+			lock.minDistance,
+			lock.maxDistance
+		)
+	end
+
+	for _, case in
+		{ { name = "taken beside a wall", late = false }, { name = "settled when a wall comes up", late = true } }
+	do
+		it(("swings to the open shoulder, not pressed into a wall at its own: a lock %s"):format(case.name), function()
+			local fixture = load()
+			fixture.frames(60)
+			if not case.late then
+				wallRight(fixture, 2.5)
+			end
+			local targetAt = ROOT + Vector3.new(0, 0, -6)
+			fixture.controller.setLockTarget(character("Kobold", targetAt, fixture.world))
+			fixture.frames(if case.late then 240 else 1)
+			if case.late then
+				expect(sideOf(fixture.camera)).toBe(1)
+				wallRight(fixture, 2.5)
+			end
+			local turn = track(fixture, 240, function() end)
+			-- One pan at the cap at most, never a whip.
+			expect(turn).toBeLessThanOrEqual(capPerFrame)
+			-- On the open side at the shot's full distance, both fighters framed.
+			local camera = fixture.camera
+			expect(sideOf(camera)).toBe(-1)
+			expect(flat(camera.CFrame.Position - ROOT).Magnitude).toBeCloseTo(shotDistance(6), 0.1)
+			for _, at in { ROOT, targetAt } do
+				local minX, maxX = column(camera, at)
+				expect(minX).toBeGreaterThan(-1)
+				expect(maxX).toBeLessThan(1)
+			end
+		end)
+	end
+
+	it("stays on its side, pulled in, between two walls: no shoulder is open", function()
+		local fixture = load()
+		fixture.frames(60)
+		wallRight(fixture, 2.5)
+		wallRight(fixture, -2.5)
+		fixture.controller.setLockTarget(character("Kobold", ROOT + Vector3.new(0, 0, -6), fixture.world))
+		local changes, last = 0, 0
+		for _ = 1, 300 do
+			fixture.frames(1)
+			local side = sideOf(fixture.camera)
+			if side ~= 0 and last ~= 0 and side ~= last then
+				changes += 1
+			end
+			last = if side ~= 0 then side else last
+		end
+		expect(changes).toBe(0)
+		expect(last).toBe(1)
+	end)
+
 	it("never whips while two fighters circle toe to toe", function()
 		local fixture = load()
 		fixture.frames(60)
@@ -735,6 +857,40 @@ describe("CameraController framing: the death freeze (F4)", function()
 		expect(turn).toBeLessThanOrEqual(8)
 		expect(slide).toBeLessThanOrEqual(0.05)
 		expect((camera.CFrame.Position - spot).Magnitude).toBeGreaterThan(0.5)
+	end)
+
+	it("stays still through the shard rise after the freeze, then eases out (D-239)", function()
+		local Fx = Harness.load("src/shared/data/fx")
+		-- The shot holds through the freeze and the shards' rise after it (fx.luau shatter).
+		expect(CameraData.lock.riseHoldSeconds).toBe(Fx.shatter.duration)
+		local freeze = 0.5
+		local stillFrames = math.floor((freeze + CameraData.lock.riseHoldSeconds) / F + 1e-6) - 1
+		for _, gone in { false, true } do
+			local fixture = load()
+			fixture.frames(60)
+			local target = character("Kobold", ROOT + Vector3.new(0, 0, -3), fixture.world)
+			fixture.controller.setLockTarget(target)
+			fixture.frames(240)
+			local camera = fixture.camera
+			local spot: Vector3 = camera.CFrame.Position
+			local look: Vector3 = camera.CFrame.LookVector
+			fixture.controller.holdLock(freeze)
+			for frame = 1, stillFrames do
+				-- `gone`: the shattered body leaves the world mid-rise; the shot keeps where it stood.
+				if gone and frame == math.floor(freeze / F) + 5 then
+					target.Parent = nil
+				end
+				fixture.frames(1)
+				expect((camera.CFrame.Position - spot).Magnitude).toBeLessThan(1e-3)
+				expect(angleBetween(camera.CFrame.LookVector, look)).toBeLessThan(0.05)
+			end
+			-- The rise over, it lets go and eases (never cuts) to the free camera.
+			local turn, slide = watch(fixture, 120)
+			expect(turn).toBeLessThanOrEqual(8)
+			expect(slide).toBeLessThanOrEqual(0.05)
+			expect((camera.CFrame.Position - spot).Magnitude).toBeGreaterThan(0.5)
+			expect(fixture.controller.lockLive()).toBe(false)
+		end
 	end)
 
 	it("gives way at once to a new lock taken during the freeze", function()

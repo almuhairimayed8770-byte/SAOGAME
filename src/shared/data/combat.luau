@@ -22,11 +22,12 @@ local Combat = {
 		Kill = 10,
 	},
 	hitStopFrameSeconds = 1 / 60,
-	-- A hold asks the rig for this many frames less than its count (F6). A rendered frame a hair
-	-- shorter than 1/60 left a sliver of pause that froze one more whole frame (7 on a Final, 4 on a
-	-- Normal in about a third of casts at 5% frame-time jitter); half a frame short counts exactly
-	-- 3, 6 and 10 for any frame within a quarter frame of 1/60.
-	hitStopShaveFrames = 0.5,
+	-- A hold asks the rig for this many frames less than its count (F6). It is 0: the rig itself
+	-- ends a pause once what is left is under half of the step (Mixer, D-228 amended), which counts
+	-- 3, 6 and 10 frames at 60 Hz under frame-time jitter, as half a frame short did, and the
+	-- frames nearest 50, 100 and 166.7 ms at any other refresh rate (half a frame short of 1/60 cut
+	-- a Normal to 41.7 ms at 120, 144 and 240 Hz).
+	hitStopShaveFrames = 0,
 	cameraNudgeStuds = 0.4,
 	cameraShakeStuds = {
 		Normal = 0.15,
@@ -108,6 +109,24 @@ local Combat = {
 	hitSampleHz = 60,
 	lagAllowance = 0.15,
 	hitSphereRadius = HIT_SPHERE_RADIUS,
+	-- A fighter beside a player's swing (its root outside the aim assist's cone, aim.assistConeDegrees,
+	-- around the swing's facing, read where the body stands as each window opens) is cut only where
+	-- the drawn blade itself crosses its body: the blade's line (TrailStart to TrailEnd) grown by
+	-- this radius, not hitSphereRadius. The hit radius stays for the enemy the swing is aimed at,
+	-- the one the snap turned the body onto: it forgives the blade's reach to that enemy's body (the
+	-- hit matrix's real-fight placements need it), not a cut that ends a stud short of a fighter to
+	-- the side. A hair under half the one-handed blade's width (weaponModels.luau categories.
+	-- OneHandedSword, 0.32): the blade's edge is in the body. The hit matrix's shoulder placements
+	-- sit 0.107 and 0.194 studs from the blade's line on either side of it, so frame timing never
+	-- flips one.
+	besideHitRadius = 0.15,
+	-- Beside the swing the blade's move between two samples follows the drawn arc: split at its
+	-- middle (the clip posed there) while an end still moves farther than this and the body is near
+	-- enough to touch, then taken straight in steps of besideHitRadius. Its chord then strays from
+	-- the arc by under 0.01 studs, so the server's 60 Hz samples and a 30 fps client's frames agree
+	-- (BladeContact.followTouch).
+	besideFollowStep = 0.3,
+	besideMaxSubdivisions = 16, -- arc splits of that test per fighter per sweep (server) or frame (client)
 	maxTargetsPerWindow = 6,
 	-- The sweep follows the blade's arc, not the 60 Hz chords (HitSweep.followArc): between two
 	-- samples it adds clip-time sub-samples until neither end of the blade moves farther than this.
@@ -195,7 +214,8 @@ local Combat = {
 		-- at the window's open, and runs ahead of the client by every hit-stop the client held)
 		-- plays on the key frame, not on arrival; at most this many seconds of play, longer than
 		-- a Normal hold still running plus a window's open to its key (a 4-frame snap) and a frame.
-		-- A kill's word plays when it comes: its EntityDied comes with it.
+		-- A kill's word waits the same way, and its EntityDied with it (D-267 amended): the death's
+		-- freeze, silence and shatter start on the key frame, the Kill hold on the frame after.
 		wordWaitSeconds = 0.25,
 		-- The Art stand-off (fix F1): an Art whose first cut would start with the blade already in
 		-- the target's body (the review's kobold at the hip or the shoulder) steps the body straight
@@ -216,6 +236,11 @@ local Combat = {
 			easing = "QuadOut",
 			-- Samples of each damage window the reach check poses the cut at.
 			reachSamples = 16,
+			-- The step never goes into the world: the root's box is cast back along it (Blockcast,
+			-- never meeting a character or an enemy), shrunk by this on every side so a body already
+			-- touching a wall still finds it, and the body stops this far short of what it meets. A
+			-- wall nearer than the step the target calls for takes the longest step that fits.
+			wallGapStuds = 0.05,
 		},
 		-- A contact is predicted to kill only when the hit cannot do less than the enemy has left:
 		-- its least damage (the weapon's attack times the move's multiplier, less the enemy's
@@ -255,7 +280,10 @@ local Combat = {
 		snapTurnEasing = "QuadOut",
 		replicationMarginDegrees = 9, -- turn the server may still be behind on when a request lands
 		assistRange = 10.5, -- studs, flat, root to root: the farthest real-fight placement (10.1) and a little
-		assistConeDegrees = 90, -- the whole assist cone around the body's look (45 each side)
+		-- The whole assist cone around the body's look (40 each side): no wider than twice the snap,
+		-- so a swing at an enemy inside it turns the body all the way onto it before the cut. An
+		-- enemy outside it is beside the swing, and only the blade itself cuts it (besideHitRadius).
+		assistConeDegrees = 80,
 		assistAngleWeightStuds = 6, -- assist ranking: one radian off the look costs this many studs
 		minFaceDistance = 0.5, -- studs, flat: a target closer than this gives no direction to face
 	},

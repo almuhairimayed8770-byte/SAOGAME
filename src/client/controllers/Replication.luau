@@ -118,6 +118,7 @@ local AI = require(Shared.data.ai)
 local Signal = require(Shared.util.Signal)
 local RushWorld = require(Shared.choreo.RushWorld)
 local ClipSampler = require(Shared.choreo.ClipSampler)
+local CameraMath = require(script.Parent.Parent.camera.CameraMath)
 local ActionLogic = require(script.Parent.ActionLogic)
 local Siblings = require(script.Parent.Siblings)
 
@@ -286,9 +287,16 @@ local earlyConfirms: { EarlyConfirm } = {}
 -- strike's key (D-267): the server counts a point-blank hit at its window's open and runs ahead
 -- by the holds this client played. Each waits for the key frame (the contact the blade makes on
 -- it, or the Heartbeat after the clip showed the key), at most combat.contact.wordWaitSeconds.
-local heldWords: { { payload: any, seen: number } } = {}
+-- A kill's word keeps its EntityDied (`deaths`), which plays just before it, as on the wire.
+local heldWords: { { payload: any, seen: number, deaths: { any }? } } = {}
 -- The word being let go now (it is not held again).
 local releasing: any = nil
+-- Deaths a player dealt that came while a word may be held (the server sends a kill's EntityDied
+-- just before its HitConfirmed): each waits for the word that follows it, which takes it along
+-- when it is held, and plays on the next Heartbeat when no held word takes it (D-267 amended).
+local heldDeaths: { any } = {}
+-- The death being let go now (it is not held again).
+local releasingDeath: any = nil
 -- The runs of holds on the local fighter's rig: a hold put on while none runs starts a new run,
 -- one put on while one runs joins it (the same cut's other targets, a blow taken inside the
 -- hold). A confirmation's stronger tier runs on only its own contact's run, so the word for an
@@ -501,13 +509,12 @@ local function takeMatch(list: { any }, targetId: number, windowIndex: number, a
 end
 
 -- True when the server's word for one of the local fighter's hits is to wait for its strike's key
--- on this client's clip (D-267). A kill's word never waits: its EntityDied comes with it. Words
--- wait only on a client that ticks Heartbeat (deps.onHeartbeat), which lets them go.
+-- on this client's clip (D-267). A kill's word waits too, and its EntityDied with it (D-267
+-- amended). Words wait only on a client that ticks Heartbeat (deps.onHeartbeat), which lets them go.
 local function waitsForKey(payload: any): boolean
 	local keyAhead = dependencies().keyAhead
 	return playTicking
 		and keyAhead ~= nil
-		and payload.killed ~= true
 		and typeof(payload.hitIndex) == "number"
 		and keyAhead(payload.hitIndex, payload.artId, payload.swing) == true
 end
@@ -796,7 +803,8 @@ end
 
 -- A rush's slam on the frame its drawn snout meets the wall (D-217): the dust thrown off the
 -- face and the stone thud where they meet, and a short shake when that is near the local
--- player's body (fx.wallSlam). The dust never glows: it is no flash, so it needs no flash budget.
+-- player's body (fx.wallSlam), whole up to shakeFullRadius and fading by CameraMath.falloff to
+-- nothing at shakeRadius. The dust never glows: it is no flash, so it needs no flash budget.
 local function slamCue(point: Vector3, normal: Vector3)
 	local d = dependencies()
 	local slam = Fx.wallSlam
@@ -808,8 +816,9 @@ local function slamCue(point: Vector3, normal: Vector3)
 	local localId = d.localId()
 	local own = if localId ~= nil then d.entities.get(localId) else nil
 	local at = if own ~= nil and own.model ~= nil then d.positionOf(own.model) else nil
-	if at ~= nil and (at - point).Magnitude <= slam.shakeRadius then
-		d.camera.shake(slam.shakeTier)
+	local distance = if at ~= nil then (at - point).Magnitude else math.huge
+	if distance <= slam.shakeRadius then
+		d.camera.shake(slam.shakeTier, CameraMath.falloff(distance, slam.shakeFullRadius, slam.shakeRadius))
 	end
 end
 
@@ -1467,6 +1476,80 @@ function handlers.RushTurned(payload: any)
 	RushDraw.turn(rush.state, legs, payload.kind, payload.at, toVector(payload.contact), toVector(payload.normal))
 end
 
+-- Plays one death the server sent (EntityDied) that was held for its kill's word.
+local function playDeath(payload: any)
+	releasingDeath = payload
+	handlers.EntityDied(payload)
+	releasingDeath = nil
+end
+
+-- Plays the held deaths of `entityId` (nil: every one) now, oldest first.
+local function releaseDeaths(entityId: number?)
+	local index = 1
+	while index <= #heldDeaths do
+		local death = heldDeaths[index]
+		if entityId == nil or death.entityId == entityId then
+			table.remove(heldDeaths, index)
+			playDeath(death)
+		else
+			index += 1
+		end
+	end
+end
+
+-- The held deaths of `entityId`, taken from the list for the kill's word that holds them.
+local function takeDeaths(entityId: number): { any }?
+	local taken: { any }? = nil
+	local index = 1
+	while index <= #heldDeaths do
+		local death = heldDeaths[index]
+		if death.entityId == entityId then
+			table.remove(heldDeaths, index)
+			taken = taken or {}
+			table.insert(taken :: { any }, death)
+		else
+			index += 1
+		end
+	end
+	return taken
+end
+
+-- A held death's shatter comes as late as its word may wait: what goes with the body (its plate,
+-- whose own time began with the Dead state) waits for it, never leaving before the body (D-187).
+local function expectLate(payload: any)
+	local d = dependencies()
+	local record = d.entities.get(payload.entityId)
+	local expect = method(d.shatter, "expect")
+	if record ~= nil and expect ~= nil then
+		expect(record.model, Combat.contact.wordWaitSeconds + Moments.deathDuckDelay() + Combat.deathFreeze)
+	end
+end
+
+-- True when this EntityDied is held for its kill's word (D-267 amended): a kill word already held
+-- for its key takes it along; a death a player dealt while words may wait waits for the word the
+-- server sends right after it. The local fighter's own death is never held.
+local function holdsDeath(payload: any): boolean
+	if payload == releasingDeath then
+		return false
+	end
+	for _, word in heldWords do
+		if word.payload.targetId == payload.entityId and word.payload.killed == true then
+			local deaths = word.deaths or {}
+			table.insert(deaths, payload)
+			word.deaths = deaths
+			expectLate(payload)
+			return true
+		end
+	end
+	local d = dependencies()
+	if not playTicking or d.keyAhead == nil or payload.byPlayer ~= true or payload.entityId == d.localId() then
+		return false
+	end
+	table.insert(heldDeaths, payload)
+	expectLate(payload)
+	return true
+end
+
 function handlers.HitConfirmed(payload: any)
 	local d = dependencies()
 	local attacker = d.entities.get(payload.attackerId)
@@ -1487,8 +1570,10 @@ function handlers.HitConfirmed(payload: any)
 		dropStale(earlyConfirms, seen)
 		predicted = takeMatch(predictions, payload.targetId, payload.hitIndex, payload.artId, payload.swing)
 		if predicted == nil and payload ~= releasing and waitsForKey(payload) then
-			-- Before the blade showed the key: the hold starts on the key frame (D-267).
-			table.insert(heldWords, { payload = payload, seen = seen })
+			-- Before the blade showed the key: the hold starts on the key frame (D-267), and a kill's
+			-- freeze, silence and shatter with it (its EntityDied came just before it).
+			local deaths = if payload.killed == true then takeDeaths(payload.targetId) else nil
+			table.insert(heldWords, { payload = payload, seen = seen, deaths = deaths })
 			return
 		end
 		if predicted == nil then
@@ -1500,6 +1585,10 @@ function handlers.HitConfirmed(payload: any)
 				seen = seen,
 			})
 		end
+	end
+	-- A death held for this word plays first, as it came (D-267 amended).
+	if #heldDeaths > 0 then
+		releaseDeaths(payload.targetId)
 	end
 	-- An enemy's blow on the local fighter shown on its strike frame (D-258): this word brings the
 	-- number and what it adds; one that guards or parries took the flinch back.
@@ -1734,6 +1823,10 @@ function handlers.StateChanged(payload: any)
 end
 
 function handlers.EntityDied(payload: any)
+	-- A kill whose word waits for its strike's key freezes, falls silent and shatters with it.
+	if holdsDeath(payload) then
+		return
+	end
 	local d = dependencies()
 	local record = d.entities.get(payload.entityId)
 	local position = toVector(payload.position)
@@ -1860,6 +1953,13 @@ local function letGo(index: number)
 	if word == nil then
 		return
 	end
+	-- A kill's death first, as the server sent them (D-267 amended).
+	local deaths = word.deaths
+	if deaths ~= nil then
+		for _, death in deaths do
+			playDeath(death)
+		end
+	end
 	releasing = word.payload
 	handlers.HitConfirmed(word.payload)
 	releasing = nil
@@ -1868,11 +1968,13 @@ end
 --- Plays the server's held words (D-267) once this client's clip showed their strike's key, the
 --- swing stopped or changed, or they waited combat.contact.wordWaitSeconds of play. Every
 --- Heartbeat, after the render step that moved the clip: the hold starts on the frame after the key
---- frame, the key pose being what freezes.
+--- frame, the key pose being what freezes. A kill's word plays its death just before it, and a
+--- death no held word took (another fighter's kill, a word that did not wait) plays now.
 function Replication.stepWords()
 	if deps == nil then
 		return
 	end
+	releaseDeaths(nil)
 	local now = playClock()
 	local index = 1
 	while index <= #heldWords do
@@ -2243,6 +2345,8 @@ function Replication.bind(newDeps: Deps)
 	table.clear(earlyConfirms)
 	table.clear(heldWords)
 	releasing = nil
+	table.clear(heldDeaths)
+	releasingDeath = nil
 	for id in rushes do
 		endRush(id)
 	end

@@ -9,6 +9,11 @@
 	holds through its strike until its snap and glints over the parry window (F7). The
 	accessibility intensity comes from the HUD setting; its floor is still visible.
 
+	The glint leads by this client's latency (D-289): the server judges a parry on when the press
+	reaches it, so the glint opens and closes the least lateness of the last few tells heard
+	earlier (fx.luau telegraph.glintLeadSamples, capped by glintLeadMax). The tell still holds to
+	its snap; only the glint moves. The server is unchanged.
+
 	A rig with no weapon part (the boar: its tusks are its body) is filled whole through its own
 	outline Highlight (OutlineManager.tint), never a second Highlight on the same model: the engine
 	draws one Highlight per adornee, and the left-over fill Highlight kept a boar from ever showing
@@ -40,6 +45,7 @@ type Active = {
 	windUp: number,
 	ends: number, -- seconds into the wind-up the tell goes out (TelegraphShapes.timing)
 	glintFrom: number, -- seconds into the wind-up its glint begins
+	glintUntil: number, -- and ends (its lead before the snap, D-289)
 	start: number,
 	highlight: Highlight?, -- the weapon's fill; nil when the rig's own outline is tinted instead
 	color: Color3,
@@ -58,6 +64,9 @@ local folder: Instance? = nil
 local stopLoop: (() -> ())? = nil
 local intensity: number? = nil
 local intensitySource: (() -> number)? = nil
+-- The lateness (lateBy) of the last few tells heard, a ring of fx.luau telegraph.glintLeadSamples.
+local lateness: { number } = {}
+local latenessNext = 1
 
 local function ensureFolder(): Instance
 	if folder == nil then
@@ -220,7 +229,14 @@ local function applyAlpha(active: Active, now: number)
 			end
 		end
 	end
-	local fill = TelegraphShapes.fillTransparency(elapsed, active.windUp, level, active.ends, active.glintFrom)
+	local fill = TelegraphShapes.fillTransparency(
+		elapsed,
+		active.windUp,
+		level,
+		active.ends,
+		active.glintFrom,
+		active.glintUntil
+	)
 	local highlight = active.highlight
 	if highlight ~= nil then
 		highlight.FillTransparency = fill
@@ -303,13 +319,19 @@ function Telegraphs.show(
 	end
 
 	local now = Engine.now()
-	local ends, glintFrom = TelegraphShapes.timing(windUp, strike)
+	if lateBy ~= nil then
+		local samples = math.max(1, Fx.telegraph.glintLeadSamples)
+		lateness[latenessNext] = math.max(0, lateBy)
+		latenessNext = latenessNext % samples + 1
+	end
+	local ends, glintFrom, glintUntil = TelegraphShapes.timing(windUp, strike, Telegraphs.glintLead())
 	local active: Active = {
 		model = model,
 		kind = kind,
 		windUp = math.max(windUp, 0),
 		ends = ends,
 		glintFrom = glintFrom,
+		glintUntil = glintUntil,
 		start = now - math.max(0, lateBy or 0),
 		highlight = highlight,
 		color = color,
@@ -385,6 +407,22 @@ end
 function Telegraphs.parts(model: Instance): { BasePart }
 	local active = actives[model]
 	return if active ~= nil then table.clone(active.pieces) else {}
+end
+
+--- Seconds the parry glint leads by (D-289): the least lateness of the last
+--- fx.luau telegraph.glintLeadSamples tells heard with one, capped by glintLeadMax; 0 before any.
+function Telegraphs.glintLead(): number
+	local least: number? = nil
+	for _, late in lateness do
+		least = if least == nil then late else math.min(least, late)
+	end
+	return math.clamp(least or 0, 0, Fx.telegraph.glintLeadMax)
+end
+
+--- Forgets the latenesses heard (tests; the lead is 0 again until the next tell).
+function Telegraphs.resetLatency()
+	table.clear(lateness)
+	latenessNext = 1
 end
 
 --- Advances the fades by hand (tests, or outside Heartbeat).

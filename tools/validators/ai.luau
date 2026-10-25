@@ -8,13 +8,15 @@
 	Default whose `apart` pairs name only them or Default and let a rush pass the players (D-167); a
 	stopped rush turns solid after longer than the clients' draw lag and before its recovery ends
 	(D-190); a rush's line keeps up with its body by less than the lag that reads as a jam (D-195).
-	An enemy's blocker (D-198) collides with players and with nothing else (not the world, not an
-	enemy, not a rush, not another blocker), a standing enemy's root no longer collides with players,
+	An enemy's blocker (D-198) collides with players, with other enemies and their blockers (D-281)
+	and with nothing else (not the world, not a rush), a standing enemy's root no longer collides with players,
 	and blockerHeight reaches above the top of every enemy rig's root. How a rush meets the world
 	(rushWorld, D-205 to D-209): positive numbers, a glance below 90 degrees, a look ahead at least a
 	sidestep's run, a sidestep that fits its run, at least three legs, the server's leg turn equal to
 	the drawn one (choreo enemy.rush.turnRate), a daze no shorter than a parry's stagger, and a
-	climbable riser below every Charger rig's hip.
+	climbable riser below every Charger rig's hip. A rush's dead stop leads by at most one AI tick,
+	and a walking body's snout slack in a wall stays below a rush's corner margin (D-278, D-279); a
+	blocked step tells running from blocked and is told before the jam lag (D-280).
 ]]
 
 type Context = {
@@ -49,6 +51,9 @@ local CHARGER_FIELDS = {
 	"wheelSpeedMultiplier",
 	"jamLagStuds",
 	"keepUpStuds",
+	"runningFraction",
+	"blockedFraction",
+	"blockedSeconds",
 }
 
 local function validate(ctx: Context): { string }
@@ -211,6 +216,30 @@ local function validate(ctx: Context): { string }
 				"archetypes.Charger.keepUpStuds must be below jamLagStuds (a jam is further behind than keeping up)"
 			)
 		end
+		-- A blocked step (D-280): a pass that shows the body running is never one that shows it
+		-- blocked, and the blocked time is told before the body could fall jamLagStuds behind.
+		local running, blockedShare = charger.runningFraction, charger.blockedFraction
+		if typeof(running) == "number" and running > 1 then
+			problem("archetypes.Charger.runningFraction must be at most 1")
+		end
+		if typeof(running) == "number" and typeof(blockedShare) == "number" and blockedShare >= running then
+			problem("archetypes.Charger.blockedFraction must be below runningFraction")
+		end
+		local blockedSeconds = charger.blockedSeconds
+		if
+			typeof(blockedSeconds) == "number"
+			and typeof(charger.jamLagStuds) == "number"
+			and typeof(charger.chargeSpeed) == "number"
+			and charger.chargeSpeed > 0
+			and blockedSeconds >= charger.jamLagStuds / charger.chargeSpeed
+		then
+			problem(
+				("archetypes.Charger.blockedSeconds %s must be shorter than jamLagStuds / chargeSpeed (%.3f s)"):format(
+					tostring(blockedSeconds),
+					charger.jamLagStuds / charger.chargeSpeed
+				)
+			)
+		end
 		for _, def in Enemies.list() do
 			if def.archetype == "Charger" then
 				for _, attack in def.attacks do
@@ -260,6 +289,33 @@ local function validate(ctx: Context): { string }
 		end
 	else
 		problem("movement.materialCosts must be a table")
+	end
+	if typeof(AI.movement) == "table" then
+		-- A rush's dead stop (D-279) takes the next frame to come within a tick at most, so a stop
+		-- point is never reached more than a tick's run early.
+		local lead = AI.movement.haltLeadSeconds
+		positiveNumber(lead, "movement.haltLeadSeconds")
+		if typeof(lead) == "number" and lead > AI.tickSeconds() + 1e-9 then
+			problem(
+				("movement.haltLeadSeconds %s must be at most one AI tick (%s s)"):format(
+					tostring(lead),
+					tostring(AI.tickSeconds())
+				)
+			)
+		end
+		-- A walk's snout stands in a wall by a hair at most (D-278): less than the margin a rush keeps
+		-- off a corner it clips past.
+		local slack = AI.movement.snoutSlackStuds
+		positiveNumber(slack, "movement.snoutSlackStuds", true)
+		local margin = if typeof(AI.rushWorld) == "table" then AI.rushWorld.clipMarginStuds else nil
+		if typeof(slack) == "number" and typeof(margin) == "number" and slack >= margin then
+			problem(
+				("movement.snoutSlackStuds %s must be below rushWorld.clipMarginStuds (%s)"):format(
+					tostring(slack),
+					tostring(margin)
+				)
+			)
+		end
 	end
 
 	if typeof(AI.attack) == "table" and typeof(AI.attack.weights) == "table" then
@@ -349,13 +405,17 @@ local function validate(ctx: Context): { string }
 		if not passesPlayers then
 			problem("collision.apart must let the rushing group pass the players group")
 		end
-		-- D-198: the blocker is what a player bumps into, and nothing else touches it.
+		-- D-198: the blocker is what a player bumps into; D-281: a solid enemy's whole footprint meets
+		-- another's (its blocker, its root), so enemies never stand inside each other. It never meets
+		-- the world (the body moves on the floor as before) nor a rush (D-167).
 		local blockers = collision.blockers
 		if typeof(blockers) == "string" then
-			if apartSet[blockers .. "|" .. tostring(collision.players)] then
-				problem("collision.apart must not keep the blockers group from the players group")
+			for _, key in { "players", "enemies", "blockers" } do
+				if apartSet[blockers .. "|" .. tostring(collision[key])] then
+					problem(("collision.apart must not keep the blockers group from the %s group"):format(key))
+				end
 			end
-			for _, other in { "Default", collision.enemies, collision.rushing, blockers } do
+			for _, other in { "Default", collision.rushing } do
 				if not apartSet[blockers .. "|" .. tostring(other)] then
 					problem(("collision.apart must keep the blockers group from %s"):format(tostring(other)))
 				end

@@ -11,12 +11,14 @@
 	wrist turns about the grip on the way, the blade does not. The reach leaves the grip 1.53
 	studs from the shoulder, the elbow still bent, and 2 studs of blade in the sheath: they come
 	out as the blade swings out over the mouth, behind the head, an edge out through the wall for
-	14 ms (0.291 to 0.304 s, under one 60 Hz frame). The swing over the shoulder (to 0.43 s), up
-	to straight (0.555 s) and down into the carry (0.735 s) each get time in step with how far the
-	tip travels and ease in and out, so on the client's own path none moves the tip past 78 studs
-	a second (1.3 a 60 Hz frame) or turns the blade past 1020 degrees a second (choreo.luau
-	sheath.drawTipSpeed and bladeTurnRate, tests/choreo/SheathTip.spec.luau): a whip, where the
-	drop from straight up to the guard used to take 3.4 studs and 36 degrees in one frame. It then
+	14 ms (0.291 to 0.304 s, under one 60 Hz frame). The swing over the shoulder (to 0.445 s), up
+	to straight (0.59 s) and down into the carry (0.79 s) each get time in step with how far the
+	tip travels and ease in and out, so on the client's own path none moves the tip past 72 studs
+	a second standing or 75 over a sprint's torso at the worst point of its cycle (1.25 a 60 Hz
+	frame), or turns the blade past 960 degrees a second (choreo.luau sheath.drawTipSpeed,
+	movingTipShare and bladeTurnRate, tests/choreo/SheathTip.spec.luau): a whip, where the drop
+	from straight up to the guard used to take 3.4 studs and 36 degrees in one frame, and where
+	a sprint read 1.44 studs in a Studio frame before the last three swings got 10% more time. It then
 	drops a little past the carry (low, the point forward, D-047) and springs back, the point
 	higher than the drawn idle's so that a sprint's lean under it keeps it off the field.
 	The head tucks and leans away from the reaching arm until the blade is out: the hilt sits just
@@ -38,7 +40,7 @@ end
 local clip: Types.ClipDef = {
 	id = "player/OneHandedSword/Draw",
 	rig = "PlayerR15",
-	duration = 0.875,
+	duration = 0.93,
 	loop = false,
 	sheathed = true,
 	layer = "UpperBody",
@@ -105,7 +107,7 @@ local clip: Types.ClipDef = {
 		},
 		{
 			-- over the shoulder: the hand high, the blade sweeping out behind the head
-			time = 0.43,
+			time = 0.445,
 			easing = "SineInOut",
 			joints = {
 				Neck = rot(1, 7, 2),
@@ -117,7 +119,7 @@ local clip: Types.ClipDef = {
 		},
 		{
 			-- the blade comes over the top and stands straight up
-			time = 0.555,
+			time = 0.59,
 			easing = "SineInOut",
 			joints = {
 				RightShoulder = rot(120, 0, 10),
@@ -128,7 +130,7 @@ local clip: Types.ClipDef = {
 		},
 		{
 			-- down into the carry, a little past it (the shoulder and the point lower)
-			time = 0.735,
+			time = 0.79,
 			easing = "SineInOut",
 			joints = {
 				Neck = rot(5, 9, 0),
@@ -142,7 +144,7 @@ local clip: Types.ClipDef = {
 			-- settle: the drawn idle's arm, the point 24 degrees higher than its carry so a run's
 			-- or a sprint's lean under it keeps the point off the field; the blend out hands the
 			-- sword to the base's own carry
-			time = 0.875,
+			time = 0.93,
 			easing = "Spring",
 			joints = {
 				Neck = rot(6, 10, 0),

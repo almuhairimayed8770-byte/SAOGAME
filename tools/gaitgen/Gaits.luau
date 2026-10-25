@@ -17,7 +17,9 @@ local roblox = require("@lune/roblox")
 local Keys = require("./Keys")
 local Rig = require("./Rig")
 
+local SourceRun = require("./sources/Run")
 local SourceRunDrawn = require("./sources/RunDrawn")
+local SourceSprint = require("./sources/Sprint")
 local SourceSprintDrawn = require("./sources/SprintDrawn")
 local SourceWalkBackDrawn = require("./sources/WalkBackDrawn")
 local SourceWalkForward = require("./sources/WalkForward")
@@ -58,6 +60,31 @@ local function evenKeys(T: number, count: number): { number }
 	for i = 0, count - 1 do
 		table.insert(keys, math.floor(i * (T / count) * 1e6 + 0.5) / 1e6)
 	end
+	return keys
+end
+
+-- A run's key times: every `step` s through each stance (the left foot's from 0 to `lift`, the
+-- right foot's half a cycle later) and on through its peel (`peel` s), then the swing keys
+-- `swing` (left foot's half; the right foot's are half a cycle later), each rounded to the
+-- microsecond. Dense keys keep the planted foot on its line (a SineInOut key slows a limb at both
+-- ends, so between keys the foot runs ahead of the line and back by about a tenth of the ground
+-- it covers between them).
+local function stanceKeys(T: number, lift: number, step: number, peel: number, swing: { number }): { number }
+	local half = {}
+	local count = math.floor((lift + peel) / step + 0.5)
+	for i = 0, count do
+		table.insert(half, i * step)
+	end
+	for _, t in swing do
+		table.insert(half, t)
+	end
+	local keys = {}
+	for _, offset in { 0, T / 2 } do
+		for _, t in half do
+			table.insert(keys, math.floor((t + offset) * 1e6 + 0.5) / 1e6)
+		end
+	end
+	table.sort(keys)
 	return keys
 end
 
@@ -135,19 +162,6 @@ local function flipPlan(plan: Plan): Plan
 	return out
 end
 
--- The value a time-keyed table holds at t (within a microsecond, wrapping at T).
-local function lookup(values: { [number]: number }, t: number, T: number): number
-	local best, bestD = nil, math.huge
-	for k, v in values do
-		local d = math.abs(((t - k + T / 2) % T) - T / 2)
-		if d < bestD then
-			best, bestD = v, d
-		end
-	end
-	assert(best ~= nil and bestD < 1e-6, "no table value at " .. t)
-	return best
-end
-
 -- A source clip sampled at t: every joint `keep` accepts, rotation only.
 local function sampledRotations(rig: Rig.Rig, source: Keys.SourceClip, t: number, keep: (string) -> boolean): Joints
 	local out: Joints = {}
@@ -157,6 +171,25 @@ local function sampledRotations(rig: Rig.Rig, source: Keys.SourceClip, t: number
 		end
 	end
 	return out
+end
+
+-- A source clip sampled at t: every joint `keep` accepts, with its position where it moves.
+local function sampledJoints(rig: Rig.Rig, source: Keys.SourceClip, t: number, keep: (string) -> boolean): Joints
+	local out: Joints = {}
+	for name, offset in rig.ClipSampler.sample(source, t) do
+		if keep(name) then
+			local pos = offset.pos
+			local moved = math.abs(pos[1]) + math.abs(pos[2]) + math.abs(pos[3]) > 1e-9
+			out[name] = if moved
+				then { pos = { pos[1], pos[2], pos[3] }, rot = { offset.rot[1], offset.rot[2], offset.rot[3] } }
+				else { rot = { offset.rot[1], offset.rot[2], offset.rot[3] } }
+		end
+	end
+	return out
+end
+
+local function notLeg(joint: string): boolean
+	return not LEGS[joint]
 end
 
 type WalkBody = {
@@ -219,6 +252,7 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 			flatTo = 0.05,
 			liftPivot = "toe",
 			liftAngle = -45,
+			peel = { duration = 0.025, rise = 0.12, angle = -10 },
 			swingJoints = { -- hip X, knee X, ankle X through the swing (hip Y/Z and ankle Z blend lift to strike)
 				{ t = 0.2, hip = 15, knee = -115, ankle = 15 },
 				{ t = 0.3, hip = 55, knee = -120, ankle = 0 },
@@ -229,12 +263,11 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 				{ t = 0.5, hip = 55, knee = -22, ankle = -10 },
 			},
 		}
-		local ROOT_Y = { [0] = -0.08, [0.025] = -0.13, [0.05] = -0.16, [0.075] = -0.12, [0.1] = -0.04, [0.2] = 0.06 }
 		G.Run = {
 			duration = T,
 			speed = locomotion.runSpeed,
 			dir = Vector3.new(0, 0, -1),
-			keyTimes = { 0, 0.025, 0.05, 0.075, 0.1, 0.2, 0.3, 0.325, 0.35, 0.375, 0.4, 0.5 },
+			keyTimes = stanceKeys(T, 0.1, 0.0125, 0.025, { 0.2 }),
 			plans = { Left = left, Right = mirrorPlan(left, T) },
 			events = { { time = 0.02, foot = "Left" }, { time = 0.32, foot = "Right" } },
 			comments = {
@@ -250,27 +283,18 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 			header = {
 				"player/OneHandedSword/Run: the sheathed set, the sword on the back.",
 				"16 studs/s, a 0.6 s cycle with the same plants as RunDrawn. The anime run: the body leans",
-				"forward, both arms pump hard with the elbows bent, and the feet strike on the ball and push",
-				"off the toe with a long flight between. Each foot stays planted where it lands while the body",
-				"passes over it (the keys inside a stance are 0.025 s apart so the ground speed matches).",
+				"forward with the head in line with it, both arms pump hard with the elbows bent and a little",
+				"out at the back of the swing, and the feet strike on the ball and push off the toe with a long",
+				"flight between. The head stays in line because the hilt sits just behind it: tipped back to",
+				"look up, it would meet the hilt. The elbows go out at the back so the left hand passes outside",
+				"the scabbard, and the waist twists only 8 degrees so the scabbard clears the hips. Each foot",
+				"stays planted where it lands while the body passes over it (the keys inside a stance are",
+				"0.0125 s apart so the ground speed matches) and peels off the ground going back with it.",
 				"Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.",
 			},
+			-- the hand re-key for the back mount (D-050, D-055), pinned in sources/Run.luau
 			upper = function(t: number): Joints
-				local c = cosAt(t, T) -- 1 at the left plant, -1 at the right plant
-				local s = sinAt(t, T)
-				local c2 = cosAt(t, T / 2)
-				local y = lookup(ROOT_Y, t % (T / 2), T / 2)
-				return {
-					Root = pr(0, y, 0, -6, -6 * c, 0),
-					Waist = r(-16 + 2 * c2, 10 * c, 2 * c),
-					Neck = r(18 - 2 * c2, -4 * c, -1 * c),
-					LeftShoulder = r(5 - 50 * c, 0, -8 - 2 * s),
-					LeftElbow = r(85 + 15 * -c, 0, 0),
-					LeftWrist = r(-5, 0, 0),
-					RightShoulder = r(5 + 50 * c, 0, 8 - 2 * s),
-					RightElbow = r(85 + 15 * c, 0, 0),
-					RightWrist = r(-5, 0, 0),
-				}
+				return sampledJoints(rig, SourceRun, t, notLeg)
 			end,
 			sheathed = true,
 			mirrored = false,
@@ -292,6 +316,7 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 			flatTo = 0.04,
 			liftPivot = "toe",
 			liftAngle = -55,
+			peel = { duration = 0.01, rise = 0.1, angle = -5 },
 			swingJoints = {
 				{ t = 0.165, hip = 22, knee = -125, ankle = 15 },
 				{ t = 0.25, hip = 68, knee = -125, ankle = 0 },
@@ -302,12 +327,11 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 				{ t = 0.415, hip = 62, knee = -22, ankle = -12 },
 			},
 		}
-		local ROOT_Y = { [0] = -0.1, [0.02] = -0.16, [0.04] = -0.2, [0.06] = -0.13, [0.08] = -0.02, [0.165] = 0.08 }
 		G.Sprint = {
 			duration = T,
 			speed = locomotion.sprintSpeed,
 			dir = Vector3.new(0, 0, -1),
-			keyTimes = { 0, 0.02, 0.04, 0.06, 0.08, 0.165, 0.25, 0.27, 0.29, 0.31, 0.33, 0.415 },
+			keyTimes = stanceKeys(T, 0.08, 0.01, 0.01, { 0.165 }),
 			plans = { Left = left, Right = mirrorPlan(left, T) },
 			events = { { time = 0.02, foot = "Left" }, { time = 0.27, foot = "Right" } },
 			comments = {
@@ -323,27 +347,16 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 			header = {
 				"player/OneHandedSword/Sprint: the sheathed set, the sword on the back.",
 				"24 studs/s, a 0.5 s cycle with the same plants as SprintDrawn. A deeper lean than Run, a",
-				"longer stride with a high heel kick, and a hard arm pump; the head stays up. Each foot stays",
-				"planted where it lands while the body passes over it (the keys inside a stance are 0.02 s",
-				"apart so the ground speed matches).",
+				"longer stride with a high heel kick, and a hard arm pump; the head drives forward in line with",
+				"the body (tipped back it would meet the hilt). As in Run, the elbows go out at the back of the",
+				"swing past the scabbard and the waist twist stays small enough for the scabbard to clear the",
+				"hips. Each foot stays planted where it lands while the body passes over it (the keys inside a",
+				"stance are 0.01 s apart so the ground speed matches) and peels off the ground going back with it.",
 				"Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.",
 			},
+			-- the hand re-key for the back mount (D-050, D-055), pinned in sources/Sprint.luau
 			upper = function(t: number): Joints
-				local c = cosAt(t, T)
-				local s = sinAt(t, T)
-				local c2 = cosAt(t, T / 2)
-				local y = lookup(ROOT_Y, t % (T / 2), T / 2)
-				return {
-					Root = pr(0, y, 0, -10, -7 * c, 0),
-					Waist = r(-20 + 2 * c2, 12 * c, 2 * c),
-					Neck = r(24 - 2 * c2, -5 * c, -1 * c),
-					LeftShoulder = r(8 - 62 * c, 0, -10 - 3 * s),
-					LeftElbow = r(85 - 20 * c, 0, 0),
-					LeftWrist = r(-8, 0, 0),
-					RightShoulder = r(8 + 62 * c, 0, 10 - 3 * s),
-					RightElbow = r(85 + 20 * c, 0, 0),
-					RightWrist = r(-8, 0, 0),
-				}
+				return sampledJoints(rig, SourceSprint, t, notLeg)
 			end,
 			sheathed = true,
 			mirrored = false,
@@ -847,7 +860,7 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 			"arm pumping (the sword arm pumps shorter, its wrist keeping the point forward and off the",
 			"grass), the feet striking on the ball and pushing off the toe with a long flight between.",
 			"Each foot stays planted where it lands while the body passes over it (the keys inside a",
-			"stance are 0.025 s apart so the ground speed matches).",
+			"stance are 0.0125 s apart so the ground speed matches) and peels off the ground going back with it.",
 			"Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.",
 		}, {
 			[0] = "left foot plants on the ball",
@@ -864,7 +877,8 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 			"24 studs/s, a 0.5 s cycle with the same legs as Sprint: a longer stride with a high heel",
 			"kick, the free arm thrown hard, the sword arm pumping short with the point forward and off",
 			"the grass. Each foot stays planted where it lands while the body passes over it (the keys",
-			"inside a stance are 0.02 s apart so the ground speed matches).",
+			"inside a stance are 0.01 s apart so the ground speed matches) and peels off the ground going",
+			"back with it.",
 			"Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.",
 		}, {
 			[0] = "left foot plants on the ball",

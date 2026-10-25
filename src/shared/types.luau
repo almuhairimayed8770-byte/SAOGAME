@@ -479,6 +479,22 @@ export type EnemyStrikeOptions = {
 -- Why a rush stopped early (the RushEnded remote, D-169).
 export type RushEndReason = "Jammed" | "Interrupted" | "Died" | "Stopped"
 
+-- Every reason the RushEnded remote carries (Remotes.RushEnded checks the same literals): an early
+-- stop (RushEndReason), a slam ("Wall", D-208), or an attack a sleep or a hold dropped before it
+-- landed or launched ("Dropped", D-254). A rush that ran its time ("Done") is never told.
+export type RushEndedReason = RushEndReason | "Wall" | "Dropped"
+
+-- The RushEnded remote's payload (Remotes.RushEnded): `contact` and `normal` come with a "Wall" only.
+export type RushEndedPayload = {
+	entityId: number,
+	launchedAt: number, -- the RushStarted serverTime it ends; for a "Dropped", its wind-up's end
+	serverTime: number,
+	distance: number, -- studs down the path where the server's body stands (0 for a "Dropped")
+	reason: RushEndedReason,
+	contact: Vec3?,
+	normal: Vec3?,
+}
+
 Types.VERSION = 1
 
 return Types

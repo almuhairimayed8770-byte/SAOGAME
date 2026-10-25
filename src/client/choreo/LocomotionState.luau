@@ -26,10 +26,13 @@
 	and then hands weight to Idle, which shortens the stride; above Sprint's the sprint speeds up.
 	Each set has its own speeds, so the sheathed and drawn walks blend at their own points.
 	Run's and Sprint's feet push along the facing. While the body turns to its move that is the
-	move, but with the facing held off it (a lock-on strafe, D-112: no angle, a slow yaw) Run takes
-	only the share whose foot stays on the move and the side walk carries the part across the
-	facing; by runSpeed the cadence shares are back. Locomotion paces every gait clip to the root's
-	real speed on one shared phase.
+	move. A move the body is not turning to (the facing held to a lock or by Guard, D-112: no angle,
+	a slow yaw; or a straight move) the set's walks carry alone, by direction, up to walkSpeed (the
+	speed a lock or Guard holds the body to), and the cadence shares are back by the speed at which
+	the walks alone reach rateCeiling (heldShare, D-292): a joint-angle blend of a walk and Run
+	skates its planted foot. That held share rises over stride.heldRiseSeconds and falls at once,
+	so a run's two-step stop still hands over by cadence. Locomotion paces every gait clip to the
+	root's real speed on one shared phase.
 
 	Also the raycast foot IK math (two-bone legs, pelvis drop) as a pure function.
 ]]
@@ -102,6 +105,9 @@ export type State = {
 	lean: number,
 	wasGrounded: boolean,
 	airTime: number,
+	-- The share of a held move the set's walks carry alone (D-292): it follows heldShare, falling
+	-- at once and rising over stride.heldRiseSeconds.
+	held: number,
 	update: (self: State, dt: number, input: Input) -> Output,
 }
 
@@ -489,54 +495,36 @@ function LocomotionState.runAlong(input: Input): number
 	return input.forward / length
 end
 
--- A move into the forward half with a part across the facing, which the body is not turning to:
--- the shares of the forward walk, the side walk and Run (they sum to 1) at which the blend's planted
--- foot goes straight back along the move. The forward walk's and Run's feet go back along the
--- facing and the side walk's across it, so each axis covers its part of the move: forward share x
--- stride + Run share x stride = speed x along x cycle, side share x stride = speed x across x
--- cycle, the cycle being the shares' mean duration (the blend's natural cadence). Where that would
--- need a negative forward walk (the side walk cannot cover its part at its natural cadence: a
--- quick strafe) it is Run and the side walk alone, in the ratio that keeps the foot on the move,
--- played faster; where it would need a negative Run (a slow move) the two walks alone. No
--- allocation.
-local function heldShares(
-	speed: number,
-	along: number,
-	across: number,
-	forwardWalk: Gait,
-	sideWalk: Gait,
-	run: Gait
-): (number, number, number)
-	local a1 = forwardWalk.stride - speed * along * forwardWalk.duration
-	local b1 = -speed * along * sideWalk.duration
-	local c1 = run.stride - speed * along * run.duration
-	local a2 = -speed * across * forwardWalk.duration
-	local b2 = sideWalk.stride - speed * across * sideWalk.duration
-	local c2 = -speed * across * run.duration
-	local determinant = a1 * (b2 - c2) - b1 * (a2 - c2) + c1 * (a2 - b2)
-	local forwardShare, sideShare, runShare = -1, 0, 0
-	if math.abs(determinant) > 1e-6 then
-		forwardShare = (b1 * c2 - c1 * b2) / determinant
-		sideShare = (c1 * a2 - a1 * c2) / determinant
-		runShare = (a1 * b2 - b1 * a2) / determinant
-		if forwardShare >= 0 and sideShare >= 0 and runShare >= 0 then
-			return forwardShare, sideShare, runShare
-		end
+--- The share of a move the set's walks carry alone, by direction (D-292), for a move the body is
+--- not turning to (the facing held to a lock or by Guard, D-112, or a straight move): all of it up
+--- to locomotion.walkSpeed, the speed a lock or Guard holds the body to, and none by the speed at
+--- which the walks alone reach stride.rateCeiling (`walkSpeed` is their ground speed along the
+--- move, LocomotionState.walkGait). A walk alone plants at any pace as at its ground speed, while
+--- a joint-angle blend of a walk and Run sinks the planted foot below the field and skates it
+--- forward as Run's foot leaves (about 0.2 studs a step at walkSpeed), and Run's feet push along
+--- the facing, across a strafe. A body turning to its move gets 0: the cadence shares.
+function LocomotionState.heldShare(speed: number, input: Input, walkSpeed: number): number
+	local length = math.sqrt(input.forward * input.forward + input.right * input.right)
+	if length < 1e-6 or turningToMove(input) then
+		return 0
 	end
-	if forwardShare < 0 then
-		local runAcross = run.stride * across
-		local sideAlong = sideWalk.stride * along
-		return 0, runAcross / (runAcross + sideAlong), sideAlong / (runAcross + sideAlong)
+	if speed <= Config.walkSpeed then
+		return 1
 	end
-	local forwardPart = along / forwardWalk.stride
-	local sidePart = across / sideWalk.stride
-	return forwardPart / (forwardPart + sidePart), sidePart / (forwardPart + sidePart), 0
+	local ceiling = walkSpeed * Stride.rateCeiling
+	if ceiling <= Config.walkSpeed then
+		return 0
+	end
+	return clamp01((ceiling - speed) / (ceiling - Config.walkSpeed))
 end
 
 -- Writes the weights of a moving frame into `weights` (the set's walks by direction, Run, Sprint
--- and Idle by cadence) and returns the Sprint share. Sprint shows only while sprinting, and then
--- as soon as the speed clears Run's ground speed.
-local function moveWeights(weights: { [string]: number }, speed: number, input: Input): number
+-- and Idle by cadence, the walks alone for the held share) and returns the Sprint share. Sprint
+-- shows only while sprinting, and then as soon as the speed clears Run's ground speed. The held
+-- share follows heldShare: down at once, up over stride.heldRiseSeconds, so a run's two-step stop,
+-- which passes walkSpeed in a few frames, hands its run to the walk by cadence as it slows, while
+-- a body a lock or Guard holds to walkSpeed is soon on its walks alone.
+local function moveWeights(self: any, weights: { [string]: number }, speed: number, input: Input, dt: number): number
 	local drawn = input.drawn
 	local direction = LocomotionState.walkWeights(input.forward, input.right, drawn)
 	local walkSpeed, walkDuration = LocomotionState.walkGait(direction, input.forward, input.right, drawn)
@@ -554,30 +542,17 @@ local function moveWeights(weights: { [string]: number }, speed: number, input: 
 	weights[clipFor("Run", drawn)] = run
 	weights[clipFor("Sprint", drawn)] = sprint
 	weights[clipFor("Idle", drawn)] = idle
-	-- A move with a part across a facing held off it (a lock-on strafe, D-112), past the walks'
-	-- own ground speed: Run's feet push along the facing, so Run takes only as much as keeps the
-	-- planted foot on the move and the side walk carries the rest (heldShares). That holds at
-	-- walkSpeed (the speed a lock holds the body to) and hands back to the cadence shares above
-	-- by runSpeed: a running body turns into its move, and a rig whose facing lags its velocity by a
-	-- few degrees keeps its run.
-	local length = math.sqrt(input.forward * input.forward + input.right * input.right)
-	if runGait ~= nil and speed > walkSpeed and not turningToMove(input) and length > 1e-6 then
-		local along, across = input.forward / length, math.abs(input.right) / length
-		local held = clamp01((Config.runSpeed - speed) / (Config.runSpeed - Config.walkSpeed))
-		if along > 1e-6 and across > 1e-6 and held > 0 then
-			local forwardName = clipFor("WalkForward", drawn)
-			local sideName = clipFor(if input.right > 0 then "WalkRight" else "WalkLeft", drawn)
-			local runName = clipFor("Run", drawn)
-			local forwardShare, sideShare, runShare =
-				heldShares(speed, along, across, gaits[forwardName], gaits[sideName], runGait)
-			for name, weight in weights do
-				weights[name] = weight * (1 - held)
-			end
-			weights[forwardName] += held * forwardShare
-			weights[sideName] += held * sideShare
-			weights[runName] += held * runShare
-			sprint *= 1 - held
+	local target = LocomotionState.heldShare(speed, input, walkSpeed)
+	local held = if target <= self.held then target else math.min(target, self.held + dt / Stride.heldRiseSeconds)
+	self.held = held
+	if held > 0 then
+		for name, weight in weights do
+			weights[name] = weight * (1 - held)
 		end
+		for name, share in direction do
+			weights[clipFor(name, drawn)] += held * share
+		end
+		sprint *= 1 - held
 	end
 	return sprint
 end
@@ -601,6 +576,7 @@ function LocomotionState.new(): State
 		lean = 0,
 		wasGrounded = true,
 		airTime = 0,
+		held = 1,
 	}, LocomotionState)
 	return (self :: any) :: State
 end
@@ -632,7 +608,7 @@ function LocomotionState.update(self: any, dt: number, input: Input): Output
 		self.previousSpeed = speed
 		-- Keep the gait weights alive underneath so the landing blends back into motion.
 		if moving then
-			moveWeights(weights, speed, input)
+			moveWeights(self, weights, speed, input, dt)
 		else
 			weights[clipFor("Idle", input.drawn)] = 1
 		end
@@ -686,13 +662,15 @@ function LocomotionState.update(self: any, dt: number, input: Input): Output
 
 	local drawnSprint = 0
 	if moving then
-		local sprint = moveWeights(weights, speed, input)
+		local sprint = moveWeights(self, weights, speed, input, dt)
 		if input.drawn then
 			drawnSprint = sprint
 		end
 		self.turnAccumulated = 0
 	else
 		weights[clipFor("Idle", input.drawn)] = 1
+		-- Standing, no gait shows to hand over from: a start takes its held share at once.
+		self.held = 1
 		-- Turn in place when the body wants to face elsewhere (or has already turned that far
 		-- on the spot) and nothing else is playing. With the stick pushed the root is about to
 		-- move, so the first steps take the turn.

@@ -146,14 +146,14 @@ local Choreo = {
 				WalkBack = 3,
 				WalkLeft = 3.2,
 				WalkRight = 3.2,
-				Run = 15.55,
-				Sprint = 23.31,
+				Run = 15.98,
+				Sprint = 24.12,
 				WalkForwardDrawn = 3.5,
 				WalkBackDrawn = 2.99,
 				WalkLeftDrawn = 3.2,
 				WalkRightDrawn = 3.2,
-				RunDrawn = 15.55,
-				SprintDrawn = 23.19,
+				RunDrawn = 15.99,
+				SprintDrawn = 24.06,
 			},
 			groundSpeedTolerance = 0.05, -- studs per second the measurement may drift from groundSpeed
 			measureHz = 240,
@@ -177,6 +177,12 @@ local Choreo = {
 			-- at one phase, and pacing takes up most but not all of it (measured worst: 0.28).
 			-- Under a third of the foot's length: the foot pivots, it never skates.
 			transientBar = 0.3,
+			-- Seconds the walks take to carry a held move alone (LocomotionState.heldShare, D-292)
+			-- once its speed comes down to them: a run's two-step stop passes walkSpeed in a tenth
+			-- of a second and hands the run to the walk by cadence as it slows (a quicker swap moves
+			-- the planted foot faster than the phase can take up), while a body a lock or Guard
+			-- holds to walkSpeed is on its walks alone within a step or two. Falling, it is at once.
+			heldRiseSeconds = 0.4,
 			-- A body held off its stick (D-144): walking into an enemy or a wall, or slid along its
 			-- flank. Once the stick has stayed within `degrees` of one direction for
 			-- `settleSeconds` (a turn swings the root's velocity across after the stick; a pan
@@ -203,13 +209,13 @@ local Choreo = {
 				WalkBack = { left = { -0.777, -0.419 }, right = { -0.778, 0.419 } },
 				WalkLeft = { left = { -0.001, -1.079 }, right = { 0.001, 0.17 } },
 				WalkRight = { left = { 0.001, -0.17 }, right = { -0.001, 1.079 } },
-				Run = { left = { 0.091, -0.362 }, right = { 0.09, 0.362 } },
+				Run = { left = { 0.124, -0.361 }, right = { 0.124, 0.361 } },
 				Sprint = { left = { 0.1, -0.319 }, right = { 0.1, 0.319 } },
 				WalkForwardDrawn = { left = { 0.757, -0.418 }, right = { 0.757, 0.418 } },
 				WalkBackDrawn = { left = { -0.779, -0.419 }, right = { -0.779, 0.419 } },
 				WalkLeftDrawn = { left = { -0.001, -1.079 }, right = { 0.001, 0.17 } },
 				WalkRightDrawn = { left = { 0.001, -0.17 }, right = { -0.001, 1.079 } },
-				RunDrawn = { left = { 0.092, -0.359 }, right = { 0.092, 0.359 } },
+				RunDrawn = { left = { 0.125, -0.359 }, right = { 0.125, 0.359 } },
 				SprintDrawn = { left = { 0.1, -0.32 }, right = { 0.1, 0.32 } },
 			} :: { [string]: { left: { number }, right: { number } } },
 			touchdownTolerance = 0.01, -- studs the measurement may drift from touchdown
@@ -301,6 +307,13 @@ local Choreo = {
 		-- jumps, and the 2.74 before that.
 		drawTipSpeed = 84,
 		sheatheTipSpeed = 84,
+		-- Over a moving base Studio reads the tip faster than the Lune path does: a Draw at a sprint
+		-- read 1.44 studs in a rendered frame where the path read at most 1.36 (81.7 studs a second
+		-- at the worst point of the sprint's cycle), 6% more; standing and running the two agree
+		-- within 2%. So a Draw over a walk, a run or a sprint, flipped at any point of the gait's
+		-- cycle, keeps under drawTipSpeed times this on the path (SheathTip.spec, D-293), and
+		-- under drawTipSpeed in Studio.
+		movingTipShare = 0.92,
 		-- The blade's line, in degrees a second: 18 degrees a 60 Hz frame. Sheathe's jump turned it
 		-- 24.8 in a frame, Draw's 36.4.
 		bladeTurnRate = 1080,

@@ -46,6 +46,14 @@
 	them (`serverDrawn()` gives the Drawn attribute to the character controller). An instance with
 	no signals (a Lune test rig) falls back to reading them once a step.
 
+	On the local rig, an attack clip let go before its first damage frame (an Art's stance or
+	wind-up taken away by a hit, a refusal or a cancelled hold) fades out where it stood
+	(Mixer.hold, D-294): played on, its fade ran the body on through the anticipation toward the
+	first cut and crossed its sound and trail keys. Nothing of it has lit but the activation light,
+	which CharacterController puts out as it lets the clip go. A clip let go after its first damage
+	frame plays on through its fade, as before. A rig Locomotion.attach drives keeps the clock
+	running: Replication puts a remote Art's light out on the HitWindowOpen its fade crosses (D-231).
+
 	The drawn sprint pose follows SprintDrawn's live weight, so it fades with the blend space
 	instead of jumping when the target flips. It is off while the sword is on its sheath and gives
 	way to a Draw or Sheathe clip, so the hand meets the hilt at the handoff.
@@ -150,6 +158,42 @@ local function isDrawCut(clip: Types.ClipDef): boolean
 		drawCutById[clip.id] = cached
 	end
 	return cached :: boolean
+end
+
+-- An attack clip's first damage frame: the time of its first HitWindowOpen, TrailOn or SmearOn
+-- (the first thing it lights after the activation), math.huge for a clip with none.
+local firstStrikeById: { [string]: number } = {}
+local function firstStrike(clip: Types.ClipDef): number
+	local cached = firstStrikeById[clip.id]
+	if cached == nil then
+		local first = math.huge
+		local events = clip.events
+		if events ~= nil then
+			for _, event in events do
+				if event.kind == "HitWindowOpen" or event.kind == "TrailOn" or event.kind == "SmearOn" then
+					first = math.min(first, event.time)
+				end
+			end
+		end
+		cached = first
+		firstStrikeById[clip.id] = first
+	end
+	return cached :: number
+end
+
+-- An attack clip let go before its first damage frame fades out where it stood (D-294): its clock
+-- stands from this step on, so the fade shows the pose it was let go in and crosses none of its
+-- keys or events. Runs before the mixer steps, so a clip let go between frames stands from the
+-- step that follows.
+local function holdCutAttacks(mixer: any, handles: { any })
+	for _, handle in handles do
+		if handle.stopping and not handle.held and not handle.done and not handle.ended then
+			local clip = handle.clip
+			if typeof(clip) == "table" and clip.attack == true and handle.time < firstStrike(clip) then
+				mixer:hold(handle)
+			end
+		end
+	end
 end
 
 -- The arm joints the Draw and Sheathe clips move (the sword's own joint left out). Read once from
@@ -280,10 +324,10 @@ end
 
 -- What the live clips say this step: a draw-cut, a clip that hides the arm, the Draw clip, the
 -- Sheathe clip; and the target.
-local function scanClips(self: any): SheathState.Input
+local function scanClips(self: any, handles: { any }?): SheathState.Input
 	local cut, covered, drawing, sheathing = false, false, false, false
 	local sheatheShown = 0
-	for _, handle in self.animator.mixer:handles() do
+	for _, handle in handles or self.animator.mixer:handles() do
 		if handle.done or handle.stopping then
 			continue
 		end
@@ -386,7 +430,7 @@ end
 
 -- The sheath step: runs before the mixer, so the sword's move and the clip pose land together.
 -- The mount's own step hook runs right after this one and puts the sword where it is wished.
-local function stepSheath(self: any, dt: number)
+local function stepSheath(self: any, dt: number, handles: { any }?)
 	if self.pollAttributes then
 		readAttributes(self)
 	end
@@ -400,7 +444,7 @@ local function stepSheath(self: any, dt: number)
 		self.mountGeneration = generation
 		self.sheath.place = targetPlace(self)
 	end
-	local input = scanClips(self)
+	local input = scanClips(self, handles)
 	local out = self.sheath:step(dt, input)
 	if out.stop ~= nil then
 		local id = sheathClipId(out.stop)
@@ -603,6 +647,9 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		followX = 0, -- blocked: the velocity the gait follows (at 1x, smoothed)
 		followZ = 0,
 		unreadableRoot = nil :: Instance?, -- a root whose velocity cannot be read (a Lune test part)
+		-- An attack clip let go before its first damage frame fades out where it stood (D-294);
+		-- false on a rig Locomotion.attach drives.
+		holdsCutAttacks = true,
 		destroyed = false,
 	}, Locomotion)
 	if self.raycast == nil and self.footIK then
@@ -625,7 +672,15 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 	end
 	self.unhookSheath = animator:onStep(function(dt: number)
 		if not self.destroyed then
-			stepSheath(self, dt)
+			-- One copy of the live handles for the step (an animator with no mixer: none).
+			local mixer = animator.mixer
+			local handles = if typeof(mixer) == "table" and typeof(mixer.handles) == "function"
+				then mixer:handles()
+				else nil
+			if self.holdsCutAttacks and handles ~= nil then
+				holdCutAttacks(mixer, handles)
+			end
+			stepSheath(self, dt, handles)
 			stepGait(self, dt)
 		end
 	end)
@@ -1058,6 +1113,9 @@ function Locomotion.attach(animator: any, character: Model, deps: Dependencies?)
 	local driver: any
 	if rigId == "PlayerR15" then
 		driver = Locomotion.new(animator, character, dependencies)
+		-- A remote Art taken away runs its clock through its fade: Replication puts its activation
+		-- light out on the HitWindowOpen the fade crosses (D-231), and nothing else would.
+		driver.holdsCutAttacks = false
 		if tracker == nil then
 			-- The driver already follows the Drawn attribute; the tracker reads it from there.
 			tracker = Locomotion.humanoidTracker(character, function(): boolean

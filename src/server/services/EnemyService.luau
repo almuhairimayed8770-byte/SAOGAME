@@ -96,13 +96,18 @@ export type Engine = {
 	-- root collides with in its own group: a rushing body's walls, never a player or an enemy), its
 	-- box moved by `offset` first when given, within `distance` studs, whether that face is ground it
 	-- runs over (D-204, D-209) and the face's normal; nil when nothing is in the way
-	-- (EnemyService.worldAhead). Nil: no world.
+	-- (EnemyService.worldAhead). `walk`: a walking body's question (its snout's room): the world
+	-- alone, with the root's box turned to face `direction`. Nil: no world.
 	worldAhead: ((
 		model: Model,
 		direction: Vector3,
 		distance: number,
-		offset: Vector3?
+		offset: Vector3?,
+		walk: boolean?
 	) -> (number?, boolean?, Vector3?))?,
+	-- Stops the body dead (no skid): its flat velocity is zeroed and it holds where it stands, or on
+	-- `position` when given (a goal it would pass before the next frame). Nil: `stop` stands in.
+	halt: ((model: Model, position: Vector3?) -> ())?,
 }
 
 -- The world cast worldAhead makes: a box of `size` at `start` moved by `vector`, colliding as
@@ -159,6 +164,13 @@ type Mover = {
 	direct: boolean,
 	-- A request arrived since the last update: the frame pass applies it in the same frame.
 	pending: boolean,
+	-- The body's corners at rest and its root's size (spawn): how far its snout leads a walk, so a
+	-- walk never pushes it into a wall (snoutRoom). Nil: the root's box alone.
+	body: RushWorld.Body?,
+	-- A direct goal that is where the body stops (a slam's stop): the body stops dead on it (arrive).
+	exact: boolean,
+	-- The exact goal the body was stopped dead on (Engine.halt, arrive); nil until it is reached.
+	halted: Vector3?,
 }
 
 export type Entry = {
@@ -243,7 +255,7 @@ end
 -- Mover: MoveTo with a pathfinding fallback
 -- ---------------------------------------------------------------------------------------------
 
-local function newMover(model: Model, speed: number): Mover
+local function newMover(model: Model, speed: number, body: RushWorld.Body?): Mover
 	return {
 		model = model,
 		goal = nil,
@@ -265,6 +277,9 @@ local function newMover(model: Model, speed: number): Mover
 		stuck = false,
 		direct = false,
 		pending = false,
+		body = body,
+		exact = false,
+		halted = nil,
 	}
 end
 
@@ -282,9 +297,11 @@ local function dropPath(mover: Mover)
 	mover.computing = false
 end
 
--- `direct`: a strike's own movement, straight at the goal and never along a path (D-183).
-local function moverRequest(mover: Mover, goal: Vector3, speed: number, direct: boolean?)
+-- `direct`: a strike's own movement, straight at the goal and never along a path (D-183). `exact`
+-- (direct only): the goal is where the body stops, and it stops dead on it (arrive).
+local function moverRequest(mover: Mover, goal: Vector3, speed: number, direct: boolean?, exact: boolean?)
 	local isDirect = direct == true
+	mover.exact = isDirect and exact == true
 	if isDirect ~= mover.direct then
 		-- A different kind of movement is a new movement: its own clock, and no path from the old one.
 		mover.direct = isDirect
@@ -296,26 +313,166 @@ local function moverRequest(mover: Mover, goal: Vector3, speed: number, direct: 
 	mover.pending = true
 end
 
-local function moverStop(mover: Mover)
+-- `dead`: the body stops dead where it stands (Engine.halt: a jammed or cancelled rush rests where its
+-- end told every client, not a skid past it); otherwise it stops as the engine does (Humanoid:MoveTo
+-- where it stands).
+local function moverStop(mover: Mover, dead: boolean?)
 	mover.goal = nil
 	mover.pending = false
 	mover.direct = false
+	mover.exact = false
+	mover.halted = nil
 	if mover.moving then
 		mover.moving = false
 		mover.issuedGoal = nil
 		-- A path still computing is for a goal that no longer exists; its result is dropped.
 		dropPath(mover)
-		dependencies().engine.stop(mover.model)
+		local engine = dependencies().engine
+		local halt = engine.halt
+		if dead == true and halt ~= nil then
+			halt(mover.model, nil)
+		else
+			engine.stop(mover.model)
+		end
 	end
 end
 
-local function issue(mover: Mover, target: Vector3, now: number)
+-- How far a body facing `facing` walks along the flat unit `direction` before its leading corner meets
+-- the face the walk cast found (`travelled`: how far the root's box, turned to face `direction` and
+-- starting with its front at the root's centre, ran before it met a face of normal `normal`; nil:
+-- head on): where the box would touch, moved by how much further than the box the body reaches
+-- toward the face, over how fast the walk closes on it. Huge for a walk along the face.
+local function walkRoom(
+	body: RushWorld.Body,
+	facing: Vector3,
+	direction: Vector3,
+	travelled: number,
+	normal: Vector3?
+): number
+	local into = if normal ~= nil then Brain.horizontal(-normal) else nil
+	local inward: Vector3 = into or direction
+	local closing = direction:Dot(inward)
+	if closing <= AI.flatEpsilon then
+		return math.huge
+	end
+	local half = body.size / 2
+	local square = CFrame.lookAt(Vector3.zero, direction)
+	local boxInto = math.abs(square.RightVector:Dot(inward)) * half.X + math.abs(square.LookVector:Dot(inward)) * half.Z
+	local bodyInto = RushWorld.support(body.profile, facing, inward)
+	return travelled - half.Z + (boxInto - bodyInto) / closing
+end
+
+-- How far the body, facing `facing`, can walk along `direction` (flat, unit) within `distance` before
+-- its snout meets a wall: `distance` when nothing is in the way or it is ground the body climbs (a
+-- slope, a step), less than 0 when the snout would already stand inside one. A long body's head
+-- reaches past its root's box, the only part that collides with the world (RigBuilder), so the
+-- engine alone lets it walk its head into a wall. The cast asks about the world alone (players,
+-- enemies and blockers are the engine's and Spacing's), with the root's box turned to face the walk,
+-- moved by `offset` first when given (where the body is on its way to). The second value: the normal
+-- of the face that cut the walk (nil when nothing did).
+local function snoutWalk(
+	mover: Mover,
+	facing: Vector3,
+	direction: Vector3,
+	distance: number,
+	offset: Vector3?
+): (number, Vector3?)
+	local body = mover.body
+	local cast = dependencies().engine.worldAhead
+	if body == nil or cast == nil then
+		return distance, nil
+	end
+	local lead = RushWorld.support(body.profile, facing, direction)
+	local face, ground, normal = cast(mover.model, direction, distance + lead, offset, true)
+	if face == nil or ground == true then
+		return distance, nil
+	end
+	local room = walkRoom(body, facing, direction, face, normal)
+	if room >= distance then
+		return distance, nil
+	end
+	return room, normal
+end
+
+-- Where a walk toward `target` stops so the body's snout never goes into a wall (snoutWalk), the
+-- walk's own leading corner set on the face the way a slam's is (D-205). A walk that meets the face
+-- at a slant slides along it from there (D-295): the rest of the walk, less its part into the face,
+-- goes on along the face as far as the snout lets it, so a body walking up to a player who stands
+-- by a wall (the walk a little into the wall, a side of the body already on it) still gets there
+-- instead of stopping where it stands. The second value: whether the walk was cut short or bent
+-- (its goal is issued at once, never left to the re-issue rule, which would let the body walk on to
+-- the longer goal it last heard).
+local function snoutRoom(mover: Mover, position: Vector3, target: Vector3): (Vector3, boolean)
+	if mover.body == nil then
+		return target, false
+	end
+	local offset = Vector3.new(target.X - position.X, 0, target.Z - position.Z)
+	local distance = offset.Magnitude
+	if distance < AI.flatEpsilon then
+		return target, false
+	end
+	local direction = offset / distance
+	local facing = dependencies().engine.facing(mover.model)
+	local room, normal = snoutWalk(mover, facing, direction, distance)
+	if room >= distance then
+		return target, false
+	end
+	local stop = direction * math.max(0, room)
+	local into = if normal ~= nil then Brain.horizontal(-normal) else nil
+	if into ~= nil then
+		local rest = offset - stop
+		local along = rest - into * rest:Dot(into)
+		local length = along.Magnitude
+		if length >= AI.flatEpsilon then
+			local slide = along / length
+			local slid = snoutWalk(mover, facing, slide, length, stop)
+			if slid > 0 then
+				stop += slide * slid
+			end
+		end
+	end
+	return Vector3.new(position.X + stop.X, target.Y, position.Z + stop.Z), true
+end
+
+-- How far the body, turned to `facing` where it stands, could walk that way before its snout meets a
+-- wall (negative: the snout would stand inside it); its whole front's reach when nothing is that near.
+-- A walking body is judged where it stands, not where it is walking to (D-295): the walk to a stop by
+-- a wall is cut so the snout as it faces now just meets the face there, so at that stop nearly every
+-- other facing reads deeper and a body on its way could not turn at all. The walk itself is checked
+-- again with the facing it then has (snoutRoom, every AI tick), which cuts it at once if a turn on
+-- the way would carry the snout into the wall.
+local function snoutAhead(mover: Mover, facing: Vector3): number
+	local body = mover.body
+	if body == nil then
+		return math.huge
+	end
+	local room = snoutWalk(mover, facing, facing, RushWorld.support(body.profile, facing, facing))
+	return room
+end
+
+-- Whether a walking body may turn to `facing`: not when the turn would swing its snout more than
+-- movement.snoutSlackStuds into a wall, unless it stands no deeper than it does now (a turn away). A
+-- strike's own movement turns by its own rules (RushWorld, D-206).
+local function canFace(mover: Mover, facing: Vector3): boolean
+	if mover.direct then
+		return true
+	end
+	local room = snoutAhead(mover, facing)
+	if room >= -AI.movement.snoutSlackStuds then
+		return true
+	end
+	return room >= snoutAhead(mover, dependencies().engine.facing(mover.model))
+end
+
+-- `urgent`: a goal that must be heard at once (a walk cut short at a wall), whatever the re-issue rule.
+local function issue(mover: Mover, target: Vector3, now: number, urgent: boolean?)
 	local engine = dependencies().engine
 	local issued = mover.issuedGoal
 	if
 		issued == nil
 		or (target - issued).Magnitude >= AI.movement.reissueStuds
 		or now - mover.issuedAt >= AI.movement.reissueInterval
+		or (urgent == true and (target - issued).Magnitude >= AI.flatEpsilon)
 	then
 		engine.moveTo(mover.model, target)
 		mover.issuedGoal = target
@@ -429,7 +586,8 @@ local function moverUpdate(mover: Mover, now: number)
 	local distance = Brain.horizontalDistance(position, goal)
 	if distance <= movement.arriveRadius then
 		mover.path = nil
-		issue(mover, goal, now)
+		local room, cut = snoutRoom(mover, position, goal)
+		issue(mover, room, now, cut)
 		return
 	end
 
@@ -456,13 +614,40 @@ local function moverUpdate(mover: Mover, now: number)
 				mover.pathIndex += 1
 			end
 			if mover.pathIndex <= #path then
-				issue(mover, path[mover.pathIndex], now)
+				local room, cut = snoutRoom(mover, position, path[mover.pathIndex])
+				issue(mover, room, now, cut)
 				return
 			end
 			mover.path = nil -- walked to its end; the goal is in direct reach
 		end
 	end
-	issue(mover, goal, now)
+	local room, cut = snoutRoom(mover, position, goal)
+	issue(mover, room, now, cut)
+end
+
+-- A strike's own movement to where it stops (`exact`: a slam's stop) that would reach it before the
+-- next server frame (at its speed over this frame's seconds, at most movement.haltLeadSeconds) stops
+-- dead on it (Engine.halt): the body rests on the stop the rush told every client (D-208), never a
+-- skid past it. Once per goal.
+local function arrive(mover: Mover, dt: number)
+	local goal = mover.goal
+	if not mover.exact or not mover.moving or goal == nil then
+		return
+	end
+	local engine = dependencies().engine
+	local halt = engine.halt
+	if halt == nil then
+		return
+	end
+	local halted = mover.halted
+	if halted ~= nil and Brain.horizontalDistance(halted, goal) < AI.flatEpsilon then
+		return
+	end
+	local lead = mover.speed * math.clamp(dt, 0, AI.movement.haltLeadSeconds)
+	if Brain.horizontalDistance(engine.position(mover.model), goal) <= lead + AI.flatEpsilon then
+		mover.halted = goal
+		halt(mover.model, goal)
+	end
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -556,6 +741,43 @@ end
 -- client hands the body back where the server's stopped (D-210). Every stop but a slam's (a jam
 -- stops the body too, D-190) waits to rejoin the enemies group until the body has stayed clear long
 -- enough (rejoin, from tickAll); a slam's body waits from the stop that ends its rush.
+-- The RushEnded payload for a stop (Types.RushEndedPayload, the remote's own reasons): told as
+-- itself, every stop but a run that ran its time ("Done"), which is never told (nil); `contact`
+-- and `normal` for a slam only.
+local function endedPayload(
+	id: number,
+	launchedAt: number,
+	serverTime: number,
+	reason: Brain.RushEnd,
+	distance: number,
+	contact: RushWorld.Contact?
+): Types.RushEndedPayload?
+	local told: Types.RushEndedReason
+	if reason == "Jammed" then
+		told = "Jammed"
+	elseif reason == "Wall" then
+		told = "Wall"
+	elseif reason == "Interrupted" then
+		told = "Interrupted"
+	elseif reason == "Died" then
+		told = "Died"
+	elseif reason == "Stopped" then
+		told = "Stopped"
+	else
+		return nil
+	end
+	local wall = if reason == "Wall" then contact else nil
+	return {
+		entityId = id,
+		launchedAt = launchedAt,
+		serverTime = serverTime,
+		distance = math.max(0, distance),
+		reason = told,
+		contact = if wall ~= nil then toVec3(wall.point) else nil,
+		normal = if wall ~= nil then unitVec3(wall.normal) else nil,
+	}
+end
+
 local function rushEnded(
 	entry: Entry,
 	rush: Brain.Rush,
@@ -579,17 +801,11 @@ local function rushEnded(
 		tell = true
 		entry.rushEndFinal = true
 	end
-	if tell then
-		local wall = if reason == "Wall" then contact else nil
-		d.fireAll("RushEnded", {
-			entityId = entry.id,
-			launchedAt = rush.startedAt,
-			serverTime = d.serverTime(),
-			distance = math.max(0, distance),
-			reason = reason,
-			contact = if wall ~= nil then toVec3(wall.point) else nil,
-			normal = if wall ~= nil then unitVec3(wall.normal) else nil,
-		})
+	local payload = if tell
+		then endedPayload(entry.id, rush.startedAt, d.serverTime(), reason, distance, contact)
+		else nil
+	if payload ~= nil then
+		d.fireAll("RushEnded", payload)
 	end
 	-- A slam's body is still on its way to its stop (passing through players, D-167): its wait starts
 	-- with the stop that ends the rush (the daze's interrupt, a death, its run's end).
@@ -625,18 +841,74 @@ local function rushTurned(entry: Entry, rush: Brain.Rush, contact: RushWorld.Con
 	})
 end
 
+-- An enemy's blocker (D-198): the part of its model in the blockers group, or nil.
+local function blockerOf(model: Model): BasePart?
+	for _, child in model:GetChildren() do
+		if child:IsA("BasePart") and child.CollisionGroup == AI.collision.blockers then
+			return child
+		end
+	end
+	return nil
+end
+
+-- Whether two upright boxes overlap (separating axes: the vertical, then each box's two horizontal
+-- axes; a blocker turns with its root's yaw only).
+local function uprightBoxesOverlap(a: BasePart, b: BasePart): boolean
+	local ha, hb = a.Size / 2, b.Size / 2
+	local fa, fb = a.CFrame, b.CFrame
+	local between = fb.Position - fa.Position
+	if math.abs(between.Y) >= ha.Y + hb.Y then
+		return false
+	end
+	for _, axis in { fa.RightVector, fa.LookVector, fb.RightVector, fb.LookVector } do
+		local flat = Brain.horizontal(axis)
+		if flat ~= nil then
+			local reachA = math.abs(fa.RightVector:Dot(flat)) * ha.X + math.abs(fa.LookVector:Dot(flat)) * ha.Z
+			local reachB = math.abs(fb.RightVector:Dot(flat)) * hb.X + math.abs(fb.LookVector:Dot(flat)) * hb.Z
+			if math.abs(between:Dot(flat)) >= reachA + reachB then
+				return false
+			end
+		end
+	end
+	return true
+end
+
+--- Whether an enemy's blocker stands clear of every other solid enemy's (D-281): a solid blocker
+--- meets other enemies' roots and blockers, so a stopped rush whose body stands over a packmate's
+--- would be pushed out of it the moment it turned solid. A blocker covers its body's whole
+--- footprint, root included, from the floor up past every root's top, so blocker against blocker
+--- settles root against blocker too. Judged on the parts' own boxes: the engine's queries never see
+--- a blocker (CanQuery off). A model with no blocker is clear.
+function EnemyService.blockerClear(model: Model): boolean
+	local own = blockerOf(model)
+	if own == nil then
+		return true
+	end
+	for _, entry in entries do
+		local other = entry.model
+		if other ~= model then
+			local theirs = blockerOf(other)
+			if theirs ~= nil and theirs.CanCollide and uprightBoxesOverlap(own, theirs) then
+				return false
+			end
+		end
+	end
+	return true
+end
+
 -- A stopped rush's body rejoins the enemies group once its root has overlapped no player and no
--- enemy for ai.collision.rejoinClearSeconds in a row, so the engine never has to push two bodies
--- apart (that push is what lifted one boar onto another). The wait outlasts the time every client
--- draws a server body late (D-190): a body that turned solid the moment the server saw it clear was
--- still drawn inside the player it had just run through, still moving, and the engine pushed that
--- player out at the rush's speed, up onto its back.
+-- enemy, and its blocker no other solid enemy's (D-281), for ai.collision.rejoinClearSeconds in a
+-- row, so the engine never has to push two bodies apart (that push is what lifted one boar onto
+-- another). The wait outlasts the time every client draws a server body late (D-190): a body that
+-- turned solid the moment the server saw it clear was still drawn inside the player it had just
+-- run through, still moving, and the engine pushed that player out at the rush's speed, up onto
+-- its back.
 local function rejoin(entry: Entry, now: number)
 	if not entry.rejoinPending then
 		return
 	end
 	local clear = dependencies().engine.bodyClear
-	if clear ~= nil and not clear(entry.model) then
+	if (clear ~= nil and not clear(entry.model)) or not EnemyService.blockerClear(entry.model) then
 		entry.clearSince = nil
 		return
 	end
@@ -739,19 +1011,26 @@ local function makeContext(entry: Entry): Brain.Context
 		facing = function()
 			return d.engine.facing(model)
 		end,
-		moveTo = function(position, speed, direct)
+		moveTo = function(position, speed, direct, exact)
 			entry.stepping = false
-			moverRequest(mover, position, speed, direct)
+			moverRequest(mover, position, speed, direct, exact)
 		end,
 		stop = function()
 			entry.stepping = false
 			moverStop(mover)
+		end,
+		halt = function()
+			entry.stepping = false
+			moverStop(mover, true)
 		end,
 		standOff = function(point)
 			return standOffFor(entry, point)
 		end,
 		face = function(direction)
 			d.engine.setFacing(model, direction)
+		end,
+		canFace = function(direction)
+			return canFace(mover, direction)
 		end,
 		telegraph = function(attack, origin, facing, shape)
 			fireTelegraph(entry, attack, origin, facing, shape)
@@ -803,13 +1082,14 @@ local function makeContext(entry: Entry): Brain.Context
 			-- Reliable, on the beat the clients keep the attack by (its wind-up's end): each drops the
 			-- swing, the tell and a launch its telegraph predicted (Replication, D-254). A rush's own
 			-- remote, so it stays in order with the launch and the stop it stands in for.
-			d.fireAll("RushEnded", {
+			local payload: Types.RushEndedPayload = {
 				entityId = id,
 				launchedAt = math.max(0, beat),
 				serverTime = d.serverTime(),
 				distance = 0,
 				reason = "Dropped",
-			})
+			}
+			d.fireAll("RushEnded", payload)
 		end,
 		daze = function(seconds)
 			-- A slam (D-208): a Stagger from the front, through EntityService like a parry's, which
@@ -940,7 +1220,7 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 		defId = defId,
 		def = def,
 		model = model,
-		mover = newMover(model, def.moveSpeed),
+		mover = newMover(model, def.moveSpeed, body),
 		awake = true,
 		held = false,
 		home = d.engine.position(model),
@@ -1168,9 +1448,10 @@ end
 
 -- The frame pass (D-184, D-185): every awake brain resolves the attack edges due by now (the
 -- wind-up's end, the strike, a rush's stretches and run) and turns its body for the frame; a
--- movement it asked for on the way (the rush's launch) reaches the mover in the same frame. Asleep,
--- held and dead enemies are skipped.
-local function frameAll()
+-- movement it asked for on the way (the rush's launch) reaches the mover in the same frame, and a
+-- strike's own movement about to reach its goal stops dead on it (arrive). Asleep, held and dead
+-- enemies are skipped.
+local function frameAll(dt: number)
 	local d = dependencies()
 	local now = d.serverTime()
 	table.clear(frameList) -- a pass that errored out last frame left its snapshot behind
@@ -1190,6 +1471,7 @@ local function frameAll()
 		if entry.mover.pending then
 			moverUpdate(entry.mover, now)
 		end
+		arrive(entry.mover, dt)
 	end
 	table.clear(frameList)
 end
@@ -1211,7 +1493,7 @@ function EnemyService.step(dt: number)
 	if accumulator >= stepSeconds then
 		accumulator = 0
 	end
-	frameAll()
+	frameAll(dt)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -1411,7 +1693,8 @@ function EnemyService.worldAhead(
 	direction: Vector3,
 	distance: number,
 	cast: WorldCast?,
-	offset: Vector3?
+	offset: Vector3?,
+	walk: boolean?
 ): (number?, boolean?, Vector3?)
 	local root = model.PrimaryPart
 	local flat = Brain.horizontal(direction)
@@ -1419,12 +1702,16 @@ function EnemyService.worldAhead(
 		return nil, nil, nil
 	end
 	local engineCast: WorldCast = cast or defaultWorldCast
-	local group = root.CollisionGroup
+	local group = if walk == true then AI.collision.rushing else root.CollisionGroup
 	local bound: RushWorld.Cast = function(start: CFrame, size: Vector3, vector: Vector3): (number?, Vector3?)
 		return engineCast(start, size, vector, group, model)
 	end
 	local frame = root.CFrame + (offset or Vector3.zero)
 	local reach = EnemyService.rootReach(model, flat)
+	if walk == true then
+		frame = CFrame.lookAt(frame.Position, frame.Position + flat)
+		reach = root.Size.Z / 2
+	end
 	local ok, travelled, normal = pcall(bound, frame - flat * reach, root.Size, flat * distance)
 	if not ok or typeof(travelled) ~= "number" then
 		return nil, nil, nil
@@ -1529,8 +1816,25 @@ local function defaultEngine(groups: any?): Engine
 				return groups.clear(model)
 			end
 			else nil,
-		worldAhead = function(model, direction, distance, offset)
-			return EnemyService.worldAhead(model, direction, distance, nil, offset)
+		worldAhead = function(model, direction, distance, offset, walk)
+			return EnemyService.worldAhead(model, direction, distance, nil, offset, walk)
+		end,
+		halt = function(model, position)
+			local humanoid = humanoidOf(model)
+			local root = model.PrimaryPart
+			if root == nil then
+				return
+			end
+			if position ~= nil then
+				-- On the goal it would have passed before the next frame (its yaw and height kept).
+				local at = root.Position
+				model:PivotTo(CFrame.new(position.X - at.X, 0, position.Z - at.Z) * model:GetPivot())
+			end
+			local velocity = root.AssemblyLinearVelocity
+			root.AssemblyLinearVelocity = Vector3.new(0, velocity.Y, 0)
+			if humanoid ~= nil then
+				humanoid:MoveTo(root.Position)
+			end
 		end,
 	}
 end

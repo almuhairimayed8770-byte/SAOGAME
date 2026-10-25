@@ -259,13 +259,14 @@ describe("clip data", function()
 		-- strike past its snap's start key, where the blade has left the wind-up and cuts: the
 		-- frame on the snap start shows the still wind-up extreme. At 60 fps from the snap start,
 		-- that is exactly the snap's first two moving frames, the scale back on the third.
+		-- Every attack clip with a smear: the player's, Kobold/Overhead and Boar/Charge (D-229).
 		local owned = {}
 		for _, clip in attackClips() do
-			if clip.id:sub(1, 7) == "player/" or clip.id == "enemy/Kobold/Overhead" then
+			if #ReviewMarkers.eventSpans(clip, "SmearOn", "SmearOff") > 0 then
 				table.insert(owned, clip)
 			end
 		end
-		expect(#owned).toBe(8)
+		expect(#owned).toBe(9)
 		for _, clip in owned do
 			local snaps = ReviewMarkers.strikeSnaps(clip)
 			local smears = ReviewMarkers.eventSpans(clip, "SmearOn", "SmearOff")

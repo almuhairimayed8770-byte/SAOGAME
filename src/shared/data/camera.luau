@@ -25,6 +25,7 @@
 ]]
 
 local Combat = require(script.Parent.combat)
+local Fx = require(script.Parent.fx)
 
 -- One FOV punch (CameraMath.punchOffset). Named by the hit-stop tier it lands on.
 export type Punch = {
@@ -169,6 +170,27 @@ local Camera = {
 		-- view: a target that ran past to the camera's side would pull the midpoint in under it, a
 		-- look straight down onto the player's hat (issue 12).
 		aimDepthFraction = 1,
+		-- The catch-up (a rush pass): once a target that was on screen is more than catchUpMargin
+		-- of the half width past the screen's side, the turn cap lifts to catchUpDegreesPerSecond
+		-- (7 degrees a 60 fps frame, and never more than catchUpMostDegrees in a longer frame),
+		-- eased on and off over catchUpEase seconds, and the bearing pans straight at its mark
+		-- until the target is back inside that margin. A target that only grazes the edge, or a
+		-- new lock behind the camera, keeps the cap above.
+		catchUpDegreesPerSecond = 420,
+		catchUpMostDegrees = 7,
+		catchUpMargin = 0.25,
+		catchUpEase = 0.05,
+		-- A death's still shot (F4, D-239): after the freeze (CameraController.holdLock) the shot
+		-- stays still this long more, the shards' rise (fx.luau shatter.duration), framing where
+		-- the body stood, and only then eases out to the free camera. A boss's longer rise eases
+		-- out over its last part.
+		riseHoldSeconds = Fx.shatter.duration,
+		-- A wall at the camera's shoulder: once a wall leaves the camera under wallBlockedFraction
+		-- of its reach, and the other shoulder's spot opens at least wallGainFraction more of its
+		-- own, the shot swings over to the open side (a pan at the turn cap) instead of standing
+		-- pressed against the wall. Between two walls neither side opens: it stays and pulls in.
+		wallBlockedFraction = 0.6,
+		wallGainFraction = 0.3,
 	},
 
 	mobile = {

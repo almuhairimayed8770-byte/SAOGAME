@@ -242,6 +242,57 @@ describe("CameraMath framing", function()
 		expect(CameraMath.lockSide(-1, 20, 15)).toBe(1)
 	end)
 
+	it("fades a shake with distance: full to the near end, none at the radius, smooth between", function()
+		expect(CameraMath.falloff(0, 26, 32)).toBe(1)
+		expect(CameraMath.falloff(26, 26, 32)).toBe(1)
+		expect(CameraMath.falloff(29, 26, 32)).toBeCloseTo(0.5, 1e-9)
+		expect(CameraMath.falloff(32, 26, 32)).toBe(0)
+		expect(CameraMath.falloff(40, 26, 32)).toBe(0)
+		-- Never rising with distance, and no step anywhere in the band.
+		local last = 1
+		for tenth = 260, 320 do
+			local now = CameraMath.falloff(tenth / 10, 26, 32)
+			expect(now <= last + 1e-12).toBe(true)
+			expect(last - now).toBeLessThan(0.03)
+			last = now
+		end
+		-- A band of no width is a step at the radius.
+		expect(CameraMath.falloff(5, 5, 5)).toBe(1)
+		expect(CameraMath.falloff(5.01, 5, 5)).toBe(0)
+	end)
+
+	it("keeps the wall slam's shake full where the review stood, and none past its radius (D-266)", function()
+		local slam = Harness.load("src/shared/data/fx").wallSlam
+		-- The review: 20 studs behind the boar's root, the snout 5.6 ahead of it.
+		expect(slam.shakeFullRadius).toBeGreaterThanOrEqual(20 + 5.6)
+		expect(slam.shakeFullRadius).toBeLessThan(slam.shakeRadius)
+		expect(CameraMath.falloff(20 + 5.6, slam.shakeFullRadius, slam.shakeRadius)).toBe(1)
+		expect(CameraMath.falloff(slam.shakeRadius, slam.shakeFullRadius, slam.shakeRadius)).toBe(0)
+	end)
+
+	it("measures how far across the view a point stands: 1 at the side's edge, huge behind", function()
+		local look, right = { 0, 0, -1 }, { 1, 0, 0 }
+		local tanHalfWidth = math.tan(math.rad(35)) * 16 / 9
+		expect(CameraMath.acrossView({ 0, 0, -10 }, look, right, tanHalfWidth)).toBeCloseTo(0, 1e-9)
+		local edge = 10 * tanHalfWidth
+		expect(CameraMath.acrossView({ edge, 0, -10 }, look, right, tanHalfWidth)).toBeCloseTo(1, 1e-9)
+		expect(CameraMath.acrossView({ -1.5 * edge, 4, -10 }, look, right, tanHalfWidth)).toBeCloseTo(1.5, 1e-9)
+		expect(CameraMath.acrossView({ 0, 0, 3 }, look, right, tanHalfWidth)).toBe(math.huge)
+		expect(CameraMath.acrossView({ 1, 0, 0 }, look, right, tanHalfWidth)).toBe(math.huge)
+	end)
+
+	it("takes the other shoulder only when its own is walled in and the other opens well past it", function()
+		-- Open enough: stays, however open the other side.
+		expect(CameraMath.takesOpenSide(0.7, 1, 0.6, 0.3)).toBe(false)
+		expect(CameraMath.takesOpenSide(0.6, 1, 0.6, 0.3)).toBe(false)
+		-- Walled in, the other side open: swings.
+		expect(CameraMath.takesOpenSide(0.15, 1, 0.6, 0.3)).toBe(true)
+		expect(CameraMath.takesOpenSide(0.4, 0.7, 0.6, 0.3)).toBe(true)
+		-- Walled in both sides (a corridor), or the other only a little better: stays.
+		expect(CameraMath.takesOpenSide(0.15, 0.2, 0.6, 0.3)).toBe(false)
+		expect(CameraMath.takesOpenSide(0.4, 0.65, 0.6, 0.3)).toBe(false)
+	end)
+
 	it("leashes the lagged pivot along the view only: so far ahead, a little further behind", function()
 		local forward = { 0, 0, -1 }
 		-- The body hopped back toward the camera: the lagged pivot is 4 studs ahead of it.

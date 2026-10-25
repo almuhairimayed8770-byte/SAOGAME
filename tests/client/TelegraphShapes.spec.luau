@@ -191,6 +191,52 @@ describe("TelegraphShapes", function()
 		expect(rushGlint).toBe(0.6)
 	end)
 
+	-- D-289: the client's press reaches the server its one-way latency late, so the glint opens and
+	-- closes that much earlier (`lead`, capped by fx.luau telegraph.glintLeadMax): a press at it
+	-- reaches the server inside the parry window. The tell itself still holds to the snap.
+	it("a lead moves the whole glint earlier, capped, and the tell still holds to the snap", function()
+		local AI = Harness.load("src/shared/data/ai")
+		local combat = Harness.load("src/shared/data/combat")
+		local windUp, strike = 1.0, 0.35
+		local lands = windUp + strike
+		local plainEnds, plainFrom = TelegraphShapes.timing(windUp, strike)
+		local ends, glintFrom, glintUntil = TelegraphShapes.timing(windUp, strike, 0.08)
+		expect(ends).toBeCloseTo(plainEnds, 1e-9)
+		expect(glintFrom).toBeCloseTo(lands - combat.parryWindow - 0.08, 1e-9)
+		expect(glintUntil).toBeCloseTo(ends - 0.08, 1e-9)
+		-- No lead (or none given, or a negative one): the glint runs from the window to the snap.
+		for _, lead in { 0, -0.2 } do
+			local e, f, u = TelegraphShapes.timing(windUp, strike, lead)
+			expect(e).toBeCloseTo(plainEnds, 1e-9)
+			expect(f).toBeCloseTo(plainFrom, 1e-9)
+			expect(u).toBeCloseTo(plainEnds, 1e-9)
+		end
+		local _, _, untilNone = TelegraphShapes.timing(windUp, strike)
+		expect(untilNone).toBeCloseTo(plainEnds, 1e-9)
+		-- A lead past the cap moves it by the cap alone.
+		local cap = Fx.telegraph.glintLeadMax
+		local _, cappedFrom, cappedUntil = TelegraphShapes.timing(windUp, strike, 1)
+		expect(cappedFrom).toBeCloseTo(lands - combat.parryWindow - cap, 1e-9)
+		expect(cappedUntil).toBeCloseTo(ends - cap, 1e-9)
+		-- The fill glints from glintFrom to glintUntil, then is the plain lit fill to the snap.
+		local glint = AI.telegraph.glintFillTransparency
+		local function fill(at: number): number
+			return TelegraphShapes.fillTransparency(at, windUp, 1, ends, glintFrom, glintUntil)
+		end
+		expect(fill(glintFrom - 0.01)).never.toBeCloseTo(glint)
+		expect(fill(glintFrom + 0.01)).toBeCloseTo(glint)
+		expect(fill(glintUntil - 0.01)).toBeCloseTo(glint)
+		local after = fill(glintUntil + 0.01)
+		expect(after).never.toBeCloseTo(glint)
+		expect(after).toBeLessThan(1)
+		expect(fill(ends)).toBe(1)
+		-- A rush's line has no glint to move.
+		local rushEnds, rushFrom, rushUntil = TelegraphShapes.timing(0.6, nil, 0.1)
+		expect(rushEnds).toBe(0.6)
+		expect(rushFrom).toBe(0.6)
+		expect(rushUntil).toBe(0.6)
+	end)
+
 	it("maps kinds to the three telegraph tokens", function()
 		expect(TelegraphShapes.token("Normal")).toBe("TelegraphWhite")
 		expect(TelegraphShapes.token("Unblockable")).toBe("TelegraphRed")

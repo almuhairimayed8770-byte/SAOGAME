@@ -324,6 +324,31 @@ describe("CameraController on the contact frame (D-180, D-211)", function()
 		expect(moved).toBeLessThanOrEqual(CameraData.shake.amplitude.Final + 1e-6)
 	end)
 
+	it("scales a shake by the falloff it is asked with: the same noise, smaller, and none at 0", function()
+		local full, spot = settled()
+		local half = settled()
+		local none = settled()
+		full.frame(F, nil, -1, function()
+			full.controller.shake("Kill")
+		end)
+		half.frame(F, nil, -1, function()
+			half.controller.shake("Kill", 0.5)
+		end)
+		none.frame(F, nil, -1, function()
+			none.controller.shake("Kill", 0)
+		end)
+		for _ = 1, 8 do
+			local a = full.camera.CFrame.Position - spot
+			local b = half.camera.CFrame.Position - spot
+			-- The same direction, half the size (the follow sits still: only the shake moves it).
+			expect((b - a * 0.5).Magnitude).toBeLessThan(1e-6)
+			expect((none.camera.CFrame.Position - spot).Magnitude).toBeLessThan(1e-9)
+			full.frames(1)
+			half.frames(1)
+			none.frames(1)
+		end
+	end)
+
 	it("changes nothing on frames whose hits came before its step: the same frames as one step alone", function()
 		local late, spot = settled()
 		local alone = settled({ withoutLate = true })

@@ -642,6 +642,51 @@ describe("A player's basic swing through the real remote (D-112, D-113)", functi
 	end)
 end)
 
+describe("A swing turns onto what it aims at and cuts beside it only with the blade (D-275)", function()
+	-- The Play-test (2026-10-25): a boar 60 degrees off, the body never turned, yet the server took
+	-- its HP; one 45 off turned in five frames and stopped 5 short of it.
+
+	it("a boar anywhere in the assist cone is turned onto before the cut, and cut", function()
+		local half = AIM.assistConeDegrees / 2
+		for _, bearing in { half, -half, half * 0.5 } do
+			local result = swing({ boarBearing = bearing })
+			expect(result.rejected).toEqual({})
+			expect(result.facingYaw).toBeCloseTo(bearing, 1e-6)
+			expect(result.hpAfter < result.hpBefore).toBe(true)
+		end
+	end)
+
+	it("a boar 60 off with no lock: the body does not turn, the cut ends short of it, no hit", function()
+		local result = swing({ boarBearing = 60 })
+		expect(result.rejected).toEqual({})
+		expect(result.facingYaw).toBe(0) -- outside the assist cone: nothing turns the body
+		expect(result.hpAfter).toBe(result.hpBefore)
+		local event = result.events[1]
+		expect(event.hits).toBe(0)
+		-- Still outside the cone as the window closes (the root has stepped on a little).
+		expect(event.nearest.bearingDegrees > AIM.assistConeDegrees / 2).toBe(true)
+		-- The blade passes clear of the boar: the clearance is from the blade itself.
+		expect(event.nearest.clearance > 0).toBe(true)
+	end)
+
+	it("locked on a boar 90 off and swung at once: the snap turns 40, the blade passes beside it", function()
+		local result = swing({ boarBearing = 90, lockBearing = 90 })
+		expect(result.rejected).toEqual({})
+		expect(result.facingYaw).toBeCloseTo(AIM.snapDegrees, 1e-6)
+		expect(result.hpAfter).toBe(result.hpBefore)
+		expect(result.events[1].hits).toBe(0)
+	end)
+
+	it("a boar beside the swing that the blade crosses is still cut", function()
+		-- The first basic swing starts with its blade out to the right and cuts across from there:
+		-- it passes through a boar 75 degrees to the right that nothing turned the body to.
+		local result = swing({ boarBearing = -75, facingYaw = 0 })
+		expect(result.rejected).toEqual({})
+		expect(result.hpAfter < result.hpBefore).toBe(true)
+		expect(result.events[1].nearest.clearance <= 0).toBe(true)
+	end)
+end)
+
 describe("A controlled kill through the real remote (D-121)", function()
 	it("a boar set to 1 HP by the dev hook dies to one basic swing: Kill hit-stop, Dead, EntityDied", function()
 		local result = swing({ boarBearing = 0, facingYaw = 0, boarHp = 1 })

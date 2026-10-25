@@ -604,6 +604,83 @@ describe("LocomotionState.update", function()
 		expect(drifting.weights.Run).toBeGreaterThan(0.9)
 	end)
 
+	it("a held move at walkSpeed (a lock or Guard, the body not turning): the walks alone (D-292)", function()
+		for _, drawn in { false, true } do
+			-- Straight ahead: the forward walk alone, paced past its ground speed, no Run.
+			local walk = LocomotionState.clipFor("WalkForward", drawn)
+			local out = LocomotionState.new()
+				:update(FRAME, input({ forward = 1, speed = Config.walkSpeed, drawn = drawn }))
+			expect(out.weights[walk]).toBeCloseTo(1, 1e-9)
+			expect(out.weights[LocomotionState.clipFor("Run", drawn)]).toBe(0)
+			-- A few degrees off: the walks by direction, nothing else.
+			for _, degrees in { 3, 8, 30, 352 } do
+				local radians = math.rad(degrees)
+				local forward, right = math.cos(radians), math.sin(radians)
+				local direction = LocomotionState.walkWeights(forward, right, drawn)
+				out = LocomotionState.new():update(
+					FRAME,
+					input({ forward = forward, right = right, speed = Config.walkSpeed, drawn = drawn })
+				)
+				for name, weight in out.weights do
+					local share = direction[name:gsub("Drawn$", "")] or 0
+					local expected = if LocomotionState.clipFor(name:gsub("Drawn$", ""), drawn) == name
+						then share
+						else 0
+					expect(weight).toBeCloseTo(expected, 1e-9)
+				end
+			end
+		end
+		-- heldShare: all of it up to walkSpeed, none by the speed at which the walks alone reach
+		-- rateCeiling, and none for a body turning to its move.
+		local ahead = input({ forward = 1 })
+		local walkSpeed = Stride.groundSpeed.WalkForward
+		local ceiling = walkSpeed * Stride.rateCeiling
+		expect(LocomotionState.heldShare(Config.walkSpeed, ahead, walkSpeed)).toBe(1)
+		expect(LocomotionState.heldShare((Config.walkSpeed + ceiling) * 0.5, ahead, walkSpeed)).toBeCloseTo(0.5, 1e-9)
+		expect(LocomotionState.heldShare(ceiling, ahead, walkSpeed)).toBe(0)
+		expect(LocomotionState.heldShare(Config.runSpeed, ahead, walkSpeed)).toBe(0)
+		expect(LocomotionState.heldShare(Config.walkSpeed, input({ forward = 1, turning = -30 }), walkSpeed)).toBe(0)
+		expect(
+			LocomotionState.heldShare(
+				Config.walkSpeed,
+				input({ forward = 1, yawRate = 2 * Stride.turnYawRate }),
+				walkSpeed
+			)
+		).toBe(0)
+	end)
+
+	it(
+		"a run slowing to walkSpeed keeps its cadence shares and hands over to the walk within heldRiseSeconds",
+		function()
+			local gaits = LocomotionState.gaits()
+			local direction = LocomotionState.walkWeights(1, 0, false)
+			local walkSpeed, walkDuration = LocomotionState.walkGait(direction, 1, 0, false)
+			local cadenceWalk, cadenceRun =
+				LocomotionState.gaitWeights(Config.walkSpeed, walkSpeed, walkDuration, gaits.Run, nil)
+			expect(cadenceRun).toBeGreaterThan(0.3)
+			local state = LocomotionState.new()
+			state:update(FRAME, input({ forward = 1, speed = Config.runSpeed }))
+			-- The frame the run comes down to walkSpeed (a two-step stop passes it in a few frames).
+			local held = FRAME / Stride.heldRiseSeconds
+			local out = state:update(FRAME, input({ forward = 1, speed = Config.walkSpeed }))
+			expect(out.weights.Run).toBeCloseTo(cadenceRun * (1 - held), 1e-9)
+			expect(out.weights.WalkForward).toBeCloseTo(cadenceWalk * (1 - held) + held, 1e-9)
+			-- Held there (a lock or Guard): the walk alone once heldRiseSeconds have passed.
+			for _ = 1, math.ceil(Stride.heldRiseSeconds / FRAME) do
+				out = state:update(FRAME, input({ forward = 1, speed = Config.walkSpeed }))
+			end
+			expect(out.weights.WalkForward).toBeCloseTo(1, 1e-9)
+			expect(out.weights.Run).toBe(0)
+			-- Speeding up again (the lock lets go): the run is back at once.
+			out = state:update(FRAME, input({ forward = 1, speed = Config.runSpeed }))
+			expect(out.weights.Run).toBeCloseTo(1, 1e-9)
+			-- Standing, then a start at walkSpeed: no gait to hand over from, the walk alone at once.
+			state:update(FRAME, input({}))
+			out = state:update(FRAME, input({ forward = 1, speed = Config.walkSpeed }))
+			expect(out.weights.WalkForward).toBeCloseTo(1, 1e-9)
+		end
+	)
+
 	it("leans into turns while moving and never past the data maximum", function()
 		local state = LocomotionState.new()
 		local out

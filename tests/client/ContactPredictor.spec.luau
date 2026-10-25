@@ -197,7 +197,7 @@ end
 local function bodyParts(model: any): { any }
 	local list = {}
 	for _, part in model:GetDescendants() do
-		if part:IsA("BasePart") and BladeContact.queryable(part) then
+		if part:IsA("BasePart") and BladeContact.hurtbox(part) then -- its body, not its club (D-277)
 			table.insert(list, part)
 		end
 	end
@@ -351,14 +351,19 @@ describe("ContactPredictor on the real rigs", function()
 		local to = BladeContact.read(chain)
 		local _, tipFrom = BladeContact.blade(chain, from)
 		local _, tipTo = BladeContact.blade(chain, to)
-		local _, tipMiddle = BladeContact.blade(chain, to, from, 0.5)
+		-- The middle of the tip's path: the clip posed halfway between the frames, the arc it draws.
+		poseAt(sharp.clip, (before + after) / 2)
+		local _, tipMiddle = BladeContact.blade(chain, BladeContact.read(chain))
 		expect((tipTo - tipFrom).Magnitude > 3 * Combat.hitSphereRadius).toBe(true)
-		-- A small target just past the middle of the tip's path, out of reach of both frames' blades.
+		-- A small target on the middle of the tip's path, out of reach of both frames' blades. This
+		-- cut passes well to the body's right (outside the aim assist's cone), so only the blade
+		-- itself touches what it passes (D-275): the target sits on the arc, its near face just
+		-- outside it, where no chord between the frames' tips can come.
 		local model = Instance.new("Model")
 		local part = Instance.new("Part")
 		part.Size = Vector3.new(0.2, 0.2, 0.2)
 		local outward = (tipMiddle - (tipFrom + tipTo) / 2).Unit
-		part.CFrame = CFrame.new(tipMiddle + outward * 0.3)
+		part.CFrame = CFrame.new(tipMiddle + outward * 0.15)
 		part.Parent = model
 		model.PrimaryPart = part
 		expect((BladeContact.touch(BladeContact.blade(chain, from), tipFrom, { part }, Combat.hitSphereRadius))).toBe(
@@ -655,5 +660,97 @@ describe("ContactPredictor swing numbers and drawn-away parts (items 4, D-171)",
 		})
 		expect(#walked).toBe(#plain)
 		expect(#frozen).toBe(1)
+	end)
+end)
+
+describe("ContactPredictor: a fighter beside the swing is touched only by the blade (D-275)", function()
+	-- A boar side-on `distance` studs from the player at `bearing` degrees from his look (+ = left),
+	-- facing him, its feet on the field (PlayerSwing's placement).
+	local function boarAt(bearing: number, distance: number): (any, any)
+		local def = Enemies.byId("FrenzyBoar")
+		local rig = Rigs[def.skin]
+		local model = RigBuilder.build(def.skin)
+		local height = PlaygroundLayout.rootHeight(rig.hipHeight, model.PrimaryPart.Size.Y, World.spawn.groundEpsilon)
+		local base = avatar.base * CFrame.new(0, height - avatar.rootHeight, 0)
+		local out = (base * CFrame.Angles(0, math.rad(bearing), 0)).LookVector
+		local at = base.Position + out * distance
+		local frame = CFrame.lookAt(at, Vector3.new(base.Position.X, at.Y, base.Position.Z))
+		for name, solved in Pose.solve(model, frame, {}) do
+			local part = model:FindFirstChild(name)
+			if part ~= nil and part:IsA("BasePart") then
+				part.CFrame = solved
+			end
+		end
+		return model, def
+	end
+
+	it("never predicts a cut that ends short of a boar beside the swing, though the hit radius reaches it", function()
+		local enemy, def = boarAt(60, 5)
+		local which = attack("Basic1")
+		-- The hit radius reaches it: the server's old rule counted it.
+		local window = ClipSampler.hitWindows(which.clip)[1]
+		expect(firstTouch(which, bodyParts(enemy), window) ~= nil).toBe(true)
+		for _, phase in { 0, 0.5 } do
+			expect(#swing(which, { record(5, enemy, def) }, { phase = phase })).toBe(0)
+		end
+	end)
+
+	it("predicts a boar beside the swing the blade itself passes through", function()
+		local enemy, def = boarAt(-75, 5)
+		local which = attack("Basic1")
+		for _, phase in { 0, 0.5 } do
+			local found = swing(which, { record(5, enemy, def) }, { phase = phase })
+			expect(#found).toBe(1)
+			expect(found[1].contact.targetId).toBe(5)
+		end
+	end)
+
+	it("a boar in the cone keeps the hit radius: one the cut ends a little short of is still touched", function()
+		-- 38 degrees off at 7.5 studs the first basic's blade passes 0.41 studs from the boar.
+		local enemy, def = boarAt(Combat.aim.assistConeDegrees / 2 - 2, 7.5)
+		local which = attack("Basic1")
+		local window = ClipSampler.hitWindows(which.clip)[1]
+		local chain = BladeContact.chain(avatar.model)
+		local nearest = math.huge
+		for k = 0, 240 do
+			local t = window.open + (window.close - window.open) * k / 240
+			poseAt(which.clip, t)
+			local guard, tip = BladeContact.blade(chain :: any, BladeContact.read(chain :: any))
+			for _, part in bodyParts(enemy) do
+				nearest = math.min(nearest, (BladeContact.segmentBoxDistance(guard, tip, part.CFrame, part.Size)))
+			end
+		end
+		expect(nearest > Combat.besideHitRadius + 0.1).toBe(true)
+		for _, phase in { 0, 0.5 } do
+			expect(#swing(which, { record(5, enemy, def) }, { phase = phase })).toBe(1)
+		end
+	end)
+end)
+
+describe("ContactPredictor: a held weapon clashes, it never wounds (D-277)", function()
+	it("a blade that meets only the kobold's club predicts nothing; one that meets both lands on the body", function()
+		local which = attack("RisingArc")
+		local enemy, def = placeEnemy("Kobold", 3.5)
+		local club = enemy:FindFirstChild("Weapon")
+		-- Both: the Rising Arc's first cut meets the club a few ms before the body (D-277 measure).
+		local found = swing(which, { record(5, enemy, def) })
+		local first = nil
+		for _, entry in found do
+			if entry.contact.windowIndex == 1 then
+				first = entry
+			end
+		end
+		expect(first).never.toBeNil()
+		local onClub =
+			BladeContact.segmentBoxDistance(first.contact.position, first.contact.position, club.CFrame, club.Size)
+		expect(onClub > 1e-3).toBe(true)
+		-- The club alone: the body out of every query.
+		for _, part in enemy:GetDescendants() do
+			if part:IsA("BasePart") and part ~= club then
+				part.CanCollide, part.CanQuery = false, false
+			end
+		end
+		expect(#swing(which, { record(5, enemy, def) })).toBe(0)
+		enemy:Destroy()
 	end)
 end)

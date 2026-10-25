@@ -44,6 +44,9 @@ export type ChargerTuning = ArchetypeTuning & {
 	jamLagStuds: number, -- a rushing body this far behind the rush's clock is jammed (D-169)
 	keepUpStuds: number, -- the rush's line resolves at most this far past where the body's snout
 	-- keeps up with its run (D-195); above a free body's physics lag, below jamLagStuds
+	runningFraction: number, -- a pass that makes this share of the rush's pace shows the body running
+	blockedFraction: number, -- a running body's passes that make less than this share are blocked
+	blockedSeconds: number, -- blocked this long (over two passes at least): jammed (D-280)
 }
 
 export type BruteTuning = ArchetypeTuning & {
@@ -129,6 +132,15 @@ local AI = {
 		reissueInterval = 0.5, -- but every goal is re-issued at least this often (MoveTo times out)
 		stuckSeconds = 1.5, -- no progress for this long switches to pathfinding
 		stuckProgressStuds = 0.5,
+		-- A strike's own movement (the rush) that would reach its goal before the next server frame
+		-- stops dead on it (EnemyService, Engine.halt): the body rests where the rush said it stops,
+		-- never a skid past it. The next frame is taken to come at most this many seconds later, so
+		-- the stop never moves a body more than its speed times this.
+		haltLeadSeconds = 1 / 30,
+		-- A walk stops with the body's snout on a wall, never in it, and a turn never swings it in
+		-- (EnemyService): a turn that sets the snout more than this far inside a wall is not taken
+		-- (turning away from a wall it faces head on swings a corner of the snout a hair forward first).
+		snoutSlackStuds = 0.1,
 		waypointReach = 3, -- a path waypoint within this is passed
 		repathInterval = 1.0, -- seconds between path computations while following a path
 		pathFailRetry = 2.0, -- seconds before retrying after a failed path
@@ -224,10 +236,13 @@ local AI = {
 	-- Players collide with players, enemies with enemies (a pack never melts into one body) and the
 	-- world. What a player bumps into on an enemy is its blocker (D-198), not its root: the root
 	-- floats at HipHeight with its top edge at a player's chest, and a player walking into that edge
-	-- bobbed on it and slid off sideways. The blocker is one upright, invisible box over the root's
-	-- footprint from the floor to blockerHeight, in `blockers`: it collides with players only (never
-	-- the world, so the body moves as before, nor any query, which runs as Default), and only while
-	-- the enemy is solid (CollisionGroups.assign turns it off for a rush).
+	-- bobbed on it and slid off sideways. The blocker is one upright, invisible box over the body's
+	-- footprint at rest from the floor to blockerHeight, in `blockers`: it collides with players, and
+	-- with other enemies' roots and blockers (D-281: a boar's snout and a kobold's axe stand outside
+	-- the roots, so roots alone let one enemy stand inside another; Spacing still steers them apart
+	-- first, D-259), never with the world (the body moves as before) nor any query (which runs as
+	-- Default), and only while the enemy is solid (CollisionGroups.assign turns it off for a rush;
+	-- a stopped rush rejoins only once its blocker is clear too, EnemyService.blockerClear).
 	collision = {
 		players = "SkyspirePlayers",
 		enemies = "SkyspireEnemies",
@@ -260,9 +275,7 @@ local AI = {
 			{ "SkyspireRushing", "SkyspireRushing" },
 			{ "SkyspireEnemies", "SkyspirePlayers" },
 			{ "SkyspireBlockers", "Default" },
-			{ "SkyspireBlockers", "SkyspireEnemies" },
 			{ "SkyspireBlockers", "SkyspireRushing" },
-			{ "SkyspireBlockers", "SkyspireBlockers" },
 		},
 	},
 
@@ -356,6 +369,17 @@ local AI = {
 			-- first frame); a body held back by a wall falls further behind, and the rush's line stops
 			-- this far past its snout, so a charge only hits what it reaches (D-195).
 			keepUpStuds = 1,
+			-- A blocked step (D-280): the body's run pass by pass on the server's own frames tells a
+			-- stop the world cast misses (a slope too steep to climb, a part that moved into the
+			-- path) well before the body falls jamLagStuds behind the clock. A body that has once made
+			-- runningFraction of the rush's pace over a pass, then makes less than blockedFraction of it
+			-- (of what is left of its run, when that is less) on every pass for blockedSeconds and two
+			-- passes at least, is jammed: told about 0.05 s after the stop, not 0.13 s. A body held to
+			-- 0.85 of the rush speed, a slow start, a glance along a face and one long frame are never
+			-- blocked; the jam lag still covers a body that never got going.
+			runningFraction = 0.5,
+			blockedFraction = 0.25,
+			blockedSeconds = 0.04,
 		} :: ChargerTuning,
 		Brute = {
 			turnRate = 160,

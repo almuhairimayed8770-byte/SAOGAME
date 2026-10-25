@@ -113,6 +113,14 @@ local blendSpring = Spring.new(0, CameraMath.springFromLag(CameraData.lock.blend
 local reachSpring = Spring.new(1, CameraMath.springFromLag(CameraData.collision.pullOutLag), CameraData.follow.damping)
 -- The two-shot's side of the line (1 right of the player, -1 left) and where its target last was.
 local lockSign = 1
+-- The shot is swinging over to the open shoulder away from a wall: the side holds until the bearing
+-- stands on it. And the fraction of its reach the last frame's wall probe left the camera.
+local sideForced = false
+local wallAllowed = 1
+-- The catch-up (a rush pass): whether the lock's target has been on screen since the lock took
+-- it, and the catch-up's weight (0 the turn cap, 1 lock.catchUpDegreesPerSecond).
+local targetSeen = false
+local catchUp = 0
 local lockPoint: Vector3? = nil
 local wasLocked = false
 -- A lock held past its target's death (F4): the shot stays on it until this os.clock, then lets go.
@@ -333,6 +341,61 @@ local function blockerDistance(origin: Vector3, direction: Vector3): number?
 	return found
 end
 
+-- The fraction of the way from `pivot` to `spot` a wall leaves the camera (1: open).
+local function reachLeft(pivot: Vector3, spot: Vector3): number
+	local reach = spot - pivot
+	local length = reach.Magnitude
+	if length <= CameraData.epsilon or raycastParams == nil then
+		return 1
+	end
+	local collision = CameraData.collision
+	local allowed = CameraMath.collisionDistance(
+		length,
+		blockerDistance(pivot, reach),
+		collision.probeRadius,
+		collision.minDistance
+	)
+	return math.min(allowed / length, 1)
+end
+
+-- How far across the last drawn view `point` stands (CameraMath.acrossView: past 1 off the
+-- screen's side, math.huge behind the camera); nil when the view's size is unknown.
+local function acrossView(point: Vector3): number?
+	local camera = workspace.CurrentCamera
+	if camera == nil then
+		return nil
+	end
+	local size = (camera :: any).ViewportSize
+	if typeof(size) ~= "Vector2" or size.Y <= 0 then
+		return nil
+	end
+	local frame = camera.CFrame
+	local tanHalfWidth = math.tan(math.rad(camera.FieldOfView / 2)) * size.X / size.Y
+	return CameraMath.acrossView(
+		toTable(point - frame.Position),
+		toTable(frame.LookVector),
+		toTable(frame.RightVector),
+		tanHalfWidth
+	)
+end
+
+-- The bearing's turn cap this frame (degrees per second): lock.maxTurnDegreesPerSecond, lifted
+-- toward lock.catchUpDegreesPerSecond while a target that was on screen has left it well past
+-- the side (a rush pass): more than lock.catchUpMargin of the half width past the edge.
+local function turnCap(point: Vector3, span: number): number
+	local lock = CameraData.lock
+	local across = acrossView(point)
+	if across ~= nil and across <= 1 then
+		targetSeen = true
+	end
+	local engaged = targetSeen and across ~= nil and across > 1 + lock.catchUpMargin
+	local ease = span / math.max(lock.catchUpEase, CameraData.epsilon)
+	catchUp = math.clamp(catchUp + (if engaged then ease else -ease), 0, 1)
+	-- Never more than catchUpMostDegrees in one frame, however long the frame.
+	local fast = math.min(lock.catchUpDegreesPerSecond, lock.catchUpMostDegrees / math.max(span, CameraData.epsilon))
+	return lock.maxTurnDegreesPerSecond + math.max(fast - lock.maxTurnDegreesPerSecond, 0) * catchUp
+end
+
 local function orbitDistance(): number
 	local orbit = CameraData.orbit[mode]
 	return math.clamp(orbit.distance + zoomOffset, CameraData.zoom.min, CameraData.zoom.max)
@@ -392,7 +455,13 @@ local function rig(root: BasePart, span: number, settle: boolean): (Vector3, Vec
 	local freeLook = toVector(CameraMath.shoulderLook(yaw, orbit.height, orbit.side))
 
 	local targetRoot = lockRoot()
-	if targetRoot ~= nil then
+	-- A death's freeze and the shards' rise after it hold the shot where it stood (F4, D-239): the
+	-- point it framed stays put, whatever the shattered body does or wherever its model goes.
+	local held = holdUntil ~= nil and lockPoint ~= nil
+	local framing = targetRoot ~= nil or held
+	if held then
+		targetRoot = nil
+	elseif targetRoot ~= nil then
 		-- The target's drawn body, not its root part: a rush draws it ahead of the hidden root (D-193).
 		lockPoint = DrawnBody.position(lockTarget) or targetRoot.Position
 	elseif wasLocked then
@@ -401,14 +470,16 @@ local function rig(root: BasePart, span: number, settle: boolean): (Vector3, Vec
 		freeCamera = toVector(CameraMath.orbitOffset(yaw, usePitch, distance, orbit.height, orbit.side))
 		freeLook = toVector(CameraMath.shoulderLook(yaw, orbit.height, orbit.side))
 	end
-	wasLocked = targetRoot ~= nil
-	blendSpring.target = if targetRoot ~= nil then 1 else 0
+	wasLocked = framing
+	blendSpring.target = if framing then 1 else 0
 	local weight = advanceSpring(blendSpring, span, settle)
 	local point = lockPoint
-	if point == nil or (targetRoot == nil and weight <= CameraData.epsilon) then
+	if point == nil or (not framing and weight <= CameraData.epsilon) then
 		-- Free: the two-shot would start from where this camera stands around the player.
 		lockPoint = nil
 		shotLive = false
+		sideForced = false
+		targetSeen, catchUp = false, 0
 		closeSpring:Snap(0)
 		blendSpring:Snap(0)
 		bearingSpring:Snap(CameraMath.yawTowards(toTable(freeCamera), { 0, 0, 0 }))
@@ -436,30 +507,64 @@ local function rig(root: BasePart, span: number, settle: boolean): (Vector3, Vec
 		shotDistanceSpring:Snap(shot.distance)
 		shotAimSpring:Snap(aim)
 	end
-	if targetRoot ~= nil then
+	local pivot = pivotOf(root)
+	local height = lock.height + (lock.closeHeight - lock.height) * closeness
+	if framing then
 		local offLine = CameraMath.shortestDelta(shot.lineYaw, bearingSpring.position)
-		lockSign = CameraMath.lockSide(lockSign, offLine, lock.sideHysteresis)
+		if sideForced then
+			-- Swinging to the open shoulder: it holds until the bearing stands on that side.
+			if offLine * lockSign >= math.min(lock.sideHysteresis, shot.swing) * 0.5 then
+				sideForced = false
+			end
+		else
+			lockSign = CameraMath.lockSide(lockSign, offLine, lock.sideHysteresis)
+		end
+		if
+			targetRoot ~= nil
+			and not sideForced
+			and not settle
+			and stage == nil
+			and wallAllowed < lock.wallBlockedFraction
+		then
+			-- A wall presses the camera in at its shoulder: the other shoulder, if it is open.
+			local here = reachLeft(
+				pivot,
+				toVector(CameraMath.twoShotCamera(player, shot.lineYaw + lockSign * shot.swing, shot.distance, height))
+			)
+			local there = reachLeft(
+				pivot,
+				toVector(CameraMath.twoShotCamera(player, shot.lineYaw - lockSign * shot.swing, shot.distance, height))
+			)
+			if CameraMath.takesOpenSide(here, there, lock.wallBlockedFraction, lock.wallGainFraction) then
+				lockSign = -lockSign
+				sideForced = true
+			end
+		end
 		local bearing = shot.lineYaw + lockSign * shot.swing
 		local before = bearingSpring.position
 		bearingSpring.target = before + CameraMath.shortestDelta(before, bearing)
 		advanceSpring(bearingSpring, span, settle)
 		if not settle then
-			-- A whip (a target running past, a side change toe to toe) turns no faster than the cap.
-			bearingSpring.position, bearingSpring.velocity = CameraMath.capTurn(
-				before,
-				bearingSpring.position,
-				bearingSpring.velocity,
-				lock.maxTurnDegreesPerSecond,
-				span
-			)
+			-- A whip (a target running past, a side change toe to toe) turns no faster than the cap,
+			-- but for a short catch-up once a target that ran past has left the screen.
+			local cap = if targetRoot ~= nil then turnCap(point, span) else lock.maxTurnDegreesPerSecond
+			if catchUp > 0 and span > 0 then
+				-- The catch-up pans straight at the bearing at the lifted cap, not waiting on the spring.
+				local delta = bearingSpring.target - before
+				local step = math.clamp(delta, -cap * span, cap * span)
+				if math.abs(step) > math.abs(bearingSpring.position - before) then
+					bearingSpring.position = before + step
+					bearingSpring.velocity = if math.abs(step) < math.abs(delta) then step / span else 0
+				end
+			end
+			bearingSpring.position, bearingSpring.velocity =
+				CameraMath.capTurn(before, bearingSpring.position, bearingSpring.velocity, cap, span)
 		end
 	end
 	shotDistanceSpring.target = shot.distance
 	shotAimSpring.target = aim
 	local distanceNow = advanceSpring(shotDistanceSpring, span, settle)
 	local aimNow = advanceSpring(shotAimSpring, span, settle)
-	local pivot = pivotOf(root)
-	local height = lock.height + (lock.closeHeight - lock.height) * closeness
 	local cameraAt = CameraMath.twoShotCamera(player, bearingSpring.position, distanceNow, height)
 	-- The aim never comes in under the lens (issue 12): a target past the player on the camera's
 	-- side leaves it out at the player's depth, beside them.
@@ -625,6 +730,7 @@ local function step(dt: number)
 	local reach = anchor - pivot + cameraOffset
 	local aim = anchor - pivot + lookOffset
 	local length = reach.Magnitude
+	wallAllowed = 1
 	if length > CameraData.epsilon and raycastParams ~= nil then
 		local allowed = math.min(
 			CameraMath.collisionDistance(
@@ -635,6 +741,7 @@ local function step(dt: number)
 			) / length,
 			1
 		)
+		wallAllowed = allowed
 		-- Pull in at once in front of a wall; ease back out.
 		if allowed < reachSpring.position then
 			reachSpring:Snap(allowed)
@@ -774,9 +881,14 @@ function CameraController.nudge(toward: Vector3, studs: number)
 	end
 end
 
---- Starts (or raises) a shake at the tier's amplitude; it decays on its own from now.
-function CameraController.shake(tier: string)
-	local amplitude = CameraData.shake.amplitude[tier] or CameraData.shake.amplitude.Normal
+--- Starts (or raises) a shake at the tier's amplitude, times `scale` (0 to 1; 1 when left out:
+--- a falloff with distance, CameraMath.falloff); it decays on its own from now.
+function CameraController.shake(tier: string, scale: number?)
+	local amplitude = (CameraData.shake.amplitude[tier] or CameraData.shake.amplitude.Normal)
+		* math.clamp(if scale ~= nil then scale else 1, 0, 1)
+	if amplitude <= 0 then
+		return
+	end
 	local at = now()
 	shakePeak = math.max(shakeValue(at), amplitude)
 	shakeAt = at
@@ -813,18 +925,23 @@ function CameraController.setLockTarget(model: Model?)
 	if model ~= nil and lockTarget == nil then
 		lockSign = 1
 	end
+	if model ~= lockTarget then
+		-- A new target is caught up with only once it has been on screen.
+		targetSeen, catchUp = false, 0
+	end
 	holdUntil = nil
 	lockTarget = model
 end
 
---- Holds the lock's shot on its target for `seconds` more, then lets it go and eases out (F4): a
---- kill's or a death's 0.5 s freeze is one still picture, the punch alone moving it, until the
---- shatter. Does nothing with no lock; a setLockTarget in the meantime takes over.
+--- Holds the lock's shot on its target for `seconds` more (to the shatter) and the shards' rise
+--- after it (camera.luau lock.riseHoldSeconds), then lets it go and eases out (F4, D-239): a
+--- kill's or a death's 0.5 s freeze and its shatter are one still picture, the punch alone moving
+--- it. Does nothing with no lock; a setLockTarget in the meantime takes over.
 function CameraController.holdLock(seconds: number)
 	if lockTarget == nil then
 		return
 	end
-	holdUntil = now() + math.max(seconds, 0)
+	holdUntil = now() + math.max(seconds, 0) + CameraData.lock.riseHoldSeconds
 end
 
 --- Whether the shot frames a target the player still holds a lock on (not one held for a freeze).
@@ -837,12 +954,13 @@ end
 --- around it, wherever the two-shot stands (CameraMath.lockMove). The engine's own reading walks
 --- forward along the camera's look, which a two-shot keeps 45 to 60 degrees off the line and a
 --- spring behind it, so W only circled the target, about 4.2 studs out (D-198's wide flank stop).
---- Unchanged with no live lock.
+--- Unchanged with no live lock, and while a staged view holds the camera (setStage): the keys then
+--- walk the way that fixed view shows them.
 function CameraController.lockMove(direction: Vector3): Vector3
 	local model = lockTarget
 	local root = subjectRoot()
 	local camera = workspace.CurrentCamera
-	if model == nil or holdUntil ~= nil or root == nil or camera == nil then
+	if model == nil or holdUntil ~= nil or stage ~= nil or root == nil or camera == nil then
 		return direction
 	end
 	if direction.Magnitude <= CameraData.epsilon then

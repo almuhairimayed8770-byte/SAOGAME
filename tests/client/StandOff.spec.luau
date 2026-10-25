@@ -199,9 +199,8 @@ describe("the Art stand-off picks its step (fix F1)", function()
 
 	it("in a locked fight the first cut never starts inside the body", function()
 		-- Straight ahead, where a lock or the assist turns the body, at every real-fight placement.
-		-- The body, not the weapon it holds: the kobold's club, beside the player at the touch, runs
-		-- along the step, so no step back clears the Rising Arc's start pose of it; a touch there
-		-- plays on the strike's key (contact.keyEpsilon), with the blade on the move.
+		-- The body, not the weapon it holds: a blade that meets the kobold's club clashes, it never
+		-- wounds (D-277), so the stand-off does not step back from it either.
 		for _, artId in Playground.loadout.artSlots do
 			for _, setup in Dev.hitMatrix.setups do
 				if setup.pointBlank then
@@ -265,5 +264,256 @@ describe("the Art stand-off stays inside the anti-cheat's limits", function()
 				expect(travel <= allowed).toBe(true)
 			end
 		end
+	end)
+end)
+
+describe("the Art stand-off never steps into the world (D-235 amended)", function()
+	local rootSize: Vector3 = avatar.model.PrimaryPart.Size
+	local AWAY = Vector3.new(0, 0, 1) -- straight back from a target ahead of the matrix's base
+	local GAP: number = STAND_OFF.wallGapStuds
+
+	-- Whether two boxes overlap (separating axes), touching included.
+	local function overlaps(a: CFrame, aSize: Vector3, b: CFrame, bSize: Vector3): boolean
+		local axesA = { a.RightVector, a.UpVector, a.LookVector }
+		local axesB = { b.RightVector, b.UpVector, b.LookVector }
+		local halfA = { aSize.X / 2, aSize.Y / 2, aSize.Z / 2 }
+		local halfB = { bSize.X / 2, bSize.Y / 2, bSize.Z / 2 }
+		local axes = table.clone(axesA)
+		for _, axis in axesB do
+			table.insert(axes, axis)
+		end
+		for _, u in axesA do
+			for _, v in axesB do
+				local cross = u:Cross(v)
+				if cross.Magnitude > 1e-6 then
+					table.insert(axes, cross.Unit)
+				end
+			end
+		end
+		local between = b.Position - a.Position
+		for _, axis in axes do
+			local reachA, reachB = 0, 0
+			for index = 1, 3 do
+				reachA += halfA[index] * math.abs(axesA[index]:Dot(axis))
+				reachB += halfB[index] * math.abs(axesB[index]:Dot(axis))
+			end
+			if math.abs(between:Dot(axis)) > reachA + reachB + 1e-9 then
+				return false
+			end
+		end
+		return true
+	end
+
+	-- The engine's Blockcast over `world` (parts, or models of parts) to within 0.001 studs: it
+	-- meets only parts that can collide and are not under `exclude`, and never one the box starts
+	-- in. `excludes` collects what each call left out.
+	local function engineCast(world: { Instance }, excludes: { { Instance } }?)
+		return function(start: CFrame, size: Vector3, vector: Vector3, exclude: { Instance }): number?
+			if excludes ~= nil then
+				table.insert(excludes, exclude)
+			end
+			local length = vector.Magnitude
+			if length < 1e-9 then
+				return nil
+			end
+			local direction = vector.Unit
+			local parts: { BasePart } = {}
+			for _, item in world do
+				local list = if item:IsA("BasePart") then { item } else item:GetDescendants()
+				for _, part in list do
+					if part:IsA("BasePart") and part.CanCollide then
+						local left = false
+						for _, skip in exclude do
+							if part == skip or part:IsDescendantOf(skip) then
+								left = true
+							end
+						end
+						if not left then
+							table.insert(parts, part)
+						end
+					end
+				end
+			end
+			local best: number? = nil
+			for _, part in parts do
+				if overlaps(start, size, part.CFrame, part.Size) then
+					continue
+				end
+				local travelled = 0
+				while travelled <= length do
+					if overlaps(start + direction * travelled, size, part.CFrame, part.Size) then
+						if best == nil or travelled < (best :: number) then
+							best = travelled
+						end
+						break
+					end
+					travelled += 0.001
+				end
+			end
+			return best
+		end
+	end
+
+	local function block(frame: CFrame, size: Vector3): Part
+		local part = Instance.new("Part")
+		part.Size = size
+		part.CFrame = frame
+		part.Anchored = true
+		return part
+	end
+
+	-- A wall across the step whose face stands `gap` studs behind the root's box.
+	local function wallBehind(gap: number): Part
+		return block(avatar.base * CFrame.new(0, 0, rootSize.Z / 2 + gap + 0.5), Vector3.new(20, 10, 1))
+	end
+
+	-- A 1-stud pillar behind the root's box, its near face `gap` studs back, `side` studs off the line.
+	local function pillarBehind(gap: number, side: number, yawDegrees: number?): Part
+		local frame = avatar.base * CFrame.new(side, 0, rootSize.Z / 2 + gap + 0.5)
+		if yawDegrees ~= nil then
+			-- Turned about its own axis; its corner then points at the body (half its diagonal out).
+			local corner = math.sqrt(0.5) - 0.5
+			frame = avatar.base
+				* CFrame.new(side, 0, rootSize.Z / 2 + gap + 0.5 + corner)
+				* CFrame.Angles(0, math.rad(yawDegrees), 0)
+		end
+		return block(frame, Vector3.new(1, 10, 1))
+	end
+
+	local function roomWith(world: { Instance }, distance: number): number
+		local cast = ContactPredictor.worldCast(avatar.model, engineCast(world))
+		return ContactPredictor.room(avatar.base, rootSize, AWAY, distance, cast)
+	end
+
+	it("keeps a gap from the world that is under one step", function()
+		expect(GAP > 0).toBe(true)
+		expect(GAP <= STAND_OFF.stepStuds + 1e-9).toBe(true)
+	end)
+
+	it("measures the room behind the root's box, its gap short of a wall, a pillar or a pillar's corner", function()
+		expect(roomWith({}, 1.5)).toBeCloseTo(1.5, 1e-9)
+		expect(roomWith({ wallBehind(3) }, 1.5)).toBeCloseTo(1.5, 1e-9)
+		expect(roomWith({ wallBehind(0.3) }, 1.5)).toBeCloseTo(0.3 - GAP, 0.003)
+		-- Against the wall already, or a hair into it: no room, never through it.
+		expect(roomWith({ wallBehind(0) }, 1.5)).toBe(0)
+		expect(roomWith({ wallBehind(-GAP / 2) }, 1.5)).toBe(0)
+		-- Never more than asked.
+		expect(roomWith({ wallBehind(0.3) }, 0.1)).toBeCloseTo(0.1, 1e-9)
+		-- A pillar on the line, one that only clips the box's edge, one beside it, one corner-on.
+		expect(roomWith({ pillarBehind(0.4, 0) }, 1.5)).toBeCloseTo(0.4 - GAP, 0.003)
+		local clip = rootSize.X / 2 + 0.5 - 0.1
+		expect(roomWith({ pillarBehind(0.4, clip) }, 1.5)).toBeCloseTo(0.4 - GAP, 0.003)
+		local beside = rootSize.X / 2 + 0.5 + 0.1
+		expect(roomWith({ pillarBehind(0.4, beside) }, 1.5)).toBeCloseTo(1.5, 1e-9)
+		expect(roomWith({ pillarBehind(0.5, 0, 45) }, 1.5)).toBeCloseTo(0.5 - GAP, 0.003)
+	end)
+
+	it("never meets a fighter: the body itself, an enemy, a stand-in or another player", function()
+		local scene = Instance.new("Folder")
+		local enemies = Instance.new("Folder")
+		enemies.Name = World.playground.folders.enemies
+		enemies.Parent = scene
+		local entities = Instance.new("Folder")
+		entities.Name = World.playground.folders.entities
+		entities.Parent = scene
+		local boar = place(setupOf("BoarSide"), 1.8)
+		local behind = avatar.base * CFrame.new(0, 0, rootSize.Z / 2 + 0.3 + 0.5)
+		-- An enemy and a stand-in right behind the body, and another player's character there too.
+		local enemy = Instance.new("Model")
+		block(behind, Vector3.new(4, 10, 1)).Parent = enemy
+		enemy.Parent = enemies
+		local dummy = Instance.new("Model")
+		block(behind, Vector3.new(4, 10, 1)).Parent = dummy
+		dummy.Parent = entities
+		local other = Instance.new("Model")
+		block(behind, Vector3.new(4, 10, 1)).Parent = other
+		local fighters = ContactPredictor.fighters(avatar.model, scene, {
+			{ Character = other },
+			{ Character = nil },
+			{ Character = avatar.model },
+		})
+		for _, expected in { avatar.model, enemies, entities, other } do
+			expect(table.find(fighters, expected)).never.toBeNil()
+		end
+		local count = 0
+		for _, item in fighters do
+			if item == avatar.model then
+				count += 1
+			end
+		end
+		expect(count).toBe(1)
+		local excludes: { { Instance } } = {}
+		local cast =
+			ContactPredictor.worldCast(avatar.model, engineCast({ enemy, dummy, other, boar }, excludes), fighters)
+		expect(ContactPredictor.room(avatar.base, rootSize, AWAY, 1.5, cast)).toBeCloseTo(1.5, 1e-9)
+		expect(excludes[1]).toBe(fighters)
+		-- Without that list they would stop it.
+		local bare = ContactPredictor.worldCast(avatar.model, engineCast({ enemy }), { avatar.model })
+		expect(ContactPredictor.room(avatar.base, rootSize, AWAY, 1.5, bare) < 0.3).toBe(true)
+		boar:Destroy()
+	end)
+
+	it("takes the longest step the world behind leaves, none against a wall it touches", function()
+		local open = standOffFor("OneHandedSword.RisingArc", "BoarSide", 1.8)
+		expect(open).never.toBeNil()
+		local need = open.distance
+		local clip = artClip("OneHandedSword.RisingArc")
+		local model = place(setupOf("BoarSide"), 1.8)
+		local from = holdTime(clip)
+		local function planWith(world: { Instance }): any
+			local cast = ContactPredictor.worldCast(avatar.model, engineCast(world), { avatar.model })
+			return ContactPredictor.standOff(avatar.model, clip, from, avatar.base, model, cast)
+		end
+		-- Room enough: the same step, and the plan carries the world for the frames that take it.
+		local far = planWith({ wallBehind(3) })
+		expect(far.distance).toBeCloseTo(need, 1e-9)
+		expect(typeof(far.room)).toBe("function")
+		expect(far.room(avatar.base, 0.2)).toBeCloseTo(0.2, 1e-9)
+		-- A wall nearer than the step: the longest whole step that keeps the gap.
+		for _, wall in { 0.3, 0.17, need - 0.01 } do
+			local plan = planWith({ wallBehind(wall) })
+			local fits = math.floor((wall - GAP) / STAND_OFF.stepStuds + 1e-6) * STAND_OFF.stepStuds
+			expect(plan).never.toBeNil()
+			expect(plan.distance).toBeCloseTo(fits, 1e-6)
+			expect(wall - plan.distance >= GAP - 0.003).toBe(true)
+			-- The frames that take it meet the same wall: the rest of the step is not there.
+			expect(plan.room(avatar.base + AWAY * plan.distance, need) <= 0.003 + STAND_OFF.stepStuds).toBe(true)
+			-- Still never a hit lost: a shorter step leaves every cut at least as deep as the full one.
+			for index, window in ClipSampler.hitWindows(clip) do
+				local function deepest(back: number): number
+					local best = math.huge
+					for k = 0, 48 do
+						local time = window.open + (window.close - window.open) * k / 48
+						best = math.min(best, gap(model, clip, rootAt(clip, from, time, AWAY, back), time))
+					end
+					return best
+				end
+				if index == 1 or deepest(0) <= PROMISE then
+					expect(deepest(plan.distance) <= PROMISE).toBe(true)
+				end
+			end
+		end
+		-- Backed against the wall (or a pillar on the line): no step at all.
+		expect(planWith({ wallBehind(0) })).toBeNil()
+		expect(planWith({ wallBehind(GAP / 2) })).toBeNil()
+		expect(planWith({ pillarBehind(0.02, 0) })).toBeNil()
+		-- A pillar beside the line leaves the step whole.
+		local beside = planWith({ pillarBehind(0.1, rootSize.X / 2 + 0.6) })
+		expect(beside.distance).toBeCloseTo(need, 1e-9)
+		model:Destroy()
+	end)
+end)
+
+describe("the Art stand-off steps back from the body, not from the weapon it holds (D-277)", function()
+	it("the Rising Arc's start pose that meets only the kobold's club takes no step", function()
+		local plan, clip, model, from = standOffFor("OneHandedSword.RisingArc", "Kobold", 3.5)
+		expect(plan).toBeNil()
+		-- The start pose is in the club, and clear of the body.
+		local window = ClipSampler.hitWindows(clip)[1]
+		local still = rootAt(clip, from, window.open, Vector3.zero, 0)
+		local held = Rigs[Enemies.byId(setupOf("Kobold").enemy).skin].trailParts
+		expect(gap(model, clip, still, window.open) < STAND_OFF.clearStuds).toBe(true)
+		expect(gap(model, clip, still, window.open, held) >= STAND_OFF.clearStuds).toBe(true)
+		model:Destroy()
 	end)
 end)

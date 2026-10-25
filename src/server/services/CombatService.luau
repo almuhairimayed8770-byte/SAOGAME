@@ -21,7 +21,11 @@
 	turned to the run's facing (D-113): the facing the request carried, which facingMatches already
 	held within deg(acos(1 - facingTolerance)) of the root, so a client that snapped its body toward a
 	target (D-112) sweeps there even while the replicated root is still turning. After the last window
-	the body is held in PostMotion (zero when the target was in Break), then freed. A requested Art
+	the body is held in PostMotion (zero when the target was in Break), then freed.
+	A fighter beside the swing (D-275: its root outside the aim assist's cone, combat.aim.
+	assistConeDegrees, around the run's facing, read where the body stood as the window opened) is
+	cut only where the drawn blade itself crosses its body (HitSweep's beside test, combat.
+	besideHitRadius), never by the hit sphere's padding around a blade that passed it by. A requested Art
 	or basic swing runs that timeline from its clientTime clamped into combat.lagAllowance and
 	floored at the moment the body was last free (runStartOf), so a lagged swing's damage windows
 	line up with what its client already showed without ever overlapping the lock before it.
@@ -51,6 +55,7 @@ local Weapons = require(Shared.data.weapons)
 local Net = require(Shared.net.Net)
 local Signal = require(Shared.util.Signal)
 local ClipSampler = require(Shared.choreo.ClipSampler)
+local BladeContact = require(Shared.choreo.BladeContact)
 local Pose = require(Shared.choreo.Pose)
 local DamageMath = require(script.Parent.Parent.combat.DamageMath)
 local HitSweep = require(script.Parent.Parent.combat.HitSweep)
@@ -84,8 +89,8 @@ export type ValidationContext = {
 
 -- The nearest enemy to a closed window (traceSink): flat root-to-root studs, the signed bearing
 -- from the run's facing (degrees, + = left), and the studs between the window's blade path and the
--- enemy's nearest part less combat.hitSphereRadius (0 or less: the blade reached it), nil when the
--- window solved no blade.
+-- enemy's nearest part (its body, not a weapon it holds) less the blade's reach (0 or less: it
+-- reached it), nil when the window solved no blade.
 export type TraceNearest = {
 	entityId: number,
 	name: string,
@@ -142,6 +147,8 @@ type ArtRun = {
 	lastSample: HitSweep.BladeSample?,
 	rootCredit: number, -- the window chain's lag credit left (HitSweep.jumped); full at each window
 	windowHits: { [number]: boolean },
+	aimOrigin: Vector3?, -- D-275: the root's position as the current window opened
+	besideIds: { [number]: boolean }, -- D-275: each fighter judged beside the current window or not
 	hitAny: boolean,
 	hitBreak: boolean, -- a target was in Break: zero post-motion
 	switchShown: boolean,
@@ -703,6 +710,31 @@ local function landHit(run: ArtRun, attacker: Record, hit: HitSweep.Hit, now: nu
 	end
 end
 
+-- D-275: whether the fighter `targetId` stands beside the current window's swing: its root outside
+-- the aim assist's cone (combat.aim.assistConeDegrees) around the run's facing, seen from where the
+-- body stood as the window opened. Judged once per window and kept, so a fighter the cut moves past
+-- does not change sides partway through it.
+local function besideSwing(run: ArtRun, targetId: number): boolean
+	local known = run.besideIds[targetId]
+	if known ~= nil then
+		return known
+	end
+	local origin = run.aimOrigin
+	local target = EntityService.get(targetId)
+	local targetRoot = if target ~= nil then target.model.PrimaryPart else nil
+	local beside = origin ~= nil
+		and targetRoot ~= nil
+		and BladeContact.beside(
+			origin,
+			run.facing,
+			targetRoot.CFrame.Position,
+			Combat.aim.assistConeDegrees,
+			Combat.aim.minFaceDistance
+		)
+	run.besideIds[targetId] = beside
+	return beside
+end
+
 -- Sweeps the blade over this frame's sample times, spending arc sub-samples from
 -- `frame.subdivisions` (what is left of this frame's combat.sweepMaxSubdivisions) and solving
 -- through `frame.chain` (read on the frame's first sweep). `clipTime` is the clip time the live
@@ -791,16 +823,17 @@ local function sweep(
 		table.insert(path, sample)
 	end
 	run.lastSample = samples[#samples]
+	if run.aimOrigin == nil then
+		-- The window's first sweep: where the body stands as it opens is where the swing aims from.
+		local firstRoot = samples[1].root
+		run.aimOrigin = if firstRoot ~= nil then firstRoot.Position else rootCFrame.Position
+	end
 	-- Follow the arc between the samples, not their chords. The root is not frozen during a window,
 	-- so a sub-sample between last frame's sample and this frame's first is solved from a root
 	-- interpolated between the two frames' roots (HitSweep.followArc): the body's own travel is
 	-- spread over the interval as it happened, instead of landing in one step no split can shrink.
-	local refined, added = HitSweep.followArc(
-		path,
-		HitSweep.solver(record.model, run.clip, trailStart, trailEnd, joints),
-		Combat.sweepMaxTipStep,
-		frame.subdivisions
-	)
+	local solve = HitSweep.solver(record.model, run.clip, trailStart, trailEnd, joints)
+	local refined, added = HitSweep.followArc(path, solve, Combat.sweepMaxTipStep, frame.subdivisions, run.clip)
 	frame.subdivisions -= added
 	if CombatService.traceSink ~= nil then
 		local kept = run.tracePath or {}
@@ -823,6 +856,11 @@ local function sweep(
 			return mayDamage(record, EntityService.get(targetId))
 		end,
 		alreadyHit = run.windowHits,
+		beside = function(targetId: number): boolean
+			return besideSwing(run, targetId)
+		end,
+		solve = solve, -- the beside test follows the drawn arc between the samples (D-275)
+		clip = run.clip,
 		cast = d.cast,
 		overlap = d.overlap,
 		continued = previous ~= nil,
@@ -863,7 +901,7 @@ local function traceOf(run: ArtRun, record: Record): TraceEvent
 		if path ~= nil and #path > 0 then
 			local closest = math.huge
 			for _, part in nearest.model:GetDescendants() do
-				if part:IsA("BasePart") and (part.CanQuery or part.CanCollide) then
+				if part:IsA("BasePart") and BladeContact.hurtbox(part) then
 					for _, sample in path do
 						local distance =
 							HitSweep.segmentBoxDistance(sample.start, sample.finish, part.CFrame, part.Size)
@@ -872,7 +910,10 @@ local function traceOf(run: ArtRun, record: Record): TraceEvent
 				end
 			end
 			if closest < math.huge then
-				clearance = closest - Combat.hitSphereRadius
+				-- Beside the swing only the blade itself cuts (D-275): the clearance is from its own
+				-- reach, combat.besideHitRadius, instead of the hit sphere's.
+				local reach = if besideSwing(run, nearest.id) then Combat.besideHitRadius else Combat.hitSphereRadius
+				clearance = closest - reach
 			end
 		end
 		nearestTrace = {
@@ -943,6 +984,8 @@ local function stepRun(session: Session, run: ArtRun, now: number)
 			run.lastSample = nil
 			run.rootCredit = HitSweep.fullRootCredit()
 			run.windowHits = {}
+			run.aimOrigin = nil
+			run.besideIds = {}
 		else
 			break
 		end
@@ -1008,6 +1051,8 @@ local function beginRun(
 		lastSample = nil,
 		rootCredit = HitSweep.fullRootCredit(),
 		windowHits = {},
+		aimOrigin = nil,
+		besideIds = {},
 		hitAny = false,
 		hitBreak = false,
 		switchShown = false,

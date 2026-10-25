@@ -233,6 +233,8 @@ describe("a blow's tell holds to its snap (F7)", function()
 	local ai = Harness.load("src/shared/data/ai")
 
 	it("the Kobold's Overhead stays lit through its strike and goes out as the axe falls", function()
+		-- No latency heard before it (D-289): the glint sits on the parry window itself.
+		Telegraphs.resetLatency()
 		local clock = 100
 		Engine.setClock(function(): number
 			return clock
@@ -260,6 +262,103 @@ describe("a blow's tell holds to its snap (F7)", function()
 		-- The glint opens with the parry window before the blow lands.
 		local window = 1.0 + 0.35 - combat.parryWindow
 		expect(math.abs((glinted :: number) - window) <= 1 / 60 + 1e-6).toBe(true)
+	end)
+end)
+
+-- D-289: the server judges a parry on when the press reaches it, the client's one-way latency
+-- after the press. The glint opens that much earlier (the least lateness of the last few tells
+-- heard, fx.luau telegraph.glintLeadSamples, capped by glintLeadMax), so a press at any glinting
+-- frame reaches the server inside the parry window. The server is unchanged.
+describe("the glint leads by the client's latency, so a press at it parries (D-289)", function()
+	local Engine = Harness.load("src/client/fx/Engine")
+	local ai = Harness.load("src/shared/data/ai")
+	local WIND_UP, STRIKE = 1.0, 0.35
+	local LANDS = WIND_UP + STRIKE
+	local STEP = 1 / 240
+
+	-- Hears `heard` earlier tells at those latenesses, then one blow heard `lateBy` late; returns
+	-- each glinting moment (seconds on the server's clock since its wind-up began).
+	local function glintOf(heard: { number }, lateBy: number): { number }
+		Telegraphs.resetLatency()
+		local clock = 0
+		Engine.setClock(function(): number
+			return clock
+		end)
+		for _, late in heard do
+			local earlier = kobold()
+			Telegraphs.show(earlier, "Normal", WIND_UP, Vector3.zero, Vector3.zAxis, nil, late, STRIKE)
+			Telegraphs.forget(earlier)
+		end
+		local model = kobold()
+		clock = lateBy
+		Telegraphs.show(model, "Normal", WIND_UP, Vector3.zero, Vector3.zAxis, nil, lateBy, STRIKE)
+		local fill = model:FindFirstChild("TelegraphFill") :: Highlight
+		local moments: { number } = {}
+		while Telegraphs.isShowing(model) and clock < 3 do
+			clock += STEP
+			Telegraphs.step()
+			if Telegraphs.isShowing(model) and near(fill.FillTransparency, ai.telegraph.glintFillTransparency) then
+				table.insert(moments, clock)
+			end
+		end
+		Telegraphs.forget(model)
+		Engine.setClock(nil)
+		return moments
+	end
+
+	-- True when a press at every glinting moment, reaching the server `up` later, parries.
+	local function allParry(moments: { number }, up: number): boolean
+		for _, at in moments do
+			local arrives = at + up
+			if arrives < LANDS - combat.parryWindow - 1e-9 or arrives > LANDS + 1e-9 then
+				return false
+			end
+		end
+		return true
+	end
+
+	it("a press at any glinting frame parries, from no latency to the cap", function()
+		local glintSpan = combat.parryWindow - ai.telegraph.snapLeadSeconds
+		for _, latency in { 0, 0.05, 0.067, 0.1, 0.15 } do
+			local moments = glintOf({ latency, latency, latency }, latency)
+			-- Still a whole glint to see (to a frame of the step), only earlier.
+			expect(#moments * STEP >= glintSpan - 2 * STEP).toBe(true)
+			expect(allParry(moments, latency)).toBe(true)
+		end
+	end)
+
+	it("leads by the least lateness heard, so a slower press still parries", function()
+		-- Jittered tells: the least of them is the path's own latency.
+		local moments = glintOf({ 0.12, 0.09, 0.1, 0.13, 0.08, 0.11 }, 0.1)
+		expect(math.abs(Telegraphs.glintLead() - 0.08)).toBeLessThan(1e-9)
+		expect(allParry(moments, 0.08)).toBe(true)
+		expect(allParry(moments, 0.12)).toBe(true)
+		-- Only the last few count: a path that got slower is learned again.
+		local samples = Harness.load("src/shared/data/fx").telegraph.glintLeadSamples
+		local heard: { number } = {}
+		for _ = 1, samples do
+			table.insert(heard, 0.02)
+		end
+		for _ = 1, samples do
+			table.insert(heard, 0.1)
+		end
+		expect(allParry(glintOf(heard, 0.1), 0.1)).toBe(true)
+		expect(math.abs(Telegraphs.glintLead() - 0.1)).toBeLessThan(1e-9)
+		-- A tell heard with no lateness (nil) teaches nothing; with none heard there is no lead.
+		local quiet = kobold()
+		Telegraphs.show(quiet, "Normal", WIND_UP, Vector3.zero, Vector3.zAxis, nil, nil, STRIKE)
+		Telegraphs.forget(quiet)
+		expect(math.abs(Telegraphs.glintLead() - 0.1)).toBeLessThan(1e-9)
+		Telegraphs.resetLatency()
+		expect(Telegraphs.glintLead()).toBe(0)
+	end)
+
+	it("never leads by more than the cap", function()
+		local cap = Harness.load("src/shared/data/fx").telegraph.glintLeadMax
+		local moments = glintOf({ 0.3, 0.3 }, 0.3)
+		expect(math.abs(Telegraphs.glintLead() - cap)).toBeLessThan(1e-9)
+		local opens = LANDS - combat.parryWindow - cap
+		expect(math.abs(moments[1] - opens) <= STEP + 1e-6).toBe(true)
 	end)
 end)
 

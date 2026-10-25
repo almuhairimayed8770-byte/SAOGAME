@@ -123,6 +123,10 @@ export type Handle = {
 	mask: { [string]: number }?, -- PlayOptions.mask (Additive only)
 	beat: Beat?, -- the server's beat it keeps (keepBeat), nil once past the mark
 	held: boolean, -- Mixer.hold: the clock stands still (a stopped clip fading out where it was)
+	-- The clock before the latest step moved it (the start time before the first step; a seek's
+	-- time after one): the clip time the frame before showed. A reader of this step's pose samples
+	-- the clip between the two (the trail ribbon's in-betweens, D-269).
+	lastTime: number,
 }
 
 -- jumped: a render stall's gap crossed it (the step, or this handle's part of it, was a jump).
@@ -271,6 +275,7 @@ function Mixer.play(self: any, clip: Types.ClipDef, opts: PlayOptions?): Handle
 		mask = options.mask,
 		beat = nil,
 		held = false,
+		lastTime = startTime,
 	}
 	table.insert(self._handles, handle)
 	return handle
@@ -545,17 +550,24 @@ end
 -- The rule one step follows, in pieces Mixer.step and Mixer.preview share, so a caller that reads
 -- the next step's blend ahead of it never copies (and drifts from) the step's own.
 
+-- True while a pause of `pause` seconds still owes a step of `dt` (D-228 amended): at least half
+-- of the step, give or take pauseEpsilon. A hold so counts the rendered frames nearest its length
+-- at any refresh rate (3 frames at 60 Hz are 7 at 144 and 12 at 240, never the 6 and 10 a whole
+-- last frame short), and a frame the hold owes only a sliver of is not frozen for it.
+local function owes(pause: number, dt: number): boolean
+	return pause > ChoreoData.pauseEpsilon and pause + ChoreoData.pauseEpsilon >= dt * 0.5
+end
+
 -- A step of `dt` with `pause` seconds of hit-stop left: the time the clocks (and envelopes and
 -- weights) of handles that keep the pause move by, whether the step is a render stall's jump, and
 -- whether the pause still holds. A hit-stop asked for during a stall that is over inside the gap
 -- holds nothing: the rest of the gap moves the clocks.
 local function clockStep(pause: number, dt: number): (number, boolean, boolean)
 	local jumped = dt > ChoreoData.stall.jumpSeconds
-	local paused = pause > ChoreoData.pauseEpsilon
-	if jumped and paused and pause < dt then
+	if jumped and pause > ChoreoData.pauseEpsilon and pause < dt then
 		return dt - pause, jumped, false
 	end
-	return dt, jumped, paused
+	return dt, jumped, owes(pause, dt)
 end
 
 -- One handle's part of a step: the seconds its envelope, weight and clock move by (a handle that
@@ -762,6 +774,8 @@ function Mixer.seek(_self: any, handle: Handle, clipTime: number): { FiredEvent 
 		handle.lastRoot = ClipSampler.rootMotionAt(clip, target)
 	end
 	handle.time = target
+	-- A seek is no step a frame shows: nothing lies between it and the clock it left.
+	handle.lastTime = target
 	return events
 end
 
@@ -821,12 +835,14 @@ function Mixer.step(self: any, dt: number): StepResult
 	local clockDt, jumped, paused = clockStep(self._pause, dt)
 	if paused then
 		self._pause = self._pause - dt
-	elseif clockDt < dt then
-		-- A hit-stop asked for during a render stall is over inside the gap: the rest moves the clocks.
-		self._pause = 0
-	end
-	-- Snap the float residue of the last frame to zero so pauseRemaining agrees with the clocks.
-	if self._pause <= ChoreoData.pauseEpsilon then
+		-- What remains under half a step of this length is no frame of its own (D-228 amended): the
+		-- hold ends here, so pauseRemaining agrees with the frames it froze.
+		if not owes(self._pause, dt) then
+			self._pause = 0
+		end
+	else
+		-- A sliver no step is owed for, or a hit-stop asked for during a render stall that is over
+		-- inside the gap (the rest of the gap moves the clocks): the hold is over.
 		self._pause = 0
 	end
 	local timeScale = self._timeScale
@@ -849,6 +865,7 @@ function Mixer.step(self: any, dt: number): StepResult
 		local frozen = paused and not handle.ignorePause
 		local handleDt, handleJumped = handleStep(handle, dt, clockDt, jumped)
 		handle.sinceStep = 0
+		handle.lastTime = handle.time
 		local beat = handle.beat
 		if beat ~= nil and (handle.stopping or handle.done or handle.time >= beat.untilTime) then
 			-- Past the mark (or stopped): the beat is the strike's own from here.

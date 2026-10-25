@@ -1115,6 +1115,8 @@ describe("data validators on the real tables", function()
 			"clips",
 			"content",
 			"world",
+			"camera",
+			"dev",
 		}
 	do
 		it(name .. " is clean", function()
@@ -2015,6 +2017,62 @@ describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", fun
 		expect(runAi(function() end)).toEqual({})
 	end)
 
+	it("a rush's dead stop leads by at most a tick, and a walk's snout slack stays a hair (D-278, D-279)", function()
+		local function withMovement(field: string, value: any): { string }
+			return runAi(function(copy)
+				copy.movement = table.clone(copy.movement)
+				copy.movement[field] = value
+			end)
+		end
+		expect(hasProblem(withMovement("haltLeadSeconds", 0), "movement.haltLeadSeconds must be positive")).toBe(true)
+		expect(hasProblem(withMovement("haltLeadSeconds", nil), "movement.haltLeadSeconds must be a number")).toBe(true)
+		expect(
+			hasProblem(
+				withMovement("haltLeadSeconds", 0.06),
+				"movement.haltLeadSeconds 0.06 must be at most one AI tick (0.05 s)"
+			)
+		).toBe(true)
+		expect(hasProblem(withMovement("snoutSlackStuds", -0.1), "movement.snoutSlackStuds must be zero or positive")).toBe(
+			true
+		)
+		expect(
+			hasProblem(
+				withMovement("snoutSlackStuds", 0.15),
+				"movement.snoutSlackStuds 0.15 must be below rushWorld.clipMarginStuds (0.15)"
+			)
+		).toBe(true)
+		expect(withMovement("snoutSlackStuds", 0)).toEqual({})
+	end)
+
+	it("a blocked step is told sooner than the jam lag, by fractions that tell running from blocked (D-280)", function()
+		local function withCharger(field: string, value: any): { string }
+			return runAi(function(copy)
+				copy.archetypes.Charger[field] = value
+			end)
+		end
+		expect(hasProblem(withCharger("blockedSeconds", 0), "archetypes.Charger.blockedSeconds must be positive")).toBe(
+			true
+		)
+		expect(
+			hasProblem(
+				withCharger("blockedSeconds", 0.2),
+				"archetypes.Charger.blockedSeconds 0.2 must be shorter than jamLagStuds / chargeSpeed"
+			)
+		).toBe(true)
+		expect(
+			hasProblem(
+				withCharger("blockedFraction", 0.5),
+				"archetypes.Charger.blockedFraction must be below runningFraction"
+			)
+		).toBe(true)
+		expect(hasProblem(withCharger("runningFraction", 1.2), "archetypes.Charger.runningFraction must be at most 1")).toBe(
+			true
+		)
+		expect(hasProblem(withCharger("runningFraction", nil), "archetypes.Charger.runningFraction must be a number")).toBe(
+			true
+		)
+	end)
+
 	it("a Charger needs a positive jamLagStuds", function()
 		expect(hasProblem(
 			runAi(function(copy)
@@ -2081,29 +2139,41 @@ describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", fun
 		copy.collision.apart = kept
 	end
 
-	it("an enemy's blocker meets players and nothing else, and stands in for the root (D-198)", function()
-		local groups = Harness.load("src/shared/data/ai").collision
-		for _, other in { "Default", groups.enemies, groups.rushing, groups.blockers } do
+	it(
+		"an enemy's blocker meets players, enemies and other blockers, never the world or a rush (D-198, D-281)",
+		function()
+			local groups = Harness.load("src/shared/data/ai").collision
+			for _, other in { "Default", groups.rushing } do
+				expect(hasProblem(
+					runAi(function(copy)
+						without(copy, groups.blockers, other)
+					end),
+					("collision.apart must keep the blockers group from %s"):format(other)
+				)).toBe(true)
+			end
+			-- Enemies never stand inside each other: a solid enemy's whole footprint meets another's.
+			for _, key in { "enemies", "blockers" } do
+				expect(hasProblem(
+					runAi(function(copy)
+						table.insert(copy.collision.apart, { groups.blockers, groups[key] })
+					end),
+					("collision.apart must not keep the blockers group from the %s group"):format(key)
+				)).toBe(true)
+			end
 			expect(hasProblem(
 				runAi(function(copy)
-					without(copy, groups.blockers, other)
+					table.insert(copy.collision.apart, { groups.players, groups.blockers })
 				end),
-				("collision.apart must keep the blockers group from %s"):format(other)
+				"collision.apart must not keep the blockers group from the players group"
+			)).toBe(true)
+			expect(hasProblem(
+				runAi(function(copy)
+					without(copy, groups.enemies, groups.players)
+				end),
+				"collision.apart must keep the enemies group from the players group"
 			)).toBe(true)
 		end
-		expect(hasProblem(
-			runAi(function(copy)
-				table.insert(copy.collision.apart, { groups.players, groups.blockers })
-			end),
-			"collision.apart must not keep the blockers group from the players group"
-		)).toBe(true)
-		expect(hasProblem(
-			runAi(function(copy)
-				without(copy, groups.enemies, groups.players)
-			end),
-			"collision.apart must keep the enemies group from the players group"
-		)).toBe(true)
-	end)
+	)
 
 	it("the blocker reaches above every enemy rig's root (D-198)", function()
 		expect(hasProblem(
@@ -2249,5 +2319,415 @@ describe("playground validator: spawn spacing (D-170)", function()
 			copy.spawnSpacing.widenings = 0
 		end)
 		expect(hasProblem(problems, "playground.spawnSpacing: the widest disc (6 studs) leaves no room")).toBe(true)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- The camera lock's close-fight keys, the dev capture's shots and the shatter balance: the rules
+-- tests/client/CameraFraming, tests/data/devCapture and tests/data/sfx check, in the validators
+-- ------------------------------------------------------------------------------------------
+
+describe("camera, dev capture and sfx shatter rules", function()
+	local function deepCopy(value: any): any
+		if typeof(value) ~= "table" then
+			return value
+		end
+		local copy = {}
+		for key, element in value do
+			copy[key] = deepCopy(element)
+		end
+		return setmetatable(copy, getmetatable(value))
+	end
+
+	-- Runs a validator with one data module replaced by a mutated copy of the real one: a deep copy,
+	-- or with `only`, a shallow one with just that row deep copied (a validator that checks a row
+	-- by identity against another module's).
+	local function runWith(validator: string, dataPath: string, mutate: ((any) -> ())?, only: string?): { string }
+		local real = Harness.load(dataPath)
+		local copy
+		if only ~= nil then
+			copy = table.clone(real)
+			copy[only] = deepCopy(real[only])
+		else
+			copy = deepCopy(real)
+		end
+		if mutate ~= nil then
+			mutate(copy)
+		end
+		return loadTool("tools/validators/" .. validator)({
+			load = function(path: string): any
+				if path == dataPath then
+					return copy
+				end
+				return Harness.load(path)
+			end,
+			listFiles = Harness.listFiles,
+			readFile = Harness.readFile,
+			repoRoot = root,
+		})
+	end
+
+	local function camera(mutate: ((any) -> ())?): { string }
+		return runWith("camera", "src/shared/data/camera", mutate, "lock")
+	end
+	local function dev(mutate: ((any) -> ())?): { string }
+		return runWith("dev", "src/shared/data/dev", mutate)
+	end
+	local function sfx(mutate: ((any) -> ())?): { string }
+		return runWith("sfx", "src/shared/data/sfx", mutate)
+	end
+
+	it("each is clean on a copy of the real table", function()
+		expect(camera()).toEqual({})
+		expect(dev()).toEqual({})
+		expect(sfx()).toEqual({})
+	end)
+
+	it("camera: the close shot opens from closeGap to openGap, both positive", function()
+		expect(hasProblem(
+			camera(function(copy)
+				copy.lock.closeGap = copy.lock.openGap
+			end),
+			"lock.closeGap"
+		)).toBe(true)
+		expect(hasProblem(
+			camera(function(copy)
+				copy.lock.closeGap = 0
+			end),
+			"lock.closeGap"
+		)).toBe(true)
+	end)
+
+	it("camera: the close swing is inside a quarter turn, the height and the turn cap positive", function()
+		for _, bad in { 0, 95 } do
+			expect(hasProblem(
+				camera(function(copy)
+					copy.lock.closeSwingDegrees = bad
+				end),
+				"lock.closeSwingDegrees"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			camera(function(copy)
+				copy.lock.closeHeight = 0
+			end),
+			"lock.closeHeight"
+		)).toBe(true)
+		expect(hasProblem(
+			camera(function(copy)
+				copy.lock.maxTurnDegreesPerSecond = 0
+			end),
+			"lock.maxTurnDegreesPerSecond"
+		)).toBe(true)
+	end)
+
+	it("camera: the aim depth is a fraction in (0, 1], and the footprint is RigBuilder's blocker", function()
+		for _, bad in { 0, 1.2 } do
+			expect(hasProblem(
+				camera(function(copy)
+					copy.lock.aimDepthFraction = bad
+				end),
+				"lock.aimDepthFraction"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			camera(function(copy)
+				copy.lock.footprintPart = "HumanoidRootPart"
+			end),
+			"lock.footprintPart"
+		)).toBe(true)
+	end)
+
+	it("dev: a shot names its staging, a camera side, prompts and a perform list", function()
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.shots[1].cameraSide = 0
+			end),
+			"cameraSide"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.shots[1].prompts = {}
+			end),
+			".prompts must list at least one beat"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.shots[1].stage.enemies = {}
+			end),
+			"must stage at least one enemy"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.shots[1].camera = "Nowhere"
+			end),
+			"'Nowhere' must be Lock or a capture.cameras view"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.shots[1].stage.enemies[1].enemy = "NoSuchEnemy"
+			end),
+			"'NoSuchEnemy', which is not an enemy the game has"
+		)).toBe(true)
+	end)
+
+	it("dev: the lock camera only on a shot that locks on", function()
+		expect(hasProblem(
+			dev(function(copy)
+				for _, shot in copy.capture.shots do
+					if shot.camera == "Lock" then
+						shot.stage.lock = false
+					end
+				end
+			end),
+			"takes the Lock camera on a shot that does not lock on"
+		)).toBe(true)
+	end)
+
+	it("dev: prompt beats start at 0, run in order and show inside the take", function()
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.shots[1].prompts[1].at = 1
+			end),
+			"must be 0: the first prompt shows as the take starts"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				local prompts = copy.capture.shots[1].prompts
+				prompts[#prompts].at = copy.capture.shots[1].seconds
+			end),
+			"must show inside the take"
+		)).toBe(true)
+	end)
+
+	it("dev: a perform press is a real action, timed by one of a moment and a clip, inside the take", function()
+		local function firstPress(copy: any): any
+			for _, shot in copy.capture.shots do
+				if #shot.perform > 0 then
+					return shot.perform[1]
+				end
+			end
+			error("no perform press in dev.luau")
+		end
+		expect(hasProblem(
+			dev(function(copy)
+				firstPress(copy).action = "Fly"
+			end),
+			"'Fly' is not an input.luau action"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				local press = firstPress(copy)
+				press.onClip = "enemy/Kobold/Overhead"
+				press.lead = 0
+				press.at = press.at or 1
+			end),
+			"must be timed by exactly one of `at` and `onClip`"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				firstPress(copy).hold = 0
+			end),
+			".hold must be a positive number of seconds"
+		)).toBe(true)
+	end)
+
+	it("dev: an Art press is held past the start pose and activation, short of the cancel time", function()
+		local function artPress(copy: any): any
+			for _, shot in copy.capture.shots do
+				for _, press in shot.perform do
+					if press.action == "Art" or press.action:match("^ArtSlot") ~= nil then
+						return press
+					end
+				end
+			end
+			error("no Art press in dev.luau")
+		end
+		local combatData = Harness.load("src/shared/data/combat")
+		expect(hasProblem(
+			dev(function(copy)
+				artPress(copy).hold = combatData.startPoseTime + combatData.activationHold
+			end),
+			"an Art press is held past the start pose and activation"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				artPress(copy).hold = combatData.activationCancelTime
+			end),
+			"an Art press is held past the start pose and activation"
+		)).toBe(true)
+	end)
+
+	it("dev: a clip-timed press names a clip with a hit window and leads it inside the parry window", function()
+		local function clipPress(copy: any): any
+			for _, shot in copy.capture.shots do
+				for _, press in shot.perform do
+					if press.onClip ~= nil then
+						return press
+					end
+				end
+			end
+			error("no clip-timed press in dev.luau")
+		end
+		local combatData = Harness.load("src/shared/data/combat")
+		expect(hasProblem(
+			dev(function(copy)
+				clipPress(copy).lead = combatData.parryWindow
+			end),
+			"must be 0 or more and under combat.parryWindow"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				clipPress(copy).lead = nil
+			end),
+			".lead must say how far ahead of the hit window"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				clipPress(copy).onClip = "player/OneHandedSword/Idle"
+			end),
+			"'player/OneHandedSword/Idle' must name a clip with a HitWindowOpen event"
+		)).toBe(true)
+	end)
+
+	it("dev: the hotkeys are distinct, off the game's bindings and never a function key", function()
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.hotkeys.markDone = copy.capture.hotkeys.startCountdown
+			end),
+			"are both"
+		)).toBe(true)
+		local input = Harness.load("src/shared/data/input")
+		local boundKey: string? = nil
+		for _, keys in input.keyboard do
+			boundKey = boundKey or keys[1]
+		end
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.hotkeys.markDone = boundKey
+			end),
+			"is one of the game's own keyboard bindings"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.hotkeys.markDone = "F7"
+			end),
+			"must not be a function key"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.hotkeys.autoPerform = nil
+			end),
+			"capture.hotkeys.autoPerform is missing"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.perform.defaultOn = true
+			end),
+			"perform.defaultOn"
+		)).toBe(true)
+	end)
+
+	it("dev: field enemies move past the lock's range, and the stage's numbers are sane", function()
+		local cameraData = Harness.load("src/shared/data/camera")
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.stage.awayStuds = cameraData.lock.range
+			end),
+			"must be past camera.luau lock.range"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.stage.requestsPerSecond = 0
+			end),
+			"capture.stage.requestsPerSecond must be a positive number"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.stage.holdWaitSeconds = copy.capture.stageTimeoutSeconds
+			end),
+			"capture.stage.holdWaitSeconds must be under capture.stageTimeoutSeconds"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.stage.ledge.standInset = copy.capture.stage.ledge.size[3]
+			end),
+			"capture.stage.ledge.standInset must be inside the ledge's top"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.ring.thickness = copy.capture.stage.standHeightTolerance
+			end),
+			"capture.walk.ring.thickness must be positive and under"
+		)).toBe(true)
+	end)
+
+	it("dev: the stage's spots stand on the field, its enemies off the ledge, the ledge off the spawns", function()
+		local playground = Harness.load("src/shared/data/playground")
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.stage.area.position = { playground.fieldRadius, 0, 0 }
+			end),
+			"capture.stage.area spot must stand"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.stage.ledge.position = table.clone(playground.spawns[1].position)
+			end),
+			"stands on playground spawn"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				-- The open shot's enemy straight ahead, on the ledge's own top.
+				for _, shot in copy.capture.shots do
+					if shot.stage.open then
+						shot.stage.enemies[1].side = 0
+						shot.stage.enemies[1].distance = 1
+					end
+				end
+			end),
+			"stands on the ledge"
+		)).toBe(true)
+	end)
+
+	it("sfx: the shatter balance names glass and bass that resolve, apart, and a positive gap", function()
+		expect(hasProblem(
+			sfx(function(copy)
+				copy.shatterBalance.glassGapDb = 0
+			end),
+			"shatterBalance.glassGapDb"
+		)).toBe(true)
+		expect(hasProblem(
+			sfx(function(copy)
+				table.insert(copy.shatterBalance.glass, "shatter.NoSuchTake")
+			end),
+			"'shatter.NoSuchTake' is not a sfx.luau 'family.Name'"
+		)).toBe(true)
+		expect(hasProblem(
+			sfx(function(copy)
+				table.insert(copy.shatterBalance.bass, copy.shatterBalance.glass[1])
+			end),
+			"both glass and bass"
+		)).toBe(true)
+	end)
+
+	it("sfx: every shatter cue doubles its glass, and its glass leads its bass by the gap", function()
+		expect(hasProblem(
+			sfx(function(copy)
+				local cue = copy.cues[copy.shatterCues.normal]
+				for index = #cue, 1, -1 do
+					if cue[index].name == copy.shatterBalance.glass[2] then
+						table.remove(cue, index)
+					end
+				end
+			end),
+			"two glass layers"
+		)).toBe(true)
+		expect(hasProblem(
+			sfx(function(copy)
+				copy.shatterBalance.glassGapDb = 40
+			end),
+			"over its loudest bass layer, under shatterBalance.glassGapDb"
+		)).toBe(true)
 	end)
 end)

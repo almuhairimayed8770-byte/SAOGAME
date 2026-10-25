@@ -6,7 +6,9 @@
 	D-149): the follow's leash (positive, and never clipping a hit's nudge), the two-shot's height,
 	clearances, widest swing (inside a quarter turn, where the split between the fighters grows
 	with the swing), side hysteresis, solve steps and blend lag, and the probe's see-through
-	threshold and pass count. The punch rows (Final, Kill):
+	threshold and pass count. The close fight (F3): closeGap under openGap, both positive, the close
+	swing inside a quarter turn, a positive close height and turn cap, the aim depth a fraction in
+	(0, 1], and footprintPart RigBuilder's blocker name. The punch rows (Final, Kill):
 	a few degrees, an attack inside the tier's hit-stop, a spring that swings back past rest by at
 	most a quarter and is settled when it ends, eased in (never linear), short; the kill pushes in
 	at least as far as the final hit. The render-stall numbers (stall): the longest piece a frame
@@ -121,6 +123,32 @@ return function(ctx: any): { string }
 	)
 	check(count(lock.solveSteps), "lock.solveSteps must be a whole number of bisection steps, at least 1")
 	check(positive(lock.blendLag), "lock.blendLag must be a positive number of seconds")
+	-- Close fights (F3): the shot is fully close at closeGap, not at all from openGap.
+	check(
+		positive(lock.closeGap) and positive(lock.openGap) and lock.closeGap < lock.openGap,
+		"lock.closeGap must be positive and below lock.openGap: the close shot eases out between them"
+	)
+	check(
+		positive(lock.closeSwingDegrees) and lock.closeSwingDegrees <= 90,
+		"lock.closeSwingDegrees must be in (0, 90]: a three-quarter view, never past a quarter turn"
+	)
+	check(positive(lock.closeHeight), "lock.closeHeight must be a positive number of studs above the player's root")
+	check(
+		positive(lock.maxTurnDegreesPerSecond),
+		"lock.maxTurnDegreesPerSecond must be a positive cap on the bearing's turn (degrees per second)"
+	)
+	check(
+		positive(lock.aimDepthFraction) and lock.aimDepthFraction <= 1,
+		"lock.aimDepthFraction must be in (0, 1]: the aim never comes nearer the lens than that much of the player's depth"
+	)
+	local RigBuilder = ctx.load("src/server/world/RigBuilder")
+	check(
+		lock.footprintPart == RigBuilder.BLOCKER_NAME,
+		("lock.footprintPart '%s' must be RigBuilder's blocker name '%s': the close gap is measured to the body's footprint"):format(
+			tostring(lock.footprintPart),
+			tostring(RigBuilder.BLOCKER_NAME)
+		)
+	)
 	local leash: any = if typeof(camera.follow.leash) == "table" then camera.follow.leash else nil
 	check(leash ~= nil, "follow.leash is missing (closer and further)")
 	if leash ~= nil then
