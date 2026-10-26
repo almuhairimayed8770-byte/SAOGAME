@@ -2,7 +2,8 @@
 --[[
 	Impact frames (the reel style on top of section 10 beat 4): on the biggest hits the picture
 	turns for a few frames into flat silhouettes of the fighters on a solid field, the anime's
-	impact frames. Every number ImpactFrames, ImpactSequence and FlashBudget use lives here.
+	impact frames. Every number ImpactFrames, ImpactSequence and FlashBudget use lives here, and
+	the count of frames a hit-stop freezes the rig for (hold, read by the Mixer's pause).
 
 	Units: frames are 60 fps frames and convert through combat.hitStopFrameSeconds; seconds;
 	screen fractions; degrees; relative luminance (0 black .. 1 white). Colors are palette tokens,
@@ -61,6 +62,22 @@ local Impact = {
 	timing = {
 		paceSamples = 5,
 		maxPaceSeconds = 0.1,
+	},
+
+	-- How many frames a hit-stop freezes the rig (D-327, Mixer's pause). The count is chosen once,
+	-- when the hold starts, from the rig's pace: the mean of its last paceFrames steps, leaving out
+	-- a step longer than hitchFactor times their median (a hitch is not the pace). The hold freezes
+	-- the whole number of frames nearest its length; a length within tieFrames of a half frame takes
+	-- the longer count, so 1.5 frames at 30 fps hold 2 under any jitter, while 60 fps keeps exactly
+	-- 3, 6 and 10 and 144 fps holds 7, 14 and 24. A rig with fewer than paceFrames steps behind it
+	-- (just built) ends its hold on the frame nearest the length instead (D-271).
+	hold = {
+		paceFrames = 32,
+		-- Over 2 (D-341): a rig behind a vsync display shows frames of one and two refreshes (45
+		-- fps on 60 Hz is 1, 1, 2 again and again), and those two-refresh frames are its pace. At
+		-- 1.5 they were left out as hitches: a Final froze 133 ms and a Kill up to 233 ms at 45 fps.
+		hitchFactor = 2.5,
+		tieFrames = 0.08,
 	},
 
 	looks = {

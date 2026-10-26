@@ -108,7 +108,9 @@ local function clipOf(name: string): any
 	return clip
 end
 
-type Window = { key: number, hold: number?, holdFrame: number?, keyFrame: number? }
+type Window = { key: number, hold: number?, holdFrame: number?, keyFrame: number?, sent: boolean? }
+-- A word the server sends, heard `at`: a HitConfirmed, or (death) an EntityDied.
+type Word = { at: number, payload: any, death: boolean? }
 
 -- Plays one move through the real path with the server's word `latency` after the server counts
 -- each hit; `extraWords` adds words for windows the blade never touches (sent at their open).
@@ -264,7 +266,7 @@ local function play(
 	for index in windows do
 		result[index] = { key = ContactPredictor.strikeKey(clip, windows[index]) }
 	end
-	local words: { { at: number, payload: any } } = {}
+	local words: { Word } = {}
 	local sent: { [number]: boolean } = {}
 	local held = 0
 	local function send(index: number, at: number, killed: boolean?)
@@ -317,7 +319,7 @@ local function play(
 		local index = 1
 		while index <= #words do
 			if clock >= words[index].at - 1e-9 then
-				local word = table.remove(words, index)
+				local word = table.remove(words, index) :: Word
 				if word.death then
 					opts.deathCame = opts.deathCame or frame
 					records[5].state = "Dead"

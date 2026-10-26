@@ -78,12 +78,12 @@ export type PerformStep = {
 -- - `at`: it goes down `at` seconds into the take;
 -- - `onClip`: a reaction, `lead` seconds before the HitWindowOpen of the clip `onClip` as the
 --   client draws it on staged enemy `enemy` (stage.enemies index, 1 when nil), a Guard the
---   client's latency lead earlier still (Telegraphs.glintLead, D-289; D-CI2): the first play only, or each
+--   client's latency lead earlier still (Telegraphs.glintLead, D-289; D-319): the first play only, or each
 --   one when `repeats`. Every later event of the play heard moves the moment with it (the client
 --   holds an attack's clip through its attacker's hit-stop). With `lock` the lock goes to that
 --   enemy when its clip is heard (a guard must face its attacker). Its `chain` steps follow it; a
 --   reaction heard drops the steps left of the one before it. Nothing of it, its chain included,
---   goes down past `to` seconds into the take (D-CI3), so what it launches lands before the cut;
+--   goes down past `to` seconds into the take (D-320), so what it launches lands before the cut;
 -- - `every`: a standing rule, pressed every `every` seconds from `from` to `to` while no
 --   reaction waits or chain runs: a BasicAttack while the lock's target stands within `within`
 --   studs (flat; the attack in between), a LockOn on staged enemy `enemy` while the lock is off.
@@ -225,6 +225,38 @@ local Dev = {
 		settleSeconds = 1,
 		-- Studs: a position past this on any axis is refused as a typo, not a place in the world.
 		maxCoordinate = 10000,
+	},
+
+	-- DevCombat's Studio test hooks (D-333), so a Studio check needs no hand-built scene: "enemy"
+	-- places a living enemy, "walk" walks one to a point at its own pace, "charge" makes a Charger
+	-- rush at a point (EnemyService.place, walk and charge: a server-owned body, no anti-cheat
+	-- involved), "part" and "clearparts" make and remove temporary anchored parts (a wall, a 35 to
+	-- 45 degree slope, a stair run). Every point is a floor point (an enemy's root goes its rig's
+	-- root height above it, as a spawn's does), each axis within place.maxCoordinate.
+	-- tools/validators/dev.luau ties each number to the game numbers it waits on.
+	hooks = {
+		-- "walk" has arrived when the root stands this close to the point (flat studs): under ai.luau
+		-- leash.homeRadius, so where it stops is its home and its leash never walks it back.
+		arriveStuds = 1,
+		-- A longer walk is refused; one not there after walkTimeoutSeconds ends where the body
+		-- stands. The timeout gives the slowest walking enemy twice its straight walk.
+		maxWalkStuds = 60,
+		walkTimeoutSeconds = 30,
+		-- "charge" waits at most this long for the rush to be over: past every Charger rush's
+		-- wind-up (with the hit-stop pauses it may take) and run.
+		chargeTimeoutSeconds = 3,
+		-- "part": the folder under Workspace the parts live in and how many it holds at once (a stair
+		-- run of 16 steps, a slope and their walls), each side's least and most studs, how late
+		-- `after` may make one (a part dropped into a rush's path: at most a charge's wait), how
+		-- long a given name may be, and how the parts look.
+		folderName = "SkyspireDevParts",
+		maxParts = 32,
+		minPartStuds = 0.2,
+		maxPartStuds = 512,
+		maxAfterSeconds = 3,
+		maxNameLength = 40,
+		partColorToken = "PlaceholderSteel",
+		partMaterial = "Slate",
 	},
 
 	-- tools/pose-server.luau (Lune) and the PoseEditor plugin's HttpService calls.
@@ -587,6 +619,18 @@ local Dev = {
 			backgroundToken = "OutlineInk",
 			backgroundTransparency = 0.35,
 		},
+		-- The render-frame tick (dev only, D-336), shown with the counter: beside f, r counts every
+		-- RenderStepped since the take started, never paused, and a size-pixel square margin pixels
+		-- in from the screen's bottom-right corner swaps between its two colors every rendered
+		-- frame, so a recording shows each frame the engine drew and any the recorder dropped or
+		-- doubled. The two colors differ in hue, their relative luminance within maxLuminanceStep:
+		-- a swap a recording tells apart, never a flash.
+		frameTick = {
+			size = 12,
+			margin = 4,
+			tokens = { "SystemCyan", "DigitYellow" },
+			maxLuminanceStep = 0.05,
+		},
 		-- The move and its moment (the shot's prompts), just above the counter while a take runs.
 		prompt = {
 			height = 34,
@@ -666,7 +710,8 @@ local Dev = {
 		-- control script's own Move at Input, before the character controller reads MoveDirection
 		-- at choreo.luau renderOrder.character), so the controller, Locomotion and the two-step stop
 		-- see the same input a held key gives. The walk holds input.luau's sprintAction through the
-		-- input path (as the key does), so it runs at the sprint and its stop is the Skid's: above
+		-- input path (as the key does, as the panel's own source: D-338, so the player's Shift
+		-- let-go never lets go of it), so it runs at the sprint and its stop is the Skid's: above
 		-- choreo locomotion.skidSpeedThreshold the two-step stop (D-059) carries nothing, and the
 		-- body stops where the walk lets go. It steers to each route point until it is within
 		-- waypointStuds; on the last leg (the approach along the spot's facing) it follows the
@@ -804,11 +849,11 @@ local Dev = {
 						enemy = 1,
 						repeats = true,
 						lock = true,
-						-- As parry-spark's: the latency lead comes on top (D-CI2).
+						-- As parry-spark's: the latency lead comes on top (D-319).
 						lead = 0.04,
 						hold = 0.3,
 						-- The fifth parry still comes; its Art (down at about 19.2 s, launched about
-						-- 19.7 s) would land after the 20 s cut, where its number is never seen (D-CI3).
+						-- 19.7 s) would land after the 20 s cut, where its number is never seen (D-320).
 						to = 19,
 						chain = {
 							{
@@ -827,7 +872,7 @@ local Dev = {
 						lead = 0.3,
 						hold = 0.05,
 						chain = {
-							{ action = "LockOn", enemy = 2, delay = 0.6, hold = 0.05 },
+							{ action = "LockOn", enemy = 2, delay = 0.6, hold = 0.05 } :: PerformStep,
 							{
 								action = "Move",
 								stick = { 0, 1 },
@@ -978,7 +1023,7 @@ local Dev = {
 				},
 				-- The guard leaves `lead` before the hit window and the latency lead earlier still
 				-- (Telegraphs.glintLead, D-289): 0.04 parries at 0 to 100 ms on Studio's link and a
-				-- live one with at least 18 ms to spare (tests/client/ParryGlint.spec.luau, D-CI2).
+				-- live one with at least 18 ms to spare (tests/client/ParryGlint.spec.luau, D-319).
 				perform = {
 					{ action = "Guard", onClip = "enemy/Kobold/Overhead", lead = 0.04, hold = 0.4 },
 				},

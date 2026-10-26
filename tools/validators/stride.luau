@@ -11,7 +11,8 @@
 	velocity off the stick from one along it (0 < degrees < 90), a settle that is no wait at all or
 	under a second, a smoothing time above 0, and a speed match tighter than idleSpeedThreshold at
 	the slowest capture step (dev.luau timeScale.steps), so a velocity that is not the speed's
-	reading is never taken for it.
+	reading is never taken for it. stride.heldRiseSeconds, the time the walks take to carry a held
+	move alone (LocomotionState.heldShare, D-292), is a positive number of seconds.
 	tests/choreo/Stride.spec.luau re-measures the ground speeds and touchdowns from the clips.
 ]]
 
@@ -35,6 +36,13 @@ return function(ctx: any): { string }
 
 	check(stride.rateFloor > 0 and stride.rateFloor < 1, "rateFloor must sit between 0 and a clip's own rate 1")
 	check(stride.rateCeiling > 1, "rateCeiling must be above a clip's own rate 1")
+	local heldRise = stride.heldRiseSeconds
+	check(
+		typeof(heldRise) == "number" and heldRise > 0 and heldRise < math.huge,
+		("heldRiseSeconds (%s) must be a positive number of seconds: the walks take a held move over across it, never in one frame (D-292)"):format(
+			tostring(heldRise)
+		)
+	)
 	local handOver = locomotion.stopHandOverCycles
 	check(
 		typeof(handOver) == "number" and handOver > 0 and handOver < 0.5,

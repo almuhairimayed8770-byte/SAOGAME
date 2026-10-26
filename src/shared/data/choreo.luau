@@ -177,12 +177,27 @@ local Choreo = {
 			-- at one phase, and pacing takes up most but not all of it (measured worst: 0.28).
 			-- Under a third of the foot's length: the foot pivots, it never skates.
 			transientBar = 0.3,
+			-- On the engine's own steps (60 Hz rendered frames, the root moved in whole 1/240 s
+			-- physics steps; item 282, D-334): a foot is flat while its centre is within flatBand
+			-- of its height standing, and while flat it moves no more than frameBar between two
+			-- rendered frames (a SineInOut key slows a limb at both ends, so a planted foot weaves
+			-- about its line by a tenth of the ground between keys) and no more than slideBar over
+			-- the whole time it is flat. A third of a pixel-wide shimmer on a 1080p side shot.
+			flatBand = 0.09,
+			frameBar = 0.04,
 			-- Seconds the walks take to carry a held move alone (LocomotionState.heldShare, D-292)
 			-- once its speed comes down to them: a run's two-step stop passes walkSpeed in a tenth
 			-- of a second and hands the run to the walk by cadence as it slows (a quicker swap moves
 			-- the planted foot faster than the phase can take up), while a body a lock or Guard
 			-- holds to walkSpeed is on its walks alone within a step or two. Falling, it is at once.
 			heldRiseSeconds = 0.4,
+			-- Seconds of travel at the speed the root's own travel may run ahead of (or behind)
+			-- what its speed carries and still move the gait phase (D-334). The
+			-- engine moves the root in whole 1/240 s physics steps, two to six to a rendered
+			-- frame, while its velocity reads steady: a frame's travel is a step or two off
+			-- speed x dt, and the phase takes that up so the planted foot holds the ground. Four
+			-- physics steps of headroom; a teleport or a shove past it is dropped.
+			travelSlipSeconds = 1 / 30,
 			-- A body held off its stick (D-144): walking into an enemy or a wall, or slid along its
 			-- flank. Once the stick has stayed within `degrees` of one direction for
 			-- `settleSeconds` (a turn swings the root's velocity across after the stick; a pan
@@ -209,13 +224,13 @@ local Choreo = {
 				WalkBack = { left = { -0.777, -0.419 }, right = { -0.778, 0.419 } },
 				WalkLeft = { left = { -0.001, -1.079 }, right = { 0.001, 0.17 } },
 				WalkRight = { left = { 0.001, -0.17 }, right = { -0.001, 1.079 } },
-				Run = { left = { 0.124, -0.361 }, right = { 0.124, 0.361 } },
+				Run = { left = { 0.144, -0.361 }, right = { 0.146, 0.36 } },
 				Sprint = { left = { 0.1, -0.319 }, right = { 0.1, 0.319 } },
 				WalkForwardDrawn = { left = { 0.757, -0.418 }, right = { 0.757, 0.418 } },
 				WalkBackDrawn = { left = { -0.779, -0.419 }, right = { -0.779, 0.419 } },
 				WalkLeftDrawn = { left = { -0.001, -1.079 }, right = { 0.001, 0.17 } },
 				WalkRightDrawn = { left = { 0.001, -0.17 }, right = { -0.001, 1.079 } },
-				RunDrawn = { left = { 0.125, -0.359 }, right = { 0.125, 0.359 } },
+				RunDrawn = { left = { 0.146, -0.36 }, right = { 0.145, 0.36 } },
 				SprintDrawn = { left = { 0.1, -0.32 }, right = { 0.1, 0.32 } },
 			} :: { [string]: { left: { number }, right: { number } } },
 			touchdownTolerance = 0.01, -- studs the measurement may drift from touchdown

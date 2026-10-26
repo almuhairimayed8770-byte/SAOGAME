@@ -41,7 +41,7 @@
 		                 (EntityService.setHp restarts the out-of-combat regen wait), so it comes in
 		                 at the HP the shot staged, however long it was held. It replies
 		                 { ok, released, scheduled = { { id, after } } }
-		"hold"           the take has ended (CS1): every staged enemy still standing is held where it
+		"hold"           the take has ended (D-297): every staged enemy still standing is held where it
 		                 is (EnemyService.setHeld: Idle at once; a wind-up is dropped, D-254, and a
 		                 launched rush stops where it is), and a late "go" lets nobody go, so nothing
 		                 of the take acts between takes
@@ -246,7 +246,7 @@ local function spawnStaged(shot: Dev.Shot, x: number, z: number, facing: number)
 end
 
 local function stageShot(player: Player, shotId: unknown): Reply
-	-- The last take's enemies go before anything else, whatever this request comes to (CS1).
+	-- The last take's enemies go before anything else, whatever this request comes to (D-297).
 	clearStaged()
 	local index = DevStageLogic.shotIndex(Shots, shotId)
 	if index == nil then
@@ -337,7 +337,7 @@ local function go(): Reply
 	return { ok = true, released = released, scheduled = later }
 end
 
--- The take is over: its enemies stop where they stand (CS1).
+-- The take is over: its enemies stop where they stand (D-297).
 local function holdTake(): Reply
 	local held: { number } = {}
 	for _, id in staged do

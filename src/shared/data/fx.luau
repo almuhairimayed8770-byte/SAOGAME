@@ -40,17 +40,23 @@ local Fx = {
 	qualityDefaultDesktop = "High",
 	qualityDefaultTouch = "Medium",
 
-	-- Weapon trails (section 10): width from the weapon data, lifetime 0.18 s, LightEmission 1.
+	-- Weapon trails (section 10): width from the weapon data, LightEmission 1; the lifetime is
+	-- shorter than section 10's 0.18 s (D-335, below).
 	trail = {
-		lifetime = 0.18,
+		-- Seconds a trail sample lives (D-335): the reel's slash shapes last a few frames, so the
+		-- cut's arc is gone about 8 frames after the blade stops (it was 0.18: 12 frames).
+		lifetime = 0.13,
 		lightEmission = 1,
 		minLength = 0.05, -- Trail.MinLength; below this no segment is emitted
 		-- Width multipliers on the weapon's trailWidth per activation kind.
 		width = { Art = 1.0, Basic = 0.55, Smear = 1.0 },
 		-- How far a Basic trail's color moves toward TrailWhite (thinner and whiter, section 10).
 		basicWhiteBlend = 0.65,
-		-- Width keypoints along the trail (head -> tail) and transparency keypoints.
-		widthKeys = { { 0, 1 }, { 0.7, 0.8 }, { 1, 0.25 } },
+		-- Width keypoints along the trail (head -> tail, by age over the lifetime) and transparency
+		-- keypoints. Full width only at the head, where the blade is (D-335): a frame back the
+		-- ribbon is under half as wide, so a cut seen edge-on (a horizontal swing from the side)
+		-- reads as a thin arc at the blade's height, not a flat band down to the floor.
+		widthKeys = { { 0, 1 }, { 0.12, 0.4 }, { 0.5, 0.16 }, { 1, 0.06 } },
 		transparencyKeys = { { 0, 0 }, { 0.6, 0.2 }, { 1, 1 } },
 		defaultWidth = 0.9, -- studs when a rig has no weapon def or TrailWidth attribute
 		enemyWidth = 0.8, -- placeholder enemy weapons
@@ -79,6 +85,13 @@ local Fx = {
 			maxStep = 0.3,
 			maxSubsteps = 8,
 			maxSamples = 48,
+			-- The ribbon draws the cut, not the blade's settle after it (D-335): once a stroke that
+			-- started at its clip's open has swept `turnBackAfter` studs, a step of the tip more than
+			-- `turnBackDegrees` off the way it was going ends the stroke; the window draws nothing
+			-- more (every window is one cut). The settle used to lay fresh full-width samples back
+			-- over the cut's end for 3 frames.
+			turnBackDegrees = 100,
+			turnBackAfter = 1.5,
 			-- The body's width: the weapon's trailWidth x the kind's width x this, so a one-handed
 			-- sword's band covers most of its 3.2-stud blade (thick, not the thin engine strip).
 			thickness = 2.4,
@@ -101,7 +114,7 @@ local Fx = {
 					whiteBlend = 0,
 					lightEmission = 0,
 					zOffset = 0,
-					transparencyKeys = { { 0, 0.05 }, { 0.6, 0.25 }, { 1, 1 } },
+					transparencyKeys = { { 0, 0.05 }, { 0.35, 0.3 }, { 1, 1 } },
 				},
 				{
 					name = "Core",
@@ -110,7 +123,7 @@ local Fx = {
 					whiteBlend = 0.8,
 					lightEmission = 1,
 					zOffset = 0.05,
-					transparencyKeys = { { 0, 0 }, { 0.5, 0.3 }, { 1, 1 } },
+					transparencyKeys = { { 0, 0 }, { 0.35, 0.3 }, { 1, 1 } },
 				},
 			},
 		},
@@ -301,15 +314,15 @@ local Fx = {
 			GuardBreak = "telegraph.GuardBreak",
 		},
 		intensityMin = 0.5, -- the accessibility slider's floor: still visible
-		-- The parry glint (D-CP1): a blow's tell (fill and ground) goes glintToken for glintFrames
+		-- The parry glint (D-316): a blow's tell (fill and ground) goes glintToken for glintFrames
 		-- frames, the fill at ai.luau telegraph.glintFillTransparency and the ground at
 		-- glintDecalAlpha, then back to its kind's color until the snap. The glint is centred on the
 		-- middle of the parry window (combat.luau parryWindow before the blow lands), glintAimFrames
 		-- earlier: a press is read a frame or two after the frame that showed it, and the server reads
 		-- it on its next frame. Three frames is as long as it can be with a press at its first frame
-		-- and at its last both inside the window on Studio's link and a live one (D-CP1 margins: 18 ms
+		-- and at its last both inside the window on Studio's link and a live one (D-316 margins: 18 ms
 		-- each side; four frames leave 2). Only the kinds in glintKinds glint: an Unblockable blow
-		-- cannot be parried (section 6), so it never shows the cue to press (D-CP2).
+		-- cannot be parried (section 6), so it never shows the cue to press (D-317).
 		glintFrames = 3,
 		glintAimFrames = 1,
 		glintToken = "TelegraphWhite",

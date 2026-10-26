@@ -328,7 +328,7 @@ describe("CameraController staged views (F12)", function()
 		end
 	end)
 
-	it("Open holds the whole locomotion take: the lock at 5 s and its release never take the view (CS8)", function()
+	it("Open holds the whole locomotion take: the lock at 5 s and its release never take the view (D-301)", function()
 		local fixture = load()
 		-- The locomotion pass's beats along D (screen right, -Z under the Open view): run, sprint,
 		-- the lock on the kobold at 5 s (ahead and to the left), its release at 5.8, the drawn

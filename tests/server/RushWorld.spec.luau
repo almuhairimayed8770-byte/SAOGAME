@@ -236,7 +236,7 @@ local function angled(meet: number, ahead: number): Shape
 	return plane(Vector3.new(0, 0, -ahead), Vector3.new(math.cos(r), 0, math.sin(r)))
 end
 
-describe("RushWorld: the body is its parts, never its blocker faces (D-CH4)", function()
+describe("RushWorld: the body is its parts, never its blocker faces (D-315)", function()
 	it("reads a boar that carries its blocker as the boar the server measured at spawn", function()
 		-- The server measures the body as built, before addBlocker (EnemyService.spawn); the client
 		-- reads the replicated model, faces and all (Replication's rush draw). The faces stand over

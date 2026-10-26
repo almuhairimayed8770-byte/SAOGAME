@@ -55,13 +55,52 @@
 		                               UserId) picks the player, the first player by default;
 		                               replies from, to and facing
 
+	The Studio test hooks (D-333; numbers in dev.luau hooks) put enemies and plain parts where a
+	check needs them, so it needs no hand-built scene. Every point is a Vector3 or {x, y, z}, each
+	axis within place.maxCoordinate; an enemy's points are floor points (y is the top of the ground
+	it stands on: its root goes its rig's root height above, as a spawn's does):
+		"enemy" { entityId, position, facing?, hold? }
+		                               EnemyService.place: drops whatever the living enemy was doing
+		                               (as a hold does), pivots its body to stand on position facing
+		                               `facing` degrees (its own facing when absent) and makes that
+		                               its home; hold = true leaves it held, otherwise its brain
+		                               starts afresh in Idle under every server rule; replies from,
+		                               to (the root) and facing
+		"walk" { entityId, toward, hold?, wait? }
+		                               EnemyService.walk: walks the enemy to toward at its own pace
+		                               (its def's moveSpeed) and turn rate through the mover, its room
+		                               to the other enemies kept; its brain decides nothing until it
+		                               stands within hooks.arriveStuds of the point (or
+		                               hooks.walkTimeoutSeconds pass, or a hit staggers it), then
+		                               takes over there, held when hold = true; at most
+		                               hooks.maxWalkStuds; wait = true replies once it is over
+		"charge" { entityId, toward }  EnemyService.charge: a Charger faces toward at once and starts
+		                               its rush through Charger's normal path (the crouch, telegraph
+		                               and clip, the launch, the contact sweep, the glance, clip,
+		                               slam and jam stops, the daze); waits up to
+		                               hooks.chargeTimeoutSeconds for the wind-up and the run, then
+		                               replies the launch and every stop told for it (reason,
+		                               distance down the path, seconds after the launch)
+		"part" { size, cframe | position, tilt?, name?, after? }
+		                               an anchored, solid part in the Workspace folder
+		                               hooks.folderName (a wall, a slope, a stair step): size {x, y,
+		                               z} studs, each within hooks.minPartStuds to maxPartStuds; a
+		                               CFrame, or its centre position turned by tilt (degrees about
+		                               X, + lifts the -Z end; or {x, y, z}, the Orientation order);
+		                               after = seconds (at most hooks.maxAfterSeconds) makes it
+		                               that much later, into a rush's path; at most hooks.maxParts
+		"clearparts"                   removes every part (and a part still to come) and the folder
+
 	The sink is set only while a trace is on or a swing is collecting, so CombatService measures
 	nothing for it the rest of the time; a sink someone else set is chained and given back. Nothing
 	the sink does can break the combat tick that calls it (errors are caught and warned once).
 	"basic" and "art" skip the client and the request path: they test the server's sweep alone (the
 	client hook, DevAim, drives the real request path). "hold", "sethp" and "heal" only set up the
 	fight: they fire no remote and decide no hit, so a kill on a held enemy at 1 HP is still a real
-	swing's sweep through CombatService. "place" moves only a player, on the server, and no client
+	swing's sweep through CombatService. "enemy", "walk" and "charge" move only a server-owned enemy
+	body through EnemyService and never touch a player or the anti-cheat: what the enemy then does
+	(its hits, its room to other enemies, its stops at walls) is the game's own code with no dev
+	rule in it. "part" and "clearparts" touch only their folder. "place" moves only a player, on the server, and no client
 	can ask for it: the BindableFunction lives under ServerScriptService, which never replicates,
 	and no remote leads to it (a Studio MCP execute_luau in the Server context invokes it). Every
 	wait is task.wait (Heartbeat).
@@ -82,11 +121,15 @@ end
 
 local Server = script.Parent.Parent
 local Playground = require(Shared.data.playground)
+local Rigs = require(Shared.data.rigs)
+local World = require(Shared.data.world)
+local Palette = require(Shared.data.palette)
 local CombatService = require(Server.services.CombatService)
 local EnemyService = require(Server.services.EnemyService)
 local EntityService = require(Server.services.EntityService)
 local AntiCheatService = require(Server.services.AntiCheatService)
 local DevTrace = require(script.Parent.DevTrace)
+local PlaygroundLayout = require(Server.world.PlaygroundLayout)
 
 type Reply = { [string]: any }
 type TraceEvent = CombatService.TraceEvent
@@ -95,7 +138,24 @@ type Record = EntityService.Record
 
 local Trace = Dev.trace
 local Place = Dev.place
-local COMMANDS = { "help", "trace", "events", "basic", "art", "hp", "hold", "sethp", "heal", "place" }
+local Hooks = Dev.hooks
+local COMMANDS = {
+	"help",
+	"trace",
+	"events",
+	"basic",
+	"art",
+	"hp",
+	"hold",
+	"sethp",
+	"heal",
+	"place",
+	"enemy",
+	"walk",
+	"charge",
+	"part",
+	"clearparts",
+}
 -- One line per command for "help": its arguments (? = optional).
 local USAGE: { [string]: string } = {
 	help = "help: this list",
@@ -108,6 +168,11 @@ local USAGE: { [string]: string } = {
 	sethp = "sethp { entityId, hp }: HP clamped to [1, maxHp], never a kill",
 	heal = "heal { entityId? }: full HP",
 	place = "place { position = {x, y, z}, facing? = degrees, entityId? | player? }: move a player on the server; the anti-cheat lets it settle",
+	enemy = "enemy { entityId, position = floor {x, y, z}, facing? = degrees, hold? }: stand a living enemy there, Idle (held if hold)",
+	walk = "walk { entityId, toward = floor {x, y, z}, hold?, wait? }: walk an enemy there at its own pace (held there if hold)",
+	charge = "charge { entityId, toward = {x, y, z} }: a Charger's real rush at the point; replies its launch and stops",
+	part = "part { size = {x, y, z}, cframe | position = {x, y, z}, tilt? = degrees or {x, y, z}, name?, after? = seconds }: an anchored part in the dev folder",
+	clearparts = "clearparts: remove every dev part (and any still to come)",
 }
 
 local printing = false
@@ -116,7 +181,11 @@ local listeners: { [number]: Sink } = {}
 local listenerCount = 0
 local previous: Sink? = nil
 local warnedSink = false
-local busy = false
+-- The waiting command ("basic", "art", "charge", or "walk" with wait), or nil.
+local busy: string? = nil
+-- "part": parts asked for with `after` still to come, and the token "clearparts" bumps to drop them.
+local pendingParts = 0
+local partsToken = 0
 
 local function round(value: number?): number?
 	return DevTrace.round(value, Trace.decimals)
@@ -538,8 +607,9 @@ local function placedRecord(args: { [string]: any }): (Record?, string?)
 	return found, nil
 end
 
-local function placePosition(value: unknown): (Vector3?, string?)
-	local message = ("position must be a Vector3 or an {x, y, z} list of numbers, each within %g studs"):format(
+local function placePosition(value: unknown, name: string): (Vector3?, string?)
+	local message = ("%s must be a Vector3 or an {x, y, z} list of numbers, each within %g studs"):format(
+		name,
 		Place.maxCoordinate
 	)
 	local position: Vector3? = nil
@@ -568,7 +638,7 @@ local function plainVector(value: Vector3): { number }
 end
 
 local function place(args: { [string]: any }): Reply
-	local position, positionError = placePosition(args.position)
+	local position, positionError = placePosition(args.position, "position")
 	if position == nil then
 		return fail(positionError or "no position")
 	end
@@ -602,6 +672,369 @@ local function place(args: { [string]: any }): Reply
 	}
 end
 
+-- ------------------------------------------------------------------ the Studio test hooks (D-333)
+
+-- The living enemy "enemy", "walk" and "charge" act on, its root and its name.
+local function enemyOf(args: { [string]: any }): (number?, BasePart?, string)
+	local id = args.entityId
+	if typeof(id) ~= "number" then
+		return nil, nil, "entityId must be a living enemy's entity id (a number; hp lists them)"
+	end
+	local model = EnemyService.modelOf(id)
+	if model == nil then
+		return nil, nil, ("entity %s is no living enemy"):format(tostring(id))
+	end
+	local root = model.PrimaryPart
+	if root == nil then
+		return nil, nil, ("enemy %d has no root part"):format(id)
+	end
+	local record = EntityService.get(id)
+	return id, root, if record ~= nil then record.name else tostring(id)
+end
+
+-- How far an enemy's root stands above the floor under it (its rig's, as a spawn stands).
+local function rootHeightOf(id: number): number?
+	local def = EnemyService.defOf(id)
+	local rig = if def ~= nil then Rigs[def.skin] else nil
+	if rig == nil then
+		return nil
+	end
+	local rootSpec = if rig.parts ~= nil then (rig.parts :: any)[rig.rootPart] else nil
+	local rootSize = if rootSpec ~= nil then rootSpec.size[2] else 0
+	return PlaygroundLayout.rootHeight(rig.hipHeight, rootSize, World.spawn.groundEpsilon)
+end
+
+local function optionalFlag(args: { [string]: any }, name: string): (boolean?, string?)
+	local value = args[name]
+	if value ~= nil and typeof(value) ~= "boolean" then
+		return nil, ("%s must be true or false"):format(name)
+	end
+	return value == true, nil
+end
+
+local function flatDistance(a: Vector3, b: Vector3): number
+	return Vector3.new(b.X - a.X, 0, b.Z - a.Z).Magnitude
+end
+
+local function enemyCommand(args: { [string]: any }): Reply
+	local id, root, name = enemyOf(args)
+	if id == nil or root == nil then
+		return fail(name)
+	end
+	local floor, floorError = placePosition(args.position, "position")
+	if floor == nil then
+		return fail(floorError or "no position")
+	end
+	if args.facing ~= nil and not isFinite(args.facing) then
+		return fail("facing must be a number of degrees (0 looks along -Z, + turns left)")
+	end
+	local hold, holdError = optionalFlag(args, "hold")
+	if hold == nil then
+		return fail(holdError or "bad hold")
+	end
+	local height = rootHeightOf(id)
+	if height == nil then
+		return fail(("enemy %d has no rig to stand by"):format(id))
+	end
+	local from = root.CFrame.Position
+	local facing: number = if args.facing ~= nil then args.facing else DevTrace.yawOf(root.CFrame.LookVector) or 0
+	local at = floor + Vector3.new(0, height, 0)
+	if not EnemyService.place(id, CFrame.new(at) * CFrame.Angles(0, math.rad(facing), 0), hold) then
+		return fail(("entity %d is no living enemy"):format(id))
+	end
+	return {
+		ok = true,
+		entityId = id,
+		name = name,
+		from = plainVector(from),
+		to = plainVector(at),
+		facing = round(facing),
+		held = EnemyService.isHeld(id),
+	}
+end
+
+local function walkCommand(args: { [string]: any }): Reply
+	local id, root, name = enemyOf(args)
+	if id == nil or root == nil then
+		return fail(name)
+	end
+	local goal, goalError = placePosition(args.toward, "toward")
+	if goal == nil then
+		return fail(goalError or "no toward")
+	end
+	local hold, holdError = optionalFlag(args, "hold")
+	if hold == nil then
+		return fail(holdError or "bad hold")
+	end
+	local wait, waitError = optionalFlag(args, "wait")
+	if wait == nil then
+		return fail(waitError or "bad wait")
+	end
+	local from = root.CFrame.Position
+	local distance = flatDistance(from, goal)
+	if distance > Hooks.maxWalkStuds then
+		return fail(("toward is %.1f studs away; a walk goes at most %g"):format(distance, Hooks.maxWalkStuds))
+	end
+	local def = EnemyService.defOf(id)
+	local started, reason = EnemyService.walk(id, goal, {
+		arriveStuds = Hooks.arriveStuds,
+		seconds = Hooks.walkTimeoutSeconds,
+		hold = hold,
+	})
+	if not started then
+		return { ok = false, entityId = id, name = name, error = ("refused: %s"):format(tostring(reason)) }
+	end
+	local reply: Reply = {
+		ok = true,
+		entityId = id,
+		name = name,
+		from = plainVector(from),
+		to = plainVector(goal),
+		distance = round(distance),
+		seconds = if def ~= nil and def.moveSpeed > 0 then round(distance / def.moveSpeed) else nil,
+		hold = hold,
+	}
+	if wait then
+		local startedAt = os.clock()
+		local deadline = startedAt + Hooks.walkTimeoutSeconds
+		while EnemyService.walking(id) and os.clock() < deadline do
+			task.wait()
+		end
+		local model = EnemyService.modelOf(id)
+		local now = if model ~= nil and model.PrimaryPart ~= nil then model.PrimaryPart.CFrame.Position else nil
+		reply.over = not EnemyService.walking(id)
+		reply.at = if now ~= nil then plainVector(now) else nil
+		reply.arrived = now ~= nil and flatDistance(now, goal) <= Hooks.arriveStuds
+		reply.took = round(os.clock() - startedAt)
+		reply.held = EnemyService.isHeld(id)
+	end
+	return reply
+end
+
+local function chargeCommand(args: { [string]: any }): Reply
+	local id, root, name = enemyOf(args)
+	if id == nil or root == nil then
+		return fail(name)
+	end
+	local toward, towardError = placePosition(args.toward, "toward")
+	if toward == nil then
+		return fail(towardError or "no toward")
+	end
+	local from = root.CFrame.Position
+	local startedAt = os.clock()
+	local started, reason = EnemyService.charge(id, toward)
+	if not started then
+		return { ok = false, entityId = id, name = name, error = ("refused: %s"):format(tostring(reason)) }
+	end
+	-- The wind-up and the run: over once the brain leaves them (Recover after a full run, Interrupted
+	-- for a slam's daze or a hit's stagger, Dead).
+	local deadline = startedAt + Hooks.chargeTimeoutSeconds
+	local function phase(): string?
+		local brain = EnemyService.brainOf(id)
+		return if brain ~= nil then brain:getPhase() else nil
+	end
+	while os.clock() < deadline do
+		local now = phase()
+		if now ~= "WindUp" and now ~= "Strike" then
+			break
+		end
+		task.wait()
+	end
+	local log = EnemyService.devRushOf(id)
+	local launched = if log ~= nil then log.launched else nil
+	local stops: { Reply } = {}
+	if log ~= nil and launched ~= nil then
+		for _, stop in log.stops do
+			table.insert(stops, {
+				reason = stop.reason,
+				distance = round(stop.distance),
+				after = round(stop.at - launched.at),
+			})
+		end
+	end
+	local model = EnemyService.modelOf(id)
+	local now = if model ~= nil and model.PrimaryPart ~= nil then model.PrimaryPart.CFrame.Position else nil
+	local phaseNow = phase()
+	return {
+		ok = true,
+		entityId = id,
+		name = name,
+		attackId = if log ~= nil then log.attackId else nil,
+		from = plainVector(from),
+		toward = plainVector(toward),
+		complete = phaseNow ~= "WindUp" and phaseNow ~= "Strike",
+		phase = phaseNow,
+		at = if now ~= nil then plainVector(now) else nil,
+		launched = if launched ~= nil
+			then { origin = plainVector(launched.origin), direction = plainVector(launched.direction) }
+			else nil,
+		stops = stops,
+		seconds = round(os.clock() - startedAt),
+	}
+end
+
+-- The folder the parts live in (made on the first part).
+local function partsFolder(create: boolean): Instance?
+	local folder = workspace:FindFirstChild(Hooks.folderName)
+	if folder == nil and create then
+		folder = Instance.new("Folder")
+		folder.Name = Hooks.folderName
+		folder.Parent = workspace
+	end
+	return folder
+end
+
+local function partSize(value: unknown): (Vector3?, string?)
+	local message = ("size must be a Vector3 or an {x, y, z} list of studs, each from %g to %g"):format(
+		Hooks.minPartStuds,
+		Hooks.maxPartStuds
+	)
+	local size: Vector3? = nil
+	if typeof(value) == "Vector3" then
+		size = value
+	elseif typeof(value) == "table" then
+		local list = value :: { [any]: any }
+		if isFinite(list[1]) and isFinite(list[2]) and isFinite(list[3]) then
+			size = Vector3.new(list[1], list[2], list[3])
+		end
+	end
+	if size == nil then
+		return nil, message
+	end
+	local box = size :: Vector3
+	for _, side in { box.X, box.Y, box.Z } do
+		if not isFinite(side) or side < Hooks.minPartStuds or side > Hooks.maxPartStuds then
+			return nil, message
+		end
+	end
+	return box, nil
+end
+
+-- tilt: degrees about X (+ lifts the -Z end: a slope rising along -Z), or {x, y, z} degrees in
+-- the Orientation order (CFrame.fromOrientation).
+local function tiltOf(value: unknown): (CFrame?, string?)
+	if value == nil then
+		return CFrame.identity, nil
+	end
+	if isFinite(value) then
+		return CFrame.Angles(math.rad(value :: number), 0, 0), nil
+	end
+	if typeof(value) == "table" then
+		local list = value :: { [any]: any }
+		if isFinite(list[1]) and isFinite(list[2]) and isFinite(list[3]) then
+			return CFrame.fromOrientation(math.rad(list[1]), math.rad(list[2]), math.rad(list[3])), nil
+		end
+	end
+	return nil, "tilt must be degrees about X or an {x, y, z} list of degrees (the Orientation order)"
+end
+
+local function partCFrame(args: { [string]: any }): (CFrame?, string?)
+	if args.cframe ~= nil then
+		if args.position ~= nil or args.tilt ~= nil then
+			return nil, "give cframe, or position with tilt, not both"
+		end
+		if typeof(args.cframe) ~= "CFrame" then
+			return nil, "cframe must be a CFrame"
+		end
+		local cframe = args.cframe :: CFrame
+		local _, positionError = placePosition(cframe.Position, "cframe's position")
+		if positionError ~= nil then
+			return nil, positionError
+		end
+		return cframe, nil
+	end
+	local position, positionError = placePosition(args.position, "position")
+	if position == nil then
+		return nil, positionError or "no position"
+	end
+	local tilt, tiltError = tiltOf(args.tilt)
+	if tilt == nil then
+		return nil, tiltError or "bad tilt"
+	end
+	return CFrame.new(position) * tilt, nil
+end
+
+local function makePart(name: string, size: Vector3, cframe: CFrame): BasePart
+	local part = Instance.new("Part")
+	part.Name = name
+	part.Anchored = true
+	part.CanCollide = true
+	part.CanQuery = true
+	part.CanTouch = false
+	part.Size = size
+	part.CFrame = cframe
+	part.Material = (Enum.Material :: any)[Hooks.partMaterial]
+	part.Color = Palette.color3(Hooks.partColorToken :: any)
+	part.TopSurface = Enum.SurfaceType.Smooth
+	part.BottomSurface = Enum.SurfaceType.Smooth
+	part.Parent = partsFolder(true)
+	return part
+end
+
+local function partCommand(args: { [string]: any }): Reply
+	local size, sizeError = partSize(args.size)
+	if size == nil then
+		return fail(sizeError or "no size")
+	end
+	local cframe, cframeError = partCFrame(args)
+	if cframe == nil then
+		return fail(cframeError or "no cframe")
+	end
+	local after = args.after
+	if after ~= nil and (not isFinite(after) or after < 0 or after > Hooks.maxAfterSeconds) then
+		return fail(("after must be seconds from 0 to %g"):format(Hooks.maxAfterSeconds))
+	end
+	local folder = partsFolder(false)
+	local count = (if folder ~= nil then #folder:GetChildren() else 0) + pendingParts
+	if count >= Hooks.maxParts then
+		return fail(("the dev folder holds %d parts at most; clearparts first"):format(Hooks.maxParts))
+	end
+	local name = args.name
+	if name == nil then
+		name = ("Part%d"):format(count + 1)
+	elseif typeof(name) ~= "string" or #name == 0 or #name > Hooks.maxNameLength then
+		return fail(("name must be a string of 1 to %d characters"):format(Hooks.maxNameLength))
+	end
+	local partName = name :: string
+	local box = size :: Vector3
+	local at = cframe :: CFrame
+	if after ~= nil and after > 0 then
+		pendingParts += 1
+		local token = partsToken
+		task.delay(after, function()
+			if token ~= partsToken then
+				return -- a clearparts came first
+			end
+			pendingParts -= 1
+			makePart(partName, box, at)
+		end)
+	else
+		makePart(partName, box, at)
+	end
+	local rx, ry, rz = at:ToOrientation()
+	return {
+		ok = true,
+		name = partName,
+		size = plainVector(box),
+		position = plainVector(at.Position),
+		tilt = { round(math.deg(rx)), round(math.deg(ry)), round(math.deg(rz)) },
+		parts = count + 1,
+		after = after,
+	}
+end
+
+local function clearParts(): Reply
+	partsToken += 1
+	local cancelled = pendingParts
+	pendingParts = 0
+	local folder = partsFolder(false)
+	local removed = if folder ~= nil then #folder:GetChildren() else 0
+	if folder ~= nil then
+		folder:Destroy()
+	end
+	return { ok = true, removed = removed, cancelled = cancelled }
+end
+
 -- ------------------------------------------------------------------ the BindableFunction
 
 local HANDLERS: { [string]: (args: { [string]: any }) -> Reply } = {
@@ -619,23 +1052,33 @@ local HANDLERS: { [string]: (args: { [string]: any }) -> Reply } = {
 	sethp = sethp,
 	heal = heal,
 	place = place,
+	enemy = enemyCommand,
+	walk = walkCommand,
+	charge = chargeCommand,
+	part = partCommand,
+	clearparts = clearParts,
 }
-local YIELDS: { [string]: boolean } = { basic = true, art = true }
+-- The commands that wait (task.wait) before they reply: one at a time.
+local function yields(command: string, args: { [string]: any }): boolean
+	return command == "basic" or command == "art" or command == "charge" or (command == "walk" and args.wait == true)
+end
 
 local function invoke(command: unknown, rawArgs: unknown): Reply
 	local handler = if typeof(command) == "string" then HANDLERS[command] else nil
 	if handler == nil then
 		return { ok = false, error = ("unknown command %s"):format(tostring(command)), commands = COMMANDS }
 	end
-	local yields = YIELDS[command :: string] == true
-	if yields and busy then
-		return fail("busy: another swing is still collecting")
-	end
-	busy = busy or yields
 	local args: { [string]: any } = if typeof(rawArgs) == "table" then rawArgs :: any else {}
+	local waits = yields(command :: string, args)
+	if waits and busy ~= nil then
+		return fail(("busy: a %s is still waiting"):format(busy :: string))
+	end
+	if waits then
+		busy = command :: string
+	end
 	local ok, reply = pcall(handler, args)
-	if yields then
-		busy = false
+	if waits then
+		busy = nil
 	end
 	if not ok then
 		return fail(tostring(reply))

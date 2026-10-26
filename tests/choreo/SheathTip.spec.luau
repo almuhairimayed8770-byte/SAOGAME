@@ -260,7 +260,7 @@ local BACK_STRIDE = 3
 -- Points of the gait's cycle the "phases" cases flip the target at, spread over the longest gait
 -- clip's cycle (at least one whole cycle of every gait at every speed): a moving base's torso
 -- adds its own swing to the arm's, most where the two line up.
-local PHASES = 12
+local PHASES = 48
 local function longestCycle(): number
 	local longest = 0
 	for _, gait in LocomotionState.gaits() do

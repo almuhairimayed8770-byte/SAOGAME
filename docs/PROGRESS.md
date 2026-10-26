@@ -723,6 +723,125 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
     - The FlinchFront review row stays open (re-record).
   - Studio items 263–283, then the ten gate shots recorded again.
 
+## Gate shot fixes, third round (2026-10-25, D-297 to D-341)
+
+- **Why:** two Studio runs on the owner's PC. One on 2727b4c, before rounds B and C; its "glint" timing was the clash-star billboard, as its correction says. One on c2f76c1 (round B). Round C (D-297 to D-322) and round D (D-323 to D-341) answer what they found. Every fix has a spec that failed before it.
+- **Capture and staged shots (D-297 to D-311, D-319, D-320, D-328, D-337, D-338):**
+  - A take ends with its staged enemies held, and the next shot clears them first. Leftover hits per take went from 4/3/3/3 to 0.
+  - Art shots press at 0.5 s and launch on release at 1.0 s (was +1.39 to +1.42 s).
+  - ThreeQuarter sits 75° off the line at 14 studs on the weapon side: the kobold is in frame 98.4% and 95.8% of its takes (was about 70%), its axe 85.7% and 100% (was 0%). The boar charges from 12 studs and lands one counted hit (Meets). The Open view holds the locomotion take under the lock.
+  - The auto-walk sprints in and skids: worst rest 2.25 studs and 8.7° → 0.20 and 0.5°, the same at 0.5x and 0.25x. It walks the last leg again up to 2 times and is never staged outside the ring. A movement key hands over in any phase (auto moves after a key 113 → 0). J needs no change.
+  - Auto-perform has `at`, `onClip` reactions with chains, and `every` standing rules, plus a stick, releaseAfter and staged HP on release. A capture Guard comes the latency lead early, and a reaction ends at `to`.
+  - Shot 1 is the gate fight: at 60 fps, 12 server hits (5 basics, 7 Art), 6 parries with 6 sparks, 0 hits taken, the boar killed at 10.80–10.93 s with one shatter, 300/300 HP, and the digits equal the server's count. 144 fps is the same; at 17–100 ms of lag, 11 hits.
+  - Shot 10 walks, runs, sprints and turns in place by itself: walk at 8.0 studs/s, Fall 1.78 s, Land 2.02 s, skids at 4.85, 8.83 and 13.23 s, turns with 0 studs moved.
+  - The panel counts rendered frames ("r N") and flips a 12 px frame-tick square every frame. Sprint is held per source, so a player's Shift let-go no longer ends the panel's sprint (6.08 studs off the path → 0).
+  - The F key's staged-only rule (D-328) is in TargetController but inert until Capture.client calls stageTarget.
+- **Hits and freezes (D-312 to D-314, D-321, D-326, D-327, D-341):**
+  - A hold waits for its word, up to 0.2 s from the contact, so under 0.1 s of lag the number shows inside the freeze (Normal 4 frames). A Kill upgrades the running hold in place, as one unbroken 10-frame freeze with no blade jump.
+  - A freeze holds the whole body still: the Mixer holds the procedural channels, and every Art and basic plans a keep-out, so no colliding part goes deeper into a blocker than the swing found it (worst +0.0139). Rising Arc's Normal drift of 0.08–0.2 studs a frame is gone.
+  - The hit matrix swings from the keep-out too.
+  - An Art that a shown blow dooms never lights: 16 of 16 lit before, 0 of 24 now.
+  - Holds are counted in frames from the rig's pace: 30 fps holds 2/3/5 frames in 100% of jittered runs (was 1 frame in 44–52%). 60 Hz stays 3/6/10 and 144 Hz holds 7/14/24. At 45 fps on 60 Hz, Final 5 and Kill 8 frames.
+- **Blockers and enemies (D-315, D-318, D-322, D-329, D-332, D-333, D-339):**
+  - An enemy's blocker is faces over its rest and idle hull, plus one per held part. The kobold's idle column went 1.03 → −0.025, and its stops front/right/back/left 1.37/2.62/1.37/2.62 → 1.86/3.43/1.69/3.08.
+  - The faces are not the body: bodyExtents and the client's rush profile skip them (the drawn boar stopped up to 0.12 short of the server's wall stop; now 0). Every face blocks between enemies.
+  - Corpse faces go off at the shatter (about 0.67 s after the death, was 4 s).
+  - Spacing is face to face. Closest gaps: heap line −0.346 → 1.849, stack −0.328 → 1.063, three chasing −0.048 → 0.720.
+  - DevCombat gains "enemy", "walk", "charge", "part" and "clearparts" (Studio only, no remote, no anti-cheat call), so items 269–272 and 277 can be set up exactly.
+  - A dropped attack is cut at the drop's own time, so a charge right after a hold keeps its tell and crouch.
+- **Camera (D-323 to D-325):**
+  - The death's still shot keys off the kill this client shows and is a still frame: 0.28–0.42 studs a frame → 0.000.
+  - A look of 4° or more ends it within 3 frames.
+  - A wall-forced shoulder swap dwells 2 s: changes in 5 s past pillars 7/8/6/5/3 → 2/2/2/2/1.
+- **Telegraphs (D-316, D-317):** the parry glint is three white frames, one frame early plus the latency lead. Presses on every glint frame parry at 0, 17, 50 and 100 ms on Studio's link and a live one (768 of 768). Unblockable blows never glint.
+- **Animation and FX (D-330, D-334 to D-336, D-340):**
+  - The Draw is 0.97 s: at most 74.6 studs/s at 240 Hz over 48 points of any gait.
+  - The gait phase follows the root's real travel: a flat foot moved up to 0.258 studs between frames, now ≤ 0.037 a frame and ≤ 0.048 net per plant.
+  - The trail ribbon reads as an arc: lifetime 0.13 s, full width only at the head, and it ends at the blade's turn-back (217/157/139 px over the cut, 9 frames, 0.32 above the floor). The kill trail lights on its first frame.
+  - A stance the server takes away comes down over 0.5 s: tip 110–142 → 55–58 studs/s.
+- **Validators (D-331):** new contact, telegraph and wallSlam validators, and rules for the round-B combat, camera.lock, choreo and stride keys (35 validators).
+- **PC run on 2727b4c (before rounds B and C), Studio items 221–262:**
+
+| Item | Result | Numbers | Answered by |
+|---|---|---|---|
+| 221 | Pass | 10/10 Horizontals counted at 2.14 studs, 71° right; every flash had its number | — |
+| 222 | (a) fail by numbers, (b) pass | real touch 2.33–2.42 studs, never 1.8; ease-back 0.04–0.10, not about 0.5; largest step 0.33 a frame | The item text was wrong: D-314; item 286 |
+| 223 | Pass | no step at the 2.76 touch; root ≥ 0.69 off the wall | — |
+| 224(b) | Partial | Finals 6 (Horizontal, Vertical), 5–6 (Rising Arc, Sharp Nail); Sharp Nail Normal 3; Rising Arc Normal drifts 0.08–0.2 a frame | D-271 (round B), D-314; item 288 |
+| 225 | Pass | 3/3: no flash or number, glow out in about 0.2 s | — |
+| 226 | Pass | at most 0.84° of turn after the Final | — |
+| 228, shots 1–9 | Fail in places | shot 1's perform empty, player killed about 5 s after; shot 4 stopped 3.13 from the spot (radius 3); shot 6's charge missed, a second hit for 16 after the take; shot 7's kobold hidden; shots 7–9 hit during the walk | D-306, D-310 (shot 1); D-302, D-303; D-300; D-299; D-297 |
+| 230, shot 10 | Fail | perform only pressed F, player never moved; A then D moved about 15 studs each way; camera behind or in front | D-307, D-311, D-301 |
+| 231 | Fail | Arts at +1.39 to +1.42 s against the prompt's 1.0 | D-298 |
+| 236 | Partial | boar flanks 1.9, front 6.2, back 3.9; kobold front and back 1.35; its right arm and axe inside the player at its right flank | D-315, D-318; item 284 |
+| 238 | Partial | wedge lit to +1.27 s; no white seen | D-316; item 291 |
+| 240 | Pass | tell out on the Idle frame, no RushStarted | — |
+| 242 | (a) pass, (b) inconclusive | flash 0.12–0.13 s before the HP drop at 0.1 s of lag, 0.27 s at 0.25 s | — |
+| 255 | Fail | freezes 1–3 frames; number 2 frames (0.05 s) or 5 frames (0.1 s) after the freeze starts | D-271 (round B), D-312; item 298 |
+| 256 | Fail | 2-frame freeze, a 1.07-stud blade jump, about 4 frames held 0.1 s later | D-272 (round B), D-313; item 299 |
+| 257 | Void | timed the clash-star billboard. The real glint on c2f76c1 (item 278): first-frame press 2/10 at 0 lag, 10/10 at 0.1 s | D-316, D-319; item 292 |
+| 259(a), 260 | 259(a) fail, 260 pass | shot 4 rested 3.13 studs out; shot 10's walk round the ledge took 6 s | D-302, D-303; item 316 |
+| 262 | Fail | W tap: about 7 more studs, then staged; J: about 3.5 studs of slide | D-304, D-305; item 317 |
+| Not run | — | 227, 237, 239, 241, 243–254, 258 (video, 120/144 Hz, a second client, listening, enemy placement) | D-333 hooks place and move enemies |
+
+- **PC run on c2f76c1 (round B), items 264–282:**
+
+| Item | Result | Numbers | Answered by |
+|---|---|---|---|
+| 264 | Pass | 15 point-blank kills at 0/0.05/0.1 s, 10-frame freezes after the snap | D-312, D-313 make the word land inside |
+| 266 | Fail against the text | on the right, 60/75/90° hit with clear −0.15 | The item text was wrong: D-275 corrected; item 290 |
+| 267 | Mixed | flush wall and 0.3 off pass; pillar behind sank about 0.07; pillar beside stepped 0.05, not 0.5 | D-314 (the text assumed a 1.8 touch); item 287 |
+| 268 | (a) pass, (b) not achieved | hits unchanged when the blade crossed the axe | — |
+| 269 | Head-on only | snout at the wall face (0.00–0.25); the client drew no rush and the boar jumped 9.4 studs after a DevCombat place | Not reproduced in Lune; D-339, D-333; items 306, 307 |
+| 273 | Mixed | right flank 2.95 (not 1.8); left flank 1.07, inside the body | D-315; item 289 |
+| 274 | Fail | camera 0.45–0.76 studs a frame for the first 6 frames of a locked kill freeze | D-323, D-324; items 300, 293 |
+| 275 | Pass | left shoulder at 11 studs, at most 0.25 a frame | D-325 adds the dwell; item 294 |
+| 276 | Pass | never off screen; under 3.2° a frame | — |
+| 278 | (a) pass, (b) fail | 0.1 s: 10/10; 0 lag: 2/10 (white +1.13 to +1.23 s, parries +1.17 to +1.30 s) | D-316, D-319; items 292, 301 |
+| 279 | Pass | — | — |
+| 280 | (a) pass, (b) note | the stance faded in 0.19 s, the blade sweeping from +3.6 to −4.4 in front | D-340; item 295 |
+| 281 | Pass, plus a new fault | Draw tip ≤ 1.27 studs a frame (1.76 at the skid); a guard pressed sheathed snaps 6.2 studs | D-330; the guard is open (guard-draw.patch) |
+| 255, 236, 222 re-run | Improved / unchanged / unchanged | 255: full-length freezes, the number still about 5 frames late at 0.1 s; 236: 1.32–1.35 front and back, head in head; 222: touch 2.34–2.43 | D-312; D-315, D-318; D-314 |
+
+- **Checks (final tree, after the id renumbering):**
+  - 3170 specs pass in 173 files, 0 failed (HEAD c2f76c1: 2955 in 160), in 568 s.
+  - stylua is clean. tools/lint.sh --offline is ALL GREEN in 560 s: stylua, selene with 0 errors, the suite, 35 validators with 0 problems (HEAD 32), and the rojo builds of the game, ClipLab and Playground.
+  - The hit matrix exits 0 in 52 s: every required placement registers at every frame phase, and the client draws exactly the hits the server counts, keep-out included.
+  - The animation review is current (64 clips, Draw regenerated at 0.97 s). gaitgen matches all 12 gait clips. The CI UDim2 grep prints nothing.
+  - luau-lsp (old solver): src has 814 messages against HEAD's 813. The one new is InputController.luau:106 ('true' expected, 'true?' given). rigs.luau's 12 are the old message, with the blocker type now in its text. New specs add 5 real type messages (DevCombat.spec ×3, DevEnemyHooks.spec ×2); the rest are the harness globals every spec has.
+  - The code comments' round C and D placeholder ids are now D-297 to D-341 (68 files, comments and spec names only).
+- **Open:**
+  - GAME_SPEC section 10 says the trail lifetime is 0.18 s; D-335 uses 0.13. Update the spec line or revert the value.
+  - Unapplied patches:
+    - guard-draw.patch: a guard pressed sheathed draws first; c2f76c1 item 281 snapped 6.2 studs. It needs an id and its Studio check.
+    - frameclock-pace.patch: the impact picture reads the pace as the holds do; item 305(b) waits on it.
+    - walk-fix.patch no longer applies on this tree: shot 10's walk from shot 9's spot still fails.
+  - Capture.client does not call TargetController.stageTarget yet, so D-328 is inert.
+  - Freeze and impact frames land on the strike key (touch +2, Rising Arc and Sharp Nail +3), not the contact frame. The fix amends D-227, D-267 and D-272 and changes Replication.
+  - Validator rules still missing: camera.lock.lookBreakDegrees and wallSwapDwellSeconds, impact.hold, fx.trail, and stride travelSlipSeconds, flatBand and frameBar. 18 of 133 report sites have no spec case.
+  - Holds:
+    - At 30 fps with the word at 100–117 ms a Kill upgrade holds 6 frames, not 5; with 8% jitter 11 of 257 Final holds at 30 and 144 fps are a frame off.
+    - At 250 ms a Kill can freeze twice, past the 0.2 s cap.
+    - A Dead with no kill word now waits 0.25 s before the lock lets go.
+  - The travel slip has no leak. In Lune, looping the PC's step pattern for 18 s puts it on its clamp after about 5.5 s, and a sprinting foot then moves 0.152 studs a frame (bar 0.04). Not seen in the engine yet; item 296(b) checks it.
+  - Enemies:
+    - Four kobolds chasing still end 0.22 inside each other's faces.
+    - Attack poses still reach in (kobold Overhead 1.13, boar Charge 1.12).
+    - wallGapStuds strict < would need a data change.
+    - A parry from sheathed still snaps the blade 7.78 studs, by design (an instant draw-cut).
+  - Capture:
+    - Shot 6 is off screen for about 68 of 300 frames.
+    - The 30 fps fight has a first-guard break.
+    - A player leaving during DevStage leaves the field held.
+    - InputController's other held actions still use a single flag.
+  - Code:
+    - TargetController requires the dev CaptureLogic.
+    - WeaponMount.spec depends on spec order.
+    - A remote fighter's struck stance still fades over 0.2 s (Replication.playReaction and stopReaction).
+    - CharacterController reads a shown blow from the local Flinch; a Replication.strikeShown query would be exact.
+  - The commit must add the untracked files: the 13 new specs and tools/validators/contact, telegraph and wallSlam.
+  - Studio items 284–328, then the ten gate shots recorded again.
+
 ## Next three tasks
 
 1. Rerun the Play-test on the new build with the display kept awake: the fight with landed hits (items 99 to 102 and

@@ -884,7 +884,7 @@ describe("clips validator", function()
 			"choreo rigs.Boar walk enemy/Boar/Walk must loop: it starts at the rig's idle phase (D-123)",
 		})
 		local outside = "choreo enemyIdlePhaseStep must be a number above 0 and below 1"
-		for _, step in { 0, 1, -0.2, 1.4, "half" } do
+		for _, step in { 0, 1, -0.2, 1.4, "half" } :: { any } do
 			expect(run(step, true)).toEqual({ outside })
 		end
 		expect(run(nil, true)).toEqual({ outside })
@@ -1696,7 +1696,7 @@ describe("combat validator: the snap's visible turn (item 102)", function()
 	end)
 
 	it("wants a positive number of seconds", function()
-		for _, bad in { 0, -0.05, 0 / 0, math.huge, "0.08" } do
+		for _, bad in { 0, -0.05, 0 / 0, math.huge, "0.08" } :: { any } do
 			local problems = runCombat({ snapTurnSeconds = bad })
 			expect(hasProblem(problems, "aim.snapTurnSeconds must be a positive number")).toBe(true)
 		end
@@ -1951,7 +1951,7 @@ describe("choreo validator: the render-stall jump", function()
 
 	it("wants a stall block with a positive, finite jumpSeconds", function()
 		expect(hasProblem(runChoreo(nil), "stall is missing")).toBe(true)
-		for _, bad in { 0, -0.5, 0 / 0, math.huge, "0.5" } do
+		for _, bad in { 0, -0.5, 0 / 0, math.huge, "0.5" } :: { any } do
 			local problems = runChoreo({ jumpSeconds = bad })
 			expect(hasProblem(problems, "stall.jumpSeconds must be a positive number")).toBe(true)
 		end
@@ -2568,70 +2568,73 @@ describe("camera, dev capture and sfx shatter rules", function()
 		)).toBe(true)
 	end)
 
-	it("dev: a released Charger says whether its first charge meets or passes the player on the spot (CS7)", function()
-		-- A released Charger that does `charge`; with none in dev.luau (every take's charge Meets
-		-- since CF), a released one made to say it (the rule is checked on the copy).
-		local function charger(copy: any, charge: string): any
-			local released = nil
-			for _, shot in copy.capture.shots do
-				for _, entry in shot.stage.enemies do
-					if entry.charge == charge then
-						return entry
+	it(
+		"dev: a released Charger says whether its first charge meets or passes the player on the spot (D-300)",
+		function()
+			-- A released Charger that does `charge`; with none in dev.luau (every take's charge Meets
+			-- since CF), a released one made to say it (the rule is checked on the copy).
+			local function charger(copy: any, charge: string): any
+				local released = nil
+				for _, shot in copy.capture.shots do
+					for _, entry in shot.stage.enemies do
+						if entry.charge == charge then
+							return entry
+						end
+						released = released or (if entry.charge ~= nil then entry else nil)
 					end
-					released = released or (if entry.charge ~= nil then entry else nil)
 				end
+				if released == nil then
+					error("no released Charger in dev.luau")
+				end
+				released.charge = charge
+				return released
 			end
-			if released == nil then
-				error("no released Charger in dev.luau")
-			end
-			released.charge = charge
-			return released
+			local reach = Harness.load("src/shared/data/enemies").byId("FrenzyBoar").attacks[1].reach
+			expect(hasProblem(
+				dev(function(copy)
+					charger(copy, "Meets").charge = nil
+				end),
+				".charge must say what the first charge does to the player on the spot"
+			)).toBe(true)
+			-- the line ends short of the player: the boar runs over them unhurt (the 18-stud take)
+			expect(hasProblem(
+				dev(function(copy)
+					charger(copy, "Meets").distance = reach + 4
+				end),
+				"a charge that Meets needs the line"
+			)).toBe(true)
+			-- the line's end grazes the body: neither a clean hit nor a clean pass
+			expect(hasProblem(
+				dev(function(copy)
+					charger(copy, "Passes").distance = reach + 0.5
+				end),
+				"a charge that Passes needs the line"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					charger(copy, "Meets").distance = 6
+				end),
+				"must be inside the charge band"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					charger(copy, "Meets").held = true
+				end),
+				".charge is only for a released Charger"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					copy.capture.shots[2].stage.enemies[1].charge = "Meets"
+				end),
+				".charge is only for a released Charger"
+			)).toBe(true)
 		end
-		local reach = Harness.load("src/shared/data/enemies").byId("FrenzyBoar").attacks[1].reach
-		expect(hasProblem(
-			dev(function(copy)
-				charger(copy, "Meets").charge = nil
-			end),
-			".charge must say what the first charge does to the player on the spot"
-		)).toBe(true)
-		-- the line ends short of the player: the boar runs over them unhurt (the 18-stud take)
-		expect(hasProblem(
-			dev(function(copy)
-				charger(copy, "Meets").distance = reach + 4
-			end),
-			"a charge that Meets needs the line"
-		)).toBe(true)
-		-- the line's end grazes the body: neither a clean hit nor a clean pass
-		expect(hasProblem(
-			dev(function(copy)
-				charger(copy, "Passes").distance = reach + 0.5
-			end),
-			"a charge that Passes needs the line"
-		)).toBe(true)
-		expect(hasProblem(
-			dev(function(copy)
-				charger(copy, "Meets").distance = 6
-			end),
-			"must be inside the charge band"
-		)).toBe(true)
-		expect(hasProblem(
-			dev(function(copy)
-				charger(copy, "Meets").held = true
-			end),
-			".charge is only for a released Charger"
-		)).toBe(true)
-		expect(hasProblem(
-			dev(function(copy)
-				copy.capture.shots[2].stage.enemies[1].charge = "Meets"
-			end),
-			".charge is only for a released Charger"
-		)).toBe(true)
-	end)
+	)
 
 	it(
-		"dev: a timed attack has a prompt beat at its press, an Art one at its release, and the glow reads (CS5)",
+		"dev: a timed attack has a prompt beat at its press, an Art one at its release, and the glow reads (D-298)",
 		function()
-			local function shotOf(copy: any, action: string): any
+			local function shotOf(copy: any, action: string): (any, any)
 				for _, shot in copy.capture.shots do
 					for _, press in shot.perform do
 						if press.action == action and press.at ~= nil then
@@ -2781,7 +2784,7 @@ describe("camera, dev capture and sfx shatter rules", function()
 	end
 
 	it("dev: a Move press holds a stick of length (0, 1]; only it has a stick or a sprint (CF)", function()
-		for _, bad in { {}, { 0, 0 }, { 1, 1 }, { "1", 0 } } do
+		for _, bad in { {}, { 0, 0 }, { 1, 1 }, { "1", 0 } :: { any } } :: { any } do
 			expect(hasProblem(
 				dev(function(copy)
 					moveEntry(copy).stick = bad
@@ -2813,7 +2816,7 @@ describe("camera, dev capture and sfx shatter rules", function()
 			end),
 			".sprint is only for a capture.perform.moveAction press"
 		)).toBe(true)
-		for _, bad: any in { "LockOn", 3 } do
+		for _, bad in { "LockOn", 3 } :: { any } do
 			expect(hasProblem(
 				dev(function(copy)
 					copy.capture.perform.moveAction = bad
@@ -3061,7 +3064,7 @@ describe("camera, dev capture and sfx shatter rules", function()
 		)).toBe(true)
 	end)
 
-	it("dev: a reaction may end at a `to` inside the take, and has no `from` (D-CI3)", function()
+	it("dev: a reaction may end at a `to` inside the take, and has no `from` (D-320)", function()
 		local function aboutTo(problems: any): boolean
 			return hasProblem(problems, ".from and .to are only for a standing rule")
 				or hasProblem(problems, "nothing of the reaction goes down past it")
@@ -3186,57 +3189,99 @@ describe("camera, dev capture and sfx shatter rules", function()
 		)).toBe(true)
 	end)
 
-	it("dev: the walk rests inside the ring, sprints to a stop with no carry and follows the last leg (CS2)", function()
+	it("dev: the render-frame tick is a small square in two palette colors that never flash (D-336)", function()
 		expect(hasProblem(
 			dev(function(copy)
-				copy.capture.walk.restStuds = copy.capture.stage.standRadius
+				copy.capture.frameTick.size = 0
 			end),
-			"capture.walk.restStuds (3) must be under capture.stage.standRadius"
+			"capture.frameTick.size must be a whole number of pixels"
 		)).toBe(true)
 		expect(hasProblem(
 			dev(function(copy)
-				copy.capture.walk.restDegrees = 90
+				copy.capture.frameTick.margin = -1
 			end),
-			"capture.walk.restDegrees (90) must be under 90"
+			"capture.frameTick.margin must be a whole number of pixels"
 		)).toBe(true)
 		expect(hasProblem(
 			dev(function(copy)
-				copy.capture.walk.restStuds = 0
+				copy.capture.frameTick.tokens = { "SystemCyan", "SystemCyan" }
 			end),
-			"capture.walk.restStuds must be a positive number"
+			"capture.frameTick.tokens must be two different palette tokens"
 		)).toBe(true)
 		expect(hasProblem(
 			dev(function(copy)
-				copy.capture.walk.secondWalks = 1.5
+				copy.capture.frameTick.tokens = { "SystemCyan", "NoSuchToken" }
 			end),
-			"capture.walk.secondWalks must be a whole number"
+			"capture.frameTick.tokens must be two different palette tokens"
 		)).toBe(true)
 		expect(hasProblem(
 			dev(function(copy)
-				copy.capture.walk.sprintAction = "Run"
+				copy.capture.frameTick.tokens = { "SystemCyan", "OutlineInk" }
 			end),
-			"capture.walk.sprintAction (Run) must be an input.luau action"
+			"capture.frameTick.tokens differ in brightness"
 		)).toBe(true)
 		expect(hasProblem(
 			dev(function(copy)
-				copy.capture.walk.lookaheadStuds = copy.capture.stage.approachStuds
+				copy.capture.frameTick.maxLuminanceStep = 0.5
 			end),
-			"capture.walk.lookaheadStuds (6) must be under capture.stage.approachStuds"
-		)).toBe(true)
-		local locomotion = Harness.load("src/shared/data/choreo").locomotion
-		expect(hasProblem(
-			dev(function(copy)
-				copy.capture.walk.carrySeconds = locomotion.stopStepsSeconds
-			end),
-			"must be under choreo locomotion.stopStepsSeconds"
-		)).toBe(true)
-		expect(hasProblem(
-			dev(function(copy)
-				copy.capture.walk.carrySeconds = copy.capture.stage.approachStuds / locomotion.runSpeed
-			end),
-			"off the last leg"
+			"capture.frameTick.maxLuminanceStep must be above 0 and at most"
 		)).toBe(true)
 	end)
+
+	it(
+		"dev: the walk rests inside the ring, sprints to a stop with no carry and follows the last leg (D-302)",
+		function()
+			expect(hasProblem(
+				dev(function(copy)
+					copy.capture.walk.restStuds = copy.capture.stage.standRadius
+				end),
+				"capture.walk.restStuds (3) must be under capture.stage.standRadius"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					copy.capture.walk.restDegrees = 90
+				end),
+				"capture.walk.restDegrees (90) must be under 90"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					copy.capture.walk.restStuds = 0
+				end),
+				"capture.walk.restStuds must be a positive number"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					copy.capture.walk.secondWalks = 1.5
+				end),
+				"capture.walk.secondWalks must be a whole number"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					copy.capture.walk.sprintAction = "Run"
+				end),
+				"capture.walk.sprintAction (Run) must be an input.luau action"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					copy.capture.walk.lookaheadStuds = copy.capture.stage.approachStuds
+				end),
+				"capture.walk.lookaheadStuds (6) must be under capture.stage.approachStuds"
+			)).toBe(true)
+			local locomotion = Harness.load("src/shared/data/choreo").locomotion
+			expect(hasProblem(
+				dev(function(copy)
+					copy.capture.walk.carrySeconds = locomotion.stopStepsSeconds
+				end),
+				"must be under choreo locomotion.stopStepsSeconds"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					copy.capture.walk.carrySeconds = copy.capture.stage.approachStuds / locomotion.runSpeed
+				end),
+				"off the last leg"
+			)).toBe(true)
+		end
+	)
 
 	it("dev: the stage's spots stand on the field, its enemies off the ledge, the ledge off the spawns", function()
 		local playground = Harness.load("src/shared/data/playground")
@@ -3307,7 +3352,7 @@ describe("camera, dev capture and sfx shatter rules", function()
 		)).toBe(true)
 	end)
 
-	it("contact: the word's hold covers the Kill hold; the keep-out fits the slack (D-CH1, D-CH3)", function()
+	it("contact: the word's hold covers the Kill hold; the keep-out fits the slack (D-312, D-314)", function()
 		expect(hasProblem(
 			contact("src/shared/data/combat", function(copy)
 				copy.contact.wordHoldSeconds = 0.1
@@ -3328,7 +3373,7 @@ describe("camera, dev capture and sfx shatter rules", function()
 		)).toBe(true)
 	end)
 
-	it("contact: the keep-out stays out of the faces RigBuilder builds, with the body's own parts (D-CH4)", function()
+	it("contact: the keep-out stays out of the faces RigBuilder builds, with the body's own parts (D-315)", function()
 		expect(hasProblem(
 			contact("src/shared/data/combat", function(copy)
 				copy.contact.standOff.keepOut.bodyFace = "Body"
@@ -3360,7 +3405,7 @@ describe("camera, dev capture and sfx shatter rules", function()
 		expect(hasProblem(plan, "keepOut.maxPieces must be a whole number")).toBe(true)
 	end)
 
-	it("contact: a rig's blocker poses its own rig's clips, every one there (D-CH4)", function()
+	it("contact: a rig's blocker poses its own rig's clips, every one there (D-315)", function()
 		expect(hasProblem(
 			contact("src/shared/data/rigs", function(copy)
 				copy.Kobold.blocker.clips = { "enemy/Boar/Idle" }
@@ -3381,7 +3426,7 @@ describe("camera, dev capture and sfx shatter rules", function()
 		)).toBe(true)
 	end)
 
-	it("telegraph: the glint's own numbers, and never on an Unblockable blow (D-CP1, D-CP2, D-289)", function()
+	it("telegraph: the glint's own numbers, and never on an Unblockable blow (D-316, D-317, D-289)", function()
 		local shape = telegraph("src/shared/data/fx", function(copy)
 			copy.telegraph.glintFrames = 2.5
 			copy.telegraph.glintAimFrames = -1
@@ -3421,7 +3466,7 @@ describe("camera, dev capture and sfx shatter rules", function()
 	end)
 
 	it(
-		"telegraph: every blow that glints glints wholly on its parry window, before its tell goes out (D-CP1)",
+		"telegraph: every blow that glints glints wholly on its parry window, before its tell goes out (D-316)",
 		function()
 			-- Longer than the window, earlier than its open, past the tell's end: each puts a blow's
 			-- glint frames where a press on them cannot parry.
@@ -3454,4 +3499,306 @@ describe("camera, dev capture and sfx shatter rules", function()
 			end
 		end
 	)
+
+	it("combat: the assist's cone within the snap, the blade's edge beside the swing, the wall gap", function()
+		local function combat(mutate: (any) -> ()): { string }
+			return runWith("combat", "src/shared/data/combat", mutate)
+		end
+		-- One call holds three independent problems; each names its own numbers.
+		local wide = combat(function(copy)
+			copy.aim.assistConeDegrees = 82
+			copy.besideHitRadius = 0.17
+			copy.contact.standOff.wallGapStuds = 0.06
+		end)
+		expect(hasProblem(wide, "combat: aim.assistConeDegrees 82 is more than twice aim.snapDegrees (40)")).toBe(true)
+		expect(
+			hasProblem(
+				wide,
+				"combat: besideHitRadius 0.17 is over half the narrowest in-scope blade (OneHandedSword, 0.32 wide)"
+			)
+		).toBe(true)
+		expect(hasProblem(wide, "combat: contact.standOff.wallGapStuds 0.06 is over contact.standOff.stepStuds (0.05)")).toBe(
+			true
+		)
+		-- The follow step splits the arc only down to the straight steps of the radius.
+		expect(hasProblem(
+			combat(function(copy)
+				copy.besideFollowStep = copy.besideHitRadius
+			end),
+			"combat: besideFollowStep 0.15 must be above besideHitRadius (0.15)"
+		)).toBe(true)
+		expect(hasProblem(
+			combat(function(copy)
+				copy.contact.standOff.wallGapStuds = -0.01
+			end),
+			"combat: contact.standOff.wallGapStuds must be a number, 0 or more (got -0.01)"
+		)).toBe(true)
+		-- At the edges each rule still passes: half the cone at the snap, the gap one step, and only
+		-- in-scope blades count (the Rapier's 0.16 is no Phase 0 weapon).
+		expect(combat(function(copy)
+			copy.aim.assistConeDegrees = 80
+			copy.besideHitRadius = 0.16
+			copy.contact.standOff.wallGapStuds = copy.contact.standOff.stepStuds
+		end)).toEqual({})
+	end)
+
+	it("combat: a struck stance falls inside the stagger and slower than a plain end (D-340)", function()
+		local function combat(mutate: (any) -> ()): { string }
+			return runWith("combat", "src/shared/data/combat", mutate)
+		end
+		local choreo = Harness.load("src/shared/data/choreo")
+		local long = combat(function(copy)
+			copy.struckStanceBlendOut = copy.staggerDuration + 0.1
+			copy.struckStanceTipSpeed = choreo.sheath.drawTipSpeed
+		end)
+		expect(hasProblem(long, "combat: struckStanceBlendOut 0.6 is over staggerDuration (0.5)")).toBe(true)
+		expect(hasProblem(long, "combat: struckStanceTipSpeed 84 must be under choreo.sheath.drawTipSpeed (84)")).toBe(
+			true
+		)
+		expect(hasProblem(
+			combat(function(copy)
+				copy.struckStanceBlendOut = 0.15
+			end),
+			"combat: struckStanceBlendOut 0.15 is under locomotionBlendOut (0.2)"
+		)).toBe(true)
+		expect(hasProblem(
+			combat(function(copy)
+				copy.struckStanceTipSpeed = 0
+			end),
+			"combat: struckStanceTipSpeed must be a positive number (got 0)"
+		)).toBe(true)
+		-- At the edges each rule still passes.
+		expect(combat(function(copy)
+			copy.struckStanceBlendOut = copy.staggerDuration
+		end)).toEqual({})
+		expect(combat(function(copy)
+			copy.struckStanceBlendOut = copy.locomotionBlendOut
+		end)).toEqual({})
+	end)
+
+	it("camera: the catch-up lifts the cap and eases; the still shot and the wall side are fractions", function()
+		local bad = camera(function(copy)
+			copy.lock.catchUpDegreesPerSecond = copy.lock.maxTurnDegreesPerSecond - 1
+			copy.lock.catchUpMostDegrees = 0
+			copy.lock.catchUpMargin = -0.1
+			copy.lock.catchUpEase = 0
+			copy.lock.riseHoldSeconds = -1
+			copy.lock.wallBlockedFraction = 0
+			copy.lock.wallGainFraction = 1.2
+		end)
+		for _, needle in
+			{
+				"camera: lock.catchUpDegreesPerSecond must be at least lock.maxTurnDegreesPerSecond",
+				"camera: lock.catchUpMostDegrees must be a positive number of degrees",
+				"camera: lock.catchUpMargin must be 0 or more",
+				"camera: lock.catchUpEase must be a positive number of seconds",
+				"camera: lock.riseHoldSeconds must be 0 or more seconds",
+				"camera: lock.wallBlockedFraction must be in (0, 1]",
+				"camera: lock.wallGainFraction must be in [0, 1]",
+			}
+		do
+			expect(hasProblem(bad, needle)).toBe(true)
+		end
+		expect(#bad).toBe(7)
+		-- The edges: a catch-up at the cap, no margin, no hold, a wall at the whole reach, no gain.
+		expect(camera(function(copy)
+			copy.lock.catchUpDegreesPerSecond = copy.lock.maxTurnDegreesPerSecond
+			copy.lock.catchUpMargin = 0
+			copy.lock.riseHoldSeconds = 0
+			copy.lock.wallBlockedFraction = 1
+			copy.lock.wallGainFraction = 0
+		end)).toEqual({})
+		expect(hasProblem(
+			camera(function(copy)
+				copy.lock.wallBlockedFraction = 1.5
+			end),
+			"camera: lock.wallBlockedFraction must be in (0, 1]"
+		)).toBe(true)
+	end)
+
+	it("choreo and stride: the sheath's moving share and the held walks' rise", function()
+		local function choreo(mutate: (any) -> ()): { string }
+			return runWith("choreo", "src/shared/data/choreo", mutate)
+		end
+		local function stride(mutate: (any) -> ()): { string }
+			return runWith("stride", "src/shared/data/choreo", mutate)
+		end
+		expect(choreo(function() end)).toEqual({})
+		expect(stride(function() end)).toEqual({})
+		expect(hasProblem(
+			choreo(function(copy)
+				copy.sheath.movingTipShare = 0
+			end),
+			"choreo: sheath.movingTipShare (0) must be in (0, 1]"
+		)).toBe(true)
+		expect(hasProblem(
+			choreo(function(copy)
+				copy.sheath.movingTipShare = 1.1
+			end),
+			"choreo: sheath.movingTipShare (1.1) must be in (0, 1]"
+		)).toBe(true)
+		expect(choreo(function(copy)
+			copy.sheath.movingTipShare = 1
+		end)).toEqual({})
+		for _, bad in { 0, -0.4, 0 / 0, math.huge } :: { any } do
+			expect(hasProblem(
+				stride(function(copy)
+					copy.locomotion.stride.heldRiseSeconds = bad
+				end),
+				("stride: heldRiseSeconds (%s) must be a positive number of seconds"):format(tostring(bad))
+			)).toBe(true)
+		end
+	end)
+
+	it("dev: the Studio test hooks' numbers fit the game they wait on (D-333)", function()
+		local cases: { { needle: string, mutate: (any) -> () } } = {
+			{
+				needle = "hooks table is missing",
+				mutate = function(copy)
+					copy.hooks = nil
+				end,
+			},
+			{
+				-- Arrived 3 studs off is no longer at home: the leash would walk it back.
+				needle = "hooks.arriveStuds (3) must be positive and under ai.luau leash.homeRadius (3)",
+				mutate = function(copy)
+					copy.hooks.arriveStuds = 3
+				end,
+			},
+			{
+				needle = "hooks.arriveStuds (0) must be positive",
+				mutate = function(copy)
+					copy.hooks.arriveStuds = 0
+				end,
+			},
+			{
+				needle = "hooks.maxWalkStuds must be a positive number of studs",
+				mutate = function(copy)
+					copy.hooks.maxWalkStuds = 0 / 0
+				end,
+			},
+			{
+				-- The slowest walking enemy (5 studs a second) needs 24 s for twice a 60-stud walk.
+				needle = "hooks.walkTimeoutSeconds (20) must give the slowest walking enemy (5 studs a second) twice its longest walk (24 s)",
+				mutate = function(copy)
+					copy.hooks.walkTimeoutSeconds = 20
+				end,
+			},
+			{
+				-- A wind-up of 0.6 s, a pause cap of 0.25 s and a 0.786 s run.
+				needle = "hooks.chargeTimeoutSeconds (1.5) must outlast every Charger rush's wind-up, pauses and run (1.636 s)",
+				mutate = function(copy)
+					copy.hooks.chargeTimeoutSeconds = 1.5
+					copy.hooks.maxAfterSeconds = 1
+				end,
+			},
+			{
+				needle = "hooks.folderName must be a plain instance name",
+				mutate = function(copy)
+					copy.hooks.folderName = "Dev Parts"
+				end,
+			},
+			{
+				needle = "hooks.folderName 'Playground' is already a name in the place",
+				mutate = function(copy)
+					copy.hooks.folderName = "Playground"
+				end,
+			},
+			{
+				needle = "hooks.maxParts must be a whole number from 1 to 256",
+				mutate = function(copy)
+					copy.hooks.maxParts = 1000
+				end,
+			},
+			{
+				needle = "hooks.maxParts must be a whole number from 1 to 256",
+				mutate = function(copy)
+					copy.hooks.maxParts = 2.5
+				end,
+			},
+			{
+				needle = "hooks.minPartStuds and maxPartStuds must satisfy 0 < min < max <= 2048",
+				mutate = function(copy)
+					copy.hooks.minPartStuds = copy.hooks.maxPartStuds
+				end,
+			},
+			{
+				needle = "hooks.minPartStuds and maxPartStuds must satisfy 0 < min < max <= 2048",
+				mutate = function(copy)
+					copy.hooks.maxPartStuds = 4096
+				end,
+			},
+			{
+				needle = "hooks.maxAfterSeconds (4) must be positive and at most hooks.chargeTimeoutSeconds (3)",
+				mutate = function(copy)
+					copy.hooks.maxAfterSeconds = 4
+				end,
+			},
+			{
+				needle = "hooks.maxNameLength must be a whole number from 1 to 100",
+				mutate = function(copy)
+					copy.hooks.maxNameLength = 0
+				end,
+			},
+			{
+				needle = "hooks.partColorToken 'Beige' is not a palette token",
+				mutate = function(copy)
+					copy.hooks.partColorToken = "Beige"
+				end,
+			},
+			{
+				needle = "hooks.partMaterial 'Cheese' is not an Enum.Material",
+				mutate = function(copy)
+					copy.hooks.partMaterial = "Cheese"
+				end,
+			},
+		}
+		for _, case in cases do
+			local problems = dev(case.mutate)
+			if not hasProblem(problems, case.needle) then
+				error(("expected '%s' in { %s }"):format(case.needle, table.concat(problems, " | ")))
+			end
+		end
+		-- At the edges: an arrival just under the home radius and a timeout of exactly the slowest
+		-- walk twice over are fine.
+		expect(dev(function(copy)
+			copy.hooks.arriveStuds = 2.99
+			copy.hooks.walkTimeoutSeconds = 24
+		end)).toEqual({})
+	end)
+
+	it("wallSlam: the shake fades from shakeFullRadius to nothing at shakeRadius (D-296)", function()
+		local function wallSlam(dataPath: string, mutate: (any) -> ()): { string }
+			return runWith("wallSlam", dataPath, mutate)
+		end
+		expect(wallSlam("src/shared/data/fx", function() end)).toEqual({})
+		expect(hasProblem(
+			wallSlam("src/shared/data/fx", function(copy)
+				copy.wallSlam.shakeFullRadius = copy.wallSlam.shakeRadius
+			end),
+			"wallSlam: shakeFullRadius (32) must be in [0, shakeRadius 32)"
+		)).toBe(true)
+		expect(hasProblem(
+			wallSlam("src/shared/data/fx", function(copy)
+				copy.wallSlam.shakeFullRadius = -1
+			end),
+			"wallSlam: shakeFullRadius (-1) must be in [0, shakeRadius 32)"
+		)).toBe(true)
+		expect(hasProblem(
+			wallSlam("src/shared/data/fx", function(copy)
+				copy.wallSlam.shakeRadius = 0
+			end),
+			"wallSlam: shakeRadius (0) must be a positive number of studs"
+		)).toBe(true)
+		expect(hasProblem(
+			wallSlam("src/shared/data/fx", function(copy)
+				copy.wallSlam.shakeTier = "Huge"
+			end),
+			"wallSlam: shakeTier 'Huge' must be a tier of combat.cameraShakeStuds"
+		)).toBe(true)
+		-- A full radius of 0 is a shake that fades from the contact itself: fine.
+		expect(wallSlam("src/shared/data/fx", function(copy)
+			copy.wallSlam.shakeFullRadius = 0
+		end)).toEqual({})
+	end)
 end)

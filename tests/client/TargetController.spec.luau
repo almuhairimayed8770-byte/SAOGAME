@@ -41,9 +41,14 @@ type Fixture = {
 	setState: (record: any, state: string) -> (),
 	-- Runs the controller's per-heartbeat lock check.
 	heartbeat: () -> (),
+	-- Moves the fake clock on `seconds` (the TargetRequest pacer and the dying target's wait).
+	advance: (seconds: number) -> (),
+	-- The client shows a kill: Replication.hit fires its HitConfirmed (killed) for `record`.
+	showKill: (record: any) -> (),
 }
 
-local function load(origin: Vector3, cameraLook: Vector3): Fixture
+-- `capture`: a dev capture place (workspace DevCapture), where a take can stage a target.
+local function load(origin: Vector3, cameraLook: Vector3, capture: boolean?): Fixture
 	local clock = 100
 	local records: { [number]: any } = {}
 	local requests: { { entityId: number? } } = {}
@@ -64,7 +69,9 @@ local function load(origin: Vector3, cameraLook: Vector3): Fixture
 			return if name == "HumanoidRootPart" then root else nil
 		end,
 	}
+	local replicationHit = Signal.new()
 	local fakes: { [string]: any } = {
+		Replication = { hit = replicationHit },
 		Net = {
 			client = function(): any
 				return {
@@ -147,7 +154,13 @@ local function load(origin: Vector3, cameraLook: Vector3): Fixture
 			return services[name]
 		end,
 	}
-	env.workspace = { CurrentCamera = { CFrame = CFrame.lookAt(origin, origin + cameraLook) } }
+	local Dev = Harness.load("src/shared/data/dev")
+	env.workspace = {
+		CurrentCamera = { CFrame = CFrame.lookAt(origin, origin + cameraLook) },
+		GetAttribute = function(_self: any, name: string): any
+			return if name == Dev.attributes.capture then capture else nil
+		end,
+	}
 	env.os = {
 		clock = function(): number
 			return clock
@@ -195,6 +208,12 @@ local function load(origin: Vector3, cameraLook: Vector3): Fixture
 			if onHeartbeat ~= nil then
 				onHeartbeat(1 / 60)
 			end
+		end,
+		advance = function(seconds: number)
+			clock += seconds
+		end,
+		showKill = function(record: any)
+			replicationHit:Fire({ attackerId = 50, targetId = record.id, killed = true, hitStop = "Kill" })
 		end,
 	}
 end
@@ -463,6 +482,13 @@ describe("TargetController holds the shot through a death until the shatter (F4)
 	it("ends the lock on the target's death but holds the camera's framing until the shatter", function()
 		local fixture, boar = locked()
 		fixture.setState(boar, "Dead")
+		-- The State lands with the server's word, which may wait for the blade's key (D-272): the
+		-- lock stays until this client shows the death (D-323).
+		expect(fixture.controller.current()).toBe(boar)
+		expect(fixture.cameraHolds).toEqual({})
+		fixture.heartbeat()
+		expect(fixture.controller.current()).toBe(boar)
+		fixture.showKill(boar)
 		-- The lock itself ends now: outline, the server's lock, the signal.
 		expect(fixture.controller.current()).toBeNil()
 		expect(fixture.outlines[#fixture.outlines].model).toBe(boar.model)
@@ -479,9 +505,53 @@ describe("TargetController holds the shot through a death until the shatter (F4)
 		local fixture, boar = locked()
 		boar.state = "Dead" -- the attribute landed without a changed event yet
 		fixture.heartbeat()
+		expect(fixture.controller.current()).toBe(boar)
+		fixture.showKill(boar)
 		expect(fixture.controller.current()).toBeNil()
 		expect(fixture.cameraLocks).toEqual({ boar.model })
 		expect(fixture.cameraHolds).toEqual({ SHATTER })
+	end)
+
+	it("keys the hold off the kill this client shows, not the State, at any latency (D-323)", function()
+		-- The word came first and waits for the key (17 ms), or comes with the key frame (50, 100 ms).
+		for _, wait in { 0, 2 / 60, 3 / 60 } do
+			local fixture, boar = locked()
+			fixture.setState(boar, "Dead")
+			fixture.advance(wait)
+			fixture.heartbeat()
+			expect(fixture.cameraHolds).toEqual({})
+			expect(fixture.requests).toEqual({ { entityId = 7 } })
+			fixture.showKill(boar)
+			expect(fixture.cameraHolds).toEqual({ SHATTER })
+			expect(#fixture.requests).toBe(2)
+			expect(fixture.requests[1].entityId).toBe(7)
+			expect(fixture.requests[2].entityId).toBeNil()
+		end
+	end)
+
+	it("lets a dying target go after the longest a held death waits when no kill shows", function()
+		local fixture, boar = locked()
+		fixture.setState(boar, "Dead")
+		fixture.advance(Combat.contact.wordWaitSeconds * 0.9)
+		fixture.heartbeat()
+		expect(fixture.controller.current()).toBe(boar)
+		fixture.advance(Combat.contact.wordWaitSeconds * 0.2)
+		fixture.heartbeat()
+		expect(fixture.controller.current()).toBeNil()
+		expect(fixture.cameraHolds).toEqual({ SHATTER })
+	end)
+
+	it("ignores a kill shown for another enemy, dying or alive", function()
+		local fixture, boar = locked()
+		local kobold = fixture.add(8, "Enemy", Vector3.new(2, 1, -6))
+		fixture.setState(boar, "Dead")
+		fixture.showKill(kobold)
+		expect(fixture.controller.current()).toBe(boar)
+		local other = load(ORIGIN, AHEAD)
+		local alive = other.add(7, "Enemy", Vector3.new(0, 1, -5))
+		expect(other.controller.lockOn(7)).toBe(true)
+		other.showKill({ id = 9 })
+		expect(other.controller.current()).toBe(alive)
 	end)
 
 	it("lets the shot go at once on the key, on the break distance and when the target is removed", function()
@@ -513,8 +583,75 @@ describe("TargetController holds the shot through a death until the shatter (F4)
 		local fixture, boar = locked()
 		local kobold = fixture.add(8, "Enemy", Vector3.new(2, 1, -6))
 		fixture.setState(boar, "Dead")
+		fixture.showKill(boar)
 		fixture.lockToggle:Fire()
 		expect(fixture.controller.current()).toBe(kobold)
 		expect(fixture.cameraLocks).toEqual({ boar.model, kobold.model })
+	end)
+end)
+
+describe("TargetController's lock key in a staged capture take (D-290, D-328)", function()
+	-- A field enemy nearer the player than the staged one, both well inside the cone and the range.
+	local function staged(capture: boolean?): (Fixture, any, any)
+		local fixture = load(ORIGIN, AHEAD, if capture == nil then true else capture)
+		local field = fixture.add(1, "Enemy", Vector3.new(0, 3, -3))
+		local star = fixture.add(2, "Enemy", Vector3.new(0.5, 3, -7))
+		return fixture, field, star
+	end
+
+	it("acts on the staged enemy alone: locks it past a nearer field enemy, lets it go on it, never cycles", function()
+		local fixture, field, star = staged()
+		-- With nothing staged the key takes the nearer field enemy first.
+		fixture.lockToggle:Fire()
+		expect(fixture.controller.current()).toBe(field)
+		fixture.controller.clear()
+		fixture.controller.stageTarget(star.id)
+		fixture.lockToggle:Fire()
+		expect(fixture.controller.current()).toBe(star)
+		-- Again on it: lets it go (CaptureLogic.lockPress "Release"), never on to the field enemy.
+		fixture.lockToggle:Fire()
+		expect(fixture.controller.current()).toBeNil()
+		fixture.lockToggle:Fire()
+		expect(fixture.controller.current()).toBe(star)
+		-- On another enemy: the key moves the lock to the staged one.
+		expect(fixture.controller.lockOn(field.id)).toBe(true)
+		fixture.lockToggle:Fire()
+		expect(fixture.controller.current()).toBe(star)
+		for _, record in { star, false, star, field, star } do
+			expect(table.find(fixture.changes, record)).never.toBeNil()
+		end
+	end)
+
+	it("hands the key its cycle back when the take ends", function()
+		local fixture, field, star = staged()
+		fixture.controller.stageTarget(star.id)
+		fixture.lockToggle:Fire()
+		expect(fixture.controller.current()).toBe(star)
+		fixture.controller.stageTarget(nil)
+		fixture.lockToggle:Fire()
+		-- The cycle: best, then the next one down (the lock was on the second best).
+		expect(fixture.controller.current()).toBeNil()
+		fixture.lockToggle:Fire()
+		expect(fixture.controller.current()).toBe(field)
+	end)
+
+	it("keeps the lock it had when the staged enemy cannot be locked (dead or out of range)", function()
+		local fixture, field, star = staged()
+		fixture.controller.stageTarget(star.id)
+		expect(fixture.controller.lockOn(field.id)).toBe(true)
+		star.state = "Dead"
+		fixture.lockToggle:Fire()
+		expect(fixture.controller.current()).toBe(field)
+		star.state = "Idle"
+		star.model.PrimaryPart.Position = Vector3.new(0, 3, -(CameraData.lock.range + 2))
+		fixture.lockToggle:Fire()
+		expect(fixture.controller.current()).toBe(field)
+	end)
+
+	it("stages nothing outside a capture place: the key keeps its cycle", function()
+		local fixture, field, star = staged(false)
+		fixture.controller.stageTarget(star.id)
+		fixture.lockToggle:Fire()
+		expect(fixture.controller.current()).toBe(field)
 	end)
 end)

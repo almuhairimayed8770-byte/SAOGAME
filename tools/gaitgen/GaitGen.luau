@@ -213,6 +213,32 @@ local function peelCF(body: Body, gait: Gait, plan: Plan, peel: Keys.Peel, t: nu
 	return CFrame.new(at) * rotation * CFrame.new(-pivot)
 end
 
+-- When the foot comes down onto its line: the strike, or the start of its approach (D-334).
+local function approachStart(plan: Plan): number
+	local approach = plan.approach
+	return plan.ts - (if approach then approach.duration else 0)
+end
+
+-- The approaching foot's frame at time t (approachStart <= t <= plan.ts): already going back with
+-- the field, the strike pivot coming down and the roll going back to the strike's, both eased out
+-- into the strike, so it meets stanceCF there.
+local function approachCF(body: Body, gait: Gait, plan: Plan, approach: Keys.Approach, t: number): CFrame
+	local a = math.clamp((plan.ts - t) / approach.duration, 0, 1)
+	local eased = a * a
+	local travel = gait.dir * gait.speed * (t - plan.ts)
+	local flat = Vector3.new(plan.x, body.ground, plan.z) - travel
+	local pivot = body.pivots[plan.strikePivot]
+	local at = flat + (pivot - body.sole) + Vector3.new(0, approach.rise * eased, 0)
+	local angle = plan.strikeAngle + approach.angle * eased
+	local rotation
+	if plan.strikePivot == "left" or plan.strikePivot == "right" then
+		rotation = CFrame.Angles(0, 0, math.rad(angle))
+	else
+		rotation = CFrame.Angles(math.rad(angle), 0, 0)
+	end
+	return CFrame.new(at) * rotation * CFrame.new(-pivot)
+end
+
 -- The foot's frame from the strike to the end of its peel.
 local function groundCF(body: Body, gait: Gait, plan: Plan, t: number): CFrame
 	local peel = plan.peel
@@ -233,9 +259,9 @@ end
 
 type PathPoint = { t: number, s: FootState }
 
--- The foot's frame at any time: planted or peeling, or on the swing path (a Hermite curve through
--- the lift state, the swing points and the next strike state, its end tangents matching the
--- stance's).
+-- The foot's frame at any time: planted or peeling, coming down through its approach, or on the
+-- swing path (a Hermite curve through the lift state, the swing points and the next strike state
+-- or the approach's start, its end tangents matching the stance's or the approach's).
 local function footCF(body: Body, gait: Gait, plan: Plan, time: number): CFrame
 	local T = gait.duration
 	local t = wrap(time, plan.ts, T)
@@ -243,18 +269,33 @@ local function footCF(body: Body, gait: Gait, plan: Plan, time: number): CFrame
 	if t <= off + EDGE then
 		return groundCF(body, gait, plan, t)
 	end
+	local approach = plan.approach
+	local on = approachStart(plan) + T
+	if approach and t >= on - EDGE then
+		return approachCF(body, gait, plan, approach, t - T)
+	end
 	local lift = cfState(body, groundCF(body, gait, plan, off))
 	local liftBefore = cfState(body, groundCF(body, gait, plan, off - EPS))
-	local strike = cfState(body, stanceCF(body, gait, plan, plan.ts))
-	local strikeAfter = cfState(body, stanceCF(body, gait, plan, plan.ts + EPS))
+	local strike, strikeAfter
+	if approach then
+		strike = cfState(body, approachCF(body, gait, plan, approach, on - T))
+		strikeAfter = cfState(body, approachCF(body, gait, plan, approach, on - T + EPS))
+	else
+		strike = cfState(body, stanceCF(body, gait, plan, plan.ts))
+		strikeAfter = cfState(body, stanceCF(body, gait, plan, plan.ts + EPS))
+	end
 	local points: { PathPoint } = { { t = off, s = lift } }
 	local swing = plan.swing
 	if swing then
 		for _, p in swing do
-			table.insert(points, { t = wrap(p.t, plan.ts, T), s = { p.x, p.y, p.z, p.pitch, p.roll } })
+			local at = wrap(p.t, plan.ts, T)
+			if at >= on - SAME then
+				error(("gaitgen: a swing point at %.4f s falls in the approach"):format(p.t))
+			end
+			table.insert(points, { t = at, s = { p.x, p.y, p.z, p.pitch, p.roll } })
 		end
 	end
-	table.insert(points, { t = plan.ts + T, s = strike })
+	table.insert(points, { t = on, s = strike })
 	table.sort(points, function(a: PathPoint, b: PathPoint): boolean
 		return a.t < b.t
 	end)
@@ -463,27 +504,66 @@ local function solveKeys(body: Body, gait: Gait): ({ Emit.ClipKey }, number, { s
 			end
 			offAngles = peeled :: LegAngles
 		end
+		-- approach keys by IK, back in time from the strike (seeded from the strike's solution)
+		local on = approachStart(plan) + T
+		local function inApproach(kt: number): boolean
+			return plan.approach ~= nil and wrap(kt, plan.ts, T) >= on - EDGE
+		end
+		local onAngles: LegAngles = struck
+		if plan.approach then
+			local order: { number } = {}
+			for index, kt in gait.keyTimes do
+				if inApproach(kt) then
+					table.insert(order, index)
+				end
+			end
+			table.sort(order, function(a: number, b: number): boolean
+				return wrap(gait.keyTimes[a], plan.ts, T) > wrap(gait.keyTimes[b], plan.ts, T)
+			end)
+			seeds[side] = struck
+			local started: LegAngles? = nil
+			for _, index in order do
+				local kt = gait.keyTimes[index]
+				local x, miss = legIK(body, keyOffsets[index], side, footCF(body, gait, plan, kt), seeds[side])
+				seeds[side] = x
+				solution[index] = x
+				worst = math.max(worst, miss)
+				if miss > MISS then
+					table.insert(misses, ("%s foot misses its approach by %.3f at %.4f s"):format(side, miss, kt))
+				end
+				if same(kt, on) then
+					started = x
+				end
+			end
+			if started == nil then
+				error("gaitgen: a plan's approach needs a key at its start")
+			end
+			onAngles = started :: LegAngles
+		end
 		-- swing keys: set by hand (hip Y/Z and ankle Z blend from the lift, or the peel's end, to
-		-- the strike) with the keys between them where the clip would play the leg without them,
-		-- or by IK to the path
+		-- the strike or the approach's start) with the keys between them where the clip would play
+		-- the leg without them, or by IK to the path
 		local entries: { Keys.SwingJoint } = plan.swingJoints or {}
 		type Anchor = { t: number, x: LegAngles }
 		local anchors: { Anchor } = { { t = off, x = offAngles } }
-		local span = plan.ts + T - off
+		local span = on - off
 		for _, e in entries do
 			local at = wrap(e.t, off, T)
+			if at >= on - SAME then
+				error(("gaitgen: a swing joint key at %.4f s falls in the approach"):format(e.t))
+			end
 			local frac = (at - off) / span
 			local function mix(i: number): number
-				return offAngles[i] + (struck[i] - offAngles[i]) * frac
+				return offAngles[i] + (onAngles[i] - offAngles[i]) * frac
 			end
 			table.insert(anchors, { t = at, x = { e.hip, mix(2), mix(3), e.knee, e.ankle, mix(6) } })
 		end
-		table.insert(anchors, { t = plan.ts + T, x = struck })
+		table.insert(anchors, { t = on, x = onAngles })
 		table.sort(anchors, function(a: Anchor, b: Anchor): boolean
 			return a.t < b.t
 		end)
 		for index, kt in gait.keyTimes do
-			if not inStance(plan, kt) and not inPeel(kt) then
+			if not inStance(plan, kt) and not inPeel(kt) and not inApproach(kt) then
 				if #entries > 0 then
 					local at = wrap(kt, off, T)
 					local x: LegAngles? = nil

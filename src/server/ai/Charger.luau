@@ -82,13 +82,29 @@ local WORLD = AI.rushWorld
 -- Two passes this close in time are one moment (the tick's and the frame's); float noise, not tuning.
 local EPSILON = 1e-6
 
-local Charger: Brain.Archetype = {
+-- The archetype, plus two Studio test hooks (D-333) that EnemyService.charge calls for DevCombat.
+type ChargerModule = Brain.Archetype & {
+	rushOf: (def: { attacks: { Types.EnemyAttackDef } }) -> Types.EnemyAttackDef?,
+	charge: (brain: Brain.Brain, direction: Vector3) -> (boolean, string?),
+}
+
+local Charger: ChargerModule = {
 	name = "Charger",
 } :: any
 
 --- A rush attack: a line on the ground (arc 0).
 local function isRush(attack: Types.EnemyAttackDef): boolean
 	return attack.arc == 0 or attack.groundShape == "Line"
+end
+
+--- A def's rush (its first line attack), or nil (a Studio test hook, D-333).
+function Charger.rushOf(def: { attacks: { Types.EnemyAttackDef } }): Types.EnemyAttackDef?
+	for _, attack in def.attacks do
+		if isRush(attack) then
+			return attack
+		end
+	end
+	return nil
 end
 
 --- A new chase starts outside the circle-out rule.
@@ -402,6 +418,42 @@ function Charger.onStrikeStart(brain: Brain.Brain, _target: Brain.Target?)
 	brain:moveDirect(rush.origin + rush.direction * length, speed)
 	brain:rushStarted(rush)
 	sweep(brain, rush, rush.bodyStartedAt - rush.startedAt)
+end
+
+--- Starts the brain's rush now along `direction` (a Studio test hook, D-333; DevCombat's "charge"
+--- through EnemyService.charge, never the game): an awake brain free to start an attack
+--- (AI.spacing.freePhases: Idle, Alert, Chase, Return) faces the line at once, as a chase that
+--- lined up does, and begins the rush the way chase begins it (Brain.beginAttack: the crouch, the
+--- telegraph from where it stands along its facing, the clip, the Art state, the cooldown). From
+--- there the brain runs it: the wind-up's hold, the launch (onStrikeStart), the sweep, every wall
+--- and jam rule, the recovery. False (and why) when the def has no rush, the brain sleeps, it is
+--- busy (an attack, a stagger, death) or the direction is no horizontal line.
+function Charger.charge(brain: Brain.Brain, direction: Vector3): (boolean, string?)
+	local attack = Charger.rushOf(brain.def)
+	if attack == nil then
+		return false, "no rush attack"
+	end
+	if not brain:isAwake() then
+		return false, "asleep"
+	end
+	local phase = brain:getPhase()
+	if AI.spacing.freePhases[phase] ~= true then
+		return false, ("busy (%s)"):format(phase)
+	end
+	local flat = Brain.horizontal(direction)
+	if flat == nil then
+		return false, "no direction"
+	end
+	local memory = brain.memory -- what onChaseStart clears: the charge starts a fresh line
+	memory.tooClose = false
+	memory.rushing = false
+	memory.rush = nil
+	brain.facingDir = flat
+	brain.turnGoal = nil
+	brain.turnSense = nil
+	brain.context.face(flat)
+	brain:beginAttack(attack, brain:now())
+	return true, nil
 end
 
 --- A rush resolves from the crouch point along the line (what the telegraph drew); anything else

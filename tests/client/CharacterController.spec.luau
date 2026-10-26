@@ -154,8 +154,8 @@ type Options = {
 	renderOrder: string?,
 	-- What the fake ContactPredictor.standOff answers (fix F1): step this far along `away`, to
 	-- the clip time `to`, from the clip time the controller asks from, with `room` the world it
-	-- leaves (D-235 amended), and `keep` the keep-out at each clip time (D-CH3), with `keepSide`
-	-- along `side` off a held part's face (D-CH4) and `roomSide` the world aside. Nil: no stand-off.
+	-- leaves (D-235 amended), and `keep` the keep-out at each clip time (D-314), with `keepSide`
+	-- along `side` off a held part's face (D-315) and `roomSide` the world aside. Nil: no stand-off.
 	standOff: {
 		distance: number,
 		away: Vector3,
@@ -1108,6 +1108,64 @@ describe("CharacterController's impact director calls", function()
 		expect(#lights(rig)).toBe(0)
 		expect(rig.animator.mixer:find(art.clip)).never.toBeNil()
 	end)
+
+	it("a stance the server takes falls over struckStanceBlendOut, the player's own end does not (D-340)", function()
+		local Combat = Harness.load("src/shared/data/combat")
+		expect(Combat.struckStanceBlendOut).never.toBe(Combat.locomotionBlendOut)
+		-- The Art's handle and the blend-out it was stopped with, after `ending` ran on a hold
+		-- (`launched`: released first, before its first damage frame).
+		local function ended(launched: boolean, ending: (rig: Rig) -> ()): (boolean, number)
+			local rig = load({ choreo = true, impact = true, trails = true })
+			for _ = 1, 40 do
+				rig.frame(Vector3.zero)
+			end
+			local art = rig.controller.slots()[1]
+			rig.controller.beginArt(1)
+			local handle = rig.animator.mixer:find(art.clip)
+			expect(handle).never.toBeNil()
+			for _ = 1, 12 do
+				rig.frame(Vector3.zero)
+			end
+			if launched then
+				rig.controller.releaseArt(1, 12 * FRAME)
+				rig.frame(Vector3.zero)
+			end
+			ending(rig)
+			return handle.stopping, handle.blendOut
+		end
+		-- Hit, guard-broken or killed out of the hold, or out of the launch before the first cut.
+		for _, launched in { false, true } do
+			for _, way in { "Stagger", "GuardBroken", "Dead" } do
+				local stopping, blendOut = ended(launched, function(rig: Rig)
+					rig.serverState(way)
+				end)
+				expect(stopping).toBe(true)
+				expect(blendOut).toBe(Combat.struckStanceBlendOut)
+			end
+		end
+		-- The player's own ends: the next action may follow at once, so the stance goes as ever.
+		local own: { [string]: (rig: Rig) -> () } = {
+			dodge = function(rig: Rig)
+				rig.controller.dodge()
+			end,
+			cancel = function(rig: Rig)
+				rig.controller.cancelArt(1)
+			end,
+			["late release"] = function(rig: Rig)
+				rig.controller.releaseArt(1, Combat.activationCancelTime + 0.05)
+			end,
+		}
+		for _, ending in own do
+			local stopping, blendOut = ended(false, ending)
+			expect(stopping).toBe(true)
+			expect(blendOut).toBe(Combat.locomotionBlendOut)
+		end
+		local stopping, blendOut = ended(true, function(rig: Rig)
+			rig.reject("Art")
+		end)
+		expect(stopping).toBe(true)
+		expect(blendOut).toBe(Combat.locomotionBlendOut)
+	end)
 end)
 
 -- ------------------------------------------------------------------------------------------
@@ -1326,7 +1384,7 @@ describe("CharacterController: the Art stand-off (fix F1)", function()
 		end
 	end)
 
-	it("keeps the body out on the clip's clock and holds it still through a freeze (item 224, D-CH3)", function()
+	it("keeps the body out on the clip's clock and holds it still through a freeze (item 224, D-314)", function()
 		local away = Vector3.new(0, 0, 1)
 		-- A keep-out alone (no blade step): 1.5 studs a second of clip time past 0.3.
 		local function keep(t: number): number
@@ -1391,7 +1449,7 @@ describe("CharacterController: the Art stand-off (fix F1)", function()
 		expect(apart() > keep(held) + 1e-3).toBe(true)
 	end)
 
-	it("a basic swing asks for its keep-out on its first frame, with no blade step (D-CH3)", function()
+	it("a basic swing asks for its keep-out on its first frame, with no blade step (D-314)", function()
 		local away = Vector3.new(0, 0, 1)
 		local function keep(t: number): number
 			return math.max(0, t - 0.05) * 2
@@ -1432,7 +1490,7 @@ describe("CharacterController: the Art stand-off (fix F1)", function()
 	end)
 
 	it(
-		"holds the body aside off a held part's face as the plan says, through a freeze and up to the world (D-CH4)",
+		"holds the body aside off a held part's face as the plan says, through a freeze and up to the world (D-315)",
 		function()
 			local away = Vector3.new(0, 0, 1)
 			local side = Vector3.new(1, 0, 0)
@@ -2524,6 +2582,189 @@ describe("CharacterController's Art hold across a render stall (D-132)", functio
 		expect(#events).toBe(1)
 		expect(events[1].jumped).toBe(false)
 		expect(handle.time >= hold and handle.time < hold + FRAME).toBe(true)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- An Art doomed by a blow shown before the server's word (D-326): Replication shows an enemy's
+-- blow on the local fighter on its strike frame (D-258) by playing a Flinch on the rig, and
+-- lights the blade, chimes and kicks the FOV on the Art clip's ActivationHold (routeOneShot).
+-- The spec plays the flinch as Replication.showStrike does and reads the ActivationHold events.
+-- ------------------------------------------------------------------------------------------
+
+describe("CharacterController: an Art a shown blow dooms skips its activation (D-326)", function()
+	local AI = Harness.load("src/shared/data/ai")
+	local SIDES = { "FlinchFront", "FlinchBack", "FlinchLeft", "FlinchRight" }
+
+	-- The clip's ActivationHold events up to `at` (Replication lights, chimes and kicks on each).
+	local function litBy(rig: Rig, clipId: string, at: number): { ClipEventRow }
+		local rows = {}
+		for _, row in clipEventsOf(rig, clipId) do
+			if row.kind == "ActivationHold" and row.at <= at then
+				table.insert(rows, row)
+			end
+		end
+		return rows
+	end
+
+	-- Presses the Art and shows a blow `shownAfter` frames later; returns the Art, its handle,
+	-- the flinch's handle and when the key went down.
+	local function struckHold(rig: Rig, shownAfter: number, side: string?): (any, any, any, number)
+		local art = rig.controller.slots()[1]
+		local pressedAt = rig.now()
+		rig.controller.beginArt(1)
+		local handle = rig.animator.mixer:find(art.clip)
+		for _ = 1, shownAfter do
+			rig.frame(STILL)
+		end
+		local flinch = rig.animator:play("player/OneHandedSword/" .. (side or "FlinchFront"))
+		return art, handle, flinch, pressedAt
+	end
+
+	it("a blow shown before the hold pose keeps it unlit until the server's word ends the hold", function()
+		local holdFrames = math.ceil(holdTimeOf(load({ choreo = true }).controller.slots()[1].clip) / FRAME - 1e-9)
+		for shownAfter = 1, holdFrames - 1 do
+			for _, wordAfter in { 3, 12, 24 } do
+				local rig = standingRig({ choreo = true, impact = true, trails = true })
+				local art, handle, _flinch = struckHold(rig, shownAfter, SIDES[shownAfter % #SIDES + 1])
+				local before: number? = nil
+				for _ = 1, wordAfter do
+					rig.frame(STILL)
+					if before == nil and rig.timeScales[#rig.timeScales] == 0 then
+						before = handle.time
+					elseif before ~= nil then
+						-- The stance holds where it stopped, short of the hold pose.
+						expect(handle.time).toBe(before)
+					end
+				end
+				-- Neither Replication's light, chime and kick nor the hold pose: no ActivationHold.
+				expect(#clipEventsOf(rig, art.clip)).toBe(0)
+				expect(handle.time < holdTimeOf(art.clip)).toBe(true)
+				expect(rig.controller.state()).toBe("Holding")
+				if shownAfter + wordAfter >= holdFrames then
+					expect(rig.timeScales[#rig.timeScales]).toBe(0)
+				end
+				-- The word: a Stagger ends the hold, and nothing of its activation ever starts (the
+				-- clip is let go: what its fade crosses Replication starts nothing on, F5).
+				local wordAt = rig.now()
+				rig.serverState("Stagger")
+				expect(handle.stopping).toBe(true)
+				for _ = 1, 20 do
+					rig.frame(STILL)
+				end
+				expect(#litBy(rig, art.clip, wordAt)).toBe(0)
+				expect(sends(rig, "ArtRequest")).toBe(0)
+			end
+		end
+	end)
+
+	it("a blow taken back lights the hold on the next frame, at its hold pose, on the server's clock", function()
+		for _, takenAfter in { 12, 30 } do
+			local rig = standingRig({ choreo = true, impact = true })
+			local art, handle, flinch, pressedAt = struckHold(rig, 3)
+			for _ = 1, takenAfter do
+				rig.frame(STILL)
+			end
+			expect(#clipEventsOf(rig, art.clip)).toBe(0)
+			-- Replication's take-back (no word in confirmSeconds, or a guard or parry in it).
+			rig.animator:stop(flinch, AI.strikePrediction.takeBackBlendOut)
+			rig.frame(STILL)
+			local events = clipEventsOf(rig, art.clip)
+			expect(#events).toBe(1)
+			expect(events[1].kind).toBe("ActivationHold")
+			expect(events[1].jumped).toBe(false)
+			local hold = holdTimeOf(art.clip)
+			expect(handle.time).toBeCloseTo(hold, 1e-9)
+			expect(rig.timeScales[#rig.timeScales]).toBe(0)
+			-- The release waits the hold pose's clip time, as a hold that was never struck does.
+			releaseInStep(rig, art, handle, pressedAt, hold)
+		end
+	end)
+
+	it("a blow taken back before the clip reaches its hold pose leaves the hold as it was", function()
+		local rig = standingRig({ choreo = true, impact = true })
+		local art, handle, flinch, pressedAt = struckHold(rig, 2)
+		rig.frame(STILL)
+		rig.animator:stop(flinch, AI.strikePrediction.takeBackBlendOut)
+		local frozenAt: number? = nil
+		for _ = 1, 30 do
+			rig.frame(STILL)
+			if frozenAt == nil and rig.timeScales[#rig.timeScales] == 0 then
+				frozenAt = rig.now()
+			end
+		end
+		local events = clipEventsOf(rig, art.clip)
+		expect(#events).toBe(1)
+		expect(events[1].at).toBe(frozenAt)
+		local hold = holdTimeOf(art.clip)
+		expect(handle.time >= hold and handle.time < hold + FRAME).toBe(true)
+		expect((frozenAt :: number) - pressedAt < hold + FRAME + 1e-9).toBe(true)
+	end)
+
+	it("a release while the blow waits launches from where the stance stands", function()
+		local rig = standingRig({ choreo = true, impact = true })
+		local art, handle, _flinch, pressedAt = struckHold(rig, 3)
+		for _ = 1, 12 do
+			rig.frame(STILL)
+		end
+		local waiting = handle.time
+		expect(waiting < holdTimeOf(art.clip)).toBe(true)
+		expect(#clipEventsOf(rig, art.clip)).toBe(0)
+		releaseInStep(rig, art, handle, pressedAt, waiting)
+	end)
+
+	it("the section 6 fallback and a render stall's wake leave a struck hold unlit too", function()
+		-- Asleep from the press: the fallback's freeze finds the clip short of its hold pose.
+		local rig = standingRig({ choreo = true, impact = true })
+		local art = rig.controller.slots()[1]
+		rig.controller.beginArt(1)
+		local handle = rig.animator.mixer:find(art.clip)
+		rig.frame(STILL)
+		rig.animator:play("player/OneHandedSword/FlinchLeft")
+		for _ = 1, 30 do
+			rig.heartbeat()
+		end
+		rig.wake()
+		for _ = 1, 6 do
+			rig.frame(STILL)
+		end
+		expect(#clipEventsOf(rig, art.clip)).toBe(0)
+		expect(handle.time < holdTimeOf(art.clip)).toBe(true)
+		expect(rig.timeScales[#rig.timeScales]).toBe(0)
+		local wordAt = rig.now()
+		rig.serverState("Stagger")
+		expect(handle.stopping).toBe(true)
+		rig.frame(STILL)
+		expect(#litBy(rig, art.clip, wordAt)).toBe(0)
+	end)
+
+	it("a flinch over before the press, or a blow shown after the hold lit, changes nothing", function()
+		-- Over: the hold freezes on its ActivationHold as any hold does.
+		local rig = standingRig({ choreo = true, impact = true })
+		local flinch = rig.animator:play("player/OneHandedSword/FlinchBack")
+		repeat
+			rig.frame(STILL)
+		until flinch.done or rig.now() > 2
+		expect(flinch.done).toBe(true)
+		local art = rig.controller.slots()[1]
+		rig.controller.beginArt(1)
+		local handle = rig.animator.mixer:find(art.clip)
+		for _ = 1, 30 do
+			rig.frame(STILL)
+		end
+		local events = clipEventsOf(rig, art.clip)
+		expect(#events).toBe(1)
+		expect(events[1].kind).toBe("ActivationHold")
+		local hold = holdTimeOf(art.clip)
+		expect(handle.time >= hold and handle.time < hold + FRAME).toBe(true)
+		-- Shown after the hold lit: already lit, the stance stays frozen where it was.
+		local frozen = handle.time
+		rig.animator:play("player/OneHandedSword/FlinchRight")
+		for _ = 1, 6 do
+			rig.frame(STILL)
+		end
+		expect(#clipEventsOf(rig, art.clip)).toBe(1)
+		expect(handle.time).toBe(frozen)
 	end)
 end)
 

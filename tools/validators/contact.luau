@@ -1,11 +1,11 @@
 --!strict
 --[[
 	Validates the contact numbers in src/shared/data/combat.luau `contact` that the hold for the
-	server's word (D-CH1) and the swing's keep-out (D-CH3, D-CH4) run on, and the enemy blockers in
+	server's word (D-312) and the swing's keep-out (D-314, D-315) run on, and the enemy blockers in
 	src/shared/data/rigs.luau they keep out of:
 	- contact.wordHoldSeconds is at least the Kill hold (hitStopFrames.Kill frames of
 	  hitStopFrameSeconds), so a kill's word that comes inside it upgrades the hold in place and
-	  never starts a second freeze (D-CH2);
+	  never starts a second freeze (D-313);
 	- contact.standOff.keepOut.maxStuds is at least standOff.maxStuds (it caps the Art's step and
 	  the keep-out together, so it never cuts the step alone short) and within rootMotionSlack, so
 	  the anti-cheat's mid-swing allowance covers the step, the keep-out and an Art's own root motion;
@@ -43,7 +43,7 @@ return function(ctx: any): { string }
 		return problems
 	end
 
-	-- D-CH1, D-CH2: the word's hold covers the Kill hold.
+	-- D-312, D-313: the word's hold covers the Kill hold.
 	local killHold = combat.hitStopFrames.Kill * combat.hitStopFrameSeconds
 	check(
 		isNumber(contact.wordHoldSeconds) and contact.wordHoldSeconds >= killHold - 1e-9,
@@ -60,7 +60,7 @@ return function(ctx: any): { string }
 		return problems
 	end
 
-	-- D-CH3: one budget for the step and the keep-out, inside the anti-cheat's slack.
+	-- D-314: one budget for the step and the keep-out, inside the anti-cheat's slack.
 	check(
 		isNumber(keepOut.maxStuds) and keepOut.maxStuds >= standOff.maxStuds - 1e-9,
 		("standOff.keepOut.maxStuds (%s) must be at least standOff.maxStuds (%s): it caps the step and the keep-out together"):format(
@@ -76,7 +76,7 @@ return function(ctx: any): { string }
 		)
 	)
 
-	-- D-CH4: the faces the keep-out stays out of are the ones RigBuilder builds.
+	-- D-315: the faces the keep-out stays out of are the ones RigBuilder builds.
 	check(
 		keepOut.bodyFace == RigBuilder.BLOCKER_NAME,
 		("standOff.keepOut.bodyFace '%s' must be RigBuilder's BLOCKER_NAME '%s'"):format(
@@ -128,7 +128,7 @@ return function(ctx: any): { string }
 		end
 	end
 
-	-- D-CH4: each rig's blocker is posed over its own rig's clips.
+	-- D-315: each rig's blocker is posed over its own rig's clips.
 	local rigNames: { string } = {}
 	for name in rigs do
 		if typeof(name) == "string" then

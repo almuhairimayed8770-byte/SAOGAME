@@ -117,6 +117,9 @@ local lockSign = 1
 -- stands on it. And the fraction of its reach the last frame's wall probe left the camera.
 local sideForced = false
 local wallAllowed = 1
+-- When (os.clock) a wall last swung the shot to the other shoulder: it stays there at least
+-- camera.luau lock.wallSwapDwellSeconds (D-325). Nil: no swing yet on this shot.
+local wallSwappedAt: number? = nil
 -- The catch-up (a rush pass): whether the lock's target has been on screen since the lock took
 -- it, and the catch-up's weight (0 the turn cap, 1 lock.catchUpDegreesPerSecond).
 local targetSeen = false
@@ -125,6 +128,12 @@ local lockPoint: Vector3? = nil
 local wasLocked = false
 -- A lock held past its target's death (F4): the shot stays on it until this os.clock, then lets go.
 local holdUntil: number? = nil
+-- The still shot (D-323): the true pivot it stood on last frame (it moves with the body alone), and
+-- the look input added up while it holds (D-324): the degrees moved, and the move to turn by when a
+-- deliberate look lets it go.
+local stillPivot: Vector3? = nil
+local heldLookDegrees = 0
+local heldLookX, heldLookY = 0, 0
 -- A staged view (the capture's gate shots, F12; setStage): it rides over the free rig and the
 -- lock's two-shot on its own blend, its bearing on its own spring and turn cap. The target's last
 -- drawn spot and look stay when it is gone (the kill shot's shatter).
@@ -414,6 +423,44 @@ local function applyLook(dx: number, dy: number, degreesPerUnit: number)
 	)
 end
 
+-- Lets a death's still shot go now: its time is up, or a deliberate look broke it (D-324).
+local function letGoHold()
+	holdUntil = nil
+	lockTarget = nil
+	stillPivot = nil
+	heldLookDegrees, heldLookX, heldLookY = 0, 0, 0
+end
+
+-- Look input while a death's still shot holds (D-324), `dx` and `dy` in units of `degreesPerUnit`:
+-- added up, and once the move comes to camera.luau lock.lookBreakDegrees the shot lets go at once.
+-- The free camera then takes the view's heading turned by the whole move, so none of it is lost; a
+-- twitch under the threshold leaves the shot still.
+local function lookDuringHold(dx: number, dy: number, degreesPerUnit: number)
+	heldLookX += dx * degreesPerUnit
+	heldLookY += dy * degreesPerUnit
+	heldLookDegrees += math.sqrt(dx * dx + dy * dy) * degreesPerUnit
+	if heldLookDegrees < CameraData.lock.lookBreakDegrees then
+		return
+	end
+	local x, y = heldLookX, heldLookY
+	letGoHold()
+	-- What rig() does when a lock lets go, now, so the look turns from the view's heading.
+	yaw = viewYaw
+	wasLocked = false
+	applyLook(x, y, 1)
+end
+
+-- The still shot's springs keep where they are and lose their way (D-323): nothing of the shot
+-- moves while it holds, and nothing it was doing carries on when it lets go.
+local function stillSprings()
+	bearingSpring.velocity = 0
+	shotDistanceSpring.velocity = 0
+	shotAimSpring.velocity = Vector3.zero
+	closeSpring.velocity = 0
+	blendSpring.velocity = 0
+	reachSpring.velocity = 0
+end
+
 -- The shake's offset at `time` with `energy`, in the axes of `axes` (zero with no energy).
 local function shakeIn(axes: CFrame, energy: number, time: number): Vector3
 	if energy <= 0 then
@@ -479,6 +526,7 @@ local function rig(root: BasePart, span: number, settle: boolean): (Vector3, Vec
 		lockPoint = nil
 		shotLive = false
 		sideForced = false
+		wallSwappedAt = nil
 		targetSeen, catchUp = false, 0
 		closeSpring:Snap(0)
 		blendSpring:Snap(0)
@@ -519,12 +567,14 @@ local function rig(root: BasePart, span: number, settle: boolean): (Vector3, Vec
 		else
 			lockSign = CameraMath.lockSide(lockSign, offLine, lock.sideHysteresis)
 		end
+		local swappedAt = wallSwappedAt
 		if
 			targetRoot ~= nil
 			and not sideForced
 			and not settle
 			and stage == nil
 			and wallAllowed < lock.wallBlockedFraction
+			and (swappedAt == nil or now() - swappedAt >= lock.wallSwapDwellSeconds)
 		then
 			-- A wall presses the camera in at its shoulder: the other shoulder, if it is open.
 			local here = reachLeft(
@@ -538,6 +588,7 @@ local function rig(root: BasePart, span: number, settle: boolean): (Vector3, Vec
 			if CameraMath.takesOpenSide(here, there, lock.wallBlockedFraction, lock.wallGainFraction) then
 				lockSign = -lockSign
 				sideForced = true
+				wallSwappedAt = now()
 			end
 		end
 		local bearing = shot.lineYaw + lockSign * shot.swing
@@ -681,20 +732,32 @@ local function step(dt: number)
 	end
 
 	-- Right stick: integrate the held deflection over the frame (never over a stall). A lock owns
-	-- the view: the look input waits.
-	if gamepadLook.Magnitude > 0 and not settle and lockTarget == nil and stage == nil then
+	-- the view: the look input waits, but a deliberate one lets a death's still shot go (D-324).
+	if gamepadLook.Magnitude > 0 and not settle and stage == nil then
 		local perSecond = CameraData.input.gamepadDegreesPerSecond
-		applyLook(gamepadLook.X * span, -gamepadLook.Y * span, perSecond)
+		if lockTarget == nil then
+			applyLook(gamepadLook.X * span, -gamepadLook.Y * span, perSecond)
+		elseif holdUntil ~= nil then
+			lookDuringHold(gamepadLook.X * span, -gamepadLook.Y * span, perSecond)
+		end
 	end
 
 	-- A lock held through a death freeze lets go at the shatter (F4).
 	if holdUntil ~= nil and at >= (holdUntil :: number) then
-		holdUntil = nil
-		lockTarget = nil
+		letGoHold()
 	end
+	-- The death's still shot (D-323): from its first frame no spring of the shot steps and none keeps
+	-- its way, and the shake and the nudge do not play on it. It moves only with the body (the
+	-- lagged pivot is carried by exactly what the body did) and with the FOV's punch.
+	local still = holdUntil ~= nil
+	if still then
+		stillSprings()
+	end
+	local rigSpan = if still then 0 else span
+	local rigSettle = settle and not still
 
 	local pivot = pivotOf(root)
-	local cameraOffset, lookOffset = rig(root, span, settle)
+	local cameraOffset, lookOffset = rig(root, rigSpan, rigSettle)
 	cameraOffset, lookOffset = staged(root, span, settle, cameraOffset, lookOffset)
 
 	-- The lagged pivot, leashed along and across the view.
@@ -708,7 +771,18 @@ local function step(dt: number)
 		follow:Snap(pivot)
 	end
 	follow.target = pivot
-	local trailing = advanceSpring(follow, span, settle)
+	local trailing: Vector3
+	if still then
+		local from = stillPivot
+		if from ~= nil then
+			follow.position += pivot - from
+		end
+		follow.velocity = Vector3.zero
+		trailing = follow.position
+	else
+		trailing = advanceSpring(follow, span, settle)
+	end
+	stillPivot = if still then pivot else nil
 	local view = lookOffset - cameraOffset
 	local forward = Vector3.new(view.X, 0, view.Z)
 	local anchor = trailing
@@ -742,12 +816,12 @@ local function step(dt: number)
 			1
 		)
 		wallAllowed = allowed
-		-- Pull in at once in front of a wall; ease back out.
+		-- Pull in at once in front of a wall; ease back out (not while the still shot holds).
 		if allowed < reachSpring.position then
 			reachSpring:Snap(allowed)
 		else
 			reachSpring.target = allowed
-			advanceSpring(reachSpring, span, settle)
+			advanceSpring(reachSpring, rigSpan, rigSettle)
 		end
 	end
 	local fraction = reachSpring.position
@@ -759,7 +833,7 @@ local function step(dt: number)
 	end
 
 	-- Shake: noise scaled by a decaying energy, in the camera's own axes.
-	local shakeEnergy = shakeValue(at)
+	local shakeEnergy = if still then 0 else shakeValue(at)
 	shakeTime += span
 	local axes = camera.CFrame
 	local shakeVector = shakeIn(axes, shakeEnergy, shakeTime)
@@ -810,6 +884,10 @@ local function lateStep(_dt: number)
 	local shook = lateShake
 	lateImpulse = Vector3.zero
 	lateShake = false
+	if holdUntil ~= nil then
+		-- A death's still shot takes no nudge and no shake (D-323).
+		return
+	end
 	local nudged = impulse.Magnitude > CameraData.epsilon
 	if not nudged and not shook then
 		return
@@ -864,6 +942,10 @@ end
 
 --- Pushes the camera toward `toward` so it peaks `studs` away from its path (every hit, section 10).
 function CameraController.nudge(toward: Vector3, studs: number)
+	if holdUntil ~= nil then
+		-- A death's still shot takes no nudge (D-323).
+		return
+	end
 	local spring = pivotSpring
 	local spot = cameraSpot
 	if spring == nil or spot == nil then
@@ -924,24 +1006,29 @@ end
 function CameraController.setLockTarget(model: Model?)
 	if model ~= nil and lockTarget == nil then
 		lockSign = 1
+		wallSwappedAt = nil
 	end
 	if model ~= lockTarget then
 		-- A new target is caught up with only once it has been on screen.
 		targetSeen, catchUp = false, 0
 	end
-	holdUntil = nil
+	letGoHold()
 	lockTarget = model
 end
 
 --- Holds the lock's shot on its target for `seconds` more (to the shatter) and the shards' rise
 --- after it (camera.luau lock.riseHoldSeconds), then lets it go and eases out (F4, D-239): a
 --- kill's or a death's 0.5 s freeze and its shatter are one still picture, the punch alone moving
---- it. Does nothing with no lock; a setLockTarget in the meantime takes over.
+--- it. From the next frame nothing of the shot moves (D-323): no spring steps, no shake or nudge
+--- plays, and it moves only as the body does. A deliberate look lets it go early (D-324). Does
+--- nothing with no lock; a setLockTarget in the meantime takes over.
 function CameraController.holdLock(seconds: number)
 	if lockTarget == nil then
 		return
 	end
 	holdUntil = now() + math.max(seconds, 0) + CameraData.lock.riseHoldSeconds
+	stillPivot = nil
+	heldLookDegrees, heldLookX, heldLookY = 0, 0, 0
 end
 
 --- Whether the shot frames a target the player still holds a lock on (not one held for a freeze).
@@ -1053,8 +1140,12 @@ end
 local function onInputChanged(input: InputObject, processed: boolean)
 	local inputType = input.UserInputType
 	if inputType == Enum.UserInputType.MouseMovement then
-		if mouseCaptured and lockTarget == nil and stage == nil then
-			applyLook(input.Delta.X, input.Delta.Y, CameraData.input.mouseDegreesPerPixel)
+		if mouseCaptured and stage == nil then
+			if lockTarget == nil then
+				applyLook(input.Delta.X, input.Delta.Y, CameraData.input.mouseDegreesPerPixel)
+			elseif holdUntil ~= nil then
+				lookDuringHold(input.Delta.X, input.Delta.Y, CameraData.input.mouseDegreesPerPixel)
+			end
 		end
 	elseif inputType == Enum.UserInputType.MouseWheel then
 		zoomOffset = math.clamp(
@@ -1063,8 +1154,12 @@ local function onInputChanged(input: InputObject, processed: boolean)
 			CameraData.zoom.max - CameraData.orbit[mode].distance
 		)
 	elseif inputType == Enum.UserInputType.Touch then
-		if not processed and lockTarget == nil and stage == nil then
-			applyLook(input.Delta.X, input.Delta.Y, CameraData.input.touchDegreesPerPixel)
+		if not processed and stage == nil then
+			if lockTarget == nil then
+				applyLook(input.Delta.X, input.Delta.Y, CameraData.input.touchDegreesPerPixel)
+			elseif holdUntil ~= nil then
+				lookDuringHold(input.Delta.X, input.Delta.Y, CameraData.input.touchDegreesPerPixel)
+			end
 		end
 	elseif input.KeyCode == Enum.KeyCode.Thumbstick2 then
 		local position = Vector2.new(input.Position.X, input.Position.Y)

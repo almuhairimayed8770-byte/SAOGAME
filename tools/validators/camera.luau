@@ -8,7 +8,10 @@
 	with the swing), side hysteresis, solve steps and blend lag, and the probe's see-through
 	threshold and pass count. The close fight (F3): closeGap under openGap, both positive, the close
 	swing inside a quarter turn, a positive close height and turn cap, the aim depth a fraction in
-	(0, 1], and footprintPart RigBuilder's blocker name. The punch rows (Final, Kill):
+	(0, 1], and footprintPart RigBuilder's blocker name. The catch-up: catchUpDegreesPerSecond at
+	least maxTurnDegreesPerSecond (it lifts the cap), catchUpMostDegrees and catchUpEase positive,
+	catchUpMargin 0 or more. The death's still shot: riseHoldSeconds 0 or more. The wall at the
+	shoulder: wallBlockedFraction in (0, 1], wallGainFraction in [0, 1]. The punch rows (Final, Kill):
 	a few degrees, an attack inside the tier's hit-stop, a spring that swings back past rest by at
 	most a quarter and is settled when it ends, eased in (never linear), short; the kill pushes in
 	at least as far as the final hit. The render-stall numbers (stall): the longest piece a frame
@@ -140,6 +143,38 @@ return function(ctx: any): { string }
 	check(
 		positive(lock.aimDepthFraction) and lock.aimDepthFraction <= 1,
 		"lock.aimDepthFraction must be in (0, 1]: the aim never comes nearer the lens than that much of the player's depth"
+	)
+	-- The catch-up (a rush pass): a lifted cap, never a lower one, eased on and off.
+	check(
+		positive(lock.catchUpDegreesPerSecond)
+			and positive(lock.maxTurnDegreesPerSecond)
+			and lock.catchUpDegreesPerSecond >= lock.maxTurnDegreesPerSecond,
+		"lock.catchUpDegreesPerSecond must be at least lock.maxTurnDegreesPerSecond: the catch-up lifts the turn cap, never lowers it"
+	)
+	check(
+		positive(lock.catchUpMostDegrees),
+		"lock.catchUpMostDegrees must be a positive number of degrees: the most the catch-up turns in one long frame"
+	)
+	check(
+		typeof(lock.catchUpMargin) == "number" and lock.catchUpMargin >= 0 and lock.catchUpMargin < math.huge,
+		"lock.catchUpMargin must be 0 or more: the share of the half width past the screen's side before the catch-up starts"
+	)
+	check(
+		positive(lock.catchUpEase),
+		"lock.catchUpEase must be a positive number of seconds: the catch-up eases on and off, never pops"
+	)
+	-- A death's still shot (F4, D-239) and the wall at the shoulder.
+	check(
+		typeof(lock.riseHoldSeconds) == "number" and lock.riseHoldSeconds >= 0 and lock.riseHoldSeconds < math.huge,
+		"lock.riseHoldSeconds must be 0 or more seconds: how long the death's still shot stays after the freeze"
+	)
+	check(
+		positive(lock.wallBlockedFraction) and lock.wallBlockedFraction <= 1,
+		"lock.wallBlockedFraction must be in (0, 1]: the share of the camera's reach a wall leaves before the shot swings over"
+	)
+	check(
+		typeof(lock.wallGainFraction) == "number" and lock.wallGainFraction >= 0 and lock.wallGainFraction <= 1,
+		"lock.wallGainFraction must be in [0, 1]: how much more of its reach the other shoulder must open"
 	)
 	local RigBuilder = ctx.load("src/server/world/RigBuilder")
 	check(

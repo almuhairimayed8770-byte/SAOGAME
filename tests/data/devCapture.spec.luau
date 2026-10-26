@@ -73,40 +73,43 @@ describe("dev.luau capture shots", function()
 		end
 	end)
 
-	it("a released Charger's charge meets or passes the player on the spot, and the prompts say which (CS7)", function()
-		local AI = Harness.load("src/shared/data/ai")
-		local tuning = AI.tuningFor("Charger")
-		local any = false
-		for _, shot in Capture.shots do
-			for _, entry in shot.stage.enemies do
-				local def = Enemies.byId(entry.enemy) :: any
-				if def.archetype ~= "Charger" or entry.held then
-					expect(entry.charge).toBe(nil)
-					continue
-				end
-				any = true
-				local reach = def.attacks[1].reach
-				expect(entry.distance).toBeGreaterThanOrEqual(tuning.minChargeDistance)
-				expect(entry.distance).toBeLessThanOrEqual(tuning.maxChargeDistance)
-				local said = false
-				for _, beat in shot.prompts do
-					said = said
-						or beat.text:find(if entry.charge == "Meets" then "into you" else "past you", 1, true)
-							~= nil
-				end
-				expect(said).toBe(true)
-				if entry.charge == "Meets" then
-					expect(entry.distance).toBeLessThanOrEqual(reach)
-				else
-					expect(entry.charge).toBe("Passes")
-					expect(entry.distance - 1).toBeGreaterThan(reach) -- past the line's end by a body
+	it(
+		"a released Charger's charge meets or passes the player on the spot, and the prompts say which (D-300)",
+		function()
+			local AI = Harness.load("src/shared/data/ai")
+			local tuning = AI.tuningFor("Charger")
+			local any = false
+			for _, shot in Capture.shots do
+				for _, entry in shot.stage.enemies do
+					local def = Enemies.byId(entry.enemy) :: any
+					if def.archetype ~= "Charger" or entry.held then
+						expect(entry.charge).toBe(nil)
+						continue
+					end
+					any = true
+					local reach = def.attacks[1].reach
+					expect(entry.distance).toBeGreaterThanOrEqual(tuning.minChargeDistance)
+					expect(entry.distance).toBeLessThanOrEqual(tuning.maxChargeDistance)
+					local said = false
+					for _, beat in shot.prompts do
+						said = said
+							or beat.text:find(if entry.charge == "Meets" then "into you" else "past you", 1, true)
+								~= nil
+					end
+					expect(said).toBe(true)
+					if entry.charge == "Meets" then
+						expect(entry.distance).toBeLessThanOrEqual(reach)
+					else
+						expect(entry.charge).toBe("Passes")
+						expect(entry.distance - 1).toBeGreaterThan(reach) -- past the line's end by a body
+					end
 				end
 			end
+			expect(any).toBe(true)
 		end
-		expect(any).toBe(true)
-	end)
+	)
 
-	it("the open shot's runs name the key that crosses the Open view (D or A), never W or S (CS8)", function()
+	it("the open shot's runs name the key that crosses the Open view (D or A), never W or S (D-301)", function()
 		local Cameras = Capture.cameras
 		local checked = 0
 		for _, shot in Capture.shots do
@@ -160,8 +163,8 @@ describe("dev.luau capture shots", function()
 		end
 	end)
 
-	-- CS5: an Art launches on its release, a basic on its press. The prompts mark both moments.
-	it("a timed attack's prompts mark when to press, hold and let go, and the glow holds on camera (CS5)", function()
+	-- D-298: an Art launches on its release, a basic on its press. The prompts mark both moments.
+	it("a timed attack's prompts mark when to press, hold and let go, and the glow holds on camera (D-298)", function()
 		local function beatAt(shot: any, at: number): any
 			for _, beat in shot.prompts do
 				if math.abs(beat.at - at) < 1e-6 then
@@ -314,13 +317,14 @@ describe("dev.luau capture shots", function()
 			assert(kobold ~= nil and boar ~= nil, "the fight stages a kobold and a boar")
 			local guard, dodge, basics, relock = nil, nil, nil, nil
 			for _, entry in shot.perform do
-				if entry.action == "Guard" and entry.onClip == "enemy/Kobold/Overhead" then
+				local action: string = entry.action
+				if action == "Guard" and entry.onClip == "enemy/Kobold/Overhead" then
 					guard = entry
-				elseif entry.action == "Dodge" and entry.onClip == "enemy/Boar/Charge" then
+				elseif action == "Dodge" and entry.onClip == "enemy/Boar/Charge" then
 					dodge = entry
-				elseif entry.action == "BasicAttack" and entry.every ~= nil then
+				elseif action == "BasicAttack" and entry.every ~= nil then
 					basics = entry
-				elseif entry.action == "LockOn" and entry.every ~= nil then
+				elseif action == "LockOn" and entry.every ~= nil then
 					relock = entry
 				end
 			end
@@ -606,5 +610,31 @@ describe("dev.luau capture stand ring and walk (D-244)", function()
 		expect((Enum.Material :: any)[ring.material] ~= nil).toBe(true)
 		expect(ring.transparency).toBeGreaterThanOrEqual(0)
 		expect(ring.transparency).toBeLessThan(1)
+	end)
+end)
+
+-- A color's relative luminance (sRGB, 0 to 1).
+local function luminance(color: Color3): number
+	local function linear(channel: number): number
+		return if channel <= 0.04045 then channel / 12.92 else ((channel + 0.055) / 1.055) ^ 2.4
+	end
+	return 0.2126 * linear(color.R) + 0.7152 * linear(color.G) + 0.0722 * linear(color.B)
+end
+
+describe("dev.luau capture render-frame tick (D-336)", function()
+	it("is a small square in two palette colors that differ in hue, not brightness", function()
+		local tick = Capture.frameTick
+		expect(typeof(tick)).toBe("table")
+		expect(tick.size >= 4 and tick.size <= 32 and tick.size % 1 == 0).toBe(true)
+		expect(tick.margin >= 0 and tick.margin % 1 == 0).toBe(true)
+		expect(#tick.tokens).toBe(2)
+		expect(tick.tokens[1] ~= tick.tokens[2]).toBe(true)
+		local a = Palette.color3(tick.tokens[1])
+		local b = Palette.color3(tick.tokens[2])
+		-- A swap a recording can tell apart frame from frame...
+		expect((Vector3.new(a.R, a.G, a.B) - Vector3.new(b.R, b.G, b.B)).Magnitude).toBeGreaterThan(0.3)
+		-- ...that never flashes: the two are as bright as each other, within the data's step.
+		expect(tick.maxLuminanceStep > 0 and tick.maxLuminanceStep <= 0.1).toBe(true)
+		expect(math.abs(luminance(a) - luminance(b)) <= tick.maxLuminanceStep).toBe(true)
 	end)
 end)

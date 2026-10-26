@@ -27,6 +27,29 @@ describe("CaptureLogic counter", function()
 		expect(text).toBe("locomotion  f 0  0.0 / 14 s  0.25x")
 	end)
 
+	it("counts the rendered frames beside f, when it has them (D-336)", function()
+		local text = Logic.counterText({
+			shotId = "kill-shatter",
+			frames = 42,
+			rendered = 43,
+			elapsed = 0.7,
+			target = 5,
+			scale = 1,
+		})
+		expect(text).toBe("kill-shatter  f 42  r 43  0.7 / 5 s  1x")
+	end)
+
+	it("the corner square swaps its two colors every rendered frame (D-336)", function()
+		local tokens = Dev.capture.frameTick.tokens
+		expect(Logic.tickToken(0, tokens)).toBe(tokens[1])
+		expect(Logic.tickToken(1, tokens)).toBe(tokens[2])
+		expect(Logic.tickToken(2, tokens)).toBe(tokens[1])
+		expect(Logic.tickToken(1001, tokens)).toBe(tokens[2])
+		for rendered = 0, 20 do
+			expect(Logic.tickToken(rendered + 1, tokens) ~= Logic.tickToken(rendered, tokens)).toBe(true)
+		end
+	end)
+
 	it("says when auto-perform presses, and what a second K does while a stop waits to be confirmed", function()
 		local text = Logic.counterText({
 			shotId = "kill-shatter",
@@ -241,7 +264,7 @@ describe("CaptureLogic reactions, chains, standing rules and the stick (CF)", fu
 		expect(dodge.at).toBeCloseTo(2 + open - voice.time - 0.05, 1e-9)
 	end)
 
-	it("sets no press past the reaction's `to`, and keeps a chain's steps inside it (CF, D-CI3)", function()
+	it("sets no press past the reaction's `to`, and keeps a chain's steps inside it (CF, D-320)", function()
 		local reaction = Logic.reactions({
 			{ action = "Guard", onClip = Overhead.id, lead = 0.04, hold = 0.3, repeats = true, to = 10 },
 		})[1]
@@ -315,7 +338,7 @@ describe("CaptureLogic reactions, chains, standing rules and the stick (CF)", fu
 	it("presses a standing rule every `every` seconds inside its span", function()
 		local rule = Logic.standing({
 			{ action = "Art", at = 1, hold = 0.5 },
-			{ action = "BasicAttack", every = 0.4, from = 0.3, to = 19, within = 5.5, hold = 0.05 },
+			{ action = "BasicAttack", every = 0.4, from = 0.3, to = 19, within = 5.5, hold = 0.05 } :: any,
 		})
 		expect(#rule).toBe(1)
 		local basics = rule[1]

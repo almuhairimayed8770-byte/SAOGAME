@@ -29,7 +29,8 @@
 
 	Room between enemies (D-259): after each free enemy's tick (deciding or walking, never mid-attack,
 	staggered or asleep) Spacing steers its mover so no enemy stands, stops or walks inside another's
-	footprint (measured on its rig at spawn): a goal inside another body moves out to its edge, a walk
+	footprint (measured on its rig at spawn, every blocker face included, so face to face between
+	two enemies with faces, D-332): a goal inside another body moves out to its edge, a walk
 	into one slides along it, and a body caught inside one steps out. A strike's own movement is
 	never steered. A Return reaches a home another body stands on at its side (context.standOff).
 
@@ -42,6 +43,14 @@
 	Releasing it hands it back to the sleep rules on the next tick. This is the cinematic hold
 	(a boss entrance, the announcement, any story beat or cutscene freezes the field) and what
 	the Studio dev hook uses to run a controlled fight.
+
+	Studio test hooks (D-333; DevCombat calls them, the game never does): place(id, cframe, held)
+	drops whatever a living enemy was doing the way a hold does, pivots its body there, stops it
+	dead and makes it its home; walk(id, goal, hold) walks it to a point at its own pace, turning at
+	its own rate, through the mover and the room rules (keepRoom) like any walk; charge(id, toward)
+	turns a Charger to face the point and starts its rush, which then runs Charger's normal path
+	(the crouch, the telegraph, the launch, the sweep, the wall and jam stops). devRushOf reads back
+	how that rush launched and stopped. None of them touches a player or the anti-cheat.
 
 	A brain's telegraph becomes the Telegraph remote (wind-up, kind, origin, facing, ground shape),
 	its clip the ActionStarted remote, its strike a CombatService.enemyStrike call, its state an
@@ -57,7 +66,9 @@ local Shared = ReplicatedStorage.Shared
 
 local Types = require(Shared.types)
 local AI = require(Shared.data.ai)
+local Combat = require(Shared.data.combat)
 local Enemies = require(Shared.data.enemies)
+local Moments = require(Shared.data.moments)
 local Rigs = require(Shared.data.rigs)
 local Signal = require(Shared.util.Signal)
 local RushWorld = require(Shared.choreo.RushWorld)
@@ -108,6 +119,9 @@ export type Engine = {
 	-- Stops the body dead (no skid): its flat velocity is zeroed and it holds where it stands, or on
 	-- `position` when given (a goal it would pass before the next frame). Nil: `stop` stands in.
 	halt: ((model: Model, position: Vector3?) -> ())?,
+	-- Moves a placed body to `cframe` (Model:PivotTo; the Studio test hook place, D-333). Nil:
+	-- Model:PivotTo itself.
+	pivot: ((model: Model, cframe: CFrame) -> ())?,
 }
 
 -- The world cast worldAhead makes: a box of `size` at `start` moved by `vector`, colliding as
@@ -197,6 +211,26 @@ export type Entry = {
 	rushEndFinal: boolean,
 	rejoinPending: boolean, -- a stopped rush waits for a clear body to rejoin the enemies group (D-167)
 	clearSince: number?, -- since when a waiting body has been clear of every player and enemy (D-190)
+	-- The Studio test hooks (D-333): a walk the dev asked for (its brain does not decide meanwhile),
+	-- and the log of a rush the dev started. Nil for every enemy the game runs by itself.
+	walk: DevWalk?,
+	devRush: DevRush?,
+}
+
+-- A dev walk (EnemyService.walk): where to, how near counts as there, until when, and whether to
+-- hold the body once there.
+export type DevWalk = { goal: Vector3, arriveStuds: number, endsAt: number, hold: boolean }
+-- What the caller (DevCombat, dev.luau hooks) gives a walk: how near counts as there, how long it
+-- may take, and whether the body is held once it is over.
+export type DevWalkOptions = { arriveStuds: number, seconds: number, hold: boolean? }
+
+-- A dev rush's log (EnemyService.charge, devRushOf): its launch (server time, crouch point, line)
+-- and every stop told for it (reason, how far down its path, server time), in order.
+export type DevRushStop = { reason: Brain.RushEnd, distance: number, at: number }
+export type DevRush = {
+	attackId: string,
+	launched: { at: number, origin: Vector3, direction: Vector3 }?,
+	stops: { DevRushStop },
 }
 
 local FORWARD = -Vector3.zAxis
@@ -230,6 +264,8 @@ local started = false
 local warnedNoCombat = false
 local holdNew = false
 local frameList: { Entry } = {} -- the frame pass's snapshot, reused every frame (no garbage per frame)
+-- Dead enemies whose blocker faces still stand (D-281): model -> the server time they go off.
+local corpses: { [Model]: number } = {}
 
 local function dependencies(): Deps
 	if deps == nil then
@@ -733,6 +769,15 @@ local function rushStarted(entry: Entry, rush: Brain.Rush)
 		speed = rush.speed,
 		duration = rush.duration,
 	})
+	-- A dev charge's log (D-333) takes its launch; a later rush of its own ends the log.
+	local log = entry.devRush
+	if log ~= nil then
+		if log.launched == nil then
+			log.launched = { at = rush.startedAt, origin = rush.origin, direction = rush.direction }
+		else
+			entry.devRush = nil
+		end
+	end
 end
 
 -- A rush stopped: an early stop is told once, with where the body meets the wall for a slam
@@ -807,6 +852,10 @@ local function rushEnded(
 	if payload ~= nil then
 		d.fireAll("RushEnded", payload)
 	end
+	local log = entry.devRush
+	if log ~= nil and log.launched ~= nil then
+		table.insert(log.stops, { reason = reason, distance = math.max(0, distance), at = d.serverTime() })
+	end
 	-- A slam's body is still on its way to its stop (passing through players, D-167): its wait starts
 	-- with the stop that ends the rush (the daze's interrupt, a death, its run's end).
 	if not entry.rejoinPending and reason ~= "Wall" then
@@ -841,7 +890,7 @@ local function rushTurned(entry: Entry, rush: Brain.Rush, contact: RushWorld.Con
 	})
 end
 
--- An enemy's blocker faces (D-198, D-CH4): every part of its model in the blockers group, the
+-- An enemy's blocker faces (D-198, D-315): every part of its model in the blockers group, the
 -- body's and one over each part it holds (a kobold's axe); empty when it has none.
 local function blockersOf(model: Model): { BasePart }
 	local faces: { BasePart } = {}
@@ -849,6 +898,24 @@ local function blockersOf(model: Model): { BasePart }
 		if child:IsA("BasePart") and child.CollisionGroup == AI.collision.blockers then
 			table.insert(faces, child)
 		end
+	end
+	return faces
+end
+
+-- Its blocker faces flat in its root's space (Spacing.Face, D-332): each stands along the root's
+-- axes (RigBuilder.addBlocker), so its middle and half its width and depth are all a face needs.
+local function facesOf(model: Model): { Spacing.Face }
+	local root = model.PrimaryPart
+	local faces: { Spacing.Face } = {}
+	if root == nil then
+		return faces
+	end
+	for _, part in blockersOf(model) do
+		local centre = root.CFrame:PointToObjectSpace(part.CFrame.Position)
+		table.insert(faces, {
+			centre = Vector3.new(centre.X, 0, centre.Z),
+			half = Vector3.new(part.Size.X / 2, 0, part.Size.Z / 2),
+		})
 	end
 	return faces
 end
@@ -880,26 +947,38 @@ end
 --- would be pushed out of it the moment it turned solid. A blocker covers its body's whole
 --- footprint, root included, from the floor up past every root's top, so blocker against blocker
 --- settles root against blocker too. Every face counts, on both sides: the body's and the one over
---- each part an enemy holds (D-CH4: a kobold's axe face is solid with its body's). Judged on the
+--- each part an enemy holds (D-315: a kobold's axe face is solid with its body's). Judged on the
 --- parts' own boxes: the engine's queries never see a blocker (CanQuery off). A model with no
---- blocker is clear.
+--- blocker is clear. A body that died counts too while its faces still stand (until it shatters,
+--- see sweepCorpses): the engine pushes out of a corpse's solid face as out of a living one's.
 function EnemyService.blockerClear(model: Model): boolean
 	local own = blockersOf(model)
 	if #own == 0 then
 		return true
 	end
-	for _, entry in entries do
-		local other = entry.model
-		if other ~= model then
-			for _, theirs in blockersOf(other) do
-				if theirs.CanCollide then
-					for _, face in own do
-						if uprightBoxesOverlap(face, theirs) then
-							return false
-						end
+	local function meets(other: Model): boolean
+		if other == model then
+			return false
+		end
+		for _, theirs in blockersOf(other) do
+			if theirs.CanCollide then
+				for _, face in own do
+					if uprightBoxesOverlap(face, theirs) then
+						return true
 					end
 				end
 			end
+		end
+		return false
+	end
+	for _, entry in entries do
+		if meets(entry.model) then
+			return false
+		end
+	end
+	for corpse in corpses do
+		if meets(corpse) then
+			return false
 		end
 	end
 	return true
@@ -1148,7 +1227,28 @@ local function forget(id: number, reason: string)
 	entry.awake = false
 	entry.brain:die()
 	moverStop(entry.mover)
+	if reason == "Died" then
+		-- The body stands frozen until every client shatters it (D-281): its faces stay until then.
+		corpses[entry.model] = dependencies().serverTime() + Moments.deathDuckDelay() + Combat.deathFreeze
+	end
 	EnemyService.Despawned:Fire(id, entry.defId, reason)
+end
+
+-- A corpse's blocker faces (D-281): solid while the frozen body still stands, so nothing walks or
+-- turns solid inside a body still drawn; off from the moment every client shatters it (the kill's
+-- hit-stop, Moments.deathDuckDelay, then Combat.deathFreeze), so nobody bumps into a body no longer
+-- drawn while the model waits out Combat.corpseRemoveDelay. A model already gone is let go.
+local function sweepCorpses(now: number)
+	for model, offAt in corpses do
+		if model.Parent == nil then
+			corpses[model] = nil
+		elseif now >= offAt then
+			for _, face in blockersOf(model) do
+				face.CanCollide = false
+			end
+			corpses[model] = nil
+		end
+	end
 end
 
 -- Holds an enemy: its brain sleeps (it stops and forgets its target), its mover stops and its HP
@@ -1212,11 +1312,13 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 	local body: RushWorld.Body? = if root ~= nil
 		then { profile = RushWorld.profileOf(model), size = root.Size }
 		else nil
-	local footprint = Spacing.footprintOf(if body ~= nil then body.profile else {})
 	-- What players bump into instead of the root (D-198); the enemies group switches it on.
 	if typeof(d.rigBuilder.addBlocker) == "function" then
 		d.rigBuilder.addBlocker(model)
 	end
+	-- The room it keeps from other enemies (D-259): every blocker face it was just given counts
+	-- (D-332): since D-281 a face meets every other enemy's faces.
+	local footprint = Spacing.footprintOf(if body ~= nil then body.profile else {}, facesOf(model))
 	setGroup(model, AI.collision.enemies)
 	-- Parent first: the engine's place() claims server network ownership of the root, which the
 	-- engine refuses for a part that is not under Workspace yet.
@@ -1381,6 +1483,185 @@ function EnemyService.count(): number
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- Studio test hooks (D-333): DevCombat's "enemy", "walk" and "charge". The game never calls them.
+-- ---------------------------------------------------------------------------------------------
+
+-- Drops whatever a living enemy was doing the way a hold does (its brain sleeps: an attack in its
+-- wind-up is dropped and told, a launched rush stops and is told; its mover stops; a dev walk
+-- ends), then wakes it at once, free and in Idle.
+local function rouse(entry: Entry)
+	entry.walk = nil
+	hold(entry)
+	entry.held = false
+	holdRegen(entry.id, false)
+	entry.awake = true
+	entry.brain:wake()
+end
+
+-- Why a living enemy cannot take a dev walk or charge now (staggered, dazed or dead), or nil.
+local function busyFor(entry: Entry): string?
+	local phase = entry.brain:getPhase()
+	if phase == "Interrupted" or phase == "Dead" then
+		return ("it is %s (%s); try again once it recovers"):format(phase, tostring(entry.brain.interruptState))
+	end
+	return nil
+end
+
+-- A dev walk's tick (EnemyService.walk), in place of the brain's: the body turns toward the goal at
+-- its archetype's rate (turnToward; the frame pass carries the turn out) and walks there at its own
+-- pace through the mover; the room rules (keepRoom) and the mover run after it as after any tick.
+local function walkTick(entry: Entry, now: number, step: number): boolean
+	local walk = entry.walk
+	if walk == nil then
+		return true
+	end
+	local brain = entry.brain
+	if brain:getPhase() ~= "Idle" then
+		entry.walk = nil -- an interrupt (a hit's stagger) took over: the brain decides from here
+		return true
+	end
+	local position = dependencies().engine.position(entry.model)
+	if Brain.horizontalDistance(position, walk.goal) <= walk.arriveStuds or now >= walk.endsAt then
+		entry.walk = nil
+		brain:enterIdle(now) -- stops the mover and the turn
+		entry.home = position
+		if walk.hold then
+			hold(entry)
+		end
+		return true
+	end
+	local direction = Brain.horizontal(walk.goal - position)
+	if direction ~= nil then
+		brain:turnToward(direction, brain.tuning.turnRate, step)
+	end
+	entry.stepping = false
+	moverRequest(entry.mover, walk.goal, entry.def.moveSpeed, false)
+	return true
+end
+
+--- Places a living enemy (a Studio test hook, D-333): whatever it was doing is dropped the way a
+--- hold drops it (an attack in its wind-up is told dropped, a launched rush stops and is told, a dev
+--- walk ends), its body pivots to `cframe` (the look's flat part is its facing), stops dead there
+--- and takes it as its home. `held` leaves it held; otherwise the sleep rules take it back on the
+--- next tick and its brain starts afresh in Idle, as a spawned one does, under every server rule
+--- (its room to other enemies, its hits, its walls). False when `id` is no living enemy.
+function EnemyService.place(id: number, cframe: CFrame, held: boolean?): boolean
+	local entry = entries[id]
+	if entry == nil then
+		return false
+	end
+	local engine = dependencies().engine
+	local model = entry.model
+	entry.walk = nil
+	entry.devRush = nil
+	hold(entry)
+	local pivot = engine.pivot
+	if pivot ~= nil then
+		pivot(model, cframe)
+	else
+		model:PivotTo(cframe)
+	end
+	local look = Brain.horizontal(cframe.LookVector) or FORWARD
+	engine.setFacing(model, look)
+	entry.brain.facingDir = look
+	-- The hold stopped the body where it stood before the move, and a Humanoid walks back to the
+	-- spot it was stopped on: stop it dead where it stands now.
+	local halt = engine.halt
+	if halt ~= nil then
+		halt(model, nil)
+	else
+		engine.stop(model)
+	end
+	restartClock(entry.mover)
+	entry.mover.halted = nil
+	entry.stepping = false
+	entry.home = engine.position(model)
+	if held ~= true then
+		entry.held = false
+		holdRegen(id, false)
+		lastSleepCheck = -math.huge
+	end
+	return true
+end
+
+--- Walks a living enemy to `goal` (a Studio test hook, D-333): whatever it was doing is dropped the
+--- way a hold drops it, then it walks there awake at its own pace (its def's moveSpeed), turning at
+--- its archetype's rate, through the mover (a path past a wall, the stuck clock, the snout's room)
+--- with its room to every other enemy kept (keepRoom); its brain decides nothing meanwhile. The
+--- walk is over once the root stands within options.arriveStuds of the goal, after
+--- options.seconds, or when the brain leaves Idle (a hit's stagger, a death); the brain then takes
+--- over where the body stands, its home there, held when options.hold. False (and why) when `id`
+--- is no living enemy or the body cannot walk now.
+function EnemyService.walk(id: number, goal: Vector3, options: DevWalkOptions): (boolean, string?)
+	local entry = entries[id]
+	if entry == nil then
+		return false, "no living enemy"
+	end
+	if entry.def.moveSpeed <= 0 then
+		return false, "it is rooted (moveSpeed 0)"
+	end
+	local busy = busyFor(entry)
+	if busy ~= nil then
+		return false, busy
+	end
+	entry.devRush = nil
+	rouse(entry)
+	entry.walk = {
+		goal = goal,
+		arriveStuds = options.arriveStuds,
+		endsAt = dependencies().serverTime() + options.seconds,
+		hold = options.hold == true,
+	}
+	return true, nil
+end
+
+--- Whether a living enemy is on a dev walk (EnemyService.walk).
+function EnemyService.walking(id: number): boolean
+	local entry = entries[id]
+	return entry ~= nil and entry.walk ~= nil
+end
+
+--- Starts a Charger's rush at `toward` (a Studio test hook, D-333): whatever it was doing is dropped
+--- the way a hold drops it, it wakes facing the point at once (Charger.charge) and crouches; from
+--- there the rush runs Charger's normal path: the telegraph and the clip, the wind-up's hold, the
+--- launch along the facing, the sweep that hits on contact, the glance, clip, slam and jam stops,
+--- the daze and the recovery, after which the brain takes over. devRushOf(id) reads back its launch
+--- and its stops. False (and why) when `id` is no living enemy, has no rush, is staggered or dead,
+--- or the point is where it stands.
+function EnemyService.charge(id: number, toward: Vector3): (boolean, string?)
+	local entry = entries[id]
+	if entry == nil then
+		return false, "no living enemy"
+	end
+	local attack = Charger.rushOf(entry.def)
+	if ARCHETYPES[entry.def.archetype] ~= Charger or attack == nil then
+		return false, ("%s is no Charger with a rush"):format(entry.def.id)
+	end
+	local busy = busyFor(entry)
+	if busy ~= nil then
+		return false, busy
+	end
+	local direction = Brain.horizontal(toward - dependencies().engine.position(entry.model))
+	if direction == nil then
+		return false, "the point is where it stands"
+	end
+	rouse(entry)
+	entry.devRush = { attackId = attack.id, launched = nil, stops = {} }
+	local started, reason = Charger.charge(entry.brain, direction)
+	if not started then
+		entry.devRush = nil
+	end
+	return started, reason
+end
+
+--- How the rush the last charge(id) started launched and stopped (server times, the stops in the
+--- order told), or nil: no living enemy, no dev charge, or a later rush of its own since.
+function EnemyService.devRushOf(id: number): DevRush?
+	local entry = entries[id]
+	return if entry ~= nil then entry.devRush else nil
+end
+
+-- ---------------------------------------------------------------------------------------------
 -- The tick
 -- ---------------------------------------------------------------------------------------------
 
@@ -1394,6 +1675,9 @@ local function refreshSleep(now: number)
 	for _, entry in entries do
 		if entry.held then
 			continue -- held: asleep until released, whoever stands next to it
+		end
+		if entry.walk ~= nil then
+			continue -- a dev walk (D-333) keeps its body awake until it is over
 		end
 		local position = engine.position(entry.model)
 		local awake = false
@@ -1432,6 +1716,7 @@ local function tickAll(step: number)
 	local now = d.serverTime()
 	currentPlayers = d.players()
 	refreshSleep(now)
+	sweepCorpses(now)
 	local snapshot = {}
 	for _, entry in entries do
 		table.insert(snapshot, entry)
@@ -1444,7 +1729,12 @@ local function tickAll(step: number)
 		if not entry.awake then
 			continue
 		end
-		local ok, err = pcall(runTick, entry.brain, step)
+		local ok, err
+		if entry.walk ~= nil then
+			ok, err = pcall(walkTick, entry, now, step)
+		else
+			ok, err = pcall(runTick, entry.brain, step)
+		end
 		if not ok then
 			warn(("[EnemyService] brain of entity %d (%s) failed: %s"):format(entry.id, entry.defId, tostring(err)))
 		end
@@ -1575,7 +1865,7 @@ end
 --- look, over every corner of every BasePart of its body as the parts stand now (spawn() measures
 --- the rig as built, at its rest pose). A rush strikes where the snout is (D-166). Its blocker
 --- faces (the blockers group, D-198) are not its body: they stand over its idle and what it holds
---- (D-CH4), so a live enemy reaches as far as the rig spawn() measured. (0, 0) without a root.
+--- (D-315), so a live enemy reaches as far as the rig spawn() measured. (0, 0) without a root.
 function EnemyService.bodyExtents(model: Model): (number, number)
 	local root = model.PrimaryPart
 	if root == nil then
@@ -1847,6 +2137,9 @@ local function defaultEngine(groups: any?): Engine
 				humanoid:MoveTo(root.Position)
 			end
 		end,
+		pivot = function(model, cframe)
+			model:PivotTo(cframe)
+		end,
 	}
 end
 
@@ -1977,6 +2270,7 @@ function EnemyService.reset()
 		forget(id, "Despawned")
 	end
 	table.clear(entries)
+	table.clear(corpses)
 	currentPlayers = {}
 	accumulator = 0
 	lastSleepCheck = -math.huge

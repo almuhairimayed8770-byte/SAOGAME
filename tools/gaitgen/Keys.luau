@@ -34,11 +34,19 @@ export type SwingJoint = { t: number, hip: number, knee: number, ankle: number }
 --- root and skating forward. Keys inside it are solved by IK; one must fall at its end.
 export type Peel = { duration: number, rise: number, angle: number }
 
+--- The touch-down (D-334): for `duration` s before the strike the foot already goes back with the
+--- ground while its strike pivot comes down `rise` studs and the foot rolls `angle` degrees back to
+--- its strike angle (both eased out into the strike), so the sole meets the field at rest instead
+--- of landing while it still moves with the body. The swing ends where it starts. Keys inside it are
+--- solved by IK; one must fall at its start.
+export type Approach = { duration: number, rise: number, angle: number }
+
 --- One foot's cycle. It strikes at `ts` on `strikePivot` tipped `strikeAngle` degrees, rolls flat
 --- by `flatFrom`, stays flat to `flatTo`, and leaves by `tl` rolled `liftAngle` about `liftPivot`
 --- (eased by `liftPower` when set, smoothstep otherwise), then peels off the field (`peel`) when
 --- set. (`x`, `z`) is where the flat sole center sits at the strike; while planted it moves against
---- the root's travel. The swing from the lift (or the peel's end) to the next strike follows
+--- the root's travel. It comes down onto that line through `approach` when set. The swing from the
+--- lift (or the peel's end) to the next strike (or the approach's start) follows
 --- `swing` points (a Hermite path solved by IK) or `swingJoints`: hand-set keys, and between them
 --- (a key the plan does not set) the leg as the clip would play it without that key.
 export type Plan = {
@@ -54,6 +62,7 @@ export type Plan = {
 	liftAngle: number,
 	liftPower: number?,
 	peel: Peel?,
+	approach: Approach?,
 	swing: { SwingPoint }?,
 	swingJoints: { SwingJoint }?,
 }

@@ -138,12 +138,12 @@ export type StandOff = {
 	from: number,
 	to: number,
 	room: ((rootCFrame: CFrame, distance: number) -> number)?,
-	-- The keep-out (D-CH3, StandOffOptions.keepOut): how much farther along `away` the body stands
+	-- The keep-out (D-314, StandOffOptions.keepOut): how much farther along `away` the body stands
 	-- at a clip time than the step above puts it, and the clip time past which that changes no more.
 	keep: ((clipTime: number) -> number)?,
 	keepUntil: number?,
 	-- And how far the keep-out holds the body aside at a clip time, along `side` (flat, unit, square
-	-- to `away`), off the face over a part the target holds (D-CH4); `roomSide` is `room` along it.
+	-- to `away`), off the face over a part the target holds (D-315); `roomSide` is `room` along it.
 	-- Nil when the target holds nothing the body stands beside.
 	side: Vector3?,
 	keepSide: ((clipTime: number) -> number)?,
@@ -153,7 +153,7 @@ export type StandOff = {
 --- What a stand-off plan covers (ContactPredictor.standOff). With neither field it is the Art's
 --- blade step alone.
 export type StandOffOptions = {
-	-- Plan the keep-out too (D-CH3): a plan comes back whenever the target has a blocker.
+	-- Plan the keep-out too (D-314): a plan comes back whenever the target has a blocker.
 	keepOut: boolean?,
 	-- false: no blade step (a basic swing; its first cut is the key rule's alone).
 	step: boolean?,
@@ -858,12 +858,12 @@ type KeepOut = {
 	keepSide: ((clipTime: number) -> number)?,
 }
 
--- The keep-out (D-CH3) of a swing whose body stands at `rootCFrame` at clip time `from` and steps
+-- The keep-out (D-314) of a swing whose body stands at `rootCFrame` at clip time `from` and steps
 -- `distance` along `away` by clip time `to` (the blade step): how much farther along `away` the
 -- body stands at each clip time, and how far aside, so that no colliding part goes deeper into the
 -- target's blocker (as its faces stood when the plan was made) than at `from`. The body's face
 -- (keepOut.bodyFace) holds the body back along `away`. A face over a part the target holds
--- (keepOut.heldFace, D-CH4: a kobold's axe, which hangs beside a body at its front) holds it back
+-- (keepOut.heldFace, D-315: a kobold's axe, which hangs beside a body at its front) holds it back
 -- or aside, whichever is the shorter step: aside along `side`, square to `away` and off the held
 -- face nearest the root (a lean into an axe beside the body is undone by a step off it, not by
 -- backing past its far end). Both only ever grow, so a freeze holds where the body stands, and the
@@ -1092,9 +1092,9 @@ end
 --- world for the frames that take the step. Pure apart from `cast`: it poses the clip itself and
 --- reads only the parts' boxes.
 ---
---- With `options.keepOut` the plan also keeps the body out of the target (D-CH3): `keep` says how
+--- With `options.keepOut` the plan also keeps the body out of the target (D-314): `keep` says how
 --- much farther along `away` the body stands at each clip time, and `keepSide` how far along
---- `side` (off a part the target holds, D-CH4), so that the swing's own motion never carries a
+--- `side` (off a part the target holds, D-315), so that the swing's own motion never carries a
 --- colliding part (standOff.keepOut.parts) deeper into the target's blocker than the swing found
 --- it (posed lazily, a sample a frame as the clip gets there), and a plan comes back whenever the
 --- target has a blocker (`distance` 0 for a keep-out alone; `keep` may stay 0).

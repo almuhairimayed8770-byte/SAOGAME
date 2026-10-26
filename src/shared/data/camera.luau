@@ -185,12 +185,22 @@ local Camera = {
 		-- the body stood, and only then eases out to the free camera. A boss's longer rise eases
 		-- out over its last part.
 		riseHoldSeconds = Fx.shatter.duration,
+		-- The still shot is still (D-323): from its first frame no spring moves it, and the kill's
+		-- shake and nudge do not play on it; it moves only with the body (rigidly) and the FOV punch.
+		-- A deliberate look lets it go at once (D-324): look input adding up to this many degrees
+		-- while it holds (a flick of the mouse, a push of the stick), not a twitch.
+		lookBreakDegrees = 4,
 		-- A wall at the camera's shoulder: once a wall leaves the camera under wallBlockedFraction
 		-- of its reach, and the other shoulder's spot opens at least wallGainFraction more of its
 		-- own, the shot swings over to the open side (a pan at the turn cap) instead of standing
 		-- pressed against the wall. Between two walls neither side opens: it stays and pulls in.
 		wallBlockedFraction = 0.6,
 		wallGainFraction = 0.3,
+		-- After a wall swings the shot to the other shoulder it stays there at least this long
+		-- (D-325): a run past pillars on alternate sides changes shoulder at most once a dwell, not
+		-- at every pillar (6 changes in 5 s at 16 studs a second). A wall at the shoulder inside the
+		-- dwell pulls the camera in, as between two walls.
+		wallSwapDwellSeconds = 2,
 	},
 
 	mobile = {

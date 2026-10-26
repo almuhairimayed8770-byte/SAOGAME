@@ -1,6 +1,6 @@
 --!strict
 --[[
-	Item 224 (D-CH3): a freeze holds the whole body and its blade still. In Studio the Rising Arc's
+	Item 224 (D-314): a freeze holds the whole body and its blade still. In Studio the Rising Arc's
 	Normal hold moved the body 0.08-0.2 studs a frame at a point-blank kobold, from two causes:
 
 	- The clip's root motion and its lean carried the body's colliding parts (root, torsos, head)
@@ -17,7 +17,7 @@
 	on at its 6.2), plus one placement already inside the blocker, on 60 and 144 Hz frames. The
 	keep-out never costs a cut that reached the body and stays inside the anti-cheat's allowance.
 
-	The kobold holds its axe in a face of its own (D-CH4), hanging beside a body at its front: a
+	The kobold holds its axe in a face of its own (D-315), hanging beside a body at its front: a
 	lean into it there is undone by a step aside, square to the line back, since backing off it
 	means past its far end (more than the keep-out's budget). Each sample keeps out what the parts
 	sweep from the one before, in pieces when they turn fast (a cut turns the head up to 64 degrees
@@ -103,7 +103,7 @@ local function setupOf(id: string): any
 end
 
 -- The touching distances of item 224's fights (and one body already in the blocker), and a body
--- against the kobold's axe at its front right (the axe's own face, D-CH4): `yaw` turns the enemy
+-- against the kobold's axe at its front right (the axe's own face, D-315): `yaw` turns the enemy
 -- from the hit matrix setup's.
 type Placement = { setup: string, distance: number, yaw: number? }
 local PLACEMENTS: { Placement } = {
@@ -117,7 +117,7 @@ local PLACEMENTS: { Placement } = {
 }
 
 -- An enemy's rig in its rest pose where the hit matrix stands it, with its blocker (D-198): its
--- faces, the body's first (D-CH4).
+-- faces, the body's first (D-315).
 local function place(setupId: string, distance: number, yaw: number?): (any, { any })
 	local setup = setupOf(setupId)
 	local def = Enemies.byId(setup.enemy)
@@ -227,7 +227,7 @@ local function planFor(swing: Swing, model: any): any?
 	)
 end
 
-describe("a freeze holds the procedural channels (item 224, D-CH3)", function()
+describe("a freeze holds the procedural channels (item 224, D-314)", function()
 	for _, swing in SWINGS do
 		for _, fps in { 60, 144 } do
 			it(
@@ -287,7 +287,7 @@ describe("a freeze holds the procedural channels (item 224, D-CH3)", function()
 	end
 end)
 
-describe("the keep-out holds the body out of the enemy's blocker (item 224, D-CH3)", function()
+describe("the keep-out holds the body out of the enemy's blocker (item 224, D-314)", function()
 	for _, swing in SWINGS do
 		it(swing.name .. ": no colliding part goes deeper than it started, at 60 and 144 Hz", function()
 			for _, placement in PLACEMENTS do
@@ -364,7 +364,7 @@ describe("the keep-out holds the body out of the enemy's blocker (item 224, D-CH
 	end)
 
 	it(
-		"beside the kobold's axe at its front, a lean into the axe steps the body aside, not back past the axe (D-CH4)",
+		"beside the kobold's axe at its front, a lean into the axe steps the body aside, not back past the axe (D-315)",
 		function()
 			-- Measured: Sharp Nail 0.18 and the third basic 0.21 aside at a kobold 2 studs ahead; backing
 			-- off the axe instead needs past its far end, 3.85 ahead of the kobold, more than maxStuds.
@@ -451,7 +451,7 @@ describe("the keep-out holds the body out of the enemy's blocker (item 224, D-CH
 	end)
 end)
 
-describe("the keep-out stays inside the anti-cheat's limits (D-CH3)", function()
+describe("the keep-out stays inside the anti-cheat's limits (D-314)", function()
 	it("caps the blade step and the keep-out together within the mid-swing slack", function()
 		expect(KEEP_OUT.maxStuds <= Combat.rootMotionSlack).toBe(true)
 		expect(KEEP_OUT.maxStuds >= STAND_OFF.maxStuds).toBe(true)

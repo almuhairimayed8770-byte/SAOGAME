@@ -999,7 +999,7 @@ describe("A stopped rush never carries a player (D-190)", function()
 		expect(met).toBeGreaterThan(100)
 	end)
 
-	it("blockerClear meets every face: a kobold's axe face counts as its body's does (D-281, D-CH4)", function()
+	it("blockerClear meets every face: a kobold's axe face counts as its body's does (D-281, D-315)", function()
 		fresh()
 		local koboldId = EnemyService.spawn("KoboldAxeman", CFrame.new(0, 3, 0))
 		local boarId = EnemyService.spawn("FrenzyBoar", CFrame.new(40, 3, 0))

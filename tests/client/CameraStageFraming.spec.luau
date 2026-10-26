@@ -1,7 +1,7 @@
 --!strict
 --[[
 	The ThreeQuarter staged view frames the kobold's overhead (enemy-kobold-overhead) and the parry
-	(parry-spark) with the kobold whole and its axe in sight (CS6). Both bodies are posed frame by
+	(parry-spark) with the kobold whole and its axe in sight (D-299). Both bodies are posed frame by
 	frame at 60 Hz: the player is the hit matrix's avatar with its sword (HitMatrix.standing), the
 	kobold the RigBuilder rig with its axe, at the shot's own placement; each clip is sampled with
 	ClipSampler and solved with Pose. The camera is CameraController's, set to the shot's view and
@@ -375,7 +375,7 @@ local function clashOf(attack: any): number
 	return ClipSampler.hitWindows(attack)[1].open
 end
 
-describe("The ThreeQuarter staged view: the kobold whole, its axe in sight (CS6)", function()
+describe("The ThreeQuarter staged view: the kobold whole, its axe in sight (D-299)", function()
 	it("the overhead: the wind-up, the chop and the recovery, never behind the player", function()
 		local result = measure("enemy-kobold-overhead", OVERHEAD.duration, function(t: number): Frame
 			return { enemy = OVERHEAD, enemyTime = t, player = IDLE, playerTime = t % IDLE.duration }

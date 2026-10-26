@@ -4,9 +4,11 @@
 	Every clip it checks regenerates byte for byte from tools/gaitgen/ (the plans in Gaits.luau,
 	the pinned upper-body sources in sources/), the same check `lune run tools/gaitgen.luau --check`
 	runs, so a hand edit to one of those clips fails here: change the generator's input and
-	regenerate instead. Run and Sprint are left out of the byte check (GaitGen.DRIFTED: their upper
-	bodies were re-keyed by hand after generation), but their key times, root, legs and Footsteps
-	must still be the generator's, and they must still differ (else they belong back in the check).
+	regenerate instead. Every gait clip is in the byte check, Run and Sprint too (D-291: their
+	hand-keyed upper bodies are pinned sources, so GaitGen.DRIFTED is empty). Should a clip ever be
+	listed there again, it is left out of the byte check, but its key times, root, legs and
+	Footsteps must still be the generator's, and it must still differ (else it belongs back in the
+	check).
 ]]
 
 local fs = require("@lune/fs")

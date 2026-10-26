@@ -39,7 +39,7 @@
 	HitWindowOpen, of the staged enemy it names, which the shot lets go; led by 0 or more and under
 	combat.parryWindow for a Guard, at most the wind-up after the clip's first event for any other
 	press; `repeats` and `lock` booleans; an optional `to` above 0 and inside the take, past which
-	nothing of it goes down (D-CI3); a `chain` of steps each a `delay` of 0 or more after the
+	nothing of it goes down (D-320); a `chain` of steps each a `delay` of 0 or more after the
 	one before, timed by nothing else, a `cycle` of Art actions starting with its own, `within`
 	only on a Move step) and `every` (a standing rule: BasicAttack with a positive `within`, or
 	LockOn, inside 0 <= from < to <= the take). A timed attack lands where its prompts say: an Art launches on its release, so
@@ -59,6 +59,11 @@
 	and its ramp off every spawn's scatter; no staged enemy on the ledge; the ring's disc thinner
 	than standHeightTolerance, palette-coloured, a real material, transparency in [0, 1).
 
+	The capture's render-frame tick (D-336): capture.frameTick.size is a whole number of pixels
+	from 1 to MAX_TICK_PIXELS and its margin a whole number of 0 or more; its tokens are two
+	different palette tokens whose relative luminance differs by at most maxLuminanceStep (above 0,
+	at most MAX_TICK_LUMINANCE_STEP), so the square it swaps every rendered frame never flashes.
+
 	The capture's walk into the stand ring (D-244: the staging never moves the player):
 	- capture.stage's ring numbers are positive, and the ring is wider than the auto-walk's rest
 	  target (capture.walk.restStuds), so a body at rest on the spot stands inside it;
@@ -77,6 +82,21 @@
 	  the stage area up to the open shot's spot at locomotion walkSpeed;
 	- walk.renderOrder runs after the control script's input step and before the character
 	  controller's step (choreo.luau renderOrder.character), and walk.cancelKeys are real KeyCodes.
+
+	DevCombat's Studio test hooks (`hooks`, D-333):
+	- hooks.arriveStuds is positive and under ai.luau leash.homeRadius, so a walked body stands at
+	  home where it stops and its leash never walks it back;
+	- hooks.walkTimeoutSeconds gives the slowest walking enemy WALK_DETOUR times its straight walk of
+	  hooks.maxWalkStuds;
+	- hooks.chargeTimeoutSeconds outlasts every Charger rush (every def, Elite too): its wind-up with
+	  ai.hitStop.maxPausePerAttack of hit-stop in it, then the longer of its strike beat and its run
+	  (reach plus the Charger's overshoot at ai.rushSpeed);
+	- hooks.folderName is a plain instance name no other part of the place uses (the Playground
+	  model, its kill volume, the stage's ledge and ramp); hooks.maxParts is whole, 1 to
+	  MAX_DEV_PARTS; 0 < minPartStuds < maxPartStuds <= the engine's 2048; hooks.maxAfterSeconds is
+	  positive and at most chargeTimeoutSeconds (a late part lands while a charge still waits);
+	  hooks.maxNameLength is whole, 1 to 100 (the engine's name cap); the parts' colour is a palette
+	  token and their material a real Enum.Material.
 ]]
 
 type Context = {
@@ -116,6 +136,135 @@ local function isMaterial(name: any): boolean
 		return (roblox.Enum.Material :: any)[name]
 	end)
 	return ok and material ~= nil
+end
+
+-- DevCombat's Studio test hooks (D-333): dev.luau `hooks`.
+-- A walk gets this many times its straight walk at the slowest walking enemy's pace before it ends:
+-- room for a path round an obstacle and a slide along another body.
+local WALK_DETOUR = 2
+-- The most parts the dev folder may hold, and the engine's own cap on a part's side (studs).
+local MAX_DEV_PARTS = 256
+local ENGINE_MAX_PART_STUDS = 2048
+-- The engine's cap on an Instance.Name.
+local MAX_INSTANCE_NAME = 100
+-- The render-frame tick (D-336): a small square, its two colors as bright as each other.
+local MAX_TICK_PIXELS = 32
+local MAX_TICK_LUMINANCE_STEP = 0.1
+
+local function checkHooks(ctx: Context, dev: any, problem: (message: string) -> ())
+	local hooks = dev.hooks
+	if typeof(hooks) ~= "table" then
+		problem("hooks table is missing (DevCombat's enemy, walk, charge and part numbers)")
+		return
+	end
+	local ai = ctx.load("src/shared/data/ai")
+	local enemies = ctx.load("src/shared/data/enemies")
+	local palette = ctx.load("src/shared/data/palette")
+	local world = ctx.load("src/shared/data/world")
+
+	-- "walk": arrived inside the home radius, so the leash never walks the body back.
+	local homeRadius = ai.leash.homeRadius
+	if not isNumber(hooks.arriveStuds) or hooks.arriveStuds <= 0 or hooks.arriveStuds >= homeRadius then
+		problem(
+			("hooks.arriveStuds (%s) must be positive and under ai.luau leash.homeRadius (%g)"):format(
+				tostring(hooks.arriveStuds),
+				homeRadius
+			)
+		)
+	end
+	if not isNumber(hooks.maxWalkStuds) or hooks.maxWalkStuds <= 0 then
+		problem("hooks.maxWalkStuds must be a positive number of studs")
+	else
+		local slowest = math.huge
+		for _, def in enemies.list() do
+			if isNumber(def.moveSpeed) and def.moveSpeed > 0 then
+				slowest = math.min(slowest, def.moveSpeed)
+			end
+		end
+		local needed = WALK_DETOUR * hooks.maxWalkStuds / slowest
+		if not isNumber(hooks.walkTimeoutSeconds) or hooks.walkTimeoutSeconds < needed then
+			problem(
+				("hooks.walkTimeoutSeconds (%s) must give the slowest walking enemy (%g studs a second) twice its longest walk (%g s)"):format(
+					tostring(hooks.walkTimeoutSeconds),
+					slowest,
+					needed
+				)
+			)
+		end
+	end
+
+	-- "charge": over once the rush is: its wind-up (paused by hits at most maxPausePerAttack), then
+	-- the longer of its strike beat and its run (reach and overshoot at its rush speed).
+	local longest = 0
+	local overshoot = ai.archetypes.Charger.overshoot
+	for _, base in enemies.list() do
+		for _, def in { enemies.scaled(base), enemies.variant(enemies.scaled(base), "Elite") } do
+			if def.archetype ~= "Charger" then
+				continue
+			end
+			for _, attack in def.attacks do
+				if attack.arc == 0 or attack.groundShape == "Line" then
+					local run = (attack.reach + overshoot) / ai.rushSpeed(attack)
+					longest =
+						math.max(longest, attack.windUp + ai.hitStop.maxPausePerAttack + math.max(attack.strike, run))
+				end
+			end
+		end
+	end
+	if not isNumber(hooks.chargeTimeoutSeconds) or hooks.chargeTimeoutSeconds <= longest then
+		problem(
+			("hooks.chargeTimeoutSeconds (%s) must outlast every Charger rush's wind-up, pauses and run (%.3f s)"):format(
+				tostring(hooks.chargeTimeoutSeconds),
+				longest
+			)
+		)
+	end
+
+	-- "part" and "clearparts".
+	if not isName(hooks.folderName) then
+		problem("hooks.folderName must be a plain instance name")
+	else
+		local taken = { world.playground.modelName, world.playground.killVolumeName }
+		local stage = if typeof(dev.capture) == "table" then dev.capture.stage else nil
+		local ledge = if typeof(stage) == "table" then stage.ledge else nil
+		if typeof(ledge) == "table" then
+			table.insert(taken, ledge.name)
+			if typeof(ledge.ramp) == "table" then
+				table.insert(taken, ledge.ramp.name)
+			end
+		end
+		if table.find(taken, hooks.folderName) ~= nil then
+			problem(("hooks.folderName '%s' is already a name in the place"):format(hooks.folderName))
+		end
+	end
+	if not isWhole(hooks.maxParts) or hooks.maxParts < 1 or hooks.maxParts > MAX_DEV_PARTS then
+		problem(("hooks.maxParts must be a whole number from 1 to %d"):format(MAX_DEV_PARTS))
+	end
+	local least, most = hooks.minPartStuds, hooks.maxPartStuds
+	if not isNumber(least) or not isNumber(most) or least <= 0 or least >= most or most > ENGINE_MAX_PART_STUDS then
+		problem(("hooks.minPartStuds and maxPartStuds must satisfy 0 < min < max <= %d"):format(ENGINE_MAX_PART_STUDS))
+	end
+	if
+		not isNumber(hooks.maxAfterSeconds)
+		or hooks.maxAfterSeconds <= 0
+		or (isNumber(hooks.chargeTimeoutSeconds) and hooks.maxAfterSeconds > hooks.chargeTimeoutSeconds)
+	then
+		problem(
+			("hooks.maxAfterSeconds (%s) must be positive and at most hooks.chargeTimeoutSeconds (%s): a late part lands while a charge still waits"):format(
+				tostring(hooks.maxAfterSeconds),
+				tostring(hooks.chargeTimeoutSeconds)
+			)
+		)
+	end
+	if not isWhole(hooks.maxNameLength) or hooks.maxNameLength < 1 or hooks.maxNameLength > MAX_INSTANCE_NAME then
+		problem(("hooks.maxNameLength must be a whole number from 1 to %d"):format(MAX_INSTANCE_NAME))
+	end
+	if palette.tokens[hooks.partColorToken] == nil then
+		problem(("hooks.partColorToken '%s' is not a palette token"):format(tostring(hooks.partColorToken)))
+	end
+	if not isMaterial(hooks.partMaterial) then
+		problem(("hooks.partMaterial '%s' is not an Enum.Material"):format(tostring(hooks.partMaterial)))
+	end
 end
 
 return function(ctx: Context): { string }
@@ -523,7 +672,7 @@ return function(ctx: Context): { string }
 					problem(("%s.%s must be true or false"):format(pressLabel, key))
 				end
 			end
-			-- `to` (D-CI3): nothing of the reaction, its chain included, goes down past it, so what
+			-- `to` (D-320): nothing of the reaction, its chain included, goes down past it, so what
 			-- it launches lands before the take's cut.
 			if
 				press.to ~= nil
@@ -766,7 +915,7 @@ return function(ctx: Context): { string }
 							end
 						end
 					end
-					-- A released Charger's first charge, against a player standing on the spot (CS7).
+					-- A released Charger's first charge, against a player standing on the spot (D-300).
 					local rush = rushOf(def)
 					if rush == nil or entry.held ~= false then
 						if entry.charge ~= nil then
@@ -913,7 +1062,7 @@ return function(ctx: Context): { string }
 					end
 				end
 				local art = isArt(press.action)
-				-- A timed attack lands where its prompts say (CS5): an Art launches on its release, so
+				-- A timed attack lands where its prompts say (D-298): an Art launches on its release, so
 				-- a beat tells the player to press and hold at `at` and one to let go at `at + hold`,
 				-- the lit stance between long enough to read; a basic swings on its press.
 				if isNumber(press.at) and (art or press.action == "BasicAttack") then
@@ -1211,6 +1360,57 @@ return function(ctx: Context): { string }
 		end
 	end
 
+	-- The render-frame tick (D-336): a small square whose two colors swap every rendered frame.
+	local tick = if typeof(capture) == "table" then capture.frameTick else nil
+	if typeof(tick) ~= "table" then
+		problem("capture.frameTick must be a table")
+	else
+		if not isWhole(tick.size) or tick.size < 1 or tick.size > MAX_TICK_PIXELS then
+			problem(("capture.frameTick.size must be a whole number of pixels from 1 to %d"):format(MAX_TICK_PIXELS))
+		end
+		if not isWhole(tick.margin) or tick.margin < 0 then
+			problem("capture.frameTick.margin must be a whole number of pixels, 0 or more")
+		end
+		local step = tick.maxLuminanceStep
+		if not isNumber(step) or step <= 0 or step > MAX_TICK_LUMINANCE_STEP then
+			problem(
+				("capture.frameTick.maxLuminanceStep must be above 0 and at most %g"):format(MAX_TICK_LUMINANCE_STEP)
+			)
+		end
+		local palette = ctx.load("src/shared/data/palette")
+		local tokens = tick.tokens
+		if
+			typeof(tokens) ~= "table"
+			or #tokens ~= 2
+			or tokens[1] == tokens[2]
+			or palette.tokens[tokens[1]] == nil
+			or palette.tokens[tokens[2]] == nil
+		then
+			problem("capture.frameTick.tokens must be two different palette tokens")
+		elseif isNumber(step) then
+			-- Relative luminance (sRGB): the swap is a change of hue, never a flash.
+			local function luminance(token: string): number
+				local rgb = palette.rgb(token)
+				local total = 0
+				for index, weight in { 0.2126, 0.7152, 0.0722 } do
+					local channel = rgb[index]
+					local linear = if channel <= 0.04045 then channel / 12.92 else ((channel + 0.055) / 1.055) ^ 2.4
+					total += weight * linear
+				end
+				return total
+			end
+			local gap = math.abs(luminance(tokens[1]) - luminance(tokens[2]))
+			if gap > step then
+				problem(
+					("capture.frameTick.tokens differ in brightness by %.3f, over maxLuminanceStep %g: the square would flash"):format(
+						gap,
+						step
+					)
+				)
+			end
+		end
+	end
+
 	local aim = dev.aim
 	local trace = dev.trace
 	if typeof(aim) ~= "table" then
@@ -1445,5 +1645,6 @@ return function(ctx: Context): { string }
 		)
 	end
 
+	checkHooks(ctx, dev, problem)
 	return problems
 end

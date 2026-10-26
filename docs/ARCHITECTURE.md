@@ -913,6 +913,68 @@ the sweep.
   - fx.luau: wallSlam.shakeFullRadius, telegraph.glintLeadMax and glintLeadSamples.
   - choreo.luau: sheath.movingTipShare, locomotion.stride.heldRiseSeconds.
 
+### Gate shot fixes, third round (D-297 to D-341)
+
+- **Hit path (client):**
+  - Replication:
+    - Each prediction carries `asked` and `waiting`. The Heartbeat runs holdForWords(step) after stepWords. A hold whose HitConfirmed has not come by the tier's last frame goes on a frame at a time until the word comes, capped at combat.contact.wordHoldSeconds from the contact (D-312).
+    - A Kill word in the running or waiting hold extends that hold to the Kill length from the contact, never a second freeze. EntityDied leads its silence from a contact within deathDuckDelay (D-313).
+    - dropAttack sets `launches[id]` to the RushEnded payload's serverTime and leaves alone a wind-up that began at or after the drop (D-339).
+  - Mixer:
+    - While a hit-stop pause holds, the procedural channels (lean, foot IK, drawn sprint) are added as the last unpaused step composed them (D-314).
+    - A pause is a frame count picked once at its start from the rig's pace (impact.hold: framesAt, holdFor, clockStep, notePace; paceFrames, hitchFactor, tieFrames). A rig with too few steps keeps the nearest-frame end (D-327, D-341).
+  - ContactPredictor: `standOff(model, clip, from, rootCFrame, target, cast?, options?)` with options { keepOut, step }. The plan gains keep(clipTime), keepUntil, side, keepSide(clipTime) and roomSide(rootCFrame, distance). It holds keepOut.parts no deeper in any blocker face than the swing found them, in up to maxPieces pieces when parts turn more than maxTurnDegrees (D-314, D-315).
+  - CharacterController:
+    - Every Art and every basic plans a keep-out stand-off (basics pass step = false). stepStandOff moves the root along `away` by step + keep and along `side` by keepSide, on the clip's clock; each move is room-capped and only grows. clearCharacter resets the stand-off state (D-314).
+    - struckShown (a shown blow's Flinch on the local rig) and waitUnlit hold an Art short of its ActivationHold; lightHold seeks it to the hold pose once the blow is taken back (Hold.unlit; D-326).
+    - onServerState stops an Art the server takes away over combat.struckStanceBlendOut through clearHold(blendOut) and takeArtAway(current, blendOut). stopClip(handle, blendOut?) defaults to locomotionBlendOut, which every action the player starts keeps (D-340).
+- **Blockers and enemies (server):**
+  - RigBuilder: `addBlocker(model): Part?` builds upright faces from the floor to blockerHeight, welded to the root, in the blockers group, CanQuery and CanTouch off, Massless. "Blocker" (BLOCKER_NAME) is the flat hull of every part but the trailParts, at rest and over rigs[rig].blocker.clips; one "HeldBlocker" (HELD_BLOCKER_NAME) per trailPart. `footprints(rigId)` returns each face's name, centre, size and parts in root space, cached per rig; `footprint(rigId)` is the body face (D-315).
+  - EnemyService:
+    - bodyExtents skips the faces. blockersOf and blockerClear test every own face against every colliding face of every other entry, solid corpse faces included (D-318, D-329).
+    - forget records each corpse with offAt (deathDuckDelay + combat.deathFreeze); sweepCorpses in tickAll turns its faces off at the shatter (D-329).
+    - facesOf(model) gives the faces in root space for the spawn footprint (D-332).
+    - Dev hooks: place, walk, walking, charge and devRushOf, plus engine.pivot (Model:PivotTo) (D-333).
+  - Spacing: Face and Footprint.faces; footprintOf(profile, faces); faceCorners; clearance is the separation over the faces' own axes, then the nearest point-to-edge distance; a slide keeps its way round by the cross product's sign (D-332).
+  - Charger: rushOf and charge, additive only, for the dev hooks (D-333).
+  - RushWorld.profileOf skips the faces, so the client reads the body the server measured before addBlocker (D-322).
+- **Camera:**
+  - CameraController: during holdLock the still shot stops the rig springs (stillSprings) and moves the follow rigidly with the body (stillPivot), with no late pass, shake or nudge. A look past camera.lock.lookBreakDegrees (lookDuringHold) lets the hold go (letGoHold). A wall-forced shoulder change dwells camera.lock.wallSwapDwellSeconds (wallSwappedAt) (D-323, D-324, D-325).
+  - TargetController: a locked target's death ends the lock on the kill the client shows (onShownHit on Replication.hit killed), or combat.contact.wordWaitSeconds after State Dead with no kill word (dying). stageTarget(id), accepted only in a DevCapture place, makes toggle() follow CaptureLogic.lockPress. TargetController now requires Replication and Client.dev.CaptureLogic (D-323, D-328).
+- **Telegraphs:** TelegraphShapes gives timing, glinting, glints, token and decalAlpha. A glinting blow's glint is fx.telegraph.glintFrames frames centred glintAimFrames early on the parry window, early again by Telegraphs.glintLead; only fx.telegraph.glintKinds glint. Telegraphs paints the weapon fill (ai.telegraph.glintFillTransparency), the ground pieces, textured decals (glintDecalAlpha) and a weapon-less rig's outline tint glintToken white (D-316, D-317). This replaces the D-252 bullet's "steady glint over the parry window".
+- **Animation:**
+  - Locomotion.stepTravel advances the gait phase by speed × dt plus the change in a running travel slip clamped to locomotion.stride.travelSlipSeconds of travel; it resets standing, in the air, on a stall and when held, and drops a teleport or shove (D-334).
+  - tools/gaitgen: Run and Sprint get denser stance keys and the strafes a trail-foot approach; the 8 regenerated clips match (D-334).
+  - player/OneHandedSword/Draw is 0.97 s, settle key included; docs/ANIMATION_REVIEW.md regenerated (D-330).
+- **Trails:** a stroke that started at its clip's open ends once it has swept fx.trail.ribbon.turnBackAfter and a tip step turns more than turnBackDegrees (D-335). A lazily attached rig's first stroke uses standIn (the current pose for the missing previous one) and ribbonStart (the ribbon clock from the last render time) (D-336).
+- **Input:** InputController.handle(action, state, inputObject, source?) keeps sprintHolds per source (nil is the player); sprint is on while any source holds it, sprintChanged fires only on a change, and toggle mode flips only the player's hold (D-338).
+- **Dev capture:**
+  - CaptureLogic: walk helpers stopCarry, lastLeg, ahead, steer and restOff (D-302, D-303). Auto-perform state: Press carries a Move entry; Reaction {entry, at, heard, pressed, count}; Standing {entry, last}; reactions, hear(reaction, events, eventTime, elapsed, early), inside, pause, pressed, standing, standingDue, cycleAction, stickMove, enemyId and enqueue (D-306, D-307, D-319, D-320).
+  - Capture.client: holdSprint presses as "CapturePanel" through InputController.handle and stopWalk releases it. walkStep polls the cancel keys (takeOver), learns the stop carry and walks the last leg again up to secondWalks; manual lasts until P. While recording, the "SkyspireCaptureWalk" render step runs stickStep (Humanoid:Move for the stick), feeds Replication.clipEvent to the reactions with the Guard early by Telegraphs.glintLead, pushes a waiting reaction by a hit's attackPause, and presses due keys, reactions, chain steps and standing rules, never past a reaction's `to`. The panel shows "r N" (RenderStepped frames) and the FrameTick square (D-302 to D-304, D-306, D-307, D-319, D-320, D-337, D-338).
+  - DevStage.server: "hold" at take end (EnemyService.setHeld, holdTake); stageShot calls clearStaged first; "go" lets the released enemies go and schedules releaseAfter ones (task.delay with releaseToken); letGo sets the staged HP again (D-297, D-308, D-309).
+- **DevCombat (Studio only, D-333):** "enemy", "walk", "charge", "part" and "clearparts" go through the same gate and BindableFunction, with no remote and no anti-cheat call. dev.luau hooks (arriveStuds, maxWalkStuds, walkTimeoutSeconds, chargeTimeoutSeconds) with tools/validators/dev.luau checkHooks. "part" builds anchored, collidable, non-touch parts in workspace.SkyspireDevParts.
+- **Validators (35):**
+  - New tools/validators/contact.luau: wordHoldSeconds ≥ the Kill hold; standOff.maxStuds ≤ keepOut.maxStuds ≤ rootMotionSlack; bodyFace and heldFace equal RigBuilder's names; keepOut sampleSeconds, maxTurnDegrees, rounds, maxPieces, depthEpsilon and parts; every rigs[name].blocker clip is an enemy/<Rig>/ clip that plays on that rig (D-312, D-314, D-315).
+  - New tools/validators/telegraph.luau: glintFrames, glintAimFrames, glintToken, glintKinds (never Unblockable), decal.alpha < glintDecalAlpha ≤ 1, glintLeadMax, glintLeadSamples, and every glinting blow's zero-lead glint inside [lands − parryWindow, lands − snapLeadSeconds] (D-316, D-317).
+  - New tools/validators/wallSlam.luau: shakeTier, shakeRadius, shakeFullRadius (D-331).
+  - combat, camera, choreo, stride and dev carry the round's other keys: assist cone vs snap reach, besideHitRadius vs in-scope blades, wallGapStuds ≤ stepStuds, besideFollowStep, camera.lock round-B keys, movingTipShare, heldRiseSeconds, struckStanceBlendOut and struckStanceTipSpeed, capture.walk, perform triggers, releaseAfter, frameTick, hooks (D-300, D-303, D-306, D-308, D-320, D-331, D-333, D-337, D-340).
+- **tools/hitmatrix/HitMatrix:** the player path plans standOff with { keepOut = true, step = isArt } at every assisted enemy and applies away × (step + keep) + side × keepSide; each cell carries keepOut (D-321).
+- **Data keys:**
+  - rigs: RigDef.blocker { clips, sampleSeconds }.
+  - combat: contact.wordHoldSeconds; contact.standOff.keepOut { parts, bodyFace, heldFace, maxStuds, sampleSeconds, depthEpsilon, rounds, maxTurnDegrees, maxPieces }; struckStanceBlendOut, struckStanceTipSpeed.
+  - impact: hold { paceFrames, hitchFactor, tieFrames }.
+  - camera: lock.lookBreakDegrees, lock.wallSwapDwellSeconds.
+  - fx: telegraph glintFrames, glintAimFrames, glintToken, glintDecalAlpha, glintKinds, glintLeadMax, glintLeadSamples; trail lifetime 0.13, widthKeys, Body and Core transparency, ribbon.turnBackDegrees and turnBackAfter.
+  - ai: telegraph.glintFillTransparency.
+  - choreo: locomotion.stride.travelSlipSeconds; stride flatBand, frameBar, slideBar.
+  - dev: capture.walk (lookaheadStuds, carrySeconds, restStuds, restDegrees, secondWalks), capture.artGlowSeconds, capture.perform.moveAction, capture.frameTick, capture.cameras.ThreeQuarter, StagedEnemy.releaseAfter and charge, Perform and PerformStep, hooks.
+- **New specs:** tests/client/CaptureWalk, CameraStageFraming, HitWordHold, FreezeStill, ParryGlint, TrailsArc, InputController and DropThenCharge; tests/server/DevStageTakes, CorpseBlocker, DevEnemyHooks and PackFaces; tests/choreo/StanceLetGo (all .spec.luau).
+- **Lines to replace in older sections:**
+  - ~706 (server/world/RigBuilder): replace "builds the invisible blocker: the root's footprint from the floor to blockerHeight, welded to the root, in the blockers group, named `RigBuilder.BLOCKER_NAME` ("Blocker")" with "builds the invisible blocker faces: "Blocker" over the body's hull at rest and in its idle, one "HeldBlocker" per held part, from the floor to blockerHeight, welded to the root, in the blockers group (D-315)".
+  - ~843: replace "the blocker over the rest footprint (D-237)" with "the blocker faces over the body's rest and idle hull and each held part (D-237, D-315); RigBuilder.footprints(rigId)".
+  - ~845: replace "pure capsule spacing between enemies. footprintOf(profile) is taken from RushWorld.profileOf corners at spawn" with "face-to-face spacing between enemies. footprintOf(profile, faces) is taken from RushWorld.profileOf corners and EnemyService.facesOf at spawn (D-332)".
+  - ~849: replace "with a steady glint over the parry window" with "with a three-frame white glint on the parry window, never on an Unblockable blow (D-316, D-317)".
+
 ## Data tables (src/shared/data)
 
 | File | Holds |

@@ -11,6 +11,10 @@
 	  every tier. Low's 4 Hz far rate wants 0.5 s.
 	- A gap the camera snaps through (camera.luau stall.settleSeconds) is a stall for the clips too,
 	  so jumpSeconds is at most settleSeconds.
+
+	And the sheath's moving cap: sheath.movingTipShare is in (0, 1], the share of drawTipSpeed and
+	sheatheTipSpeed a Draw or Sheathe over a moving body is held to (tests/choreo/SheathTip.spec.luau
+	sweeps the cycle at it), so the cap moving is never above the cap standing.
 ]]
 
 local TIERS = { "High", "Medium", "Low" }
@@ -30,6 +34,16 @@ return function(ctx: any): { string }
 
 	local choreo = ctx.load("src/shared/data/choreo")
 	local camera = ctx.load("src/shared/data/camera")
+
+	local sheath = choreo.sheath
+	local share = if typeof(sheath) == "table" then sheath.movingTipShare else nil
+	check(
+		positive(share) and share <= 1,
+		("sheath.movingTipShare (%s) must be in (0, 1]: the share of the tip cap a Draw or Sheathe over a moving body keeps"):format(
+			tostring(share)
+		)
+	)
+
 	local stall = choreo.stall
 	if typeof(stall) ~= "table" then
 		check(false, "stall is missing (jumpSeconds: the longest step that is not a render-stall jump)")

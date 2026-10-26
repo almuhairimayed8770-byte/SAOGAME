@@ -64,16 +64,27 @@ local function evenKeys(T: number, count: number): { number }
 end
 
 -- A run's key times: every `step` s through each stance (the left foot's from 0 to `lift`, the
--- right foot's half a cycle later) and on through its peel (`peel` s), then the swing keys
--- `swing` (left foot's half; the right foot's are half a cycle later), each rounded to the
--- microsecond. Dense keys keep the planted foot on its line (a SineInOut key slows a limb at both
--- ends, so between keys the foot runs ahead of the line and back by about a tenth of the ground
--- it covers between them).
-local function stanceKeys(T: number, lift: number, step: number, peel: number, swing: { number }): { number }
+-- right foot's half a cycle later), back through its approach (`approach` s before the strike) and
+-- on through its peel (`peel` s), then the swing keys `swing` (left foot's half; the right foot's
+-- are half a cycle later), each rounded to the microsecond. Dense keys keep the planted foot on
+-- its line (a SineInOut key slows a limb at both ends, so between keys the foot runs ahead of the
+-- line and back by about a tenth of the ground it covers between them: under 0.015 studs at
+-- 0.06 studs a key, D-334).
+local function stanceKeys(
+	T: number,
+	lift: number,
+	step: number,
+	peel: number,
+	swing: { number },
+	approach: number?
+): { number }
 	local half = {}
 	local count = math.floor((lift + peel) / step + 0.5)
 	for i = 0, count do
 		table.insert(half, i * step)
+	end
+	for i = 1, math.floor((approach or 0) / step + 0.5) do
+		table.insert(half, -i * step)
 	end
 	for _, t in swing do
 		table.insert(half, t)
@@ -81,7 +92,7 @@ local function stanceKeys(T: number, lift: number, step: number, peel: number, s
 	local keys = {}
 	for _, offset in { 0, T / 2 } do
 		for _, t in half do
-			table.insert(keys, math.floor((t + offset) * 1e6 + 0.5) / 1e6)
+			table.insert(keys, math.floor(((t + offset) % T) * 1e6 + 0.5) / 1e6)
 		end
 	end
 	table.sort(keys)
@@ -128,6 +139,10 @@ local function mirrorPlan(plan: Plan, T: number): Plan
 	end
 	if out.strikePivot == "left" or out.strikePivot == "right" then
 		out.strikeAngle = -plan.strikeAngle
+		local approach = plan.approach
+		if approach then
+			out.approach = { duration = approach.duration, rise = approach.rise, angle = -approach.angle }
+		end
 	end
 	if out.liftPivot == "left" or out.liftPivot == "right" then
 		out.liftAngle = -plan.liftAngle
@@ -155,6 +170,10 @@ local function flipPlan(plan: Plan): Plan
 	out.liftPivot = swap[plan.liftPivot] or plan.liftPivot
 	if plan.strikePivot == "left" or plan.strikePivot == "right" then
 		out.strikeAngle = -plan.strikeAngle
+		local approach = plan.approach
+		if approach then
+			out.approach = { duration = approach.duration, rise = approach.rise, angle = -approach.angle }
+		end
 	end
 	if plan.liftPivot == "left" or plan.liftPivot == "right" then
 		out.liftAngle = -plan.liftAngle
@@ -267,7 +286,7 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 			duration = T,
 			speed = locomotion.runSpeed,
 			dir = Vector3.new(0, 0, -1),
-			keyTimes = stanceKeys(T, 0.1, 0.0125, 0.025, { 0.2 }),
+			keyTimes = stanceKeys(T, 0.1, 0.00625, 0.025, { 0.2 }),
 			plans = { Left = left, Right = mirrorPlan(left, T) },
 			events = { { time = 0.02, foot = "Left" }, { time = 0.32, foot = "Right" } },
 			comments = {
@@ -289,7 +308,7 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 				"look up, it would meet the hilt. The elbows go out at the back so the left hand passes outside",
 				"the scabbard, and the waist twists only 8 degrees so the scabbard clears the hips. Each foot",
 				"stays planted where it lands while the body passes over it (the keys inside a stance are",
-				"0.0125 s apart so the ground speed matches) and peels off the ground going back with it.",
+				"0.00625 s apart so the ground speed matches) and peels off the ground going back with it.",
 				"Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.",
 			},
 			-- the hand re-key for the back mount (D-050, D-055), pinned in sources/Run.luau
@@ -331,7 +350,7 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 			duration = T,
 			speed = locomotion.sprintSpeed,
 			dir = Vector3.new(0, 0, -1),
-			keyTimes = stanceKeys(T, 0.08, 0.01, 0.01, { 0.165 }),
+			keyTimes = stanceKeys(T, 0.08, 0.005, 0.01, { 0.165 }),
 			plans = { Left = left, Right = mirrorPlan(left, T) },
 			events = { { time = 0.02, foot = "Left" }, { time = 0.27, foot = "Right" } },
 			comments = {
@@ -351,7 +370,7 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 				"the body (tipped back it would meet the hilt). As in Run, the elbows go out at the back of the",
 				"swing past the scabbard and the waist twist stays small enough for the scabbard to clear the",
 				"hips. Each foot stays planted where it lands while the body passes over it (the keys inside a",
-				"stance are 0.01 s apart so the ground speed matches) and peels off the ground going back with it.",
+				"stance are 0.005 s apart so the ground speed matches) and peels off the ground going back with it.",
 				"Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.",
 			},
 			-- the hand re-key for the back mount (D-050, D-055), pinned in sources/Sprint.luau
@@ -623,6 +642,8 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 			flatTo = 0.45 + D - 0.084375,
 			liftPivot = "toe",
 			liftAngle = -14,
+			-- the last key before it lands, it already goes back with the ground (D-334)
+			approach = { duration = 0.028125, rise = 0.1, angle = 0 },
 			-- lifts off wide, stays out while the lead is down, then cuts in as the lead leaves
 			swing = {
 				{
@@ -860,7 +881,7 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 			"arm pumping (the sword arm pumps shorter, its wrist keeping the point forward and off the",
 			"grass), the feet striking on the ball and pushing off the toe with a long flight between.",
 			"Each foot stays planted where it lands while the body passes over it (the keys inside a",
-			"stance are 0.0125 s apart so the ground speed matches) and peels off the ground going back with it.",
+			"stance are 0.00625 s apart so the ground speed matches) and peels off the ground going back with it.",
 			"Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.",
 		}, {
 			[0] = "left foot plants on the ball",
@@ -877,7 +898,7 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 			"24 studs/s, a 0.5 s cycle with the same legs as Sprint: a longer stride with a high heel",
 			"kick, the free arm thrown hard, the sword arm pumping short with the point forward and off",
 			"the grass. Each foot stays planted where it lands while the body passes over it (the keys",
-			"inside a stance are 0.01 s apart so the ground speed matches) and peels off the ground going",
+			"inside a stance are 0.005 s apart so the ground speed matches) and peels off the ground going",
 			"back with it.",
 			"Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.",
 		}, {

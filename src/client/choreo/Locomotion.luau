@@ -17,7 +17,13 @@
 	root's speed, and each clip runs its own duration in that time with its clock set from the
 	phase (each clip's left Footstep at phase 0). So the planted foot moves back as fast as the root
 	moves on, no clip drifts from another, a walk and its drawn twin stay in step, and each clip
-	crosses its Footsteps once per plant. One-shots (Jump, Fall, Land, TurnLeft, TurnRight, Skid) play
+	crosses its Footsteps once per plant. The phase also takes up how far the root really went
+	(D-334): the engine moves it in whole 1/240 s physics steps, two to six to a rendered frame,
+	while its velocity reads steady, so a frame's travel is a step or two off speed x dt. The gap
+	(the root's move against speed x dt, held within locomotion.stride.travelSlipSeconds of travel)
+	moves the phase too, so the planted foot stays where it is on the ground instead of hopping by
+	that step every frame. Grounded and moving only; a teleport or shove past the bound is dropped.
+	The root's physics position never changes. One-shots (Jump, Fall, Land, TurnLeft, TurnRight, Skid) play
 	on the FullBody layer (a turn in place or a standing Land stops when the root starts to move;
 	a landing on the move plays Land with no weight, for its sounds); the lean into turns, the drawn sprint "weapon low and back" pose and the
 	raycast foot IK ride as procedural additive channels. The raycast is injected so the IK math
@@ -571,7 +577,10 @@ local function stepGait(self: any, dt: number)
 					moved += change * (LocomotionState.plantedAlong(name, phase, forward, right) - planted)
 				end
 			end
-			local advance = dt * scale * pace + moved / baseShown / stride
+			-- The root's travel this frame past (or short of) its speed's (stepTravel, D-334): the
+			-- planted foot moves back by what the root moved on, so it holds the ground on a frame
+			-- the physics stepped long or short.
+			local advance = dt * scale * pace + (moved / baseShown + self.travelExtra) / stride
 			pace = math.clamp(advance / (dt * scale), minPace, maxPace)
 		end
 		self.gaitPace = pace
@@ -597,6 +606,8 @@ local function stepGait(self: any, dt: number)
 	if gaitShown > 0 and running then
 		self.gaitPhase = (phase + dt * scale * pace) % 1
 	end
+	-- This frame's travel is taken (or dropped: standing, or held in a hit-stop).
+	self.travelExtra = 0
 end
 
 --- Creates the locomotion driver for a player rig's animator and its character model.
@@ -635,6 +646,12 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		runAlong = 1,
 		gaitPhase = Stride.startPhase, -- the shared gait phase: 0..1 of a cycle, 0 at every left Footstep
 		gaitPace = nil :: number?, -- cycles per second the phase last advanced at
+		-- The root's own travel (stepTravel, D-334): where the root stood at the last update, how
+		-- far its travel along the move has run ahead of its speed's (studs, within
+		-- stride.travelSlipSeconds of travel at the speed), and this frame's part of that.
+		travelFrom = nil :: Vector3?,
+		travelSlip = 0,
+		travelExtra = 0,
 		shownNow = {} :: { [string]: number }, -- each Base clip's shown weight at this step's start
 		shownLast = {} :: { [string]: number }, -- and at the last step's
 		-- The body is held off its stick (stride.blocked, D-144): the gait follows the velocity.
@@ -837,6 +854,43 @@ local function stepBlocked(
 	return x, z
 end
 
+-- Keeps the root's own travel this update against what its speed carries in the frame
+-- (stepTravel, D-334). The engine moves the root in whole physics steps, so a rendered frame's
+-- travel runs a step long or short while the velocity reads steady; stepGait moves the phase on by
+-- this frame's difference so the planted foot moves back exactly as far as the root moved on. On
+-- open ground the travel is the length of the root's horizontal move (the speed is the length of
+-- its velocity); blocked (D-144) it is the move along the velocity the gait follows (followX,
+-- followZ: a unit world direction, or zero while that velocity goes nowhere). The running
+-- difference stays within stride.travelSlipSeconds of travel at the speed (a teleport or a shove
+-- past it is dropped) and starts over standing, in the air, on a stalled frame or held still.
+local function stepTravel(self: any, root: BasePart, state: State, dt: number, followX: number?, followZ: number?)
+	local position = root.CFrame.Position
+	local from = self.travelFrom
+	self.travelFrom = position
+	local extra = 0
+	local speed = self.speed
+	if
+		from ~= nil
+		and dt > 0
+		and dt <= ChoreoData.stall.jumpSeconds
+		and state.grounded
+		and speed > Config.idleSpeedThreshold
+		and not (followX == 0 and followZ == 0)
+	then
+		local moveX, moveZ = position.X - from.X, position.Z - from.Z
+		local along = if followX ~= nil and followZ ~= nil
+			then moveX * followX + moveZ * followZ
+			else math.sqrt(moveX * moveX + moveZ * moveZ)
+		local bound = Stride.travelSlipSeconds * speed
+		local slip = math.clamp(self.travelSlip + along - speed * dt, -bound, bound)
+		extra = slip - self.travelSlip
+		self.travelSlip = slip
+	else
+		self.travelSlip = 0
+	end
+	self.travelExtra = extra
+end
+
 function Locomotion.update(self: any, dt: number, state: State): LocomotionState.Output
 	local animator = self.animator
 	local root: BasePart? = self.character.PrimaryPart or self.character:FindFirstChild("HumanoidRootPart") :: any
@@ -871,9 +925,12 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 		-- the root's speed along it; a jostle that goes nowhere stands, so the feet neither walk in
 		-- place nor skate along a flank.
 		local x, z = stepBlocked(self, root, state, dt, clock, stickX, stickZ, forward, right)
+		-- Blocked, the root's travel is read along the velocity the gait follows (stepTravel).
+		local travelX: number?, travelZ: number? = nil, nil
 		if x ~= nil and z ~= nil then
 			local followX, followZ = self.followX, self.followZ
 			local follow = math.sqrt(followX * followX + followZ * followZ)
+			travelX, travelZ = 0, 0
 			if follow > Config.idleSpeedThreshold then
 				followX /= follow
 				followZ /= follow
@@ -883,10 +940,12 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 				right = followX * side.X + followZ * side.Z
 				self.speed = math.max(0, x * followX + z * followZ)
 				blendSpeed = self.speed / (if clock > 0 then clock else 1)
+				travelX, travelZ = followX, followZ
 			else
 				blendSpeed = 0
 			end
 		end
+		stepTravel(self, root, state, dt, travelX, travelZ)
 	end
 	if forward ~= 0 or right ~= 0 then
 		self.travelForward, self.travelRight = forward, right

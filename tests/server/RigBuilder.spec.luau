@@ -255,7 +255,7 @@ describe("RigBuilder.addBlocker (D-198)", function()
 			local blocker = RigBuilder.addBlocker(model) :: Part
 			expect(blocker).never.toBeNil()
 			expect(blocker.Name).toBe(RigBuilder.BLOCKER_NAME)
-			-- The body's face first (RigBuilder.footprint), then one per part it holds (D-CH4).
+			-- The body's face first (RigBuilder.footprint), then one per part it holds (D-315).
 			local centre, size = RigBuilder.footprint(rigId)
 			expect(footprints[1].name).toBe(RigBuilder.BLOCKER_NAME)
 			expect(near(footprints[1].centre, centre)).toBe(true)
@@ -335,7 +335,7 @@ describe("RigBuilder.addBlocker (D-198)", function()
 			-- The boar walked into head-on stopped inside its head (the root ends 2.5 studs ahead of its
 			-- centre, the snout 5.6), from behind inside its tail, and on its flank 0.1 into its side.
 			-- Over the rest pose alone, a kobold's idle stood its head 0.49 ahead of the face and its
-			-- arms 0.46 out, and the axe it holds hung 3.9 ahead (D-CH4). Root space, studs.
+			-- arms 0.46 out, and the axe it holds hung 3.9 ahead (D-315). Root space, studs.
 			local expected = {
 				Boar = { Blocker = { -1.4211, 1.318, -5.6325, 3.3142 } },
 				Kobold = {

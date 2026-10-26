@@ -16,6 +16,14 @@
 	(`standOff`), a walk heading into a body within the gap plus the slide band slides along it,
 	and a body caught inside another steps out. The rules read ai.luau `spacing`.
 
+	Since D-281 an enemy's blocker faces (RigBuilder.addBlocker: one over the body, one over each
+	part it holds, D-315) are solid against every other enemy's faces, and they reach past the
+	capsule: a kobold's axe face 1.84 studs past it, 3.85 ahead at its right, the body face's
+	corners 1.36. Two kobolds a capsule gap apart could stand with their faces inside each other,
+	and the engine shoved them apart. So a footprint also carries the faces (footprintOf, read off
+	the model EnemyService spawns), and between two bodies that both have faces the clear ground is
+	face to face (D-332): every rule above then keeps every face the gap from every other.
+
 	Pure: plain Vector3 maths, no engine, so every rule runs in Lune.
 ]]
 
@@ -23,10 +31,20 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AI = require(ReplicatedStorage.Shared.data.ai)
 
+-- One blocker face on the ground (D-198, D-315, D-332): a flat box along the root's axes, in the
+-- root's space (X to its right, -Z ahead), as RigBuilder.addBlocker welds it.
+export type Face = {
+	centre: Vector3, -- its middle (only X and Z count)
+	half: Vector3, -- half its width across the root (X) and half its depth along it (Z)
+}
+
 export type Footprint = {
 	front: number, -- studs the body reaches ahead of its root along the facing
 	back: number, -- studs it reaches behind
 	radius: number, -- half its widest width across the facing
+	-- Its blocker faces, when it has them: with faces on both bodies the clear ground between them
+	-- is face to face (D-332), else capsule to capsule.
+	faces: { Face }?,
 }
 
 export type Body = {
@@ -40,8 +58,8 @@ export type Neighbor = {
 	-- How much of a step out this body takes on: 0.5 when the other steps too (both free), 1 when
 	-- the other stays where it is (busy, asleep or held).
 	share: number,
-	-- Which way out when the two spines cross exactly (no direction between them): +1 or -1 along
-	-- world X, opposite for the two of a pair.
+	-- Which way out when the two spines cross exactly, or two faces' middles line up (no direction
+	-- between them): +1 or -1 along world X, opposite for the two of a pair.
 	side: number,
 }
 
@@ -63,16 +81,31 @@ local function unitFlat(vector: Vector3): Vector3?
 	return f / length
 end
 
---- A body's footprint from its rest corners in the root's space (RushWorld.profileOf: -Z ahead).
---- Without corners it is a point.
-function Spacing.footprintOf(profile: { Vector3 }): Footprint
+--- A body's footprint from its rest corners in the root's space (RushWorld.profileOf: -Z ahead)
+--- and its blocker faces (D-332), whose corners the capsule spans too. Without corners or faces it
+--- is a point.
+function Spacing.footprintOf(profile: { Vector3 }, faces: { Face }?): Footprint
 	local front, back, radius = 0, 0, 0
-	for _, corner in profile do
-		front = math.max(front, -corner.Z)
-		back = math.max(back, corner.Z)
-		radius = math.max(radius, math.abs(corner.X))
+	local function take(x: number, z: number)
+		front = math.max(front, -z)
+		back = math.max(back, z)
+		radius = math.max(radius, math.abs(x))
 	end
-	return { front = front, back = back, radius = radius }
+	for _, corner in profile do
+		take(corner.X, corner.Z)
+	end
+	local kept: { Face }? = nil
+	if faces ~= nil and #faces > 0 then
+		kept = faces
+		for _, face in faces do
+			for _, x in { -1, 1 } do
+				for _, z in { -1, 1 } do
+					take(face.centre.X + x * face.half.X, face.centre.Z + z * face.half.Z)
+				end
+			end
+		end
+	end
+	return { front = front, back = back, radius = radius, faces = kept }
 end
 
 --- The two flat ends of a body's spine: ahead and behind the root along its facing, each a radius
@@ -133,10 +166,145 @@ function Spacing.nearestPoints(a0: Vector3, a1: Vector3, b0: Vector3, b1: Vector
 	return onA, nearestOnSegment(b0, b1, onA)
 end
 
---- The clear ground between two bodies (their capsules' gap; negative when they overlap) and the
---- flat unit direction from `other` toward `body`, out of it. Spines that cross exactly take
---- `fallback` (a flat unit vector) as the way out.
+--- A face's four flat corners in world space on a body, counter-clockwise seen from above.
+function Spacing.faceCorners(body: Body, face: Face): { Vector3 }
+	local look = unitFlat(body.facing) or -Vector3.zAxis
+	local right = Vector3.new(-look.Z, 0, look.X)
+	-- The root's +Z is behind it: a face centre at (x, z) stands x to the right and -z ahead.
+	local centre = flat(body.position) + right * face.centre.X - look * face.centre.Z
+	local across, along = right * face.half.X, look * face.half.Z
+	return { centre - across - along, centre + across - along, centre + across + along, centre - across + along }
+end
+
+-- The projections of a flat polygon's corners on a flat unit axis: least and most.
+local function project(polygon: { Vector3 }, axis: Vector3): (number, number)
+	local least, most = math.huge, -math.huge
+	for _, point in polygon do
+		local d = point:Dot(axis)
+		least, most = math.min(least, d), math.max(most, d)
+	end
+	return least, most
+end
+
+-- The clear ground between two flat convex polygons that stand apart, and the flat unit direction
+-- from `b`'s nearest point to `a`'s; nil when they touch or overlap (no edge normal parts them).
+local function polygonsApart(a: { Vector3 }, b: { Vector3 }): (number?, Vector3?)
+	local parted = false
+	for _, polygon in { a, b } do
+		for index = 1, #polygon do
+			local edge = polygon[index % #polygon + 1] - polygon[index]
+			local length = edge.Magnitude
+			if length < AI.flatEpsilon then
+				continue
+			end
+			local axis = Vector3.new(-edge.Z, 0, edge.X) / length
+			local aMin, aMax = project(a, axis)
+			local bMin, bMax = project(b, axis)
+			if aMin - bMax > AI.flatEpsilon or bMin - aMax > AI.flatEpsilon then
+				parted = true
+				break
+			end
+		end
+		if parted then
+			break
+		end
+	end
+	if not parted then
+		return nil, nil
+	end
+	-- Apart: the nearest points are a corner of one on an edge of the other.
+	local least, onA, onB = math.huge, a[1], b[1]
+	for pass = 1, 2 do
+		local fromA = pass == 1
+		local points: { Vector3 } = if fromA then a else b
+		local edges: { Vector3 } = if fromA then b else a
+		for _, point in points do
+			for index = 1, #edges do
+				local nearest = nearestOnSegment(edges[index], edges[index % #edges + 1], point)
+				local distance = (point - nearest).Magnitude
+				if distance < least then
+					least = distance
+					onA, onB = if fromA then point else nearest, if fromA then nearest else point
+				end
+			end
+		end
+	end
+	return least, (onA - onB) / least
+end
+
+-- How far one body's faces stand past another's along a flat unit axis: the least, over every
+-- pair of faces, of where this one's begins less where the other's ends (negative: moved that way
+-- by its depth, every pair would part along it).
+local function setSeparation(mine: { { Vector3 } }, theirs: { { Vector3 } }, axis: Vector3): number
+	local least = math.huge
+	for _, corners in mine do
+		local begins = project(corners, axis)
+		for _, otherCorners in theirs do
+			local _, ends = project(otherCorners, axis)
+			least = math.min(least, begins - ends)
+		end
+	end
+	return least
+end
+
+--- The clear ground between two bodies (negative when they overlap) and the flat unit direction
+--- from `other` toward `body`, out of it. When both carry their blocker faces (D-332): apart, the
+--- least true distance over every pair of faces, out from the nearest point of the other's; in
+--- each other, the least push that parts every pair at once, along one of the faces' own axes
+--- either way (the same axis and opposite ways for the two of a pair, so the two step apart, and
+--- the short way out, never along a boar's length), as a negative clearance. Else it is their
+--- capsules' gap. Spines that cross exactly, or two bodies whose pushes tie (one on the other),
+--- take `fallback` (a flat unit vector) as the way out.
 function Spacing.clearance(body: Body, other: Body, fallback: Vector3): (number, Vector3)
+	local mine, theirs = body.footprint.faces, other.footprint.faces
+	if mine ~= nil and theirs ~= nil and #mine > 0 and #theirs > 0 then
+		local mineCorners: { { Vector3 } } = {}
+		local theirCorners: { { Vector3 } } = {}
+		for _, face in mine do
+			table.insert(mineCorners, Spacing.faceCorners(body, face))
+		end
+		for _, face in theirs do
+			table.insert(theirCorners, Spacing.faceCorners(other, face))
+		end
+		local best, bestAxis = -math.huge, fallback
+		for _, list in { mineCorners, theirCorners } do
+			for _, corners in list do
+				for index = 1, 2 do
+					local edge = corners[index + 1] - corners[index]
+					local length = edge.Magnitude
+					if length < AI.flatEpsilon then
+						continue
+					end
+					local normal = Vector3.new(-edge.Z, 0, edge.X) / length
+					for _, axis in { normal, -normal } do
+						local separation = setSeparation(mineCorners, theirCorners, axis)
+						local better = separation > best + AI.flatEpsilon
+							or (
+								separation > best - AI.flatEpsilon
+								and axis:Dot(fallback) > bestAxis:Dot(fallback) + AI.flatEpsilon
+							)
+						if better then
+							best, bestAxis = math.max(separation, best), axis
+						end
+					end
+				end
+			end
+		end
+		if best <= 0 then
+			return best, bestAxis
+		end
+		-- Apart along that axis, so every pair is apart: the least true distance between them.
+		local least, out = math.huge, bestAxis
+		for _, corners in mineCorners do
+			for _, otherCorners in theirCorners do
+				local apart, direction = polygonsApart(corners, otherCorners)
+				if apart ~= nil and direction ~= nil and apart < least then
+					least, out = apart, direction
+				end
+			end
+		end
+		return if least < math.huge then least else best, out
+	end
 	local a0, a1 = Spacing.spine(body)
 	local b0, b1 = Spacing.spine(other)
 	local onBody, onOther = Spacing.nearestPoints(a0, a1, b0, b1)
@@ -234,16 +402,23 @@ function Spacing.steer(body: Body, goal: Vector3?, neighbors: { Neighbor }): Vec
 		local out = binding.out
 		local closing = out * walk:Dot(out)
 		local along = walk - closing
-		if distance > tuning.slideMinStuds and along.Magnitude < tuning.slideMinStuds then
-			-- The goal nearly straight behind the body: round it on the side this body already stands
-			-- of the line from the other's middle to the goal (left on the line). The way the goal
-			-- leans from here would flip each tick as the step crosses that line.
+		if distance > tuning.slideMinStuds then
+			-- Round the body on the side this body already stands of the line from the other's middle
+			-- to the goal (left on the line): one way round, the turn along its edge kept turning
+			-- that way as the edge does. The way the goal leans from here would flip each tick as
+			-- the step crosses that line; and along a flat face (D-332) the turn points at the
+			-- goal's foot on that face, back across the line, so it would walk to the face's middle
+			-- and stay there. A turn that heads back, or is shorter than slideMinStuds (a goal nearly
+			-- straight behind the body), becomes slideMinStuds round.
 			local left = Vector3.new(-out.Z, 0, out.X)
 			local line = unitFlat(spot - binding.center)
 			local offset = flat(position - binding.center)
-			local aside = if line ~= nil then offset - line * offset:Dot(line) else Vector3.zero
-			local direction = if aside:Dot(left) >= -AI.flatEpsilon then left else -left
-			along = direction * tuning.slideMinStuds
+			-- Which side of the line it stands: the turn of the line onto the offset (seen from above).
+			local side = if line ~= nil then line.X * offset.Z - line.Z * offset.X else 0
+			local direction = if side <= AI.flatEpsilon then left else -left
+			if along:Dot(direction) < tuning.slideMinStuds then
+				along = direction * tuning.slideMinStuds
+			end
 		end
 		walk = closing + along
 		local length = walk.Magnitude

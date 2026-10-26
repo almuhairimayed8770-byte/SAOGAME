@@ -189,7 +189,7 @@ local AI = {
 		-- at its launch: the run is the strike.
 		snapLeadSeconds = 0.05,
 		-- For the parry glint, a few frames on the parry window before the blow (fx.luau
-		-- telegraph.glintFrames, D-CP1), the fill is at its brightest, steady, no pulse (F7). 0 is solid.
+		-- telegraph.glintFrames, D-316), the fill is at its brightest, steady, no pulse (F7). 0 is solid.
 		glintFillTransparency = 0,
 	},
 

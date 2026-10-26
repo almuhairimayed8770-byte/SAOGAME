@@ -107,6 +107,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage.Shared
 
+local Types = require(Shared.types)
 local Combat = require(Shared.data.combat)
 local ChoreoData = require(Shared.data.choreo)
 local Fx = require(Shared.data.fx)
@@ -265,7 +266,7 @@ type Prediction = {
 	allowance: number,
 	attack: Attack?,
 	-- Seconds of hold this contact asked of the local rig so far: its tier's, and every frame it
-	-- held on for the word (D-CH1). Less what the rig has left, it is what the hold has shown.
+	-- held on for the word (D-312). Less what the rig has left, it is what the hold has shown.
 	asked: number,
 	-- True while its hold may still hold on for the word: until the word comes, the hold has run
 	-- contact.wordHoldSeconds from the contact, a later hold's run began, or a word for a later
@@ -305,7 +306,7 @@ local heldDeaths: { any } = {}
 -- The death being let go now (it is not held again).
 local releasingDeath: any = nil
 -- The contact frame (on the clock) of the kill whose word lets its held death go now: the death's
--- silence and shatter keep that contact's beat (D-CH2).
+-- silence and shatter keep that contact's beat (D-313).
 local releasingContactAt: number? = nil
 -- The runs of holds on the local fighter's rig: a hold put on while none runs starts a new run,
 -- one put on while one runs joins it (the same cut's other targets, a blow taken inside the
@@ -320,7 +321,7 @@ local holdEnds = -math.huge
 local playSeconds = 0
 local playWall: number? = nil
 local playTicking = false
--- The clock at the last Heartbeat and the length of the step it closed (D-CH1): a hold that holds
+-- The clock at the last Heartbeat and the length of the step it closed (D-312): a hold that holds
 -- on for its word goes on one such step at a time, so it ends on the frame the word comes.
 local beatAt: number? = nil
 local beatStep: number = ChoreoData.frameSeconds
@@ -349,8 +350,8 @@ type Rush = {
 	ground: ((spot: Vector3) -> number?)?,
 }
 local rushes: { [number]: Rush } = {}
--- enemy id -> the server time of the last rush launch heard (RushStarted), or of the last attack
--- the server dropped (RushEnded "Dropped", its wind-up's end): a Telegraph or an ActionStarted from
+-- enemy id -> the server time of the last rush launch heard (RushStarted), or of the last drop of
+-- an attack (RushEnded "Dropped", the drop's own time, D-339): a Telegraph or an ActionStarted from
 -- before it is that attack's own, or an older one's, come late (they are unreliable; these are not).
 local launches: { [number]: number } = {}
 -- enemy id -> its blow on the local fighter shown on the strike's server frame (F16, D-258), until
@@ -766,7 +767,7 @@ local function holdOneStep(animator: any, step: number): number
 	return math.max(0, step - (left or 0))
 end
 
--- A contact's hold waits for its word (D-CH1). Every Heartbeat, after the render step: while a
+-- A contact's hold waits for its word (D-312). Every Heartbeat, after the render step: while a
 -- contact of the hold now running on the local rig still waits for the server's HitConfirmed, has
 -- held less than contact.wordHoldSeconds from its contact frame and the hold would let go on the
 -- next frame, both rigs hold one more step. The word then lets them go (HitConfirmed: the frame
@@ -1190,12 +1191,14 @@ end
 -- An attack the server dropped before it landed or launched (RushEnded "Dropped", D-254: a hold or a
 -- sleep, which no stagger tells): its tell comes down, its clip fades out, a launch its telegraph
 -- predicted is not drawn, and its Telegraph or ActionStarted heard late is ignored (`launches`).
--- `beat` is its wind-up's end on the server's clock: an attack known to begin after it is a newer one.
-local function dropAttack(record: any, beat: number)
+-- `droppedAt` is the drop's own server time: the dropped attack began before it, so an attack that
+-- began at or after it is a newer one (D-339: a DevCombat "charge" right after "enemy" or "hold",
+-- or a wake inside the dropped wind-up, begins its own before the dropped wind-up's end would come).
+local function dropAttack(record: any, droppedAt: number)
 	local id = record.id
-	launches[id] = math.max(launches[id] or -math.huge, beat)
+	launches[id] = math.max(launches[id] or -math.huge, droppedAt)
 	local attack = attacks[id]
-	if attack ~= nil and attack.since > beat + 0.5 * AI.tickSeconds() then
+	if attack ~= nil and attack.since >= droppedAt then
 		return
 	end
 	dependencies().telegraphs.hide(record.model)
@@ -1525,11 +1528,11 @@ local function rushOf(payload: any): Rush?
 	return rush
 end
 
-function handlers.RushEnded(payload: any)
+function handlers.RushEnded(payload: Types.RushEndedPayload)
 	if payload.reason == "Dropped" then
 		local record = dependencies().entities.get(payload.entityId)
 		if record ~= nil then
-			dropAttack(record, payload.launchedAt)
+			dropAttack(record, payload.serverTime)
 		end
 		return
 	end
@@ -1663,7 +1666,7 @@ function handlers.HitConfirmed(payload: any)
 		dropStale(earlyConfirms, seen)
 		predicted = takeMatch(predictions, payload.targetId, payload.hitIndex, payload.artId, payload.swing)
 		-- The server counts a swing's windows in order: a word for a later window of the swing says
-		-- an earlier one still waiting was not counted, and its hold waits no more (D-CH1).
+		-- an earlier one still waiting was not counted, and its hold waits no more (D-312).
 		for _, other in predictions do
 			if
 				other.waiting
@@ -1714,7 +1717,7 @@ function handlers.HitConfirmed(payload: any)
 
 	if predicted ~= nil then
 		if attacker ~= nil and predicted.run == holdRun then
-			-- The contact's hold, while it is still on or waits for this word (D-CH1), runs on to the
+			-- The contact's hold, while it is still on or waits for this word (D-312), runs on to the
 			-- stronger tier's length from the contact, never restarted: a Kill that comes inside a
 			-- Normal's hold, or while the hold waits for it, is one unbroken freeze. One that already
 			-- let go is not stopped again: a hit holds once (issue 6), and a later cut's hold is
@@ -1977,7 +1980,7 @@ function handlers.EntityDied(payload: any)
 	-- silence waits the kill's hit-stop so the kill's crack and impact frames are heard first; the
 	-- shatter and the line move by the same lead. Only the newest death ducks and restores: a
 	-- death after this one brings its own silence, which this one's shatter never cuts short.
-	-- A kill the local blade already touched counts its hit-stop from that contact frame (D-CH2):
+	-- A kill the local blade already touched counts its hit-stop from that contact frame (D-313):
 	-- its word came a latency later, inside the hold, so the silence and the shatter keep the
 	-- contact's beat, as they do when the word comes first.
 	local lead = Moments.deathDuckDelay()
@@ -2513,7 +2516,7 @@ function Replication.bind(newDeps: Deps)
 			Replication.stepStrikes()
 			-- The server's words held for their strike's key (D-267).
 			Replication.stepWords()
-			-- Contacts' holds waiting for their words (D-CH1).
+			-- Contacts' holds waiting for their words (D-312).
 			holdForWords(beatStep)
 		end)
 	end

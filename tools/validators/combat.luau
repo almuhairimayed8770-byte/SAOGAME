@@ -35,7 +35,21 @@
 	aim.replicationMarginDegrees stays within deg(acos(1 - facingTolerance)), the farthest a request's
 	facing may be from the root the server has seen. A swing turns the body by up to the snap the
 	instant it is sent, and the server may still be catching up on a turn before it, so a bigger sum
-	would get honest swings rejected (and their clips cancelled).
+	would get honest swings rejected (and their clips cancelled). Half of aim.assistConeDegrees is
+	within aim.snapDegrees: the assist picks a target up to half its cone off the facing, and the
+	snap is what turns the body onto it.
+
+	Beside the swing (D-275): besideHitRadius is at most half the narrowest in-scope blade's width
+	(weaponModels.luau, over the categories of scope.luau's Arts), so a cut beside the swing lands
+	only where the blade's edge was; besideFollowStep is above it, since the arc is split only down
+	to chords that the straight steps of besideHitRadius then walk; besideMaxSubdivisions is a
+	positive whole number. The Art stand-off (fix F1): contact.standOff.wallGapStuds is 0 or more and
+	at most stepStuds, so a wall in the way costs the step at most one increment more than it must.
+
+	A struck stance (D-340): struckStanceBlendOut is at least locomotionBlendOut and at most
+	staggerDuration, so the stance a hit takes away comes down slower than a plain end and is gone
+	when the stagger gives the body back; struckStanceTipSpeed is positive and under choreo.luau's
+	sheath.drawTipSpeed (tests/choreo/StanceLetGo.spec.luau holds the fade under it).
 
 	The snap's whip (item 102): the body shows the snap over aim.snapTurnSeconds on
 	aim.snapTurnEasing. The seconds are positive and end by the time the earliest player clip's
@@ -301,6 +315,16 @@ return function(ctx: Context): { string }
 			end
 			checkSnapEasing(ctx, aim.snapTurnEasing, seconds, combat.hitStopFrameSeconds, problem)
 		end
+		-- The assist's cone and the snap: the assist picks a target up to half its cone off the
+		-- facing, and the snap is what turns the body onto it, so half the cone stays within the snap.
+		if snapOk and isNumber(aim.assistConeDegrees) and aim.assistConeDegrees / 2 > aim.snapDegrees + 1e-9 then
+			problem(
+				("aim.assistConeDegrees %s is more than twice aim.snapDegrees (%s): a target the assist picks at the cone's edge is past the snap, so the body would swing without facing it"):format(
+					tostring(aim.assistConeDegrees),
+					tostring(aim.snapDegrees)
+				)
+			)
+		end
 		if snapOk and marginOk and toleranceOk then
 			local acceptance = math.deg(math.acos(1 - combat.facingTolerance))
 			if aim.snapDegrees + aim.replicationMarginDegrees > acceptance then
@@ -312,6 +336,97 @@ return function(ctx: Context): { string }
 					)
 				)
 			end
+		end
+	end
+
+	-- Beside the swing (D-275): the blade's own edge is in the body, and the arc is split only down
+	-- to chords the straight steps then walk.
+	local besideOk = positive("besideHitRadius")
+	if besideOk then
+		local arts = ctx.load("src/shared/data/arts")
+		local scope = ctx.load("src/shared/data/scope")
+		local WeaponModels = ctx.load("src/shared/data/weaponModels")
+		local narrowest, narrowestName = math.huge, ""
+		for _, artId in scope.arts do
+			local art = arts.byId(artId)
+			local model = if art ~= nil then WeaponModels.categories[art.weapon] else nil
+			if model ~= nil and isNumber(model.blade.width) and model.blade.width < narrowest then
+				narrowest, narrowestName = model.blade.width, art.weapon
+			end
+		end
+		if narrowest < math.huge and combat.besideHitRadius > narrowest / 2 + 1e-9 then
+			problem(
+				("besideHitRadius %s is over half the narrowest in-scope blade (%s, %s wide): a cut beside the swing would land where the blade's edge never reached"):format(
+					tostring(combat.besideHitRadius),
+					narrowestName,
+					tostring(narrowest)
+				)
+			)
+		end
+	end
+	if positive("besideFollowStep") and besideOk and combat.besideFollowStep <= combat.besideHitRadius then
+		problem(
+			("besideFollowStep %s must be above besideHitRadius (%s): the arc is split only down to chords the straight steps of besideHitRadius then walk"):format(
+				tostring(combat.besideFollowStep),
+				tostring(combat.besideHitRadius)
+			)
+		)
+	end
+	positiveWhole("besideMaxSubdivisions")
+
+	-- The Art stand-off's wall gap (fix F1): the body stops this far short of a wall, under one of
+	-- the step's own increments, so a wall in the way costs at most one step more than it must.
+	local standOff = if typeof(combat.contact) == "table" then combat.contact.standOff else nil
+	if typeof(standOff) == "table" then
+		local gap, step = standOff.wallGapStuds, standOff.stepStuds
+		if not isNumber(step) or step <= 0 then
+			problem(("contact.standOff.stepStuds must be a positive number (got %s)"):format(tostring(step)))
+		elseif not isNumber(gap) or gap < 0 then
+			problem(("contact.standOff.wallGapStuds must be a number, 0 or more (got %s)"):format(tostring(gap)))
+		elseif gap > step + 1e-9 then
+			problem(
+				("contact.standOff.wallGapStuds %s is over contact.standOff.stepStuds (%s): the body would stop more than one step short of a wall"):format(
+					tostring(gap),
+					tostring(step)
+				)
+			)
+		end
+	end
+
+	-- A struck stance (D-340): it falls slower than a plain end, and is gone by the time the stagger
+	-- gives the body back, so nothing the fighter does next plays under it; its tip moves slower
+	-- than a Draw may whip the blade out.
+	if
+		positive("struckStanceBlendOut")
+		and isNumber(combat.locomotionBlendOut)
+		and isNumber(combat.staggerDuration)
+	then
+		if combat.struckStanceBlendOut > combat.staggerDuration + 1e-9 then
+			problem(
+				("struckStanceBlendOut %s is over staggerDuration (%s): the fighter would act while the stance still falls"):format(
+					tostring(combat.struckStanceBlendOut),
+					tostring(combat.staggerDuration)
+				)
+			)
+		elseif combat.struckStanceBlendOut < combat.locomotionBlendOut - 1e-9 then
+			problem(
+				("struckStanceBlendOut %s is under locomotionBlendOut (%s): a struck stance would come down faster than a plain end"):format(
+					tostring(combat.struckStanceBlendOut),
+					tostring(combat.locomotionBlendOut)
+				)
+			)
+		end
+	end
+	if positive("struckStanceTipSpeed") then
+		local sheath = ctx.load("src/shared/data/choreo").sheath
+		local draw = if typeof(sheath) == "table" then sheath.drawTipSpeed else nil
+		if isNumber(draw) and combat.struckStanceTipSpeed >= draw then
+			problem(
+				("struckStanceTipSpeed %s must be under choreo.sheath.drawTipSpeed (%s): a stance let down moves the blade slower than a Draw whips it out"):format(
+					tostring(combat.struckStanceTipSpeed),
+					tostring(draw)
+				)
+			)
 		end
 	end
 

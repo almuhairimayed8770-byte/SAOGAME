@@ -14,6 +14,17 @@ local Combat = {
 	activationCancelTime = 1.0, -- holding the key past this cancels the Art
 	postMotionMin = 0.2, -- the shortest a Switch can cut a post-motion to (Phase 1)
 	locomotionBlendOut = 0.2, -- blend from the end pose back to locomotion
+	-- A stance the server takes away before the Art's first cut (a hit, a guard break, death:
+	-- CharacterController's Stagger, GuardBroken, Break and Dead) fades out over this instead
+	-- (D-340). Over locomotionBlendOut the raised stance came down past the front of the body as
+	-- a cut: Sharp Nail's tip 12 studs at up to 93 studs a second, the Vertical's 17 at up to 130,
+	-- with no trail, while the fighter is the one being hit. The fighter cannot act while the stance
+	-- falls (at most staggerDuration), so nothing it does next plays under it.
+	struckStanceBlendOut = 0.5,
+	-- The fastest that fade may move the blade's tip, in studs a second, in the root part's space
+	-- (tests/choreo/StanceLetGo.spec.luau): one stud a 60 Hz frame, the sword let down, not swung.
+	-- The Arts' own wind-ups move it up to 35, their cuts 280 to 540.
+	struckStanceTipSpeed = 60,
 
 	-- Hit-stop in frames at 60 fps (section 6) and the camera response to each tier (section 10)
 	hitStopFrames = {
@@ -217,7 +228,7 @@ local Combat = {
 		-- A kill's word waits the same way, and its EntityDied with it (D-267 amended): the death's
 		-- freeze, silence and shatter start on the key frame, the Kill hold on the frame after.
 		wordWaitSeconds = 0.25,
-		-- A contact's hold waits for its word (D-CH1): when the server's HitConfirmed has not come
+		-- A contact's hold waits for its word (D-312): when the server's HitConfirmed has not come
 		-- by the last frame of the contact's tier, the hold on both rigs goes on a frame at a time
 		-- until it comes, at most this many seconds from the contact frame, so the server's number
 		-- shows inside the freeze at up to about 0.15 s of latency (a 0.1 s lag, a frame of the
@@ -250,11 +261,11 @@ local Combat = {
 			-- touching a wall still finds it, and the body stops this far short of what it meets. A
 			-- wall nearer than the step the target calls for takes the longest step that fits.
 			wallGapStuds = 0.05,
-			-- The keep-out (D-CH3): a swing's own motion (the clip's root motion, its pose, and the
+			-- The keep-out (D-314): a swing's own motion (the clip's root motion, its pose, and the
 			-- step above) never carries the body's colliding parts (`parts`: the R15 root, torsos and
 			-- head, what the engine collides of a character) deeper into the target's blocker
 			-- (D-198: its faces, the body's `bodyFace` and one `heldFace` over each part it holds,
-			-- D-CH4) than the swing found them. The plan poses the
+			-- D-315) than the swing found them. The plan poses the
 			-- clip every sampleSeconds from where the swing starts to its end and steps the body
 			-- back along the stand-off's line (straight away from the target) as far as the pose
 			-- went in (to within depthEpsilon of where it started); off a held part's face (a

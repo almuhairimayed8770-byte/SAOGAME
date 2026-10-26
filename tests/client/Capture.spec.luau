@@ -657,7 +657,7 @@ local function asksOf(world: World, action: string, from: number?): { { action: 
 	return list
 end
 
-describe("Capture: between takes (CS1)", function()
+describe("Capture: between takes (D-297)", function()
 	it("holds the take's enemies the frame it ends, by itself at its length or on K", function()
 		local world = load()
 		local shot = CAPTURE.shots[shotIndex("enemy-boar-charge")]
@@ -747,6 +747,55 @@ describe("Capture: the take (F12)", function()
 		local box = world.counter()
 		expect(box.AutomaticSize).toBe(Enum.AutomaticSize.X)
 		expect(box.Text.AutomaticSize).toBe(Enum.AutomaticSize.X)
+	end)
+
+	it("counts every rendered frame beside f and swaps the corner square's color each frame (D-336)", function()
+		local world = load()
+		local shot = CAPTURE.shots[shotIndex("kill-shatter")]
+		local tick = CAPTURE.frameTick
+		local Palette = Harness.load("src/shared/data/palette")
+		local colors = { Palette.color3(tick.tokens[1]), Palette.color3(tick.tokens[2]) }
+		local function which(color: Color3): number?
+			for index, expected in colors do
+				if
+					math.abs(color.R - expected.R) < 1e-3
+					and math.abs(color.G - expected.G) < 1e-3
+					and math.abs(color.B - expected.B) < 1e-3
+				then
+					return index
+				end
+			end
+			return nil
+		end
+		goTo(world, shot.id)
+		world.key(KEYS.startCountdown)
+		world.untilRecording()
+		local square = world.gui:FindFirstChild(CAPTURE.panel.screenGuiName):FindFirstChild("FrameTick")
+		expect(square).never.toBeNil()
+		expect(square.Visible).toBe(true)
+		-- A small square in the bottom-right corner.
+		expect(square.Size.X.Offset).toBe(tick.size)
+		expect(square.Size.Y.Offset).toBe(tick.size)
+		expect(square.AnchorPoint).toBe(Vector2.new(1, 1))
+		expect(square.Position.X.Scale).toBe(1)
+		expect(square.Position.Y.Scale).toBe(1)
+		expect(world.counterText():find("f 0  r 0  ", 1, true)).never.toBeNil()
+		local last = which(square.BackgroundColor3)
+		expect(last).never.toBeNil()
+		for frame = 1, 7 do
+			world.frames(1)
+			expect(world.counterText():find(("f %d  r %d  "):format(frame, frame), 1, true)).never.toBeNil()
+			local now = which(square.BackgroundColor3)
+			expect(now).never.toBeNil()
+			expect(now ~= last).toBe(true)
+			last = now
+		end
+		-- K short of the target pauses neither count.
+		world.key(KEYS.markDone)
+		world.frames(1)
+		expect(world.counterText():find("f 8  r 8  ", 1, true)).never.toBeNil()
+		world.seconds(shot.seconds)
+		expect(square.Visible).toBe(false)
 	end)
 
 	it("hides the mouse cursor for the take and gives it back after", function()
@@ -859,10 +908,10 @@ describe("Capture: auto-perform (F12)", function()
 		expect(world.handled[2].at - world.handled[1].at).toBeCloseTo(perform.hold, 2 * FRAME)
 	end)
 
-	-- CS5: an Art launches on its key's release (CharacterController.releaseArt sends ArtRequest),
+	-- D-298: an Art launches on its key's release (CharacterController.releaseArt sends ArtRequest),
 	-- a basic on its press. At the snapshot the prompt said "Q now" at 1.0 s and the key came up
 	-- (the launch) at 1.35 s, under that same line; a human tapping on "now" never held the glow.
-	it("lands each attack on the beat that says so: hold on the press, let go on the launch (CS5)", function()
+	it("lands each attack on the beat that says so: hold on the press, let go on the launch (D-298)", function()
 		local Combat = Harness.load("src/shared/data/combat")
 		local checked = 0
 		for _, shot in CAPTURE.shots do
@@ -903,7 +952,13 @@ describe("Capture: auto-perform (F12)", function()
 			end
 			local down, up = seen[1], seen[2]
 			print(
-				("[CS5] %s: press %.3f s (%q), release %.3f s (%q)"):format(shot.id, down.at, down.text, up.at, up.text)
+				("[D-298] %s: press %.3f s (%q), release %.3f s (%q)"):format(
+					shot.id,
+					down.at,
+					down.text,
+					up.at,
+					up.text
+				)
 			)
 			expect(down.state).toBe("Begin")
 			expect(up.state).toBe("End")
@@ -925,7 +980,7 @@ describe("Capture: auto-perform (F12)", function()
 					end
 				end
 				local glow = up.at - (down.at + lit)
-				print(("[CS5] %s: glow %.3f s"):format(shot.id, glow))
+				print(("[D-298] %s: glow %.3f s"):format(shot.id, glow))
 				expect(glow).toBeGreaterThan(CAPTURE.artGlowSeconds - FRAME)
 			else
 				expect(down.text:lower():find("now", 1, true)).never.toBeNil()
@@ -981,7 +1036,7 @@ describe("Capture: auto-perform (F12)", function()
 
 	-- A press reaches the server a latency after it leaves: it leaves the client's latency lead
 	-- early (Telegraphs.glintLead, D-289), as the glint shows, so the guard is down on the server
-	-- `lead` before the window at any latency the lead has learnt (S-CP3(b)).
+	-- `lead` before the window at any latency the lead has learnt (Studio item 324(b)).
 	it("guards the client's latency lead earlier still, as the glint comes (D-289)", function()
 		local world = load()
 		local shot = CAPTURE.shots[shotIndex("parry-spark")]
@@ -1224,7 +1279,7 @@ describe("Capture: the fight's auto-perform (CF)", function()
 	end)
 
 	-- The take cuts at its length: a press past the guard's `to` (the chain's Art included) would
-	-- land its hit after the cut, where the review never sees its number (D-CI3).
+	-- land its hit after the cut, where the review never sees its number (D-320).
 	it("presses nothing of a reaction past its `to`: the guard inside it, the chain's Art never after", function()
 		local world, start = fightTake()
 		koboldAt(world, 20)

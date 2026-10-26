@@ -24,7 +24,8 @@ local function hold(tier: string, nextDt: () -> number): (number, number, number
 		mixer:step(nextDt())
 	end
 	mixer:hitStop(math.max(0, Combat.hitStopFrames[tier] - Combat.hitStopShaveFrames))
-	local still, seconds, left = 0, 0, mixer:pauseRemaining()
+	local still, seconds = 0, 0
+	local left = mixer:pauseRemaining()
 	for _ = 1, 200 do
 		local before = handle.time
 		local dt = nextDt()
@@ -91,7 +92,7 @@ describe("a hold counts the frames nearest its length (D-228 amended)", function
 
 	it("keeps 60 Hz exact: 3, 6 and 10 frames at 0, 5 and 10% jitter", function()
 		local rng = Random.new(20261025)
-		for _, case in { { 0, false }, { 0.05, true }, { 0.05, false }, { 0.1, false } } do
+		for _, case in { { 0, false }, { 0.05, true }, { 0.05, false }, { 0.1, false } } :: { { any } } do
 			local jitter, drift = case[1] :: number, case[2] :: boolean
 			for _ = 1, 100 do
 				for _, tier in TIERS do
@@ -128,6 +129,234 @@ describe("a hold counts the frames nearest its length (D-228 amended)", function
 		local before = handle.time
 		mixer:step(1 / 60)
 		expect(handle.time > before).toBe(true)
+		expect(mixer:pauseRemaining()).toBe(0)
+	end)
+end)
+
+-- A rig in a running fight: `warm` frames from `nextDt` before the hold goes on, so the Mixer has
+-- the pace of its last impact.luau hold.paceFrames steps (D-327).
+-- A 12 s loop: no warm-up runs it out, and nothing in it ends or jumps the clock.
+local longClip = Harness.load("src/shared/clips/player/OneHandedSword/IdleDrawn")
+local function holdAfter(tier: string, nextDt: () -> number, warm: number): number
+	local mixer = Mixer.new()
+	local handle = mixer:play(longClip)
+	for _ = 1, warm do
+		mixer:step(nextDt())
+	end
+	-- The clip is long enough that the warm-up never ends it.
+	assert(not handle.done and handle.time < 6, "the warm-up ran the clip out")
+	mixer:hitStop(math.max(0, Combat.hitStopFrames[tier] - Combat.hitStopShaveFrames))
+	local still = 0
+	for _ = 1, 200 do
+		local before = handle.time
+		mixer:step(nextDt())
+		if handle.time > before + 1e-12 then
+			break
+		end
+		still += 1
+	end
+	return still
+end
+
+describe("a hold's frames are counted once, at its start, from the rig's pace (D-327)", function()
+	local ImpactData = Harness.load("src/shared/data/impact")
+	local WARM = ImpactData.hold.paceFrames + 4
+
+	it("holds a Normal 2 frames at 30 Hz under 5 and 10% jitter, a Final 3 and a Kill 5", function()
+		local rng = Random.new(30301)
+		local want = { Normal = 2, Final = 3, Kill = 5 }
+		for _, case in { { 0.05, false }, { 0.1, false }, { 0.05, true }, { 0.1, true } } :: { { any } } do
+			local jitter, drift = case[1] :: number, case[2] :: boolean
+			for run = 1, 300 do
+				for _, tier in TIERS do
+					local still = holdAfter(tier, jittered(30, jitter, rng, drift), WARM + run % 7)
+					if still ~= want[tier] then
+						error(
+							("%s at 30 Hz, %d%% jitter%s, run %d, held %d frames, want %d"):format(
+								tier,
+								jitter * 100,
+								if drift then " (drifting)" else "",
+								run,
+								still,
+								want[tier]
+							)
+						)
+					end
+				end
+			end
+		end
+	end)
+
+	it("keeps 60 Hz exact (3, 6 and 10) and 120 and 240 Hz at the nearest frames under jitter", function()
+		local rng = Random.new(60601)
+		for _, hz in { 60, 120, 240 } do
+			-- Frame times that drift on their own (no display grid) only at 60 Hz: at 240 Hz a Kill
+			-- is 40 frames and their mean wanders by a frame's fraction either way (as at HEAD).
+			local cases: { { any } } = if hz == 60
+				then { { 0, false }, { 0.05, false }, { 0.1, false }, { 0.05, true } } :: { { any } }
+				else { { 0, false }, { 0.05, false }, { 0.1, false } } :: { { any } }
+			for _, case in cases do
+				local jitter, drift = case[1] :: number, case[2] :: boolean
+				for run = 1, 100 do
+					for _, tier in TIERS do
+						local want = math.floor(Combat.hitStopFrames[tier] * hz / 60 + 0.5)
+						local still = holdAfter(tier, jittered(hz, jitter, rng, drift), WARM + run % 5)
+						if still ~= want then
+							error(
+								("%s at %d Hz, %d%% jitter%s, held %d frames, want %d"):format(
+									tier,
+									hz,
+									jitter * 100,
+									if drift then " (drifting)" else "",
+									still,
+									want
+								)
+							)
+						end
+					end
+				end
+			end
+		end
+	end)
+
+	it("at 144 Hz holds the nearest frames steadily, and at most one more under jitter", function()
+		local rng = Random.new(14401)
+		for _, case in { { 0, false }, { 0.05, false }, { 0.1, false }, { 0.05, true } } :: { { any } } do
+			local jitter, drift = case[1] :: number, case[2] :: boolean
+			for run = 1, if jitter == 0 then 1 else 100 do
+				for _, tier in TIERS do
+					local want = math.floor(Combat.hitStopFrames[tier] * 144 / 60 + 0.5)
+					local still = holdAfter(tier, jittered(144, jitter, rng, drift), WARM + run % 5)
+					local slack = if jitter == 0 then 0 else 1
+					if still < want or still > want + slack then
+						error(
+							("%s at 144 Hz, %d%% jitter, held %d frames, want %d"):format(
+								tier,
+								jitter * 100,
+								still,
+								want
+							)
+						)
+					end
+				end
+			end
+		end
+	end)
+
+	it("is not shortened by a hitch just before it", function()
+		for _, hz in { 30, 60 } do
+			for _, tier in TIERS do
+				local count = 0
+				local still = holdAfter(tier, function(): number
+					count += 1
+					-- One 0.2 s hitch two frames before the hold.
+					return if count == WARM - 1 then 0.2 else 1 / hz
+				end, WARM)
+				expect(still).toBe(math.floor(Combat.hitStopFrames[tier] * hz / 60 + 0.5))
+			end
+		end
+	end)
+
+	it("takes a display's own cadence as the pace, never as hitches (D-341)", function()
+		-- A rig that cannot keep up with a vsync display shows each frame for one or two refreshes:
+		-- 45 fps on 60 Hz is 1, 1, 2 refreshes again and again. The two-refresh frames are a third of
+		-- them, the pace, not hitches: left out, a Final held 6 frames (133 ms) and a Kill 10 (217 to
+		-- 233 ms) at 45 fps. The hold is the frames nearest its length at the mean pace (a half frame
+		-- going to the longer count): 45 fps holds 2, 5 and 8 (2.25, 4.5 and 7.5 frames).
+		-- At 120 and 144 Hz the 32 frames' mean moves with the cadence's phase (32 is no multiple of
+		-- 3), so a length near a half frame may hold one more, as under jitter at 144 Hz above.
+		local cases: { { any } } = {
+			{ 60, { 1, 1, 2 }, { Normal = 2, Final = 5, Kill = 8 }, 0 }, -- 45 fps
+			{ 60, { 1, 2 }, { Normal = 2, Final = 4, Kill = 7 }, 0 }, -- 40 fps
+			{ 144, { 1, 1, 2 }, { Normal = 5, Final = 11, Kill = 18 }, 1 }, -- 108 fps
+			{ 120, { 1, 1, 2 }, { Normal = 5, Final = 9, Kill = 15 }, 1 }, -- 90 fps
+		}
+		for _, case in cases do
+			local hz, pattern, want = case[1] :: number, case[2] :: { number }, case[3] :: { [string]: number }
+			local slack = case[4] :: number
+			for phase = 0, #pattern - 1 do
+				for _, tier in TIERS do
+					local count = phase
+					local still = holdAfter(tier, function(): number
+						count += 1
+						return pattern[(count - 1) % #pattern + 1] / hz
+					end, WARM)
+					if still < want[tier] or still > want[tier] + slack then
+						error(
+							("%s at %d Hz showing frames for %s refreshes (phase %d) held %d frames, want %d"):format(
+								tier,
+								hz,
+								table.concat(pattern, ", "),
+								phase,
+								still,
+								want[tier]
+							)
+						)
+					end
+				end
+			end
+		end
+	end)
+
+	it("follows a change of frame rate within its pace's frames", function()
+		local count = 0
+		-- 60 Hz, then 30 Hz from the frame the pace starts over.
+		local still = holdAfter("Normal", function(): number
+			count += 1
+			return if count <= WARM then 1 / 60 else 1 / 30
+		end, WARM + ImpactData.hold.paceFrames)
+		expect(still).toBe(2)
+	end)
+
+	it("keeps a running count when a shorter hold comes, and counts on from now for a longer one", function()
+		local mixer = Mixer.new()
+		local handle = mixer:play(longClip)
+		for _ = 1, WARM do
+			mixer:step(1 / 30)
+		end
+		mixer:hitStop(Combat.hitStopFrames.Final) -- 3 frames at 30 Hz
+		mixer:step(1 / 30)
+		mixer:hitStop(Combat.hitStopFrames.Normal) -- 2 frames: the 2 left are kept
+		local still = 1
+		for _ = 1, 20 do
+			local before = handle.time
+			mixer:step(1 / 30)
+			if handle.time > before + 1e-12 then
+				break
+			end
+			still += 1
+		end
+		expect(still).toBe(3)
+		-- A Kill asked for on the Normal's first frame runs its 5 frames from there.
+		mixer:hitStop(Combat.hitStopFrames.Normal)
+		mixer:step(1 / 30)
+		mixer:hitStop(Combat.hitStopFrames.Kill)
+		still = 1
+		for _ = 1, 20 do
+			local before = handle.time
+			mixer:step(1 / 30)
+			if handle.time > before + 1e-12 then
+				break
+			end
+			still += 1
+		end
+		expect(still).toBe(6)
+	end)
+
+	it("says what is left of the hold in its own seconds, none once its last frame is held", function()
+		local mixer = Mixer.new()
+		mixer:play(longClip)
+		for _ = 1, WARM do
+			mixer:step(1 / 30)
+		end
+		local asked = Combat.hitStopFrames.Normal * Combat.hitStopFrameSeconds
+		mixer:hitStop(Combat.hitStopFrames.Normal)
+		expect(mixer:pauseRemaining()).toBeCloseTo(asked, 1e-9)
+		mixer:step(1 / 30)
+		-- Half the hold's seconds for the one frame of its two still to come: still owed a frame
+		-- by Replication's rule (at least half a step).
+		expect(mixer:pauseRemaining()).toBeCloseTo(asked / 2, 1e-9)
+		mixer:step(1 / 30)
 		expect(mixer:pauseRemaining()).toBe(0)
 	end)
 end)

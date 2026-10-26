@@ -175,6 +175,11 @@ type Entry = {
 	guardAt: Vector3, -- the blade at `pose`
 	tipAt: Vector3,
 	stroke: boolean, -- the ribbon's newest sample continues a stroke that is still drawing
+	cutSourced: boolean, -- the stroke started at its clip's open (D-273), so it may end on a turn back
+	cutTip: Vector3, -- the tip of the stroke's newest kept sample
+	cutWay: Vector3?, -- the unit way the tip went to reach it; nil before the stroke has moved
+	cutSwept: number, -- studs the stroke's tip has swept
+	cutDone: boolean, -- the tip turned back: the window draws nothing more (D-335)
 	source: any, -- the Mixer handle whose clip lit the stroke (its sub-steps sample it); nil: none
 	sourceMixer: any, -- the mixer that plays it
 	sourceTime: number, -- its clock at `pose`
@@ -651,6 +656,18 @@ local function hideGlow(entry: Entry)
 	end
 end
 
+-- Where a new rig's ribbon clock starts: the last render step's time, when that was within a jump,
+-- so a rig attached inside a frame (by its first trail event) has that whole frame on its ribbon
+-- clock, as a rig attached before it does (D-336); else now.
+local function ribbonStart(): number
+	local now = Engine.now()
+	local at = renderedAt
+	if at ~= nil and at <= now and now - at <= ChoreoData.stall.jumpSeconds then
+		return at
+	end
+	return now
+end
+
 --- Finds (or builds) the Trail and PointLight on a rig's Weapon part; returns nil for rigs without one.
 function Trails.attach(model: Instance): boolean
 	if entries[model] ~= nil then
@@ -709,6 +726,11 @@ function Trails.attach(model: Instance): boolean
 		guardAt = Vector3.zero,
 		tipAt = Vector3.zero,
 		stroke = false,
+		cutSourced = false,
+		cutTip = Vector3.zero,
+		cutWay = nil,
+		cutSwept = 0,
+		cutDone = false,
 		source = nil,
 		sourceMixer = nil,
 		sourceTime = 0,
@@ -722,7 +744,7 @@ function Trails.attach(model: Instance): boolean
 		between = { root = CFrame.identity, transforms = {} },
 		ribbon = nil,
 		ribbonClock = 0,
-		ribbonAt = Engine.now(),
+		ribbonAt = ribbonStart(),
 		style = { color = color, whiteBlend = 0, width = width, lifetime = Fx.trail.lifetime },
 	}
 	entry.light.Color = color
@@ -1039,24 +1061,102 @@ local function bladeAt(entry: Entry, chain: BladeContact.Chain, alpha: number): 
 	return BladeContact.blade(chain, between)
 end
 
+-- A new stroke's cut starts at `tip`; `sourced` when it starts at its clip's open (D-273).
+local function beginCut(entry: Entry, tip: Vector3, sourced: boolean)
+	entry.cutSourced = sourced
+	entry.cutTip = tip
+	entry.cutWay = nil
+	entry.cutSwept = 0
+	entry.cutDone = false
+end
+
+-- The stroke kept a sample at `tip`: the way the tip went and how far it has swept.
+local function advanceCut(entry: Entry, tip: Vector3)
+	local move = tip - entry.cutTip
+	local length = move.Magnitude
+	if length > 1e-6 then
+		entry.cutWay = move / length
+		entry.cutSwept += length
+	end
+	entry.cutTip = tip
+end
+
+-- True when the tip at `tip` turns back on the cut (D-335): a stroke that started at its clip's
+-- open, has swept fx.trail.ribbon.turnBackAfter studs and now steps more than turnBackDegrees off
+-- the way it was going (a step under trail.minLength is no step). A stroke with no clip (a flash,
+-- a stall's wake) may start on wind-up motion, so it never ends this way.
+local function turnsBack(entry: Entry, tip: Vector3): boolean
+	local way = entry.cutWay
+	if not entry.cutSourced or way == nil or entry.cutSwept < Fx.trail.ribbon.turnBackAfter then
+		return false
+	end
+	local move = tip - entry.cutTip
+	local length = move.Magnitude
+	if length < Fx.trail.minLength then
+		return false
+	end
+	return move:Dot(way) < length * math.cos(math.rad(Fx.trail.ribbon.turnBackDegrees))
+end
+
+-- A stroke starting with no pose from the frame before, on a frame its clip lit it (Trails attaches
+-- a rig on its first trail event, so a rig's first swing lights on the first frame anything reads
+-- it): the pose read now stands in for the frame before too, and pushBlade carries what this frame
+-- shows on top of the clip back across the frame unchanged, so the clip at its last clock poses
+-- the frame before and the stroke starts at the open, as an attached rig's does (D-273, D-336).
+-- False (nothing stood in) with no such clip, or for a step longer than a jump (a stall's wake:
+-- nothing across the dark is drawn).
+local function standIn(entry: Entry): boolean
+	local handle = lighting(entry)
+	if handle == nil or handle.time - handle.lastTime > ChoreoData.stall.jumpSeconds then
+		return false
+	end
+	local pose, lastPose = entry.pose, entry.lastPose
+	lastPose.root = pose.root
+	table.clear(lastPose.transforms)
+	for index, transform in pose.transforms do
+		lastPose.transforms[index] = transform
+	end
+	return true
+end
+
 -- Adds the blade's move since the last frame to the ribbon: sub-steps from the frame before's pose
 -- to this one (each end moving at most trail.ribbon.maxStep), born along the ribbon clock between
 -- the two frames, posed from the stroke's clip where it is known (bladeAt). A stroke that starts
 -- on a frame its clip lit takes its first sample at the clip time the window opened (the frame
--- before is the wind-up, D-269); one with no such clip starts from the frame before's blade, and
--- one with no frame before (a stall, a new chain) where the blade is.
+-- before is the wind-up, D-269), even on a rig's first read (standIn); one with no such clip starts
+-- from the frame before's blade, and one with no frame before (a stall, a new chain) where the
+-- blade is. A clip's stroke ends where its tip turns back on the cut (turnsBack): the settle after
+-- a cut is not drawn (D-335).
 local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boolean, clockBefore: number)
 	local ribbon = acquireRibbon(entry)
 	local guard, tip = entry.guardAt, entry.tipAt
 	local clock = entry.ribbonClock
+	local standing = false
 	if not hadPose then
-		TrailRibbon.push(ribbon, guard, tip, clock, false)
-		entry.stroke = true
-		entry.source = nil
+		standing = not entry.stroke and standIn(entry)
+		if not standing then
+			TrailRibbon.push(ribbon, guard, tip, clock, false)
+			entry.stroke = true
+			entry.source = nil
+			beginCut(entry, tip, false)
+			return
+		end
+	end
+	if entry.stroke and entry.cutDone then
+		-- The cut turned back: the rest of the window (the settle) draws nothing (D-335).
 		return
 	end
 	local starting = not entry.stroke
-	local start = followSource(entry, starting) or 0
+	local opened = followSource(entry, starting)
+	if standing then
+		-- The frame before wears what this one shows on top of the clip (standIn).
+		local residuals = entry.residuals
+		table.clear(residuals)
+		for index, residual in entry.nextResiduals do
+			residuals[index] = residual
+		end
+	end
+	local start = opened or 0
 	local fromGuard, fromTip
 	if start > 0 then
 		fromGuard, fromTip = bladeAt(entry, chain, start)
@@ -1066,6 +1166,7 @@ local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boole
 	if starting then
 		TrailRibbon.push(ribbon, fromGuard, fromTip, clockBefore + (clock - clockBefore) * start, false)
 		entry.stroke = true
+		beginCut(entry, fromTip, opened ~= nil)
 	end
 	local config = Fx.trail.ribbon
 	local steps = BladeContact.steps(fromGuard, fromTip, guard, tip, config.maxStep, config.maxSubsteps)
@@ -1075,7 +1176,13 @@ local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boole
 		if step < steps then
 			stepGuard, stepTip = bladeAt(entry, chain, alpha)
 		end
-		TrailRibbon.push(ribbon, stepGuard, stepTip, clockBefore + (clock - clockBefore) * alpha, true)
+		if turnsBack(entry, stepTip) then
+			entry.cutDone = true
+			return
+		end
+		if TrailRibbon.push(ribbon, stepGuard, stepTip, clockBefore + (clock - clockBefore) * alpha, true) then
+			advanceCut(entry, stepTip)
+		end
 	end
 end
 

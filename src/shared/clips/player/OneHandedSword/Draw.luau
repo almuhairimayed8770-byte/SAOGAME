@@ -13,14 +13,17 @@
 	out as the blade swings out over the mouth, behind the head, an edge out through the wall for
 	14 ms (0.291 to 0.304 s, under one 60 Hz frame). The swing over the shoulder (to 0.445 s), up
 	to straight (0.59 s) and down into the carry (0.79 s) each get time in step with how far the
-	tip travels and ease in and out, so on the client's own path none moves the tip past 72 studs
-	a second standing or 75 over a sprint's torso at the worst point of its cycle (1.25 a 60 Hz
-	frame), or turns the blade past 960 degrees a second (choreo.luau sheath.drawTipSpeed,
-	movingTipShare and bladeTurnRate, tests/choreo/SheathTip.spec.luau): a whip, where the drop
-	from straight up to the guard used to take 3.4 studs and 36 degrees in one frame, and where
-	a sprint read 1.44 studs in a Studio frame before the last three swings got 10% more time. It then
-	drops a little past the carry (low, the point forward, D-047) and springs back, the point
-	higher than the drawn idle's so that a sprint's lean under it keeps it off the field.
+	tip travels and ease in and out: a whip, where the drop from straight up to the guard used to
+	take 3.4 studs and 36 degrees in one frame, and where a sprint read 1.44 studs in a Studio frame
+	before the last three swings got 10% more time. It then drops a little past the carry (low,
+	the point forward, D-047) and springs back over 0.18 s, the point higher than the drawn idle's
+	so that a sprint's lean under it keeps it off the field: the spring leaves the low key at six
+	times its mean pace, and over 0.14 s that start, on a sprint's torso swing, moved the tip 79.5
+	studs a second at 240 Hz. On the client's own path the Draw now moves the tip at most 71.3
+	studs a second standing and 74.6 over a walk, a run or a sprint at any of 48 points of its
+	cycle (the fastest in the swing down, near 0.7 s; 1.24 studs a 60 Hz frame), under
+	sheath.drawTipSpeed (84) and its moving share (77.28), and turns the blade at most 951 degrees
+	a second, under sheath.bladeTurnRate (choreo.luau sheath, tests/choreo/SheathTip.spec.luau).
 	The head tucks and leans away from the reaching arm until the blade is out: the hilt sits just
 	behind it, and a run's raised head would meet it.
 	Before WeaponDraw the sword is on the back, so no key moves Weapon there.
@@ -40,7 +43,7 @@ end
 local clip: Types.ClipDef = {
 	id = "player/OneHandedSword/Draw",
 	rig = "PlayerR15",
-	duration = 0.93,
+	duration = 0.97,
 	loop = false,
 	sheathed = true,
 	layer = "UpperBody",
@@ -144,7 +147,7 @@ local clip: Types.ClipDef = {
 			-- settle: the drawn idle's arm, the point 24 degrees higher than its carry so a run's
 			-- or a sprint's lean under it keeps the point off the field; the blend out hands the
 			-- sword to the base's own carry
-			time = 0.93,
+			time = 0.97,
 			easing = "Spring",
 			joints = {
 				Neck = rot(6, 10, 0),

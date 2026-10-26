@@ -1252,3 +1252,312 @@ describe("held off the stick (D-144): the posed body against a wall", function()
 		expect(table.concat(problems, "; ")).toBe("")
 	end)
 end)
+
+describe("on the engine's own steps (item 282, D-334): a flat foot holds the ground frame to frame", function()
+	-- Rendered at 60 Hz, the root moved by physics in whole 1/240 s steps that do not line up
+	-- with the render frames: two to six of them a frame while the velocity reads steady. The
+	-- PC's own pattern (pc-282-feetcheck.csv: the sheathed run at 16 studs a second), then two
+	-- seeded clocks whose frames jitter 5% and 10% with the steps caught up in pairs and singly.
+	-- Each frame the real Locomotion and Choreo animator pose the body at the root where physics
+	-- left it, at the speed each state really walks at (a lock-on strafe at walkSpeed). A foot is
+	-- flat while its centre is within stride.flatBand of its height standing (the PC's rule): while
+	-- flat it moves no more than stride.frameBar between two frames, and no more than slideBar
+	-- over the whole time it is flat.
+	local PC_STEPS = {
+		4,
+		4,
+		4,
+		4,
+		4,
+		4,
+		4,
+		4,
+		4,
+		2,
+		4,
+		4,
+		4,
+		4,
+		4,
+		4,
+		6,
+		4,
+		2,
+		6,
+		4,
+		4,
+		2,
+		6,
+		4,
+		2,
+		6,
+		2,
+		4,
+		6,
+		4,
+		2,
+		4,
+		4,
+		4,
+		6,
+		4,
+		2,
+		4,
+		4,
+		4,
+		6,
+		4,
+		4,
+		4,
+		4,
+		4,
+		4,
+		4,
+		2,
+		6,
+		2,
+		6,
+		4,
+		2,
+		6,
+		4,
+		2,
+		4,
+		4,
+		4,
+		4,
+		4,
+		4,
+		6,
+		4,
+		2,
+		6,
+		4,
+		2,
+		4,
+		4,
+	}
+	local PC_MS = {
+		15.6,
+		17.7,
+		16.5,
+		17.2,
+		16.2,
+		16.5,
+		16.9,
+		16.7,
+		16.6,
+		16.4,
+		16.1,
+		17.3,
+		15.7,
+		16.8,
+		17.1,
+		17.0,
+		16.9,
+		16.0,
+		17.7,
+		16.1,
+		16.5,
+		16.7,
+		17.1,
+		16.5,
+		16.0,
+		17.0,
+		16.4,
+		17.0,
+		16.8,
+		16.6,
+		16.0,
+		17.7,
+		15.4,
+		17.7,
+		17.2,
+		15.9,
+		16.1,
+		17.4,
+		15.9,
+		17.2,
+		17.2,
+		16.6,
+		17.0,
+		15.9,
+		16.7,
+		17.4,
+		15.9,
+		16.8,
+		16.2,
+		17.3,
+		15.9,
+		16.9,
+		17.1,
+		15.9,
+		16.7,
+		17.5,
+		15.9,
+		16.7,
+		17.4,
+		15.7,
+	}
+	type Clock = (frame: number) -> (number, number) -- a rendered frame's dt, and its physics steps
+
+	local function pcClock(): Clock
+		return function(frame: number): (number, number)
+			return PC_MS[(frame - 1) % #PC_MS + 1] / 1000, PC_STEPS[(frame - 1) % #PC_STEPS + 1]
+		end
+	end
+
+	-- A 60 Hz render clock jittered by `jitter`; physics catches up in whole quanta of `quantum`
+	-- steps, its boundary `lead` of a quantum off the render clock's.
+	local function jitterClock(seed: number, jitter: number, quantum: number, lead: number): Clock
+		local random = Random.new(seed)
+		local wall, sim = 0, 0
+		local q = quantum / 240
+		return function(): (number, number)
+			local dt = (1 / 60) * (1 + jitter * (random:NextNumber() * 2 - 1))
+			wall += dt
+			local count = math.max(0, math.floor((wall - sim) / q + lead))
+			sim += count * q
+			return dt, count * quantum
+		end
+	end
+
+	local CLOCKS: { { name: string, make: () -> Clock } } = {
+		{ name = "PC", make = pcClock },
+		{
+			name = "jitter 5%",
+			make = function(): Clock
+				return jitterClock(7, 0.05, 2, 0.02)
+			end,
+		},
+		{
+			name = "jitter 10%",
+			make = function(): Clock
+				return jitterClock(9, 0.1, 1, 0.05)
+			end,
+		},
+	}
+
+	local function state(direction: any, speed: number, drawn: boolean, sprinting: boolean): any
+		return {
+			moveDir = if speed > 0 then direction else Vector3.zero,
+			speed = speed,
+			sprinting = sprinting,
+			grounded = true,
+			drawn = drawn,
+			turning = 0,
+			verticalVelocity = 0,
+			velocity = direction * speed,
+		}
+	end
+
+	-- The foot centre's height above the field standing still (Idle, sheathed).
+	local cachedRest: number? = nil
+	local function restHeight(): number
+		if cachedRest == nil then
+			local shape = body()
+			local model = buildRig()
+			local animator: any = Choreo.get(model)
+			local locomotion = Locomotion.new(animator, model, { footIK = false }) :: any
+			for _ = 1, 30 do
+				locomotion:update(1 / 60, state(Vector3.zero, 0, false, false))
+				animator:step(1 / 60)
+			end
+			local solved = Pose.solve(shape.model, shape.base, animator.mixer:lastOffsets(), shape.chain)
+			locomotion:destroy()
+			Choreo.release(model)
+			cachedRest = solved.LeftFoot.Position.Y - shape.fieldTop
+		end
+		return cachedRest :: number
+	end
+
+	type Flat = { frame: number, net: number, runs: number }
+
+	-- The worst flat frame-to-frame move and flat net over 3 s, after 1.5 s to settle.
+	local function engineSteps(direction: any, speed: number, drawn: boolean, sprinting: boolean, clock: Clock): Flat
+		local shape = body()
+		local rest = restHeight()
+		local model = buildRig()
+		local animator: any = Choreo.get(model)
+		local locomotion = Locomotion.new(animator, model, { footIK = false }) :: any
+		local position = Vector3.zero
+		local t, frame = 0, 0
+		local result: Flat = { frame = 0, net = 0, runs = 0 }
+		local open: { [string]: { net: any, frames: number, worst: number }? } = {}
+		local previous: { [string]: any } = {}
+		while t < 4.5 do
+			frame += 1
+			local dt, steps = clock(frame)
+			t += dt
+			position += direction * (speed * steps / 240)
+			model.PrimaryPart.CFrame = CFrame.new(position)
+			locomotion:update(dt, state(direction, speed, drawn, sprinting))
+			animator:step(dt)
+			local rootFrame = CFrame.new(shape.base.Position + position)
+			local solved = Pose.solve(shape.model, rootFrame, animator.mixer:lastOffsets(), shape.chain)
+			for _, foot in FEET do
+				local centre = solved[foot].Position
+				local run = open[foot]
+				if centre.Y - shape.fieldTop <= rest + Stride.flatBand then
+					if run == nil then
+						open[foot] = { net = Vector3.zero, frames = 1, worst = 0 }
+					elseif previous[foot] ~= nil then
+						local moved = centre - previous[foot]
+						local flat = Vector3.new(moved.X, 0, moved.Z)
+						run.net += flat
+						run.frames += 1
+						run.worst = math.max(run.worst, flat.Magnitude)
+					end
+				elseif run ~= nil then
+					if t >= 1.5 and run.frames >= 2 then
+						result.frame = math.max(result.frame, run.worst)
+						result.net = math.max(result.net, run.net.Magnitude)
+						result.runs += 1
+					end
+					open[foot] = nil
+				end
+				previous[foot] = centre
+			end
+		end
+		locomotion:destroy()
+		Choreo.release(model)
+		return result
+	end
+
+	it("walk, back, strafe both ways, run and sprint, both sets, on the PC's steps and jittered clocks", function()
+		local shape = body()
+		local gaits = {
+			{ name = "walk", direction = shape.forward, speed = Config.walkSpeed },
+			{ name = "back", direction = -shape.forward, speed = Config.walkSpeed },
+			{ name = "strafe left", direction = -shape.right, speed = Config.walkSpeed },
+			{ name = "strafe right", direction = shape.right, speed = Config.walkSpeed },
+			{ name = "run", direction = shape.forward, speed = Config.runSpeed },
+			{ name = "sprint", direction = shape.forward, speed = Config.sprintSpeed, sprinting = true },
+		}
+		local problems = {}
+		for _, drawn in { false, true } do
+			for _, gait in gaits do
+				for _, clock in CLOCKS do
+					local label = ("%s %s, %s"):format(gait.name, drawnLabel(drawn), clock.name)
+					local flat = engineSteps(gait.direction, gait.speed, drawn, gait.sprinting == true, clock.make())
+					if flat.runs < 4 then
+						table.insert(problems, ("%s: %d flat feet"):format(label, flat.runs))
+					end
+					if flat.frame > Stride.frameBar then
+						table.insert(
+							problems,
+							("%s: moved %.3f in a frame, limit %.3f"):format(label, flat.frame, Stride.frameBar)
+						)
+					end
+					if flat.net > Stride.slideBar then
+						table.insert(
+							problems,
+							("%s: slid %.3f flat, limit %.3f"):format(label, flat.net, Stride.slideBar)
+						)
+					end
+				end
+			end
+		end
+		expect(table.concat(problems, "; ")).toBe("")
+	end)
+end)

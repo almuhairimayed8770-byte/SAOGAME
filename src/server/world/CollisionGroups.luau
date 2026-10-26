@@ -8,14 +8,18 @@
 	rush never jams on the player it hits or on a packmate. Players collide with players and with
 	walking enemies, and enemies with each other, as before.
 
-	What a player bumps into on a standing enemy is its blocker (D-198): one upright, invisible box
-	over the root's footprint from the floor up past a player's head (RigBuilder.addBlocker), in the
-	blockers group, which collides with players only. The root (a box floating at HipHeight, its top
+	What a player bumps into on a standing enemy is its blocker (D-198): upright, invisible faces
+	over the root's footprint and over each part it holds, from the floor up past a player's head
+	(RigBuilder.addBlocker, D-315), in the blockers group. That group collides with players, with
+	walking enemies and with other blockers (D-281), so a solid enemy's whole footprint, its held
+	axe's face included, meets another's and two enemies never stand inside each other; it never
+	collides with the world or with a rushing body. The root (a box floating at HipHeight, its top
 	edge at a player's chest) no longer collides with players: walking into that edge bobbed a player
 	up and slid them off sideways, while a face from the floor up past the head is a flat stop. The
 	blocker never collides with the world, so the body moves on the floor and stops at walls as
 	before, and a query (run as Default) never sees it. assign leaves it in its group and switches it
-	on only with the enemies group, so a rush still passes through players (D-167).
+	on only with the enemies group, so a rush still passes through players (D-167). A body that died
+	keeps its faces solid only until every client shatters it (EnemyService, D-329).
 
 	The server registers the groups once (register, from Main and EnemyService.start, either first);
 	the engine replicates the group table and every part's CollisionGroup to the clients, so a

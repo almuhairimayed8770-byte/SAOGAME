@@ -19,7 +19,7 @@
 	the snout 5.6), from behind inside its tail, and on the flank 0.1 into its side. A walk-in now
 	stops where the player touches the body, on every side.
 
-	And over what the body shows standing, not its rest pose alone (D-CH4): a kobold idles hunched,
+	And over what the body shows standing, not its rest pose alone (D-315): a kobold idles hunched,
 	its head 0.5 ahead of its rest footprint and its arms out, with the axe hanging 3.9 ahead at its
 	right; over the rest footprint a player walked in from its front right stood 1.03 deep in the
 	axe, 0.46 in its head and 0.39 in its arm. The body's face covers every part at rest and over
@@ -220,7 +220,7 @@ describe("Walking into an enemy meets one upright face (D-198)", function()
 			local root = model.PrimaryPart :: BasePart
 			local skin = Enemies.byId(defId).skin
 			local colliders = collidersWith(model, GROUPS.players)
-			-- One face over the body, and one over each part it holds (D-CH4): the kobold's axe.
+			-- One face over the body, and one over each part it holds (D-315): the kobold's axe.
 			local footprints = RigBuilder.footprints(skin)
 			expect(#footprints).toBe(1 + #(Rigs[skin].trailParts or {}))
 			expect(#colliders).toBe(#footprints)
@@ -381,7 +381,7 @@ describe("Walking into an enemy meets one upright face (D-198)", function()
 
 	it("nothing else changes: the body's reach, and no blade or query ever meets a face", function()
 		-- The reach the brain plans with (a rush's length, D-202) is the built body's at rest, never
-		-- a face's: the faces stand over the idle's poses and what the enemy holds (D-CH4).
+		-- a face's: the faces stand over the idle's poses and what the enemy holds (D-315).
 		for _, defId in { "FrenzyBoar", "KoboldAxeman" } do
 			local built = RigBuilder.build(Enemies.byId(defId).skin)
 			local front, back = EnemyService.bodyExtents(built)
@@ -446,7 +446,7 @@ describe("Walking into an enemy meets one upright face (D-198)", function()
 		expect(sweep(root.CFrame.Position.Y)).toBe(1)
 	end)
 
-	it("a live enemy's reach is its body's, never a face's (the faces cover its idle, D-CH4)", function()
+	it("a live enemy's reach is its body's, never a face's (the faces cover its idle, D-315)", function()
 		-- EnemyService.bodyExtents on the spawned model (faces and all) is what the brain planned with
 		-- before the faces went on: a rush's line ends at the snout, not at the idle's hull.
 		for _, defId in { "FrenzyBoar", "KoboldAxeman" } do

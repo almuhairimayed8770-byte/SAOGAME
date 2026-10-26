@@ -23,7 +23,7 @@ local Types = require(script.Parent.Parent.types)
 
 export type PlaceholderJoint = Types.RigJoint & { c1: { pos: Types.Vec3, rot: Types.Vec3 }? }
 
--- What a walk-in stops at on an enemy rig (RigBuilder.addBlocker, D-198, D-237, D-CH4): upright
+-- What a walk-in stops at on an enemy rig (RigBuilder.addBlocker, D-198, D-237, D-315): upright
 -- faces over the body and over each part it holds (trailParts), each the flat box over that part
 -- as it stands at rest and in every pose of `clips` (the loops it stands in), posed every
 -- sampleSeconds.

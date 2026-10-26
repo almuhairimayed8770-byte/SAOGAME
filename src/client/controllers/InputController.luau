@@ -7,6 +7,12 @@
 
 	Touch builds the mobile button layout from input.luau (section 14) through the ui package's
 	`lib.El.new` when it exists, else plain ScreenGui buttons; a tap on the world is a basic attack.
+
+	Sprint is held per source (D-338): the player's own key, button or toggle is one source (a
+	`handle` call with no source); a dev tool that presses through `handle` (the capture panel's
+	auto-walk and auto-perform) names its own. Sprint is on while any source holds it and
+	`sprintChanged` fires only when that changes, so the player's Shift let-go never ends the
+	panel's sprint, nor the panel's let-go the player's; the player alone sprints as before.
 ]]
 
 local ContextActionService = game:GetService("ContextActionService")
@@ -42,6 +48,9 @@ InputController.sprintChanged = Signal.new() :: Signal.Signal<boolean>
 local hold: Hold? = nil
 local holdToken = 0
 local sprinting = false
+-- The sources holding the sprint now (D-338); PLAYER_SOURCE is the player's own input.
+local PLAYER_SOURCE = "Player"
+local sprintHolds: { [string]: true } = {}
 local started = false
 local touchGui: ScreenGui? = nil
 
@@ -92,16 +101,25 @@ local function releaseArt(slot: number)
 	InputController.artReleased:Fire(slot, now() - current.pressedAt)
 end
 
-local function setSprinting(on: boolean)
-	if sprinting == on then
+-- Holds or lets go of `source`'s sprint; sprint is on while any source holds it.
+local function holdSprint(source: string, on: boolean)
+	sprintHolds[source] = if on then true else nil
+	local held = next(sprintHolds) ~= nil
+	if sprinting == held then
 		return
 	end
-	sprinting = on
-	InputController.sprintChanged:Fire(on)
+	sprinting = held
+	InputController.sprintChanged:Fire(held)
 end
 
 --- Routes one action state change to its Signal (ContextActionService and touch buttons share it).
-function InputController.handle(actionName: string, inputState: Enum.UserInputState, inputObject: InputObject?)
+--- `source` names who holds a sprint (D-338): nil is the player's own input.
+function InputController.handle(
+	actionName: string,
+	inputState: Enum.UserInputState,
+	inputObject: InputObject?,
+	source: string?
+)
 	local began = inputState == Enum.UserInputState.Begin
 	local ended = inputState == Enum.UserInputState.End or inputState == Enum.UserInputState.Cancel
 	local slot = InputData.artSlot(actionName)
@@ -144,15 +162,16 @@ function InputController.handle(actionName: string, inputState: Enum.UserInputSt
 			InputController.quickSlotRing:Fire(false)
 		end
 	elseif actionName == "Sprint" then
+		local holder = source or PLAYER_SOURCE
 		local mode = (InputData.sprintMode :: any)[deviceOf(inputObject)] or "Hold"
 		if mode == "Toggle" then
 			if began then
-				setSprinting(not sprinting)
+				holdSprint(holder, sprintHolds[holder] == nil)
 			end
 		elseif began then
-			setSprinting(true)
+			holdSprint(holder, true)
 		elseif ended then
-			setSprinting(false)
+			holdSprint(holder, false)
 		end
 	end
 end
@@ -275,7 +294,7 @@ function InputController.isHolding(): boolean
 	return hold ~= nil
 end
 
---- True while sprint is on.
+--- True while sprint is on (any source holds it).
 function InputController.isSprinting(): boolean
 	return sprinting
 end

@@ -160,7 +160,7 @@ describe("TelegraphShapes", function()
 		expect(dipped).toBeLessThan(1)
 	end)
 
-	-- F7 (issue 9) and D-CP1: a blow's tell stays lit past the wind-up until its snap begins (the
+	-- F7 (issue 9) and D-316: a blow's tell stays lit past the wind-up until its snap begins (the
 	-- strike's landing less ai.luau telegraph.snapLeadSeconds). Its glint is fx.luau
 	-- telegraph.glintFrames frames centred on the parry window's middle, glintAimFrames early: the
 	-- frames a press seen on it reaches the server inside the window from, a frame or two later.
@@ -284,7 +284,7 @@ describe("TelegraphShapes", function()
 		expect(TelegraphShapes.token("Nonsense")).toBe("TelegraphWhite")
 		expect(TelegraphShapes.token("GuardBreak", true)).toBe(Fx.telegraph.glintToken)
 		expect(TelegraphShapes.token("GuardBreak", false)).toBe("TelegraphYellow")
-		-- Only a blow that can be parried glints (D-CP2): an Unblockable one must be dodged.
+		-- Only a blow that can be parried glints (D-317): an Unblockable one must be dodged.
 		expect(TelegraphShapes.glints("Normal")).toBe(true)
 		expect(TelegraphShapes.glints("GuardBreak")).toBe(true)
 		expect(TelegraphShapes.glints("Unblockable")).toBe(false)

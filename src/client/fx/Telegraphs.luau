@@ -9,10 +9,10 @@
 	holds through its strike until its snap (F7). The accessibility intensity comes from the HUD
 	setting; its floor is still visible.
 
-	The parry glint (D-CP1): for a few frames on the parry window (TelegraphShapes.timing) a blow
+	The parry glint (D-316): for a few frames on the parry window (TelegraphShapes.timing) a blow
 	that can be parried turns its fill and its ground shape the glint's color (fx.luau
 	telegraph.glintToken) at their brightest, then its kind's color again until the snap. An
-	Unblockable blow never glints (D-CP2). The glint leads by this client's latency (D-289): the
+	Unblockable blow never glints (D-317). The glint leads by this client's latency (D-289): the
 	server judges a parry on when the press reaches it, so the glint comes the least lateness of the
 	last few tells heard earlier (fx.luau telegraph.glintLeadSamples, capped by glintLeadMax). The
 	tell still holds to its snap; only the glint moves. The server is unchanged.
@@ -48,7 +48,7 @@ type Active = {
 	windUp: number,
 	ends: number, -- seconds into the wind-up the tell goes out (TelegraphShapes.timing)
 	glintFrom: number, -- seconds into the wind-up its glint begins (`ends` for a kind that never glints)
-	glintUntil: number, -- and ends (D-CP1, early by its lead, D-289)
+	glintUntil: number, -- and ends (D-316, early by its lead, D-289)
 	start: number,
 	highlight: Highlight?, -- the weapon's fill; nil when the rig's own outline is tinted instead
 	color: Color3, -- its kind's
@@ -300,7 +300,7 @@ end
 --- facing `facing`. `lateBy`: seconds since the server began the wind-up (the telegraph is that far
 --- into it). `strike`: a blow's seconds from the wind-up's end to where it lands; its tell holds to
 --- its snap and, unless its kind cannot be parried, glints on the parry window
---- (TelegraphShapes.timing, D-CP1). Nil (a rush's line): it ends with the wind-up.
+--- (TelegraphShapes.timing, D-316). Nil (a rush's line): it ends with the wind-up.
 function Telegraphs.show(
 	model: Instance,
 	kind: string,

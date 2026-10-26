@@ -375,10 +375,9 @@ describe("BladeContact: a fighter beside the swing is cut only by the blade itse
 		expect(BladeContact.rootBow(clip, to, from, (from + to) / 2, CFrame.identity).Magnitude).toBe(0)
 		-- Between them: the clip's root motion less the straight line, in the root's frame.
 		local middle = (from + to) / 2
-		local a, b, m =
-			ClipSampler.rootMotionAt(clip, from),
-			ClipSampler.rootMotionAt(clip, to),
-			ClipSampler.rootMotionAt(clip, middle)
+		local a = ClipSampler.rootMotionAt(clip, from)
+		local b = ClipSampler.rootMotionAt(clip, to)
+		local m = ClipSampler.rootMotionAt(clip, middle)
 		local expected = Vector3.new(m[1] - (a[1] + b[1]) / 2, m[2] - (a[2] + b[2]) / 2, m[3] - (a[3] + b[3]) / 2)
 		local bow = BladeContact.rootBow(clip, from, to, middle, CFrame.identity)
 		expect((bow - expected).Magnitude < 1e-5).toBe(true)

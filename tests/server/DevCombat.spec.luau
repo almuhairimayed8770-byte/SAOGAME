@@ -7,12 +7,18 @@
 	and Workspace for the gate, and a fake clock behind task.wait and os.clock. The fake
 	CombatService calls the sink from its clock the way CombatService.tick does from Heartbeat. The
 	player's character model records each PivotTo, in one ordered list with serverMoved.
+	The Studio test hooks (D-333): the fake EnemyService records place, walk and charge and plays a
+	rush's phases and log on the fake clock; Workspace is a real (Lune) Folder, so "part" makes real
+	Parts in a real folder. tests/server/DevEnemyHooks.spec.luau runs the same commands over the
+	real EnemyService.
 ]]
 
 local luau = require("@lune/luau")
+local roblox = require("@lune/roblox")
 
 local Dev = Harness.load("src/shared/data/dev")
 local Playground = Harness.load("src/shared/data/playground")
+local Enemies = Harness.load("src/shared/data/enemies")
 
 local NODE = "src/server/dev/DevCombat"
 local FILE = "src/server/dev/DevCombat.server.luau"
@@ -88,6 +94,17 @@ type World = {
 	moves: { { kind: string, player: any?, seconds: number?, cframe: CFrame? } },
 	anticheat: { watched: boolean },
 	player: any,
+	-- The Studio test hooks (D-333): EnemyService.place / walk / charge calls in order, the walk's
+	-- and the charge's plans on the fake clock, and the real Workspace folder.
+	hookCalls: { { kind: string, id: number, cframe: CFrame?, held: boolean?, goal: Vector3?, options: any } },
+	walkPlan: { seconds: number, reject: string?, arriveAt: Vector3? },
+	chargePlan: {
+		windUp: number,
+		run: number,
+		reject: string?,
+		stops: { { reason: string, after: number, distance: number } },
+	},
+	workspace: any,
 }
 
 type Options = { studio: boolean?, capture: any }
@@ -201,7 +218,103 @@ local function load(options: Options): World
 		local record = recordOf(id)
 		return record ~= nil and record.kind == "Enemy" and record.state ~= "Dead"
 	end
+	-- The hooks (D-333): a walk is over after walkPlan.seconds (the body then stands at arriveAt);
+	-- a charge crouches for chargePlan.windUp, runs chargePlan.run, then recovers, and its log takes
+	-- the launch and chargePlan.stops on the clock.
+	local walkEnds: { [number]: number } = {}
+	local phases: { [number]: { windUpEnds: number, strikeEnds: number } } = {}
+	local rushLogs: { [number]: any } = {}
+	local function root(id: number): any
+		return (recordOf(id) :: any).model.PrimaryPart
+	end
+	local function moveRoot(id: number, cframe: CFrame)
+		local primary = root(id)
+		primary.CFrame = cframe
+		primary.Position = cframe.Position
+	end
 	local enemyService = {
+		modelOf = function(id: number): any
+			return if living(id) then (recordOf(id) :: any).model else nil
+		end,
+		defOf = function(id: number): any
+			return if living(id) then Enemies.byId("FrenzyBoar") else nil
+		end,
+		brainOf = function(id: number): any
+			if not living(id) then
+				return nil
+			end
+			return {
+				getPhase = function(_self: any): string
+					local plan = phases[id]
+					if plan == nil then
+						return "Idle"
+					elseif clock.now < plan.windUpEnds then
+						return "WindUp"
+					elseif clock.now < plan.strikeEnds then
+						return "Strike"
+					end
+					return "Recover"
+				end,
+			}
+		end,
+		place = function(id: number, cframe: CFrame, isHeld: boolean?): boolean
+			table.insert(world.hookCalls, { kind = "place", id = id, cframe = cframe, held = isHeld })
+			if not living(id) then
+				return false
+			end
+			moveRoot(id, cframe)
+			held[id] = if isHeld == true then true else nil
+			return true
+		end,
+		walk = function(id: number, goal: Vector3, options: any): (boolean, string?)
+			table.insert(world.hookCalls, { kind = "walk", id = id, goal = goal, options = options })
+			if not living(id) then
+				return false, "no living enemy"
+			end
+			if world.walkPlan.reject ~= nil then
+				return false, world.walkPlan.reject
+			end
+			walkEnds[id] = clock.now + world.walkPlan.seconds
+			clock.after(world.walkPlan.seconds, function()
+				walkEnds[id] = nil
+				local at = world.walkPlan.arriveAt or goal
+				moveRoot(id, CFrame.new(at.X, root(id).Position.Y, at.Z))
+				held[id] = if options.hold == true then true else nil
+			end)
+			return true, nil
+		end,
+		walking = function(id: number): boolean
+			return walkEnds[id] ~= nil
+		end,
+		charge = function(id: number, toward: Vector3): (boolean, string?)
+			table.insert(world.hookCalls, { kind = "charge", id = id, goal = toward })
+			if not living(id) then
+				return false, "no living enemy"
+			end
+			local plan = world.chargePlan
+			if plan.reject ~= nil then
+				return false, plan.reject
+			end
+			held[id] = nil
+			local launchAt = clock.now + plan.windUp
+			phases[id] = { windUpEnds = launchAt, strikeEnds = launchAt + plan.run }
+			local from = root(id).Position
+			local direction = Vector3.new(toward.X - from.X, 0, toward.Z - from.Z).Unit
+			local log = { attackId = "Charge", launched = nil, stops = {} }
+			rushLogs[id] = log
+			clock.after(plan.windUp, function()
+				log.launched = { at = clock.now, origin = from, direction = direction }
+			end)
+			for _, stop in plan.stops do
+				clock.after(plan.windUp + stop.after, function()
+					table.insert(log.stops, { reason = stop.reason, distance = stop.distance, at = clock.now })
+				end)
+			end
+			return true, nil
+		end,
+		devRushOf = function(id: number): any
+			return rushLogs[id]
+		end,
 		ids = function(): { number }
 			local ids = {}
 			for _, record in enemies do
@@ -269,7 +382,10 @@ local function load(options: Options): World
 	local created: { any } = {}
 	local required: { [string]: boolean } = {}
 	local printed: { string } = {}
-	local attributes: { [string]: any } = { [Dev.attributes.capture] = options.capture }
+	-- A real Workspace (a Lune Folder) carrying the DevCapture attribute as given.
+	local workspace = roblox.Instance.new("Folder")
+	workspace.Name = "Workspace"
+	workspace:SetAttribute(Dev.attributes.capture, options.capture)
 
 	local env = Harness.environment()
 	env.script = Harness.node(NODE)
@@ -282,14 +398,14 @@ local function load(options: Options): World
 			return services[name] or error("no service " .. name)
 		end,
 	}
-	env.workspace = {
-		GetAttribute = function(_self: any, name: string): any
-			return attributes[name]
-		end,
-	}
+	env.workspace = workspace
+	-- The BindableFunction is a plain table the spec invokes; anything else (the hooks' folder and
+	-- parts) is a real Lune instance. Every one is recorded.
 	env.Instance = {
 		new = function(className: string): any
-			local instance = { ClassName = className }
+			local instance: any = if className == "BindableFunction"
+				then { ClassName = className }
+				else roblox.Instance.new(className :: any)
 			table.insert(created, instance)
 			return instance
 		end,
@@ -311,6 +427,9 @@ local function load(options: Options): World
 				left -= step
 			end
 			return dt
+		end,
+		delay = function(seconds: number, fn: () -> ())
+			clock.after(seconds, fn)
 		end,
 	}
 	env.os = {
@@ -338,6 +457,10 @@ local function load(options: Options): World
 		moves = {},
 		anticheat = { watched = true },
 		player = player,
+		hookCalls = {},
+		walkPlan = { seconds = 2, reject = nil, arriveAt = nil },
+		chargePlan = { windUp = 0.6, run = 0.7, reject = nil, stops = {} },
+		workspace = workspace,
 	}
 	luau.load(Harness.readFile(FILE), { debugName = FILE, environment = env :: any })()
 	return world
@@ -803,5 +926,356 @@ describe("DevCombat place (D-143)", function()
 		end
 		expect(reply.usage.place:find("position", 1, true)).never.toBeNil()
 		expect(reply.usage.place:find("facing", 1, true)).never.toBeNil()
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- The Studio test hooks (D-333): "enemy", "walk", "charge", "part", "clearparts"
+-- ------------------------------------------------------------------------------------------
+
+local HOOKS = Dev.hooks
+local Rigs = Harness.load("src/shared/data/rigs")
+local WorldData = Harness.load("src/shared/data/world")
+local Palette = Harness.load("src/shared/data/palette")
+
+-- The boar's root height over the floor it stands on (as PlaygroundService spawns it).
+local BOAR_HEIGHT = (function(): number
+	local rig = Rigs.Boar
+	return rig.hipHeight + rig.parts[rig.rootPart].size[2] / 2 + WorldData.spawn.groundEpsilon
+end)()
+
+local function close(a: Vector3, b: Vector3): boolean
+	return (a - b).Magnitude < 1e-3
+end
+
+local function partsIn(world: World): { any }
+	local folder = world.workspace:FindFirstChild(HOOKS.folderName)
+	return if folder ~= nil then folder:GetChildren() else {}
+end
+
+describe("DevCombat Studio test hooks (D-333)", function()
+	it("enemy stands a living enemy on the floor point at its rig's root height, facing, held if asked", function()
+		local world = load({ studio = true, capture = true })
+		local reply = world.invoke("enemy", { entityId = 11, position = { 10, 0, -20 }, facing = 90, hold = true })
+		expect(reply.ok).toBe(true)
+		expect(reply.entityId).toBe(11)
+		expect(reply.name).toBe("Frenzy Boar")
+		expect(reply.from).toEqual({ 0, 3, -5 })
+		expect(reply.to[1]).toBe(10)
+		expect(reply.to[2]).toBeCloseTo(BOAR_HEIGHT, 0.006)
+		expect(reply.to[3]).toBe(-20)
+		expect(reply.facing).toBe(90)
+		expect(reply.held).toBe(true)
+		expect(#world.hookCalls).toBe(1)
+		local call = world.hookCalls[1]
+		expect(call.kind).toBe("place")
+		expect(call.id).toBe(11)
+		expect(call.held).toBe(true)
+		local cframe = call.cframe :: CFrame
+		expect(close(cframe.Position, Vector3.new(10, BOAR_HEIGHT, -20))).toBe(true)
+		expect(yawOf(cframe)).toBeCloseTo(90, 1e-3)
+		-- A server-owned body: no player moved and the anti-cheat never asked.
+		expect(#world.moves).toBe(0)
+		expect(world.required.AntiCheatService).toBe(true) -- "place" (players) still needs it
+
+		-- No facing keeps the body's own; no hold lets it go.
+		local again = load({ studio = true, capture = true })
+		again.enemies[1].model.PrimaryPart.CFrame = CFrame.new(0, 3, -5) * CFrame.Angles(0, math.rad(-30), 0)
+		local free = again.invoke("enemy", { entityId = 11, position = Vector3.new(4, 1, 4) })
+		expect(free.ok).toBe(true)
+		expect(free.facing).toBeCloseTo(-30, 0.01)
+		expect(free.held).toBe(false)
+		expect(again.hookCalls[1].held).toBe(false)
+		expect(close((again.hookCalls[1].cframe :: CFrame).Position, Vector3.new(4, 1 + BOAR_HEIGHT, 4))).toBe(true)
+	end)
+
+	it("walk hands EnemyService the point and the hooks' numbers and replies at once", function()
+		local world = load({ studio = true, capture = true })
+		local reply = world.invoke("walk", { entityId = 11, toward = { 0, 0, -25 } })
+		expect(reply.ok).toBe(true)
+		expect(reply.from).toEqual({ 0, 3, -5 })
+		expect(reply.to).toEqual({ 0, 0, -25 })
+		expect(reply.distance).toBe(20)
+		expect(reply.seconds).toBeCloseTo(20 / 14, 0.006) -- the boar's own pace
+		expect(reply.hold).toBe(false)
+		expect(reply.over).toBeNil()
+		expect(world.clock.now).toBe(0)
+		local call = world.hookCalls[1]
+		expect(call.kind).toBe("walk")
+		expect(close(call.goal :: Vector3, Vector3.new(0, 0, -25))).toBe(true)
+		expect(call.options).toEqual({
+			arriveStuds = HOOKS.arriveStuds,
+			seconds = HOOKS.walkTimeoutSeconds,
+			hold = false,
+		})
+	end)
+
+	it("walk with wait replies once the walk is over: where it stands, whether it arrived, held if asked", function()
+		local world = load({ studio = true, capture = true })
+		local reply = world.invoke("walk", { entityId = 11, toward = { 0, 0, -25 }, hold = true, wait = true })
+		expect(reply.ok).toBe(true)
+		expect(reply.over).toBe(true)
+		expect(reply.arrived).toBe(true)
+		expect(reply.at).toEqual({ 0, 3, -25 })
+		expect(reply.took).toBeCloseTo(world.walkPlan.seconds, FRAME + 0.006)
+		expect(reply.held).toBe(true)
+		expect(world.hookCalls[1].options.hold).toBe(true)
+
+		local short = load({ studio = true, capture = true })
+		short.walkPlan.arriveAt = Vector3.new(0, 0, -20) -- stopped 5 studs short (a wall)
+		local stopped = short.invoke("walk", { entityId = 11, toward = { 0, 0, -25 }, wait = true })
+		expect(stopped.over).toBe(true)
+		expect(stopped.arrived).toBe(false)
+		expect(stopped.at).toEqual({ 0, 3, -20 })
+
+		-- A walk that is still going when walkTimeoutSeconds pass says so.
+		local slow = load({ studio = true, capture = true })
+		slow.walkPlan.seconds = HOOKS.walkTimeoutSeconds + 5
+		local going = slow.invoke("walk", { entityId = 11, toward = { 0, 0, -25 }, wait = true })
+		expect(going.over).toBe(false)
+		expect(going.took).toBeCloseTo(HOOKS.walkTimeoutSeconds, FRAME + 0.006)
+	end)
+
+	it("charge starts the rush, waits out the wind-up and the run, and replies its launch and stops", function()
+		local world = load({ studio = true, capture = true })
+		world.chargePlan.stops = {
+			{ reason = "Wall", after = 0.3, distance = 5.5 },
+			{ reason = "Interrupted", after = 0.5, distance = 5.9 },
+		}
+		local reply = world.invoke("charge", { entityId = 11, toward = { 10, 0, -5 } })
+		expect(reply.ok).toBe(true)
+		expect(reply.entityId).toBe(11)
+		expect(reply.attackId).toBe("Charge")
+		expect(reply.from).toEqual({ 0, 3, -5 })
+		expect(reply.toward).toEqual({ 10, 0, -5 })
+		expect(reply.launched.origin).toEqual({ 0, 3, -5 })
+		expect(reply.launched.direction).toEqual({ 1, 0, 0 })
+		expect(#reply.stops).toBe(2)
+		expect(reply.stops[1]).toEqual({ reason = "Wall", distance = 5.5, after = 0.3 })
+		expect(reply.stops[2].reason).toBe("Interrupted")
+		expect(reply.complete).toBe(true)
+		expect(reply.phase).toBe("Recover")
+		expect(reply.seconds).toBeCloseTo(world.chargePlan.windUp + world.chargePlan.run, FRAME + 0.006)
+		expect(world.hookCalls[1].kind).toBe("charge")
+		expect(close(world.hookCalls[1].goal :: Vector3, Vector3.new(10, 0, -5))).toBe(true)
+		expect(#world.moves).toBe(0)
+
+		-- A run still going after chargeTimeoutSeconds is replied as it stands.
+		local long = load({ studio = true, capture = true })
+		long.chargePlan.run = HOOKS.chargeTimeoutSeconds + 5
+		local going = long.invoke("charge", { entityId = 11, toward = { 10, 0, -5 } })
+		expect(going.ok).toBe(true)
+		expect(going.complete).toBe(false)
+		expect(going.phase).toBe("Strike")
+		expect(going.seconds).toBeCloseTo(HOOKS.chargeTimeoutSeconds, FRAME + 0.006)
+	end)
+
+	it("walk and charge report EnemyService's refusal, and a waiting hook keeps the others out", function()
+		local world = load({ studio = true, capture = true })
+		world.chargePlan.reject = "KoboldAxeman is no Charger with a rush"
+		local refused = world.invoke("charge", { entityId = 11, toward = { 10, 0, -5 } })
+		expect(refused.ok).toBe(false)
+		expect(refused.error:find(world.chargePlan.reject :: string, 1, true)).never.toBeNil()
+		world.walkPlan.reject = "it is Interrupted (Stagger); try again once it recovers"
+		local stuck = world.invoke("walk", { entityId = 11, toward = { 0, 0, -25 } })
+		expect(stuck.ok).toBe(false)
+		expect(stuck.error:find("Stagger", 1, true)).never.toBeNil()
+
+		local busy = load({ studio = true, capture = true })
+		local inner: any = nil
+		local walkInner: any = nil
+		busy.clock.after(0.1, function()
+			inner = busy.invoke("basic", nil)
+			walkInner = busy.invoke("walk", { entityId = 11, toward = { 0, 0, -10 }, wait = true })
+		end)
+		expect(busy.invoke("charge", { entityId = 11, toward = { 10, 0, -5 } }).ok).toBe(true)
+		expect(inner.ok).toBe(false)
+		expect(inner.error:find("busy", 1, true)).never.toBeNil()
+		expect(walkInner.ok).toBe(false)
+		expect(#busy.calls).toBe(0)
+		-- Once the charge replied the next one goes.
+		expect(busy.invoke("charge", { entityId = 11, toward = { 10, 0, -5 } }).ok).toBe(true)
+	end)
+
+	it("refuses bad arguments and moves or makes nothing", function()
+		local far = PLACE.maxCoordinate + 1
+		local longName = string.rep("x", HOOKS.maxNameLength + 1)
+		local bad: { { any } } = {
+			{ "enemy", {} },
+			{ "enemy", { entityId = "11", position = { 0, 0, 0 } } },
+			{ "enemy", { entityId = 99, position = { 0, 0, 0 } } },
+			{ "enemy", { entityId = 1, position = { 0, 0, 0 } } }, -- the player
+			{ "enemy", { entityId = 11 } },
+			{ "enemy", { entityId = 11, position = { 0, 0 } } },
+			{ "enemy", { entityId = 11, position = { far, 0, 0 } } },
+			{ "enemy", { entityId = 11, position = { 0, 0, 0 }, facing = "north" } },
+			{ "enemy", { entityId = 11, position = { 0, 0, 0 }, hold = "yes" } },
+			{ "walk", { entityId = 11 } },
+			{ "walk", { entityId = 11, toward = { 0, 0, -5 - HOOKS.maxWalkStuds - 1 } } },
+			{ "walk", { entityId = 11, toward = { 0, 0, 0 / 0 } } },
+			{ "walk", { entityId = 11, toward = { 0, 0, -10 }, hold = 1 } },
+			{ "walk", { entityId = 11, toward = { 0, 0, -10 }, wait = "yes" } },
+			{ "walk", { entityId = 99, toward = { 0, 0, -10 } } },
+			{ "charge", { entityId = 11 } },
+			{ "charge", { entityId = 11, toward = "north" } },
+			{ "charge", { entityId = 99, toward = { 10, 0, -5 } } },
+			{ "part", {} },
+			{ "part", { size = { 4, 4, 4 } } },
+			{ "part", { size = { 0, 4, 4 }, position = { 0, 2, 0 } } },
+			{ "part", { size = { HOOKS.maxPartStuds + 1, 4, 4 }, position = { 0, 2, 0 } } },
+			{ "part", { size = { 4, 4 }, position = { 0, 2, 0 } } },
+			{ "part", { size = { 4, 4, 4 }, position = { 0, far, 0 } } },
+			{ "part", { size = { 4, 4, 4 }, position = { 0, 2, 0 }, cframe = CFrame.new() } },
+			{ "part", { size = { 4, 4, 4 }, cframe = "here" } },
+			{ "part", { size = { 4, 4, 4 }, cframe = CFrame.new(far, 0, 0) } },
+			{ "part", { size = { 4, 4, 4 }, position = { 0, 2, 0 }, tilt = "steep" } },
+			{ "part", { size = { 4, 4, 4 }, position = { 0, 2, 0 }, tilt = { 40, 0 } } },
+			{ "part", { size = { 4, 4, 4 }, position = { 0, 2, 0 }, name = "" } },
+			{ "part", { size = { 4, 4, 4 }, position = { 0, 2, 0 }, name = longName } },
+			{ "part", { size = { 4, 4, 4 }, position = { 0, 2, 0 }, name = 7 } },
+			{ "part", { size = { 4, 4, 4 }, position = { 0, 2, 0 }, after = -1 } },
+			{ "part", { size = { 4, 4, 4 }, position = { 0, 2, 0 }, after = HOOKS.maxAfterSeconds + 0.5 } },
+		}
+		for _, case in bad do
+			local world = load({ studio = true, capture = true })
+			local reply = world.invoke(case[1], case[2])
+			expect(reply.ok).toBe(false)
+			expect(typeof(reply.error)).toBe("string")
+			expect(#world.hookCalls).toBe(0)
+			expect(#world.moves).toBe(0)
+			expect(#world.workspace:GetChildren()).toBe(0)
+			expect(#world.created).toBe(1) -- the BindableFunction alone
+		end
+		-- A dead enemy is no living enemy.
+		local world = load({ studio = true, capture = true })
+		world.enemies[1].state = "Dead"
+		for _, command in { "enemy", "walk", "charge" } do
+			local reply = world.invoke(command, { entityId = 11, position = { 0, 0, 0 }, toward = { 0, 0, -10 } })
+			expect(reply.ok).toBe(false)
+		end
+		expect(#world.hookCalls).toBe(0)
+	end)
+
+	it("part makes an anchored, solid part in the dev folder: centre and tilt, or a CFrame", function()
+		local world = load({ studio = true, capture = true })
+		local wall = world.invoke("part", { size = { 12, 8, 1 }, position = { 0, 4, -20 }, name = "Wall" })
+		expect(wall.ok).toBe(true)
+		expect(wall.name).toBe("Wall")
+		expect(wall.size).toEqual({ 12, 8, 1 })
+		expect(wall.position).toEqual({ 0, 4, -20 })
+		expect(wall.tilt).toEqual({ 0, 0, 0 })
+		expect(wall.parts).toBe(1)
+		local folder = world.workspace:FindFirstChild(HOOKS.folderName)
+		expect(folder).never.toBeNil()
+		expect(folder.ClassName).toBe("Folder")
+		local part = folder:FindFirstChild("Wall")
+		expect(part.ClassName).toBe("Part")
+		expect(part.Anchored).toBe(true)
+		expect(part.CanCollide).toBe(true)
+		expect(part.CanQuery).toBe(true)
+		expect(part.CanTouch).toBe(false)
+		expect(part.Size).toBe(Vector3.new(12, 8, 1))
+		expect(close(part.CFrame.Position, Vector3.new(0, 4, -20))).toBe(true)
+		expect(part.Material).toBe((Enum.Material :: any)[HOOKS.partMaterial])
+		local color = Palette.color3(HOOKS.partColorToken)
+		expect(
+			(Vector3.new(part.Color.R, part.Color.G, part.Color.B) - Vector3.new(color.R, color.G, color.B)).Magnitude
+				< 1e-3
+		).toBe(true)
+
+		-- A 40 degree slope: + tilt lifts the -Z end.
+		local slope = world.invoke("part", { size = { 8, 1, 20 }, position = { 0, 4, -40 }, tilt = 40 })
+		expect(slope.ok).toBe(true)
+		expect(slope.name).toBe("Part2")
+		expect(slope.tilt[1]).toBeCloseTo(40, 0.006)
+		local ramp = folder:FindFirstChild("Part2")
+		expect(ramp.CFrame.LookVector.Y).toBeCloseTo(math.sin(math.rad(40)), 1e-4)
+		expect(ramp.CFrame.UpVector.Z).toBeCloseTo(math.sin(math.rad(40)), 1e-4)
+
+		-- {x, y, z} degrees, the Orientation order; and a CFrame as given.
+		local turned = world.invoke("part", { size = { 8, 1, 20 }, position = { 0, 4, -60 }, tilt = { 35, 90, 0 } })
+		expect(turned.tilt[1]).toBeCloseTo(35, 0.006)
+		expect(turned.tilt[2]).toBeCloseTo(90, 0.006)
+		local cframe = CFrame.new(5, 1, 5) * CFrame.Angles(0, math.rad(30), 0)
+		local step = world.invoke("part", { size = { 4, 1, 2 }, cframe = cframe, name = "Step" })
+		expect(step.ok).toBe(true)
+		local stepPart = folder:FindFirstChild("Step")
+		expect(close(stepPart.CFrame.Position, cframe.Position)).toBe(true)
+		expect(close(stepPart.CFrame.LookVector, cframe.LookVector)).toBe(true)
+		expect(#partsIn(world)).toBe(4)
+		-- Parts only: no enemy moved, no anti-cheat, no swing.
+		expect(#world.hookCalls).toBe(0)
+		expect(#world.moves).toBe(0)
+		expect(#world.calls).toBe(0)
+	end)
+
+	it("part with after lands that much later; at most maxParts; clearparts removes them and the late ones", function()
+		local world = load({ studio = true, capture = true })
+		local late = world.invoke("part", { size = { 4, 4, 1 }, position = { 0, 2, -10 }, after = 0.5, name = "Late" })
+		expect(late.ok).toBe(true)
+		expect(late.after).toBe(0.5)
+		expect(world.workspace:FindFirstChild(HOOKS.folderName)).toBeNil()
+		world.clock.advance(0.49)
+		expect(world.workspace:FindFirstChild(HOOKS.folderName)).toBeNil()
+		world.clock.advance(0.02)
+		expect(world.workspace:FindFirstChild(HOOKS.folderName):FindFirstChild("Late")).never.toBeNil()
+
+		-- The cap counts the parts standing and the ones still to come.
+		local full = load({ studio = true, capture = true })
+		expect(full.invoke("part", { size = { 1, 1, 1 }, position = { 0, 1, 0 }, after = 1 }).ok).toBe(true)
+		for _ = 2, HOOKS.maxParts do
+			expect(full.invoke("part", { size = { 1, 1, 1 }, position = { 0, 1, 0 } }).ok).toBe(true)
+		end
+		local over = full.invoke("part", { size = { 1, 1, 1 }, position = { 0, 1, 0 } })
+		expect(over.ok).toBe(false)
+		expect(over.error:find("clearparts", 1, true)).never.toBeNil()
+		local cleared = full.invoke("clearparts", nil)
+		expect(cleared.ok).toBe(true)
+		expect(cleared.removed).toBe(HOOKS.maxParts - 1)
+		expect(cleared.cancelled).toBe(1)
+		expect(full.workspace:FindFirstChild(HOOKS.folderName)).toBeNil()
+		full.clock.advance(2) -- the late part never lands
+		expect(full.workspace:FindFirstChild(HOOKS.folderName)).toBeNil()
+		expect(full.invoke("part", { size = { 1, 1, 1 }, position = { 0, 1, 0 } }).parts).toBe(1)
+		local again = full.invoke("clearparts", nil)
+		expect(again.removed).toBe(1)
+		expect(full.invoke("clearparts", nil)).toEqual({ ok = true, removed = 0, cancelled = 0 })
+	end)
+
+	it("exists only where DevCombat does: outside Studio or without DevCapture nothing is made", function()
+		for _, options in
+			{
+				{ studio = false, capture = true },
+				{ studio = true, capture = nil },
+				{ studio = true, capture = "true" },
+			} :: { Options }
+		do
+			local world = load(options)
+			expect(#world.created).toBe(0)
+			expect(world.required.EnemyService).toBeNil()
+			expect(world.required.PlaygroundLayout).toBeNil()
+			expect(#world.workspace:GetChildren()).toBe(0)
+		end
+	end)
+
+	it("help lists every hook with its arguments", function()
+		local world = load({ studio = true, capture = true })
+		local reply = world.invoke("help", nil)
+		for _, name in { "enemy", "walk", "charge", "part", "clearparts" } do
+			expect(table.find(reply.commands, name)).never.toBeNil()
+			expect(typeof(reply.usage[name])).toBe("string")
+		end
+		for name, words in
+			{
+				enemy = { "entityId", "position", "facing", "hold" },
+				walk = { "entityId", "toward", "hold", "wait" },
+				charge = { "entityId", "toward" },
+				part = { "size", "cframe", "position", "tilt", "name", "after" },
+			} :: { [string]: { string } }
+		do
+			for _, word in words do
+				expect(reply.usage[name]:find(word, 1, true)).never.toBeNil()
+			end
+		end
 	end)
 end)

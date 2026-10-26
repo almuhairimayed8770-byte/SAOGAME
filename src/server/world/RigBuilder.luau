@@ -29,7 +29,7 @@
 	ai.collision.blockerHeight, welded to the root, massless, in the blockers group and switched off
 	until CollisionGroups.assign puts the enemy in the enemies group. One face over the body's
 	footprint (footprint: the flat box over every part but the ones it holds), and one over each
-	part it holds (D-CH4), each over the part as it stands at rest and in every pose of the loops it
+	part it holds (D-315), each over the part as it stands at rest and in every pose of the loops it
 	stands in (rigs.luau `blocker`: its idle). Over the whole body, not the root alone, and over
 	what it shows standing, so a walk-in stops where the player touches it on every side: at the
 	boar's snout and tail as at its flank, never inside its head, a kobold's hunched head and arms
@@ -69,7 +69,7 @@ local ROOT_PRIORITY = 1
 -- The name of an enemy's blocker part over its body (addBlocker, D-198).
 local BLOCKER_NAME = "Blocker"
 RigBuilder.BLOCKER_NAME = BLOCKER_NAME
--- The name of the blocker part over each part an enemy holds (addBlocker, D-CH4).
+-- The name of the blocker part over each part an enemy holds (addBlocker, D-315).
 local HELD_BLOCKER_NAME = "HeldBlocker"
 RigBuilder.HELD_BLOCKER_NAME = HELD_BLOCKER_NAME
 
@@ -396,7 +396,7 @@ end
 
 --- Gives an enemy model its blocker (D-198) and returns the body's face, or nil when the model has
 --- no root or no rig rigs.luau knows (the Rig attribute). One face over the body's footprint
---- (RigBuilder.footprint) and one over each part it holds (HELD_BLOCKER_NAME, D-CH4), along the
+--- (RigBuilder.footprint) and one over each part it holds (HELD_BLOCKER_NAME, D-315), along the
 --- root's own axes, each from the floor the Humanoid holds the root's bottom HipHeight above, up to
 --- ai.collision.blockerHeight; welded to the root and massless, so the body and its Humanoid move
 --- as before. Invisible, casts no shadow and touches nothing; it collides with nothing until

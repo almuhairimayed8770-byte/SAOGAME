@@ -15,7 +15,10 @@
 	of the open run for locomotion) and the shot's lock is taken (TargetController.lockOn). A 3-2-1
 	runs, the panel hides, the mouse cursor hides, and the take records with a frame counter
 	bottom-left (its text written before it shows, its box as wide as its text) and above it a
-	prompt naming the move and its moment. The take stops itself at its target length and is marked
+	prompt naming the move and its moment. Beside f the counter shows r, the RenderStepped frames
+	since the take started (never paused), and a small square in the bottom-right corner swaps
+	between two colors of one brightness every rendered frame (capture.frameTick, D-336), so a
+	recording shows each frame the engine drew. The take stops itself at its target length and is marked
 	done; K marks it done at the target, and before it asks first: a second K inside
 	capture.confirmSeconds ends the take unmarked. J gives the field back (the staged enemies gone,
 	the field's holds let go). Where there is no staging remote (outside Studio) the countdown runs
@@ -43,7 +46,7 @@
 	and walk.timeoutSeconds on the capture's clock ends it with a note naming what failed.
 
 	A take that ends (at its length or by K) asks the server to hold its enemies where they stand
-	(CS1), so nothing of the take acts between takes; the next staging clears them first.
+	(D-297), so nothing of the take acts between takes; the next staging clears them first.
 
 	Auto-perform (U, off by default) plays the shot's perform list (dev.luau Perform, CF) through
 	the real input path (InputController.handle, as a key's binding does), only at 1x:
@@ -55,7 +58,7 @@
 	  it again, and its attacker's hit-stop, HitConfirmed attackPause, moves it on as the client
 	  holds the clip as long), a guard the client's latency lead earlier still, as the glint comes
 	  (Telegraphs.glintLead, D-289), so it reaches the server as a press with no latency would;
-	  on each play when it repeats, never past its `to` (nor its chain's steps, D-CI3); it may
+	  on each play when it repeats, never past its `to` (nor its chain's steps, D-320); it may
 	  lock that enemy on hearing it,
 	  and a chain of presses follows it, each `delay` after the one before (the next Art of a cycle,
 	  the lock on another enemy, a sprint that lets go in a basic's reach of the lock's target);
@@ -65,6 +68,10 @@
 	lets it go when the lock is on it), never the lock key's cycle, which could step on to a field
 	enemy nearer than it. A take that stops lets go of every key and the stick without acting: a
 	held Art is cancelled before its key comes up, so the release launches nothing.
+
+	Every key the panel presses goes through InputController.handle as the panel's own source
+	(INPUT_SOURCE, D-338): the sprint is held per source, so the player's Shift tap during the
+	walk's or the perform's sprint never lets go of the panel's.
 
 	A time-scale toggle (1x / 0.5x / 0.25x) slows every Choreo animator on this client and asks the
 	server (dev remote, dev places only) to publish the scale as a workspace attribute for anything
@@ -111,6 +118,7 @@ local CharacterController = Siblings.load(Client, "controllers.CharacterControll
 local Capture = Dev.capture
 local PanelData = Capture.panel
 local CounterData = Capture.counter
+local TickData = Capture.frameTick
 local PromptData = Capture.prompt
 local WalkData = Capture.walk
 local RingData = WalkData.ring
@@ -137,6 +145,10 @@ local phase: Phase = "Idle"
 local countdownRemaining = 0
 local elapsed = 0
 local frames = 0
+-- RenderStepped frames since the take started, never paused (D-336): on from the first take's
+-- start, set back to 0 at each take's start.
+local rendered = 0
+local ticking = false
 local doneTimer = 0
 local timeScaleIndex = 1
 local panelVisible = true
@@ -165,6 +177,8 @@ local stepCounts: { [CaptureLogic.PerformStep]: number } = {}
 type Stick = { stick: { number }?, sprint: boolean? }
 local stickHeld: Stick? = nil
 local MOVE_ACTION = Capture.perform.moveAction
+-- The source the panel's presses hold the sprint as (InputController.handle, D-338).
+local INPUT_SOURCE = "CapturePanel"
 -- Every staged enemy by stage.enemies index (the staging reply's ids), the target first.
 local stagedIds: { number }? = nil
 -- The mouse cursor as it was before the take hid it.
@@ -331,6 +345,22 @@ end
 
 local counter, counterLabel =
 	hudBox("Counter", CounterData.height, CounterData.margin, CounterData.paddingX, CounterData)
+-- The render-frame tick (D-336): a square in the bottom-right corner, shown with the counter, its
+-- color swapped every rendered frame (CaptureLogic.tickToken).
+local tickColors: { [string]: Color3 } = {}
+for _, token in TickData.tokens do
+	tickColors[token] = El.color(token)
+end
+local frameTick = El.new("Frame", {
+	Name = "FrameTick",
+	AnchorPoint = Vector2.new(1, 1),
+	Position = UDim2.new(1, -TickData.margin, 1, -TickData.margin),
+	Size = UDim2.fromOffset(TickData.size, TickData.size),
+	BackgroundColor3 = tickColors[CaptureLogic.tickToken(0, TickData.tokens)],
+	BorderSizePixel = 0,
+	Visible = false,
+}) :: Frame
+frameTick.Parent = gui
 local prompt, promptLabel = hudBox(
 	"Prompt",
 	PromptData.height,
@@ -391,6 +421,7 @@ local function writeCounter()
 	counterLabel.Text = CaptureLogic.counterText({
 		shotId = shot.id,
 		frames = frames,
+		rendered = rendered,
 		elapsed = elapsed,
 		target = shot.seconds,
 		scale = Steps[timeScaleIndex],
@@ -578,7 +609,8 @@ local function holdSprint(on: boolean)
 	InputController.handle(
 		WalkData.sprintAction,
 		if on then Enum.UserInputState.Begin else Enum.UserInputState.End,
-		nil
+		nil,
+		INPUT_SOURCE
 	)
 end
 
@@ -719,7 +751,12 @@ local function press(action: string, down: boolean, stick: Stick?, enemy: number
 	else
 		heldKeys[action] = nil
 	end
-	InputController.handle(action, if down then Enum.UserInputState.Begin else Enum.UserInputState.End, nil)
+	InputController.handle(
+		action,
+		if down then Enum.UserInputState.Begin else Enum.UserInputState.End,
+		nil,
+		INPUT_SOURCE
+	)
 end
 
 -- Lets go of every key auto-perform holds, none acting on the way up (D-290): a held Art's hold is
@@ -733,7 +770,7 @@ local function releaseKeys()
 		if key.slot ~= nil then
 			Siblings.call(CharacterController, "cancelArt", key.slot)
 		end
-		InputController.handle(key.action, Enum.UserInputState.End, nil)
+		InputController.handle(key.action, Enum.UserInputState.End, nil, INPUT_SOURCE)
 	end
 	table.clear(heldKeys)
 end
@@ -810,7 +847,7 @@ local function stepChain()
 	if at == nil or elapsed < at then
 		return
 	end
-	-- Nothing of the reaction goes down past its `to` (D-CI3): the rest of the chain is dropped.
+	-- Nothing of the reaction goes down past its `to` (D-320): the rest of the chain is dropped.
 	if not CaptureLogic.inside(running.entry, elapsed) then
 		dropChain()
 		return
@@ -975,6 +1012,9 @@ local function startRecording()
 	phase = "Recording"
 	elapsed = 0
 	frames = 0
+	rendered = 0
+	ticking = true
+	frameTick.BackgroundColor3 = tickColors[CaptureLogic.tickToken(rendered, TickData.tokens)]
 	confirmUntil = nil
 	armPerform(shot)
 	countdownLabel.Visible = false
@@ -982,13 +1022,14 @@ local function startRecording()
 	-- The text first: the counter never shows a blank frame.
 	writeCounter()
 	counter.Visible = true
+	frameTick.Visible = true
 	writePrompt()
 	hideCursor()
 	-- The staged enemies the shot lets go start now.
 	task.spawn(ask, "go")
 end
 
--- The take is over: the server holds its enemies where they stand (CS1), so nothing of it acts
+-- The take is over: the server holds its enemies where they stand (D-297), so nothing of it acts
 -- between takes. A refusal (the rate, right after the "go") is asked again at the rate, for up to
 -- stageTimeoutSeconds; a newer staging (P) or J owns the field from then and ends the asking.
 local function holdTake(token: number)
@@ -1013,7 +1054,7 @@ local function holdTake(token: number)
 	end
 end
 
--- Ends the take: marked done, or stopped short and unmarked. Its enemies stop at once (CS1).
+-- Ends the take: marked done, or stopped short and unmarked. Its enemies stop at once (D-297).
 local function finish(marked: boolean)
 	if phase ~= "Recording" then
 		return
@@ -1027,6 +1068,7 @@ local function finish(marked: boolean)
 	restoreCursor()
 	prompt.Visible = false
 	counter.Visible = false
+	frameTick.Visible = false
 	confirmUntil = nil
 	CameraController.setStage(nil)
 	if marked then
@@ -1206,6 +1248,11 @@ UserInputService.InputBegan:Connect(function(input: InputObject, processed: bool
 end)
 
 RunService.RenderStepped:Connect(function(dt: number)
+	-- Every rendered frame since the take started, whatever the phase (D-336).
+	if ticking then
+		rendered += 1
+		frameTick.BackgroundColor3 = tickColors[CaptureLogic.tickToken(rendered, TickData.tokens)]
+	end
 	if phase == "Countdown" then
 		countdownRemaining -= dt
 		if countdownRemaining <= 0 then

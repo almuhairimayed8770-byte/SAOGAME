@@ -14,7 +14,7 @@
 	The clock: every handle has its own time and speed; the mixer has a time scale (Tempo,
 	Quickness) and a pause (hit-stop: a frame count at 1/60 s during which no clock advances and
 	the rig holds its pose: no blend envelope or blend-space weight moves either, and the
-	procedural channels (lean, foot IK) stay as the last frame before the pause showed them, D-CH3,
+	procedural channels (lean, foot IK) stay as the last frame before the pause showed them, D-314,
 	whatever their owner hands in meanwhile). A handle started
 	with a server time jumps to the matching position. Handles that ignore the pause (the death
 	tremor) run on the unscaled frame time, so a time scale of zero freezes everything but them.
@@ -64,6 +64,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Types = require(Shared.types)
 local ClipSampler = require(Shared.choreo.ClipSampler)
 local ChoreoData = require(Shared.data.choreo)
+local ImpactData = require(Shared.data.impact)
 local Easing = require(Shared.util.Easing)
 
 export type Offsets = ClipSampler.Offsets
@@ -169,6 +170,9 @@ export type Mixer = {
 
 local ZERO: Types.Vec3 = { 0, 0, 0 }
 local REST: ClipSampler.Offset = { pos = ZERO, rot = ZERO }
+-- How a hold's frames are counted (D-327): impact.luau hold.
+local HOLD = ImpactData.hold
+local PACE_FRAMES: number = HOLD.paceFrames
 local LAYER_ORDER: { Types.ClipLayer } = ChoreoData.layerOrder
 local BEAT = ChoreoData.enemy.beat
 
@@ -201,15 +205,86 @@ function Mixer.catchUpStart(now: number, serverTime: number, speed: number, dura
 	return math.clamp(elapsed, 0, limit)
 end
 
+-- Remembers a step's length among the rig's last impact.luau hold.paceFrames (D-327).
+local function notePace(self: any, dt: number)
+	local index = self._paceNext
+	self._paces[index] = dt
+	self._paceNext = index % PACE_FRAMES + 1
+	self._paceCount = math.min(self._paceCount + 1, PACE_FRAMES)
+end
+
+-- The rig's pace (D-327): the mean of its last paceFrames steps, leaving out any longer than
+-- hitchFactor times their median (a hitch is not the pace). Nil until it has paceFrames steps.
+local function paceOf(self: any): number?
+	if self._paceCount < PACE_FRAMES then
+		return nil
+	end
+	local sorted = self._paceSorted
+	table.move(self._paces, 1, PACE_FRAMES, 1, sorted)
+	table.sort(sorted)
+	local median = (sorted[PACE_FRAMES // 2] + sorted[PACE_FRAMES // 2 + 1]) / 2
+	local limit = median * HOLD.hitchFactor
+	local sum, count = 0, 0
+	for _, step in sorted do
+		if step <= limit then
+			sum += step
+			count += 1
+		end
+	end
+	return if count > 0 then sum / count else nil
+end
+
+-- The frames a hold of `seconds` freezes at a pace of `pace` seconds a frame (D-327): the whole
+-- number nearest, a length within hold.tieFrames of a half frame going to the longer count.
+local function framesAt(seconds: number, pace: number): number
+	local exact = seconds / pace
+	local whole = math.floor(exact)
+	return if exact - whole + HOLD.tieFrames >= 0.5 then whole + 1 else whole
+end
+
+-- Puts a hold of `seconds` on the rig (a hit-stop, a freeze clip). A longer one already running is
+-- kept, never restarted. A rig with a pace counts the hold's frames now, once (D-327): a longer
+-- hold asked for while one runs counts its own from now and keeps the larger count.
+local function holdFor(self: any, seconds: number)
+	if seconds <= self._pause then
+		return
+	end
+	self._pause = seconds
+	local pace = paceOf(self)
+	if pace == nil then
+		self._pauseFrames = nil
+		return
+	end
+	local frames = math.max(framesAt(seconds, pace), self._pauseFrames or 0)
+	if frames <= 0 then
+		-- A sliver no frame is owed for.
+		self._pause = 0
+		self._pauseFrames = nil
+		return
+	end
+	self._pauseFrames = frames
+	self._pausePer = seconds / frames
+end
+
 --- Creates an empty mixer.
 function Mixer.new(): Mixer
 	local self = setmetatable({
 		_handles = {} :: { Handle },
 		_procedural = {} :: { [string]: { offsets: Offsets, weight: number } },
-		-- The procedural channels as the last step outside a pause added them (D-CH3), in order.
+		-- The procedural channels as the last step outside a pause added them (D-314), in order.
 		_heldChannels = {} :: { { offsets: Offsets, weight: number } },
 		_heldCount = -1, -- -1: no step has added them yet
+		-- The pause (D-327): its seconds still to hold, and once counted, the frames it still
+		-- freezes and the seconds each of them takes off; nil frames: it ends on the frame nearest
+		-- its length (`owes`, D-271).
 		_pause = 0,
+		_pauseFrames = nil :: number?,
+		_pausePer = 0,
+		-- The rig's last steps (impact.luau hold.paceFrames, a ring from _paceNext), its pace.
+		_paces = table.create(PACE_FRAMES, 0) :: { number },
+		_paceCount = 0,
+		_paceNext = 1,
+		_paceSorted = table.create(PACE_FRAMES, 0) :: { number },
 		_timeScale = 1,
 		_last = {} :: Offsets,
 	}, Mixer)
@@ -247,7 +322,7 @@ function Mixer.play(self: any, clip: Types.ClipDef, opts: PlayOptions?): Handle
 	-- A freeze clip (DeathFreeze) holds every other clock for its duration and rides on top.
 	local isFreeze = clip.id:sub(-#ChoreoData.freezeClipSuffix) == ChoreoData.freezeClipSuffix
 	if isFreeze then
-		self._pause = math.max(self._pause, clip.duration - startTime)
+		holdFor(self, clip.duration - startTime)
 	end
 
 	nextHandleId += 1
@@ -337,7 +412,7 @@ end
 --- frame shows the skip; the events in it still fire.
 function Mixer.hitStop(self: any, frames: number)
 	local seconds = math.max(0, frames) * ChoreoData.frameSeconds
-	self._pause = math.max(self._pause, seconds)
+	holdFor(self, seconds)
 	if seconds <= 0 then
 		return
 	end
@@ -437,9 +512,10 @@ function Mixer.clear(self: any)
 	table.clear(self._procedural)
 	self._heldCount = -1
 	self._pause = 0
+	self._pauseFrames = nil
 end
 
--- Copies a procedural channel into slot `index` of `held` (D-CH3), reusing the slot's tables: the
+-- Copies a procedural channel into slot `index` of `held` (D-314), reusing the slot's tables: the
 -- channel's owner may change its offsets table in place while a pause holds the copy.
 local function holdChannel(
 	held: { { offsets: Offsets, weight: number } },
@@ -599,10 +675,14 @@ end
 -- weights) of handles that keep the pause move by, whether the step is a render stall's jump, and
 -- whether the pause still holds. A hit-stop asked for during a stall that is over inside the gap
 -- holds nothing: the rest of the gap moves the clocks.
-local function clockStep(pause: number, dt: number): (number, boolean, boolean)
+local function clockStep(pause: number, frames: number?, dt: number): (number, boolean, boolean)
 	local jumped = dt > ChoreoData.stall.jumpSeconds
 	if jumped and pause > ChoreoData.pauseEpsilon and pause < dt then
 		return dt - pause, jumped, false
+	end
+	if frames ~= nil then
+		-- A counted hold (D-327) freezes its frames whatever their length.
+		return dt, jumped, frames > 0
 	end
 	return dt, jumped, owes(pause, dt)
 end
@@ -850,7 +930,7 @@ function Mixer.preview(self: any, handle: Handle, dt: number): number
 	if handle.done then
 		return 0
 	end
-	local clockDt, jumped, paused = clockStep(self._pause, dt)
+	local clockDt, jumped, paused = clockStep(self._pause, self._pauseFrames, dt)
 	local fade, weight = handle.fade, handle.weight
 	if not paused or handle.ignorePause then
 		local handleDt = handleStep(handle, dt, clockDt, jumped)
@@ -869,8 +949,19 @@ end
 
 function Mixer.step(self: any, dt: number): StepResult
 	-- The time the clocks (and envelopes and weights) of handles that keep the pause move by.
-	local clockDt, jumped, paused = clockStep(self._pause, dt)
-	if paused then
+	local clockDt, jumped, paused = clockStep(self._pause, self._pauseFrames, dt)
+	local frames = self._pauseFrames
+	if paused and frames ~= nil then
+		-- A counted hold (D-327): one of its frames, and that frame's share of its seconds.
+		frames -= 1
+		if frames > 0 then
+			self._pauseFrames = frames
+			self._pause = math.max(0, self._pause - self._pausePer)
+		else
+			self._pauseFrames = nil
+			self._pause = 0
+		end
+	elseif paused then
 		self._pause = self._pause - dt
 		-- What remains under half a step of this length is no frame of its own (D-228 amended): the
 		-- hold ends here, so pauseRemaining agrees with the frames it froze.
@@ -881,6 +972,10 @@ function Mixer.step(self: any, dt: number): StepResult
 		-- A sliver no step is owed for, or a hit-stop asked for during a render stall that is over
 		-- inside the gap (the rest of the gap moves the clocks): the hold is over.
 		self._pause = 0
+		self._pauseFrames = nil
+	end
+	if not jumped and dt > 0 then
+		notePace(self, dt)
 	end
 	local timeScale = self._timeScale
 
@@ -969,7 +1064,7 @@ function Mixer.step(self: any, dt: number): StepResult
 		end
 	end
 	if paused and self._heldCount >= 0 then
-		-- A hit-stop holds the procedural channels too (D-CH3): what the last moving frame showed.
+		-- A hit-stop holds the procedural channels too (D-314): what the last moving frame showed.
 		local held = self._heldChannels
 		for index = 1, self._heldCount do
 			local channel = held[index]

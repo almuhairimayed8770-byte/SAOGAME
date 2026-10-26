@@ -11,7 +11,7 @@
 	  "Passes" (the line ends short of them; the overshoot carries the body on, no hit).
 	- The charge shot shows the whole charge inside the take: the 0.6 s crouch with its line from
 	  the start, the launch, the hit and the skid past the player, once.
-	- The take's end holds every staged enemy (CS1): nothing of the take hits, telegraphs or starts
+	- The take's end holds every staged enemy (D-297): nothing of the take hits, telegraphs or starts
 	  an action between takes.
 ]]
 
@@ -464,7 +464,7 @@ describe("Staged takes on the real services (F12, CS)", function()
 		expect(take.hits[1].at >= launch.at).toBe(true)
 		expect(take.hits[1].at <= skid.at).toBe(true)
 		-- the run carries the body past the player, and the skid plays inside the take
-		local line = (take.playerAt - crouch.position) * Vector3.new(1, 0, 1)
+		local line = (take.playerAt - (crouch :: Phase).position) * Vector3.new(1, 0, 1)
 		local past = (skid.position - take.playerAt):Dot(line.Unit)
 		expect(past).toBeGreaterThan(0)
 		expect(skid.at + 1).toBeLessThan(take.shot.seconds)
@@ -501,7 +501,7 @@ describe("Staged takes on the real services (F12, CS)", function()
 		expect(checked >= 2).toBe(true) -- the charge shot and the fight
 	end)
 
-	it("a take's end holds every staged enemy: nothing hits, telegraphs or acts between takes (CS1)", function()
+	it("a take's end holds every staged enemy: nothing hits, telegraphs or acts between takes (D-297)", function()
 		local checked = 0
 		for _, shot in CAPTURE.shots do
 			local released = false

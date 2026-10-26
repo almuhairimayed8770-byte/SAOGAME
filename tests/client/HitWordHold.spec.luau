@@ -1,7 +1,7 @@
 --!strict
 --[[
-	A contact's hold waits for its word (D-CH1, Studio items 255 and 256), and a kill's word that
-	comes inside it upgrades the hold in place (D-CH2).
+	A contact's hold waits for its word (D-312, Studio items 255 and 256), and a kill's word that
+	comes inside it upgrades the hold in place (D-313).
 
 	Studio (owner's PC, before round B): with 0.05 and 0.1 s of incoming lag, Sharp Nail, Rising
 	Arc and the basic chain at 1.8 studs froze 1 to 3 frames, and the damage number showed 2 frames
@@ -439,7 +439,7 @@ end
 local MOVES = { "SharpNail", "RisingArc", "Basic1", "Basic2", "Basic3" }
 local FRAME = 1 / 60
 
-describe("a contact's hold waits for its word (D-CH1)", function()
+describe("a contact's hold waits for its word (D-312)", function()
 	it("holds its full tier from the contact and on until the word: the number shows inside the freeze", function()
 		local enemy, def = place("Kobold", 1.8)
 		local cap = Combat.contact.wordHoldSeconds
@@ -628,7 +628,7 @@ describe("a contact's hold waits for its word (D-CH1)", function()
 	end)
 end)
 
-describe("a kill's word inside the hold upgrades it in place (D-CH2)", function()
+describe("a kill's word inside the hold upgrades it in place (D-313)", function()
 	it("one unbroken Kill hold from the contact frame, the silence and shatter on its beat, no seek back", function()
 		local enemy, def = place("Kobold", 1.8)
 		local kills = 0

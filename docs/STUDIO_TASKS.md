@@ -665,7 +665,7 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
 139. [ ] **Camera framing (D-145, D-146, D-149).** On PC and in mobile emulation: (a) Free camera: the player stands left of center, the camera about head height with a shallow look down. (b) Lock a boar at about 3, 6 and 10 studs: both fighters are on screen side by side, and the target is never behind the player. (c) Lock on, release, and draw: each eases with no jump. Lock a target behind the camera: the camera eases around and never passes through the player. Report the fastest per-frame turn (Lune measured up to 6.6°/frame on a 180° lock). (d) Dodge back, locked and free: the lens never pushes into the player and the view does not tilt. (e) Kill the locked target: the camera eases out from where it stood. (f) Mouse look and the right stick do nothing while locked; after release the free camera continues from the lock's yaw. (g) Back against a pillar: the camera pulls in and keeps its view direction. Stand behind another player wearing hats, or turn your drawn sword toward the camera: no pull-in. (h) Lock a target standing on a ledge about 8 studs above you, and dodge left with the camera free: note whether your feet leave the bottom of the screen or your body reaches the screen edge (Lune: feet at −1.26 of the half height, body edge at 0.87 of the half width).
 140. [ ] **HUD clear of the top bar (D-148).** In Studio's device emulator, check a notched phone, a tablet, a 4:3 tablet and a 1080p desktop. The HUD name and level sit fully below and right of the top bar's buttons, 24 px from the safe-area corner. Set HP low with DevCombat sethp: the low-HP vignette still covers the whole screen, under the top bar too.
 141. [ ] **One name per enemy, death plate (D-147).** At every distance each enemy shows only our nameplate, never the engine's name or health bar. Kill one: the plate's HP bar empties and holds over the frozen rig, then disappears on the same frame the rig shatters. Check a boss: no plate at all. With a second player, note whether their name shows twice (see openIssues).
-142. [ ] **Frame counts on screen (D-155, D-159).** Record at 60 fps and step frame by frame. A basic hit's white flash shows on exactly 2 frames. Hit-stop: Normal is still for 3 frames, Final for 6, Kill for 10. The Kill picture shows 2/2/2 and the Final picture 2. Repeat with the frame rate capped at 30.
+142. [ ] **Frame counts on screen (D-155, D-159).** Record at 60 fps and step frame by frame. A basic hit's white flash shows on exactly 2 frames. Hit-stop: Normal is still for 3 frames, Final for 6, Kill for 10. The Kill picture shows 2/2/2 and the Final picture 2. Repeat with the frame rate capped at 30. Its the impact-picture counts are superseded by item 305.
 143. [ ] **The flash on a boar (D-156).** Hit a boar during its red wind-up tint: white shows for 2 frames over the tint, then the tint returns. Hit it after its strike: it flashes white like any rig.
 144. [ ] **Weapon-only activation flash and the cancel fade (D-157, D-161).** Hold an Art: only the sword flashes white, for 3 frames, and the body outline does not flash. Cancel the Art with a dodge: the blade light fades out over about 0.2 s instead of cutting off.
 145. [ ] **The kill hold (D-150, D-151, D-152, D-154).** At 0, 100 and 250 ms of incoming replication lag, finish a boar with SharpNail. The flash and sound land on the frame the blade touches, and one 10-frame still follows. There is no second still at snap 2, and the confirm never adds a second freeze. Also do a kill the client cannot prove (the boar regenerating): the 3-frame hold runs on to 10 when the confirm arrives in time.
@@ -892,14 +892,14 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
 
 221. [ ] **Point-blank Horizontal is counted (D-234).** Turn the DevCombat trace on, hold a kobold at your right shoulder about 1.5 studs off, and cast Horizontal 10 times.
    (a) Pass: every flash on the kobold shows a number. Otherwise save the trace lines for the flash that had none (the server's clip time, root and the window's samples).
-222. [ ] **The stand-off reads as a push-off (D-235).** Lock onto a side-on boar at the touch (about 1.8 studs) and cast Rising Arc 5 times. Record at 60 fps and step through the frames.
+222. [ ] **The stand-off reads as a push-off (D-235).** Lock onto a side-on boar at the touch (about 1.8 studs) and cast Rising Arc 5 times. Record at 60 fps and step through the frames. Superseded by item 286.
    (a) Pass: the body eases back about half a stud during the wind-up, and the blade starts outside the boar's flank and cuts into it.
    (b) Pass: no anti-cheat correction or snap-back.
 223. [ ] **The stand-off against a wall (D-235).** Stand with your back against a pillar, lock a kobold at the touch, and cast Rising Arc. Superseded by item 267.
    (a) Pass: the body does not go into the pillar and is not rubber-banded. If it is, report it; the step is a CFrame move with no world check.
 224. [ ] **Re-record the Art shots at 60 fps (D-227 to D-230).** Record the four Art shots and step through the frames.
    (a) Pass: each contact frame shows the blade on its strike key.
-   (b) Pass: Normal freezes 3 frames and Final 6.
+   (b) Pass: Normal freezes 3 frames and Final 6. Superseded by item 288.
    (c) Pass: the smear shows only on the two frames where the blade moves.
    (d) Pass: Sharp Nail's trail goes out between cuts.
 225. [ ] **An Art taken away shows nothing (D-231).** Let a kobold hit you during an Art's wind-up so you are staggered.
@@ -910,7 +910,7 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
    (a) Pass: the ContactPredictor step costs under 0.3 ms a frame.
 228. [ ] **Staged gate shots (D-242, D-251).** Open the Playground place in Studio and Play. In the Capture panel, select each of the 10 shots with [ and ] and press P.
    (a) Pass: the player walks into the shot's ring (item 259) and is healed; the shot's enemies stand at their distance and side, facing the player; no field enemy is within 70 studs.
-   (b) Pass: the camera takes the shot's view (Side square to the line, ThreeQuarter about 50° off it, Behind behind the boar, Open from the side), the 3-2-1 runs, and the prompt line changes on its beats.
+   (b) Pass: the camera takes the shot's view (Side square to the line, ThreeQuarter about 50° off it, Behind behind the boar, Open from the side), the 3-2-1 runs, and the prompt line changes on its beats. Superseded by item 320.
    (c) Pass: the take stops itself at its target length and the panel says done.
    (d) Pass: no anti-cheat flag or kick after a staging (the staging never moves the player, D-244).
 229. [ ] **Counter, cursor and K (D-249, D-250).** Record art-vertical at 60 fps.
@@ -919,8 +919,8 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
    (c) Pass: a K at 2 s asks to confirm, and a second K stops the take without marking it done.
 230. [ ] **Ledge fall (D-247).** Stage the locomotion shot.
    (a) Pass: the player starts on the slate ledge facing -Z; walking right (D) runs off the edge, falls and lands.
-   (b) Pass: the kobold is lockable with F at about 5 s.
-231. [ ] **Auto-perform at 1x (D-248).** Press U, then P, on art-horizontal, kill-shatter and parry-spark.
+   (b) Pass: the kobold is lockable with F at about 5 s. Superseded by item 323.
+231. [ ] **Auto-perform at 1x (D-248).** Press U, then P, on art-horizontal, kill-shatter and parry-spark. Superseded by item 319.
    (a) Pass: the Art fires at 1.0 s; the kill shatters the 1-HP kobold; the parry spark shows on the overhead.
    (b) Pass: at 0.5x, U presses nothing.
 232. [ ] **Field back (D-245, D-246, D-268).** After staging, press J.
@@ -937,13 +937,13 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
    (b) Pass: through the 0.5 s freeze the frame does not move until the shatter. Then say whether the camera's blend during the shard rise reads as a cut or as drift. Superseded by item 274.
    (c) Pass: a boar rushing past swings the shot as a pan, never a 2-frame whip or a top-down look.
    (d) Let a Charger rush past you from 1.8 studs to the side and count the frames it is off screen (Lune: 23, against 12 on HEAD). Say whether the turn cap reads as calm or as losing the target. Superseded by item 276.
-236. [ ] **Walk into enemies (D-237).** Walk into a boar and a kobold from the front, both flanks and the back.
+236. [ ] **Walk into enemies (D-237).** Walk into a boar and a kobold from the front, both flanks and the back. Superseded by item 284.
    (a) Pass: the player stops touching the body on every side, never inside it.
    (b) Under a lock, walking at the target's flank still circles it until D-238 is wired. Note it; it is not a fail. Superseded by item 273.
 237. [ ] **Recorder hygiene (review issue 21, not code).** Record the game window only, not the whole desktop, at a steady 60 fps.
    (a) Check for repeated or dropped frames before handing off.
 238. [ ] **Kobold tell holds to the snap (D-252).** Stand in front of a kobold and let it wind up. Watch the yellow wedge from the start of the crouch to the swing.
-   (a) Pass: the wedge stays lit until the axe snaps, about 1.3 s after the crouch starts, and goes white for its last instant. A parry pressed during the white lands.
+   (a) Pass: the wedge stays lit until the axe snaps, about 1.3 s after the crouch starts, and goes white for its last instant. A parry pressed during the white lands. Superseded by item 291.
 239. [ ] **Cone on the ground (D-253).** Watch a kobold and a boar telegraph on flat ground, on a slope and on a step edge.
    (a) Pass: each cone lies flat on the ground under the enemy, with no seams between triangles and no float at hip height. It never draws over your character's body.
 240. [ ] **Held wind-up leaves nothing behind (D-254).** Start a boar's wind-up, then hold it (DevStage or DevCombat hold) or walk away until it sleeps mid-crouch. Do the same with a Brute.
@@ -960,7 +960,7 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
    (a) Pass: no enemy's arms, axe or snout ever pass into another's body. The kobold walks round the boar and stops beside its home, and the twins step apart and stand still.
 245. [ ] **Trail ribbon at 60 fps (D-261, D-269).** In Playground at 60 fps, record Basic1–3, Horizontal, Vertical, Sharp Nail and Rising Arc on a boar and step through the frames.
    (a) Pass: each cut draws a curved arc around the shoulder, never a straight chord or a flat slab.
-   (b) Pass: it is thick and clearly in the trail colour over the bright sky, and shows only during the hit windows.
+   (b) Pass: it is thick and clearly in the trail colour over the bright sky, and shows only during the hit windows. Superseded by item 325.
    (c) Pass: it holds through hit-stop, then fades where it was drawn.
    (d) Note any Rising Arc frame where the ribbon visibly leaves the blade's path (up to about 1 stud is expected).
    (e) At a 30 fps cap, film Sharp Nail (window 3) and Basic3 in slow motion. Note any hook at the start of the trail that points back along the wind-up, against the cut. Superseded by item 263.
@@ -992,24 +992,24 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
    (a) Pass: on the stop frame the camera gives a short, sharp shake, clearly bigger per frame than the lock ease, and settled within about 10 frames.
    (b) Pass: a slam more than 32 studs from you does not shake the view.
    (c) Trigger slams about 5, 15 and 30 studs away. The shake is the same at all three; say whether the far ones should shake less. Superseded by item 277.
-255. [ ] **The server's word under lag (D-267).** Set Incoming Replication Lag to 0.05 s and then 0.1 s. Cast Sharp Nail and Rising Arc on a kobold at point blank (1.5–2 studs), then the basic chain.
+255. [ ] **The server's word under lag (D-267).** Set Incoming Replication Lag to 0.05 s and then 0.1 s. Cast Sharp Nail and Rising Arc on a kobold at point blank (1.5–2 studs), then the basic chain. Superseded by item 298.
    (a) Pass: every freeze shows the blade at the end of its snap, never raised, and the damage number appears with the freeze.
 256. [ ] **A point-blank kill under lag (D-267).** With the lag of item 255, land a killing blow at point blank. Superseded by item 264.
    (a) Note whether the 10-frame kill freeze lands before the cut. Kill words are not held yet.
-257. [ ] **Parry at your normal latency (D-252).** With no network simulation, parry the Kobold Axeman's Overhead 20 times, half pressing at the start of the glint and half in its last third.
+257. [ ] **Parry at your normal latency (D-252).** With no network simulation, parry the Kobold Axeman's Overhead 20 times, half pressing at the start of the glint and half in its last third. Superseded by item 292.
    (a) Pass: presses at the start of the glint parry.
    (b) Record how many presses in the last third fail. In Lune the whole glint parries up to 50 ms of one-way latency, 83% of it at 67 ms and 50% at 100 ms. Superseded by item 278.
 258. [ ] **Hit weight at 120 and 144 Hz (D-228).** On a 120 or 144 Hz display with no frame cap, compare a Normal hit's weight with 60 Hz. Superseded by item 265.
    (a) Holds measure 41.7 ms there against 50 ms at 60 Hz (Lune). Say whether the hit feels lighter.
 
 259. [ ] **Walk into the ring (D-244).** Open places/Playground.rbxl and Play (F5). Walk 20 or more studs from the stage area, choose an Art shot with ] or [, and press P.
-   (a) Pass: a cyan disc shows on the spot and the panel says "Walk into the ring"; the body walks itself in (no teleport), the disc goes, the shot stages around where you stand and counts down.
+   (a) Pass: a cyan disc shows on the spot and the panel says "Walk into the ring"; the body walks itself in (no teleport), the disc goes, the shot stages around where you stand and counts down. Superseded by item 316.
    (b) Pass: the Output shows no anti-cheat flag.
 260. [ ] **Auto-walk to the locomotion shot (D-244).** From the stage area choose the locomotion shot and press P.
-   (a) Pass: the body walks round the ledge without catching on it, climbs the ramp and stops on the ledge's top facing its -Z edge, and the take counts down.
+   (a) Pass: the body walks round the ledge without catching on it, climbs the ramp and stops on the ledge's top facing its -Z edge, and the take counts down. Superseded by item 316.
 261. [ ] **The ledge ramp (D-244).** Look at the ledge from the side.
    (a) Pass: the ramp slopes up to the ledge (tall end against the ledge's +Z face, low end on the field), you can walk up it with W, and it is behind the start, not in the run off the -Z edge.
-262. [ ] **Taking the walk over, and J (D-244).** Start a walk with P, then press W.
+262. [ ] **Taking the walk over, and J (D-244).** Start a walk with P, then press W. Superseded by item 317.
    (a) Pass: the auto-walk stops, the disc stays and the note says to walk in yourself; walk into the disc and stand still, and the shot stages.
    (b) Start another walk and press J. Pass: the disc goes, the body stops being walked, and the panel says "Field given back".
 
@@ -1022,63 +1022,223 @@ All in the Playground. Items 99 to 103 need the display awake (the lock turn run
    (b) Pass: the 10-frame Kill freeze shows the blade at the end of its snap.
 265. [ ] **Hit weight at any refresh rate (D-271).** On a 120, 144 or 240 Hz display with no frame cap, land Normal, Final and Kill hits.
    (a) Pass: each pause feels as long as at 60 Hz (about 50, 100 and 167 ms; at 120 Hz 6, 12 and 20 frames).
-   (b) Cap at 30 fps (or use a 30 fps phone), land 20 Normal hits, and count the frozen frames on each. Note how many hold only 1 frame (Lune: about half under frame-time jitter; HEAD always held 2).
+   (b) Cap at 30 fps (or use a 30 fps phone), land 20 Normal hits, and count the frozen frames on each. Note how many hold only 1 frame (Lune: about half under frame-time jitter; HEAD always held 2). Superseded by item 303.
 266. [ ] **A swing at an enemy off your look (D-275).** Turn the DevCombat trace on. With a boar about 5 studs away, swing Basic 1 with it 30°, 45°, 60° and 90° off your look, first with no lock, then locked.
-   (a) Pass, no lock: at 30° the body turns onto the boar and hits; at 45° or more it does not turn and misses.
+   (a) Pass, no lock: at 30° the body turns onto the boar and hits; at 45° or more it does not turn and misses. Superseded by item 290.
    (b) Pass, locked: the body turns 40° and hits up to 75°, and misses at 90°.
    (c) Pass: no damage number appears without a visible cut. Save the trace lines of any that does.
-267. [ ] **The stand-off against a wall (D-276).** Lock a side-on boar at the touch (about 1.8 studs) and cast Rising Arc with your back flush to a wall, then to a pillar, then 0.3 studs off the wall.
+267. [ ] **The stand-off against a wall (D-276).** Lock a side-on boar at the touch (about 1.8 studs) and cast Rising Arc with your back flush to a wall, then to a pillar, then 0.3 studs off the wall. Superseded by item 287.
    (a) Pass: the body never sinks into the wall or the pillar, and it steps back only as far as there is room (none when flush).
    (b) Pass: no anti-cheat correction or snap-back.
    (c) With the pillar beside you rather than behind, the full step (about half a stud) is taken.
 268. [ ] **A blade on the kobold's axe (D-277).** Lock a kobold and cut so the blade meets its axe first (Rising Arc from its weapon side), then swing a basic at the axe alone.
    (a) Pass: no damage number on the axe contact, and the hit on the body behind it lands.
    (b) Pass: cutting only the axe gives no damage. No clash spark or sound plays yet; note whether one is wanted.
-269. [ ] **A slam rests at the wall (D-278, D-279).** Charge a boar into a wall head-on and at 45°.
+269. [ ] **A slam rests at the wall (D-278, D-279).** Charge a boar into a wall head-on and at 45°. Superseded by item 306.
    (a) Pass: it rests touching the wall with its snout outside it, and the daze shows no push-back pop.
 270. [ ] **A jam is told early (D-280).** Charge a boar up a steep slope (about 35–45°), then into a part moved into its path mid-rush.
-   (a) Pass: the rush stops and plays Jammed within about 0.07 s, with no long grinding run.
-   (b) Charge a boar up and down the playground stairs at several speeds. Pass: no rush ends Jammed on a stair it can climb.
-271. [ ] **Enemies never stand inside each other (D-281).** Make two boars bump while walking, and charge one past the other.
+   (a) Pass: the rush stops and plays Jammed within about 0.07 s, with no long grinding run. Superseded by item 308.
+   (b) Charge a boar up and down the playground stairs at several speeds. Pass: no rush ends Jammed on a stair it can climb. Superseded by item 309.
+271. [ ] **Enemies never stand inside each other (D-281).** Make two boars bump while walking, and charge one past the other. Superseded by item 310.
    (a) Pass: neither jitters, lifts or stands inside the other.
    (b) Pass: a rush that stops over a packmate stays passable until they separate, then turns solid with no pop.
    (c) Kill an enemy right beside a packmate and watch for 4 s. Pass: the corpse's blocker does not push or lift the packmate.
    (d) Jam a boar's rush against a fresh corpse at a wall. Pass: it does not pop up or shove the corpse when it turns solid again.
-272. [ ] **Snouts by walls (D-278, D-295).** Walk a boar along a wall and turn it in a corner. Then stand with your back to a playground wall and let a FrenzyBoar and a KoboldAxeman come at you along the wall, from behind them, and from 45°.
+272. [ ] **Snouts by walls (D-278, D-295).** Walk a boar along a wall and turn it in a corner. Then stand with your back to a playground wall and let a FrenzyBoar and a KoboldAxeman come at you along the wall, from behind them, and from 45°. Superseded by item 311.
    (a) Pass: the snout never clips into the wall.
    (b) Pass: each enemy reaches you and attacks within about 5 s, and neither stands facing the wall or pushes its snout or axe visibly into it.
    (c) Note any turn where a boar's rear swings into the wall (Lune: up to 0.77 studs on a Recover turn after a rush along a wall).
 273. [ ] **Walk in at a locked flank (D-284).** Lock a kobold and walk at its flank.
-   (a) Pass: the body walks in and stops at its side (about 1.8 studs root to root), with no circling.
+   (a) Pass: the body walks in and stops at its side (about 1.8 studs root to root), with no circling. Superseded by item 289.
    (b) Pass: free walk, sprint and the skid stop are unchanged, and the capture shots' staged views still walk on the camera's frame.
 274. [ ] **Still through the shard rise (D-285).** Kill a locked kobold.
-   (a) Pass: the camera stays still through the freeze and the whole shard rise, then eases out smoothly.
-   (b) Say whether look input waiting about 1.5 s after the kill feels stuck.
+   (a) Pass: the camera stays still through the freeze and the whole shard rise, then eases out smoothly. Superseded by item 300.
+   (b) Say whether look input waiting about 1.5 s after the kill feels stuck. Superseded by item 293.
 275. [ ] **The open shoulder by a wall (D-286).** Lock on with a wall about 2.5 studs off your right shoulder, then with a wall on the left only, then in a narrow corridor.
    (a) Pass: by the right wall the camera takes the left shoulder at full distance without a whip. With the left wall nothing changes. In the corridor it stays on its side and pulls in.
-   (b) Walk past pillars that alternate sides about 2.5 studs out. Say whether the shoulder swaps (Lune: one per pillar) read as busy.
+   (b) Walk past pillars that alternate sides about 2.5 studs out. Say whether the shoulder swaps (Lune: one per pillar) read as busy. Superseded by item 294.
 276. [ ] **A rush past the lock (D-287).** Hold the lock and let a boar rush past at about 2–4 studs.
    (a) Pass: it is off screen for no more than about 12 frames, and the camera never turns more than about 7° in a frame.
    (b) Pass: a boar grazing the screen edge does not trigger a catch-up.
-277. [ ] **Wall-slam shake by distance (D-288, D-296).** Lock a kobold, have a boar slam a wall about 10, 22, 28, 29, 31 and 34 studs from you, and record at 60 fps.
+277. [ ] **Wall-slam shake by distance (D-288, D-296).** Lock a kobold, have a boar slam a wall about 10, 22, 28, 29, 31 and 34 studs from you, and record at 60 fps. Superseded by item 312.
    (a) Pass: at 10 and 22 studs the shake looks like the old one; at 28–29 it is clearly smaller (about half at 29); at 31 it is barely visible; past 32 there is none.
 278. [ ] **Parry the glint under lag (D-289).** Fight the Kobold Axeman's Overhead.
-   (a) In File > Studio Settings > Network set Incoming Replication Lag to 0.1 s, and press guard on the glint's first frame. Pass: it parries.
-   (b) Repeat at 0 lag. Pass: it parries.
+   (a) In File > Studio Settings > Network set Incoming Replication Lag to 0.1 s, and press guard on the glint's first frame. Pass: it parries. Superseded by item 301.
+   (b) Repeat at 0 lag. Pass: it parries. Superseded by item 292.
    (c) Pass: the tell still holds until the axe falls, and the glint ends a little before the snap.
 279. [ ] **Capture auto-perform: lock and stop (D-290).** Open the Capture panel.
    (a) On the locomotion shot with auto-perform on and a field enemy walked within lock range. Pass: the first F locks the staged kobold and the second releases it; no field enemy is locked.
    (b) On an Art shot, stop the take with K, K while the Art key is held. Pass: no Art launches, and the next real Art press works.
 280. [ ] **A flinch out of a stance (D-294).** In the art-sharp-nail staged shot, take a kobold hit during the activation hold and step through at 60 fps.
    (a) Pass: the flinch pose shows on the strike frame.
-   (b) Pass: the stance fades back to drawn idle over 0.2 s without moving toward the cut, and no whoosh, trail or smear plays.
+   (b) Pass: the stance fades back to drawn idle over 0.2 s without moving toward the cut, and no whoosh, trail or smear plays. Superseded by item 295.
    (c) Note what the body shows over the frames after the fade (the review's 26-frame low pose, f63–88). Drawn idle during the Stagger is by design.
 281. [ ] **A Draw at a sprint (D-293).** Sprint, run and stand still, then Draw, at several points of the stride.
    (a) Step frame by frame at 60 Hz. Pass: the root-relative tip moves under 1.4 studs a frame.
-   (b) On a 240 Hz display with the MicroProfiler recording, read the largest tip step around 0.8 s into the Draw (Lune: up to 79.5 studs/s at some stride points, against the 77.3 moving cap and the 84 cap).
-282. [ ] **No skating feet (D-291, D-292).** Lock on and walk forward, back, left and right with the sword drawn, then run and sprint unlocked, at 1x and at the Capture 0.25x scale.
+   (b) On a 240 Hz display with the MicroProfiler recording, read the largest tip step around 0.8 s into the Draw (Lune: up to 79.5 studs/s at some stride points, against the 77.3 moving cap and the 84 cap). Superseded by item 297.
+282. [ ] **No skating feet (D-291, D-292).** Lock on and walk forward, back, left and right with the sword drawn, then run and sprint unlocked, at 1x and at the Capture 0.25x scale. Superseded by item 296.
    (a) Pass: the planted feet do not visibly skate (Lune median slide under 0.1 studs).
    (b) Note the walk-to-run speed-up around 12 studs/s, where the blend still slides about 0.15 studs (open).
 283. [ ] **A remote player's cancelled Art (D-294).** With two clients, watch the other player's Art be cancelled before its first cut (dodge or GuardBreak).
    (a) Pass: its blade light still goes out.
    (b) Note whether its cut, trail and smear still play on your screen after the server staggered it (open: Replication does not stop a remote player's Art).
+
+## AE. Gate shot fixes, third round (D-297 to D-341)
+
+284. [ ] **Walk into enemies (D-315, D-318; replaces item 236).** Setup A, used by the items below that name it: Playground, Play Solo, no network simulation, 60 fps cap. Walk into a boar and a kobold from the front, both flanks and the back, slowly and then sprinting.
+   (a) Pass: you stop touching on every side, never inside, including the kobold's idle hunch, both arms and the axe ahead of its right hand: you stop at the axe. Kobold front/right/back/left about 1.86/3.43/1.69/3.08 studs root to root; boar head-on about 6.25, flanks about 1.94–2.04, tail-on about 3.93.
+   (b) Circling a locked flank is not a fail.
+   (c) Note, not a fail: limbs can reach in during attacks, flinches and staggers (Lune: kobold Overhead 1.13, Stagger 1.22; boar Charge 1.12).
+285. [ ] **Beside the kobold's axe (D-314, D-315).** Setup A. Stand touching a kobold's front, just left of its axe. Lock it and cast Sharp Nail 3 times, then the basic chain 3 times.
+   (a) Pass: the body slides aside up to about 0.2 studs off the axe, never through it and never a jump.
+   (b) Pass: every cut lands with its number, with no anti-cheat correction or snap-back.
+286. [ ] **The stand-off at the real touch (D-235, D-314; replaces item 222).** Setup A. Walk into a side-on boar's flank and stop where you touch: about 2.3–2.4 studs root to root (the colliders never allow 1.8). Lock it and cast Rising Arc 5 times at 60 fps.
+   (a) Pass: the blade starts outside the flank and cuts in. The wind-up step back is 0.1 studs or less; none is fine (the old "about half a stud" no longer applies).
+   (b) Pass: the body never goes into the boar and never jumps. It may give way smoothly, up to about 1 stud (Lune 0.93–0.95), and stands still in each freeze.
+   (c) Pass: no anti-cheat correction or snap-back.
+287. [ ] **The stand-off at a wall and a pillar (D-276, D-314; replaces item 267).** Setup A with the DevCombat trace on. At item 286's touch, cast Rising Arc with your back flush to a wall, then a pillar behind you, then 0.3 studs off the wall, then with a pillar beside you. Log the root box's gap to the wall or pillar every frame of the Art, and the pillar's size and shape. Then stand back against a pillar, touching a kobold in front, and cast Sharp Nail and Vertical.
+   (a) Pass: the root never sinks into the wall or the pillar (Lune keeps 0.05). If something sinks, say whether it is the root or only the arms (in the wind-up the arms reach 0.9–2.0 studs behind the root).
+   (b) Pass: no anti-cheat correction or snap-back, and no frame step over about 0.5 studs.
+   (c) With the pillar beside you the step is 0.1 studs or less, as in item 286; the old "full step of about half a stud" was written for a 1.8-stud touch that never happens.
+   (d) Note, not a fail: a little overlap with the kobold when there is no room to give way.
+288. [ ] **Still freezes at 60 and 144 Hz (D-271, D-314; replaces item 224(b)).** Setup A. At a point-blank kobold (1.5–2 studs) and a side-on boar, cast all four Arts and the basic chain, recorded at 60 fps. Repeat with the cap at 144 Hz (or the PC's highest).
+   (a) Pass: Normal freezes 3 frames, Final 6 and Kill 10 at 60 Hz; 7, 14 and 24 at 144 Hz.
+   (b) Pass: body, head and blade are still on every frame of every Normal and Final freeze. Rising Arc's Normal shows no drift (2727b4c: 0.08–0.2 studs a frame). Camera shake is fine.
+   (c) Item 224(a), (c) and (d) as written.
+289. [ ] **A kobold's flank, walking in and turning onto you (D-315; replaces item 273(a)).** Setup A. Lock a kobold and walk at each flank with W held. Then stand touching its flank or front and let it turn onto you, idle and while attacking.
+   (a) Pass: the body walks in with no circling and stops at its side: about 3.1 studs root to root on its left flank and about 3.4 on its axe side. About 1.8 is the front stop, not the flank.
+   (b) Pass: your root never ends inside its body (c2f76c1: 1.07 at the left flank). Log root-to-root distance and the blocker faces' CFrames on any frame under 1.5.
+   (c) Item 273(b) as written.
+290. [ ] **A swing at an enemy off your look (D-275 as corrected; replaces item 266(a)).** Setup A, the DevCombat trace on, a boar about 5 studs away (trace d about 8), swung at 30°, 45°, 60° and 90° off your look with no lock.
+   (a) Pass: at 30° the body turns onto the boar and hits. At 45° or more on your left it does not turn and misses. On your right (45–90°) the swing's arc cuts the boar's head and snout, and that hit is drawn and counted (c2f76c1's hits at bearings −46, −78 and −93 with clear −0.15 are this).
+   (b) Item 266(b) and (c) as written.
+291. [ ] **The white glint, frame by frame (D-316, D-317; replaces item 238(a)).** Setup A. The glint is the axe's fill going white, never the clash-star billboard (2727b4c timed the billboard). Stand 4 studs in front of the Kobold Axeman and let it wind up its Overhead 5 times. Log every frame the axe's TelegraphFill FillColor and FillTransparency and one TelegraphWedge part's Color, timed from the Telegraph's arrival.
+   (a) Pass: 5 of 5 show yellow, then white (FillTransparency 0, fill and wedge together) for 3 frames in a row (2–4 at a hitch), then yellow, then out.
+   (b) Pass: the white starts +1.15 to +1.22 s and ends at least one frame before the wedge goes out (about +1.27 to +1.29 s). The wedge goes out within one frame of the snap.
+   (c) Pass: no Unblockable tell ever turns white.
+292. [ ] **Parry on the white, no lag (D-316; replaces items 257 and 278(b)).** Setup A. Parry the Overhead 20 times: 10 presses on the first white frame and 10 on the last.
+   (a) Pass: 10 of 10 on each (c2f76c1: 2 of 10 on the first frame).
+293. [ ] **A look ends the death's still shot (D-324; replaces item 274(b)).** Setup A. During a locked kill's freeze, flick the mouse about 20 px or more. Repeat with a 2–5 px twitch, then with the right stick.
+   (a) Pass: the flick ends the hold and the view turns within 3 frames, eased.
+   (b) Pass: the twitch does not move it.
+294. [ ] **The shoulder dwell past pillars (D-325; replaces item 275(b)).** Setup A. Place pillars about 2.5 studs to alternate sides of a straight run, 8 studs apart. Lock an enemy ahead and sprint past them.
+   (a) Pass: the shot changes shoulder at most once every 2 s and never ping-pongs.
+   (b) Item 275(a) as written.
+295. [ ] **A struck stance lowers slowly (D-340; replaces item 280(b)).** Setup A at 60 fps. Take a kobold hit while holding Sharp Nail's stance, then the Vertical's.
+   (a) Pass: the sword lowers over about half a second within the stagger and never sweeps down past the front of the body like a cut. Frame by frame the tip moves about a stud a frame or less, except on the flinch's own hit frame.
+   (b) Pass: no Art, whoosh, trail or smear plays.
+   (c) Pass: a dodge or cancel out of a stance still drops it quickly (0.2 s).
+296. [ ] **No skating feet (D-334; replaces item 282).** Setup A. Log per-frame foot and root positions (the feetcheck CSV) for 10 s of straight flat-ground movement in each gait, sheathed and drawn: walk (W), back (S), strafe left and right locked on a held kobold, run, and sprint (Shift+W), at 1x and at the Capture 0.25x. Then run and sprint without stopping for 10–20 s.
+   (a) Pass, while a foot is flat (its centre within 0.09 studs of its standing height): it moves 0.04 studs or less between consecutive rendered frames, including frames where PostSimulation ran 2 or 6 substeps, and under 0.1 studs net per plant.
+   (b) Pass: on video no 5–7 px foot hop and back, and no skating that starts late in the 10–20 s runs.
+   (c) Pass: no anti-cheat correction.
+   (d) Note the walk-to-run speed-up around 12 studs/s.
+297. [ ] **A sprint Draw at 240 fps (D-330; replaces item 281(b)).** Setup A. Sprint, then Draw, 5 times, captured at 240 fps.
+   (a) Pass: no tip jump over 1.3 studs per 60 Hz frame (74.6 studs/s is about 1.24).
+   (b) Pass: the settle springs over its last 0.18 s with no pop at 0.97 s, and the blade never passes through the body.
+   (c) Note, open: a guard pressed with the sword sheathed still snaps the tip about 6.2 studs in one frame (c2f76c1, 3 of 3). The fix is in guard-draw.patch, not applied; the gate shots never guard sheathed.
+298. [ ] **The hold waits for its word (D-312; replaces item 255).** Setup B, used by the items below that name it: setup A with File > Studio Settings > Network > Incoming Replication Lag set as given. Here 0.05 s, then 0.1 s. Cast Sharp Nail, then Rising Arc, at a kobold 1.5–2 studs away, then the basic chain, recorded at 60 fps.
+   (a) Pass: every freeze shows the blade at the end of its snap and the number appears inside the freeze. At 0.1 s a Normal freeze may run 4 frames.
+   (b) At 0.25 s: the freeze runs at most 12 frames (0.2 s), then lets go; the number follows, and nothing freezes twice.
+299. [ ] **A kill under lag is one freeze (D-313; extends item 264).** Setup B at each lag of item 298. Land a point-blank kill with Basic1, and once with a Sharp Nail Final.
+   (a) Pass: one unbroken 10-frame freeze from the contact frame, with no second freeze and no blade jump back.
+   (b) Pass: the number shows inside it, the music ducks 10 frames after the contact, and the shatter comes about 41 frames (0.683 s) after the kill word. The PC's "about 0.75 s" includes the word's wait.
+300. [ ] **The death's still shot (D-323; replaces item 274(a)).** Setup B at 0, then 50, then 100 ms. Lock a kobold and kill it with Basic3, then with Rising Arc, recording at 60 fps.
+   (a) Pass: from the first frozen frame to the shatter the picture does not move at all (c2f76c1: 0.45–0.76 studs a frame for the first 6 frames), then eases out smoothly.
+   (b) Pass: the freeze starts on the frame the death shows.
+301. [ ] **Parry the white under lag (D-289, D-316; replaces item 278(a)).** Setup B at 0.05 s, then 0.1 s. Repeat item 292's 10 first-frame and 10 last-frame presses.
+   (a) Pass at 0.05 s: at least 9 of 10 on each.
+   (b) At 0.1 s, record both counts (expected: the first frame 10 of 10; the last frame may land a frame late if Studio delays only incoming traffic).
+   (c) Pass: the tell holds until the axe falls, and the white ends a little before the snap.
+302. [ ] **A doomed Art never lights (D-326).** Setup B at 150 ms. Stand in a kobold's swing and press an Art within about 0.15 s before the axe lands.
+   (a) Pass: no blade light, chime or FOV kick plays, and the Stagger ends the stance.
+   (b) Make the blow miss: just before it lands, move the player out of the cone with DevCombat "place" on the server. Pass: the stance lights and chimes about 0.5 s later at its hold pose, and releasing launches normally.
+303. [ ] **Holds at 30 fps (D-327; replaces item 265(b)).** Setup A with the client capped at 30 fps. Land 20 Normal hits, five Art Finals and a kill. Then a kill at 100 ms of lag.
+   (a) Pass: a Normal freezes 2 frames every time, a Final 3 and a Kill 5, with no 1-frame Normal hold in the 20 hits.
+   (b) At 100 ms of lag, note whether the kill freeze is 5 or 6 frames (Lune gives 6) and whether a one-frame kill freeze is visible.
+304. [ ] **Holds below 60 fps (D-341).** Whenever Studio drops below 60 fps while recording (45 fps on a 60 Hz display is typical), count Final and Kill freezes on the r counter.
+   (a) Pass: a Final freezes about 100 ms (5 frames at 45 fps, not 6–8) and a Kill about 167 ms (8 frames).
+305. [ ] **Impact-frame counts (D-155, D-159; replaces item 142's picture counts).** Setup A at 60 fps. Count the impact-picture frames of five Finals (Horizontal, Vertical, Rising Arc) and a Kill on the r counter.
+   (a) Until the FrameClock patch (frameclock-pace.patch) lands, 2 or 3 frames per Final is the known cause: the median of the last 5 frame lengths lands on the short side under jitter. The PC's 3/3/2 is this, not a new bug.
+   (b) After the patch: each Final shows 2 and a Kill 2/2/2.
+   (c) Item 142's flash and hit-stop counts as written.
+306. [ ] **A slam rests at the wall, with the hooks (D-278, D-279, D-322, D-333; replaces item 269).** Setup C, used by items 306–315: setup A, then in the Server command bar run `local f = game:GetService("ServerScriptService"):WaitForChild("SkyspireDevCombat", 5); local function S(c, a) return game:GetService("HttpService"):JSONEncode(f:Invoke(c, a)) end`, S("hp") for the ids, S("place", {position = {0, 3, 25}, facing = 0}) to move the player clear, and S("hold", {except = {boarId}}). The floor is at y = 0.
+   (a) Head-on: S("part", {size = {16, 8, 1}, position = {0, 4, -12.5}, name = "Wall"}), then S("enemy", {entityId = boarId, position = {0, 0, 0}, facing = 0, hold = true}), then S("charge", {entityId = boarId, toward = {0, 0, -20}}). Pass: the reply's stops are "Wall", then "Interrupted", and the boar never ends inside the wall.
+   (b) 45°: S("clearparts"), then the same wall with tilt = {0, 45, 0}. Pass: the stop is "Glance" or "Wall" by the 40° glance rule, never "Jammed".
+   (c) Pass, both: the client draws the rush and the drawn snout stops flush with the wall face, never short of it or inside it, with the slam cue on that frame and no drawn step over about 0.5 studs a frame (c2f76c1: a 9.4-stud jump). Do 5 head-on and 5 glancing.
+307. [ ] **A charge right after a hold (D-339).** Setup C. With a boar mid-wind-up, run S("enemy", …) or S("hold") and then S("charge", …) at once.
+   (a) Pass: the line and the crouch show, and the run starts from the crouch, not from standing.
+   (b) Log the drawn body (Torso, root.CFrame * bodyOffset) and the replicated root separately every frame. Pass: no drawn step over about 0.5 studs a frame.
+308. [ ] **A slope and a part dropped mid-rush (D-280; replaces item 270(a)).** Setup C.
+   (a) Slope: S("part", {size = {10, 1, 24}, position = {0, 7.7, -19.2}, tilt = 40}); for 35°, position {0, 6.9, -19.8} with tilt = 35. Boar at {0, 0, 0} facing 0, held; charge toward {0, 0, -30}. Pass: at 35° and 40° the boar runs up the slope with no "Jammed" stop.
+   (b) Late part, as one chunk: f:Invoke("clearparts"); f:Invoke("enemy", {entityId = boarId, position = {0, 0, 0}, facing = 0, hold = true}); f:Invoke("part", {size = {16, 8, 1}, position = {0, 4, -14.5}, after = 0.75, name = "Late"}); return S("charge", {entityId = boarId, toward = {0, 0, -30}}). Pass: the part appears 0.75 s after the call, the stops show "Wall" at about 8.4 studs about 0.18 s after the part lands, and no rush passes through it.
+309. [ ] **Stairs (D-280; replaces item 270(b)).** Setup C. Build: for k = 1, 8 do f:Invoke("part", {size = {8, 0.5*k, 2}, position = {0, 0.25*k, -(9 + 2*k)}, name = "Step"..k}) end; f:Invoke("part", {size = {8, 4, 12}, position = {0, 2, -32}, name = "Landing"}).
+   (a) Up: charge from {0, 0, 0} toward {0, 0, -30}. Down: S("enemy") the boar onto the landing at {0, 4, -32} (floor y 4), facing 180, and charge toward {0, 0, 5}. Pass: no "Jammed" in the stops either way.
+   (b) Pass: the body follows the steps without sinking or floating more than a riser, and the client's drawn body matches the server's.
+310. [ ] **Enemies never stand inside each other (D-281, D-318, D-329; replaces item 271).** Setup C.
+   (a) Boar A at {0, 0, 0} facing 0 and boar B at {0, 0, -16} facing 180, both held. S("walk", {entityId = A, toward = {0, 0, -16}, wait = true}), and B toward {0, 0, 0}. Pass: each reply is arrived = false at the 30 s timeout, or arrived with the room kept; the boars never overlap, jitter, lift or shove.
+   (b) B at {0, 0, -8} facing 90, held; A charges toward {0, 0, -20}. Pass: a rush that stops over B stays passable until they separate, then turns solid with no pop; B is never pushed through the floor or shoved away.
+   (c) S("sethp", {entityId = X, hp = 1}) on an enemy beside a held packmate at {0, 0, -4.5}; kill it with one hit. Pass: the corpse never pushes or lifts the packmate, and from the shatter (about 0.67 s after the death) it no longer blocks.
+   (d) A wall part at z −12.5 and a corpse made at {0, 0, -9} the same way; A charges toward {0, 0, -20}. Pass: the rush is not stopped by the corpse after the shatter and stops at the wall, with no pop or shove.
+311. [ ] **Snouts by walls (D-278, D-295; replaces item 272).** Setup C. Wall parts {size = {1, 8, 40}, position = {4, 4, -20}} and {size = {16, 8, 1}, position = {-3.5, 4, -40.5}}. Boar at {2.2, 0, 0} facing 0, held; walk it to {2.2, 0, -36}, then to {-8, 0, -37}.
+   (a) Pass: the walk along the wall reaches {2.2, 0, -36} within 1 stud, the turn goes round without passing through the end wall, and the snout never clips into either wall.
+   (b) Stand with your back to the long wall and place a FrenzyBoar and a KoboldAxeman unheld with "enemy" along the wall, behind them and at 45°. Pass: they take over in Idle, each reaches you and attacks within about 5 s, and neither stands facing the wall or pushes its snout or axe visibly into it.
+   (c) Note any turn where a boar's rear swings into the wall (Lune: up to 0.77 studs on a Recover turn).
+312. [ ] **Wall-slam shake by distance (D-288, D-296; replaces item 277).** Setup C. S("place", {position = {0, 3, 0}, facing = -90}); a kobold held at {6, 0, 4} facing 90, locked. For each slam distance d of 10, 22, 28, 29, 31 and 34 studs, with xf 8.0, 21.17, 27.35, 28.37, 30.41 and 33.47: a wall part {size = {1, 8, 16}, position = {xf + 0.5, 4, -6}}, the boar at {xf − 12, 0, -6} facing −90 and held, then charge toward {xf + 5, 0, -6}. Record at 60 fps.
+   (a) Pass: full shake at 10 and 22; clearly smaller at 28–29 (about half at 29); barely visible at 31; none at 34.
+313. [ ] **A rush ending beside the axe (D-318).** Setup C. Place a kobold and a boar so that the boar's charge passes beside the kobold and ends next to its axe (its right side). Do it 5 times.
+   (a) Pass: no body is pushed, lifted or popped when the boar turns solid again, and the boar never stands inside the axe face.
+314. [ ] **A corpse bump (D-329).** Setup C. S("sethp", {entityId = koboldId, hp = 1}) on a kobold standing at {0, 0, -9}, with a held boar at {0, 0, 0} facing 0. Kill the kobold, then charge the boar toward {0, 0, -20} 1 s after the kill.
+   (a) Pass: the stops show no "Jammed" or "Wall" at the corpse's spot, the boar is not pushed, and nothing blocks there once the shatter has played.
+315. [ ] **A kobold pack never shoves (D-332).** Setup C. Let a kobold pack spawn and respawn 5 times, or place 3 kobolds 1 stud apart with "enemy" and release them.
+   (a) Pass: in the first second no kobold jumps more than 0.5 studs sideways.
+   (b) Pass: S("hp") shows them apart, and while chasing the player they never stand inside each other's axe face. Note, open: four chasing can still end about 0.2 inside.
+316. [ ] **Walk into the ring (D-302, D-303; replaces items 259(a) and 260(a)).** Setup D, used by items 316–328: the Playground place with DevCapture, no network simulation, capture at 1x. Press P on every shot from 8 bearings and from below the ledge. Then put an obstacle or slope in the way so the stop overshoots.
+   (a) Pass: the body sprints in and skids to rest within 1 stud of the spot and 5° of its facing, with no auto motion after the stop (2727b4c shot 4: 3.13 studs against radius 3).
+   (b) Pass: an overshoot walks the last leg again at most 2 times, then stages within 1 stud or asks from outside without staging. It is never staged outside the ring.
+   (c) Items 259(b) and 260's route round the ledge as written.
+317. [ ] **Taking the walk over, and J (D-304, D-305; replaces item 262).** Setup D.
+   (a) Tap W during a walk and again while P's ask shows; separately, hold D while pressing P. Pass: only your own keys move the body until P is pressed again, and the ring and the ask stay. (2727b4c's "about 7 studs after a W tap" was the body's own run carry, never auto motion.)
+   (b) Press J mid-walk. Pass: a sprint skid stop with under 0.5 studs of slide (2727b4c: about 3.5).
+   (c) Repeat (a) with Incoming Replication Lag at 0.3 s.
+318. [ ] **A take ends with its enemies held (D-297; extends item 232).** Setup D, across the takes of items 316–327.
+   (a) Pass: the staged enemies freeze at each take's end, and no hits or damage numbers land between takes or during the next walk-in (2727b4c: shot 1's enemies killed the player about 5 s after the take; shots 7–9 took leftover hits during the walk).
+   (b) Pass: J still gives the field back.
+319. [ ] **Art shots press and hold (D-298; replaces item 231).** Setup D. Press U, then P, on the four Art shots, kill-shatter and parry-spark.
+   (a) Pass: the prompt says Hold, the key goes down at 0.5 s, the Art launches on release at 1.0 s (2727b4c: +1.39 to +1.42 s), and the glow lasts about 1/3 s.
+   (b) Pass: the kill shatters the 1-HP kobold, and the parry spark shows on the Overhead.
+   (c) At 0.5x, U presses nothing on any shot, shots 1 and 10 included (no stick and no sprint).
+320. [ ] **Staged views (D-299, D-301; replaces items 228(b) and 230(b)'s camera).** Setup D.
+   (a) ThreeQuarter shots (enemy-kobold-overhead, parry-spark). Pass: the kobold and its axe stay in frame for the whole swing, seen from about 75° on its weapon side at 14 studs (2727b4c shot 7: the kobold was mostly hidden behind the player).
+   (b) Open view (locomotion) with the lock held. Pass: the camera stays beside the run and square to it within 1°, through the lock at 5 s and its release; the run prompts name D or A, never W or S.
+   (c) Side and Behind, and items 228(a), (c) and (d), as written.
+321. [ ] **The boar charge at 12 studs (D-300).** Setup D. Stage enemy-boar-charge with U on.
+   (a) Pass: the staged charge (Meets) takes exactly one counted hit at about 1.1 s, and no second charge lands after the take (2727b4c: the first charge missed and a second hit for 16 after it).
+322. [ ] **Shot 1, the gate fight (D-306, D-308 to D-310, D-319, D-320).** Setup D. Choose shot 1 (fight-boar-kobold), press U, then P, and record 20 s at 60 fps.
+   (a) Pass: about 6 parries (sparks at about 2.2, 5.6, 8.9, 12.2, 15.5 and 18.8 s), the first four each followed by an Art (Q, 2, 4, 3); no Art launches after about 19 s.
+   (b) Pass: the boar is let go at about 8.6 s under its prompt, crouches, and the player dodges back across its line at about 9.3 s with no hit taken.
+   (c) Pass: the player locks the boar, sprints to its skid, and one basic kills it at about 10.8–10.9 s with the freeze and the shatter.
+   (d) Pass: the digits match the server's count: at least 10 hits (12 expected at low latency), all four Arts land, full HP, nothing hits the player, and every digit lands inside the 20 s take.
+   (e) Pass: after the take the kobold stops, and J gives the field back.
+   (f) Repeat at 0.05 s of lag. Pass: (a)–(e) hold, with at least 10 hits and 6 parries.
+323. [ ] **Shot 10, the locomotion pass (D-307, D-311; replaces item 230(b)).** Setup D, Open view. Start from the field, not from shot 9's spot (that walk still fails, open). Choose shot 10, press U, then P, and record 14 s at 60 fps.
+   (a) Pass: a sheathed walk at about 8 studs/s (a half stick, not a run) goes off the ledge: Fall at about 1.8 s, Land at about 2.0 s.
+   (b) Pass: run, sprint, then a skid at about 4.85 s. F at 5 s draws the sword with TurnLeft; F at 5.8 s lets go.
+   (c) Pass: drawn walk, run and sprint, a skid at about 8.8 s, and the body stands.
+   (d) Pass: F at 10.2 s turns the standing body to the kobold behind it with TurnRight, feet moving under 1 stud; F at 11.2 s lets go.
+   (e) Pass: a drawn sprint let go at 13.2 s plays the skid. The body stays in frame and ends about 14 studs from the centre, with no T-pose and no sliding foot.
+   (f) If the half stick runs at full speed in Studio, note it: CharacterController would then need a WalkSpeed scale for the capture stick.
+324. [ ] **The parry-spark take (D-319).** Setup D. Shot parry-spark, U on, press P, at no lag and again at Incoming Replication Lag 0.1 s.
+   (a) Pass, both: the guard comes down and the take parries (spark, kobold staggered, 0 damage). Lune: 33 ms early and 100 ms late to spare on Studio's link; before, 6 of 12 failed at 0.1 s.
+325. [ ] **The Horizontal ribbon (D-335; replaces item 245(b)).** Setup D. Staged shot 2 (art-horizontal), Side camera, U at 1x; frame 0 is the cut's first frame. Repeat once from above (Open camera or free cam).
+   (a) Pass, every frame: the ribbon is widest at the blade and at blade height, its lowest edge stays at least about 0.3 studs above the floor, and side-on it reads as a curved arc round the body, never a flat band on the ground. From above, the arc sweeps round the body.
+   (b) Pass: it shows on about 10 frames at most (was 16) and is gone 8–9 frames (0.13 s) after the blade stops, not about 12; the blade's settle after the cut lays no new band over its end.
+326. [ ] **The kill trail's first frame (D-336).** Setup D. Staged shot 9 (kill-shatter), U at 1x, 60 fps; again at 144 fps if Studio allows (restore the cap after). Number frames with the r counter; frame 0 is the first frame the blade moves into the Basic 1 cut.
+   (a) Pass, 5 of 5 takes: the trail shows on frame 0, not first on frame 1; its first segment starts where the blade was at the window's open; nothing is drawn on the settle after the cut.
+327. [ ] **The r counter and frame tick (D-337).** Setup D, any staged take (shot 9).
+   (a) Pass: during the take the panel reads "f N  r M", and through the kill's freeze f holds while r rises by exactly 1 per rendered frame.
+   (b) Pass: in the 60 fps recording the bottom-right 12 px square swaps SystemCyan and DigitYellow on every recorded frame. Two same-coloured frames in a row are a duplicated capture frame (r repeats too): count them and report.
+   (c) Pass: the square is hidden outside a take and never changes brightness (a hue swap only).
+328. [ ] **Sprint per source (D-338).** Setup D. Stage art-horizontal from about 25 studs off the spot and press P. While the auto-walk sprints, tap Shift (about 0.1 s).
+   (a) Pass: the body stays at sprint speed through and after the tap, stops within 1 stud and stages in the same time as an untapped walk (within a frame or two), with the same number of asks.
+   (b) Pass, outside the panel: Shift+W sprints and letting go of Shift drops to the run; L3 or the touch Sprint button toggles sprint as before.

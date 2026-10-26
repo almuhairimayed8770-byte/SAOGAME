@@ -52,7 +52,7 @@
 	ContactPredictor.standOff): when its first cut would start in the body, the root steps back
 	over the anticipation on the clip's clock, and the server reads that root as it reads the
 	clip's root motion. Every requirement above holds with it. Every swing at such an enemy, an
-	Art's or a basic's, also runs with the keep-out the client plans with it (D-CH3, D-CH4): the
+	Art's or a basic's, also runs with the keep-out the client plans with it (D-314, D-315): the
 	enemy stands with its blocker faces (RigBuilder.addBlocker, never seen by a blade or a query),
 	and the root gives way back and aside as far as the clip's own motion would carry the body's
 	colliding parts deeper into them, as CharacterController.stepStandOff applies it.
@@ -128,7 +128,7 @@ export type Cell = {
 	required: boolean,
 	-- The Art stand-off (fix F1) the client stepped back before the swing, in studs; nil for none.
 	standOff: number?,
-	-- The most the keep-out (D-CH3, D-CH4) moved the root over the swing, back and aside as one
+	-- The most the keep-out (D-314, D-315) moved the root over the swing, back and aside as one
 	-- distance, in studs; nil for none.
 	keepOut: number?,
 	-- Whether the local client drew this hit at each of its frame rates (dev.luau hitMatrix.clientFps)
@@ -433,7 +433,7 @@ local function placeEnemy(ctx: Context, setup: Setup, distance: number): (any, a
 			part.CFrame = solved
 		end
 	end
-	-- Its blocker faces, as a live enemy stands with them (D-198, D-CH4): what the keep-out keeps
+	-- Its blocker faces, as a live enemy stands with them (D-198, D-315): what the keep-out keeps
 	-- the player's body out of. No blade and no query meets them (CanQuery and CanCollide off).
 	ctx.RigBuilder.addBlocker(model)
 	return model, def
@@ -733,7 +733,7 @@ function HitMatrix.attacks(ctx: Context): { Attack }
 end
 
 -- How far a stand-off plan has moved the root at a clip time: along `away`, the Art's step (fix F1)
--- plus the keep-out's back (D-CH3), and along `side` the keep-out's aside (D-CH4), as
+-- plus the keep-out's back (D-314), and along `side` the keep-out's aside (D-315), as
 -- CharacterController.stepStandOff applies them.
 local function standOffShift(ctx: Context, standOff: any, time: number): any
 	local easing = ctx.Combat.contact.standOff.easing
@@ -763,7 +763,7 @@ end
 -- The stand-off the local client plans against this placement, as CharacterController does: only
 -- when the aim assist would pick the enemy (inside its cone and range; a lock turns the body square
 -- to it the same way), facing ahead. An Art's plans at the release, from the hold pose with the root
--- where the clip has carried it: the blade step (fix F1) and the keep-out (D-CH3, D-CH4); a basic's
+-- where the clip has carried it: the blade step (fix F1) and the keep-out (D-314, D-315); a basic's
 -- from its first frame, the keep-out alone. Nil for the point-blank shoulders (outside the
 -- assist) and a swing that needs neither.
 local function standOffOf(

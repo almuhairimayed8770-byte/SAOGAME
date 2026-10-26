@@ -1,6 +1,6 @@
 --!strict
 --[[
-	The walk into the stand ring (D-244) through the real body (CS2 to CS4). A fresh copy of the
+	The walk into the stand ring (D-244) through the real body (D-302 to D-305). A fresh copy of the
 	capture panel (Capture.client.luau) walks the local character, and a fresh copy of the real
 	CharacterController moves it: its two-step stop (D-059) runs on the real Locomotion's gait
 	(stopGait) with the real Choreo animating a real PlayerR15 rig. The Humanoid is a fake whose
@@ -11,13 +11,17 @@
 	timers. The staging server stages by the real ring rule (DevStageLogic): a root at rest in the
 	ring stages, one outside gets the ring and a route.
 
-	1. Arrival (CS2): the walk brings the body to rest within capture.walk.restStuds of the spot,
+	1. Arrival (D-302, D-303): the walk brings the body to rest within capture.walk.restStuds of the spot,
 	   facing the spot's way within restDegrees, from near and far, round the ledge and up its
 	   ramp; one that the stop carries off the spot walks the short way back onto it.
-	2. The hand-over (CS3): once a movement key went down after P, only the player's keys move the
+	2. The hand-over (D-304): once a movement key went down after P, only the player's keys move the
 	   body until P, across the asks between walks too.
-	3. J (CS4): J lets the walk go, and the body stops as it stops when the keys let go: the same
+	3. J (D-305): J lets the walk go, and the body stops as it stops when the keys let go: the same
 	   two-step stop, no farther.
+	4. The sprint's sources (D-338): the panel's sprint goes through a fresh copy of the real
+	   InputController as the panel's own source, and the sprint key (LeftShift) as the player's,
+	   as its ContextActionService binding hands it over; a Shift tap during the walk's sprint
+	   leaves the walk as it was.
 ]]
 
 local luau = require("@lune/luau")
@@ -42,6 +46,8 @@ local CONTROLLER_PATH = "src/client/controllers/CharacterController"
 local CHOREO_PATH = "src/client/choreo/Choreo"
 local CAPTURE_NODE = "src/client/dev/Capture"
 local CAPTURE_FILE = "src/client/dev/Capture.client.luau"
+local INPUT_PATH = "src/client/controllers/InputController"
+local SPRINT_KEYS = Harness.load("src/shared/data/input").keyboard.Sprint
 
 -- The default control script's movement keys, camera-relative (forward, right).
 local KEY_MOVES: { [string]: { number } } = {
@@ -96,6 +102,21 @@ local function freshChoreo(): any
 		end,
 	}
 	return luau.load(Harness.readFile(CHOREO_PATH .. ".luau"), { debugName = CHOREO_PATH, environment = env :: any })()
+end
+
+-- A fresh copy of the real InputController (its own sprint holds), never started: nothing binds.
+local function freshInput(): any
+	local env = Harness.environment()
+	env.script = Harness.node(INPUT_PATH)
+	env.require = function(target: any): any
+		return Harness.loadModule(target)
+	end
+	env.game = {
+		GetService = function(_self: any, name: string): any
+			return if name == "ReplicatedStorage" then Harness.game():GetService(name) else {}
+		end,
+	}
+	return luau.load(Harness.readFile(INPUT_PATH .. ".luau"), { debugName = INPUT_PATH, environment = env :: any })()
 end
 
 -- A PlayerR15 rig model: one Part per rig part, one Motor6D per joint.
@@ -177,8 +198,8 @@ type World = {
 	-- Studs the engine lets the body coast on after the Humanoid's move goes to zero (0: a dead
 	-- stop, as the fake Humanoid stops): a stand-in for an engine whose stop slides.
 	engineSlide: number,
-	-- The panel's calls into the input path: the action, Begin or End, and when.
-	handled: { { action: string, state: string, at: number } },
+	-- The panel's calls into the input path: the action, Begin or End, when, and the source.
+	handled: { { action: string, state: string, at: number, source: string? } },
 	-- Every frame's root position and the move the auto-walk gave (nil: none that frame).
 	trail: { { at: number, position: Vector3, walkMove: boolean } },
 	key: (name: string) -> (),
@@ -574,20 +595,25 @@ local function load(): World
 		return { ok = false, error = "walk into the ring first", walk = walk }
 	end
 	local realReplicated = Harness.game():GetService("ReplicatedStorage")
-	local handled: { { action: string, state: string, at: number } } = {}
+	local handled: { { action: string, state: string, at: number, source: string? } } = {}
 	local sprintOn = false
+	-- The real input path for the sprint, held per source (D-338); its sprintChanged drives
+	-- CharacterController.setSprinting (Main.client).
+	local input = freshInput()
+	input.sprintChanged:Connect(function(on: boolean)
+		sprintOn = on
+		controller.setSprinting(on)
+	end)
 	local held: { [string]: boolean } = {}
 	local kobold = { id = 21, kind = "Enemy", model = { Name = "Kobold" } }
 	local captureFakes: { [string]: any } = {
 		CameraController = { setStage = function() end },
 		TargetController = target,
 		InputController = {
-			handle = function(action: string, state: any, _object: any)
-				table.insert(handled, { action = action, state = state.Name, at = clock.now })
-				-- InputController.sprintChanged drives CharacterController.setSprinting (Main.client).
+			handle = function(action: string, state: any, object: any, source: string?)
+				table.insert(handled, { action = action, state = state.Name, at = clock.now, source = source })
 				if action == "Sprint" then
-					sprintOn = state == Enum.UserInputState.Begin
-					controller.setSprinting(sprintOn)
+					input.handle(action, state, object, source)
 				end
 			end,
 		},
@@ -737,12 +763,15 @@ local function load(): World
 			)
 		end,
 		hold = function(name: string, down: boolean)
+			local object = { UserInputType = Enum.UserInputType.Keyboard, KeyCode = (Enum.KeyCode :: any)[name] }
 			if down and not held[name] then
-				-- The control script binds the movement keys: they come processed.
-				inputBegan:Fire(
-					{ UserInputType = Enum.UserInputType.Keyboard, KeyCode = (Enum.KeyCode :: any)[name] },
-					true
-				)
+				-- The control script binds the movement keys, ContextActionService the sprint key:
+				-- they come processed.
+				inputBegan:Fire(object, true)
+			end
+			if table.find(SPRINT_KEYS, name) ~= nil and down ~= (held[name] == true) then
+				-- The sprint key's binding hands it to the input path as the player's (no source).
+				input.handle("Sprint", if down then Enum.UserInputState.Begin else Enum.UserInputState.End, object)
 			end
 			held[name] = down
 		end,
@@ -954,12 +983,12 @@ local function flatDistance(a: Vector3, b: Vector3): number
 	return Vector3.new(a.X - b.X, 0, a.Z - b.Z).Magnitude
 end
 
-describe("Capture: the walk into the ring through the real body (CS2)", function()
+describe("Capture: the walk into the ring through the real body (D-302)", function()
 	it("rests on the spot facing the shot's way, from near and far, on the field and on the ledge", function()
 		local lines, worst = arrivals(nil)
-		print("[CS2] " .. table.concat(lines, "\n[CS2] "))
+		print("[D-302] " .. table.concat(lines, "\n[D-302] "))
 		print(
-			("[CS2] worst %.2f studs, %.1f deg, %d asks, %.1f s"):format(
+			("[D-302] worst %.2f studs, %.1f deg, %d asks, %.1f s"):format(
 				worst.distance,
 				worst.degrees,
 				worst.asks,
@@ -976,9 +1005,9 @@ describe("Capture: the walk into the ring through the real body (CS2)", function
 		local lines, worst = arrivals(function(world: World)
 			world.engineSlide = 2.5
 		end)
-		print("[CS2 slide] " .. table.concat(lines, "\n[CS2 slide] "))
+		print("[D-302 slide] " .. table.concat(lines, "\n[D-302 slide] "))
 		print(
-			("[CS2 slide] worst %.2f studs, %.1f deg, %d asks, %.1f s"):format(
+			("[D-302 slide] worst %.2f studs, %.1f deg, %d asks, %.1f s"):format(
 				worst.distance,
 				worst.degrees,
 				worst.asks,
@@ -992,26 +1021,25 @@ describe("Capture: the walk into the ring through the real body (CS2)", function
 
 	it("rests on the spot at the slowed capture time scales too (the carry in 1x terms)", function()
 		local lines = {}
+		local starts = {
+			{ shot = "art-horizontal", x = 25, z = -10 },
+			{ shot = "art-horizontal", x = -2, z = 2 },
+			{ shot = "locomotion", x = 25, z = 40 },
+		}
 		for presses = 1, #Dev.timeScale.steps - 1 do
-			for _, start in { { "art-horizontal", 25, -10 }, { "art-horizontal", -2, 2 }, { "locomotion", 25, 40 } } do
-				local result = arrive(
-					start[1] :: string,
-					start[2] :: number,
-					start[3] :: number,
-					90,
-					function(world: World)
-						for _ = 1, presses do
-							world.key(KEYS.cycleTimeScale)
-						end
+			for _, start in starts do
+				local result = arrive(start.shot, start.x, start.z, 90, function(world: World)
+					for _ = 1, presses do
+						world.key(KEYS.cycleTimeScale)
 					end
-				)
+				end)
 				table.insert(
 					lines,
 					("%gx %s from (%g, %g): %s %.2f studs %.1f deg"):format(
 						Dev.timeScale.steps[1 + presses],
-						start[1] :: string,
-						start[2] :: number,
-						start[3] :: number,
+						start.shot,
+						start.x,
+						start.z,
 						if result.staged then "staged" else "NOT STAGED",
 						result.distance,
 						result.degrees
@@ -1022,7 +1050,7 @@ describe("Capture: the walk into the ring through the real body (CS2)", function
 				expect(result.degrees).toBeLessThan(WALK.restDegrees)
 			end
 		end
-		print("[CS2 scale] " .. table.concat(lines, "\n[CS2 scale] "))
+		print("[D-302 scale] " .. table.concat(lines, "\n[D-302 scale] "))
 	end)
 
 	it("covers every shot's spot: each shot stands on the stage area's spot or the ledge's", function()
@@ -1038,7 +1066,7 @@ describe("Capture: the walk into the ring through the real body (CS2)", function
 	end)
 end)
 
-describe("Capture: a movement key hands the walk over (CS3)", function()
+describe("Capture: a movement key hands the walk over (D-304)", function()
 	it("hands it over on a key pressed while P's ask is on its way: the walk never steers", function()
 		local world = load()
 		goTo(world, "art-horizontal")
@@ -1081,7 +1109,7 @@ describe("Capture: a movement key hands the walk over (CS3)", function()
 		local rest = world.root.Position
 		world.seconds(5)
 		print(
-			("[CS3] tap of 12 frames mid-walk: %.2f studs while held, %.2f after the key came up (%d frames), %.2f in all"):format(
+			("[D-304] tap of 12 frames mid-walk: %.2f studs while held, %.2f after the key came up (%d frames), %.2f in all"):format(
 				flatDistance(up, down),
 				flatDistance(rest, up),
 				restFrames,
@@ -1133,7 +1161,7 @@ describe("Capture: a movement key hands the walk over (CS3)", function()
 			return flatDistance(world.root.Position, down)
 		end
 		local mid, standing = tap(true), tap(false)
-		print(("[CS3] a 12-frame W tap moves the body %.2f studs mid-walk, %.2f from standing"):format(mid, standing))
+		print(("[D-304] a 12-frame W tap moves the body %.2f studs mid-walk, %.2f from standing"):format(mid, standing))
 		-- From a run the stop's carry is longer or shorter by where in the stride the key came up;
 		-- never longer than the tap plus the stop's longest carry.
 		local run = Harness.load("src/shared/data/choreo").locomotion.runSpeed
@@ -1141,7 +1169,7 @@ describe("Capture: a movement key hands the walk over (CS3)", function()
 	end)
 end)
 
-describe("Capture: J lets the walk go (CS4)", function()
+describe("Capture: J lets the walk go (D-305)", function()
 	it("stops the body as a key let-go at the walk's speed stops it", function()
 		local lines = {}
 		local worst = 0
@@ -1181,7 +1209,7 @@ describe("Capture: J lets the walk go (CS4)", function()
 			keyWorst = math.max(keyWorst, flatDistance(world.root.Position, at))
 		end
 		table.insert(lines, ("a sprint let go by the key: slid at most %.2f"):format(keyWorst))
-		print("[CS4] " .. table.concat(lines, "\n[CS4] "))
+		print("[D-305] " .. table.concat(lines, "\n[D-305] "))
 		expect(worst).toBeLessThanOrEqual(keyWorst + 1e-6)
 		expect(worst).toBeLessThan(WALK.restStuds)
 	end)
@@ -1204,7 +1232,7 @@ describe("Capture: J lets the walk go (CS4)", function()
 			most = math.max(most, carry)
 		end
 		print(
-			("[CS4] the run's stop carries %.2f to %.2f studs (middle %.2f); walk.carrySeconds x run = %.2f"):format(
+			("[D-305] the run's stop carries %.2f to %.2f studs (middle %.2f); walk.carrySeconds x run = %.2f"):format(
 				least,
 				most,
 				(least + most) / 2,
@@ -1214,5 +1242,67 @@ describe("Capture: J lets the walk go (CS4)", function()
 		expect(WALK.carrySeconds * run).toBeGreaterThan(least)
 		expect(WALK.carrySeconds * run).toBeLessThan(most)
 		expect(math.abs(WALK.carrySeconds * run - (least + most) / 2)).toBeLessThan((most - least) / 4)
+	end)
+end)
+
+describe("Capture: the player's sprint key leaves the walk's sprint held (D-338)", function()
+	it("walks the same path through a Shift tap mid-sprint, the sprint on throughout", function()
+		-- The walk from 25 studs off sprints; `tap` taps Shift (6 frames) 10 frames into the sprint.
+		local function walk(tap: boolean): (World, boolean)
+			local world = load()
+			goTo(world, "art-horizontal")
+			world.standAt(25, -10, 90)
+			world.frames(2)
+			world.key(KEYS.startCountdown)
+			for _ = 1, 120 do
+				if world.sprinting() then
+					break
+				end
+				world.frames(1)
+			end
+			expect(world.sprinting()).toBe(true)
+			world.frames(10)
+			expect(world.sprinting()).toBe(true)
+			if tap then
+				world.hold("LeftShift", true)
+				world.frames(6)
+				world.hold("LeftShift", false)
+			else
+				world.frames(6)
+			end
+			local held = world.sprinting()
+			untilStaged(world, WALK.timeoutSeconds * 3)
+			return world, held
+		end
+		local plain = walk(false)
+		local tapped, held = walk(true)
+		local worst = 0
+		for index = 1, math.min(#tapped.trail, #plain.trail) do
+			worst = math.max(worst, (tapped.trail[index].position - plain.trail[index].position).Magnitude)
+		end
+		local ask, plainAsk = staged(tapped), staged(plain)
+		print(
+			("[D-338] Shift tap mid-sprint: sprint %s after the tap, path off by at most %.4f studs, %d frames to stage (%d without), %d asks (%d)"):format(
+				if held then "on" else "OFF",
+				worst,
+				#tapped.trail,
+				#plain.trail,
+				#stageAsks(tapped),
+				#stageAsks(plain)
+			)
+		)
+		expect(held).toBe(true)
+		expect(ask ~= nil and plainAsk ~= nil).toBe(true)
+		expect(#tapped.trail).toBe(#plain.trail)
+		expect(worst).toBeLessThan(1e-6)
+		-- Every sprint press and let-go the panel made carries its source.
+		local sprints = 0
+		for _, entry in tapped.handled do
+			if entry.action == WALK.sprintAction then
+				sprints += 1
+				expect(entry.source ~= nil).toBe(true)
+			end
+		end
+		expect(sprints).toBeGreaterThan(1)
 	end)
 end)

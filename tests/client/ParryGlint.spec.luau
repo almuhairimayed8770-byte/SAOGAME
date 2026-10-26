@@ -1,6 +1,6 @@
 --!strict
 --[[
-	The parry glint as the player sees it, end to end (D-CP1; Studio items 238 and 257).
+	The parry glint as the player sees it, end to end (D-316; Studio items 238 and 257).
 
 	The real server: EntityService, EnemyService with the Kobold Axeman's Brute brain and
 	CombatService's guard judge, on a 60 fps server clock whose frames jitter by a couple of
@@ -588,7 +588,7 @@ local function eachCase(visit: (studio: boolean, latency: number, phase: number,
 	end
 end
 
-describe("the parry glint through the real chain (D-CP1)", function()
+describe("the parry glint through the real chain (D-316)", function()
 	it("the wedge stays lit to the axe's snap and goes white, fill and ground, for its glint", function()
 		eachCase(function(studio, latency, phase, seed)
 			local name = label(studio, latency, phase, seed)
@@ -666,7 +666,7 @@ describe("the parry glint through the real chain (D-CP1)", function()
 	-- The capture panel's auto-perform guards off the clip it draws, `lead` before its hit window
 	-- and the latency lead earlier still (the press reaches the server a latency after it leaves,
 	-- as the glint comes): every shot's guard on the kobold's overhead parries on both links at
-	-- every latency, with half a frame to spare (S-CP3; the 2727b4c parry-spark failed at 100 ms).
+	-- every latency, with half a frame to spare (Studio item 324; the 2727b4c parry-spark failed at 100 ms).
 	it("the capture's guard reactions parry at 0, 17, 50 and 100 ms (CaptureLogic.hear, D-289)", function()
 		local leads: { [number]: string } = {}
 		for _, shot in Dev.capture.shots do

@@ -149,7 +149,7 @@ describe("the Art stand-off picks its step (fix F1)", function()
 
 	it("a first cut that starts clear of the body takes no step", function()
 		for _, case in
-			{ { "OneHandedSword.Vertical", "Kobold", 2.3 }, { "OneHandedSword.Horizontal", "BoarFacing", 7 } }
+			{ { "OneHandedSword.Vertical", "Kobold", 2.3 }, { "OneHandedSword.Horizontal", "BoarFacing", 7 } } :: { { any } }
 		do
 			local plan = standOffFor(case[1], case[2], case[3])
 			expect(plan).toBeNil()
@@ -319,7 +319,7 @@ describe("the Art stand-off never steps into the world (D-235 amended)", functio
 			local direction = vector.Unit
 			local parts: { BasePart } = {}
 			for _, item in world do
-				local list = if item:IsA("BasePart") then { item } else item:GetDescendants()
+				local list: { Instance } = if item:IsA("BasePart") then { item :: Instance } else item:GetDescendants()
 				for _, part in list do
 					if part:IsA("BasePart") and part.CanCollide then
 						local left = false
@@ -427,11 +427,15 @@ describe("the Art stand-off never steps into the world (D-235 amended)", functio
 		dummy.Parent = entities
 		local other = Instance.new("Model")
 		block(behind, Vector3.new(4, 10, 1)).Parent = other
-		local fighters = ContactPredictor.fighters(avatar.model, scene, {
-			{ Character = other },
-			{ Character = nil },
-			{ Character = avatar.model },
-		})
+		local fighters = ContactPredictor.fighters(
+			avatar.model,
+			scene,
+			{
+				{ Character = other },
+				{ Character = nil },
+				{ Character = avatar.model },
+			} :: { any }
+		)
 		for _, expected in { avatar.model, enemies, entities, other } do
 			expect(table.find(fighters, expected)).never.toBeNil()
 		end

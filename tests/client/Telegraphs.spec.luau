@@ -228,7 +228,7 @@ describe("Telegraphs on the server's beat (D-172)", function()
 	end)
 end)
 
-describe("a blow's tell holds to its snap and glints white (F7, D-CP1)", function()
+describe("a blow's tell holds to its snap and glints white (F7, D-316)", function()
 	local Engine = Harness.load("src/client/fx/Engine")
 	local ai = Harness.load("src/shared/data/ai")
 	local F = combat.hitStopFrameSeconds
@@ -321,7 +321,7 @@ describe("a blow's tell holds to its snap and glints white (F7, D-CP1)", functio
 		OutlineManager.unregister(model)
 	end)
 
-	it("an Unblockable blow never glints: it must be dodged (D-CP2)", function()
+	it("an Unblockable blow never glints: it must be dodged (D-317)", function()
 		local model = kobold()
 		local red = palette.color3(fx.telegraph.fillToken.Unblockable)
 		local fill: Highlight? = nil

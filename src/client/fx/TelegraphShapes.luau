@@ -9,7 +9,7 @@
 	never overlap, so the translucent fan shows no seams where the old overlapping blocks doubled
 	their alpha (issue 15). The alpha curves say how the decal and the weapon Highlight fill ramp
 	in over the wind-up and vanish at the strike; a blow's tell holds through its strike until its
-	snap (F7) and glints white for a few frames on the parry window before it (`timing`, D-CP1).
+	snap (F7) and glints white for a few frames on the parry window before it (`timing`, D-316).
 	No Roblox datatypes, so every function runs in Lune.
 ]]
 
@@ -137,7 +137,7 @@ function TelegraphShapes.triangle(piece: Piece): { Vec3 }?
 	}
 end
 
---- When a tell ends and its glint begins and ends, in seconds into the wind-up (F7, D-CP1). A
+--- When a tell ends and its glint begins and ends, in seconds into the wind-up (F7, D-316). A
 --- blow's (`strike`, the seconds from the wind-up's end to where it lands) stays lit through the
 --- strike until its snap begins, ai.luau telegraph.snapLeadSeconds before it lands. Its glint is
 --- fx.luau telegraph.glintFrames frames centred on the middle of the parry window before the
@@ -176,7 +176,7 @@ function TelegraphShapes.glinting(elapsed: number, ends: number, glintFrom: numb
 end
 
 --- True when a telegraph of this kind glints before its blow (fx.luau telegraph.glintKinds): only a
---- blow that can be parried shows the cue to press (D-CP2).
+--- blow that can be parried shows the cue to press (D-317).
 function TelegraphShapes.glints(kind: string): boolean
 	return Fx.telegraph.glintKinds[kind] == true
 end
@@ -184,7 +184,7 @@ end
 --- Opacity of the ground decal `elapsed` seconds into a wind-up of `windUp` seconds at a given
 --- accessibility intensity: ramps in over the fade-in fraction, holds, and is gone at the strike
 --- (`ends`, TelegraphShapes.timing; the wind-up's end without it). From `glintFrom` to `glintUntil`
---- it glints: steady at fx.luau telegraph.glintDecalAlpha (D-CP1).
+--- it glints: steady at fx.luau telegraph.glintDecalAlpha (D-316).
 function TelegraphShapes.decalAlpha(
 	elapsed: number,
 	windUp: number,
@@ -211,7 +211,7 @@ end
 --- Transparency of the weapon Highlight fill at `elapsed` into the wind-up: 1 (invisible) before
 --- and after (`ends`, the wind-up's end without it), ramping to the fill transparency, with a soft
 --- pulse near the strike, and from `glintFrom` to `glintUntil` (the end without it) the glint:
---- steady at ai.luau telegraph.glintFillTransparency (F7, D-CP1).
+--- steady at ai.luau telegraph.glintFillTransparency (F7, D-316).
 function TelegraphShapes.fillTransparency(
 	elapsed: number,
 	windUp: number,
@@ -288,7 +288,7 @@ function TelegraphShapes.isOver(elapsed: number, ends: number): boolean
 end
 
 --- The palette token for a telegraph kind's fill and decal; while it glints (`glinting`), the
---- glint's own (fx.luau telegraph.glintToken, D-CP1).
+--- glint's own (fx.luau telegraph.glintToken, D-316).
 function TelegraphShapes.token(kind: string, glinting: boolean?): string
 	if glinting then
 		return Fx.telegraph.glintToken

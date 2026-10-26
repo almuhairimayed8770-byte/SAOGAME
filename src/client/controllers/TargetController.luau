@@ -10,11 +10,18 @@
 	camera frames both fighters and the outline manager marks the target. Ranking lives in
 	TargetRanking (tested).
 
-	A death ends the lock at once (the outline, the server's lock, targetChanged and the body's
-	turn), but not the shot (F4): the camera holds the lock's framing through the kill's hit-stop
-	and the death freeze (CameraController.holdLock) and lets go as the body shatters, so the freeze
-	reads as a still picture, never a pull-back to the free camera. Every other end (the key, a
-	target out of range or gone, a respawn) lets the shot go at once.
+	A death ends the lock (the outline, the server's lock, targetChanged and the body's turn), but
+	not the shot (F4): the camera holds the lock's framing through the kill's hit-stop and the death
+	freeze (CameraController.holdLock) and lets go as the body shatters, so the freeze reads as a
+	still picture, never a pull-back to the free camera. Every other end (the key, a target out of
+	range or gone, a respawn) lets the shot go at once.
+
+	The target's death ends the lock when this client shows it (D-323), not when its State turns
+	Dead: the State lands with the server's word, which waits for the blade's strike key (D-272),
+	so the death freeze can start a few frames later. The shown kill is the kill's HitConfirmed as
+	Replication plays it (Replication.hit, killed), which plays the held death just before it. A
+	death with no such word (no hit killed it) lets the lock go combat.contact.wordWaitSeconds after
+	the State, the longest a held death waits. The local character's own death is never held.
 
 	Every lock change goes to the server as a TargetRequest through TrailingSend: never faster than
 	the remote's rate limit, and the last change always arrives, so mashing the key cannot leave the
@@ -23,6 +30,12 @@
 	lockOn(entityId) locks a named enemy through the same path as the key (a dev helper, a tutorial
 	beat); the body then turns to face the lock (CharacterController, D-112). assistCandidates lists
 	the enemies the soft assist may aim a swing at when nothing is locked (AimLogic.assistPick).
+
+	A dev capture's staged take (D-290, D-328): while stageTarget names the enemy a take stages, the
+	key acts on it alone, by the rule the take's own lock presses keep (CaptureLogic.lockPress): it
+	locks it when the lock is off or on another enemy and lets it go when the lock is on it, never
+	stepping down the ranked list to a field enemy nearer than the staged one. Only a capture place
+	(workspace DevCapture) takes a staged target; stageTarget(nil) gives the key its cycle back.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -34,18 +47,21 @@ local Client = script.Parent.Parent
 
 local CameraData = require(Shared.data.camera)
 local Combat = require(Shared.data.combat)
+local Dev = require(Shared.data.dev)
 local Moments = require(Shared.data.moments)
 local Net = require(Shared.net.Net)
 local TrailingSend = require(Shared.net.TrailingSend)
 local Signal = require(Shared.util.Signal)
 
 local EntityTracker = require(script.Parent.EntityTracker)
+local Replication = require(script.Parent.Replication)
 local TargetRanking = require(script.Parent.TargetRanking)
 local AimLogic = require(script.Parent.AimLogic)
 local InputController = require(script.Parent.InputController)
 local Siblings = require(script.Parent.Siblings)
 local CameraController = require(Client.camera.CameraController)
 local DrawnBody = require(Client.choreo.DrawnBody)
+local CaptureLogic = require(Client.dev.CaptureLogic)
 
 local OutlineManager = Siblings.load(Client, "fx.OutlineManager")
 
@@ -59,6 +75,11 @@ local sender: TrailingSend.TrailingSend? = nil -- TargetRequest, paced to its ra
 local started = false
 -- The local record's id the lock belongs to (EntityTracker's local id when last told).
 local ownerId: number? = nil
+-- When (os.clock) the locked target's State turned Dead, while this client has yet to show the
+-- death (D-323); nil otherwise.
+local dyingSince: number? = nil
+-- The enemy a dev capture's staged take stages (D-290, D-328), or nil.
+local stagedId: number? = nil
 
 local function toTable(v: Vector3): { number }
 	return { v.X, v.Y, v.Z }
@@ -150,6 +171,7 @@ local function setTarget(record: any, death: boolean?)
 	if record == target then
 		return
 	end
+	dyingSince = nil
 	if target ~= nil then
 		OutlineManager.setImportance(target.model, "Normal")
 	end
@@ -169,9 +191,17 @@ local function setTarget(record: any, death: boolean?)
 end
 
 --- The lock key: best candidate, then the next one down, then unlock. Does nothing while the
---- local character is dead.
+--- local character is dead. In a staged capture take it acts on the staged enemy alone (D-328).
 function TargetController.toggle()
 	if localDead() then
+		return
+	end
+	local how = CaptureLogic.lockPress(stagedId, if target ~= nil then target.id else nil)
+	if how == "Lock" then
+		TargetController.lockOn(stagedId)
+		return
+	elseif how == "Release" then
+		setTarget(nil)
 		return
 	end
 	local ranked = TargetRanking.rank(TargetController.candidates(), rankingParams())
@@ -215,6 +245,39 @@ function TargetController.current(): any
 	return target
 end
 
+--- A dev capture's staged take (D-290, D-328): while `entityId` names the enemy the take stages,
+--- the lock key acts on it alone (CaptureLogic.lockPress); nil, at the take's end, gives the key its
+--- cycle back. Outside a capture place (workspace DevCapture) nothing is staged.
+function TargetController.stageTarget(entityId: number?)
+	if entityId ~= nil and workspace:GetAttribute(Dev.attributes.capture) ~= true then
+		return
+	end
+	stagedId = entityId
+end
+
+-- The locked target's State turned Dead: the lock waits for this client to show the death
+-- (D-323), at most combat.contact.wordWaitSeconds (the longest a held death waits, D-267).
+local function dying(): boolean
+	local since = dyingSince
+	if since == nil then
+		dyingSince = os.clock()
+		return true
+	end
+	if os.clock() - since < Combat.contact.wordWaitSeconds then
+		return true
+	end
+	setTarget(nil, true)
+	return false
+end
+
+-- The client shows a kill (Replication.hit, after the held death played): the locked target's
+-- death ends the lock now and the shot holds from this frame (D-323).
+local function onShownHit(payload: any)
+	if target ~= nil and typeof(payload) == "table" and payload.killed == true and payload.targetId == target.id then
+		setTarget(nil, true)
+	end
+end
+
 local function check()
 	if target == nil then
 		return
@@ -224,6 +287,9 @@ local function check()
 	local distance = if origin ~= nil and position ~= nil then (position - origin).Magnitude else nil
 	local live = EntityTracker.get(target.id)
 	local state = if live == target then target.state else nil
+	if state == "Dead" and dying() then
+		return
+	end
 	if TargetRanking.shouldClear(state, distance, CameraData.lock.breakDistance) then
 		setTarget(nil, state == "Dead")
 	end
@@ -253,15 +319,18 @@ function TargetController.start()
 		end
 	end)
 	-- The target's death, and the local character's: the lock ends with either, and the shot
-	-- holds until the shatter (F4).
+	-- holds until the shatter (F4). The target's waits for this client to show it (D-323).
 	EntityTracker.changed:Connect(function(record: any, attribute: string, value: any)
 		if attribute ~= "State" or value ~= "Dead" then
 			return
 		end
-		if record == target or EntityTracker.isLocal(record.id) then
+		if EntityTracker.isLocal(record.id) then
 			setTarget(nil, true)
+		elseif record == target then
+			dying()
 		end
 	end)
+	Replication.hit:Connect(onShownHit)
 	-- A respawn gives the player a new server record, and it starts with no lock. The old
 	-- character's lock ends with it, whether its rig goes first (old id, nil, new id) or the new
 	-- record arrives first (old id straight to the new one). A lock the client holds when the

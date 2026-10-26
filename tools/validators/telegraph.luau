@@ -1,6 +1,6 @@
 --!strict
 --[[
-	Validates the parry glint in src/shared/data/fx.luau `telegraph` (D-CP1, D-CP2, D-289) against
+	Validates the parry glint in src/shared/data/fx.luau `telegraph` (D-316, D-317, D-289) against
 	the blows it glints on:
 	- glintFrames is a whole number of at least 1 and glintAimFrames is 0 or more;
 	- glintToken is a palette token; glintKinds holds only kinds the tells have (`sounds`), each

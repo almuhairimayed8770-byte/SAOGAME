@@ -20,6 +20,16 @@
 	release launches on a normal hold's timing. A hold the cancel time ran out on during a hitch is
 	left to the cancel that comes in the same frame.
 
+	A hold a shown blow dooms (D-326): Replication shows an enemy's blow on the local fighter on its
+	strike frame by playing a Flinch on the rig (D-258), and the server's word, a Stagger that ends
+	the hold, comes a latency later. While such a flinch plays, the held clip does not go on to its
+	hold pose: it freezes where it stands short of its ActivationHold, so Replication's light,
+	chime, FOV kick and riser (routeOneShot) never start for an Art the word is about to take away.
+	The word clears the hold unlit. A blow Replication takes back (no word in confirmSeconds, or a
+	guard or parry in it) stops the flinch, and the next rig step moves the clip on to its hold pose
+	with its ActivationHold firing then. A release while it waits launches from where the clip
+	stands (ActionLogic.syncPlan reads that clip time).
+
 	The rig's step (D-139): the controller steps the local rig itself (Choreo.stepLocal) between
 	feeding Locomotion and reading the root delta, so the body moves by this frame's root motion.
 	Its render step runs at choreo.luau renderOrder.character: after Choreo's rigs and before
@@ -132,7 +142,14 @@ type Hold = {
 	pressedAt: number,
 	frozenClipTime: number?,
 	token: number,
+	-- Frozen short of its hold pose while a shown blow waits for its word (D-326): the
+	-- ActivationHold has not fired.
+	unlit: boolean,
 }
+
+-- The flinches Replication plays on the local fighter for a blow shown before the server's word
+-- (D-258: "Flinch" and the side it comes from).
+local STRUCK_FLINCHES = { "FlinchFront", "FlinchBack", "FlinchLeft", "FlinchRight" }
 
 type Predicted = {
 	action: ActionLogic.Action,
@@ -180,7 +197,7 @@ local assistTargetId: number? = nil
 local standOff: ContactPredictor.StandOff? = nil
 local standOffHandle: any = nil
 local standOffShown = 0
--- How much of the keep-out's aside (D-CH4) the root already shows; planStandOff starts it at 0.
+-- How much of the keep-out's aside (D-315) the root already shows; planStandOff starts it at 0.
 local standOffSideShown = 0
 local STAND_OFF_EASING: string = Combat.contact.standOff.easing
 local lastPredictAt: number? = nil
@@ -400,15 +417,15 @@ local function aimedTarget(): Model?
 	return record.model
 end
 
--- The swing whose stand-off was last asked for: a basic swing asks on its first frame (D-CH3).
+-- The swing whose stand-off was last asked for: a basic swing asks on its first frame (D-314).
 local standOffAsked: any = nil
 
 -- Plans the stand-off for a swing's clip `handle`, whose request faces `facing`: for a launched
 -- Art, the body steps away from the aimed enemy over the anticipation when the first cut's start
 -- pose would sit in its body (fix F1); for every swing, an Art's or a basic's (`basic`, no such
--- step), the keep-out (D-CH3) holds the body back as far as the clip's own motion would carry its
+-- step), the keep-out (D-314) holds the body back as far as the clip's own motion would carry its
 -- colliding parts into the enemy's blocker, so the engine never pushes it out through a freeze
--- (and aside off the face over a part the enemy holds, D-CH4). None of it goes into the world
+-- (and aside off the face over a part the enemy holds, D-315). None of it goes into the world
 -- behind or beside (the body's own world cast, D-235 amended). The root carries it in step().
 local function planStandOff(handle: any, facing: { number }, basic: boolean?)
 	standOff, standOffHandle, standOffShown, standOffSideShown = nil, nil, 0, 0
@@ -599,9 +616,11 @@ local function setTimeScale(scale: number)
 	end
 end
 
-local function stopClip(handle: any)
+-- Stops a clip with combat.luau locomotionBlendOut, or `blendOut` (a stance the server took away
+-- comes down over struckStanceBlendOut, D-340).
+local function stopClip(handle: any, blendOut: number?)
 	if animator ~= nil and handle ~= nil then
-		animator:stop(handle, Combat.locomotionBlendOut)
+		animator:stop(handle, blendOut or Combat.locomotionBlendOut)
 	end
 end
 
@@ -625,14 +644,14 @@ local predictDraw = CharacterController.predictDraw
 
 -- ------------------------------------------------------------------ Art hold / launch / cancel
 
-local function clearHold()
+local function clearHold(blendOut: number?)
 	if hold == nil then
 		return
 	end
 	local current = hold :: Hold
 	hold = nil
 	setTimeScale(captureScale)
-	stopClip(current.handle)
+	stopClip(current.handle, blendOut)
 	-- The wind-up contour ends with the hold, however it ended, and the blade light fades out
 	-- (issue 13): a hold that ends without a launch lets its glow go, never cuts it in a frame.
 	Impact.cancelActivation(character)
@@ -651,9 +670,47 @@ local function holdClipTime(current: Hold): number?
 	return ActionLogic.holdClipTime(handle.clip, HOLD_FALLBACK)
 end
 
+-- True while Replication shows an enemy's blow on the local fighter ahead of the server's word
+-- (D-258): its flinch plays on the rig and nothing took it back. A hold never outlives the
+-- fighter's own Stagger (the word clears it, onServerState), and the Stagger outlasts its flinch,
+-- so a flinch playing under a hold is such a blow's (D-326).
+local function struckShown(): boolean
+	if animator == nil or typeof(animator.isPlaying) ~= "function" then
+		return false
+	end
+	for _, name in STRUCK_FLINCHES do
+		local id = playerClip(name)
+		if id ~= nil and animator:isPlaying(id) then
+			return true
+		end
+	end
+	return false
+end
+
+-- A shown blow waits for its word (D-326): the stance freezes where the clip stands, short of its
+-- ActivationHold, so nothing of the activation starts for an Art the word may take away.
+local function waitUnlit(current: Hold)
+	current.frozenClipTime = current.handle.time
+	current.unlit = true
+	setTimeScale(0)
+end
+
+-- The blow a hold waited for was taken back (D-326): the clip moves on to its hold pose and stays
+-- frozen there, its ActivationHold firing on the way (Replication lights, chimes and kicks).
+local function lightHold(current: Hold)
+	current.unlit = false
+	local holdAt = holdClipTime(current)
+	if holdAt == nil or animator == nil then
+		return
+	end
+	current.frozenClipTime = holdAt
+	animator:seek(current.handle, holdAt)
+end
+
 --- Freezes the held Art clip at its activation hold (the glowing stance). A clip a render stall
 --- kept from getting there (the rig was not stepped since before it could) is moved on to its
---- hold pose first, its ActivationHold firing on the way as it would have (D-138).
+--- hold pose first, its ActivationHold firing on the way as it would have (D-138), unless a shown
+--- blow waits for its word: then it freezes where it stands, unlit (D-326).
 function CharacterController.freezeHold()
 	if hold == nil or animator == nil then
 		return
@@ -663,6 +720,10 @@ function CharacterController.freezeHold()
 		return
 	end
 	local clipTime, seek = ActionLogic.freezeAt(current.pressedAt, now(), holdClipTime(current), rigSteppedAt)
+	if seek and struckShown() then
+		waitUnlit(current)
+		return
+	end
 	current.frozenClipTime = clipTime
 	setTimeScale(0)
 	if seek then
@@ -679,20 +740,33 @@ end
 -- lit. A hold old enough to be at its hold pose that nothing froze yet freezes there first when
 -- the step is a jump or would carry the clip past its activation hold (combat.luau
 -- activationHold after the hold pose; no steady frame rate of 10 fps or more does); one the
--- cancel time has run out on is left to the cancel, which comes in the same frame (D-138). Then
+-- cancel time has run out on is left to the cancel, which comes in the same frame (D-138). While
+-- a shown blow waits for its word, a step that would reach the hold pose freezes the clip short of
+-- it, unlit; the step after the blow is taken back moves it on to its hold pose (D-326). Then
 -- the step is remembered, so a freeze can tell a rig that was not stepped from one that was.
 local function beforeRigStep(dt: number)
 	local current = hold
 	if current ~= nil and current.frozenClipTime == nil then
 		local holdAt = holdClipTime(current)
 		local age = now() - current.pressedAt
-		if holdAt ~= nil and age >= holdAt and age < Combat.activationCancelTime then
+		if holdAt ~= nil and age < Combat.activationCancelTime then
 			-- Where the step would leave the clip (an Art plays at speed 1, ActionLogic.freezeAt).
 			local reached = current.handle.time + dt * appliedScale
-			if dt > ChoreoData.stall.jumpSeconds or reached > holdAt + Combat.activationHold then
+			if reached >= holdAt and struckShown() then
+				waitUnlit(current)
+			elseif
+				age >= holdAt and (dt > ChoreoData.stall.jumpSeconds or reached > holdAt + Combat.activationHold)
+			then
 				CharacterController.freezeHold()
 			end
 		end
+	elseif
+		current ~= nil
+		and current.unlit
+		and now() - current.pressedAt < Combat.activationCancelTime
+		and not struckShown()
+	then
+		lightHold(current)
 	end
 	rigSteppedAt = now()
 	rigJumped = dt > ChoreoData.stall.jumpSeconds
@@ -720,6 +794,7 @@ function CharacterController.beginArt(slot: number)
 		pressedAt = now(),
 		frozenClipTime = nil,
 		token = holdToken,
+		unlit = false,
 	}
 	setState("Holding")
 	predictDraw()
@@ -996,8 +1071,8 @@ end
 -- it, an early end): the clip is let go, its blade light fades now over the cancel fade (D-161)
 -- and the wind-up contour ends (F5). The clip's fade crosses no tell, chime, trail or smear
 -- (Replication.routeClipEvent starts nothing on a clip taken away).
-local function takeArtAway(current: Predicted)
-	stopClip(current.handle)
+local function takeArtAway(current: Predicted, blendOut: number?)
+	stopClip(current.handle, blendOut)
 	Impact.cancelActivation(character)
 	if character ~= nil then
 		Trails.activationLight(character, false, trailToken(), true)
@@ -1032,8 +1107,12 @@ local function onServerState(serverState: string)
 	if verb == "None" then
 		return
 	end
+	-- A stance the server takes away (a hit, a guard break, death) comes down over
+	-- struckStanceBlendOut, inside the stagger, so it never reads as a cut of the fighter being hit
+	-- (D-340); the server's own end of an Art keeps locomotionBlendOut.
+	local taken = if verb == "EndAction" then nil else Combat.struckStanceBlendOut
 	if hold ~= nil then
-		clearHold()
+		clearHold(taken)
 	end
 	if verb == "EndAction" then
 		local current = predicted
@@ -1049,7 +1128,7 @@ local function onServerState(serverState: string)
 	if predicted ~= nil then
 		local current = predicted :: Predicted
 		if beforeFirstWindow(current) then
-			takeArtAway(current)
+			takeArtAway(current, taken)
 		else
 			stopClip(current.handle)
 		end

@@ -35,6 +35,8 @@ type Fixture = {
 	frames: (count: number) -> (),
 	-- One frame `dt` seconds long (a 30 fps frame, say).
 	frameOf: (dt: number) -> (),
+	-- A captured mouse moved `dx`, `dy` pixels (UserInputService.InputChanged).
+	look: (dx: number, dy: number) -> (),
 }
 
 local function part(name: string, position: Vector3, size: Vector3, parent: Instance): BasePart
@@ -107,6 +109,12 @@ local function load(): Fixture
 	local signal = {
 		Connect = function() end,
 	}
+	local inputHandlers: { (input: any, processed: boolean) -> () } = {}
+	local inputChanged = {
+		Connect = function(_self: any, fn: (input: any, processed: boolean) -> ())
+			table.insert(inputHandlers, fn)
+		end,
+	}
 	local world = Instance.new("Folder")
 	world.Name = "Workspace"
 	local subject = character("Hero", ROOT, world)
@@ -132,7 +140,7 @@ local function load(): Fixture
 			MouseEnabled = true,
 			TouchEnabled = false,
 			MouseBehavior = nil,
-			InputChanged = signal,
+			InputChanged = inputChanged,
 			LastInputTypeChanged = signal,
 		},
 		Players = {
@@ -206,6 +214,16 @@ local function load(): Fixture
 			state.clock += dt
 			for _, step in state.steps do
 				step.fn(dt)
+			end
+		end,
+		look = function(dx: number, dy: number)
+			local input = {
+				UserInputType = Enum.UserInputType.MouseMovement,
+				Delta = Vector3.new(dx, dy, 0),
+				Position = Vector3.zero,
+			}
+			for _, fn in inputHandlers do
+				fn(input, false)
 			end
 		end,
 	}
@@ -818,6 +836,41 @@ describe("CameraController framing: whips (issues 12 and 22)", function()
 		expect(last).toBe(1)
 	end)
 
+	it("changes shoulder for walls at most once a dwell, running past pillars on alternate sides (D-325)", function()
+		local fixture = load()
+		fixture.frames(60)
+		-- Pillars alternating right and left of the run, 2.5 studs out and 10 apart along it.
+		for i = 1, 60 do
+			local side = if i % 2 == 0 then 1 else -1
+			part("Pillar", ROOT + Vector3.new(side * 2.5, 0, -i * 10 + 4), Vector3.new(1, 12, 1), fixture.world)
+		end
+		local target = character("Kobold", ROOT + Vector3.new(0, 0, -6), fixture.world)
+		local targetRoot = target.PrimaryPart :: BasePart
+		fixture.controller.setLockTarget(target)
+		fixture.frames(120)
+		-- Both run on at 16 studs a second for 5 s.
+		local changes: { number } = {}
+		local last = 0
+		for frame = 1, 300 do
+			fixture.root.Position += Vector3.new(0, 0, -16 / 60)
+			targetRoot.Position += Vector3.new(0, 0, -16 / 60)
+			fixture.frames(1)
+			local x = (fixture.camera.CFrame.Position :: Vector3).X - fixture.root.Position.X
+			local side = if x > 0.05 then 1 elseif x < -0.05 then -1 else 0
+			if side ~= 0 and last ~= 0 and side ~= last then
+				table.insert(changes, frame)
+			end
+			last = if side ~= 0 then side else last
+		end
+		local dwellFrames = CameraData.lock.wallSwapDwellSeconds * 60
+		-- The pillars still swing it over (it is not stuck on one side), but never twice in a dwell.
+		expect(#changes).toBeGreaterThan(0)
+		expect(#changes).toBeLessThanOrEqual(math.ceil(300 / dwellFrames))
+		for index = 2, #changes do
+			expect(changes[index] - changes[index - 1]).toBeGreaterThanOrEqual(dwellFrames - 1)
+		end
+	end)
+
 	it("never whips while two fighters circle toe to toe", function()
 		local fixture = load()
 		fixture.frames(60)
@@ -917,6 +970,103 @@ describe("CameraController framing: the death freeze (F4)", function()
 		expect(fixture.controller.lockLive()).toBe(false)
 		fixture.frames(60)
 		expect(fixture.controller.lockLive()).toBe(false)
+	end)
+end)
+
+-- A kill under a lock as the client shows it (PC item 274): the shot was still moving when the
+-- death froze it (the player lunged in, the target stepped aside), and the kill's shake and nudge
+-- came with the death. `after`: they come just after the hold starts instead.
+local function killInMotion(fixture: Fixture, after: boolean?): Model
+	fixture.frames(60)
+	local target = character("Kobold", ROOT + Vector3.new(0, 0, -6), fixture.world)
+	fixture.controller.setLockTarget(target)
+	fixture.frames(240)
+	local targetRoot = target.PrimaryPart :: BasePart
+	for _ = 1, 10 do
+		fixture.root.Position += Vector3.new(0, 0, -0.3)
+		targetRoot.Position += Vector3.new(0.15, 0, 0)
+		fixture.frames(1)
+	end
+	if not after then
+		fixture.controller.shake("Kill")
+		fixture.controller.nudge(targetRoot.Position, CameraData.nudge.studs)
+	end
+	fixture.controller.holdLock(0.5)
+	if after then
+		fixture.controller.shake("Kill")
+		fixture.controller.nudge(targetRoot.Position, CameraData.nudge.studs)
+	end
+	return target
+end
+
+-- Frames of the still shot after its first: the freeze and the shards' rise, less the first frame
+-- and the frame the hold lets go on.
+local STILL_AFTER_FIRST = math.floor((0.5 + CameraData.lock.riseHoldSeconds) / F + 1e-6) - 2
+
+describe("CameraController framing: the death's still shot (D-323, D-324)", function()
+	for _, after in { false, true } do
+		it(
+			("holds the frame from the freeze's first frame though the shot was moving, with the kill's shake and nudge %s"):format(
+				if after then "just after it" else "with it"
+			),
+			function()
+				local fixture = load()
+				killInMotion(fixture, after)
+				local camera = fixture.camera
+				fixture.frames(1) -- the freeze's first frame
+				local spot: Vector3 = camera.CFrame.Position
+				local look: Vector3 = camera.CFrame.LookVector
+				local worst, turned = 0, 0
+				for _ = 1, STILL_AFTER_FIRST do
+					fixture.frames(1)
+					worst = math.max(worst, (camera.CFrame.Position - spot).Magnitude)
+					turned = math.max(turned, angleBetween(camera.CFrame.LookVector, look))
+				end
+				expect(worst).toBeLessThan(1e-4)
+				expect(turned).toBeLessThan(1e-3)
+			end
+		)
+	end
+
+	it("carries the still frame with the body when it moves during the hold, without turning", function()
+		local fixture = load()
+		killInMotion(fixture)
+		local camera = fixture.camera
+		fixture.frames(3)
+		local spot: Vector3 = camera.CFrame.Position
+		local look: Vector3 = camera.CFrame.LookVector
+		fixture.root.Position += Vector3.new(1, 0, 0)
+		fixture.frames(1)
+		expect((camera.CFrame.Position - (spot + Vector3.new(1, 0, 0))).Magnitude).toBeLessThan(1e-4)
+		expect(angleBetween(camera.CFrame.LookVector, look)).toBeLessThan(1e-3)
+	end)
+
+	it("lets a deliberate look go at once and turn the view; a twitch of the mouse does not", function()
+		local fixture = load()
+		killInMotion(fixture)
+		local camera = fixture.camera
+		fixture.frames(5)
+		local look: Vector3 = camera.CFrame.LookVector
+		local pixels = CameraData.lock.lookBreakDegrees / CameraData.input.mouseDegreesPerPixel
+		-- Under the threshold, a little at a time: the shot holds.
+		fixture.look(pixels * 0.4, 0)
+		fixture.frames(1)
+		fixture.look(pixels * 0.4, 0)
+		fixture.frames(3)
+		expect(angleBetween(camera.CFrame.LookVector, look)).toBeLessThan(1e-3)
+		-- Past it: the next frame turns, and the view eases (never cuts) to the free camera.
+		fixture.look(pixels, 0)
+		local before: Vector3 = camera.CFrame.LookVector
+		fixture.frames(1)
+		expect(angleBetween(camera.CFrame.LookVector, before)).toBeGreaterThan(0.05)
+		local turn, slide = watch(fixture, 60)
+		expect(turn).toBeLessThanOrEqual(8)
+		expect(slide).toBeLessThanOrEqual(0.05)
+		-- The look keeps working after it: the free camera follows the mouse.
+		local settled: Vector3 = camera.CFrame.LookVector
+		fixture.look(pixels, 0)
+		fixture.frames(20)
+		expect(angleBetween(camera.CFrame.LookVector, settled)).toBeGreaterThan(CameraData.lock.lookBreakDegrees * 0.5)
 	end)
 end)
 

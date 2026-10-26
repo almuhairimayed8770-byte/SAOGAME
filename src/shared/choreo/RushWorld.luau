@@ -173,9 +173,9 @@ end
 --- A body's corners at rest in its root's space: every BasePart's eight, placed by the rig's joints
 --- at rest (Pose.solve with no offsets) so an animated client and the server read the same body,
 --- or where they stand when no joint places them (a model without joints). Its blocker faces (the
---- blockers group, D-198, D-CH4) are not its body: they stand over its idle and what it holds, and
+--- blockers group, D-198, D-315) are not its body: they stand over its idle and what it holds, and
 --- the server measures the rig before it has them (EnemyService.spawn), so the client's replicated
---- model, faces and all, reads the same body (D-CI5). Empty without a root.
+--- model, faces and all, reads the same body (D-322). Empty without a root.
 function RushWorld.profileOf(model: Model): { Vector3 }
 	local root = model.PrimaryPart
 	local corners: { Vector3 } = {}

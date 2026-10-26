@@ -80,6 +80,7 @@ export type Walk = {
 export type Counter = {
 	shotId: string,
 	frames: number,
+	rendered: number?, -- RenderStepped frames since the take started (D-336)
 	elapsed: number,
 	target: number,
 	scale: number,
@@ -88,11 +89,16 @@ export type Counter = {
 	markKey: string?,
 }
 
---- The counter's line: the shot, the frame, the time against the target length and the scale.
+--- The counter's line: the shot, the frame (and the rendered frames, when given: r), the time
+--- against the target length and the scale.
 function CaptureLogic.counterText(counter: Counter): string
-	local text = ("%s  f %d  %.1f / %g s  %gx"):format(
+	local frame = ("f %d"):format(counter.frames)
+	if counter.rendered ~= nil then
+		frame ..= ("  r %d"):format(counter.rendered)
+	end
+	local text = ("%s  %s  %.1f / %g s  %gx"):format(
 		counter.shotId,
-		counter.frames,
+		frame,
 		counter.elapsed,
 		counter.target,
 		counter.scale
@@ -104,6 +110,12 @@ function CaptureLogic.counterText(counter: Counter): string
 		text ..= ("  short of the target: %s again stops it unmarked"):format(counter.markKey or "K")
 	end
 	return text
+end
+
+--- The corner square's color token on the `rendered`th rendered frame of a take (0 on its first):
+--- the two tokens in turn, so it swaps every rendered frame (D-336).
+function CaptureLogic.tickToken(rendered: number, tokens: { string }): string
+	return tokens[rendered % 2 + 1]
 end
 
 --- What K does `elapsed` seconds into a take of target length `target`, at clock `now` with a stop
@@ -209,7 +221,7 @@ end
 --- Telegraphs.glintLead, D-289) sets a Guard that much earlier still, as the glint comes, so it
 --- reaches the server inside the parry window as a press with no latency would (the server judges
 --- that window on its own clock); never before `elapsed`. Any other press stays on the clip as
---- drawn (a dodge and its chain meet the body this client draws, D-CI2). A press that would come
+--- drawn (a dodge and its chain meet the body this client draws, D-319). A press that would come
 --- past the entry's `to` is not set (CaptureLogic.inside). True when it set the press.
 function CaptureLogic.hear(
 	reaction: Reaction,
@@ -241,7 +253,7 @@ function CaptureLogic.hear(
 end
 
 --- Whether a reaction's key, or a step of its chain, may go down at take time `at`: at most its
---- entry's `to` (no limit without one), so what it launches lands before the take's cut (D-CI3).
+--- entry's `to` (no limit without one), so what it launches lands before the take's cut (D-320).
 function CaptureLogic.inside(entry: PerformEntry, at: number): boolean
 	local to = entry.to
 	return to == nil or at <= to + 1e-9

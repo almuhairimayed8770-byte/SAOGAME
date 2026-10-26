@@ -68,7 +68,7 @@ end)
 -- A placeholder rig built the way RigBuilder does it (Motor6Ds with C0/C1 from rigs.luau)
 -- ------------------------------------------------------------------------------------------
 
-local function cframeOf(t)
+local function cframeOf(t: { pos: { number }, rot: { number } }): CFrame
 	return CFrame.new(t.pos[1], t.pos[2], t.pos[3])
 		* CFrame.fromEulerAnglesXYZ(math.rad(t.rot[1]), math.rad(t.rot[2]), math.rad(t.rot[3]))
 end
@@ -365,7 +365,7 @@ end)
 -- A target: a Model with a root Part at `position`. The caster treats it as a sphere of `size`
 -- studs (so a spherecast of radius r touches it within r + size); its Part is the cube around
 -- that sphere, which is what the overlap test measures.
-local function makeTarget(id, position, size)
+local function makeTarget(id: number, position: Vector3, size: number)
 	local model = Instance.new("Model")
 	model.Name = "Target" .. tostring(id)
 	local root = Instance.new("Part")
@@ -378,7 +378,7 @@ local function makeTarget(id, position, size)
 end
 
 -- Something that is not a fighter (a pillar, a slab of floor), described the same way.
-local function makeObstacle(position, size)
+local function makeObstacle(position: Vector3, size: number)
 	local part = Instance.new("Part")
 	part.Name = "Pillar"
 	part.Anchored = true
@@ -402,11 +402,11 @@ local function segmentDistance(point: Vector3, origin: Vector3, direction: Vecto
 	return (point - (origin + direction * t)).Magnitude, t
 end
 
-local function queryable(part)
+local function queryable(part: BasePart): boolean
 	return part.CanQuery or part.CanCollide
 end
 
-local function isUnder(instance, exclude)
+local function isUnder(instance: Instance, exclude: { Instance }): boolean
 	for _, excluded in exclude do
 		if instance == excluded or instance:IsDescendantOf(excluded) then
 			return true
@@ -416,7 +416,7 @@ local function isUnder(instance, exclude)
 end
 
 -- Half size of a part's axis-aligned bounds.
-local function boundsHalf(part)
+local function boundsHalf(part: BasePart)
 	local cframe = part.CFrame
 	local half = part.Size / 2
 	local right, up, back = cframe.RightVector, cframe.UpVector, cframe.LookVector
@@ -428,7 +428,7 @@ local function boundsHalf(part)
 end
 
 -- Like workspace:GetPartBoundsInRadius over `parts`.
-local function boundsQuery(parts, center, radius, exclude)
+local function boundsQuery(parts: { BasePart }, center: Vector3, radius: number, exclude: { Instance })
 	local found = {}
 	for _, part in parts do
 		if queryable(part) and not isUnder(part, exclude) then
@@ -449,15 +449,15 @@ end
 
 -- A fake engine over targets and obstacles; `extraParts` are more parts the broad phase can see
 -- (a swordsman's own body). Counts every cast and every broad-phase query.
-local function fakeWorld(targets, obstacles, extraParts)
-	local world = { targets = targets, obstacles = obstacles or {}, casts = 0, tinyCasts = 0, overlaps = 0 }
+local function fakeWorld(targets: { any }, obstacles: { any }?, extraParts: { any }?)
+	local world: any = { targets = targets, obstacles = obstacles or {}, casts = 0, tinyCasts = 0, overlaps = 0 }
 	function world.cast(origin, radius, direction, exclude)
 		world.casts += 1
 		if direction.Magnitude < 1e-3 then
 			world.tinyCasts += 1
 		end
 		local best, bestAlong = nil, math.huge
-		local function consider(instance, position, size)
+		local function consider(instance: Instance, position: Vector3, size: number)
 			if (position - origin).Magnitude <= radius + size then
 				return -- the sphere starts inside it: the engine never reports it
 			end
@@ -489,7 +489,7 @@ local function fakeWorld(targets, obstacles, extraParts)
 		for _, obstacle in world.obstacles do
 			table.insert(parts, obstacle.part)
 		end
-		for _, part in extraParts or {} do
+		for _, part in (extraParts or {}) :: { any } do
 			table.insert(parts, part)
 		end
 		return boundsQuery(parts, center, radius, exclude)
@@ -502,9 +502,9 @@ local function fakeWorld(targets, obstacles, extraParts)
 		end
 		return nil, nil
 	end
-	function world.options(extra)
+	function world.options(extra: { [string]: any }?)
 		local options = { exclude = {}, resolve = world.resolve, cast = world.cast, overlap = world.overlap }
-		for key, value in extra or {} do
+		for key, value in (extra or {}) :: { [string]: any } do
 			options[key] = value
 		end
 		return options
@@ -518,13 +518,13 @@ local function noOverlap()
 end
 
 -- A blade sample with its guard at `start` and its tip at `finish`.
-local function bladeSample(time, start, finish)
+local function bladeSample(time: number, start: Vector3, finish: Vector3)
 	return { time = time, start = start, finish = finish, mid = start:Lerp(finish, 0.5) }
 end
 
 describe("HitSweep.segmentBoxDistance", function()
 	-- Distance from a point to a box, the slow way.
-	local function pointBoxDistance(point, cframe, size)
+	local function pointBoxDistance(point: Vector3, cframe: CFrame, size: Vector3)
 		local localPoint = cframe:PointToObjectSpace(point)
 		local half = size / 2
 		return Vector3.new(
@@ -1194,8 +1194,8 @@ local function largestStep(path): number
 end
 
 -- A BladeSolver that moves the blade's ends in straight lines between the samples of `path`.
-local function linearSolver(path)
-	return function(time: number, rootCFrame: CFrame?)
+local function linearSolver(path: { any })
+	return function(time: number, rootCFrame: CFrame?): any
 		for index = 2, #path do
 			local a, b = path[index - 1], path[index]
 			if time >= a.time and time <= b.time then
@@ -1436,7 +1436,7 @@ describe("HitSweep.followArc", function()
 	it("keeps the sub-samples it placed when the solver gives up part way", function()
 		local snap = snapSolver()
 		local frames = snap.frames()
-		local path, added = HitSweep.followArc(frames, function(time, rootCFrame)
+		local path, added = HitSweep.followArc(frames, function(time, rootCFrame): any
 			if snap.calls >= 2 then
 				return nil
 			end
@@ -1450,7 +1450,7 @@ describe("HitSweep.followArc", function()
 	it("a sub-sample next to a sample that kept no root is solved from its other neighbour's", function()
 		local rooted = snapSolver().at(0, SHOULDER)
 		local rootless = bladeSample(1 / 60, Vector3.new(4, 3, -2), Vector3.new(4, 3, -6))
-		for _, pair in { { rooted, rootless }, { rootless, rooted } } do
+		for _, pair in { { rooted, rootless }, { rootless, rooted } } :: { { any } } do
 			local seen = {}
 			HitSweep.followArc(pair, function(_time, rootCFrame)
 				table.insert(seen, rootCFrame or false)
@@ -1513,7 +1513,7 @@ describe("HitSweep.castBladePath: steps the arc's cap left long", function()
 			end
 		end
 		expect(worst).toBeGreaterThan(2 * Combat.hitSphereRadius) -- the premise: the overlaps leave a gap
-		local function degreesOf(sample): number
+		local function degreesOf(sample: any): number
 			local out = sample.finish - SHOULDER.Position
 			return math.deg(math.atan2(out.X, -out.Z))
 		end
@@ -1569,7 +1569,7 @@ end)
 describe("HitSweep.coneTargets", function()
 	local origin = Vector3.new(0, 0, 0)
 	local facing = Vector3.new(0, 0, -1)
-	local function candidate(id, x, z, radius)
+	local function candidate(id: number, x: number, z: number, radius: number?)
 		return { id = id, position = Vector3.new(x, 0, z), radius = radius }
 	end
 
@@ -1607,7 +1607,7 @@ end)
 describe("HitSweep.lineTargets", function()
 	local origin = Vector3.new(0, 0, 0)
 	local facing = Vector3.new(0, 0, -1)
-	local function candidate(id, x, z, radius)
+	local function candidate(id: number, x: number, z: number, radius: number?)
 		return { id = id, position = Vector3.new(x, 0, z), radius = radius }
 	end
 
