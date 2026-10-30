@@ -210,6 +210,8 @@ export type ClipEventKind =
 	| "PostMotionStart"
 	| "WeaponSwap"
 	| "CameraNudge"
+	| "WeaponDraw" -- the hand takes the sword from its sheath
+	| "WeaponSheathe" -- the sword goes back into its sheath
 
 export type ClipEvent = {
 	time: number,
@@ -229,6 +231,7 @@ export type ClipDef = {
 	rig: string, -- rig id from rigs.luau
 	duration: number, -- seconds
 	loop: boolean,
+	sheathed: boolean?, -- the sword starts this clip on its sheath (back mount), not in the hand
 	layer: ClipLayer,
 	keys: { ClipKey },
 	events: { ClipEvent },
@@ -245,7 +248,7 @@ export type ClipDef = {
 -- ---------------------------------------------------------------------------------------------
 
 export type RigJoint = {
-	name: string, -- Motor6D name, e.g. "RightShoulder"
+	name: string, -- joint name (a Motor6D or AnimationConstraint), e.g. "RightShoulder"
 	part0: string, -- parent part name
 	part1: string, -- child part name
 	c0: { pos: Vec3, rot: Vec3 }, -- rest pose
@@ -292,6 +295,9 @@ export type HitResult = {
 	attackerId: number,
 	targetId: number,
 	damage: number,
+	-- The HP the hit took off (FK5): its damage, or the HP that was left when it kills; 0 when it
+	-- was parried or found the target dead. The floating digit shows this.
+	hpRemoved: number,
 	crit: boolean,
 	gaugeDamage: number,
 	killed: boolean,
@@ -313,6 +319,183 @@ export type TelegraphShape = {
 	kind: "Line" | "Cone" | "Circle",
 	length: number,
 	width: number, -- line width or cone angle in degrees or circle radius
+}
+
+-- ---------------------------------------------------------------------------------------------
+-- Floor bosses (section 9; rows live in data/bosses.luau)
+-- ---------------------------------------------------------------------------------------------
+
+export type BossMechanicKind =
+	"Lockstep" -- two players must act within the window or the room punishes everyone
+	| "Summon" -- a guard pack or adds appear
+	| "Hazard" -- the room itself attacks (fire pools, flood, fog, darkness)
+	| "WeaponSwap" -- the boss changes weapon or body on this bar
+	| "Shield" -- a Mirror Shield or phase shield rule
+	| "Terrain" -- platforms, pillars, cover the party must use
+	| "Illusion" -- false copies of the boss
+
+export type BossMechanicDef = {
+	id: string,
+	name: string,
+	kind: BossMechanicKind,
+	description: string, -- one line for the bestiary and the designer
+	window: number?, -- seconds two players have for a Lockstep (defaults to Bosses.rules.lockstepWindow)
+	targets: number?, -- totems, chains, hearts... to strike together
+	interval: number?, -- seconds between repeats (summons, hazards)
+	failure: string?, -- what happens when the mechanic is not answered
+}
+
+export type BossSummonDef = { enemyId: string, count: number }
+
+export type BossPhaseDef = {
+	bar: number, -- the HP bar (1 = the first bar) this phase starts on
+	name: string,
+	summary: string, -- one line, the designer's intent
+	archetype: Archetype?, -- behavior module the phase borrows (a treant uproots into a Brute)
+	attacks: { EnemyAttackDef }, -- telegraphed enemy attacks available in this phase
+	arts: { string }?, -- player Art ids the boss executes with its own rig (Grolak's curved blade)
+	mechanics: { BossMechanicDef },
+	summons: { BossSummonDef }?, -- guard pack called when the phase starts
+	weapon: string?, -- weapon id drawn on this bar (WeaponSwap)
+	attackSpeed: number?, -- multiplier on telegraph and strike timing in this phase
+}
+
+export type BossDef = {
+	id: string, -- "Grolak"
+	name: string, -- "Grolak, Kobold Warlord"
+	floor: number,
+	tier: number,
+	skin: string, -- rig id / asset key
+	bars: number, -- 4 to 6 HP bars
+	hpPerBar: number, -- tier-1 base; total HP = bars * hpPerBar * tier.hp
+	attack: number,
+	defense: number,
+	guardGauge: number,
+	guardRegenPerSecond: number,
+	moveSpeed: number,
+	phases: { BossPhaseDef }, -- one entry per bar group, ascending by bar; the first starts on bar 1
+	guardPack: { BossSummonDef }, -- minions at the entrance
+	lockstep: BossMechanicDef, -- the signature two-player mechanic
+	enrage: { startSeconds: number, damagePerMinute: number },
+	mirrorShield: boolean, -- true for every boss (section 7); the Iron Bulwark Golem never drops it
+	lootTable: string,
+	lab: string, -- the Last Attack Bonus item id (weapons.luau or armor.luau)
+	shatter: ShatterKind,
+	xp: number, -- a level's worth to the raid at tier 1
+	chamber: string?, -- scene notes for the boss room
+}
+
+-- ---------------------------------------------------------------------------------------------
+-- Entity registry (server-side; ARCHITECTURE "Entities", section 6 / 16 / 17)
+-- ---------------------------------------------------------------------------------------------
+
+-- What PlaygroundService hands EntityService.registerPlayer (from playground.luau's loadout).
+export type Loadout = {
+	level: number,
+	str: number,
+	agi: number,
+	proficiency: { [WeaponCategory]: number },
+	weapon: string, -- weapon def id
+	armor: { [EquipSlot]: string }?, -- armor def ids by slot; defense is their flat sum
+	artSlots: { string }?,
+	hasShield: boolean?, -- widens the guard cone and raises the reduction (section 6)
+}
+
+-- The server's record of one fighter. EntityService owns every field; other services read
+-- through its API and change state through its functions, never by writing here.
+export type EntityRecord = {
+	id: number,
+	kind: EntityKind,
+	defId: string, -- enemy def id, or "Player"
+	name: string, -- DisplayName attribute
+	model: Model,
+	rig: string, -- rig id in rigs.luau
+	hp: number,
+	maxHp: number,
+	gauge: number,
+	maxGauge: number,
+	gaugeRegenPerSecond: number, -- fraction of maxGauge per second
+	defense: number,
+	attack: number, -- enemies: def attack; players: the equipped weapon's attack
+	stats: Stats,
+	state: EntityState,
+	stateTag: string?, -- "Basic" while the Art state is a basic-attack swing (cancelable)
+	stateUntil: number?, -- server time the state expires on its own
+	lockUntil: number, -- server time the body is free again (Art, post-motion, stagger, dodge)
+	guardHeld: boolean,
+	guardSince: number?, -- server receipt time of GuardRequest {held = true}; nil while the raise cannot parry
+	guardReleasedAt: number?, -- last release; a raise inside combat.parryRearmTime after it cannot parry
+	hasShield: boolean,
+	invulnerableUntil: number,
+	combatUntil: number, -- in combat while now < combatUntil
+	lastCombatAt: number?, -- last hit dealt or taken; HP regen waits on it
+	hpRegenHeld: boolean?, -- true while EnemyService holds the fighter (D-120): no HP regen at all
+	lastArtHitAt: number?, -- last Art hit taken; Guard Gauge regen waits on it
+	proficiency: { [WeaponCategory]: number },
+	weaponId: string?,
+	threat: { [number]: number }, -- attacker id -> accumulated threat
+	targetId: number?, -- lock-on target (TargetRequest)
+	player: Player?,
+	enemyDef: EnemyDef?,
+	shatter: ShatterKind,
+	level: number,
+	killedBy: number?,
+	diedAt: number?,
+	artSlots: { string }?, -- quick-slot Art ids copied from the loadout; nil (enemies, stand-ins, tests) skips the slot check
+}
+
+-- What CombatService hands EntityService.applyHit: the attack side of a hit, before defense.
+export type HitRequest = {
+	attackerId: number,
+	rawDamage: number, -- weaponAttack * multiplier * STR * crit (* Switch / Tempo), before defense
+	gaugeDamage: number,
+	crit: boolean,
+	parried: boolean,
+	guarded: boolean,
+	breakGuard: boolean?, -- GuardBreak telegraph: empties the gauge outright
+	isBasic: boolean?, -- basic attacks do not pause Guard Gauge regen
+	artId: string?,
+	hitIndex: number,
+	hitStop: HitStopTier,
+	position: Vec3,
+}
+
+-- EntityService.applyHit's result: a HitResult plus what the server needed to know afterwards.
+export type AppliedHit = HitResult & {
+	wasInBreak: boolean, -- the target was in Break when the hit landed (zero post-motion)
+	hpAfter: number,
+	gaugeAfter: number,
+	staggerDirection: ("Front" | "Back" | "Left" | "Right")?,
+}
+
+-- CombatService.enemyStrike's optional fifth argument: how a moving strike (a Charger's rush)
+-- resolves in stretches as its body sweeps the line (D-166). A call without it resolves the whole
+-- attack shape at once, as every strike did before.
+export type EnemyStrikeOptions = {
+	-- Line strikes: only this stretch of the line, in studs along it from the origin, counts.
+	span: { from: number, to: number }?,
+	-- Target ids this attack already resolved (hit, parried, guarded or dodged): skipped, and every
+	-- target this call reaches is added, so each is resolved once per attack.
+	resolved: { [number]: boolean }?,
+}
+
+-- Why a rush stopped early (the RushEnded remote, D-169).
+export type RushEndReason = "Jammed" | "Interrupted" | "Died" | "Stopped"
+
+-- Every reason the RushEnded remote carries (Remotes.RushEnded checks the same literals): an early
+-- stop (RushEndReason), a slam ("Wall", D-208), or an attack a sleep or a hold dropped before it
+-- landed or launched ("Dropped", D-254). A rush that ran its time ("Done") is never told.
+export type RushEndedReason = RushEndReason | "Wall" | "Dropped"
+
+-- The RushEnded remote's payload (Remotes.RushEnded): `contact` and `normal` come with a "Wall" only.
+export type RushEndedPayload = {
+	entityId: number,
+	launchedAt: number, -- the RushStarted serverTime it ends; for a "Dropped", its wind-up's end
+	serverTime: number,
+	distance: number, -- studs down the path where the server's body stands (0 for a "Dropped")
+	reason: RushEndedReason,
+	contact: Vec3?,
+	normal: Vec3?,
 }
 
 Types.VERSION = 1

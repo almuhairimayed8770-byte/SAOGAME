@@ -24,12 +24,22 @@
 				"Client": {
 					"$path": "../src/client"
 				}
+			},
+			"StarterCharacterScripts": {
+				"Animate": {
+					"$className": "LocalScript"
+				}
 			}
 		},
 		"Workspace": {
 			"$properties": {
 				"StreamingEnabled": false,
-				"FallenPartsDestroyHeight": -600
+				"FallenPartsDestroyHeight": -600,
+				"Attributes": {
+					"Attributes": {
+						"DevCapture": { "Bool": true }
+					}
+				}
 			},
 			"Playground": {
 				"$className": "Model",
@@ -69,6 +79,7 @@
 						},
 						"Material": "Slate",
 						"Color": [0.42, 0.4, 0.38],
+						"CastShadow": false,
 						"TopSurface": "Smooth",
 						"BottomSurface": "Smooth"
 					}
@@ -81,6 +92,7 @@
 						"Position": [0, 0.5, 0],
 						"Transparency": 1,
 						"CanCollide": false,
+						"CanQuery": false,
 						"Neutral": true,
 						"Duration": 0
 					}
@@ -140,13 +152,11 @@
 					"MoonAngularSize": 8,
 					"StarCount": 1500
 				}
-			},
-			"Clouds": {
-				"$className": "Clouds",
-				"$properties": {
-					"Cover": 0.55,
-					"Density": 0.3
-				}
+			}
+		},
+		"HttpService": {
+			"$properties": {
+				"HttpEnabled": true
 			}
 		},
 		"SoundService": {
