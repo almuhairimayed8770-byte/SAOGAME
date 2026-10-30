@@ -32,10 +32,10 @@
 	stroke's tail: the frame before shows the wind-up, which points back along the cut, and the
 	window opens between it and this frame. With no such clip (a flash, a rig no animator plays),
 	the sub-steps interpolate the two frames' poses and a stroke starts from the frame before. The
-	ribbon's ages stand
-	still while the rig's animator is in hit-stop. The chain is read again when the Weapon's joint
-	changes (WeaponMount moves the sword between the hand and the back), and that jump is never a
-	cut. A rig with no chain (a placeholder weapon) keeps the engine Trail.
+	ribbon's ages stand still while the rig is drawn held (Choreo heldShown, D-353: the frames the
+	screen shows its blade frozen, a frame behind the hold's flag). The chain is read again when the
+	Weapon's joint changes (WeaponMount moves the sword between the hand and the back), and that
+	jump is never a cut. A rig with no chain (a placeholder weapon) keeps the engine Trail.
 
 	`activationLight` turns the blade light on in the trail color and flashes the weapon white for
 	three rendered frames: a Highlight of the weapon part alone (fx.activationLight.flashName),
@@ -119,7 +119,7 @@ export type Deps = {
 	onRender: (fn: StepFn) -> () -> (), -- the pose readers' render step (FrameOrder); returns its leave
 	onWatch: (fn: StepFn) -> () -> (), -- Heartbeat (runs while nothing renders); returns its disconnect
 	clear: (trail: Trail) -> (), -- Trail:Clear(): drops every segment drawn so far
-	held: (model: Instance) -> boolean, -- the rig's animator is in hit-stop (the ribbon's ages hold)
+	held: (model: Instance) -> boolean, -- the rig is drawn held this frame (the ribbon's ages hold)
 	-- The rig's Choreo animator (its `mixer` plays the clip that lights the trail), nil for none.
 	animator: (model: Instance) -> any,
 }
@@ -235,10 +235,20 @@ local function choreoAnimator(model: Instance): any
 	return module.find(model)
 end
 
--- The rig's animator is in hit-stop (Choreo's isPaused): the ribbon's ages stand still.
+-- The rig's hold as this frame draws it (Choreo's heldShown, D-353): the ribbon's ages stand
+-- still on the frames that show the blade frozen, from the first still frame to the last, not on
+-- the frames the hold's flag is up (isPaused rises on the contact's step, a frame early). An
+-- animator that cannot say keeps isPaused.
 local function choreoHeld(model: Instance): boolean
 	local animator = choreoAnimator(model)
-	return animator ~= nil and animator:isPaused()
+	if animator == nil then
+		return false
+	end
+	local shown = (animator :: any).heldShown
+	if typeof(shown) == "function" then
+		return shown(animator) == true
+	end
+	return animator:isPaused()
 end
 
 local function defaults(overrides: Overrides?): Deps
@@ -386,8 +396,12 @@ local ribbonPool: { TrailRibbon.Ribbon } = {}
 local function acquireRibbon(entry: Entry): TrailRibbon.Ribbon
 	local ribbon = entry.ribbon
 	if ribbon == nil then
-		ribbon = table.remove(ribbonPool) or TrailRibbon.new()
-		entry.ribbon = ribbon
+		local taken = table.remove(ribbonPool) or TrailRibbon.new()
+		-- The host names the rig it draws now, so a per-frame log can tell whose ribbon is lit
+		-- (D-362): every host sits in the one folder under the same name.
+		taken.host:SetAttribute(Fx.trail.ribbon.ownerAttribute, entry.model:GetFullName())
+		entry.ribbon = taken
+		ribbon = taken
 	end
 	return ribbon :: TrailRibbon.Ribbon
 end
@@ -399,6 +413,7 @@ local function releaseRibbon(entry: Entry)
 	end
 	entry.ribbon = nil
 	TrailRibbon.clear(ribbon)
+	ribbon.host:SetAttribute(Fx.trail.ribbon.ownerAttribute, nil)
 	table.insert(ribbonPool, ribbon)
 end
 
@@ -501,6 +516,12 @@ local function applyAppearance(entry: Entry)
 	if not lit then
 		-- The ribbon's next light starts a new stroke: never joined to this one's tail (issue 11).
 		entry.stroke = false
+		local ribbon = entry.ribbon
+		if entry.lit and ribbon ~= nil then
+			-- The window went out: its arc fades out within trail.ribbon.closeSeconds of the last
+			-- frame it drew, so the gap before the next window shows nothing of it (D-360).
+			TrailRibbon.close(ribbon, entry.ribbonClock)
+		end
 	end
 	entry.lit = lit
 	-- The ribbon's look: the same swing color (saturated; a Basic swing's white blend after), the
@@ -745,7 +766,14 @@ function Trails.attach(model: Instance): boolean
 		ribbon = nil,
 		ribbonClock = 0,
 		ribbonAt = ribbonStart(),
-		style = { color = color, whiteBlend = 0, width = width, lifetime = Fx.trail.lifetime },
+		style = {
+			color = color,
+			whiteBlend = 0,
+			width = width,
+			lifetime = Fx.trail.lifetime,
+			closeSeconds = Fx.trail.ribbon.closeSeconds,
+			viewer = nil,
+		},
 	}
 	entry.light.Color = color
 	entries[model] = entry
@@ -1231,6 +1259,8 @@ local function stepRibbons(at: number, viewer: Vector3?)
 		end
 		local ribbon = entry.ribbon
 		if ribbon ~= nil then
+			-- The ribbon narrows a cut seen edge-on from here (D-361).
+			entry.style.viewer = viewer
 			TrailRibbon.draw(ribbon, entry.ribbonClock, entry.style)
 			if not entry.lit and not TrailRibbon.live(ribbon) then
 				releaseRibbon(entry)

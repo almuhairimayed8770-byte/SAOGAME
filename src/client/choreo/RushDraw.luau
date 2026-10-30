@@ -40,7 +40,10 @@
 	            travel at the rush speed (none on the launch frame), never backward. An offset off
 	            the path closes at that pace too, and the facing turns onto the leg's at turnRate. It
 	            never moves where the world would stop its body (`room`, the server's worldAhead cast):
-	            it stops there as at a jam, its snout on the face.
+	            it stops there as at a jam, its snout on the face. A player's body in its way it
+	            shoulders past (`pass`): the server's body runs through it (D-167), the drawn one swings
+	            off the path just enough to clear it, its snout still meeting it on the server's contact
+	            (`contactAlong`), and is back on the path by the run's end.
 	  Settle    the timeline is done: the body still closes on its end (never backward), and waits
 	            until the root has come within settleStuds of where the server's body stopped (the
 	            last RushEnded's distance, else the run's end or limit), or settleSeconds.
@@ -61,6 +64,7 @@ local Easing = require(Shared.util.Easing)
 local RushWorld = require(Shared.choreo.RushWorld)
 
 local TUNING = ChoreoData.enemy.rush
+local PASS = TUNING.pass
 local WORLD = AI.rushWorld
 local CHARGER = AI.archetypes.Charger
 
@@ -106,6 +110,29 @@ export type WorldCast = (
 	exclude: Instance
 ) -> (number?, Vector3?)
 
+--- A player's body the drawn rush may meet (RushDraw.step's `bodies`): where it stands (only X and
+--- Z are read) and how far it reaches round its centre (its root's half width, as the server's
+--- HitSweep.bodyRadius reads it).
+export type Bystander = { spot: Vector3, radius: number }
+
+--- A puff of the skid's dust (RushDraw.takeDust): where on the ground it rises (under the drawn
+--- body's hind hooves) and the flat way the body slides.
+export type Dust = { point: Vector3, heading: Vector3 }
+
+-- The drawn path's swing past a body in it (planPass): `side` the flat unit way it swings and
+-- `depth` how far; down the path it swings out from `from` to `full` (the snout meets the body at
+-- `meet`), holds to `hold` (the tail past the body) and is back on the path by `back` (the run's
+-- end).
+type Pass = {
+	side: Vector3,
+	depth: number,
+	from: number,
+	meet: number,
+	full: number,
+	hold: number,
+	back: number,
+}
+
 export type State = {
 	line: Line,
 	legs: { RushWorld.Leg }, -- its path: the line, then its bends and sidesteps
@@ -132,6 +159,9 @@ export type State = {
 	released: boolean, -- an Armed crouch that will not launch (RushDraw.release)
 	restSpot: Vector3?, -- where the late root was last seen moving (flat), and when (D-256)
 	restFrom: number?,
+	pass: Pass?, -- the swing past a player's body in the path
+	passed: boolean, -- a pass was planned (one a rush)
+	dustAt: number?, -- how far down the path the skid's next puff rises (nil: from the strike beat)
 }
 
 local RushDraw = {}
@@ -148,15 +178,52 @@ local function unitFlat(v: Vector3, fallback: Vector3): Vector3
 	return f.Unit
 end
 
--- The flat point `along` studs down the path, plus the offset off it.
+-- Smoothstep: 0 at u <= 0, 1 at u >= 1, flat at both ends.
+local function smooth(u: number): number
+	local x = math.clamp(u, 0, 1)
+	return x * x * (3 - 2 * x) -- unit: smoothstep, 3x^2 - 2x^3
+end
+
+-- How far a pass has the body swung `along` studs down the path (a share of its depth), and how fast
+-- that share changes a stud down the path.
+local function passShape(pass: Pass, along: number): (number, number)
+	if along <= pass.from or along >= pass.back then
+		return 0, 0
+	end
+	if along < pass.full then
+		local span = pass.full - pass.from
+		local u = (along - pass.from) / span
+		return smooth(u), 6 * u * (1 - u) / span -- unit: smoothstep's slope, 6x(1 - x)
+	end
+	if along <= pass.hold then
+		return 1, 0
+	end
+	local span = pass.back - pass.hold
+	local u = (along - pass.hold) / span
+	return 1 - smooth(u), -6 * u * (1 - u) / span -- unit: smoothstep's slope, 6x(1 - x)
+end
+
+-- The flat offset a pass puts the body at `along` studs down the path (none without one).
+local function passOffset(state: State, along: number): Vector3
+	local pass = state.pass
+	if pass == nil then
+		return Vector3.zero
+	end
+	local share = passShape(pass, along)
+	return pass.side * (pass.depth * share)
+end
+
+-- The flat point `along` studs down the path, plus the offsets off it.
 local function spotOf(state: State): Vector3
-	return RushWorld.pointAt(state.legs, state.along) + state.lateral
+	return RushWorld.pointAt(state.legs, state.along) + state.lateral + passOffset(state, state.along)
 end
 
 -- Puts the drawn body's place in the world on `legs` (a new line, the server's bends): the nearest
--- point down them and the flat offset off it.
+-- point down them and the flat offset off it (a pass's swing becomes an offset that closes as any
+-- other: the pass is over).
 local function rebase(state: State, legs: { RushWorld.Leg })
 	local world = spotOf(state)
+	state.pass = nil
 	state.legs = legs
 	state.along = RushWorld.project(legs, world)
 	state.lateral = world - RushWorld.pointAt(legs, state.along)
@@ -273,6 +340,9 @@ function RushDraw.new(line: Line): State
 		released = false,
 		restSpot = nil,
 		restFrom = nil,
+		pass = nil,
+		passed = false,
+		dustAt = nil,
 	}
 end
 
@@ -296,6 +366,7 @@ function RushDraw.retime(state: State, line: Line)
 	local direction = legs[1].heading
 	if state.phase == "Run" or state.phase == "Settle" then
 		local world = spotOf(state)
+		state.pass = nil
 		local rel = world - legs[1].from
 		state.along = rel:Dot(direction)
 		state.lateral = rel - direction * state.along
@@ -535,6 +606,21 @@ function RushDraw.release(state: State, now: number, root: CFrame?): boolean
 	return true
 end
 
+--- Where the root part stands on the frame that draws this step's pose (D-438): `moved`, the root
+--- carried by its velocity over the frame (Replication's rootAhead), but never farther down the
+--- path than where the server's body stops (the last RushEnded's distance, else a limit, else the
+--- run's end): a root that comes to rest there moves no farther. `root` is where it stands now.
+function RushDraw.ahead(state: State, root: CFrame, moved: CFrame): CFrame
+	local legs = state.legs
+	local stop = state.rest or state.limit or state.line.length
+	local from = RushWorld.project(legs, root.Position)
+	local to = RushWorld.project(legs, moved.Position)
+	if to <= stop or to <= from then
+		return moved
+	end
+	return root:Lerp(moved, math.clamp((stop - from) / (to - from), 0, 1))
+end
+
 --- True while the body is drawn away from its root's place (Run, Settle, HandBack or Frozen; a
 --- crouch's turn stands on its root).
 function RushDraw.drawing(state: State): boolean
@@ -630,6 +716,147 @@ local function bodyOf(state: State): RushWorld.Body
 		return body
 	end
 	return { profile = {}, size = Vector3.zero }
+end
+
+-- How far the body reaches from its root's centre: to either side, ahead (its snout) and behind (its
+-- tail), over its corners at rest.
+local function extentsOf(body: RushWorld.Body): (number, number, number)
+	local half, back = 0, 0
+	for _, corner in body.profile do
+		half = math.max(half, math.abs(corner.X))
+		back = math.max(back, corner.Z)
+	end
+	return half, RushWorld.front(body.profile), back
+end
+
+-- Where a flat point stands against the path: how far down it (its nearest point), the leg's right
+-- (the heading turned a quarter clockwise from above) and how far to that side of the path it is.
+local function placeOn(legs: { RushWorld.Leg }, spot: Vector3): (number, Vector3, number)
+	local flatSpot = flat(spot)
+	local along = RushWorld.project(legs, flatSpot)
+	local heading = legs[RushWorld.legIndex(legs, along)].heading
+	local right = Vector3.new(-heading.Z, 0, heading.X)
+	return along, right, (flatSpot - RushWorld.pointAt(legs, along)):Dot(right)
+end
+
+--- How far down its path the drawn body has come when the server's sweep reaches a body standing at
+--- `spot` with `radius` (D-166: the snout, the body's front ahead of its root, reaches the body's near
+--- edge; the whole line is resolved by the strike beat, so never later than the run's full-speed
+--- stretch). Nil when the line passes it by as far as this client can tell: more than `width` / 2 +
+--- `radius` - `margin` off the path, or more than `reach` + `radius` - `margin` down it (the client's
+--- own body is a latency ahead of the server's, so a body near an edge waits for the server's word).
+function RushDraw.contactAlong(
+	state: State,
+	spot: Vector3,
+	radius: number,
+	width: number,
+	reach: number,
+	margin: number
+): number?
+	local along, _, across = placeOn(state.legs, spot)
+	if math.abs(across) > width / 2 + radius - margin or along > reach + radius - margin then
+		return nil
+	end
+	local body = state.body
+	local front = if body ~= nil then RushWorld.front(body.profile) else 0
+	local line = state.line
+	return math.clamp(along - radius - front, 0, line.speed * cruiseSeconds(line))
+end
+
+--- True while a pass may still be planned: the rush has not launched yet or runs, and has passed
+--- no body (Replication hands RushDraw.step the players' bodies only then).
+function RushDraw.seeking(state: State): boolean
+	return not state.passed and (state.phase == "Armed" or state.phase == "Run")
+end
+
+--- The skid's dust the drawn body threw up since the last call, oldest first: a puff each `every`
+--- studs it has slid from the strike beat (where the timeline's full speed ends and the skid
+--- begins, the Charge clip's skidding stop) up to where it comes to rest (none on the stop itself),
+--- under its hind hooves
+--- (`rearShare` of its body's length behind its root, on the ground under it). Only while the run
+--- moves it (Run, Settle): a body stopped before the strike beat (a jam, a stop) throws none, and a
+--- slam's or a jam's limit ends the skid where it stops the body, so no puff rises past it.
+function RushDraw.takeDust(state: State, every: number, rearShare: number): { Dust }
+	local puffs: { Dust } = {}
+	if not RushDraw.running(state) or every <= 0 then
+		return puffs
+	end
+	local line = state.line
+	local mark = state.dustAt or line.speed * cruiseSeconds(line)
+	if state.along < mark - 1e-6 then
+		state.dustAt = mark
+		return puffs
+	end
+	local body = state.body
+	local back = 0
+	if body ~= nil then
+		local _, _, behind = extentsOf(body)
+		back = behind
+	end
+	local spot = spotOf(state)
+	local ground = (state.height or 0) - (state.hover or 0)
+	local heading = state.facing
+	local point = Vector3.new(spot.X, ground, spot.Z) - heading * (back * rearShare)
+	-- Every mark the body passed this frame: one puff each (a frame's slide is under a mark's
+	-- spacing at any rush speed the data allows, so this is nearly always one). None where it stops:
+	-- the run's end is where the slide has nothing left to kick up, and a slam's face throws its own.
+	local stop = math.min(state.limit or math.huge, line.length)
+	while state.along >= mark - 1e-6 and mark < stop - 1e-6 do
+		table.insert(puffs, { point = point, heading = heading })
+		mark += every
+	end
+	state.dustAt = mark
+	return puffs
+end
+
+-- Plans the swing past the first player's body in the drawn body's way (one a rush), on the frame
+-- the swing starts (the body reaches `upTo` this frame). The swing clears the body by the drawn
+-- body's half width + its radius + marginStuds, away from the side it stands on (a body within
+-- centreStuds of the path's middle on the rusher's right). The snout still meets the body where the
+-- server's sweep does: the swing starts leadStuds before it for a body square on the line (less
+-- for one the drawn body is already part clear of, by the share of the clearance it still has to
+-- swing) and is full fullStuds after it, and the body's look turns along the swing only once the
+-- snout has met the body (a head turned out early swings the snout off it). It holds
+-- until the tail is past the body, then comes back onto the path by the run's end (a jam or a stop
+-- told: by there), so the body rests where the server's body stops. A body the run cannot get past
+-- with returnStuds left, or no body to judge the clearance on (RushDraw.setBody), is not passed.
+local function planPass(state: State, bodies: { Bystander }, upTo: number)
+	local body = state.body
+	if state.passed or body == nil or #body.profile == 0 then
+		return
+	end
+	local half, front, back = extentsOf(body)
+	local finish = math.min(state.limit or math.huge, state.line.length)
+	for _, other in bodies do
+		local along, right, across = placeOn(state.legs, other.spot)
+		local clear = half + other.radius + PASS.marginStuds
+		if clear - math.abs(across) <= 0 then
+			continue
+		end
+		local hold = along + other.radius + back
+		if hold <= state.along or hold + PASS.returnStuds > finish then
+			continue
+		end
+		local contact = along - other.radius - front
+		local way = if math.abs(across) <= PASS.centreStuds then 1 elseif across > 0 then -1 else 1
+		local depth = clear + way * across
+		local from = math.max(contact - PASS.leadStuds * depth / clear, state.along)
+		if from > upTo then
+			continue
+		end
+		local full = math.max(contact + PASS.fullStuds, from + PASS.leadStuds)
+		state.pass = {
+			side = right * way,
+			depth = depth,
+			from = from,
+			meet = contact,
+			full = full,
+			hold = math.max(hold, full),
+			back = finish,
+		}
+		state.passed = true
+		return
+	end
 end
 
 -- Looks at the world ahead of the drawn body along the leg it runs, as the server's cast does
@@ -791,7 +1018,8 @@ end
 --- where its replicated root stands (and the velocity it carries, nil: unknown), or nil when the
 --- body is drawn on its root (once Done; a crouch stands on it, turned). `room` asks the world how
 --- far the drawn body may move (nil: never stopped); `ground` how high the ground under it stands
---- (nil: the drawn body keeps its height).
+--- (nil: the drawn body keeps its height); `bodies` the players' bodies it may shoulder past (nil:
+--- none, it runs straight).
 function RushDraw.step(
 	state: State,
 	now: number,
@@ -799,7 +1027,8 @@ function RushDraw.step(
 	root: CFrame,
 	room: Room?,
 	ground: Ground?,
-	rootVelocity: Vector3?
+	rootVelocity: Vector3?,
+	bodies: { Bystander }?
 ): CFrame?
 	local line = state.line
 	local phase = state.phase
@@ -855,13 +1084,24 @@ function RushDraw.step(
 				step = math.max(0, math.min(step, limit - state.along))
 			end
 		end
+		if bodies ~= nil then
+			planPass(state, bodies, state.along + step)
+		end
 		state.along += step
 		local off = state.lateral.Magnitude
 		if off > 1e-6 then
 			state.lateral = state.lateral * (math.max(0, off - slack) / off)
 		end
 		local leg = state.legs[RushWorld.legIndex(state.legs, state.along)]
-		state.facing = turnToward(state.facing, leg.facing, math.rad(TUNING.turnRate) * math.max(0, dt))
+		-- On a pass the body looks along its swing once its snout has met the body (before that
+		-- the swing only slides it: a head turned out early would swing the snout off the body).
+		local facing = leg.facing
+		local pass = state.pass
+		if pass ~= nil and state.along >= pass.meet then
+			local _, slope = passShape(pass, state.along)
+			facing = unitFlat(leg.facing + pass.side * (pass.depth * slope), leg.facing)
+		end
+		state.facing = turnToward(state.facing, facing, math.rad(TUNING.turnRate) * math.max(0, dt))
 		stand(state, root, dt, ground)
 		state.lastTime = now
 		if phase == "Run" and runOver(state, now) then

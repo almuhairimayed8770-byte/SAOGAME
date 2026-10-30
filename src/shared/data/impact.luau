@@ -54,8 +54,9 @@ local Impact = {
 	-- How a look's frames are drawn (issue 10). Each look shows for its steps' frames counted in
 	-- drawn frames, so a late or doubled frame never takes a frame from one look and gives it to
 	-- the next. On a device that draws slower (or faster) than 60 fps the count is scaled to its
-	-- pace (at least one drawn frame a look): the median of the last `paceSamples` render-step
-	-- frame lengths, taken on the sequence's first drawn frame, so one late frame never moves it.
+	-- pace (at least one drawn frame a look), taken on the sequence's first drawn frame: FrameClock's
+	-- mean of the last hold.paceFrames render-step frame lengths without the hitches (D-351), else
+	-- the median of the overlay's own last `paceSamples`, so one late frame never moves it.
 	-- The sequence still ends at its hit-stop (ImpactSequence.capSeconds, D-117 and D-122). A frame
 	-- longer than maxPaceSeconds is a hitch or a render stall, not the device's pace (10 fps, the
 	-- slowest screen D-122 still plays a Kill on), and is never remembered.
@@ -79,6 +80,17 @@ local Impact = {
 		hitchFactor = 2.5,
 		tieFrames = 0.08,
 	},
+
+	-- Rendered frames between a rig step writing a pose and the first frame that draws it (D-342).
+	-- The engine's Animator puts an animated rig back to rest after the draw, and Choreo writes its
+	-- pose again on PreSimulation (D-053), so a frame draws the pose the step of the frame before
+	-- wrote (measured on the PC on 1cf87aa: the blade moved on the first two frames a Final's hold
+	-- flagged and stood still from the third). A hit's cues (the impact picture, the white flash,
+	-- the number, the camera's nudge, shake and punch, the 3D accents and the sounds with them)
+	-- wait this many frames after the step that posed the contact (FrameClock.atPose); the hold
+	-- itself starts at once, on that step. The validator keeps it a whole number under the
+	-- shortest hit-stop, so every cue still lands inside the freeze.
+	poseLagFrames = 1,
 
 	looks = {
 		-- The black beat before a big hit: nothing but ink.

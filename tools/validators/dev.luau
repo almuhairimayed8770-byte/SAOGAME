@@ -21,6 +21,12 @@
 	- aim.maxSwings covers one whole basic chain; trace.keepEvents holds every window of the
 	  longest swing command.
 
+	The ClipLab's light (dev place only): key, fill and rim lights each a position, a positive range
+	and brightness and a palette color, the key and the fill on the side of the rigs the lab camera
+	starts on (clipLab.camera.startYaw) and the rim behind them, so the faces the camera sees are
+	lit and a dark outfit's edge reads against the backdrop; the backdrop a part name and a palette
+	color; the lab's ambient colors and diffuse scale in [0, 1] and its exposure in [-3, 3].
+
 	The capture's timeScale.steps are each above 0 and at most 1, and timeScale.default is one of
 	them: the capture slows the local body with them (CharacterController.setCaptureTimeScale), so
 	a step past 1x would move it faster than the anti-cheat's sprint cap.
@@ -28,7 +34,8 @@
 	The capture's shots (F12, tests/data/devCapture.spec.luau): every shot stages at least one
 	enemy the game has (a positive distance, a side within a half turn, held a boolean, hp above 0
 	and at most the enemy's own, a `releaseAfter` only on one let go, inside the take, under a
-	prompt beat at that moment), takes the Lock camera only when it locks on or else a
+	prompt beat at that moment, an `attacks` limit only on one let go, a whole number of 1 or
+	more: FK2), takes the Lock camera only when it locks on or else a
 	capture.cameras view, has a cameraSide of 1 or -1, prompt beats from 0 in order inside the take,
 	and a perform list (CF). Each press, an entry or a chain step, is an input.luau action or
 	capture.perform.moveAction (the stick: a name no input action has), held a positive time; a
@@ -51,12 +58,15 @@
 	and reference, degrees in [0, 180], a positive distance, a height of 0 or more and a focusBias in
 	[0, 1]. The hotkeys are distinct,
 	off input.luau's keyboard bindings, never a function key, autoPerform and releaseStage among
-	them, and no walk cancel key; auto-perform starts off. The stage: a plain remote name, positive
-	request rate, away distance (past camera.luau lock.range) and hold wait (under
+	them, and no walk cancel key; auto-perform starts off. No dev key (capture.hotkeys,
+	clipLab.hotkeys, capture.walk.cancelKeys) is one Studio keeps for its own shortcuts
+	(STUDIO_SHORTCUT_KEYS): pressed in Play it never reaches the game. The stage: a plain remote
+	name, positive request rate, away distance (past camera.luau lock.range) and hold wait (under
 	stageTimeoutSeconds); a ledge at least LEDGE_MIN_DROP_STUDS tall, its stand inset on its top,
 	standHeightTolerance under its height, palette colours and real materials; every stand spot
-	awayStuds inside the field's edge, the area's off the ledge and the open shot's on it; the ledge
-	and its ramp off every spawn's scatter; no staged enemy on the ledge; the ring's disc thinner
+	awayStuds inside the field's edge, the area's off the ledge (its ring routeMarginStuds clear of
+	the ledge and its ramp: a body where they go walks there first) and the open shot's on it; the
+	ledge and its ramp off every spawn's scatter; no staged enemy on the ledge; the ring's disc thinner
 	than standHeightTolerance, palette-coloured, a real material, transparency in [0, 1).
 
 	The capture's render-frame tick (D-336): capture.frameTick.size is a whole number of pixels
@@ -68,20 +78,33 @@
 	- capture.stage's ring numbers are positive, and the ring is wider than the auto-walk's rest
 	  target (capture.walk.restStuds), so a body at rest on the spot stands inside it;
 	  walk.restDegrees is under a right angle and walk.secondWalks a whole number of 0 or more;
+	- the turn on the spot (step 14): walk.faceDegreesPerSecond is positive and
+	  walk.faceSettleSeconds 0 or more, and a half turn at that rate plus the stand after it fit
+	  inside walk.timeoutSeconds;
 	- walk.sprintAction is an input.luau action whose speed (combat.luau
 	  maxSpeedStudsPerSecond) is past choreo.luau locomotion.skidSpeedThreshold, so the walk's stop
 	  is the Skid's and carries nothing (D-059);
 	- walk.lookaheadStuds is shorter than the last leg (stage.approachStuds), and the let-go below
 	  the Skid's threshold (walk.carrySeconds at locomotion runSpeed) is on it too;
 	  walk.carrySeconds is under locomotion.stopStepsSeconds, the two-step stop's longest carry;
-	- capture.walk.restSpeed is under choreo.luau locomotion.stopEndSpeed (the two-step stop has
+	- capture.walk.restSpeed is at most choreo.luau locomotion.idleSpeedThreshold (at rest is where
+	  the Locomotion stands the body) and under locomotion.stopEndSpeed (the two-step stop has
 	  ended when the body is that slow);
 	- the ledge's ramp is as tall as the ledge, no wider, and no steeper than a Humanoid walks
 	  (MaxSlopeAngle, left at its default), behind the open shot's start;
 	- the open shot's approach stands on the ramp, and walk.timeoutSeconds covers the route from
 	  the stage area up to the open shot's spot at locomotion walkSpeed;
 	- walk.renderOrder runs after the control script's input step and before the character
-	  controller's step (choreo.luau renderOrder.character), and walk.cancelKeys are real KeyCodes.
+	  controller's step (choreo.luau renderOrder.character), and walk.cancelKeys are real KeyCodes;
+	- the corrections (CW): walk.askSettleSeconds x (secondWalks + 2) fits walk.timeoutSeconds;
+	  walk.correctWithinStuds covers the ring and stays on the last leg (stage.standRadius to
+	  approachStuds); walk.correctBackStuds is past waypointStuds and on the last leg;
+	  walk.correctSpeed is at most locomotion runSpeed (a walk, never the sprint);
+	  walk.creepEndSpeed is under locomotion idleSpeedThreshold (the two-step stop carries
+	  nothing) and creepEndSpeed x creepSeconds is under restStuds;
+	- the blocked rule (316(b)): walk.blockedSeconds and blockedStuds are positive,
+	  blockedSeconds is under timeoutSeconds and over the correction's creep across its last
+	  blockedStuds, and blockedStuds is under restStuds.
 
 	DevCombat's Studio test hooks (`hooks`, D-333):
 	- hooks.arriveStuds is positive and under ai.luau leash.homeRadius, so a walked body stands at
@@ -96,7 +119,17 @@
 	  MAX_DEV_PARTS; 0 < minPartStuds < maxPartStuds <= the engine's 2048; hooks.maxAfterSeconds is
 	  positive and at most chargeTimeoutSeconds (a late part lands while a charge still waits);
 	  hooks.maxNameLength is whole, 1 to 100 (the engine's name cap); the parts' colour is a palette
-	  token and their material a real Enum.Material.
+	  token and their material a real Enum.Material; hooks.maxPackSize ("pack", item 315) is whole,
+	  from 2 to the members the widest spawn scatter (playground spawnScatterRadius widened by
+	  spawnSpacing) holds spawnSpacing.minStuds apart;
+	- the Studio frame cap (303): frameCap.attribute is a plain name no other dev attribute uses;
+	  frameCap.least and most are whole frames a second, 1 <= least < most <= 240, with the 30 the
+	  Studio item asks for inside; frameCap.priority runs after every renderOrder row of choreo,
+	  camera and fx and after capture.walk.renderOrder, so the cap holds a whole drawn frame;
+	- "place" on a wind-up (302(b)): hooks.maxPlaceAfterSeconds reaches past every enemy attack's
+	  wind-up with ai.hitStop.maxPausePerAttack of hit-stop in it and its strike, and is under
+	  hooks.windUpWaitSeconds, which outlasts every enemy attack's whole beat (wind-up, pauses,
+	  strike and recovery), so an enemy attacking on a loop starts its next wind-up inside the wait.
 ]]
 
 type Context = {
@@ -111,6 +144,9 @@ local roblox = require("@lune/roblox")
 local HALF_TURN_DEGREES = 180
 -- Roblox's Humanoid.MaxSlopeAngle default; nothing in the game changes it.
 local HUMANOID_MAX_SLOPE_DEGREES = 89
+-- Keys Studio keeps for its own shortcuts while "Respect Studio shortcuts when game has focus" is
+-- on: pressed in Play they never reach the game (measured in Studio on Windows). Enum.KeyCode names.
+local STUDIO_SHORTCUT_KEYS = { "I", "O", "Home", "End", "PageUp", "PageDown", "F1", "F2", "F11", "F12" }
 local MAX_DECIMALS = 6
 local CLIPS = "src/shared/clips/"
 -- The ledge's drop: at least this tall, so the fall off it lands with weight (choreo landing).
@@ -150,6 +186,10 @@ local MAX_INSTANCE_NAME = 100
 -- The render-frame tick (D-336): a small square, its two colors as bright as each other.
 local MAX_TICK_PIXELS = 32
 local MAX_TICK_LUMINANCE_STEP = 0.1
+-- The Studio frame cap (303): the rate the Studio item asks for, and the most a cap may hold to
+-- (Studio's own highest option).
+local FRAME_CAP_ASKED = 30
+local FRAME_CAP_MOST = 240
 
 local function checkHooks(ctx: Context, dev: any, problem: (message: string) -> ())
 	local hooks = dev.hooks
@@ -161,6 +201,7 @@ local function checkHooks(ctx: Context, dev: any, problem: (message: string) -> 
 	local enemies = ctx.load("src/shared/data/enemies")
 	local palette = ctx.load("src/shared/data/palette")
 	local world = ctx.load("src/shared/data/world")
+	local playground = ctx.load("src/shared/data/playground")
 
 	-- "walk": arrived inside the home radius, so the leash never walks the body back.
 	local homeRadius = ai.leash.homeRadius
@@ -259,11 +300,134 @@ local function checkHooks(ctx: Context, dev: any, problem: (message: string) -> 
 	if not isWhole(hooks.maxNameLength) or hooks.maxNameLength < 1 or hooks.maxNameLength > MAX_INSTANCE_NAME then
 		problem(("hooks.maxNameLength must be a whole number from 1 to %d"):format(MAX_INSTANCE_NAME))
 	end
+	-- "place" on a wind-up: `after` may reach anywhere in any wind-up and its strike, and the wait
+	-- for one outlasts every attack's whole beat.
+	local reachWindUp, wholeBeat = 0, 0
+	for _, base in enemies.list() do
+		for _, def in { enemies.scaled(base), enemies.variant(enemies.scaled(base), "Elite") } do
+			for _, attack in def.attacks do
+				local paused = attack.windUp + ai.hitStop.maxPausePerAttack
+				reachWindUp = math.max(reachWindUp, paused + attack.strike)
+				wholeBeat = math.max(wholeBeat, paused + attack.strike + attack.recovery)
+			end
+		end
+	end
+	local placeAfter, windUpWait = hooks.maxPlaceAfterSeconds, hooks.windUpWaitSeconds
+	if not isNumber(placeAfter) or placeAfter < reachWindUp then
+		problem(
+			("hooks.maxPlaceAfterSeconds (%s) must reach past every enemy wind-up, its pauses and its strike (%.3f s)"):format(
+				tostring(placeAfter),
+				reachWindUp
+			)
+		)
+	end
+	if not isNumber(windUpWait) or windUpWait <= wholeBeat then
+		problem(
+			("hooks.windUpWaitSeconds (%s) must outlast every enemy attack's wind-up, pauses, strike and recovery (%.3f s)"):format(
+				tostring(windUpWait),
+				wholeBeat
+			)
+		)
+	elseif isNumber(placeAfter) and placeAfter >= windUpWait then
+		problem(
+			("hooks.maxPlaceAfterSeconds (%s) must be under hooks.windUpWaitSeconds (%s)"):format(
+				tostring(placeAfter),
+				tostring(windUpWait)
+			)
+		)
+	end
 	if palette.tokens[hooks.partColorToken] == nil then
 		problem(("hooks.partColorToken '%s' is not a palette token"):format(tostring(hooks.partColorToken)))
 	end
 	if not isMaterial(hooks.partMaterial) then
 		problem(("hooks.partMaterial '%s' is not an Enum.Material"):format(tostring(hooks.partMaterial)))
+	end
+	-- Item 315: as many pack members as the widest scatter disc holds clear of each other (its area
+	-- over each member's minStuds circle), and at least a pair.
+	local spacing = playground.spawnSpacing
+	local widest = playground.spawnScatterRadius + spacing.widenStuds * spacing.widenings
+	local room = math.floor((widest / (spacing.minStuds / 2)) ^ 2)
+	if not isWhole(hooks.maxPackSize) or hooks.maxPackSize < 2 or hooks.maxPackSize > room then
+		problem(
+			("hooks.maxPackSize (%s) must be a whole number from 2 to %d: the members the widest spawn scatter holds clear of each other"):format(
+				tostring(hooks.maxPackSize),
+				room
+			)
+		)
+	end
+end
+
+-- The Studio frame cap (303): a Workspace attribute of its own, a range that holds the 30 frames a
+-- second the Studio item asks for, and a render step after every step of the frame.
+local function checkFrameCap(ctx: Context, dev: any, problem: (message: string) -> ())
+	local cap = dev.frameCap
+	if typeof(cap) ~= "table" then
+		problem("frameCap is missing (the Studio frame-rate cap, DevFrameCap.client.luau)")
+		return
+	end
+	local attributes = if typeof(dev.attributes) == "table" then dev.attributes else {}
+	local taken = false
+	for _, name in attributes do
+		taken = taken or name == cap.attribute
+	end
+	if not isName(cap.attribute) or taken then
+		problem("frameCap.attribute must be a plain attribute name no other dev attribute uses")
+	end
+	if
+		not isWhole(cap.least)
+		or not isWhole(cap.most)
+		or cap.least < 1
+		or cap.least >= cap.most
+		or cap.most > FRAME_CAP_MOST
+		or cap.least > FRAME_CAP_ASKED
+		or cap.most < FRAME_CAP_ASKED
+	then
+		problem(
+			("frameCap.least and most must be whole frames a second, 1 <= least < most <= %d, with %d inside (Studio item 303)"):format(
+				FRAME_CAP_MOST,
+				FRAME_CAP_ASKED
+			)
+		)
+	end
+	local function priority(row: any): number?
+		if typeof(row) ~= "table" or typeof(row.base) ~= "string" or not isWhole(row.offset) then
+			return nil
+		end
+		-- Lune's Enum throws on a name it does not have.
+		local ok, item = pcall(function(): any
+			return (roblox.Enum.RenderPriority :: any)[row.base]
+		end)
+		return if ok and item ~= nil then item.Value + row.offset else nil
+	end
+	local at = priority(cap.priority)
+	if at == nil then
+		problem("frameCap.priority must be { base = an Enum.RenderPriority name, offset = a whole number }")
+		return
+	end
+	local rows: { { label: string, row: any } } = {}
+	for _, source in { "choreo", "camera", "fx" } do
+		local data = ctx.load("src/shared/data/" .. source)
+		if typeof(data.renderOrder) == "table" then
+			for name, row in data.renderOrder do
+				table.insert(rows, { label = ("%s renderOrder.%s"):format(source, tostring(name)), row = row })
+			end
+		end
+	end
+	local walk = if typeof(dev.capture) == "table" then dev.capture.walk else nil
+	if typeof(walk) == "table" then
+		table.insert(rows, { label = "capture.walk.renderOrder", row = walk.renderOrder })
+	end
+	for _, entry in rows do
+		local other = priority(entry.row)
+		if other ~= nil and at <= other then
+			problem(
+				("frameCap.priority (%d) must run after %s (%d): the cap holds a whole frame"):format(
+					at,
+					entry.label,
+					other
+				)
+			)
+		end
 	end
 end
 
@@ -301,6 +465,98 @@ return function(ctx: Context): { string }
 		end
 	end
 
+	-- The ClipLab's light (dev place only): every light a position, a positive range and brightness
+	-- and a palette color; the key and the fill on the camera's side of the rigs (the camera starts
+	-- at clipLab.camera.startYaw, on the rigs' -Z side at yaw 0), the rim on the far side; the
+	-- backdrop a part name and a palette color; the lab's ambient colors in [0, 1], its diffuse scale
+	-- in [0, 1] and its exposure inside the engine's [-3, 3].
+	local lab = dev.clipLab
+	if typeof(lab) ~= "table" or typeof(lab.camera) ~= "table" or not isNumber(lab.camera.startYaw) then
+		problem("clipLab.camera.startYaw must be a number")
+	else
+		local palette = ctx.load("src/shared/data/palette")
+		local yaw = math.rad(lab.camera.startYaw)
+		local towardCamera = { math.sin(yaw), -math.cos(yaw) }
+		for name, side in { keyLight = 1, fillLight = 1, rimLight = -1 } do
+			local light = lab[name]
+			local position = if typeof(light) == "table" then light.position else nil
+			if
+				typeof(position) ~= "table"
+				or #position ~= 3
+				or not (isNumber(position[1]) and isNumber(position[2]) and isNumber(position[3]))
+			then
+				problem(("clipLab.%s.position must be three numbers"):format(name))
+				continue
+			end
+			if
+				not isNumber(light.range)
+				or light.range <= 0
+				or not isNumber(light.brightness)
+				or light.brightness <= 0
+			then
+				problem(("clipLab.%s needs a positive range and brightness"):format(name))
+			end
+			if typeof(light.color) ~= "string" or palette.tokens[light.color] == nil then
+				problem(("clipLab.%s.color '%s' is not a palette token"):format(name, tostring(light.color)))
+			end
+			local facing = position[1] * towardCamera[1] + position[3] * towardCamera[2]
+			if facing * side <= 0 then
+				problem(
+					("clipLab.%s must stand %s the rigs as the camera sees them (the key and the fill light the faces it looks at, the rim the edge against the backdrop)"):format(
+						name,
+						if side > 0 then "in front of" else "behind"
+					)
+				)
+			end
+		end
+		local backdrop = lab.backdrop
+		if typeof(backdrop) ~= "table" or not isName(backdrop.part) then
+			problem("clipLab.backdrop.part must name the place's backdrop part")
+		elseif typeof(backdrop.color) ~= "string" or palette.tokens[backdrop.color] == nil then
+			problem(("clipLab.backdrop.color '%s' is not a palette token"):format(tostring(backdrop.color)))
+		end
+		local lighting = lab.lighting
+		if typeof(lighting) ~= "table" then
+			problem("clipLab.lighting must be a table")
+		else
+			for _, key in { "ambient", "outdoorAmbient" } do
+				local rgb = lighting[key]
+				local ok = typeof(rgb) == "table" and #rgb == 3
+				if ok then
+					for _, channel in rgb do
+						if not isNumber(channel) or channel < 0 or channel > 1 then
+							ok = false
+						end
+					end
+				end
+				if not ok then
+					problem(("clipLab.lighting.%s must be three numbers in [0, 1]"):format(key))
+				end
+			end
+			local diffuse = lighting.environmentDiffuseScale
+			if not isNumber(diffuse) or diffuse < 0 or diffuse > 1 then
+				problem("clipLab.lighting.environmentDiffuseScale must be a number in [0, 1]")
+			end
+			local exposure = lighting.exposureCompensation
+			if not isNumber(exposure) or exposure < -3 or exposure > 3 then
+				problem("clipLab.lighting.exposureCompensation must be a number in [-3, 3]")
+			end
+		end
+		-- The hotkeys bind above the default character scripts (LabKeys, D-413).
+		local okPriority, priority = pcall(function()
+			return (roblox.Enum.ContextActionPriority :: any)[lab.actionPriority]
+		end)
+		if not okPriority or priority == nil or typeof(lab.actionPriority) ~= "string" then
+			problem(("clipLab.actionPriority '%s' is not a ContextActionPriority"):format(tostring(lab.actionPriority)))
+		elseif priority.Value <= roblox.Enum.ContextActionPriority.Medium.Value then
+			problem(
+				("clipLab.actionPriority '%s' must be above Medium: the character scripts bind the arrows and Space at the default priority"):format(
+					lab.actionPriority
+				)
+			)
+		end
+	end
+
 	-- The capture's walk into the stand ring (D-244).
 	local capture = dev.capture
 	local stage = if typeof(capture) == "table" then capture.stage else nil
@@ -323,6 +579,15 @@ return function(ctx: Context): { string }
 				"restSpeed",
 				"restStuds",
 				"restDegrees",
+				"askSettleSeconds",
+				"correctWithinStuds",
+				"correctBackStuds",
+				"correctSpeed",
+				"creepSeconds",
+				"creepEndSpeed",
+				"faceDegreesPerSecond",
+				"blockedSeconds",
+				"blockedStuds",
 			}
 		do
 			if not isNumber(walk[key]) or walk[key] <= 0 then
@@ -331,6 +596,9 @@ return function(ctx: Context): { string }
 		end
 		if not isNumber(walk.secondWalks) or walk.secondWalks < 0 or walk.secondWalks % 1 ~= 0 then
 			problem("capture.walk.secondWalks must be a whole number of 0 or more")
+		end
+		if not isNumber(walk.faceSettleSeconds) or walk.faceSettleSeconds < 0 then
+			problem("capture.walk.faceSettleSeconds must be a number of 0 or more")
 		end
 		local ledge = stage.ledge
 		local ramp = if typeof(ledge) == "table" and typeof(ledge.ramp) == "table" then ledge.ramp.size else nil
@@ -352,6 +620,18 @@ return function(ctx: Context): { string }
 			end
 			if walk.restDegrees >= 90 then
 				problem(("capture.walk.restDegrees (%g) must be under 90"):format(walk.restDegrees))
+			end
+			-- The turn on the spot (step 14): a half turn and the stand after it, inside the walk's time.
+			local faceSeconds = 180 / walk.faceDegreesPerSecond + walk.faceSettleSeconds
+			if faceSeconds >= walk.timeoutSeconds then
+				problem(
+					("capture.walk: a half turn on the spot at faceDegreesPerSecond (%g) and faceSettleSeconds (%g) take %.2f s, not under timeoutSeconds (%g)"):format(
+						walk.faceDegreesPerSecond,
+						walk.faceSettleSeconds,
+						faceSeconds,
+						walk.timeoutSeconds
+					)
+				)
 			end
 			if typeof(walk.sprintAction) ~= "string" or table.find(input.actions, walk.sprintAction) == nil then
 				problem(
@@ -389,11 +669,101 @@ return function(ctx: Context): { string }
 					)
 				)
 			end
+			if walk.restSpeed > locomotion.idleSpeedThreshold then
+				problem(
+					("capture.walk.restSpeed (%g) must be at most choreo locomotion.idleSpeedThreshold (%g): at rest means the Locomotion stands the body, so the walk never asks while it still walks in place"):format(
+						walk.restSpeed,
+						locomotion.idleSpeedThreshold
+					)
+				)
+			end
 			if walk.restSpeed >= choreo.locomotion.stopEndSpeed then
 				problem(
 					("capture.walk.restSpeed (%g) must be under choreo locomotion.stopEndSpeed (%g): at rest means the two-step stop has ended"):format(
 						walk.restSpeed,
 						choreo.locomotion.stopEndSpeed
+					)
+				)
+			end
+			-- The corrections (CW): every rest of a staging waits askSettleSeconds, a walk asked for
+			-- beside the spot starts at the rest check, and a correction walks, never sprints.
+			if walk.askSettleSeconds * (walk.secondWalks + 2) >= walk.timeoutSeconds then
+				problem(
+					("capture.walk.askSettleSeconds (%g) x (secondWalks + 2) must be under timeoutSeconds (%g): the walk's rests and its ask fit the timeout"):format(
+						walk.askSettleSeconds,
+						walk.timeoutSeconds
+					)
+				)
+			end
+			if walk.correctWithinStuds < stage.standRadius or walk.correctWithinStuds > stage.approachStuds then
+				problem(
+					("capture.walk.correctWithinStuds (%g) must be from capture.stage.standRadius (%g) to approachStuds (%g): a body at rest in the ring is never sent round the route"):format(
+						walk.correctWithinStuds,
+						stage.standRadius,
+						stage.approachStuds
+					)
+				)
+			end
+			if walk.correctBackStuds <= walk.waypointStuds or walk.correctBackStuds > stage.approachStuds then
+				problem(
+					("capture.walk.correctBackStuds (%g) must be over waypointStuds (%g) and at most capture.stage.approachStuds (%g): the correction walks back along the last leg"):format(
+						walk.correctBackStuds,
+						walk.waypointStuds,
+						stage.approachStuds
+					)
+				)
+			end
+			if walk.correctSpeed > locomotion.runSpeed then
+				problem(
+					("capture.walk.correctSpeed (%g) must be at most choreo locomotion.runSpeed (%g): a correction walks on a stick pushed at most all the way, never at the sprint"):format(
+						walk.correctSpeed,
+						locomotion.runSpeed
+					)
+				)
+			end
+			if walk.creepEndSpeed >= locomotion.idleSpeedThreshold then
+				problem(
+					("capture.walk.creepEndSpeed (%g) must be under choreo locomotion.idleSpeedThreshold (%g): the correction lets go too slow for the two-step stop to carry"):format(
+						walk.creepEndSpeed,
+						locomotion.idleSpeedThreshold
+					)
+				)
+			end
+			-- The blocked rule (316(b)): it judges a walk well inside the timeout, never a body the
+			-- walk still moves. The correction's creep (ahead / creepSeconds studs a second, let go
+			-- at creepEndSpeed) is the slowest push: its last blockedStuds take
+			-- creepSeconds x ln((blockedStuds + end) / end), end = creepEndSpeed x creepSeconds.
+			if walk.blockedSeconds >= walk.timeoutSeconds then
+				problem(
+					("capture.walk.blockedSeconds (%g) must be under timeoutSeconds (%g): a blocked walk lets go before the walk times out"):format(
+						walk.blockedSeconds,
+						walk.timeoutSeconds
+					)
+				)
+			end
+			if walk.blockedStuds >= walk.restStuds then
+				problem(
+					("capture.walk.blockedStuds (%g) must be under restStuds (%g): a body the walk moves less than that is held, not walking"):format(
+						walk.blockedStuds,
+						walk.restStuds
+					)
+				)
+			end
+			local creepEnd = walk.creepEndSpeed * walk.creepSeconds
+			local creepLast = walk.creepSeconds * math.log((walk.blockedStuds + creepEnd) / creepEnd)
+			if creepLast >= walk.blockedSeconds then
+				problem(
+					("capture.walk.blockedSeconds (%g) must be over the correction's creep over its last blockedStuds (%.3f s): the creep is never read as blocked"):format(
+						walk.blockedSeconds,
+						creepLast
+					)
+				)
+			end
+			if walk.creepEndSpeed * walk.creepSeconds >= walk.restStuds then
+				problem(
+					("capture.walk.creepEndSpeed x creepSeconds (%.3f) must be under restStuds (%g): the correction lets go on the spot"):format(
+						walk.creepEndSpeed * walk.creepSeconds,
+						walk.restStuds
 					)
 				)
 			end
@@ -708,10 +1078,23 @@ return function(ctx: Context): { string }
 				if not isNumber(step.delay) or step.delay < 0 then
 					problem(stepLabel .. ".delay must be 0 or more seconds after the step before it")
 				end
-				for _, key in { "at", "onClip", "every", "lead", "repeats", "lock", "chain", "from", "to" } do
+				for _, key in { "at", "onClip", "every", "lead", "repeats", "lock", "chain", "from" } do
 					if step[key] ~= nil then
 						problem(("%s.%s: a chain step is timed by its delay alone"):format(stepLabel, key))
 					end
+				end
+				-- A step's own `to` (EF): nothing of the step goes down past it, like its reaction's.
+				if
+					step.to ~= nil
+					and (not isNumber(step.to) or step.to <= 0 or (seconds ~= nil and step.to > seconds))
+				then
+					problem(
+						("%s.to (%s) must be above 0 and at most the take (%s s): nothing of the step goes down past it"):format(
+							stepLabel,
+							tostring(step.to),
+							tostring(seconds)
+						)
+					)
 				end
 				if step.cycle ~= nil then
 					local cycle = step.cycle
@@ -913,6 +1296,20 @@ return function(ctx: Context): { string }
 									)
 								)
 							end
+						end
+					end
+					-- The attacks it may begin before it is held at its next free tick (FK2,
+					-- EnemyService.limitAttacks): a whole number of one or more, on a let-go enemy only.
+					if entry.attacks ~= nil then
+						if entry.held ~= false then
+							problem(entryLabel .. ".attacks is only for an enemy the shot lets go (held = false)")
+						elseif not isWhole(entry.attacks) or entry.attacks < 1 then
+							problem(
+								("%s.attacks (%s) must be a whole number of 1 or more"):format(
+									entryLabel,
+									tostring(entry.attacks)
+								)
+							)
 						end
 					end
 					-- A released Charger's first charge, against a player standing on the spot (D-300).
@@ -1184,8 +1581,50 @@ return function(ctx: Context): { string }
 				end
 			end
 		end
+
+		-- No dev key is one Studio keeps for its own shortcuts: it would never reach the game.
+		local devKeys: { { where: string, key: any } } = {}
+		local clipLabKeys = if typeof(dev.clipLab) == "table" then dev.clipLab.hotkeys else nil
+		local lists = {
+			{ prefix = "capture.hotkeys", keys = hotkeys },
+			{ prefix = "clipLab.hotkeys", keys = clipLabKeys },
+		}
+		for _, list in lists do
+			if typeof(list.keys) == "table" then
+				local names = {}
+				for name in list.keys do
+					table.insert(names, tostring(name))
+				end
+				table.sort(names)
+				for _, name in names do
+					table.insert(devKeys, { where = ("%s.%s"):format(list.prefix, name), key = list.keys[name] })
+				end
+			end
+		end
+		if typeof(walk) == "table" and typeof(walk.cancelKeys) == "table" then
+			for index, key in walk.cancelKeys do
+				table.insert(devKeys, { where = ("capture.walk.cancelKeys[%d]"):format(index), key = key })
+			end
+		end
+		for _, entry in devKeys do
+			if table.find(STUDIO_SHORTCUT_KEYS, entry.key) ~= nil then
+				problem(
+					("%s (%s) is a key Studio keeps for its own shortcuts (Respect Studio shortcuts when game has focus): it never reaches the game"):format(
+						entry.where,
+						tostring(entry.key)
+					)
+				)
+			end
+		end
 		if typeof(capture.perform) ~= "table" or capture.perform.defaultOn ~= false then
 			problem("capture.perform.defaultOn must be false: auto-perform starts off")
+		end
+		-- The guard's lead read off the staging replies (EF) is capped at a positive time.
+		if
+			typeof(capture.perform) == "table"
+			and (not isNumber(capture.perform.wayUpMax) or capture.perform.wayUpMax <= 0)
+		then
+			problem("capture.perform.wayUpMax must be a positive number of seconds: the way up a guard leads by")
 		end
 
 		-- The staging's own numbers.
@@ -1193,10 +1632,48 @@ return function(ctx: Context): { string }
 			if typeof(stage.remoteName) ~= "string" or not isName(stage.remoteName) then
 				problem("capture.stage.remoteName must be a plain instance name")
 			end
-			for _, key in { "requestsPerSecond", "awayStuds", "holdWaitSeconds" } do
+			for _, key in
+				{
+					"requestsPerSecond",
+					"awayStuds",
+					"holdWaitSeconds",
+					"settleNearStuds",
+					"settleStuds",
+					"settleSeconds",
+					"settleTimeoutSeconds",
+				}
+			do
 				if not isNumber(stage[key]) or stage[key] <= 0 then
 					problem(("capture.stage.%s must be a positive number"):format(key))
 				end
+			end
+			-- The settled read (D-447): its still window fits its timeout, it covers the whole ring,
+			-- and the hold wait and the settle together stay under the client's wait.
+			if
+				isNumber(stage.settleSeconds)
+				and isNumber(stage.settleTimeoutSeconds)
+				and stage.settleSeconds >= stage.settleTimeoutSeconds
+			then
+				problem("capture.stage.settleSeconds must be under settleTimeoutSeconds: a still root is seen")
+			end
+			if
+				isNumber(stage.settleNearStuds)
+				and isNumber(stage.standRadius)
+				and stage.settleNearStuds < stage.standRadius
+			then
+				problem(
+					"capture.stage.settleNearStuds must be at least standRadius: a root in the ring is read settled"
+				)
+			end
+			if
+				isNumber(stage.holdWaitSeconds)
+				and isNumber(stage.settleTimeoutSeconds)
+				and isNumber(capture.stageTimeoutSeconds)
+				and stage.holdWaitSeconds + stage.settleTimeoutSeconds >= capture.stageTimeoutSeconds
+			then
+				problem(
+					"capture.stage.holdWaitSeconds + settleTimeoutSeconds must be under capture.stageTimeoutSeconds: the client waits out both"
+				)
 			end
 			if isNumber(stage.awayStuds) and stage.awayStuds <= camera.lock.range then
 				problem(
@@ -1294,6 +1771,25 @@ return function(ctx: Context): { string }
 								then "capture.stage.ledge: the open shot's spot must stand on the ledge"
 								else "capture.stage.area must stand off the ledge"
 						)
+					end
+				end
+				-- The area's ring stands routeMarginStuds clear of the ledge and its ramp: a body in it
+				-- never stands where they go, and a body where they go is walked there to stand clear
+				-- before they are built (DevStage).
+				if isNumber(stage.standRadius) and isNumber(stage.routeMarginStuds) then
+					local ax, _, az = logic.standSpot(false, area, ledge)
+					local clearance = stage.standRadius + stage.routeMarginStuds
+					for _, box in logic.partBoxes(ledge) do
+						local dx = math.max(box.min[1] - ax, 0, ax - box.max[1])
+						local dz = math.max(box.min[3] - az, 0, az - box.max[3])
+						if math.sqrt(dx * dx + dz * dz) < clearance then
+							problem(
+								("capture.stage.area's ring must stand routeMarginStuds (%g) clear of %s: a body where the ledge and its ramp go walks there to stand clear"):format(
+									stage.routeMarginStuds,
+									tostring(box.name)
+								)
+							)
+						end
 					end
 				end
 				-- The ledge and its ramp off the field's spawn points.
@@ -1646,5 +2142,6 @@ return function(ctx: Context): { string }
 	end
 
 	checkHooks(ctx, dev, problem)
+	checkFrameCap(ctx, dev, problem)
 	return problems
 end

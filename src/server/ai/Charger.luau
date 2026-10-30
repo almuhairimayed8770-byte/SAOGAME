@@ -156,6 +156,13 @@ local function slam(brain: Brain.Brain, rush: Brain.Rush, contact: RushWorld.Con
 	end
 	memory.rushWalled = true
 	memory.rushCap = math.min(memory.rushCap or math.huge, cap)
+	-- The stop rests the farthest pose the clients draw the body in on the face (D-437), the rest
+	-- pose's snout that much short of it: the line's snout reaches on by it to the face.
+	local body = brain:bodyProfile()
+	local front = brain:bodyExtents()
+	memory.rushReachPast = if body ~= nil and body.poses ~= nil
+		then math.max(0, RushWorld.front(body.poses) - front)
+		else 0
 	local progress = progressOf(brain, rush)
 	local stop = math.clamp(contact.at, progress, rush.length)
 	memory.rushStop = stop
@@ -275,7 +282,13 @@ local function sweep(brain: Brain.Brain, rush: Brain.Rush, elapsed: number)
 		return -- the line has resolved: the strike beat has passed
 	end
 	memory.rushSwept = upTo
-	local to = math.min(rush.speed * upTo + front, reached, memory.rushCap or math.huge, memory.rushGround or math.huge)
+	local past: number = memory.rushReachPast or 0
+	local to = math.min(
+		rush.speed * upTo + front + past,
+		reached + past,
+		memory.rushCap or math.huge,
+		memory.rushGround or math.huge
+	)
 	local from = rush.speed * (last or 0) - back
 	local resolved: number? = memory.rushResolved
 	local due: boolean
@@ -400,6 +413,7 @@ function Charger.onStrikeStart(brain: Brain.Brain, _target: Brain.Target?)
 	memory.rushJammed = false
 	memory.rushWalled = false
 	memory.rushCap = nil
+	memory.rushReachPast = nil
 	memory.rushStop = nil
 	memory.rushDazeAt = nil
 	memory.rushDazing = false
@@ -414,6 +428,10 @@ function Charger.onStrikeStart(brain: Brain.Brain, _target: Brain.Target?)
 	memory.rushRunning = false
 	memory.rushBlockedFor = 0
 	memory.rushBlockedPasses = 0
+	memory.rushClimbAt = nil
+	memory.rushClimbFrom = nil
+	memory.rushClimbY = nil
+	memory.rushClimbed = 0
 	memory.rushHit = {}
 	brain:moveDirect(rush.origin + rush.direction * length, speed)
 	brain:rushStarted(rush)
@@ -504,6 +522,37 @@ local function blocked(brain: Brain.Brain, rush: Brain.Rush, now: number, progre
 	return memory.rushBlockedPasses >= 2 and memory.rushBlockedFor >= tuning.blockedSeconds - EPSILON
 end
 
+-- The lag a climb makes up for (D-434): on every pass the body rose, the run it fell behind the
+-- rush's pace by on its flat path, up to how far it rose. A body climbing a slope or a stair (ground,
+-- D-204) runs its pace along the ground, so its flat progress falls behind the clock by about its rise
+-- (a 40 degree slope: 19 studs/s across and 10.9 up for a 28 studs/s rush); that is no jam. A body
+-- that does not rise (a ledge, a body stopped dead) is judged as before. Two passes of one moment
+-- count once.
+local function climbed(brain: Brain.Brain, rush: Brain.Rush, now: number, progress: number): number
+	local memory = brain.memory
+	local at: number? = memory.rushClimbAt
+	local from: number? = memory.rushClimbFrom
+	local fromY: number? = memory.rushClimbY
+	local total: number = memory.rushClimbed or 0
+	if at ~= nil and now - at <= EPSILON then
+		return total
+	end
+	local y = brain:position().Y
+	memory.rushClimbAt = now
+	memory.rushClimbFrom = progress
+	memory.rushClimbY = y
+	if at == nil or from == nil or fromY == nil then
+		return total
+	end
+	local rise = y - fromY
+	local lag = rush.speed * (now - at) - (progress - from)
+	if rise > 0 and lag > 0 then
+		total += math.min(lag, rise)
+		memory.rushClimbed = total
+	end
+	return total
+end
+
 --- Keeps the rush going and resolves what the body swept since the last pass (every server frame,
 --- D-184); it is over when its time has run, so the skid starts on the clip's beat. The body runs
 --- its path leg by leg, turning onto each new leg at rushWorld.turnRate. A slam the cast sees has
@@ -545,15 +594,26 @@ function Charger.onStrike(brain: Brain.Brain, dt: number, _phaseElapsed: number)
 	local progress = progressOf(brain, rush)
 	local ran = now - rush.bodyStartedAt
 	if ran >= rush.duration and memory.rushDazeAt == nil then
+		-- Its time has run, the body a frame's run short of its line's end (more on a climb): it rests
+		-- on the end every client draws the skid to (D-432), sent there at its own pace and stopped
+		-- dead on it (the recovery's stop leaves an exact run to finish), and the end tells that rest,
+		-- so no drawn body slides back to it at the hand-back.
 		memory.rushing = false
-		brain:rushEnded(rush, "Done", progress)
+		local rest = progress
+		local free = memory.rushWalled ~= true and memory.rushJammed ~= true
+		if free and rush.length - progress >= RushWorld.SAME_STUDS then
+			rest = rush.length
+			brain:moveDirect(RushWorld.pointAt(rush.legs, rest) + Vector3.new(0, rush.origin.Y, 0), rush.speed, true)
+		end
+		brain:rushEnded(rush, "Done", rest)
 		return true
 	end
 	if memory.rushWalled == true then
 		return false -- slam() sent the body to its stop; it waits there for the daze
 	end
 	local stuck = blocked(brain, rush, now, progress)
-	if memory.rushJammed ~= true and (stuck or rush.speed * ran - progress > tuning.jamLagStuds) then
+	local lag = rush.speed * ran - progress - climbed(brain, rush, now, progress)
+	if memory.rushJammed ~= true and (stuck or lag > tuning.jamLagStuds) then
 		-- The line ends here (D-195) and the clients stop drawing it ahead; the body stops where it
 		-- jammed (D-190): sent on, it ran past its clock's end still at full speed, and turned solid
 		-- in the middle of the player it had just run through.

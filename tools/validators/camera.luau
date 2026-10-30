@@ -48,6 +48,17 @@ return function(ctx: any): { string }
 	check(camera.shake.amplitude == combat.cameraShakeStuds, "shake.amplitude must point at combat.cameraShakeStuds")
 	check(camera.shake.decay > 0 and camera.shake.frequency > 0, "shake decay and frequency must be positive")
 	check(camera.shake.cutoff > 0, "shake.cutoff must be positive")
+	local startPhase = camera.shake.startPhase
+	local period = if typeof(camera.shake.frequency) == "number" and camera.shake.frequency > 0
+		then 1 / camera.shake.frequency
+		else 0
+	check(
+		typeof(startPhase) == "number" and startPhase >= 0 and startPhase < period,
+		("shake.startPhase (%s) must be in [0, 1/frequency %.4f) seconds: where a shake from rest starts its noise (312)"):format(
+			tostring(startPhase),
+			period
+		)
+	)
 	check(typeof(camera.shake.lanes) == "table" and #camera.shake.lanes >= 2, "shake needs at least two noise lanes")
 	for index, lane in camera.shake.lanes do
 		check(

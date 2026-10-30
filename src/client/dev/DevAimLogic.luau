@@ -21,7 +21,7 @@ local FREE: { [string]: boolean } = { Idle = true, Moving = true }
 local DevAimLogic = {}
 
 --- The command names the hook answers, for its "help" reply.
-DevAimLogic.COMMANDS = { "help", "status", "lock", "face", "swing", "guard", "dodge" }
+DevAimLogic.COMMANDS = { "help", "status", "lock", "face", "swing", "guard", "dodge", "draw" }
 
 --- Signed degrees (+ = left) from the flat look (lookX, lookZ) to the flat offset (dx, dz); nil
 --- when either has no length.

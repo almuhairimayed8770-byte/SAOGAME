@@ -23,6 +23,11 @@
 	A long frame (sheathTip.hitch: a hitch of `seconds` among `hz` frames) lands once the clip has
 	stepped 1 to `steps` times: the envelope takes the whole hitch in one step, and the drawn sprint
 	pose must give way in that same step, not over the normal frames after it.
+
+	A guard raised with the sword on the back (the guard cases) plays the Guard clip as
+	CharacterController's guard press does, with the Drawn target: the Draw plays over the guard
+	(sheath.drawFirstClips, overPriority) and hands the arm to it from sheath.handOverTime, under the
+	same limits. Pressed with the flip, or a little after a lock-on's Draw has started under it.
 ]]
 
 local fs = require("@lune/fs")
@@ -69,6 +74,7 @@ local WeaponModels = Harness.load("src/shared/data/weaponModels")
 local Sheath = ChoreoData.sheath
 local Tip = Dev.groundClearance.sheathTip
 local PREFIX = ChoreoData.locomotion.clipPrefix
+local GUARD_ID = PREFIX .. "Guard"
 
 local root = Harness.repoRoot()
 local function loadTool(path: string): any
@@ -121,7 +127,8 @@ local function run(
 	hz: number,
 	hitchAfter: number?,
 	backAt: number?,
-	lead: number?
+	lead: number?,
+	guardAt: number?
 ): Worst
 	-- `lead` more seconds in the start state put the flip at another point of the gait's cycle.
 	local settle = Tip.settle + (lead or 0)
@@ -150,6 +157,10 @@ local function run(
 	local clip = ClipLibrary.get(clipId)
 	local wait = if drawing then 0 else Sheath.sheatheDelay
 	local seconds = settle + wait + clip.duration + (clip.blendOut or ChoreoData.blendOut) + Tip.after
+	if guardAt ~= nil then
+		-- The Draw plays again over the guard when one had started under it.
+		seconds += guardAt
+	end
 	if backAt ~= nil then
 		-- Long enough for the clip the target turns back to as well (a Draw cut back with the sword
 		-- in the hand sheathes it again).
@@ -171,6 +182,7 @@ local function run(
 		swapped = false,
 	}
 	local lastTip: any, lastLine: any = nil, nil
+	local guarded = false
 	local travelled = Vector3.zero
 	local clipSteps = 0 -- steps the clip has been live for
 	local wentBack = false -- the target turned true again mid-Sheathe (backAt)
@@ -192,6 +204,12 @@ local function run(
 			end
 		end
 		model:SetAttribute("Drawn", drawn)
+		if guardAt ~= nil and not guarded and t > settle and t - settle >= guardAt - 1e-9 then
+			-- The guard press, on the flip's own step or later: the Guard clip plays before the
+			-- frame's locomotion step, as CharacterController's guard press does.
+			guarded = true
+			animator:play(GUARD_ID)
+		end
 		travelled += Vector3.new(0, 0, -speed * dt)
 		local rootFrame = base * CFrame.new(travelled)
 		primary.CFrame = rootFrame
@@ -261,6 +279,11 @@ local BACK_STRIDE = 3
 -- clip's cycle (at least one whole cycle of every gait at every speed): a moving base's torso
 -- adds its own swing to the arm's, most where the two line up.
 local PHASES = 48
+-- When the guard is pressed in the guard cases, in seconds after the Drawn target flips: with it
+-- (the press itself predicts drawn), and while a lock-on's Draw plays under it before and after
+-- its WeaponDraw (0.22 s).
+local GUARD_AFTER = { 0, 0.1, 0.2, 0.3, 0.5, 0.7 }
+
 local function longestCycle(): number
 	local longest = 0
 	for _, gait in LocomotionState.gaits() do
@@ -279,9 +302,15 @@ end
 -- the arm then, so the drawn pose comes back under the Draw's limits, or the sword goes back to
 -- the sheath under the Sheathe's. (A Draw cut back before its WeaponDraw leaves the blade on the
 -- back; a Sheathe cut back after its WeaponSheathe plays the Draw at once.)
-local function check(drawing: boolean, mode: ("hitches" | "back" | "phases")?): ()
+local function check(drawing: boolean, mode: ("hitches" | "back" | "phases" | "guard")?): ()
 	local name = (if drawing then "Draw" else "Sheathe")
-		.. (if mode == "back" then " cut back" elseif mode == "phases" then " over the gait's cycle" else "")
+		.. (
+			if mode == "back"
+				then " cut back"
+				elseif mode == "phases" then " over the gait's cycle"
+				elseif mode == "guard" then " under a guard raised sheathed"
+				else ""
+		)
 	local tipLimit = if drawing ~= (mode == "back") then Sheath.drawTipSpeed else Sheath.sheatheTipSpeed
 	if mode == "phases" then
 		tipLimit *= Sheath.movingTipShare
@@ -289,7 +318,8 @@ local function check(drawing: boolean, mode: ("hitches" | "back" | "phases")?): 
 	local problems: { string } = {}
 	local fastest, sharpest = 0, 0
 	local cases = 0
-	local runs: { { speed: number, hz: number, hitchAfter: number?, backAt: number?, lead: number? } } = {}
+	local runs: { { speed: number, hz: number, hitchAfter: number?, backAt: number?, lead: number?, guardAt: number? } } =
+		{}
 	local expected = 0
 	for _, speed in Tip.speeds do
 		if mode == "phases" then
@@ -300,6 +330,13 @@ local function check(drawing: boolean, mode: ("hitches" | "back" | "phases")?): 
 						table.insert(runs, { speed = speed, hz = hz, lead = point * span / PHASES })
 						expected += 1
 					end
+				end
+			end
+		elseif mode == "guard" then
+			for _, hz in Tip.stepHz do
+				for _, guardAt in GUARD_AFTER do
+					table.insert(runs, { speed = speed, hz = hz, guardAt = guardAt })
+					expected += 1
 				end
 			end
 		elseif mode == "hitches" then
@@ -324,7 +361,7 @@ local function check(drawing: boolean, mode: ("hitches" | "back" | "phases")?): 
 	end
 	for _, each in runs do
 		local speed, hz = each.speed, each.hz
-		local worst = run(drawing, speed, hz, each.hitchAfter, each.backAt, each.lead)
+		local worst = run(drawing, speed, hz, each.hitchAfter, each.backAt, each.lead, each.guardAt)
 		cases += 1
 		-- The sword must actually change place, or the case measured nothing of the swap; a Sheathe
 		-- cut back keeps it in the hand.
@@ -340,6 +377,9 @@ local function check(drawing: boolean, mode: ("hitches" | "back" | "phases")?): 
 		end
 		if each.lead ~= nil then
 			case ..= (", flipped %.3f s into the cycle"):format(each.lead)
+		end
+		if each.guardAt ~= nil then
+			case ..= (", the guard %.3f s after the flip"):format(each.guardAt)
 		end
 		if worst.tip > tipLimit then
 			table.insert(
@@ -368,7 +408,7 @@ local function check(drawing: boolean, mode: ("hitches" | "back" | "phases")?): 
 			)
 		end
 	end
-	if mode == "back" or mode == "phases" then
+	if mode == "back" or mode == "phases" or mode == "guard" then
 		expect(cases).toBe(expected)
 		expect(cases).toBeGreaterThan(#Tip.speeds)
 	else
@@ -415,5 +455,9 @@ describe("Draw and Sheathe move the blade as a whip on the client's own path", f
 
 	it("Draw cut back with the sword in the hand: sheathed again under the Sheathe's limits", function()
 		check(true, "back")
+	end)
+
+	it("Guard raised sheathed: the Draw plays over it and hands over under the Draw's limits", function()
+		check(true, "guard")
 	end)
 end)

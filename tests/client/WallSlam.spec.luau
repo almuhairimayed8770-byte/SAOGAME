@@ -305,3 +305,55 @@ describe("WallSlam's shake reads over the lock camera's ease", function()
 		expect(mean[11]).toBeLessThan(0.1)
 	end)
 end)
+
+-- A rush's skid (FB2): the same dust, smaller, kicked up under the hind hooves while the drawn body
+-- slides from the strike beat to its rest (RushDraw.takeDust says where; Replication calls skid).
+describe("WallSlam skid dust", function()
+	local skid = fx.rushSkid
+
+	it("is dust from its own pooled emitter, tuned from fx.rushSkid, smaller than a slam's", function()
+		expect(skid).never.toBeNil()
+		expect(palette.tokens[skid.token]).never.toBeNil()
+		expect(skid.lightEmission).toBe(0)
+		expect(skid.particles).toBeGreaterThan(0)
+		expect(skid.particles).toBeLessThanOrEqual(slam.particles)
+		expect(skid.size.birth).toBeLessThanOrEqual(slam.size.birth)
+		WallSlam.start()
+		local emitter = WallSlam.skidEmitter() :: ParticleEmitter
+		expect(emitter).never.toBeNil()
+		expect(emitter).never.toBe(WallSlam.emitter())
+		expect(emitter.LightEmission).toBeCloseTo(0, 1e-6)
+		expect(emitter.Rate).toBeCloseTo(0, 1e-6)
+		expect(emitter.LockedToPart).toBe(false)
+		expect(emitter.Lifetime.Max).toBeCloseTo(skid.lifetime.max, 1e-4)
+		expect(emitter.Speed.Max).toBeCloseTo(skid.speed.max, 1e-4)
+		local host = emitter.Parent :: BasePart
+		expect(host.Anchored).toBe(true)
+		expect(host.CanCollide).toBe(false)
+		expect(host.Transparency).toBeCloseTo(1, 1e-6)
+		expect((host.Parent :: Instance).Name).toBe(skid.folderName)
+	end)
+
+	it("puffs at the hooves, thrown back against the slide, at the tier's share", function()
+		WallSlam.start()
+		local emitter = WallSlam.skidEmitter() :: ParticleEmitter
+		local host = emitter.Parent :: BasePart
+		local heading = Vector3.new(1, 0, -1).Unit
+		atTier("High", function()
+			expect(WallSlam.skid(Vector3.new(4, 0.2, 6), heading)).toBe(
+				WallSlam.skidCount(fx.quality.High.particleScale)
+			)
+		end)
+		expect(host.CFrame.Position.X).toBeCloseTo(4, 1e-4)
+		expect(host.CFrame.Position.Y).toBeCloseTo(0.2, 1e-4)
+		expect(host.CFrame.LookVector:Dot(-heading)).toBeCloseTo(1, 1e-4)
+		expect(WallSlam.skidCount(1)).toBe(skid.particles)
+		expect(WallSlam.skidCount(0)).toBe(0)
+		atTier("Low", function()
+			expect(WallSlam.skid(Vector3.zero, heading)).toBe(WallSlam.skidCount(fx.quality.Low.particleScale))
+		end)
+		-- The same pool every puff.
+		WallSlam.skid(Vector3.new(-3, 0, 2), heading)
+		expect(WallSlam.skidEmitter()).toBe(emitter)
+	end)
+end)

@@ -908,6 +908,15 @@ function Brain.wake(self: Brain)
 	self.turnedAt = self.phaseStart
 end
 
+--- Ends an interrupt whose time is over by `now`, awake or not (D-433): a held brain never ticks, so
+--- a stagger or a slam's daze it was held in would never end (the record back in Idle, the brain
+--- still waiting). Does what the tick would (tickInterrupted); nothing in any other phase.
+function Brain.settle(self: Brain, now: number, record: any)
+	if self.phase == "Interrupted" and record ~= nil then
+		self:tickInterrupted(now, record)
+	end
+end
+
 function Brain.tickInterrupted(self: Brain, now: number, record: any)
 	local over: boolean
 	if self.heldUntil ~= nil then

@@ -113,6 +113,7 @@ local AimLogic = require(script.Parent.AimLogic)
 local ContactPredictor = require(script.Parent.ContactPredictor)
 local EntityTracker = require(script.Parent.EntityTracker)
 local Replication = require(script.Parent.Replication)
+local WalkShell = require(script.Parent.WalkShell)
 local WeaponInfo = require(script.Parent.WeaponInfo)
 local Siblings = require(script.Parent.Siblings)
 local CameraController = require(Client.camera.CameraController)
@@ -199,6 +200,9 @@ local standOffHandle: any = nil
 local standOffShown = 0
 -- How much of the keep-out's aside (D-315) the root already shows; planStandOff starts it at 0.
 local standOffSideShown = 0
+-- How much of the stand-off's step back the world behind has taken off so far (item 287): held
+-- off the clip's own motion toward the target instead.
+local standOffLost = 0
 local STAND_OFF_EASING: string = Combat.contact.standOff.easing
 local lastPredictAt: number? = nil
 local lastParryAt: number? = nil
@@ -248,6 +252,13 @@ local contacts = ContactPredictor.new({
 	hidden = Replication.drawnAway,
 })
 local contactHandle: any = nil
+
+-- The tracker's live records the walk's shell meets (WalkShell.hold); none from a tracker without
+-- a live list.
+local function liveRecords(): { any }
+	local live = (EntityTracker :: any).live
+	return if typeof(live) == "function" then live() else {}
+end
 -- The last swing's sequence number (combat.luau contact.swingSequenceMax): each ArtRequest and
 -- BasicAttackRequest carries the next, and its HitConfirmed echoes it (item 4).
 local swingSequence = 0
@@ -429,6 +440,7 @@ local standOffAsked: any = nil
 -- behind or beside (the body's own world cast, D-235 amended). The root carries it in step().
 local function planStandOff(handle: any, facing: { number }, basic: boolean?)
 	standOff, standOffHandle, standOffShown, standOffSideShown = nil, nil, 0, 0
+	standOffLost = 0
 	standOffAsked = handle
 	local model, rootPart = character, root
 	if model == nil or rootPart == nil or typeof(handle) ~= "table" then
@@ -462,10 +474,13 @@ end
 -- the world behind or beside leaves room (the plan's room and roomSide, cast from where the root
 -- stands now: the clip's root motion moved it too), and
 -- forgets the plan once it is done or the swing is gone. A frozen clip (a hit-stop) holds its
--- clock, so the root holds too. What a wall takes off a frame's share is not made up later. A
--- basic swing's plan is asked for here, on its first frame (the clip has taken one step, and the
--- root faces where the request turned it).
-local function stepStandOff(rootPart: BasePart)
+-- clock, so the root holds too. What a wall takes off a frame's share is not made up later: it is
+-- held off the clip's own motion toward the target instead (`carried`, this frame's root motion
+-- in the world), so with no room behind the lunge the keep-out was holding back never carries the
+-- body into the enemy (item 287: the engine then split the overlap between the blocker and the
+-- wall, 0.16-0.51 studs a frame). A basic swing's plan is asked for here, on its first frame (the
+-- clip has taken one step, and the root faces where the request turned it).
+local function stepStandOff(rootPart: BasePart, carried: Vector3)
 	local current = predicted
 	if
 		standOff == nil
@@ -499,6 +514,16 @@ local function stepStandOff(rootPart: BasePart)
 		local move = if by > 0 and room ~= nil then room(rootPart.CFrame, by) else by
 		rootPart.CFrame = rootPart.CFrame + plan.away * move
 		standOffShown = shown
+		if by > 0 and move < by then
+			standOffLost += by - move
+		end
+	end
+	-- Back along the way this frame's root motion came, so never into the world.
+	local toward = -carried:Dot(plan.away)
+	if standOffLost > 0 and toward > 0 then
+		local held = math.min(toward, standOffLost)
+		rootPart.CFrame = rootPart.CFrame + plan.away * held
+		standOffLost -= held
 	end
 	local side, keepSide = plan.side, plan.keepSide
 	if side ~= nil and keepSide ~= nil then
@@ -584,6 +609,22 @@ local function predictContacts(handle: any, artId: string?, finalHit: boolean, m
 	}
 	if contacts:begin(swing) then
 		contactHandle = handle
+	end
+end
+
+-- What runs every frame right after this frame's contacts (Replication's waits for words, D-347).
+local afterContactSteps: { (dt: number) -> () } = {}
+
+--- Runs `fn(dt)` every rendered frame right after the local fighter's step and its contacts, in
+--- this controller's render step (choreo.luau renderOrder.character), before any reader of a
+--- rig's hold: Replication's holds that wait for their words go on there (D-347).
+function CharacterController.afterContacts(fn: (dt: number) -> ())
+	table.insert(afterContactSteps, fn)
+end
+
+local function runAfterContacts(dt: number)
+	for _, after in afterContactSteps do
+		after(dt)
 	end
 end
 
@@ -790,7 +831,8 @@ function CharacterController.beginArt(slot: number)
 	hold = {
 		slot = slot,
 		art = art,
-		handle = animator:play(art.clip),
+		-- A cancel out of a basic takes the body as a snap (D-408).
+		handle = animator:play(art.clip, { handOver = true }),
 		pressedAt = now(),
 		frozenClipTime = nil,
 		token = holdToken,
@@ -880,7 +922,13 @@ function CharacterController.basicAttack()
 		return
 	end
 	local basicToken = nextToken()
-	predicted = { action = "Basic", clipId = clipId, handle = animator:play(clipId), token = basicToken }
+	-- The next basic cuts the one before it as a snap (D-408).
+	predicted = {
+		action = "Basic",
+		clipId = clipId,
+		handle = animator:play(clipId, { handOver = true }),
+		token = basicToken,
+	}
 	-- A basic chain's final hit is its last swing (section 6).
 	local sequence = nextSwing()
 	predictContacts(
@@ -908,10 +956,17 @@ function CharacterController.setGuard(held: boolean)
 		end
 		local clipId = playerClip("Guard")
 		local guardToken = nextToken()
+		-- The guard cuts a basic on the layer above it (D-408): it lets the basic go as a snap.
+		local cut = if state == "Basic" and predicted ~= nil then (predicted :: Predicted).handle else nil
 		predicted = {
 			action = "Guard",
 			clipId = clipId or "",
-			handle = if clipId ~= nil then animator:play(clipId) else nil,
+			handle = if clipId ~= nil
+				then animator:play(
+					clipId,
+					{ handOver = true, cancels = if typeof(cut) == "table" then { cut } else nil }
+				)
+				else nil,
 			token = guardToken,
 		}
 		setState("Guard")
@@ -947,10 +1002,13 @@ function CharacterController.dodge()
 	if not ok then
 		return
 	end
+	-- The guard the dodge cuts goes as a snap (D-408); an Art's hold is let go as ever (D-340).
+	local cut: any = nil
 	if state == "Holding" then
 		clearHold()
 	elseif state == "Guard" and predicted ~= nil then
-		stopClip((predicted :: Predicted).handle)
+		cut = (predicted :: Predicted).handle
+		stopClip(cut)
 		sendGuard(false)
 	end
 	local rootPart = root :: BasePart
@@ -975,7 +1033,9 @@ function CharacterController.dodge()
 	predicted = {
 		action = "Dodge",
 		clipId = clipId or "",
-		handle = if clipId ~= nil and not asleep then animator:play(clipId) else nil,
+		handle = if clipId ~= nil and not asleep
+			then animator:play(clipId, { handOver = true, cancels = if typeof(cut) == "table" then { cut } else nil })
+			else nil,
 		token = dodgeToken,
 	}
 	setState("Dodge")
@@ -1223,7 +1283,7 @@ local function wakeSleptDodge(t: number)
 		return
 	end
 	if current.clipId ~= "" then
-		current.handle = animator:play(current.clipId)
+		current.handle = animator:play(current.clipId, { handOver = true })
 	end
 	actionEndsAt = t + Combat.dodgeDuration
 	showDodge()
@@ -1232,6 +1292,8 @@ end
 local function step(dt: number)
 	local model, hum, rootPart = character, humanoid, root
 	if model == nil or hum == nil or rootPart == nil or animator == nil then
+		-- No fighter to step, but the holds that wait for their words go on every frame.
+		runAfterContacts(dt)
 		return
 	end
 	local t = now()
@@ -1312,12 +1374,23 @@ local function step(dt: number)
 		gait
 	)
 	local targetSpeed = (if carrySpeed > 0 then carrySpeed else walkSpeed) * captureScale
+	-- Item 236 (D-430): the walk (and the stop's carry) stops where the body shell touches an
+	-- enemy and slides along it; the speed share that fits is the Humanoid's WalkSpeed to cut.
+	local walkDir = if carrySpeed > 0 then Vector3.new(stopCarry.x, 0, stopCarry.z) else moveDir
+	local heldDir, heldShare = walkDir, 1
+	if not locked and walkDir.Magnitude > 0 then
+		heldDir, heldShare =
+			WalkShell.hold(model, rootPart, walkDir, math.max(speed, targetSpeed) * dt, drawn, liveRecords())
+		if heldShare > 0 then
+			targetSpeed *= heldShare
+		end
+	end
 	if targetSpeed ~= lastWalkSpeed then
 		hum.WalkSpeed = targetSpeed
 		lastWalkSpeed = targetSpeed
 	end
 	if carrySpeed > 0 then
-		moveDir = Vector3.new(stopCarry.x, 0, stopCarry.z)
+		moveDir = heldDir
 		hum:Move(moveDir)
 		carrying = true
 	elseif carrying then
@@ -1325,6 +1398,10 @@ local function step(dt: number)
 		if moveDir.Magnitude == 0 then
 			hum:Move(Vector3.zero)
 		end
+	end
+	if carrySpeed <= 0 and heldDir ~= walkDir then
+		moveDir = heldDir
+		hum:Move(moveDir)
 	end
 	-- Degrees from the facing to the direction the stick asks for (+ = left): Locomotion turns in
 	-- place past choreo.locomotion.turnInPlaceDegrees.
@@ -1371,18 +1448,21 @@ local function step(dt: number)
 	else
 		heldYaw = nil
 	end
+	local carried = Vector3.zero
 	if ActionLogic.rootMotionActive(state) then
 		local delta = animator:currentRootMotionDelta()
 		if typeof(delta) == "Vector3" and delta.Magnitude > 0 then
 			-- Along the facing the request carried: a whip still showing has the rest of its turn to
 			-- come (with none, this is the root's own space).
-			rootPart.CFrame = rootPart.CFrame + aimRotation(rootPart):VectorToWorldSpace(delta)
+			carried = aimRotation(rootPart):VectorToWorldSpace(delta)
+			rootPart.CFrame = rootPart.CFrame + carried
 		end
 	end
 	-- The Art stand-off over the anticipation (fix F1), on the clip's clock like the root motion.
-	stepStandOff(rootPart)
+	stepStandOff(rootPart, carried)
 	-- The blade on the pose this frame shows: a touch plays its hit now (issue 4).
 	stepContacts()
+	runAfterContacts(dt)
 	wakeSleptDodge(t)
 	recordYaw(rootPart, t)
 end
@@ -1415,6 +1495,7 @@ local function clearCharacter()
 	yawHistory = AimLogic.newHistory()
 	snap = nil
 	standOff, standOffHandle, standOffShown, standOffSideShown, standOffAsked = nil, nil, 0, 0, nil
+	standOffLost = 0
 	assistTargetId = nil
 	lastPredictAt = nil
 	fallTracker = { airborneSince = nil, peakY = 0 }

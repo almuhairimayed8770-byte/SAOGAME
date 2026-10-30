@@ -295,6 +295,9 @@ export type HitResult = {
 	attackerId: number,
 	targetId: number,
 	damage: number,
+	-- The HP the hit took off (FK5): its damage, or the HP that was left when it kills; 0 when it
+	-- was parried or found the target dead. The floating digit shows this.
+	hpRemoved: number,
 	crit: boolean,
 	gaugeDamage: number,
 	killed: boolean,

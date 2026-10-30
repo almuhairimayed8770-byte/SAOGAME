@@ -1,8 +1,12 @@
 --!strict
 --[[
-	player/OneHandedSword/Jump: take-off. A 0.08 s crouch (the point level, off the grass, the arms
-	back and a little out so the left hand clears the scabbard), an ExpoOut extension with the arms
-	thrown up and back, then the legs tuck with BackOut. Fall takes over when the clip ends.
+	player/OneHandedSword/Jump: take-off. A crouch carried in by a 0.08 s blend (the point level,
+	off the grass, the arms only 30% of the way from the guard to back and out, so the left hand
+	clears the scabbard), an extension over 9 frames (SineInOut) with the arms thrown up and back,
+	then the legs tuck (QuadOut). Fall takes over when the clip ends.
+	Re-key (D-378): the ExpoOut extension threw the arms' 90-degree swing into its first frame (55
+	degrees) and the 3-frame blend in carried the crouch's arm turn too fast; the BackOut tuck is
+	eased.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -23,7 +27,7 @@ local clip: Types.ClipDef = {
 	loop = false,
 	layer = "FullBody",
 	priority = 5,
-	blendIn = 0.05,
+	blendIn = 0.08,
 	blendOut = 0.15,
 	keys = {
 		{
@@ -40,19 +44,19 @@ local clip: Types.ClipDef = {
 				RightHip = rot(30, 0, 4),
 				RightKnee = rot(-50, 0, 0),
 				RightAnkle = rot(20, 0, 0),
-				LeftShoulder = rot(-30, 0, -17),
-				LeftElbow = rot(20, 0, 0),
-				LeftWrist = rot(0, 0, 0),
-				RightShoulder = rot(-30, 0, 17),
-				RightElbow = rot(20, 0, 0),
-				RightWrist = rot(-6, 0, 0),
+				LeftShoulder = rot(8.5, 0, -15.6),
+				LeftElbow = rot(41, 0, 0),
+				LeftWrist = rot(0, 0, 7),
+				RightShoulder = rot(12, 0, 12.1),
+				RightElbow = rot(30.5, 0, 0),
+				RightWrist = rot(-19.3, 0, 0),
 				Weapon = rot(4, 0, 0),
 			},
 		},
 		{
 			-- extension: everything up
-			time = 0.1,
-			easing = "ExpoOut",
+			time = 0.15,
+			easing = "SineInOut",
 			joints = {
 				Root = posRot(0, 0.1, 0, 0, 0, 0),
 				Waist = rot(4, 0, 0),
@@ -68,12 +72,14 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(50, 0, 20),
 				RightElbow = rot(14, 0, 0),
 				Weapon = rot(-70, 0, 0),
+				LeftWrist = rot(0, 0, 0),
+				RightWrist = rot(-6, 0, 0),
 			},
 		},
 		{
 			-- tuck
 			time = 0.3,
-			easing = "BackOut",
+			easing = "QuadOut",
 			joints = {
 				Root = posRot(0, 0.04, 0, 0, 0, 0),
 				Waist = rot(-6, 0, 0),

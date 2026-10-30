@@ -13,12 +13,18 @@
 	the slowest capture step (dev.luau timeScale.steps), so a velocity that is not the speed's
 	reading is never taken for it. stride.heldRiseSeconds, the time the walks take to carry a held
 	move alone (LocomotionState.heldShare, D-292), is a positive number of seconds.
+	stride.travelSlipDecaySeconds (D-411) is at least four frames and at most travelSlipSeconds / 2
+	/ 0.01: a lasting 1% bias in the root's travel holds the travel slip at half its bound at most.
 	tests/choreo/Stride.spec.luau re-measures the ground speeds and touchdowns from the clips.
 ]]
 
 local SETS = { "", "Drawn" }
 local WALKS = { "WalkForward", "WalkBack", "WalkLeft", "WalkRight" }
 local GAITS = { "WalkForward", "WalkBack", "WalkLeft", "WalkRight", "Run", "Sprint" }
+-- The travel slip's decay (D-411): the root's travel may run a lasting fraction off its speed (0.6%
+-- in the owner's run log); a 1% one must hold the running difference at half its bound at most.
+local MAX_TRAVEL_BIAS = 0.01
+local MIN_SLIP_DECAY_FRAMES = 4
 
 return function(ctx: any): { string }
 	local problems = {}
@@ -41,6 +47,23 @@ return function(ctx: any): { string }
 		typeof(heldRise) == "number" and heldRise > 0 and heldRise < math.huge,
 		("heldRiseSeconds (%s) must be a positive number of seconds: the walks take a held move over across it, never in one frame (D-292)"):format(
 			tostring(heldRise)
+		)
+	)
+	-- The travel slip's memory (D-411): longer than a few frames (a long physics frame and the short
+	-- one after it cancel inside it) and short enough that a lasting 1% bias in the root's travel
+	-- holds the running difference at no more than half travelSlipSeconds.
+	local decay = stride.travelSlipDecaySeconds
+	local slipSeconds = stride.travelSlipSeconds
+	check(
+		typeof(decay) == "number"
+			and typeof(slipSeconds) == "number"
+			and decay >= MIN_SLIP_DECAY_FRAMES / 60
+			and decay * MAX_TRAVEL_BIAS <= slipSeconds / 2,
+		("travelSlipDecaySeconds (%s) must be at least %d frames and at most travelSlipSeconds / 2 / %g (%s): a lasting bias never pins the travel slip at its bound"):format(
+			tostring(decay),
+			MIN_SLIP_DECAY_FRAMES,
+			MAX_TRAVEL_BIAS,
+			tostring(if typeof(slipSeconds) == "number" then slipSeconds / 2 / MAX_TRAVEL_BIAS else slipSeconds)
 		)
 	)
 	local handOver = locomotion.stopHandOverCycles

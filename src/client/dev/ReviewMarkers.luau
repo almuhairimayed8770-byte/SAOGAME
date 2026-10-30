@@ -27,6 +27,9 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Types = require(Shared.types)
 local ClipSampler = require(Shared.choreo.ClipSampler)
 local Dev = require(Shared.data.dev)
+local ChoreoData = require(Shared.data.choreo)
+local Combat = require(Shared.data.combat)
+local ContactPredictor = require(script.Parent.Parent.controllers.ContactPredictor)
 
 local Review = Dev.review
 local FPS = Review.fps
@@ -359,6 +362,38 @@ end
 --- sheathed clip starts on the back and the hand takes the sword at its WeaponDraw; a clip with a
 --- WeaponSheathe puts it back on the back from that event on. The ClipLab, the ground clearance
 --- spec and the rules below all read the mount from here.
+--- The ClipLab's hit-stop preview for the damage window open at `openTime` (D-154, D-412): the
+--- clip time the preview pauses at and the frames it pauses there. The game freezes a swing on the
+--- frame its clock reaches the window's strike key (ContactPredictor.strikeKey, the contact
+--- moment) and the hit-stop stands in for the authored Hold after it, so the blade stands still on
+--- the key's pose for max(hit-stop, Hold). The lab pauses on the strike key for what the hit-stop
+--- has beyond the Hold and then plays the Hold as authored: the same still on the same pose,
+--- every clip frame shown. Nil when the Hold is as long as the hit-stop (it is the whole still).
+function ReviewMarkers.hitStopPreview(clip: Types.ClipDef, openTime: number, frames: number): (number?, number)
+	-- The window open at `openTime` (the latest to open by then: the event fires on the frame the
+	-- clock passes it).
+	local open: { open: number, close: number }? = nil
+	for _, window in ClipSampler.hitWindows(clip) do
+		if window.open <= openTime + Combat.contact.keyEpsilon then
+			open = window
+		end
+	end
+	if open == nil then
+		return openTime, frames
+	end
+	local key = math.max(openTime, ContactPredictor.strikeKey(clip, open))
+	local index = ClipSampler.strikeHoldAfter(clip, key)
+	local holdFrames = 0
+	if index ~= nil and math.abs(clip.keys[index - 1].time - key) <= Combat.contact.keyEpsilon then
+		holdFrames = (clip.keys[index].time - clip.keys[index - 1].time) / ChoreoData.frameSeconds
+	end
+	local excess = frames - holdFrames
+	if excess <= 0 then
+		return nil, 0
+	end
+	return key, excess
+end
+
 function ReviewMarkers.mountAt(clip: Types.ClipDef, time: number): Mount
 	local draw = firstEventTime(clip, "WeaponDraw")
 	if clip.sheathed == true and (draw == nil or time < draw) then

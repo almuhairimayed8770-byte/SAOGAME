@@ -18,19 +18,29 @@
 		                    (up to stage.holdWaitSeconds), never held mid-attack, since a hold cancels the
 		                    attack the client already draws (a boar's crouch and line, then no rush);
 		                    one still mid-attack at the deadline fails the staging;
-		                 3. the open shot builds the ledge and its ramp (once): there is no jump
-		                    (D-024), so its fall and land come off an edge and the way up is the ramp;
-		                 4. held field enemies within stage.awayStuds of the stand spot are moved out
+		                 3. held field enemies within stage.awayStuds of the stand spot are moved out
 		                    to it (past the lock's range and every aggro radius), so the walk is safe;
-		                 5. the player's root must stand in the stand ring (DevStageLogic.inRing: within
+		                 4. the open shot builds the ledge and its ramp (once): there is no jump
+		                    (D-024), so its fall and land come off an edge and the way up is the ramp.
+		                    Never around the player's body: while its box (the model's extents) reaches
+		                    into where one goes (DevStageLogic.bodyInside), nothing is built and the
+		                    reply is { ok = false, error = "stand clear of where <part> goes first",
+		                    walk = the stage area's ring and a route to it }; the next ask builds them;
+		                 5. the player's root, read once it has stood still (settledRoot, D-447:
+		                    Studio's server reads a client's body a moment late), must stand in the
+		                    stand ring (DevStageLogic.inRing: within
 		                    stage.standRadius of the spot, its feet on the spot's floor; the open shot's
 		                    on the ledge's top). Outside it the reply is { ok = false, error = "walk
 		                    into the ring first", walk = the ring (x, y, z, facing, radius, tolerance,
-		                    over) and a route to it (DevStageLogic.route) }, and nothing is spawned;
+		                    over) and a route to it (DevStageLogic.route) }, and nothing is spawned. A
+		                    body in the ring but inside a built ledge or ramp (feet sunk into the top)
+		                    is refused: { ok = false, error = "the body stands inside <part>: ..." };
 		                 6. inside it the player is healed to full and the shot's enemies spawn
 		                    around where its root stands and faces, at their distance and side, facing
 		                    the player, held; `hp` sets one's HP (the kill shot). The first is the
-		                    shot's target.
+		                    shot's target. One let go with `attacks` (FK2) may begin that many attacks,
+		                    then is held at its next free moment (EnemyService.limitAttacks), so the
+		                    overhead and parry shots show one overhead.
 		                 Step 1 runs before any other check: the first stage request the rate lets
 		                 through after a take (a dead player's too, one that only asks for a walk)
 		                 leaves nothing of that take on the field.
@@ -50,6 +60,9 @@
 
 	One staging at a time; the server owns every enemy placement, HP and hold (the client only names
 	the shot and walks its own body). Replies are plain tables; a failure is { ok = false, error = ... }.
+	Every reply, a refusal's too, carries `receivedAt`: the server's clock (workspace:GetServerTimeNow)
+	as the ask arrived, before anything runs (EF). Against the ask's send time on the client's server
+	clock it reads how long a press takes to reach the server, the lead the auto guard needs.
 ]]
 
 local Players = game:GetService("Players")
@@ -155,28 +168,6 @@ local function holdField(): { number }
 	end
 end
 
--- Moves held field enemies standing within awayStuds of the spot out to it.
-local function moveAway(spotX: number, spotZ: number): number
-	local moved = 0
-	for _, id in EnemyService.ids() do
-		if isStaged(id) or not EnemyService.isHeld(id) then
-			continue
-		end
-		local model = EnemyService.modelOf(id)
-		local root = if model ~= nil then model.PrimaryPart else nil
-		if model == nil or root == nil then
-			continue
-		end
-		local at = root.Position
-		local x, z = DevStageLogic.awaySpot(spotX, spotZ, at.X, at.Z, Stage.awayStuds)
-		if x ~= nil and z ~= nil then
-			model:PivotTo(model:GetPivot() + Vector3.new(x - at.X, 0, z - at.Z))
-			moved += 1
-		end
-	end
-	return moved
-end
-
 -- A part from a placement table's size, name, colour token and material, anchored, at `cframe`.
 local function block(className: string, data: any, cframe: CFrame): BasePart
 	local part = Instance.new(className) :: BasePart
@@ -197,14 +188,78 @@ local function ledgeBuilt(): boolean
 	return existing ~= nil and existing.Parent ~= nil
 end
 
+local function rampBuilt(): boolean
+	local existing = ramp
+	return existing ~= nil and existing.Parent ~= nil
+end
+
+-- Moves held field enemies standing within awayStuds of the spot out to it.
+local function moveAway(spotX: number, spotZ: number): number
+	local moved = 0
+	for _, id in EnemyService.ids() do
+		if isStaged(id) or not EnemyService.isHeld(id) then
+			continue
+		end
+		local model = EnemyService.modelOf(id)
+		local root = if model ~= nil then model.PrimaryPart else nil
+		if model == nil or root == nil then
+			continue
+		end
+		local at = root.Position
+		local x, z = DevStageLogic.awaySpot(spotX, spotZ, at.X, at.Z, Stage.awayStuds, Stage)
+		if x ~= nil and z ~= nil then
+			-- Off the ledge and its ramp, on the floor where it lands (one moved off the ledge comes down).
+			local built = ledgeBuilt()
+			local rise = DevStageLogic.floorAt(Stage, built, x, z) - DevStageLogic.floorAt(Stage, built, at.X, at.Z)
+			model:PivotTo(model:GetPivot() + Vector3.new(x - at.X, rise, z - at.Z))
+			moved += 1
+		end
+	end
+	return moved
+end
+
+-- The names of the ledge and its ramp that stand in the world (built true) or are still to be
+-- built (built false).
+local function stagedParts(built: boolean): { string }
+	local names: { string } = {}
+	if ledgeBuilt() == built then
+		table.insert(names, Stage.ledge.name)
+	end
+	if rampBuilt() == built then
+		table.insert(names, Stage.ledge.ramp.name)
+	end
+	return names
+end
+
+-- Which staged part (named in `names`) the player's body reaches into, or nil: its box is the
+-- model's extents (flat: half their flat diagonal each way, so any yaw fits) from the floor its
+-- Humanoid holds it over; a face it touches within World.spawn.groundEpsilon is not inside.
+local function bodyInside(model: Model, root: BasePart, humanoid: Humanoid, names: { string }): string?
+	if #names == 0 then
+		return nil
+	end
+	local at = root.Position
+	local size = model:GetExtentsSize()
+	local floor = at.Y - PlaygroundLayout.rootHeight(humanoid.HipHeight, root.Size.Y, 0)
+	return DevStageLogic.bodyInside(
+		Stage.ledge,
+		at.X,
+		floor,
+		at.Z,
+		math.sqrt(size.X * size.X + size.Z * size.Z) / 2,
+		size.Y,
+		World.spawn.groundEpsilon,
+		names
+	)
+end
+
 -- The open shot's ledge and the ramp up to its top (no jump, D-024), built once.
 local function buildLedge()
 	local data = Stage.ledge
 	if not ledgeBuilt() then
 		ledge = block("Part", data, CFrame.new(data.position[1], data.position[2], data.position[3]))
 	end
-	local existing = ramp
-	if existing == nil or existing.Parent == nil then
+	if not rampBuilt() then
 		local x, y, z, yaw = DevStageLogic.rampFrame(data)
 		ramp = block("WedgePart", data.ramp, CFrame.new(x, y, z) * CFrame.Angles(0, math.rad(yaw), 0))
 	end
@@ -237,12 +292,47 @@ local function spawnStaged(shot: Dev.Shot, x: number, z: number, facing: number)
 				table.insert(toRelease, id)
 			end
 		end
+		if not entry.held and entry.attacks ~= nil then
+			EnemyService.limitAttacks(id, entry.attacks)
+		end
 		if entry.hp ~= nil then
 			EntityService.setHp(id, entry.hp)
 			stagedHp[id] = entry.hp
 		end
 	end
 	return ids, nil
+end
+
+-- The player's root as this server reads it once that read has stood still (D-447). Studio
+-- replicates a client-owned character a moment late, so the read the frame the walk comes to
+-- rest still trails the body down its last leg (along the shot's facing, toward where the
+-- enemies go): staged from it, a boar meant 12 studs off stood under the Charger's
+-- minChargeDistance from where the player rests and circled out before its only charge. A read
+-- farther than stage.settleNearStuds (flat) from the spot is taken as it is (the reply is a walk);
+-- nearer, it is read again every frame until it has moved no more than stage.settleStuds for
+-- stage.settleSeconds, for up to stage.settleTimeoutSeconds.
+local function settledRoot(root: BasePart, ring: DevStageLogic.Ring): Vector3
+	local at = root.Position
+	local dx, dz = at.X - ring.x, at.Z - ring.z
+	if dx * dx + dz * dz > Stage.settleNearStuds * Stage.settleNearStuds then
+		return at
+	end
+	local deadline = os.clock() + Stage.settleTimeoutSeconds
+	local anchor = at
+	local since = os.clock()
+	while os.clock() < deadline do
+		task.wait()
+		at = root.Position
+		local now = os.clock()
+		local mx, mz = at.X - anchor.X, at.Z - anchor.Z
+		if mx * mx + mz * mz > Stage.settleStuds * Stage.settleStuds then
+			anchor = at
+			since = now
+		elseif now - since >= Stage.settleSeconds then
+			break
+		end
+	end
+	return at
 end
 
 local function stageShot(player: Player, shotId: unknown): Reply
@@ -271,9 +361,6 @@ local function stageShot(player: Player, shotId: unknown): Reply
 		)
 	end
 	local open = shot.stage.open
-	if open then
-		buildLedge()
-	end
 	local ring = DevStageLogic.ring(open, Stage)
 	local moved = moveAway(ring.x, ring.z)
 	-- Where the player stands and faces; never moved here (D-244).
@@ -283,12 +370,37 @@ local function stageShot(player: Player, shotId: unknown): Reply
 	if root == nil or humanoid == nil or model.Parent == nil then
 		return fail("the player has no character in the world (respawning?)")
 	end
-	local at = root.Position
+	local at = settledRoot(root, ring)
+	if model.Parent == nil or model.PrimaryPart ~= root then
+		return fail("the player has no character in the world (respawning?)")
+	end
+	if open then
+		-- Never built around the body: a body where the ledge or its ramp goes walks to the stage
+		-- area's ring (every other shot's, clear of both) first, and the next ask builds them.
+		local blocked = bodyInside(model, root, humanoid, stagedParts(false))
+		if blocked ~= nil then
+			local clear: { [string]: any } = table.clone(DevStageLogic.ring(false, Stage)) :: any
+			clear.path = DevStageLogic.route(false, Stage, ledgeBuilt(), at.X, at.Z)
+			return {
+				ok = false,
+				error = ("stand clear of where %s goes first"):format(blocked),
+				walk = clear,
+				moved = moved,
+			}
+		end
+		buildLedge()
+	end
 	local feet = at.Y - PlaygroundLayout.rootHeight(humanoid.HipHeight, root.Size.Y, World.spawn.groundEpsilon)
 	if not DevStageLogic.inRing(ring, at.X, feet, at.Z) then
 		local walk: { [string]: any } = table.clone(ring) :: any
 		walk.path = DevStageLogic.route(open, Stage, ledgeBuilt(), at.X, at.Z)
 		return { ok = false, error = "walk into the ring first", walk = walk, moved = moved }
+	end
+	-- No shot stages around a body inside a staged part (the ring's height tolerance would take
+	-- feet sunk into the ledge's top).
+	local inside = bodyInside(model, root, humanoid, stagedParts(true))
+	if inside ~= nil then
+		return fail(("the body stands inside %s: reset the character, then stage again"):format(inside))
 	end
 	EntityService.heal(record.id, record.maxHp - record.hp)
 	local look = root.CFrame.LookVector
@@ -382,7 +494,7 @@ local HANDLERS: { [string]: (player: Player, shotId: unknown) -> Reply } = {
 
 local remote = Instance.new("RemoteFunction")
 remote.Name = Stage.remoteName
-remote.OnServerInvoke = function(player: Player, action: unknown, shotId: unknown): Reply
+local function answer(player: Player, action: unknown, shotId: unknown): Reply
 	local now = os.clock()
 	if not DevStageLogic.allowed(lastAt[player], now, Stage.requestsPerSecond) then
 		return fail("too many requests")
@@ -401,6 +513,13 @@ remote.OnServerInvoke = function(player: Player, action: unknown, shotId: unknow
 	if not ok then
 		return fail(tostring(reply))
 	end
+	return reply
+end
+
+remote.OnServerInvoke = function(player: Player, action: unknown, shotId: unknown): Reply
+	local receivedAt = workspace:GetServerTimeNow()
+	local reply = answer(player, action, shotId)
+	reply.receivedAt = receivedAt
 	return reply
 end
 remote.Parent = ReplicatedStorage

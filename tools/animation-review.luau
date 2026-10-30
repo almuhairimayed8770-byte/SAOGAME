@@ -7,7 +7,9 @@
 	Regenerates docs/ANIMATION_REVIEW.md: one table line per clip under src/shared/clips with the
 	columns ReviewMarkers derives from the data (the six beats present / frame counts at 60 fps,
 	hit-stop tier, hit count, trail timing against the hit windows, root motion in studs, duration,
-	problems the review rules found) followed by the three hand-filled columns from data/dev.luau
+	problems the review rules found: ReviewMarkers' rules on the data, then for every clip
+	dev.luau review.audit.clips lists the worst ClipAudit finding of each kind, the clip played
+	through the real Mixer on the real rigs) followed by the three hand-filled columns from data/dev.luau
 	review.humanColumns ("Watched at 0.25x", "Problems seen", "Fixed"). Hand-filled cells of an
 	existing report are carried over by clip id, so regenerating after a clip edit never loses a
 	review note.
@@ -16,6 +18,7 @@
 ]]
 
 local fs = require("@lune/fs")
+local luau = require("@lune/luau")
 local process = require("@lune/process")
 local stdio = require("@lune/stdio")
 
@@ -25,6 +28,22 @@ local root = Harness.repoRoot()
 local Dev = Harness.load("src/shared/data/dev")
 local Rigs = Harness.load("src/shared/data/rigs")
 local ReviewMarkers = Harness.load("src/client/dev/ReviewMarkers")
+local ClipAudit = Harness.load("src/client/dev/ClipAudit")
+local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
+local RigBuilder = Harness.load("src/server/world/RigBuilder")
+
+-- The hit matrix's player (the character the game builds) is a tool module, loaded with Lune
+-- libraries only (as tests/choreo/GroundClearance.spec.luau loads it).
+local function loadTool(path: string): any
+	local source = fs.readFile(root .. "/" .. path .. ".luau")
+	local env = {
+		require = function(target: string): any
+			assert(target:sub(1, 6) == "@lune/", path .. " may require only Lune libraries")
+			return require(target) :: any
+		end,
+	}
+	return luau.load(source, { debugName = path, environment = env :: any })()
+end
 
 local Review = Dev.review
 local outputPath = root .. "/" .. Review.outputPath
@@ -73,6 +92,27 @@ table.sort(loaded, function(a, b)
 	end
 	return a.id < b.id
 end)
+
+-- -----------------------------------------------------------------------------------------
+-- The clip audit (dev.luau review.audit.clips)
+-- -----------------------------------------------------------------------------------------
+
+local auditLines: { [string]: { string } } = {}
+do
+	local HitMatrix = loadTool("tools/hitmatrix/HitMatrix")
+	local avatar, field = HitMatrix.standing(Harness)
+	local bodies: { [string]: any } = {
+		PlayerR15 = ClipAudit.body(avatar.model, "PlayerR15", avatar.base, ClipAudit.topOf(field.CFrame, field.Size)),
+	}
+	for _, id in Review.audit.clips do
+		local clip = ClipLibrary.get(id)
+		if bodies[clip.rig] == nil then
+			bodies[clip.rig] = ClipAudit.standingBody(RigBuilder.build(clip.rig), clip.rig)
+		end
+		local _, findings = ClipAudit.audit(bodies[clip.rig], clip, ClipLibrary.get)
+		auditLines[id] = ClipAudit.problemLines(findings)
+	end
+end
 
 -- -----------------------------------------------------------------------------------------
 -- Carry hand-filled cells over from the existing report
@@ -157,7 +197,11 @@ add(
 	)
 )
 add("- **Root motion**: studs between the first and last root key.")
-add("- **Problems found**: everything the review rules (`src/client/dev/ReviewMarkers.luau`) flag; `none` is the goal.")
+add("- **Problems found**: everything the review rules (`src/client/dev/ReviewMarkers.luau`) flag, then for an audited")
+add(
+	"  clip the worst finding of each kind the body audit (`src/client/dev/ClipAudit.luau`, played through the Mixer on"
+)
+add("  the real rigs at 60 and 240 Hz) reports, with the clip frame and the context; `none` is the goal.")
 add(
 	("- **%s**: hand-filled; `yes <date>` once the clip was watched frame by frame in the ClipLab."):format(
 		Review.humanColumns[1]
@@ -193,6 +237,9 @@ for _, item in loaded do
 		continue
 	end
 	local row = ReviewMarkers.row(item.clip)
+	for _, line in auditLines[item.id] or {} do
+		table.insert(row.problems, line)
+	end
 	if row.attack then
 		attackCount += 1
 	end

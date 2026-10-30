@@ -26,8 +26,28 @@ export type PlaceholderJoint = Types.RigJoint & { c1: { pos: Types.Vec3, rot: Ty
 -- What a walk-in stops at on an enemy rig (RigBuilder.addBlocker, D-198, D-237, D-315): upright
 -- faces over the body and over each part it holds (trailParts), each the flat box over that part
 -- as it stands at rest and in every pose of `clips` (the loops it stands in), posed every
--- sampleSeconds.
-export type BlockerDef = { clips: { string }, sampleSeconds: number }
+-- sampleSeconds. A walk-in's body shell (BodyShell, item 236) meets each held part as heldSlices
+-- oriented boxes, one over each slice of every clip (the face over its whole footprint stops a hand
+-- where the part never is).
+export type BlockerDef = { clips: { string }, sampleSeconds: number, heldSlices: number? }
+
+-- The poses a rushing body is drawn in (RushWorld.posesOf, D-437): a wall is judged on the rest
+-- pose and every pose of `clips` (posed every sampleSeconds), so the slam's stop leaves no pose
+-- the clients draw in the face.
+export type RushPosesDef = { clips: { string }, sampleSeconds: number }
+
+-- The body shell a character carries (BodyShell.boxes, RigBuilder.playerShell, item 236): one box
+-- per part of `parts` in the root's own space, over that part as it stands in every pose of the
+-- stance's clips (`sheathed`, `drawn`), posed every sampleSeconds and padded padStuds on every
+-- side. The local character's walk stops where a box touches an enemy's body face or what it
+-- holds (WalkShell), so a walk-in ends with the arms and hands against the enemy, never inside.
+export type ShellDef = {
+	parts: { string },
+	sheathed: { string },
+	drawn: { string },
+	sampleSeconds: number,
+	padStuds: number,
+}
 
 export type Rig = Types.RigDef & {
 	joints: { PlaceholderJoint },
@@ -35,6 +55,8 @@ export type Rig = Types.RigDef & {
 	scale: { bodyHeight: number, bodyWidth: number, bodyDepth: number, head: number }?, -- player proportions
 	walkSpeed: number?,
 	blocker: BlockerDef?,
+	rush: RushPosesDef?,
+	shell: ShellDef?,
 }
 
 local Rigs: { [string]: Rig } = {
@@ -45,6 +67,17 @@ local Rigs: { [string]: Rig } = {
 		placeholder = true,
 		weaponGrip = "RightHand",
 		trailParts = { "Weapon" },
+		-- Item 236: the arms and hands the engine does not collide, boxed over the idle the
+		-- stance stands in (BodyShell.boxes; WalkShell holds the walk where they touch). Without
+		-- it a walk-in stopped with the drawn left hand 1.08 studs inside a side-on boar's torso
+		-- and 0.53 inside a kobold's arm, the sheathed one 0.30 inside its axe.
+		shell = {
+			parts = { "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm", "RightLowerArm", "RightHand" },
+			sheathed = { "player/OneHandedSword/Idle" },
+			drawn = { "player/OneHandedSword/IdleDrawn" },
+			sampleSeconds = 1 / 30,
+			padStuds = 0,
+		},
 		-- Anime proportions (section 10): slightly large head, long legs, narrow waist.
 		scale = { bodyHeight = 1.08, bodyWidth = 0.92, bodyDepth = 0.95, head = 1.06 },
 		joints = {
@@ -153,6 +186,9 @@ local Rigs: { [string]: Rig } = {
 		-- Over the idle as well as the rest pose: its weight shift rolls the torso 0.12 out on the
 		-- left flank and its head bob takes the snout 0.03 farther.
 		blocker = { clips = { "enemy/Boar/Idle" }, sampleSeconds = 1 / 120 },
+		-- Over the Charge as well as the rest pose (D-437): its gallop carries the snout up to 0.23
+		-- past the rest pose, and the clip still plays at the slam's stop and through the daze.
+		rush = { clips = { "enemy/Boar/Charge" }, sampleSeconds = 1 / 60 },
 		parts = {
 			HumanoidRootPart = { size = { 2.4, 2.4, 5 }, color = "PlaceholderBoar" },
 			Torso = { size = { 2.6, 2.4, 4.4 }, color = "PlaceholderBoar" },
@@ -248,8 +284,12 @@ local Rigs: { [string]: Rig } = {
 		weaponGrip = "RightArm",
 		trailParts = { "Weapon" },
 		-- Over the idle as well as the rest pose: it idles hunched, the head 0.5 ahead of its rest
-		-- footprint and the arms out, the axe hanging 3.9 ahead at its right (its own face).
-		blocker = { clips = { "enemy/Kobold/Idle" }, sampleSeconds = 1 / 120 },
+		-- footprint and the arms out, the axe hanging 3.9 ahead at its right (its own face). The
+		-- walk shell meets the axe as 8 boxes over the idle (item 236, WalkShell): a drawn walk-in
+		-- 15 degrees off its head rests 5.49 from the root on the axe (one box over the whole idle:
+		-- 5.58), and head-on 3.27 on its body face, inside the reach a basic hits at (dev.luau
+		-- hitMatrix Kobold, 5.25); the face over the axe's whole footprint alone held it at 5.88.
+		blocker = { clips = { "enemy/Kobold/Idle" }, sampleSeconds = 1 / 120, heldSlices = 8 },
 		parts = {
 			HumanoidRootPart = { size = { 2, 2, 1 }, color = "PlaceholderKobold" },
 			Torso = { size = { 2.2, 2.4, 1.2 }, color = "PlaceholderKobold" },

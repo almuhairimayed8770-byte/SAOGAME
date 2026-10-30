@@ -515,9 +515,9 @@ describe("Locomotion: the sheathed sword", function()
 	end)
 
 	it(
-		"an attack or a Guard played on the back takes the sword before its first frame is posed, with no Draw",
+		"an attack or a Parry played on the back takes the sword before its first frame is posed, with no Draw",
 		function()
-			for _, clipId in { HORIZONTAL, GUARD } do
+			for _, clipId in { HORIZONTAL, Config.clipPrefix .. "Parry" } do
 				local model, animator, _state, driver, motor = setup(false)
 				expect(motor.Part0).toBe(model:FindFirstChild(ROW.part))
 				animator:play(clipId, { blendIn = 0 })
@@ -529,6 +529,41 @@ describe("Locomotion: the sheathed sword", function()
 				driver:destroy()
 				Choreo.release(model)
 			end
+		end
+	)
+
+	it(
+		"a Guard played on the back waits for a Draw over it: the sword leaves the back at its WeaponDraw (D-420)",
+		function()
+			local model, animator, _state, driver, motor = setup(false)
+			animator:play(GUARD, { blendIn = 0 })
+			animator:step(FRAME)
+			-- No snap off the back with the arm at the side: the Draw plays over the guard instead.
+			expect(motor.Part0).toBe(model:FindFirstChild(ROW.part))
+			expect(animator:isPlaying(DRAW)).toBe(true)
+			local draw = handleOf(animator, DRAW)
+			expect(draw.priority).toBe(Sheath.overPriority)
+			expect(draw.priority > handleOf(animator, GUARD).priority).toBe(true)
+			local grab = eventTime(DRAW, "WeaponDraw")
+			while draw.time + FRAME < grab do
+				animator:step(FRAME)
+				expect(motor.Part0).toBe(model:FindFirstChild(ROW.part))
+			end
+			steps(animator, 2 * FRAME)
+			expect(motor.Part0).toBe(model:FindFirstChild("RightHand"))
+			-- Past sheath.handOverTime the Draw blends out into the guard's own pose.
+			while draw.time < Sheath.handOverTime do
+				animator:step(FRAME)
+			end
+			animator:step(FRAME)
+			expect(draw.stopping).toBe(true)
+			expect(draw.blendOut).toBe(Sheath.handOverBlend)
+			steps(animator, Sheath.handOverBlend + FRAME)
+			expect(animator:isPlaying(DRAW)).toBe(false)
+			expect(animator:isPlaying(GUARD)).toBe(true)
+			expect(motor.Part0).toBe(model:FindFirstChild("RightHand"))
+			driver:destroy()
+			Choreo.release(model)
 		end
 	)
 

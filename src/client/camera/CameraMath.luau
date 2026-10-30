@@ -14,7 +14,9 @@ export type Vec = { number }
 -- A staged view (the capture's shots, F12; dev.luau capture.cameras): the camera stands
 -- `distance` studs (flat) from the anchor and `height` above it, at a bearing `degrees` off the
 -- reference (stageReference), and aims `lookHeight` above the point `focusBias` of the way from
--- the player to the target.
+-- the player to the target. A `fixed` view stands still in the world once the player and the
+-- target have stood where the staging put them (CameraController, camera.luau stage): it holds
+-- that spot and aim through the take, whatever the target does.
 export type StageAnchor = "Player" | "Target" | "Middle"
 export type StageReference = "Line" | "Facing" | "World"
 
@@ -26,6 +28,7 @@ export type StageView = {
 	height: number,
 	focusBias: number,
 	lookHeight: number,
+	fixed: boolean?,
 }
 
 -- The lock-on two-shot's numbers (camera.luau lock). closeSwingDegrees is the close fight's

@@ -92,6 +92,20 @@ local Fx = {
 			-- over the cut's end for 3 frames.
 			turnBackDegrees = 100,
 			turnBackAfter = 1.5,
+			-- A window's arc goes with its window (D-360): when the trail goes out every sample on
+			-- the ribbon fades out over this many seconds of ribbon clock and goes, whatever its
+			-- age (a fade of two frames at 60 fps, at 58% then 17%; one at 30; five at 144). Each
+			-- hit window reads as its own arc; the gap before the next one shows nothing of it.
+			-- Shorter than every gap a clip leaves between its windows (validated).
+			closeSeconds = 0.04,
+			-- The Beams face the camera, so a cut seen edge-on drew a sheet the band's full width
+			-- tall (D-361). Each sample's facing is |cos| of the angle between the normal of the
+			-- sheet the blade sweeps there and the line to the camera (0 edge-on, 1 face-on). Its
+			-- width is full from `fullAt` up (about 16 degrees off edge-on), `minShare` of full from
+			-- `edgeAt` down (about 9 degrees), straight between: the receding part of a horizontal
+			-- cut filmed from beside it is a streak at the blade's height, not a slab on the
+			-- ground; a cut that faces the camera keeps the full band (beat 3's full width).
+			edgeOn = { edgeAt = 0.15, fullAt = 0.28, minShare = 0.2 },
 			-- The body's width: the weapon's trailWidth x the kind's width x this, so a one-handed
 			-- sword's band covers most of its 3.2-stud blade (thick, not the thin engine strip).
 			thickness = 2.4,
@@ -100,6 +114,11 @@ local Fx = {
 			saturation = 2.6,
 			folderName = "SkyspireTrailRibbons",
 			hostSize = 0.2,
+			-- Every ribbon's host sits in the one folder whatever rig draws it; the host carries the
+			-- full name of the rig it draws now in this attribute (set when a rig takes the ribbon
+			-- from the pool, cleared when it goes back), so a per-frame log tells the player's own
+			-- ribbon from an enemy's (D-362).
+			ownerAttribute = "TrailOwner",
 			-- Built once: a layer's transparency snaps to this many steps.
 			transparencySteps = 20,
 			-- Each layer is a chain of camera-facing Beams through one point of the blade
@@ -285,6 +304,33 @@ local Fx = {
 		-- shakes as hard as one at the player's feet. The review's 25.6 studs keep it all: from
 		-- there the shake only just reads over the lock camera's ease.
 		shakeFullRadius = 26,
+	},
+
+	-- A rush's skid (RushDraw.takeDust): from the strike beat, where the drawn body's full speed
+	-- ends and it sheds it evenly to its rest (the Charge clip's skidding stop), the hind hooves
+	-- kick up a low puff of dust each everyStuds it slides, so the stop reads as a skid, not a
+	-- halt: 4 puffs over the boar's 8-stud skid (at 14, 16, 18 and 20 studs down its 22-stud line,
+	-- none at its rest), closer together in time while it is fast.
+	-- None before the strike beat (a jam or a stop there has no skid) and none past a slam's or a
+	-- jam's stop. One pooled emitter (WallSlam's builder, its own folder); lit, never glowing (no
+	-- flash budget), the slam's pale grey, smaller, slower and shorter-lived than a slam's burst.
+	rushSkid = {
+		everyStuds = 2, -- studs the body slides between puffs
+		rearShare = 0.4, -- of the body's length behind its root (its profile's back): the hind hooves
+		particles = 5, -- per puff before the quality tier's particleScale
+		size = { birth = 0.8, death = 2.6 }, -- studs: each puff spreads as it fades
+		transparency = { birth = 0.45, death = 1 },
+		lifetime = { min = 0.35, max = 0.7 }, -- seconds
+		speed = { min = 3, max = 8 }, -- studs per second at birth, back off the hooves
+		spreadAngle = 55, -- degrees off straight back on both axes: low and to the sides
+		drag = 5, -- per second
+		gravity = 2, -- studs per second squared
+		rotation = 180, -- degrees either way at birth
+		rotSpeed = 60, -- degrees per second either way
+		lightEmission = 0, -- dust, never light
+		token = "ShatterSilver", -- the slam's pale stone grey
+		emitterSize = 0.2, -- studs; the invisible anchored part the puffs leave from
+		folderName = "RushSkidDust", -- the workspace folder that holds the pooled emitter part
 	},
 
 	-- Telegraphs (section 11): Highlight fill on the weapon plus a flat ground decal.
@@ -475,6 +521,10 @@ local Fx = {
 	-- (choreo.luau and camera.luau renderOrder), so they read the pose, the root and the view
 	-- this frame draws, in the same order on every machine. The steps stay bound (FrameOrder).
 	renderOrder = {
+		-- FrameClock's mark that this frame's rigs have stepped (200, just after choreo.luau
+		-- renderOrder.rigs and before renderOrder.character): a hit's cue asked after it waits for the
+		-- next frame, which draws the pose the step wrote (D-342, impact.poseLagFrames).
+		posed = { base = "Camera", offset = 0 },
 		-- The impact picture (impact.luau overlay.renderStepName): the camera and the frozen bodies
 		-- copied into its figures, and a picture played at the contact counted from that frame (303).
 		impactFrames = { base = "Character", offset = 3 },

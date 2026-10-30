@@ -115,6 +115,8 @@ type Rig = {
 	serverState: (value: string) -> (),
 	-- The character goes and comes back (CharacterRemoving, then CharacterAdded with the same model).
 	respawn: () -> (),
+	-- The character goes (CharacterRemoving) and no new one comes yet.
+	despawn: () -> (),
 	-- The spec's clock (os.clock and the server clock both read it).
 	now: () -> number,
 	-- The first rendered frame after a render stall: the render step's dt is the whole gap.
@@ -641,6 +643,9 @@ local function load(options: Options?): Rig
 		respawn = function()
 			localPlayer.CharacterRemoving:Fire()
 			localPlayer.CharacterAdded:Fire(model)
+		end,
+		despawn = function()
+			localPlayer.CharacterRemoving:Fire()
 		end,
 		heartbeat = function()
 			clock += FRAME
@@ -3114,6 +3119,45 @@ describe("CharacterController's blade contacts (issue 4)", function()
 		expect(rows[1]).toBe(touch)
 		rig.frame(STILL)
 		expect(#contactRows(rig, from)).toBe(1)
+	end)
+
+	it("runs what waits on its contacts right after them, every frame, on the frame's length (D-347)", function()
+		local rig = standingRig({ choreo = true })
+		local ran: { number } = {}
+		rig.controller.afterContacts(function(dt: number)
+			table.insert(rig.log, { kind = "after", name = "afterContacts", args = { dt } })
+			table.insert(ran, dt)
+		end)
+		rig.controller.basicAttack()
+		rig.frame(STILL)
+		expect(#ran).toBe(1)
+		local touch = { targetId = 7, windowIndex = 1, tier = "Normal", killed = false }
+		rig.contacts.queue = { touch }
+		local from = #rig.log + 1
+		rig.frame(STILL)
+		local contactAt, afterAt = nil, nil
+		for index = from, #rig.log do
+			local row = rig.log[index]
+			if row.kind == "contact" then
+				contactAt = index
+			elseif row.kind == "after" then
+				afterAt = index
+			end
+		end
+		expect(contactAt).never.toBeNil()
+		expect(afterAt).never.toBeNil()
+		-- After the frame's contacts, in the same render step (its hold is one the frame's readers see).
+		expect((contactAt :: number) < (afterAt :: number)).toBe(true)
+		expect(#ran).toBe(2)
+		expect(ran[2]).toBeCloseTo(FRAME, 1e-12)
+		-- A step with no swing runs it too, and so does one with no fighter (a death's respawn).
+		for _ = 1, 40 do
+			rig.frame(STILL)
+		end
+		expect(#ran).toBe(42)
+		rig.despawn()
+		rig.frame(STILL)
+		expect(#ran).toBe(43)
 	end)
 
 	it("an Art release predicts the Art's contacts with its id and multiplier, its last window final", function()

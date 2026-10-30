@@ -14,6 +14,10 @@
 	Dust is lit by the scene and never glows (lightEmission 0): a slam is no flash, so it charges
 	nothing against FlashBudget and plays the same with Reduce flashing on. The thud and the shake
 	are Replication's, played beside this from fx.wallSlam's cue and shake rows.
+
+	A rush's skid kicks up the same dust, smaller (fx.rushSkid): `skid(point, heading)` puffs it off
+	the ground under the hind hooves, thrown back against the way the body slides, from a second
+	pooled emitter built the same way in its own folder (RushDraw.takeDust says where and when).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -29,14 +33,30 @@ local WallSlam = {}
 
 local host: BasePart? = nil
 local emitter: ParticleEmitter? = nil
+local skidHost: BasePart? = nil
+local skidEmitter: ParticleEmitter? = nil
 
-local function ensureEmitter(): (BasePart, ParticleEmitter)
-	if host ~= nil and emitter ~= nil then
-		return host, emitter
-	end
-	local dust = Fx.wallSlam
+-- The tuning a dust emitter is built from (fx.wallSlam, fx.rushSkid).
+type Dust = {
+	size: { birth: number, death: number },
+	transparency: { birth: number, death: number },
+	lifetime: { min: number, max: number },
+	speed: { min: number, max: number },
+	spreadAngle: number,
+	drag: number,
+	gravity: number,
+	rotation: number,
+	rotSpeed: number,
+	lightEmission: number,
+	token: string,
+	emitterSize: number,
+	folderName: string,
+}
+
+-- One pooled dust emitter on an anchored, invisible part named `name` in `dust`'s folder.
+local function buildEmitter(dust: Dust, name: string): (BasePart, ParticleEmitter)
 	local part = Instance.new("Part")
-	part.Name = "WallSlamDust"
+	part.Name = name
 	part.Anchored = true
 	part.CanCollide = false
 	part.CanQuery = false
@@ -69,8 +89,26 @@ local function ensureEmitter(): (BasePart, ParticleEmitter)
 	particles.RotSpeed = NumberRange.new(-dust.rotSpeed, dust.rotSpeed)
 	particles.Parent = part
 	part.Parent = Engine.folder(workspace, dust.folderName)
+	return part, particles
+end
+
+local function ensureEmitter(): (BasePart, ParticleEmitter)
+	if host ~= nil and emitter ~= nil then
+		return host, emitter
+	end
+	local part, particles = buildEmitter(Fx.wallSlam :: any, "WallSlamDust")
 	host = part
 	emitter = particles
+	return part, particles
+end
+
+local function ensureSkidEmitter(): (BasePart, ParticleEmitter)
+	if skidHost ~= nil and skidEmitter ~= nil then
+		return skidHost, skidEmitter
+	end
+	local part, particles = buildEmitter(Fx.rushSkid :: any, "RushSkidDust")
+	skidHost = part
+	skidEmitter = particles
 	return part, particles
 end
 
@@ -88,9 +126,15 @@ function WallSlam.count(scale: number): number
 	return math.max(0, math.floor(Fx.wallSlam.particles * scale + 0.5))
 end
 
---- Builds the pooled emitter once so the first slam never allocates (idempotent).
+--- Puffs in one skid puff at a quality tier's particle scale (rounded, never negative).
+function WallSlam.skidCount(scale: number): number
+	return math.max(0, math.floor(Fx.rushSkid.particles * scale + 0.5))
+end
+
+--- Builds the pooled emitters once so the first slam or skid never allocates (idempotent).
 function WallSlam.start()
 	ensureEmitter()
+	ensureSkidEmitter()
 end
 
 --- Throws the dust off a wall's face at `point` (`normal`: the face's normal toward the body);
@@ -104,9 +148,24 @@ function WallSlam.slam(point: Vector3, normal: Vector3): number
 	return count
 end
 
+--- Kicks up a skid's puff on the ground at `point` (under the hind hooves), thrown back against
+--- `heading` (the flat way the body slides); returns how many puffs it emitted.
+function WallSlam.skid(point: Vector3, heading: Vector3): number
+	local part, particles = ensureSkidEmitter()
+	local count = WallSlam.skidCount(Quality.params().particleScale)
+	part.CFrame = frameAt(point, -heading, part.CFrame)
+	Bursts.emit(particles, count, Fx.rushSkid.lifetime.max)
+	return count
+end
+
 --- The pooled emitter, or nil before the first start or slam (tests read its tuning).
 function WallSlam.emitter(): ParticleEmitter?
 	return emitter
+end
+
+--- The skid's pooled emitter, or nil before the first start or skid (tests read its tuning).
+function WallSlam.skidEmitter(): ParticleEmitter?
+	return skidEmitter
 end
 
 return WallSlam

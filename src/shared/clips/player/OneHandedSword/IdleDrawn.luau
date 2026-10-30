@@ -2,7 +2,13 @@
 --[[
 	player/OneHandedSword/IdleDrawn: drawn idle, the 12-second cycle. Low stance, left foot
 	forward, blade low and forward, free hand open. Weight shifts at 3 s and 9 s and a blade
-	re-grip at 6 s (the wrist rolls, the point dips and comes back up).
+	re-grip at 6 s (the wrist rolls, the point dips and comes back up). The feet stay where they
+	stand at the start through the weight shifts (D-417): each leg is solved at every shift key for
+	the root's shift, the front foot flat on the field, the rear one on its ball as the cycle
+	starts (0.04 over the field, the heel 0.13). They sank the left foot 0.16 below the field at
+	3 s and lifted the rear one to 0.22 off it. The rear ball stays its 0.04 up: set down on the
+	field, an attack out of the drawn run sinks the right foot 0.11 as the run hands over to this
+	idle (ClipAudit Run@0.5, max 0.10) and the drawn stop drags a foot 0.19 (Stride, max 0.145).
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -40,9 +46,9 @@ local clip: Types.ClipDef = {
 				LeftShoulder = rot(25, 0, -15),
 				LeftElbow = rot(50, 0, 0),
 				LeftWrist = rot(0, 0, 10),
-				LeftHip = rot(15, 0, -6),
-				LeftKnee = rot(-20, 0, 0),
-				LeftAnkle = rot(5, 0, 0),
+				LeftHip = rot(24.7, -1.3, -6.5),
+				LeftKnee = rot(-38.1, 0, 0),
+				LeftAnkle = rot(13.2, 0, 6.4),
 				RightHip = rot(-10, 0, 6),
 				RightKnee = rot(-25, 0, 0),
 				RightAnkle = rot(35, 0, 0),
@@ -56,10 +62,12 @@ local clip: Types.ClipDef = {
 				Root = posRot(0.08, -0.15, 0.06, 0, 0, 2),
 				Waist = rot(-6, -15, -2),
 				Neck = rot(5, 15, 1),
-				LeftKnee = rot(-12, 0, 0),
-				LeftAnkle = rot(-3, 0, 0),
-				RightKnee = rot(-32, 0, 0),
-				RightAnkle = rot(42, 0, 0),
+				LeftHip = rot(29.2, -4.1, -10.5),
+				LeftKnee = rot(-43.1, 0, 0),
+				LeftAnkle = rot(13.4, 0, 9.1),
+				RightHip = rot(-3.2, 1, 1.3),
+				RightKnee = rot(-34.9, 0, 0),
+				RightAnkle = rot(38.1, 0, 2.6),
 			},
 		},
 		{
@@ -105,10 +113,12 @@ local clip: Types.ClipDef = {
 				Root = posRot(-0.04, -0.12, -0.04, 0, 0, -1),
 				Waist = rot(-9, -10, 1),
 				Neck = rot(7, 10, 0),
-				LeftKnee = rot(-24, 0, 0),
-				LeftAnkle = rot(9, 0, 0),
-				RightKnee = rot(-22, 0, 0),
-				RightAnkle = rot(32, 0, 0),
+				LeftHip = rot(23.4, -0.2, -4.4),
+				LeftKnee = rot(-37.9, 0, 0),
+				LeftAnkle = rot(14.4, 0, 5.1),
+				RightHip = rot(-13.3, -0.9, 8.3),
+				RightKnee = rot(-20.9, 0, 0),
+				RightAnkle = rot(34.3, 0, -1.4),
 			},
 		},
 		{

@@ -7,6 +7,9 @@
 	and also while the rig's clock stands still under it (a frozen Art stance, a hit-stop, D-294),
 	where a snap into the pose stood at its rest key and showed nothing. Rides on the Additive layer
 	so it works over walking, guarding or an Art.
+	Re-key (D-387): the legs carry additive keys that hold the feet where the stance under the
+	flinch has them (the drawn idle's places): the hips' shift slid the front foot 0.17
+	in a frame and 0.36 over the plant and crossed the feet 0.11 deep.
 	The sword arm rides the torso (no right shoulder key): a hit taken during Draw or Sheathe then
 	keeps the blade in line with its sheath.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
@@ -41,8 +44,12 @@ local clip: Types.ClipDef = {
 				Waist = rot(0, 0, -6),
 				Neck = rot(0, -6, -10),
 				LeftShoulder = rot(0, 0, 1),
-				LeftHip = rot(0, 0, 4),
-				RightHip = rot(0, 0, -5),
+				LeftHip = rot(-5.2, 0.1, -4.5),
+				RightHip = rot(1.3, -1.1, -4.5),
+				LeftAnkle = rot(-4.7, -0.4, 4.5),
+				LeftKnee = rot(9.9, 0, 0),
+				RightAnkle = rot(1.2, 1.9, 4.3),
+				RightKnee = rot(-2.5, 0, 0),
 			},
 		},
 		{
@@ -54,8 +61,12 @@ local clip: Types.ClipDef = {
 				Waist = rot(0, 0, -6),
 				Neck = rot(0, -6, -10),
 				LeftShoulder = rot(0, 0, 1),
-				LeftHip = rot(0, 0, 4),
-				RightHip = rot(0, 0, -5),
+				LeftHip = rot(-5.2, 0.1, -4.5),
+				RightHip = rot(1.3, -1.1, -4.5),
+				LeftAnkle = rot(-4.7, -0.4, 4.5),
+				LeftKnee = rot(9.9, 0, 0),
+				RightAnkle = rot(1.2, 1.9, 4.3),
+				RightKnee = rot(-2.5, 0, 0),
 			},
 		},
 		{
@@ -66,8 +77,12 @@ local clip: Types.ClipDef = {
 				Waist = rot(0, 0, 0),
 				Neck = rot(0, 1.8, 3),
 				LeftShoulder = rot(0, 0, -0.2),
-				LeftHip = rot(0, 0, 0),
-				RightHip = rot(0, 0, 0),
+				LeftHip = rot(0.5, 0.1, 0.9),
+				RightHip = rot(-0.5, 0.2, 0.9),
+				LeftAnkle = rot(0.5, 0.1, -0.9),
+				LeftKnee = rot(-1, 0, 0),
+				RightAnkle = rot(-0.5, -0.4, -0.8),
+				RightKnee = rot(0.9, 0, 0),
 			},
 		},
 		{
@@ -78,6 +93,12 @@ local clip: Types.ClipDef = {
 				Waist = rot(0, 0, 0),
 				Neck = rot(0, 0, 0),
 				LeftShoulder = rot(0, 0, 0),
+				LeftAnkle = rot(0, 0, 0),
+				LeftHip = rot(0, 0, 0),
+				LeftKnee = rot(0, 0, 0),
+				RightAnkle = rot(0, 0, 0),
+				RightHip = rot(0, 0, 0),
+				RightKnee = rot(0, 0, 0),
 			},
 		},
 	},

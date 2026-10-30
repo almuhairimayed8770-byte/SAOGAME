@@ -138,9 +138,10 @@ local AI = {
 		-- the stop never moves a body more than its speed times this.
 		haltLeadSeconds = 1 / 30,
 		-- A walk stops with the body's snout on a wall, never in it, and a turn never swings it in
-		-- (EnemyService): a turn that sets the snout more than this far inside a wall is not taken
-		-- (turning away from a wall it faces head on swings a corner of the snout a hair forward first).
-		snoutSlackStuds = 0.1,
+		-- (EnemyService): a turn that sets any part of the body more than this far inside a wall is
+		-- not taken (turning away from a wall it faces head on swings a corner of the snout a hair
+		-- forward first). D-435: 0.05, the most any part of a walking boar may show inside a wall.
+		snoutSlackStuds = 0.05,
 		waypointReach = 3, -- a path waypoint within this is passed
 		repathInterval = 1.0, -- seconds between path computations while following a path
 		pathFailRetry = 2.0, -- seconds before retrying after a failed path

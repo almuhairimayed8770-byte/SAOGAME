@@ -322,6 +322,8 @@ local function hitPayload(applied: Types.AppliedHit, attackPause: number?, swing
 		attackerId = applied.attackerId,
 		targetId = applied.targetId,
 		damage = applied.damage,
+		-- FK5: the HP it took off (a kill's is the HP that was left); the digit shows it.
+		hpRemoved = applied.hpRemoved,
 		crit = applied.crit,
 		gaugeDamage = applied.gaugeDamage,
 		killed = applied.killed,

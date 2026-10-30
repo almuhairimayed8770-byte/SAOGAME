@@ -71,6 +71,32 @@ describe("Remotes", function()
 		expect(Remotes.HitConfirmed.schema(payload)).toBe(false)
 	end)
 
+	it("HitConfirmed carries the HP the hit removed beside its damage (FK5)", function()
+		local payload = {
+			attackerId = 1,
+			targetId = 2,
+			damage = 37,
+			hpRemoved = 1,
+			crit = true,
+			gaugeDamage = 12,
+			killed = true,
+			broke = false,
+			hitStop = "Kill",
+			position = { 1, 2, 3 },
+			parried = false,
+			guarded = false,
+			reflected = false,
+			hitIndex = 1,
+		}
+		expect(Remotes.HitConfirmed.schema(payload)).toBe(true)
+		payload.hpRemoved = 0
+		expect(Remotes.HitConfirmed.schema(payload)).toBe(true)
+		payload.hpRemoved = -1
+		expect(Remotes.HitConfirmed.schema(payload)).toBe(false)
+		payload.hpRemoved = "1" :: any
+		expect(Remotes.HitConfirmed.schema(payload)).toBe(false)
+	end)
+
 	it("HitConfirmed may carry the pause it added to the target's attack (D-168)", function()
 		local payload = {
 			attackerId = 1,

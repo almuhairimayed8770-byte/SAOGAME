@@ -243,7 +243,14 @@ local function setup(options)
 		impact = fakeImpact(calls, state, function(seconds, fn)
 			table.insert(scheduled, { seconds = seconds, fn = fn })
 		end),
-		camera = recorder("camera", calls),
+		camera = if options.lockedOn ~= nil
+			then setmetatable({
+				-- The shot is locked on this model (CameraController.lockedOn).
+				lockedOn = function(model)
+					return model == models[options.lockedOn]
+				end,
+			}, { __index = recorder("camera", calls) })
+			else recorder("camera", calls),
 		weaponCategory = function()
 			return "OneHandedSword"
 		end,
@@ -259,6 +266,7 @@ local function setup(options)
 		now = function()
 			return state.clock
 		end,
+		atStepPose = options.atStepPose,
 	}
 	Replication.bind(deps)
 	local function find(moduleName, fn)
@@ -485,6 +493,35 @@ describe("Replication", function()
 		expect(t.find("sfx", "footstep")[2].args[2]).toBe("Stone")
 		expect(#t.find("sfx", "play")).toBe(0)
 	end)
+
+	it(
+		"HitConfirmed: the digit is the HP the hit removed, a kill's the HP that was left, its kind kept (FK5)",
+		function()
+			local t = setup()
+			Replication.dispatch(
+				"HitConfirmed",
+				hit({ hitStop = "Kill", killed = true, crit = true, damage = 5, hpRemoved = 1 })
+			)
+			local digits = t.find("digits", "show")
+			expect(#digits).toBe(1)
+			expect(digits[1].args[2]).toBe(1)
+			expect(digits[1].args[3]).toBe("Crit")
+			-- A hit that leaves the target standing removes all of its damage.
+			local live = setup()
+			Replication.dispatch("HitConfirmed", hit({ damage = 42, hpRemoved = 42 }))
+			expect(live.find("digits", "show")[1].args[2]).toBe(42)
+			-- Damage taken by the local player reads the same way.
+			local taken = setup()
+			Replication.dispatch(
+				"HitConfirmed",
+				hit({ attackerId = 7, targetId = 1, killed = true, hitStop = "Kill", damage = 30, hpRemoved = 7 })
+			)
+			local shown = taken.find("digits", "show")
+			expect(#shown).toBe(1)
+			expect(shown[1].args[2]).toBe(7)
+			expect(shown[1].args[3]).toBe("Taken")
+		end
+	)
 
 	it("HitConfirmed: the Kill tier gives 10 frames and a Kill shake; crit and Switch pick the digit kind", function()
 		local t = setup()
@@ -1052,6 +1089,82 @@ describe("Replication", function()
 		expect(#t.find("camera", "fovKick")).toBe(1)
 	end)
 
+	-- The smear stretches the blade on its 2 snap frames, and the third draws it at rest (section 10
+	-- beat 3). A clip's events fire inside the rig's step, whose pose shows a frame later
+	-- (impact.poseLagFrames), while a Part's size shows on the frame it is set: applied at once the
+	-- stretch went on the last anticipation frame and off after the first snap frame.
+	it("a smear changes the blade on the frame that draws the step its event fired in (D-345)", function()
+		local FrameClock = Harness.load("src/client/fx/FrameClock")
+		local clock = 0
+		local hooks: { [string]: any } = {}
+		local function hook(name: string)
+			return function(fn: any): () -> ()
+				hooks[name] = fn
+				return function()
+					hooks[name] = nil
+				end
+			end
+		end
+		FrameClock.bind({
+			now = function(): number
+				return clock
+			end,
+			onFrameStart = hook("start"),
+			onPosed = hook("posed"),
+			onFrameEnd = hook("finish"),
+			onHeartbeat = function(): () -> ()
+				return function() end
+			end,
+		} :: any)
+		local t = setup({ atStepPose = FrameClock.atStepPose })
+		local ally = t.records[2]
+		Replication.watch(ally)
+		-- One rendered frame: FrameClock's start, the rigs' step (`rigStep`), the posed mark, the end.
+		local function frame(rigStep: (() -> ())?)
+			clock += 1 / 60
+			hooks.start(1 / 60)
+			if rigStep ~= nil then
+				rigStep()
+			end
+			hooks.posed(1 / 60)
+			hooks.finish(1 / 60)
+		end
+		local function route(kind: string)
+			return function()
+				Replication.routeClipEvent(
+					ally,
+					"player/OneHandedSword/Horizontal",
+					{ time = 0.3, kind = kind, data = { axis = "X" } }
+				)
+			end
+		end
+		local ok, err = pcall(function()
+			frame()
+			frame(route("SmearOn"))
+			expect(#t.find("smear", "apply")).toBe(0)
+			frame()
+			local smears = t.find("smear", "apply")
+			expect(#smears).toBe(1)
+			expect(smears[1].args[2]).toBe(true)
+			expect(smears[1].args[3]).toBe("X")
+			frame(route("SmearOff"))
+			expect(#t.find("smear", "apply")).toBe(1)
+			frame()
+			smears = t.find("smear", "apply")
+			expect(#smears).toBe(2)
+			expect(smears[2].args[2]).toBe(false)
+			-- A rig let go before its stretch is drawn keeps its rest size.
+			frame(route("SmearOn"))
+			Replication.unwatch(ally)
+			frame()
+			expect(#t.find("smear", "apply")).toBe(2)
+		end)
+		FrameClock.bind(nil)
+		if not ok then
+			error(err, 0)
+		end
+	end)
+
 	it("an event a jump crossed (a render stall's gap, D-132) closes what it closes and starts nothing", function()
 		local t = setup()
 		local me = t.records[1]
@@ -1167,13 +1280,13 @@ describe("Replication", function()
 		mixer:stop(basic, combat.locomotionBlendOut)
 		run(0.5, 1 / 60)
 		expect(starts()).toBe(before)
-		-- A clip that runs to its own end still plays what its last frame crosses (a turn's second
-		-- footstep, 0.38 of 0.4, at 30 fps), and a clip played over a stopping one of the same id
-		-- starts as ever.
+		-- A clip that runs to its own end still plays what its last frame crosses (a turn's closing
+		-- footstep, 0.46 of 0.5, the third of three, at 20 fps: the frame from 0.45 to the end), and
+		-- a clip played over a stopping one of the same id starts as ever.
 		local footsteps = #t.find("sfx", "footstep")
 		mixer:play(Harness.load(root .. "TurnLeft"))
-		run(0.5, 1 / 30)
-		expect(#t.find("sfx", "footstep")).toBe(footsteps + 2)
+		run(0.5, 1 / 20)
+		expect(#t.find("sfx", "footstep")).toBe(footsteps + 3)
 		local first = mixer:play(Harness.load(root .. "Horizontal"))
 		run(0.05, 1 / 60)
 		mixer:stop(first, combat.locomotionBlendOut)
@@ -1851,7 +1964,20 @@ describe("Replication", function()
 			Replication.dispatch("ActionStarted", { entityId = 2, clipId = clipId, serverTime = 99 })
 		end
 		expect(#t.find("impact", "activation")).toBe(1)
-		expect(#t.find("trails", "activationLight")).toBe(1)
+		-- Nothing relights. The lit Art the second start cuts before its first cut lets its light
+		-- fade (D-409: the cut clip is held, so its own HitWindowOpen never puts it out); the
+		-- later starts cut Arts already past their first window, whose light is out.
+		local lit, faded = 0, 0
+		for _, call in t.find("trails", "activationLight") do
+			if call.args[2] == true then
+				lit += 1
+			elseif call.args[4] == true then
+				faded += 1
+			end
+		end
+		expect(lit).toBe(1)
+		expect(faded).toBe(1)
+		expect(#t.find("trails", "activationLight")).toBe(2)
 	end)
 
 	it("ActivationHold: the director times the riser by the clip's speed from ActionStarted", function()
@@ -2058,6 +2184,35 @@ describe("Replication: the local fighter's contact (issue 4)", function()
 		expect(t.find("animator:axeman", "hitStop")[1].args[1]).toBe(held("Kill"))
 	end)
 
+	-- A kill this client proved, on the target the shot is locked on, is the death's still shot from
+	-- its contact (D-358): the follow holds (D-357) and no nudge or shake moves the camera ahead of
+	-- the word's holdLock, which takes the shot still (D-323). Its Kill shake moved the camera 0.37
+	-- to 0.73 studs a frame on the frozen frames before the word. A target the shot is not locked
+	-- on has no still shot to come, so its kill nudges and shakes as ever; any other tier on the
+	-- locked one does too.
+	it(
+		"a proven kill on the locked target holds the shot still from its contact: no nudge, no shake (D-358)",
+		function()
+			local t = setup({ lockedOn = "axeman" })
+			Replication.contact(contact({ targetId = 8, tier = "Kill", killed = true }))
+			expect(count(t, "camera", "holdFollow")).toBe(1)
+			expect(count(t, "camera", "nudge")).toBe(0)
+			expect(count(t, "camera", "shake")).toBe(0)
+			expect(ticks(t)).toEqual({ "hitStopTick.Kill" })
+			expect(lastInfo(t).killed).toBe(true)
+
+			local other = setup({ lockedOn = "boar" })
+			Replication.contact(contact({ targetId = 8, tier = "Kill", killed = true }))
+			expect(count(other, "camera", "nudge")).toBe(1)
+			expect(other.find("camera", "shake")[1].args[1]).toBe("Kill")
+
+			local final = setup({ lockedOn = "boar" })
+			Replication.contact(contact({ tier = "Final" }))
+			expect(count(final, "camera", "nudge")).toBe(1)
+			expect(final.find("camera", "shake")[1].args[1]).toBe("Final")
+		end
+	)
+
 	it("its confirmation shows the number and the reactions and replays nothing", function()
 		local t = setup()
 		t.state.moment = "Hit"
@@ -2246,6 +2401,50 @@ describe("Replication: the local fighter's contact (issue 4)", function()
 		local stops = #t.find("animator:boar", "hitStop")
 		Replication.dispatch("HitConfirmed", hit())
 		expect(#t.find("animator:boar", "hitStop")).toBe(stops)
+	end)
+
+	-- Item 300 (D-357): the shot's follow holds with the bodies from the contact, not from the
+	-- kill's word; before, nothing asked the camera to hold until TargetController's holdLock.
+	local function callIndex(t: any, moduleName: string, fn: string): number?
+		for index, call in t.calls do
+			if call.module == moduleName and call.fn == fn then
+				return index
+			end
+		end
+		return nil
+	end
+
+	it("a contact's cue holds the shot's follow for its hold, before its nudge (D-357)", function()
+		for _, tier in { "Normal", "Final", "Kill" } do
+			local t = setup()
+			t.state.moment = if tier == "Kill" then "Kill" else "Hit"
+			expect(Replication.contact(contact({ tier = tier, killed = tier == "Kill" }))).toBe(true)
+			local holds = t.find("camera", "holdFollow")
+			expect(#holds).toBe(1)
+			expect(holds[1].args[1]).toBeCloseTo(held(tier) * FRAME, 1e-9)
+			local holdAt = callIndex(t, "camera", "holdFollow") :: number
+			local nudgeAt = callIndex(t, "camera", "nudge") :: number
+			expect(holdAt < nudgeAt).toBe(true)
+			-- Its word plays on it: the confirmation asks nothing more of the camera's follow.
+			t.state.clock += 2 * FRAME
+			Replication.dispatch("HitConfirmed", hit({ hitStop = tier, killed = tier == "Kill" }))
+			expect(#t.find("camera", "holdFollow")).toBe(1)
+		end
+	end)
+
+	it("a hit the local fighter is in shown whole holds the follow too; one it is not in leaves it", function()
+		local t = setup()
+		t.state.moment = "Hit"
+		Replication.dispatch("HitConfirmed", hit({ hitStop = "Final" }))
+		local holds = t.find("camera", "holdFollow")
+		expect(#holds).toBe(1)
+		expect(holds[1].args[1]).toBeCloseTo(held("Final") * FRAME, 1e-9)
+		expect((callIndex(t, "camera", "holdFollow") :: number) < (callIndex(t, "camera", "nudge") :: number)).toBe(
+			true
+		)
+		-- Another player's hit on the enemy: the local fighter is not held, nor is the shot.
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 2, hitIndex = 2 }))
+		expect(#t.find("camera", "holdFollow")).toBe(1)
 	end)
 end)
 

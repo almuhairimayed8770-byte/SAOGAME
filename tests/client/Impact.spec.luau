@@ -430,10 +430,57 @@ describe("Impact.hit after a predicted contact (issue 4)", function()
 		expect(only(world, "camera.punch")[1]).toBe("Kill")
 		expect(only(world, "slashArc.play")[5]).toBe("Large")
 		expect(only(world, "slashArc.line")[3]).toBe("Large")
-		-- The contact's glint and white flash already played.
+		-- The contact's glint already played; the kill's own white flash comes after its picture
+		-- (Black, Dark, Ink, then white: D-349), as a kill the contact proved shows it.
 		none(world, "glint.play")
-		none(world, "outline.flash")
+		local flash = only(world, "outline.flash")
+		expect(flash[1]).toBe(world.target)
+		expect(flash[2]).toBe("SystemWhite")
+		expect(flash[3]).toBe(combat.highlightFlashFrames)
 	end)
+
+	it("a kill upgrade flashes the target white only once its picture has gone (D-349)", function()
+		local world = bind(newWorld())
+		world.swing = Vector3.new(1, 0, 0)
+		local played = Impact.hit(hitInfo(world, {}))
+		flush(world)
+		table.clear(world.calls)
+		world.hiddenAfterPlay = 6 / 60
+		Impact.hit(hitInfo(world, { tier = "Kill", killed = true, art = false }), played)
+		only(world, "impactFrames.play")
+		none(world, "outline.flash")
+		expect(flush(world)).toEqual({ 6 / 60 })
+		expect(only(world, "outline.flash")[2]).toBe("SystemWhite")
+		-- Nothing else of the contact's moment plays twice.
+		none(world, "glint.play")
+	end)
+
+	it(
+		"a kill word that comes after the contact's freeze let go: its sound and white, no picture, no punch (D-348)",
+		function()
+			local world = bind(newWorld())
+			world.swing = Vector3.new(1, 0, 0)
+			local played = Impact.hit(hitInfo(world, {}))
+			flush(world)
+			table.clear(world.calls)
+			Impact.hit(hitInfo(world, { tier = "Kill", killed = true, art = false, late = true }), played)
+			flush(world)
+			expect(only(world, "sfx.cue")[1]).toBe("HitKill")
+			expect(only(world, "outline.flash")[2]).toBe("SystemWhite")
+			none(world, "impactFrames.play")
+			none(world, "camera.punch")
+			-- The same word in time draws both.
+			table.clear(world.calls)
+			Impact.bind(world.deps)
+			played = Impact.hit(hitInfo(world, {}))
+			flush(world)
+			table.clear(world.calls)
+			world.clock += 1
+			Impact.hit(hitInfo(world, { tier = "Kill", killed = true, art = false, late = false }), played)
+			only(world, "impactFrames.play")
+			only(world, "camera.punch")
+		end
+	)
 
 	it("a final hit the server makes a kill inside the sweep: only what the kill adds", function()
 		local world = bind(newWorld())
@@ -443,9 +490,11 @@ describe("Impact.hit after a predicted contact (issue 4)", function()
 		expect(only(world, "impactFrames.play")[1]).toBe("Kill")
 		expect(only(world, "sfx.contour")[1]).toBe("KillCut")
 		expect(only(world, "camera.punch")[1]).toBe("Kill")
-		for _, fn in { "glint.play", "slashArc.play", "slashArc.line", "outline.flash" } do
+		for _, fn in { "glint.play", "slashArc.play", "slashArc.line" } do
 			none(world, fn)
 		end
+		-- The kill's white after its picture, though the final hit's already flashed (D-349).
+		expect(only(world, "outline.flash")[2]).toBe("SystemWhite")
 	end)
 
 	it("a confirmation of the moment the contact played replays nothing, even past the sweep", function()

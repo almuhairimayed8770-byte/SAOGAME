@@ -260,7 +260,7 @@ local engine = {
 	bodyClear = function(): boolean
 		return true
 	end,
-	worldAhead = function(model: Model, direction: Vector3, distance: number, offset: Vector3?, walk: boolean?)
+	worldAhead = function(model: Model, direction: Vector3, distance: number, offset: Vector3?, walk: Vector3?)
 		return EnemyService.worldAhead(model, direction, distance, function(start, size, vector)
 			return blockcast(start, size, vector)
 		end, offset, walk)

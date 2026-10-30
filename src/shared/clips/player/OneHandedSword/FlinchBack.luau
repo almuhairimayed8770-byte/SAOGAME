@@ -7,6 +7,9 @@
 	and also while the rig's clock stands still under it (a frozen Art stance, a hit-stop, D-294),
 	where a snap into the pose stood at its rest key and showed nothing. Rides on the Additive layer
 	so it works over walking, guarding or an Art.
+	Re-key (D-387): the legs carry additive keys that hold the feet where the stance under the
+	flinch has them (the drawn idle's places): the hips' shift slid both feet 0.17 in a
+	frame and 0.37 over the plant.
 	The sword arm rides the torso (no right shoulder key): a hit taken during Draw or Sheathe then
 	keeps the blade in line with its sheath.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
@@ -41,8 +44,12 @@ local clip: Types.ClipDef = {
 				Waist = rot(-5, 0, 0),
 				Neck = rot(14, 0, 0),
 				LeftShoulder = rot(8, 0, -6),
-				LeftHip = rot(4, 0, 0),
-				RightHip = rot(4, 0, 0),
+				LeftHip = rot(-4, 0.4, -0.1),
+				RightHip = rot(-17.6, -1.8, -0.4),
+				LeftAnkle = rot(5.7, 0, 0.1),
+				LeftKnee = rot(-1.7, 0, 0),
+				RightAnkle = rot(-7.3, 0, 0.1),
+				RightKnee = rot(25, 0, 0),
 			},
 		},
 		{
@@ -54,8 +61,12 @@ local clip: Types.ClipDef = {
 				Waist = rot(-5, 0, 0),
 				Neck = rot(14, 0, 0),
 				LeftShoulder = rot(8, 0, -6),
-				LeftHip = rot(4, 0, 0),
-				RightHip = rot(4, 0, 0),
+				LeftHip = rot(-4, 0.4, -0.1),
+				RightHip = rot(-17.6, -1.8, -0.4),
+				LeftAnkle = rot(5.7, 0, 0.1),
+				LeftKnee = rot(-1.7, 0, 0),
+				RightAnkle = rot(-7.3, 0, 0.1),
+				RightKnee = rot(25, 0, 0),
 			},
 		},
 		{
@@ -66,8 +77,12 @@ local clip: Types.ClipDef = {
 				Waist = rot(1.5, 0, 0),
 				Neck = rot(-4.2, 0, 0),
 				LeftShoulder = rot(-0.8, 0, 0.6),
-				LeftHip = rot(0, 0, 0),
-				RightHip = rot(0, 0, 0),
+				LeftHip = rot(0.4, 0, 0),
+				RightHip = rot(2.5, 0.2, 0),
+				LeftAnkle = rot(-1.3, 0, 0),
+				LeftKnee = rot(0.9, 0, 0),
+				RightAnkle = rot(0.6, 0, 0),
+				RightKnee = rot(-3.1, 0, 0),
 			},
 		},
 		{
@@ -78,6 +93,12 @@ local clip: Types.ClipDef = {
 				Waist = rot(0, 0, 0),
 				Neck = rot(0, 0, 0),
 				LeftShoulder = rot(0, 0, 0),
+				LeftAnkle = rot(0, 0, 0),
+				LeftHip = rot(0, 0, 0),
+				LeftKnee = rot(0, 0, 0),
+				RightAnkle = rot(0, 0, 0),
+				RightHip = rot(0, 0, 0),
+				RightKnee = rot(0, 0, 0),
 			},
 		},
 	},

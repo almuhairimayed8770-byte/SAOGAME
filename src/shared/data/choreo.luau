@@ -18,6 +18,16 @@ local Choreo = {
 	-- Curve of every blend envelope (blend in, blend out, crossfade) as the limbs see it: no
 	-- linear tween on a limb, even between clips. Symmetric, so equal crossfades keep their sum.
 	blendEasing = "SineInOut",
+	-- A cancel (D-408): an action that cuts a live one (the next basic, an Art or the guard out of a
+	-- basic, a dodge out of a basic, the guard or an Art's start-pose hold; Mixer.play handOver)
+	-- takes the body as a snap (section 10 beat 2: 2 to 4 frames, eased out, "the eye reads the
+	-- pose, not the path"). The cut clip holds its pose and fades out over `seconds` while the new
+	-- one fades in over the same, eased by `easing` and laid over it. At most dev.luau
+	-- review.audit.cancel.snapFrames frames (tools/validators/choreo.luau).
+	handOver = {
+		seconds = 0.05,
+		easing = "ExpoOut",
+	},
 
 	-- Clip clock
 	frameSeconds = 1 / 60, -- hit-stop frame length (section 6)
@@ -122,7 +132,49 @@ local Choreo = {
 		-- The 8-direction space: four axis clips; diagonals blend the two neighbours.
 		directions = { Forward = 0, Right = 90, Back = 180, Left = 270 },
 		turnInPlaceDegrees = 45,
-		turnClipDuration = 0.4,
+		turnClipDuration = 0.5,
+		-- A standing body's feet hold the ground while its root turns (D-416, TurnPlant): the hips
+		-- keep the yaw they stood at, the Waist turns the upper body on toward the root's facing by
+		-- up to twistDegrees, and the hips come round only between a turn clip's two Footsteps
+		-- (the pivot foot set with a corner of its sole on the root's axis, the other foot lifted)
+		-- on `easing` over that clip time, at most stepDegrees in a 60 Hz frame (dev.luau
+		-- review.audit.popDegrees is the most). A lag no turn took lets go evenly over
+		-- plantSeconds once the body moves off, leaves the ground or a full-body clip takes it:
+		-- done by every attack's first strike key (tools/validators/choreo.luau).
+		turnPlant = {
+			stepDegrees = 20,
+			plantSeconds = 0.12,
+			twistDegrees = 45,
+			easing = "SineInOut",
+		},
+		-- An attack that cuts a moving gait (D-404): the gait's phase stands where the attack
+		-- found it until the attack lets go, and the attack takes each joint listed here over its
+		-- own blend in: `seconds` (or the clip's blendIn when longer) times the joint's factor. The
+		-- stride and the arm swing come into the attack's first pose over 5 to 14 frames, not
+		-- the clip's 4 to 9 cut over a running body (a foot turned 31 degrees in one frame, past
+		-- review.audit.popDegrees). The root goes last so the hips never swing round over planted
+		-- feet; an unlisted joint (the spine, the head, the sword's grip) keeps the clip's blendIn,
+		-- and a factor that leaves a joint's blend under the clip's own does nothing. Every blend is
+		-- done by the attack's first strike key, where its hit is drawn (tools/validators/choreo.luau:
+		-- the basics' 0.1 s base times 1.5 ends on their 0.15 s key).
+		handOff = {
+			seconds = 0.1,
+			joints = {
+				Root = 1.4,
+				LeftHip = 0.9,
+				RightHip = 0.9,
+				LeftKnee = 1,
+				RightKnee = 1,
+				LeftAnkle = 0.9,
+				RightAnkle = 0.9,
+				LeftShoulder = 1.5,
+				LeftElbow = 1.5,
+				LeftWrist = 1.5,
+				RightShoulder = 1.5,
+				RightElbow = 1.5,
+				RightWrist = 1.5,
+			} :: { [string]: number },
+		},
 		skidSpeedThreshold = 18, -- above run speed: stopping plays Skid
 		-- The two-step stop below the skid threshold: after the stick lets go the root slows down
 		-- (to stopEndSpeed at the slowest) through the next Footstep at least stopMinCycles of the
@@ -198,6 +250,13 @@ local Choreo = {
 			-- speed x dt, and the phase takes that up so the planted foot holds the ground. Four
 			-- physics steps of headroom; a teleport or a shove past it is dropped.
 			travelSlipSeconds = 1 / 30,
+			-- The running difference forgets itself over this many seconds (D-411): a root that
+			-- travels a lasting fraction off the speed it reads (0.6% in the owner's own run log)
+			-- held it at travelSlipSeconds after about 5.5 s, and from then on every long physics
+			-- frame went uncompensated (a flat foot moved 0.15 studs a frame at sprint). With it, a
+			-- 0.6% bias holds the difference at 0.15% of a second of travel, a twentieth of the
+			-- bound, and each frame's own step is still taken up whole.
+			travelSlipDecaySeconds = 0.25,
 			-- A body held off its stick (D-144): walking into an enemy or a wall, or slid along its
 			-- flank. Once the stick has stayed within `degrees` of one direction for
 			-- `settleSeconds` (a turn swings the root's velocity across after the stick; a pan
@@ -288,6 +347,9 @@ local Choreo = {
 			Land = "Land",
 			TurnLeft = "TurnLeft",
 			TurnRight = "TurnRight",
+			-- Over the drawn stance (D-416): Locomotion plays these when the drawn idle shows.
+			TurnLeftDrawn = "TurnLeftDrawn",
+			TurnRightDrawn = "TurnRightDrawn",
 			Skid = "Skid",
 		},
 		clipPrefix = "player/OneHandedSword/",
@@ -299,6 +361,18 @@ local Choreo = {
 		clips = { draw = "Draw", sheathe = "Sheathe" }, -- suffixes under locomotion.clipPrefix
 		-- These clips start with the sword in the hand (a draw-cut), as every clip with `attack` does.
 		drawCutClips = { "Guard", "GuardHit", "Parry" },
+		-- Of those, the guard's: raised with the sword on the back, the blade would come off the back
+		-- in one frame while the arm hangs at the side (6.2 studs in a 240 Hz step). So the Draw
+		-- plays over them instead (SheathState, D-420), at overPriority: above every one of them
+		-- (Guard 10, GuardHit 12), below Parry (14) and the attacks, which still draw-cut. Once its
+		-- clock passes handOverTime (the blade over the shoulder, past WeaponDraw) it blends out
+		-- over handOverBlend into the guard's own pose: the tip at most 71.3 studs a second over 48
+		-- points of a gait's cycle, the guard raised 0 to 0.7 s after the flip, at 240 Hz (it was
+		-- 1665: tests/choreo/SheathTip.spec.luau, the guard cases).
+		drawFirstClips = { "Guard", "GuardHit" },
+		overPriority = 13,
+		handOverTime = 0.445,
+		handOverBlend = 0.25,
 		predictSeconds = 1.5, -- the local player shows drawn this long after sending a combat request, until the attribute lands
 		sheatheDelay = 0.3, -- Drawn must stay false this long before the Sheathe clip starts
 		stopBlend = 0.1, -- blend-out of a Draw or Sheathe that a draw-cut or a cover cuts short
@@ -363,6 +437,23 @@ local Choreo = {
 			handBackEasing = "QuadOut",
 			-- The root part the body is drawn away from hides meanwhile (LocalTransparencyModifier).
 			hiddenRootTransparency = 1,
+			-- The pass (RushDraw.pass): the server's body runs through a player in its path (D-167),
+			-- the drawn one shoulders past it. Its path swings off the line from leadStuds before
+			-- its snout meets the body, so the snout still meets it (the blow lands on the body's
+			-- side), to the full clearance (the drawn body's half width + the body's radius +
+			-- marginStuds) fullStuds after; it holds that until its tail is past the body, then comes
+			-- back onto the line by the run's end, so it rests where the server's body stops. A body
+			-- within centreStuds of the line's middle is passed on the rusher's right; a body the run
+			-- cannot get past with at least returnStuds left to come back is not passed. The body's
+			-- radius is its root's half width, the torso's; marginStuds is about an arm's width more
+			-- (an R15 arm hangs a stud outside the torso), so the flank clears the hanging arm too.
+			pass = {
+				leadStuds = 2,
+				fullStuds = 6,
+				marginStuds = 0.9,
+				centreStuds = 0.5,
+				returnStuds = 3,
+			},
 		},
 	},
 

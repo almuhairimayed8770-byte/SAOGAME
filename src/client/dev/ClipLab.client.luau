@@ -9,6 +9,19 @@
 	SmearOn to the fx modules so the blade reads as it will in the game, and offers an "A/B with
 	rest pose" toggle that alternates the clip with every joint at rest.
 
+	The hit-stop preview never skips a clip frame. In the game a swing freezes on the frame its
+	clock reaches the window's strike key (the contact moment) and the hit-stop stands in for the
+	authored Hold after it (D-154: the clock skips up to the hit-stop's length of that Hold), so the
+	blade holds the key's pose for max(hit-stop, hold) once; previewed that way the frame counter
+	jumped over the Hold after every pause. The lab pauses on the strike key for what the hit-stop
+	has beyond the Hold and then plays the whole authored Hold (ReviewMarkers.hitStopPreview,
+	D-412): the same one still of max(hit-stop, hold) on the same pose, every clip frame shown. (It
+	paused at the Hold's end before, on the next key's pose: a still the game never holds.)
+	Stepping single frames shows every frame and previews no hit-stop.
+
+	Every play from a new clip time (a loop's restart, a clip picked, a step back) clears the
+	blade's trail, so no ribbon joins the clip's last pose to its first.
+
 	The sword sits where the clip time says (ReviewMarkers.mountAt, D-050): on its sheath across
 	the back before a Draw's WeaponDraw, in a sheathed walk or idle, and after a WeaponSheathe; in
 	the hand otherwise. The lab reads the time, not the events, so a scrub backwards puts the
@@ -22,7 +35,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
+local ContextActionService = game:GetService("ContextActionService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Dev = require(Shared.data.dev)
@@ -33,6 +46,7 @@ end
 
 local Types = require(Shared.types)
 local Combat = require(Shared.data.combat)
+local ChoreoData = require(Shared.data.choreo)
 local Joints = require(Shared.choreo.Joints)
 local Client = script.Parent.Parent
 local El = require(Client.ui.lib.El)
@@ -41,6 +55,7 @@ local Choreo = require(Client.choreo.Choreo)
 local ClipLibrary = require(Client.choreo.ClipLibrary)
 local WeaponMount = require(Client.choreo.WeaponMount)
 local ReviewMarkers = require(script.Parent.ReviewMarkers)
+local LabKeys = require(script.Parent.LabKeys)
 
 local Trails, hasTrails = Siblings.load(Client, "fx.Trails")
 local Smear, hasSmear = Siblings.load(Client, "fx.Smear")
@@ -152,6 +167,12 @@ local abEnabled = false
 local abRest = false
 local abTimer = 0
 local hitStopEnabled = Lab.hitStopPreview
+-- A hit-stop preview waiting for its strike key: the clip time it pauses at and the frames the
+-- hit-stop has beyond the authored Hold after it.
+local pendingStop: { at: number, frames: number }? = nil
+-- Clip seconds the hit-stop preview still holds the rig. The lab owns the clock, so it holds by
+-- not stepping: a Mixer hit-stop would also let its clock skip the authored Hold after the key.
+local labHold = 0
 local connectedAnimators: { [Choreo.Animator]: boolean } = {}
 local yaw = CameraData.startYaw
 local orbitDirection = 0
@@ -502,9 +523,21 @@ local function onClipEvent(target: Choreo.Animator, clipId: string, event: Types
 		if hasSmear then
 			Smear.apply(model, false)
 		end
-	elseif event.kind == "HitWindowOpen" and hitStopEnabled then
+	elseif event.kind == "HitWindowOpen" and hitStopEnabled and playing then
 		local tier: Types.HitStopTier = def.hitStop or "Normal"
-		target:hitStop(Combat.hitStopFrames[tier])
+		local frames = Combat.hitStopFrames[tier]
+		local current = handle
+		-- Where the game holds it (ReviewMarkers.hitStopPreview): the strike key, for what the
+		-- hit-stop has beyond the authored Hold after it.
+		local at, held = ReviewMarkers.hitStopPreview(def, if current ~= nil then current.time else event.time, frames)
+		if at == nil then
+			pendingStop = nil
+		elseif current ~= nil and at > current.time then
+			pendingStop = { at = at, frames = held }
+		else
+			pendingStop = nil
+			labHold = math.max(labHold, held * ChoreoData.frameSeconds)
+		end
 	end
 end
 
@@ -533,6 +566,23 @@ local function quietFx(model: Model)
 	end
 end
 
+-- Drops every segment of the blade's trail (the ribbon and the engine Trail), so a play from a
+-- new clip time never draws a ribbon from the pose it left: Trails forgets the rig (its ribbon
+-- released, its tip ring gone), the engine Trail's segments are cleared, and the rig is tracked
+-- again from this pose.
+local function clearTrail(model: Model)
+	if not hasTrails then
+		return
+	end
+	Trails.detach(model)
+	for _, descendant in model:GetDescendants() do
+		if descendant:IsA("Trail") then
+			descendant:Clear()
+		end
+	end
+	Trails.attach(model)
+end
+
 -- Puts the sword where the clip time says. When the place changes, the frame is posed again so
 -- the Weapon joint is pinned (back) or free (hand) in the pose on screen.
 local function syncMount()
@@ -557,6 +607,9 @@ local function play(startTime: number)
 		return
 	end
 	quietFx(target.model)
+	clearTrail(target.model)
+	pendingStop = nil
+	labHold = 0
 	handle = target:play(def.id, { startTime = startTime, blendIn = 0, blendOut = 0 })
 	target:step(0)
 	syncMount()
@@ -628,6 +681,9 @@ local function stepFrames(count: number)
 		return
 	end
 	if count >= 0 then
+		-- Single frames show every clip frame: no hit-stop preview waits for them.
+		pendingStop = nil
+		labHold = 0
 		for _ = 1, count do
 			target:step(FRAME)
 		end
@@ -745,12 +801,11 @@ local function keyCode(name: string): Enum.KeyCode?
 	return if ok then result else nil
 end
 
-local pressed: { [Enum.KeyCode]: () -> () } = {}
-local held: { [Enum.KeyCode]: (down: boolean) -> () } = {}
+local bindings: { [Enum.KeyCode]: LabKeys.Binding } = {}
 local function bind(name: string, fn: () -> ())
 	local code = keyCode(name)
 	if code ~= nil then
-		pressed[code] = fn
+		bindings[code] = { pressed = fn }
 	else
 		warn(("[ClipLab] unknown key %s in dev.luau"):format(name))
 	end
@@ -758,7 +813,7 @@ end
 local function bindHeld(name: string, fn: (down: boolean) -> ())
 	local code = keyCode(name)
 	if code ~= nil then
-		held[code] = fn
+		bindings[code] = { held = fn }
 	end
 end
 
@@ -797,28 +852,8 @@ bindHeld(keys.orbitRight, function(down: boolean)
 	orbitDirection = if down then 1 elseif orbitDirection > 0 then 0 else orbitDirection
 end)
 
-UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
-	if processed or input.UserInputType ~= Enum.UserInputType.Keyboard then
-		return
-	end
-	local fn = pressed[input.KeyCode]
-	if fn ~= nil then
-		fn()
-	end
-	local holdFn = held[input.KeyCode]
-	if holdFn ~= nil then
-		holdFn(true)
-	end
-end)
-UserInputService.InputEnded:Connect(function(input: InputObject)
-	if input.UserInputType ~= Enum.UserInputType.Keyboard then
-		return
-	end
-	local holdFn = held[input.KeyCode]
-	if holdFn ~= nil then
-		holdFn(false)
-	end
-end)
+-- Above the default character scripts, which bind the arrows and Space too (LabKeys, D-413).
+LabKeys.bind(ContextActionService, "ClipLab", (Enum.ContextActionPriority :: any)[Lab.actionPriority].Value, bindings)
 
 -- ---------------------------------------------------------------------------------------------
 -- Camera: an orbit around the selected rig's pedestal
@@ -874,7 +909,7 @@ local function readoutText(): string
 		return "Select a clip"
 	end
 	local state = if abRest then "rest pose" elseif not playing then "paused" else "playing"
-	local pauseNote = if animator ~= nil and animator:isPaused() then "  hit-stop" else ""
+	local pauseNote = if labHold > 0 or (animator ~= nil and animator:isPaused()) then "  hit-stop" else ""
 	return ("%s\n%gx  %s%s"):format(ReviewMarkers.frameLabel(current.time, def.duration), speed, state, pauseNote)
 end
 
@@ -899,7 +934,36 @@ RunService.RenderStepped:Connect(function(dt: number)
 		if abRest then
 			restPose(target.model)
 		elseif playing then
-			Choreo.stepAll(dt * speed)
+			local clipDt = dt * speed
+			local pending = pendingStop
+			local playingHandle = handle
+			if labHold > 0 then
+				local spent = math.min(labHold, clipDt)
+				labHold -= spent
+				clipDt -= spent
+			end
+			if pending ~= nil and playingHandle ~= nil and labHold <= 0 and clipDt > 0 then
+				local reach = pending.at - playingHandle.time
+				if reach < 0 then
+					-- Already past the strike key (stepped there by hand): nothing left to preview.
+					pendingStop = nil
+				elseif reach <= clipDt then
+					-- The strike key falls inside this frame: step to it, hold the excess there, and
+					-- let the rest of the frame count toward that pause.
+					if reach > 0 then
+						Choreo.stepAll(reach)
+					end
+					pendingStop = nil
+					clipDt -= reach
+					labHold = pending.frames * ChoreoData.frameSeconds
+					local spent = math.min(labHold, clipDt)
+					labHold -= spent
+					clipDt -= spent
+				end
+			end
+			if clipDt > 0 then
+				Choreo.stepAll(clipDt)
+			end
 			local current = handle
 			if current ~= nil and (current.ended or current.done) then
 				play(0)

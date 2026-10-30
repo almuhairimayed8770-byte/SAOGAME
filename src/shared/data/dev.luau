@@ -10,8 +10,10 @@
 	hooks DevAim and DevCombat (aim, trace) also need RunService:IsStudio(), and the PoseEditor is
 	a Studio plugin. Hotkeys are Enum.KeyCode names and never a function key: F9 is
 	the developer console, F5 to F8 are Studio's play controls, F11 and F12 are fullscreen and
-	screenshot. Letters that input.luau binds (Q, E, F, R, Tab, Space, 2, 3, 4, Shift) are avoided
-	in the Playground, where gameplay input is live.
+	screenshot. Nor is any dev key one Studio keeps for itself while "Respect Studio shortcuts when
+	game has focus" is on (I, O, Home, End, PageUp, PageDown, F1, F2, F11, F12): pressed in Play it
+	never reaches the game (tools/validators/dev.luau). Letters that input.luau binds (Q, E, F, R,
+	Tab, Space, 2, 3, 4, Shift) are avoided in the Playground, where gameplay input is live.
 
 	Times are seconds, sizes are pixels at UI scale 1, distances are studs, angles are degrees,
 	colors are palette tokens.
@@ -30,6 +32,10 @@ export type StagedEnemy = {
 	-- Its HP after staging (the kill shot), clamped to [1, maxHp] by the server, and set again as
 	-- it is let go, so it comes in at this HP however long it stood held (CF).
 	hp: number?,
+	-- A let-go enemy only: the attacks it may begin; once it has begun this many it is held at the
+	-- first moment it is free (EnemyService.limitAttacks, FK2), so the last one, a stagger after it
+	-- and its recovery play out whole and no next wind-up starts inside the take. Nil: no limit.
+	attacks: number?,
 	-- A released Charger only (the validator asks for it): what its first charge does to a player
 	-- standing on the spot, and what the shot's prompts tell them. "Meets": the telegraphed line
 	-- (attack reach) reaches them and the rush hits. "Passes": the line ends short of their body and
@@ -49,7 +55,7 @@ export type ShotStage = {
 }
 
 -- What the camera does during a take: the lock camera, or one of capture.cameras.
-export type ShotCamera = "Lock" | "Side" | "ThreeQuarter" | "Behind" | "Open"
+export type ShotCamera = "Lock" | "Side" | "ThreeQuarter" | "Behind" | "Rear" | "Open"
 
 -- One line of the on-screen prompt: shown from `at` seconds into the take until the next one.
 export type PromptBeat = { at: number, text: string }
@@ -57,8 +63,10 @@ export type PromptBeat = { at: number, text: string }
 -- One key auto-perform presses after a reaction (Perform.chain), `delay` seconds after the key
 -- before it came up (the reaction's own, then each step's): `action` held `hold` seconds, a Move
 -- held until its lock target is `within` studs (flat) or `hold` passes. `cycle` (Arts) presses
--- the next of its actions each time the step comes round, the first being `action`. A LockOn step
--- locks staged enemy `enemy` (stage.enemies index) and never lets a lock go.
+-- the next of its actions each time the step comes round, the first being `action`; a reaction
+-- heard while the step's Art is held cancels it and gives its turn back (EF). A LockOn step
+-- locks staged enemy `enemy` (stage.enemies index) and never lets a lock go. Nothing of the step
+-- or what follows it goes down past `to` seconds into the take (EF), nor past its reaction's.
 export type PerformStep = {
 	action: string,
 	hold: number,
@@ -68,6 +76,7 @@ export type PerformStep = {
 	stick: { number }?,
 	sprint: boolean?,
 	within: number?,
+	to: number?,
 }
 
 -- One key auto-perform presses through the real input path (InputController.handle, as the key's
@@ -77,8 +86,9 @@ export type PerformStep = {
 -- too when `sprint`. Exactly one of these times it:
 -- - `at`: it goes down `at` seconds into the take;
 -- - `onClip`: a reaction, `lead` seconds before the HitWindowOpen of the clip `onClip` as the
---   client draws it on staged enemy `enemy` (stage.enemies index, 1 when nil), a Guard the
---   client's latency lead earlier still (Telegraphs.glintLead, D-289; D-319): the first play only, or each
+--   client draws it on staged enemy `enemy` (stage.enemies index, 1 when nil), a Guard the way
+--   up earlier still (what the staging's replies read, else Telegraphs.glintLead, D-289; D-319,
+--   EF): the first play only, or each
 --   one when `repeats`. Every later event of the play heard moves the moment with it (the client
 --   holds an attack's clip through its attacker's hit-stop). With `lock` the lock goes to that
 --   enemy when its clip is heard (a guard must face its attacker). Its `chain` steps follow it; a
@@ -123,7 +133,9 @@ export type Shot = {
 -- reference: Line, 0 behind the anchor on the line between the fighters; Facing, 0 behind the
 -- anchor's own facing; World, 0 at +Z of the anchor (90 at +X). The anchor: the player's root,
 -- the target's drawn body, or the middle of the two. The aim never comes nearer the lens than the
--- anchor, and the bearing turns no faster than camera.luau lock.maxTurnDegreesPerSecond.
+-- anchor, and the bearing turns no faster than camera.luau lock.maxTurnDegreesPerSecond. A `fixed`
+-- view stands still in the world: once the player and the target have stood where the staging put
+-- them (camera.luau stage), it holds that spot and aim through the take.
 export type StageCamera = {
 	anchor: "Player" | "Target" | "Middle",
 	reference: "Line" | "Facing" | "World",
@@ -132,6 +144,7 @@ export type StageCamera = {
 	height: number,
 	focusBias: number,
 	lookHeight: number,
+	fixed: boolean?,
 }
 
 local Dev = {
@@ -140,6 +153,17 @@ local Dev = {
 		capture = "DevCapture",
 		clipLab = "ClipLab",
 		timeScale = "DevTimeScale", -- written by the server from the dev remote; dev places only
+	},
+
+	-- The Studio frame-rate cap (DevFrameCap.client.luau, Studio item 303: Studio's own menu offers
+	-- no 30): set the Workspace attribute to a number of frames a second from least to most and
+	-- every frame is held to that rate; no attribute (or one out of range) holds nothing. Its
+	-- render step runs after every step that draws the frame (camera.luau renderOrder.late is Last).
+	frameCap = {
+		attribute = "DevFrameCap",
+		least = 15,
+		most = 60,
+		priority = { base = "Last", offset = 1 },
 	},
 
 	-- Slow motion for review: the capture panel cycles these, the ClipLab offers them as buttons.
@@ -257,6 +281,15 @@ local Dev = {
 		maxNameLength = 40,
 		partColorToken = "PlaceholderSteel",
 		partMaterial = "Slate",
+		-- "pack" (item 315): at most this many members, a natural pack's top (playground.luau
+		-- packSize) and some, all of whom fit clear of each other in the widest scatter disc.
+		maxPackSize = 6,
+		-- "place" with onWindUp (302(b)): the move lands `after` seconds into the enemy's next
+		-- wind-up, at most maxPlaceAfterSeconds (anywhere in any wind-up, even one hits paused, and
+		-- the strike after it); it gives up when no wind-up starts within windUpWaitSeconds (longer
+		-- than any enemy's whole attack, so one attacking on a loop starts its next inside it).
+		maxPlaceAfterSeconds = 3,
+		windUpWaitSeconds = 10,
 	},
 
 	-- tools/pose-server.luau (Lune) and the PoseEditor plugin's HttpService calls.
@@ -292,6 +325,297 @@ local Dev = {
 		windowSnapToleranceFrames = 0.01,
 		beats = { "Anticipation", "Snap", "Smear", "Hold", "Settle", "Recovery" },
 		humanColumns = { "Watched at 0.25x", "Problems seen", "Fixed" },
+		-- The body review (src/client/dev/ClipAudit.luau; section 10 "Review loop", section 21 gate
+		-- line 4: no popping limb or sliding foot in any clip). Every attack and one-shot is played
+		-- through the real Mixer on the real rig, the way the game plays it, sampled at each of
+		-- `sampleHz` (a 60 fps frame and every frame of the 0.25x review), and measured per 60 Hz
+		-- frame. tools/animation-review.luau writes what breaks these into the Problems column and
+		-- tests/choreo/ClipAudit.spec.luau fails on it.
+		audit = {
+			sampleHz = { 60, 240 },
+			-- A pop: a body part turning more than this in one 60 Hz frame, in the root part's frame,
+			-- outside a strike's snap (the snap is the fastest motion in the game on purpose). 20 deg
+			-- a frame is 1200 deg/s: a settle's overshoot spring or a fast guard raise stays under it,
+			-- a limb that reaches its key in one frame (an ExpoOut key a frame or two long out of a
+			-- far pose) does not.
+			popDegrees = 20,
+			-- Steps under this are left out of the report (it lists only what a reader may look at).
+			reportDegrees = 8,
+			-- No limb visibly inside the body: the deepest one part may sink into another it is not
+			-- jointed to (boxes of the rig's part sizes, the head its drawn size), a tenth of a limb's
+			-- width (the stride code's own bar for a foot that moves: locomotion.stride.slideBar).
+			overlapStuds = 0.1,
+			-- The weapon in the body (the hand on the hilt and its forearm aside): groundClearance
+			-- offBody.heldMargin keeps the sword 0.05 off in the key poses; between them it may brush.
+			weaponStuds = 0.1,
+			-- Planted feet do not move: a grounded foot's least-moving grounded corner travels at
+			-- most this across the field in one frame (the drawn gaits' bar, locomotion.stride.slideBar)
+			-- and at most footDriftStuds from where it touched down over the whole plant, and no
+			-- corner goes deeper than footSinkStuds below the field.
+			footSlideStuds = 0.1,
+			footDriftStuds = 0.25,
+			footSinkStuds = 0.1,
+			-- The anticipation (section 10 beat 1: the weapon pulls the opposite way), one an attack
+			-- (the first strike's; a later strike's is reported only). Its chord (where the tip goes
+			-- over the beat) against the strike's chord: a cosine at most maxCosine (an angle of 120
+			-- deg or more: a pull the eye reads as "the other way", where -0.37 read weak and -0.59
+			-- read on the review PC); the tip travels at least minTravel; it never moves faster in a
+			-- frame than maxSpeedShare of the snap's peak (the snap is the fastest motion in the game;
+			-- a pull at nearly half its speed reads as part of the swing); and from the gameplay
+			-- camera it is behind the body for at most maxHiddenShare of the beat.
+			anticipation = {
+				maxCosine = -0.5,
+				minTravel = 1,
+				maxSpeedShare = 0.4,
+				maxHiddenShare = 0.5,
+			},
+			-- Section 10 beat 6, then the 0.2 s blend back to locomotion: the weapon's tip comes back
+			-- within returnStuds of where the game blends to (the drawn idle's guard) by the end of
+			-- the Recovery, so the blend is a settle and not a second swing.
+			returnStuds = 2.5,
+			-- The Recovery is a stance, not a blade held across the face: the blade passes in front
+			-- of the face (inside its width and height, ahead of it) for at most this share of the
+			-- Recovery's frames (a cut through the face line on the way to the stance is fine; a
+			-- held guard across it is not).
+			recoveryFaceShare = 0.5,
+			-- Section 10 beats 4 and 5: the blade leaves a hit-stop eased (D-405). On the first frame
+			-- the rig moves after a freeze, the weapon's tip moves at most this many studs a second
+			-- times the frame (0.25 a 60 Hz frame; Horizontal's QuadIn settle shows 0.11). A Spring
+			-- settle out of the hold threw most of the settle into that frame (Rising Arc 1.48 studs).
+			afterFreezeTipSpeed = 15,
+			-- A cancel (D-408, choreo.luau handOver): the action that cuts a live one takes the body
+			-- within snapFrames 60 Hz frames (section 10 beat 2: a snap is 2 to 4 frames). Those frames
+			-- are the cut's snap (no pop judged); no part turns back inside them by more than
+			-- reportDegrees, and from the frame after them the pop rule holds.
+			cancel = {
+				snapFrames = 3,
+			},
+			-- The trace: what plays under the clip starts this long before it, and the trace runs on
+			-- this long after the clip's blend-out is done.
+			leadSeconds = 0.5,
+			settleSeconds = 0.4,
+			-- A trace stops here even if the clip never ends (a stuck clock): past the longest a
+			-- trace can run (the lead, a chain, the longest clip, its blend-out and the settle).
+			maxTraceSeconds = 60,
+			-- A looping clip is traced one whole cycle and this far past its wrap.
+			loopOverSeconds = 0.05,
+			-- Points along the blade the Recovery's face cover is read at.
+			segmentSamples = 16,
+			-- Where in the drawn idle's cycle and the drawn run's (a share of its cycle) an attack
+			-- starts, and how long after a basic the next one starts on the swing's beat
+			-- (combat.luau basicHitDuration: the swing's Art state ends). The audit also chains it
+			-- mashed, one world.luau BasicAttackRequest refill after the swing (the earliest).
+			idlePhases = { 0, 6 },
+			runPhases = { 0, 0.5 },
+			chainSeconds = 0.35,
+			-- The kinds a finding has (the spec's pending list names them).
+			kinds = { "Pop", "Overlap", "Weapon", "Slide", "Drift", "Sink", "Anticipation", "Return", "Recovery" },
+			-- The clips the audit plays (tests/choreo/ClipAudit.spec.luau, the review's Problems
+			-- column): every player attack and every player one-shot (the dodges, guard, parry,
+			-- reactions, death, jump, landing, fall, skid and breathing), and every boar and kobold
+			-- clip. The player's locomotion loops and the draw and sheathe have their own specs
+			-- (Stride, SheathTip, GroundClearance).
+			clips = {
+				"player/OneHandedSword/Basic1",
+				"player/OneHandedSword/Basic2",
+				"player/OneHandedSword/Basic3",
+				"player/OneHandedSword/Horizontal",
+				"player/OneHandedSword/Vertical",
+				"player/OneHandedSword/SharpNail",
+				"player/OneHandedSword/RisingArc",
+				"player/OneHandedSword/DodgeBack",
+				"player/OneHandedSword/DodgeForward",
+				"player/OneHandedSword/DodgeLeft",
+				"player/OneHandedSword/DodgeRight",
+				"player/OneHandedSword/Parry",
+				"player/OneHandedSword/Guard",
+				"player/OneHandedSword/GuardHit",
+				"player/OneHandedSword/GuardBreak",
+				"player/OneHandedSword/FlinchBack",
+				"player/OneHandedSword/FlinchFront",
+				"player/OneHandedSword/FlinchLeft",
+				"player/OneHandedSword/FlinchRight",
+				"player/OneHandedSword/Stagger",
+				"player/OneHandedSword/DeathFreeze",
+				"player/OneHandedSword/Jump",
+				"player/OneHandedSword/Land",
+				"player/OneHandedSword/Fall",
+				"player/OneHandedSword/Skid",
+				"player/OneHandedSword/Breathe",
+				"enemy/Boar/Charge",
+				"enemy/Boar/Idle",
+				"enemy/Boar/Walk",
+				"enemy/Boar/Break",
+				"enemy/Boar/DeathFreeze",
+				"enemy/Boar/FlinchBack",
+				"enemy/Boar/FlinchFront",
+				"enemy/Boar/FlinchLeft",
+				"enemy/Boar/FlinchRight",
+				"enemy/Boar/Stagger",
+				"enemy/Kobold/Overhead",
+				"enemy/Kobold/Idle",
+				"enemy/Kobold/Walk",
+				"enemy/Kobold/Break",
+				"enemy/Kobold/DeathFreeze",
+				"enemy/Kobold/FlinchBack",
+				"enemy/Kobold/FlinchFront",
+				"enemy/Kobold/FlinchLeft",
+				"enemy/Kobold/FlinchRight",
+				"enemy/Kobold/Stagger",
+			},
+			-- Per rig: the visible body (HumanoidRootPart is not drawn), the part groups that must
+			-- stay out of each other (every a against every b; a jointed pair is left out), the
+			-- weapon parts and the body parts they may touch, the tip point the strike is read at
+			-- (an attachment, or a part and an offset in it), the feet, the drawn size of a part
+			-- smaller than its box (a share of the box on each axis: the R15 head is a 2x1x1 box
+			-- under a 1.25 head mesh), what plays under a clip (`idle` as the fallback, `breathing`
+			-- additive over it; the player's attacks over `drawnIdle` and out of `drawnRun`), the
+			-- basic chain, a clip whose body the server carries (`rush`: an enemies.luau attack) and
+			-- the head the Recovery rule reads; `over` (a clip the game plays out of another: a guard
+			-- reaction out of the guard, which it stops); `walk` (the enemy walk the server carries at the
+			-- rig's walkSpeed), `airborne` (clips played in the air: feet not held to the field),
+			-- `slideFree` (clips the controller slides on purpose: their sink is judged, not their
+			-- slide) and `views` (where the gameplay camera sees the rig from, each judged: "Behind"
+			-- the player, an enemy from the "Front" where the player squares up to it. From behind
+			-- an enemy its tell is the Telegraphs' to show, not the pose's: the boar's Charge tusk
+			-- is behind its body there for the whole beat, D-402, D-414).
+			rigs = {
+				PlayerR15 = {
+					body = {
+						"Head",
+						"UpperTorso",
+						"LowerTorso",
+						"RightUpperArm",
+						"RightLowerArm",
+						"RightHand",
+						"LeftUpperArm",
+						"LeftLowerArm",
+						"LeftHand",
+						"RightUpperLeg",
+						"RightLowerLeg",
+						"RightFoot",
+						"LeftUpperLeg",
+						"LeftLowerLeg",
+						"LeftFoot",
+					},
+					pairs = {
+						{
+							a = {
+								"RightUpperArm",
+								"RightLowerArm",
+								"RightHand",
+								"LeftUpperArm",
+								"LeftLowerArm",
+								"LeftHand",
+							},
+							b = { "Head", "UpperTorso", "LowerTorso" },
+						},
+						{
+							a = { "RightUpperArm", "RightLowerArm", "RightHand" },
+							b = { "LeftUpperArm", "LeftLowerArm", "LeftHand" },
+						},
+						{
+							a = { "RightUpperLeg", "RightLowerLeg", "RightFoot" },
+							b = { "LeftUpperLeg", "LeftLowerLeg", "LeftFoot" },
+						},
+					},
+					weapon = { "Weapon", "Guard", "Grip" },
+					weaponFree = { "RightHand", "RightLowerArm" },
+					tip = { attachment = "TrailEnd" },
+					feet = { "LeftFoot", "RightFoot" },
+					visible = { Head = { 0.625, 1.25, 1.25 } },
+					idle = "player/OneHandedSword/Idle",
+					breathing = "player/OneHandedSword/Breathe",
+					drawnIdle = "player/OneHandedSword/IdleDrawn",
+					drawnRun = "player/OneHandedSword/RunDrawn",
+					chain = {
+						["player/OneHandedSword/Basic2"] = "player/OneHandedSword/Basic1",
+						["player/OneHandedSword/Basic3"] = "player/OneHandedSword/Basic2",
+					},
+					-- The cancels the game allows (ActionLogic STARTABLE, D-408): the clip that cuts in,
+					-- the clip it cuts and how far into that one (0.15 s into an Art is its start-pose
+					-- hold, combat.luau startPoseTime). ClipAudit plays each as a "Cancel" plan.
+					cancels = {
+						{ clip = "player/OneHandedSword/Horizontal", over = "player/OneHandedSword/Basic1", gap = 0.1 },
+						{ clip = "player/OneHandedSword/Horizontal", over = "player/OneHandedSword/Basic1", gap = 0.2 },
+						{ clip = "player/OneHandedSword/Vertical", over = "player/OneHandedSword/Basic2", gap = 0.1 },
+						{ clip = "player/OneHandedSword/SharpNail", over = "player/OneHandedSword/Basic3", gap = 0.1 },
+						{ clip = "player/OneHandedSword/DodgeLeft", over = "player/OneHandedSword/Basic1", gap = 0.1 },
+						{ clip = "player/OneHandedSword/DodgeRight", over = "player/OneHandedSword/Basic1", gap = 0.1 },
+						{ clip = "player/OneHandedSword/DodgeBack", over = "player/OneHandedSword/Basic1", gap = 0.1 },
+						{
+							clip = "player/OneHandedSword/DodgeForward",
+							over = "player/OneHandedSword/Guard",
+							gap = 0.5,
+						},
+						{
+							clip = "player/OneHandedSword/DodgeBack",
+							over = "player/OneHandedSword/Horizontal",
+							gap = 0.15,
+						},
+						{
+							clip = "player/OneHandedSword/DodgeLeft",
+							over = "player/OneHandedSword/RisingArc",
+							gap = 0.15,
+						},
+						{ clip = "player/OneHandedSword/Guard", over = "player/OneHandedSword/Basic1", gap = 0.1 },
+					},
+					-- Played out of the guard (their key 0 is the Guard's pose).
+					over = {
+						["player/OneHandedSword/Parry"] = "player/OneHandedSword/Guard",
+						["player/OneHandedSword/GuardHit"] = "player/OneHandedSword/Guard",
+						["player/OneHandedSword/GuardBreak"] = "player/OneHandedSword/Guard",
+					},
+					head = "Head",
+					-- Played in the air (the Humanoid leaves the ground as the Jump starts).
+					airborne = { "player/OneHandedSword/Jump", "player/OneHandedSword/Fall" },
+					-- The two-step stop's skid: the controller slides the body to a stop under it.
+					slideFree = { "player/OneHandedSword/Skid" },
+					views = { "Behind" },
+				},
+				Boar = {
+					body = {
+						"Torso",
+						"Head",
+						"Snout",
+						"TuskLeft",
+						"TuskRight",
+						"FrontLeftLeg",
+						"FrontRightLeg",
+						"BackLeftLeg",
+						"BackRightLeg",
+						"Tail",
+					},
+					pairs = {
+						{ a = { "FrontLeftLeg", "BackLeftLeg" }, b = { "FrontRightLeg", "BackRightLeg" } },
+						{ a = { "FrontLeftLeg", "FrontRightLeg" }, b = { "BackLeftLeg", "BackRightLeg" } },
+						{ a = { "Head", "Snout", "TuskLeft", "TuskRight" }, b = { "FrontLeftLeg", "FrontRightLeg" } },
+					},
+					tip = { part = "Snout", offset = { 0, 0, -0.6 } },
+					feet = { "FrontLeftLeg", "FrontRightLeg", "BackLeftLeg", "BackRightLeg" },
+					idle = "enemy/Boar/Idle",
+					walk = "enemy/Boar/Walk",
+					rush = { ["enemy/Boar/Charge"] = { enemy = "FrenzyBoar", attack = "Charge" } },
+					views = { "Front" },
+				},
+				Kobold = {
+					body = { "Torso", "Head", "LeftArm", "RightArm", "LeftLeg", "RightLeg" },
+					pairs = {
+						{ a = { "LeftArm", "RightArm" }, b = { "Head" } },
+						{ a = { "LeftLeg" }, b = { "RightLeg" } },
+						{ a = { "LeftArm" }, b = { "RightArm" } },
+					},
+					weapon = { "Weapon" },
+					weaponFree = { "RightArm" },
+					tip = { attachment = "TrailEnd" },
+					feet = { "LeftLeg", "RightLeg" },
+					idle = "enemy/Kobold/Idle",
+					walk = "enemy/Kobold/Walk",
+					head = "Head",
+					views = { "Front" },
+				},
+			},
+		},
 	},
 
 	-- The server hit matrix (section 20 Phase 0 gate: "the server registered every hit").
@@ -579,7 +903,7 @@ local Dev = {
 			startCountdown = "P", -- stage the shot, then 3-2-1, then the panel hides and the take runs
 			nextShot = "RightBracket",
 			previousShot = "LeftBracket",
-			cycleTimeScale = "O",
+			cycleTimeScale = "T", -- 1x / 0.5x / 0.25x (not O: Studio keeps O for its own shortcut)
 			togglePanel = "H",
 			markDone = "K",
 			autoPerform = "U", -- auto-perform on or off (off when the panel starts)
@@ -654,6 +978,11 @@ local Dev = {
 		perform = {
 			defaultOn = false,
 			moveAction = "Move",
+			-- A guard reaction goes down the way up early (EF): how long the staging's asks took to
+			-- reach the server on its clock (each reply's receivedAt less the ask's send on this
+			-- client's server clock, the least of a staging's asks). Never more than this; Studio's
+			-- network simulation runs to 0.25 s each way.
+			wayUpMax = 0.5,
 		},
 		-- The server's half (DevStage.server.luau).
 		stage = {
@@ -665,6 +994,20 @@ local Dev = {
 			-- The longest a field enemy's wind-up or strike is waited out before it is held (a hold
 			-- inside a wind-up leaves a rush drawn that never comes).
 			holdWaitSeconds = 3,
+			-- The player's root as the staging reads it (D-447). Studio replicates a client-owned
+			-- character a moment late, and the walk's last leg runs along the shot's facing at the
+			-- sprint: read the frame the body came to rest, the root still trailed it by a few studs,
+			-- short of the spot, so a boar staged 12 studs ahead of that read stood under 10 from
+			-- where the player rested (ai.luau minChargeDistance) and circled out before its only
+			-- charge (or the read fell outside the ring and asked for another walk). A root read
+			-- within settleNearStuds (flat) of the
+			-- spot is read again every frame until it has moved no more than settleStuds over
+			-- settleSeconds, for up to settleTimeoutSeconds, and the ring check and the spawn use that
+			-- read; one farther off is taken at once (the reply is a walk).
+			settleNearStuds = 10,
+			settleStuds = 0.05,
+			settleSeconds = 0.15,
+			settleTimeoutSeconds = 1,
 			-- The stand ring (D-244: the staging never moves the player). The shot stages only once
 			-- the player's root stands within standRadius studs (flat) of the stand spot, its feet
 			-- within standHeightTolerance studs of the spot's floor (the open shot: over the ledge's
@@ -721,23 +1064,50 @@ local Dev = {
 		-- at run speed, 1.8 to 4.2 studs by where the stride is, 3.0 in the middle: 0.186 s at 16
 		-- studs per second), or the carry the last sprint stop was seen to make when the engine
 		-- slid it on. Once the body is slower than restSpeed (studs per second, flat) it is at
-		-- rest: more than restStuds (flat) off the spot or restDegrees off its facing, it walks
-		-- the last leg again (at most secondWalks times), and otherwise the shot is asked for
-		-- again (a root outside the ring gets a new walk). A cancelKeys key (Enum.KeyCode names:
-		-- the default control script's movement keys), pressed or held at any point after P, hands
-		-- the walk to the player until P: the walk lets go of the sprint and never moves the body
-		-- again (the ring stays and the ask comes once the root stands in it at rest); J, P and
-		-- timeoutSeconds (on the capture's clock) end it.
+		-- rest, and it stays so for askSettleSeconds (real seconds) before the shot is asked for:
+		-- the server reads the root as it last replicated, which in Studio trails the client, and
+		-- a root asked for the frame it stopped was read where it was in its slide (outside the
+		-- ring: a new walk, which sprinted the body on the spot back to the approach and round
+		-- again; inside it: enemies staged off where it stands, CW). At rest more than restStuds
+		-- (flat) off the spot or restDegrees off its facing, it corrects (at most secondWalks times
+		-- a staging), never at a sprint: it walks at correctSpeed to correctBackStuds behind the spot
+		-- along the approach (unless it already stands that far behind it, on the line), then in
+		-- along it at ahead / creepSeconds studs a second (at most correctSpeed) and lets go once
+		-- that falls under creepEndSpeed, so the body arrives as good as stopped and the two-step
+		-- stop carries nothing. Otherwise the shot is asked for again (a root outside the ring gets
+		-- a new walk). A walk asked for while the root stands within correctWithinStuds of the spot
+		-- (flat, its feet within the ring's height tolerance) never runs the route: in the ring it
+		-- starts at the rest check, and outside it is a correction from where the root stands (the
+		-- server's new walk, not one of the secondWalks). On the spot but off its facing alone, it
+		-- turns there at faceDegreesPerSecond and stands faceSettleSeconds (step 14). A cancelKeys key
+		-- (Enum.KeyCode names: the default control script's movement keys), pressed or held at any
+		-- point after P, hands the walk to the player until P: the walk lets go of the sprint and
+		-- never moves the body again (the ring stays and the ask comes once the root stands in it at
+		-- rest); J and P end it, and timeoutSeconds never does (317(a)). timeoutSeconds (on the
+		-- capture's clock) ends a walk nobody walks: the auto-walk's, or one the world blocked.
 		walk = {
 			timeoutSeconds = 15,
 			waypointStuds = 1,
 			lookaheadStuds = 1.5,
 			sprintAction = "Sprint",
 			carrySeconds = 0.186,
-			restSpeed = 0.5,
+			restSpeed = 0.25,
 			restStuds = 1,
 			restDegrees = 5,
 			secondWalks = 2,
+			askSettleSeconds = 0.5,
+			correctWithinStuds = 4,
+			correctBackStuds = 2.5,
+			correctSpeed = 8,
+			creepSeconds = 0.2,
+			creepEndSpeed = 0.15,
+			faceDegreesPerSecond = 360,
+			faceSettleSeconds = 0.35,
+			-- The blocked rule (316(b)): a walk whose push has not moved the root blockedStuds
+			-- (flat) in blockedSeconds (on the capture's clock) lets go and leaves the ring to the
+			-- player.
+			blockedSeconds = 1,
+			blockedStuds = 0.25,
 			cancelKeys = { "W", "A", "S", "D", "Up", "Down", "Left", "Right" },
 			renderOrder = { base = "Input", offset = 1 },
 			-- The ring: a flat client-made disc (no collision, no query) the stand ring's size.
@@ -752,9 +1122,18 @@ local Dev = {
 		-- The staged views (CameraController.setStage, StageCamera). Side frames the Arts and the
 		-- kill; ThreeQuarter the kobold's overhead and the parry, from wide on the side of its axe
 		-- hand (those shots take cameraSide -1), so the player never stands between the lens and the
-		-- kobold or its axe (tests/client/CameraStageFraming.spec.luau); Behind follows the boar's
-		-- charge from behind its tail; Open watches the locomotion pass from the player's +X, so a
-		-- run along -Z crosses the screen.
+		-- kobold or its axe (tests/client/CameraStageFraming.spec.luau); Behind holds the boar's
+		-- whole charge still (fixed) from high behind its right flank, the side its pass shoulders
+		-- past the player on (cameraSide 1): it looks down the line from over the crouch, so the
+		-- crouch, the launch, the contact, the skid and the turn all play in one frame, and it stands
+		-- far enough off the line that the skid's end and the turn, 10 studs past the player on the
+		-- line, never fall behind the player's body, and high enough that the snout coming round
+		-- in the turn clears the player's head (tests/client/CameraBehindFraming.spec.luau); Rear
+		-- reads the boar's wind-up from behind it (FB4, section 10 "Enemy animation rules"): still,
+		-- 20 degrees off the line behind the crouch, low enough that the red line shows past its
+		-- body, for the crouch and the launch only (no view that near the line keeps the skid and
+		-- the turn clear of the player: tests/client/CameraRearFraming.spec.luau); Open watches the
+		-- locomotion pass from the player's +X, so a run along -Z crosses the screen.
 		cameras = {
 			Side = {
 				anchor = "Middle",
@@ -776,12 +1155,23 @@ local Dev = {
 			},
 			Behind = {
 				anchor = "Target",
-				reference = "Facing",
-				degrees = 15,
-				distance = 10,
-				height = 4,
+				reference = "Line",
+				degrees = 75,
+				distance = 14,
+				height = 14,
+				focusBias = 0.3,
+				lookHeight = 1,
+				fixed = true,
+			},
+			Rear = {
+				anchor = "Target",
+				reference = "Line",
+				degrees = 20,
+				distance = 14,
+				height = 7,
 				focusBias = 0.5,
 				lookHeight = 1,
+				fixed = true,
 			},
 			Open = {
 				anchor = "Player",
@@ -849,18 +1239,21 @@ local Dev = {
 						enemy = 1,
 						repeats = true,
 						lock = true,
-						-- As parry-spark's: the latency lead comes on top (D-319).
+						-- As parry-spark's: the way up comes on top (D-319, EF).
 						lead = 0.04,
 						hold = 0.3,
-						-- The fifth parry still comes; its Art (down at about 19.2 s, launched about
-						-- 19.7 s) would land after the 20 s cut, where its number is never seen (D-320).
-						to = 19,
+						-- Every overhead the take shows is guarded (EF: at 0.05 s in Studio the sixth
+						-- came late, its guard past 19 s was dropped, and the basics swung into it).
+						to = 20,
 						chain = {
 							{
 								action = "Art",
 								delay = 0.15,
 								hold = 0.5,
 								cycle = { "Art", "ArtSlot2", "ArtSlot4", "ArtSlot3" },
+								-- The last parry's Art (down at about 19.2 s, launched about 19.7 s)
+								-- would land after the 20 s cut, where its number is never seen (D-320).
+								to = 19,
 							},
 						},
 					},
@@ -972,7 +1365,7 @@ local Dev = {
 				id = "enemy-boar-charge",
 				title = "Boar: Charge telegraph and strike",
 				seconds = 5,
-				notes = "0.6 s crouch with the red line, the launch, the skid, readable from behind",
+				notes = "0.6 s crouch with the red line, the launch, the skid and the turn, from the flank (the read from behind is enemy-boar-charge-rear)",
 				stage = {
 					open = false,
 					lock = false,
@@ -995,7 +1388,8 @@ local Dev = {
 				stage = {
 					open = false,
 					lock = false,
-					enemies = { { enemy = "KoboldAxeman", distance = 4.5, side = 0, held = false } },
+					-- One overhead (FK2): no second wind-up fills the take's last second.
+					enemies = { { enemy = "KoboldAxeman", distance = 4.5, side = 0, held = false, attacks = 1 } },
 				},
 				camera = "ThreeQuarter",
 				cameraSide = -1, -- the kobold holds its axe in its right hand: the lens on that side
@@ -1013,7 +1407,8 @@ local Dev = {
 				stage = {
 					open = false,
 					lock = true,
-					enemies = { { enemy = "KoboldAxeman", distance = 4.5, side = 0, held = false } },
+					-- One overhead (FK2): no second wind-up fills the take's last second.
+					enemies = { { enemy = "KoboldAxeman", distance = 4.5, side = 0, held = false, attacks = 1 } },
 				},
 				camera = "ThreeQuarter",
 				cameraSide = -1, -- the kobold holds its axe in its right hand: the lens on that side
@@ -1094,6 +1489,24 @@ local Dev = {
 					{ action = "Move", at = 12, hold = 1.2, stick = { 1, 0 }, sprint = true },
 				},
 			},
+			{
+				id = "enemy-boar-charge-rear",
+				title = "Boar: Charge wind-up from behind",
+				seconds = 2,
+				notes = "the 0.6 s crouch and the red line readable from behind the boar, then the launch into the player",
+				-- enemy-boar-charge's stage: the same charge, seen from behind the boar.
+				stage = {
+					open = false,
+					lock = false,
+					enemies = { { enemy = "FrenzyBoar", distance = 12, side = 0, held = false, charge = "Meets" } },
+				},
+				camera = "Rear",
+				cameraSide = 1,
+				prompts = {
+					{ at = 0, text = "Stand still: the boar crouches (0.6 s, red line), then charges into you" },
+				},
+				perform = {},
+			},
 		} :: { Shot },
 	},
 	-- The clip review scene (section 10 "Review loop").
@@ -1104,8 +1517,11 @@ local Dev = {
 		speeds = { 0.25, 0.5, 1 },
 		defaultSpeed = 1,
 		abInterval = 1.2, -- seconds per half of the A/B (clip / rest pose) alternation
-		hitStopPreview = true, -- pause the clock on HitWindowOpen like a landed hit would
+		hitStopPreview = true, -- pause the clock on each strike key like a landed hit would
 		stageWaitSeconds = 10,
+		-- ContextActionService priority name the hotkeys bind at (LabKeys, D-413): above the
+		-- default character scripts, which bind the arrows and Space to move and jump.
+		actionPriority = "High",
 		hotkeys = {
 			speedSlow = "One",
 			speedHalf = "Two",
@@ -1129,8 +1545,23 @@ local Dev = {
 		},
 		pedestal = { size = { 10, 1, 10 }, color = "PlaceholderSteel", transparency = 0 },
 		stage = { radius = 60, thickness = 2, color = "OutlineInk", transparency = 0.1 },
-		keyLight = { position = { 12, 18, 16 }, range = 60, brightness = 2.2, color = "SystemWhite" },
-		fillLight = { position = { -16, 10, 10 }, range = 50, brightness = 0.8, color = "ShardBlue" },
+		-- Three-point light. The camera looks at the rigs' faces from their -Z side (camera.startYaw),
+		-- so the key and the fill stand on that side, high and low, and the rim stands behind them,
+		-- above the shoulders, so a dark outfit's edge reads against the backdrop.
+		keyLight = { position = { 10, 16, -14 }, range = 60, brightness = 2.4, color = "SystemWhite" },
+		fillLight = { position = { -14, 7, -10 }, range = 50, brightness = 1.2, color = "ShardBlue" },
+		rimLight = { position = { 0, 12, 12 }, range = 40, brightness = 2.5, color = "TrailIvory" },
+		-- The place's backdrop wall (places/ClipLab.project.json Workspace.ClipLab), colored here: a mid
+		-- grey a black outfit stands out against.
+		backdrop = { part = "Backdrop", color = "PlaceholderSteel" },
+		-- Over the lighting preset, for the lab only: a brighter ambient and diffuse so the folds of
+		-- dark cloth show, and a little exposure.
+		lighting = {
+			ambient = { 0.5, 0.52, 0.56 },
+			outdoorAmbient = { 0.58, 0.6, 0.66 },
+			environmentDiffuseScale = 1,
+			exposureCompensation = 0.3,
+		},
 		camera = {
 			distance = 13,
 			height = 3.5,

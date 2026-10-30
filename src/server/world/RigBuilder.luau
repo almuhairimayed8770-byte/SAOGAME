@@ -47,6 +47,7 @@ local Palette = require(Shared.data.palette)
 local Fx = require(Shared.data.fx)
 local WeaponModels = require(Shared.data.weaponModels)
 local Pose = require(Shared.choreo.Pose)
+local BodyShell = require(Shared.choreo.BodyShell)
 local ClipSampler = require(Shared.choreo.ClipSampler)
 local AI = require(Shared.data.ai)
 
@@ -435,6 +436,14 @@ function RigBuilder.addBlocker(model: Model): Part?
 		end
 	end
 	return bodyFace
+end
+
+--- The body shell a character carries (item 236, BodyShell.boxes): one box per part of rigs.luau
+--- PlayerR15.shell `parts` the model has, in its root's own space, over that part (corners and all)
+--- in every pose of the stance's clips (`drawn` or `sheathed`), posed every sampleSeconds, each
+--- clip's end included, and padded padStuds. Empty for a rig with no shell or a model without a root.
+function RigBuilder.playerShell(model: Model, drawn: boolean): { BodyShell.Box }
+	return BodyShell.boxes(model, drawn)
 end
 
 --- Number of parts and Motor6Ds a rig builds to (budgeting and tests).

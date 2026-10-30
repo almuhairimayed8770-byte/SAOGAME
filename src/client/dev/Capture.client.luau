@@ -15,7 +15,10 @@
 	of the open run for locomotion) and the shot's lock is taken (TargetController.lockOn). A 3-2-1
 	runs, the panel hides, the mouse cursor hides, and the take records with a frame counter
 	bottom-left (its text written before it shows, its box as wide as its text) and above it a
-	prompt naming the move and its moment. Beside f the counter shows r, the RenderStepped frames
+	prompt naming the move and its moment. f counts the take's frames the game moves on: it holds
+	on the frames that draw the local rig frozen (a hit-stop, as drawn: a frame after its flag,
+	D-465, 327(a)). Beside f the
+	counter shows r, the RenderStepped frames
 	since the take started (never paused), and a small square in the bottom-right corner swaps
 	between two colors of one brightness every rendered frame (capture.frameTick, D-336), so a
 	recording shows each frame the engine drew. The take stops itself at its target length and is marked
@@ -35,15 +38,32 @@
 	stop's top speed the body carries nothing (D-059). The route's last leg runs along the spot's
 	facing and the walk follows that line, so it turns the body the shot's way; it lets go when the
 	spot is the stop's carry ahead (none at the sprint, the two-step stop's middle carry below it,
-	or the carry the last sprint stop was seen to make where the engine slides one on). At rest
-	more than walk.restStuds off the spot or walk.restDegrees off its facing, it walks the last leg
-	again (walk.secondWalks times at most); then the ring goes and the shot is asked for again (no
-	faster than the server's rate): a root in the ring stages, one outside gets a new walk. A
-	movement key pressed after P, or held as the walk would steer, hands the walk to the player
-	until P: the sprint lets go, the walk never moves the body again, the ring stays and the ask
-	comes once the root stands in it at rest (a key during an ask between walks hands it over too).
-	J ends it with the field given back (the body stops as a let-go key stops it), P stages afresh,
-	and walk.timeoutSeconds on the capture's clock ends it with a note naming what failed.
+	or the carry the last sprint stop was seen to make where the engine slides one on). At rest more
+	than walk.restStuds off the spot or walk.restDegrees off its facing, it corrects
+	(walk.secondWalks times at most), never at the sprint (CW): on a part-pushed stick it walks to
+	walk.correctBackStuds behind the spot along the approach, then creeps in along it ever slower
+	and lets go as good as stopped. Once the body has stood at rest walk.askSettleSeconds (the
+	server reads the root as it last replicated, which trails it: asked the moment it stopped, it
+	was read mid-slide), the ring goes and the shot is asked for again (no faster than the server's
+	rate): a root in the ring stages, one outside gets a new walk, which a root still beside the
+	spot never runs from the route's first point (in the ring it starts at the rest check, the
+	server having read it before it came to rest there; outside, it is a correction from where it
+	stands). On the spot but off its facing alone (the Humanoid's turn trails the walk's move), it
+	turns the root there at walk.faceDegreesPerSecond and stands walk.faceSettleSeconds instead. A
+	movement key pressed after P, or held as the walk would steer, hands the walk to the
+	player until P: the sprint lets go, the walk never moves the body again, the ring stays and the
+	ask comes once the root stands in it at rest (a key during an ask between walks hands it over
+	too); that ask stays until then, with no timeout (317(a)). A walk the world stops (its push has
+	not moved the root walk.blockedStuds in walk.blockedSeconds: a wall across its leg) lets go of
+	the sprint and the stick at once and tells the player to walk in; the ring and the ask stay,
+	and it is never staged outside the ring (316(b)). J ends it with the field given back (the body
+	stops as a let-go key stops it), P stages afresh, and walk.timeoutSeconds on the capture's clock
+	ends a walk nobody walks (the auto-walk's, a blocked one the player never took) with a note
+	naming what failed.
+	No ask goes before the root has stood at rest walk.askSettleSeconds, unpushed by the walk: P
+	pressed mid-walk lets the sprint go and asks once the body has stopped (asked at once, the
+	server read it in the ring mid-skid and staged it as it slid on out, CW); a body that has not
+	come to rest in capture.stageTimeoutSeconds is not asked for.
 
 	A take that ends (at its length or by K) asks the server to hold its enemies where they stand
 	(D-297), so nothing of the take acts between takes; the next staging clears them first.
@@ -111,6 +131,7 @@ local FrameOrder = require(Client.fx.FrameOrder)
 local Telegraphs = require(Client.fx.Telegraphs)
 local World = require(Shared.data.world)
 local ChoreoData = require(Shared.data.choreo)
+local ImpactData = require(Shared.data.impact)
 
 local Choreo, hasChoreo = Siblings.load(Client, "choreo.Choreo")
 local CharacterController = Siblings.load(Client, "controllers.CharacterController")
@@ -126,9 +147,11 @@ local Shots = Capture.shots
 local Steps = Dev.timeScale.steps
 
 type Phase = "Idle" | "Staging" | "Walking" | "Countdown" | "Recording" | "Done"
--- The walk into the stand ring: the auto-walk steering, its let-go (waiting for the body to come
--- to rest), or the player walking it after a movement key.
-type WalkMode = "Auto" | "Settle" | "Manual"
+-- The walk into the stand ring: the auto-walk steering, a correction walking back onto the spot
+-- (never at a sprint, CW), its let-go (waiting for the body to come to rest and stay so), the
+-- walk the world stopped (it lets go and waits for the player), or the player walking it after a
+-- movement key.
+type WalkMode = "Auto" | "Correct" | "Face" | "Settle" | "Blocked" | "Manual"
 
 local WALK_STEP_NAME = "SkyspireCaptureWalk"
 
@@ -148,12 +171,27 @@ local frames = 0
 -- RenderStepped frames since the take started, never paused (D-336): on from the first take's
 -- start, set back to 0 at each take's start.
 local rendered = 0
+-- Whether this frame draws the local rig held (a hit-stop, or a hold waiting for its word): the
+-- rig's step of the frame before froze it (D-465). Read in the walk's render step, before
+-- every rig steps (327(a)): f counts only the frames the game moves on, so it holds through a
+-- freeze while r counts on.
+local rigFrozen = false
+-- The local rig's animator and its running count of frozen steps (Choreo heldCount, D-354) at
+-- each of the last impact.luau poseLagFrames + 1 walk steps, oldest first; a new animator (a
+-- respawn) starts over.
+local POSE_LAG: number = ImpactData.poseLagFrames
+local frozenOf: any = nil
+local frozenCounts: { number } = table.create(POSE_LAG + 1)
 local ticking = false
 local doneTimer = 0
 local timeScaleIndex = 1
 local panelVisible = true
 local reapplyTimer = 0
 local statusNote: string? = nil
+-- The take reached its target length on the frame just counted (FK3): that frame is drawn with its
+-- counter like every counted one, and the take ends on the next RenderStepped, so the panel never
+-- shows on a counted frame.
+local lastCounted = false
 -- The staging this panel asked for last (a reply to an older one is ignored) and its target.
 local stageToken = 0
 local targetId: number? = nil
@@ -161,8 +199,9 @@ local targetId: number? = nil
 local confirmUntil: number? = nil
 -- Auto-perform: on or off, the take's timed presses left, the keys it holds down, its reactions
 -- (clip-timed entries) and standing rules, the reaction's chain running (the step it is on, when
--- that goes down, and its Move while held), how often each cycling step has pressed, and the
--- entry or step whose stick the walk's render step holds (CF).
+-- that goes down, and its Move while held), how often each cycling step has pressed, the chain's
+-- Art key down and not yet up (EF) and the entry or step whose stick the walk's render step holds
+-- (CF).
 local autoOn = Capture.perform.defaultOn
 local performing = false
 local presses: { CaptureLogic.Press } = {}
@@ -174,6 +213,8 @@ local chain: Chain? = nil
 local chainMove: CaptureLogic.PerformStep? = nil
 local chainMoveUntil = 0
 local stepCounts: { [CaptureLogic.PerformStep]: number } = {}
+type ChainArt = { action: string, step: CaptureLogic.PerformStep }
+local chainArt: ChainArt? = nil
 type Stick = { stick: { number }?, sprint: boolean? }
 local stickHeld: Stick? = nil
 local MOVE_ACTION = Capture.perform.moveAction
@@ -190,14 +231,35 @@ local walkMode: WalkMode = "Auto"
 local walkElapsed = 0
 local ringPart: BasePart? = nil
 local lastAskAt: number? = nil
--- Whether the auto-walk holds the sprint now, the walks of the last leg it has left this staging,
--- how far the spot was ahead when it let go and whether that let-go was a sprint's, and the carry
--- the last sprint stop was seen to make (nil until one was: an engine that slides a stop on).
+-- The way up this staging's asks read (EF, CaptureLogic.wayUp): the least, nil until one was read.
+local wayUp: number? = nil
+-- Whether the auto-walk holds the sprint now, the corrections it has left this staging, how far
+-- the spot was ahead when it let go and whether that let-go was a sprint's, the carry the last
+-- sprint stop was seen to make (nil until one was: an engine that slides a stop on), and how
+-- long (real seconds) the body has stood at rest.
 local walkSprint = false
 local secondWalksLeft = 0
 local letGoAhead: number? = nil
 local letGoSprint = false
 local learnedCarry: number? = nil
+local restFor = 0
+-- When (os.clock) the root last moved or the walk last pushed it: no ask goes before it has stood
+-- at rest walk.askSettleSeconds since. At rest here is slower than walk.restSpeed and than the
+-- controller's standing speed too: let go in a correction's creep (P, J or a key), the two-step
+-- stop carries the root on a step slower than restSpeed.
+local movedAt = -math.huge
+local STILL_SPEED = math.min(WalkData.restSpeed, ChoreoData.locomotion.idleSpeedThreshold)
+
+-- The turn on the spot (walkMode "Face"): whether the root has reached the spot's facing, and the
+-- real seconds it has stood there since.
+local faceReached = false
+local faceStood = 0
+
+-- The blocked rule (walk.blockedSeconds, walk.blockedStuds): where the root stood when the walk's
+-- push last moved it walk.blockedStuds (flat), and how long (on the capture's clock) the walk has
+-- pushed since; nil while the walk does not push (a let-go, a turn on the spot, the player's walk).
+local blockedFrom: Vector3? = nil
+local blockedFor = 0
 
 -- ---------------------------------------------------------------------------------------------
 -- Panel
@@ -484,18 +546,37 @@ end
 -- Staging (the server's half is DevStage.server.luau)
 -- ---------------------------------------------------------------------------------------------
 
--- Asks the staging remote; nil when this place has none (outside Studio).
+-- This client's server clock (workspace:GetServerTimeNow, the clock a request's clientTime is
+-- read on); nil where there is none.
+local function serverNow(): number?
+	local ok, now = pcall(function(): number
+		return workspace:GetServerTimeNow()
+	end)
+	return if ok and typeof(now) == "number" then now else nil
+end
+
+-- Asks the staging remote; nil when this place has none (outside Studio). Each reply says when the
+-- server got the ask (DevStage receivedAt): the least way up of a staging's asks (a new staging
+-- starts afresh, so a slower link shows at once) is the lead the auto guard takes (EF).
 local function ask(action: string, shotId: string?): any
 	local remote = ReplicatedStorage:FindFirstChild(Capture.stage.remoteName)
 	if remote == nil or not remote:IsA("RemoteFunction") then
 		return nil
 	end
 	lastAskAt = os.clock()
+	if action == "stage" then
+		wayUp = nil
+	end
+	local sentAt = serverNow()
 	local ok, reply = pcall(function(): any
 		return (remote :: RemoteFunction):InvokeServer(action, shotId)
 	end)
 	if not ok then
 		return { ok = false, error = tostring(reply) }
+	end
+	local sample = CaptureLogic.wayUp(sentAt, reply, Capture.perform.wayUpMax)
+	if sample ~= nil then
+		wayUp = math.min(wayUp or sample, sample)
 	end
 	return reply
 end
@@ -583,15 +664,52 @@ local function walkNote(): string
 	if walkMode == "Manual" then
 		return "Walk into the ring yourself: the shot stages around where you stand and face"
 	end
+	if walkMode == "Blocked" then
+		local current = walk
+		local character = player.Character
+		local root = if character ~= nil then character.PrimaryPart else nil
+		local where = ""
+		if current ~= nil and root ~= nil then
+			local at = root.Position
+			where = (" %.1f studs from the spot"):format(Vector3.new(at.X - current.x, 0, at.Z - current.z).Magnitude)
+		end
+		return ("The walk is blocked%s: walk into the ring yourself (a movement key takes over, %s stages again, %s stops)"):format(
+			where,
+			keys.startCountdown,
+			keys.releaseStage
+		)
+	end
 	return ("Walk into the ring (walking there: a movement key takes over, %s stops)"):format(keys.releaseStage)
 end
 
--- The staging asked for a walk into its ring (D-244).
+-- The feet's floor height under a root (the server's rule, DevStage).
+local function feetOf(root: BasePart, humanoid: Humanoid): number
+	return root.Position.Y - (humanoid.HipHeight + root.Size.Y / 2 + World.spawn.groundEpsilon)
+end
+
+-- The staging asked for a walk into its ring (D-244). A root already beside the spot never runs
+-- the route from its first point (that turned a body on the spot round to sprint back to the
+-- approach, CW): in the ring (the server read it before it came to rest there) it starts at the
+-- rest check, and outside it the walk is a correction from where it stands.
 local function startWalk(asked: CaptureLogic.Walk)
 	phase = "Walking"
 	walk = asked
+	restFor = 0
+	blockedFrom = nil
 	if walkMode ~= "Manual" then
 		walkMode = "Auto"
+		local character = player.Character
+		local root = if character ~= nil then character.PrimaryPart else nil
+		local humanoid = if character ~= nil then character:FindFirstChildOfClass("Humanoid") else nil
+		if root ~= nil and humanoid ~= nil then
+			local at = root.Position
+			local feet = feetOf(root, humanoid)
+			if CaptureLogic.near(asked, at.X, feet, at.Z, WalkData.correctWithinStuds) then
+				letGoAhead = nil
+				asked.backed = false
+				walkMode = if CaptureLogic.inRing(asked, at.X, feet, at.Z) then "Settle" else "Correct"
+			end
+		end
 	end
 	-- No lock: a lock would turn the body to face it and walk it slow.
 	TargetController.clear()
@@ -623,6 +741,24 @@ end
 -- Asks the server to stage `shot` and frames it, or walks into its ring when it says so.
 local function runStaging(shot: Dev.Shot, token: number)
 	task.spawn(function()
+		-- Never asked while the body moves, nor before the server's view of it has come to rest too
+		-- (it reads the root as it last replicated): P pressed mid-walk asks once the stop is over.
+		local deadline = os.clock() + Capture.stageTimeoutSeconds
+		while os.clock() - movedAt < WalkData.askSettleSeconds do
+			if os.clock() >= deadline then
+				phase = "Idle"
+				statusNote = ("Staging failed: the body did not come to rest in %g s; press %s again"):format(
+					Capture.stageTimeoutSeconds,
+					keys.startCountdown
+				)
+				refreshPanel()
+				return
+			end
+			task.wait()
+			if not stillStaging(token) then
+				return
+			end
+		end
 		-- No faster than the server's rate: P straight after a take (its hold just asked) stages,
 		-- never "too many requests".
 		local wait = CaptureLogic.askWait(lastAskAt, os.clock(), Capture.stage.requestsPerSecond)
@@ -766,6 +902,7 @@ local function releaseKeys()
 	stickHeld = nil
 	chain = nil
 	chainMove = nil
+	chainArt = nil
 	for _, key in CaptureLogic.letGo(heldKeys, InputData.artSlot) do
 		if key.slot ~= nil then
 			Siblings.call(CharacterController, "cancelArt", key.slot)
@@ -782,19 +919,49 @@ local function armPerform(shot: Dev.Shot)
 	standing = if performing then CaptureLogic.standing(shot.perform) else {}
 	chain = nil
 	chainMove = nil
+	chainArt = nil
 	stickHeld = nil
 	table.clear(stepCounts)
 end
 
--- A reaction heard drops the chain running: the stick it holds lets go, its keys already down
--- come up at their time.
+-- A reaction heard drops the chain running: the stick it holds lets go, and an Art key it holds
+-- is cancelled and comes up at once, launching nothing (as a stopped take's, D-290), its turn of
+-- the cycle given back, so the next chain presses it (EF: in Studio the boar's crouch was heard
+-- with the third parry's Sharp Nail held; the dodge cleared the hold, Sharp Nail never came and
+-- every later parry pressed the Art after the one meant). Its other keys come up at their time.
 local function dropChain()
 	local move = chainMove
 	if move ~= nil then
 		chainMove = nil
 		press(MOVE_ACTION, false, move)
 	end
+	local held = chainArt
+	chainArt = nil
+	if held ~= nil and heldKeys[held.action] then
+		local slot = InputData.artSlot(held.action)
+		if slot ~= nil then
+			Siblings.call(CharacterController, "cancelArt", slot)
+		end
+		heldKeys[held.action] = nil
+		InputController.handle(held.action, Enum.UserInputState.End, nil)
+		CaptureLogic.unqueue(presses, held.action)
+		stepCounts[held.step] = math.max((stepCounts[held.step] or 1) - 1, 0)
+	end
 	chain = nil
+end
+
+-- The lead a guard reaction takes (CaptureLogic.hear): the way up this staging's asks read, else
+-- the glint lead (Telegraphs.glintLead, D-289). The glint lead is the way down less this client's
+-- clock lag, the least of the last few tells: a press needs the way up plus that lag, and after
+-- the link slows the least is still the faster link's for a few tells (EF: at 0.1 s the parry
+-- shot's guard reached the server after the hit).
+local function guardLead(): number
+	return if wayUp ~= nil then wayUp else Telegraphs.glintLead()
+end
+
+-- Whether the body could start a standing rule's action now (CaptureLogic.standingFree, EF).
+local function bodyFree(action: string): boolean
+	return CaptureLogic.standingFree(action, Siblings.call(CharacterController, "state"))
 end
 
 -- Whether a reaction waits for its moment or a chain runs: the standing rules wait.
@@ -847,12 +1014,13 @@ local function stepChain()
 	if at == nil or elapsed < at then
 		return
 	end
-	-- Nothing of the reaction goes down past its `to` (D-320): the rest of the chain is dropped.
-	if not CaptureLogic.inside(running.entry, elapsed) then
+	-- Nothing of the reaction goes down past its `to` (D-320), nor a step past its own (EF): the
+	-- rest of the chain is dropped.
+	local step = running.steps[running.index]
+	if not CaptureLogic.inside(running.entry, elapsed) or not CaptureLogic.inside(step, elapsed) then
 		dropChain()
 		return
 	end
-	local step = running.steps[running.index]
 	if step.action == MOVE_ACTION then
 		chainMove = step
 		chainMoveUntil = elapsed + step.hold
@@ -862,7 +1030,11 @@ local function stepChain()
 	end
 	local count = (stepCounts[step] or 0) + 1
 	stepCounts[step] = count
-	tap(CaptureLogic.cycleAction(step, count), step.hold, step.enemy, true)
+	local action = CaptureLogic.cycleAction(step, count)
+	tap(action, step.hold, step.enemy, true)
+	if InputData.artSlot(action) ~= nil then
+		chainArt = { action = action, step = step }
+	end
 	-- The next step counts its delay from this key's let-go.
 	running.index += 1
 	local following = running.steps[running.index]
@@ -880,6 +1052,10 @@ local function stepPerform()
 		return
 	end
 	for _, due in CaptureLogic.due(presses, elapsed) do
+		local held = chainArt
+		if held ~= nil and not due.down and due.action == held.action then
+			chainArt = nil
+		end
 		press(due.action, due.down, due.entry)
 	end
 	local running = chain
@@ -919,7 +1095,8 @@ local function stepPerform()
 				rule.last = elapsed
 				tap("LockOn", entry.hold, entry.enemy, true)
 			end
-		elseif lockWithin(entry.within) then
+		elseif lockWithin(entry.within) and bodyFree(entry.action) then
+			-- Only a press the body can take spends the rule's beat (EF).
 			rule.last = elapsed
 			tap(entry.action, entry.hold)
 		end
@@ -945,9 +1122,9 @@ end
 
 -- What this client draws: each reaction hears its clip on its staged enemy, and sets its key
 -- `lead` before the clip's hit window from whichever event comes (each later one moves it on),
--- a guard the client's latency lead earlier still (Telegraphs.glintLead, D-289): it reaches the
--- server a latency after it leaves, so it leaves as early as the glint shows. One heard drops the
--- chain running; with `lock` the lock goes to its enemy.
+-- a guard the way up earlier still (guardLead: the staging replies' way up, else the glint lead,
+-- D-289, EF): it reaches the server that long after it leaves. One heard drops the chain running;
+-- with `lock` the lock goes to its enemy.
 Replication.clipEvent:Connect(function(record: any, clipId: string, event: any, jumped: boolean)
 	if phase ~= "Recording" or not performing or jumped or record == nil then
 		return
@@ -965,7 +1142,7 @@ Replication.clipEvent:Connect(function(record: any, clipId: string, event: any, 
 			end
 			clip = found
 		end
-		if CaptureLogic.hear(reaction, clip.events, event.time, elapsed, Telegraphs.glintLead()) then
+		if CaptureLogic.hear(reaction, clip.events, event.time, elapsed, guardLead()) then
 			dropChain()
 			if entry.lock == true and lockedId() ~= record.id then
 				TargetController.lockOn(record.id)
@@ -1059,6 +1236,7 @@ local function finish(marked: boolean)
 	if phase ~= "Recording" then
 		return
 	end
+	lastCounted = false
 	local shot = currentShot()
 	releaseKeys()
 	performing = false
@@ -1212,6 +1390,7 @@ local function takeOver()
 	end
 	walkMode = "Manual"
 	walkElapsed = 0
+	restFor = 0
 	holdSprint(false)
 	if phase == "Walking" then
 		statusNote = walkNote()
@@ -1260,9 +1439,15 @@ RunService.RenderStepped:Connect(function(dt: number)
 		else
 			countdownLabel.Text = tostring(math.ceil(countdownRemaining))
 		end
+	elseif phase == "Recording" and lastCounted then
+		-- The frame after the take's last counted frame (FK3): that one was drawn with its counter up
+		-- and the panel hidden; the panel comes back on this one.
+		finish(true)
 	elseif phase == "Recording" then
 		elapsed += dt
-		frames += 1
+		if not rigFrozen then
+			frames += 1
+		end
 		if confirmUntil ~= nil and os.clock() > (confirmUntil :: number) then
 			confirmUntil = nil
 		end
@@ -1270,8 +1455,9 @@ RunService.RenderStepped:Connect(function(dt: number)
 		writeCounter()
 		writePrompt()
 		if elapsed >= currentShot().seconds then
-			-- The take stops itself at its target length.
-			finish(true)
+			-- The take stops itself at its target length: this frame is its last counted one, drawn
+			-- like the others, and the next frame ends it (FK3).
+			lastCounted = true
 		end
 	elseif phase == "Done" then
 		doneTimer -= dt
@@ -1300,8 +1486,8 @@ local function walkFailed(root: BasePart?)
 		local at = root.Position
 		where = ("%.1f studs from the spot"):format(Vector3.new(at.X - current.x, 0, at.Z - current.z).Magnitude)
 	end
-	statusNote = if walkMode == "Manual"
-		then ("Walk failed: not in the ring after %g s (%s); press %s to stage again"):format(
+	statusNote = if walkMode == "Blocked"
+		then ("Walk failed: the auto-walk was blocked and nobody walked in within %g s (%s); press %s to stage again"):format(
 			WalkData.timeoutSeconds,
 			where,
 			keys.startCountdown
@@ -1314,6 +1500,31 @@ local function walkFailed(root: BasePart?)
 	refreshPanel()
 end
 
+-- The blocked rule: the walk pushed the root this frame. True once it has pushed for
+-- walk.blockedSeconds (on the capture's clock, as the walk's own clock runs) without the root
+-- getting walk.blockedStuds (flat) from where it stood when the count began: the world holds it.
+local function pushBlocked(at: Vector3, dt: number): boolean
+	local from = blockedFrom
+	if from == nil or Vector3.new(at.X - from.X, 0, at.Z - from.Z).Magnitude >= WalkData.blockedStuds then
+		blockedFrom = at
+		blockedFor = 0
+		return false
+	end
+	blockedFor += dt * Steps[timeScaleIndex]
+	return blockedFor >= WalkData.blockedSeconds
+end
+
+-- The world stopped the walk (a wall across its leg): it lets go of the sprint and the stick, the
+-- body stops as a let-go key stops it, and the ring and the ask stay for the player to walk in.
+local function walkBlocked()
+	holdSprint(false)
+	walkMode = "Blocked"
+	blockedFrom = nil
+	restFor = 0
+	statusNote = walkNote()
+	refreshPanel()
+end
+
 -- The walk into the ring, each frame after the control script's Move and before the character
 -- controller reads MoveDirection (WalkData.renderOrder).
 local function walkStep(dt: number)
@@ -1321,11 +1532,14 @@ local function walkStep(dt: number)
 	if phase ~= "Walking" or current == nil then
 		return
 	end
-	walkElapsed += dt * Steps[timeScaleIndex]
+	local scale = Steps[timeScaleIndex]
+	walkElapsed += dt * scale
 	local character = player.Character
 	local root = if character ~= nil then character.PrimaryPart else nil
 	local humanoid = if character ~= nil then character:FindFirstChildOfClass("Humanoid") else nil
-	if walkElapsed >= WalkData.timeoutSeconds then
+	-- The timeout ends a walk nobody walks (D-244); one the player took over is theirs until they
+	-- stand in the ring at rest, P or J (D-304, item 317(a)).
+	if walkMode ~= "Manual" and walkElapsed >= WalkData.timeoutSeconds then
 		walkFailed(root)
 		return
 	end
@@ -1342,10 +1556,10 @@ local function walkStep(dt: number)
 		-- The stop's carry at the walk's speed (in 1x terms: the slowed body stops as far), and half
 		-- of this frame's step, so the body comes to rest within half a step of the spot.
 		local skid = ChoreoData.locomotion.skidSpeedThreshold
-		local sprint = speed / Steps[timeScaleIndex] > skid
+		local sprint = speed / scale > skid
 		local carry = if sprint and learnedCarry ~= nil
 			then learnedCarry :: number
-			else CaptureLogic.stopCarry(speed / Steps[timeScaleIndex], skid, WalkData.carrySeconds)
+			else CaptureLogic.stopCarry(speed / scale, skid, WalkData.carrySeconds)
 		local dx, dz = CaptureLogic.steer(
 			current,
 			at.X,
@@ -1355,24 +1569,87 @@ local function walkStep(dt: number)
 			WalkData.lookaheadStuds
 		)
 		if dx ~= nil and dz ~= nil then
+			if pushBlocked(at, dt) then
+				walkBlocked()
+				return
+			end
 			holdSprint(true)
 			humanoid:Move(Vector3.new(dx, 0, dz), false)
+			movedAt = os.clock()
 			return
 		end
+		blockedFrom = nil
 		-- The spot is the stop's carry ahead: let go, and the stop brings the body to rest.
 		letGoAhead = CaptureLogic.ahead(current, at.X, at.Z)
 		letGoSprint = sprint
 		holdSprint(false)
 		walkMode = "Settle"
+		restFor = 0
+	elseif walkMode == "Correct" then
+		-- Back behind the spot and in along the approach at a walk, a stick pushed part way for the
+		-- pace (the Humanoid walks at its WalkSpeed x the push).
+		local dx, dz, pace = CaptureLogic.correctStep(
+			current,
+			at.X,
+			at.Z,
+			WalkData.correctBackStuds,
+			WalkData.waypointStuds,
+			WalkData.lookaheadStuds,
+			WalkData.correctSpeed,
+			WalkData.creepSeconds,
+			WalkData.creepEndSpeed
+		)
+		if dx ~= nil and dz ~= nil and pace ~= nil then
+			if pushBlocked(at, dt) then
+				walkBlocked()
+				return
+			end
+			local push = math.clamp(pace * scale / math.max(humanoid.WalkSpeed, 1e-3), 0, 1)
+			humanoid:Move(Vector3.new(dx * push, 0, dz * push), false)
+			movedAt = os.clock()
+			return
+		end
+		blockedFrom = nil
+		-- As good as stopped on the spot: let go (the two-step stop has nothing to carry).
+		walkMode = "Settle"
+		restFor = 0
+	end
+	if walkMode == "Face" then
+		-- On the spot, short of its facing: the root turns there (in 1x terms, slowed with the
+		-- capture), then stands so the server's view of it has the turn before the ask.
+		if not faceReached then
+			local look = root.CFrame.LookVector
+			local turn, reached = CaptureLogic.faceTurn(
+				current,
+				look.X,
+				look.Z,
+				WalkData.faceDegreesPerSecond * Steps[timeScaleIndex] * dt
+			)
+			local frame = root.CFrame
+			root.CFrame = CFrame.new(frame.Position) * CFrame.Angles(0, math.rad(turn), 0) * frame.Rotation
+			faceReached = reached
+			faceStood = 0
+			return
+		end
+		faceStood += dt
+		if faceStood < WalkData.faceSettleSeconds then
+			return
+		end
+		walkMode = "Settle"
 	end
 	if speed > WalkData.restSpeed then
+		restFor = 0
 		return
 	end
-	local feet = at.Y - (humanoid.HipHeight + root.Size.Y / 2 + World.spawn.groundEpsilon)
-	if walkMode == "Manual" and not CaptureLogic.inRing(current, at.X, feet, at.Z) then
+	if
+		(walkMode == "Manual" or walkMode == "Blocked")
+		and not CaptureLogic.inRing(current, at.X, feetOf(root, humanoid), at.Z)
+	then
+		restFor = 0
 		return
 	end
-	if walkMode == "Settle" then
+	if walkMode == "Settle" and restFor == 0 then
+		-- Come to rest: judged where it stands.
 		local seen = letGoAhead
 		letGoAhead = nil
 		if seen ~= nil and letGoSprint then
@@ -1382,18 +1659,32 @@ local function walkStep(dt: number)
 		end
 		local look = root.CFrame.LookVector
 		local studs, degrees = CaptureLogic.restOff(current, at.X, at.Z, look.X, look.Z)
-		if (studs > WalkData.restStuds or degrees > WalkData.restDegrees) and secondWalksLeft > 0 then
-			-- Off the spot or its facing: the last leg again, from the point before the spot.
-			secondWalksLeft -= 1
-			current.index = math.max(1, #current.path - 1)
-			walkMode = "Auto"
+		if degrees > WalkData.restDegrees and (studs <= WalkData.restStuds or secondWalksLeft == 0) then
+			-- Off the facing alone (or with no walk left): a turn on the spot, never a walk. The
+			-- Humanoid's own turn trails the walk's move, so a walk would leave the same again.
+			faceReached = false
+			faceStood = 0
+			walkMode = "Face"
 			return
 		end
+		if (studs > WalkData.restStuds or degrees > WalkData.restDegrees) and secondWalksLeft > 0 then
+			-- Off the spot or its facing: a correction, walked (never the sprint and its turn-round).
+			secondWalksLeft -= 1
+			current.backed = false
+			walkMode = "Correct"
+			return
+		end
+	end
+	-- Kept at rest long enough for the server's view of the root to have caught up with it before
+	-- the ask (real seconds: the replication's lag does not slow with the capture's clock).
+	restFor += dt
+	if restFor < WalkData.askSettleSeconds then
+		return
 	end
 	if CaptureLogic.askWait(lastAskAt, os.clock(), Capture.stage.requestsPerSecond) > 0 then
 		return
 	end
-	-- At rest in the ring (or where the auto-walk let go): the ring goes and the shot is asked for
+	-- At rest in the ring (or where the walk let go): the ring goes and the shot is asked for
 	-- again; a root still outside it gets a new walk.
 	stopWalk()
 	phase = "Staging"
@@ -1402,8 +1693,45 @@ local function walkStep(dt: number)
 	runStaging(currentShot(), stageToken)
 end
 
+-- Notes when the root moves (faster than STILL_SPEED, flat), or is not there to stand.
+local function trackRest()
+	local character = player.Character
+	local root = if character ~= nil then character.PrimaryPart else nil
+	local velocity = if root ~= nil then root.AssemblyLinearVelocity else nil
+	if velocity == nil or Vector3.new(velocity.X, 0, velocity.Z).Magnitude > STILL_SPEED then
+		movedAt = os.clock()
+	end
+end
+
+-- Whether this frame draws the local rig held (D-465). A frame draws the pose its rig's step of
+-- impact.luau poseLagFrames frames ago wrote (D-353), so the hold as drawn runs that far behind
+-- isPaused, which rises on the contact's own step (its picture still shows the swing arriving)
+-- and falls a frame before the last still frame. Read before every rig steps, the step this
+-- frame draws held the rig exactly when the count of frozen steps (heldCount) rose across it:
+-- between the walk step poseLagFrames frames back and the one after it.
+local function localFrozen(): boolean
+	local character = player.Character
+	local animator = if hasChoreo and character ~= nil then Choreo.find(character) else nil
+	if animator ~= frozenOf then
+		frozenOf = animator
+		table.clear(frozenCounts)
+	end
+	if animator == nil then
+		return false
+	end
+	table.insert(frozenCounts, animator:heldCount())
+	if #frozenCounts > POSE_LAG + 1 then
+		table.remove(frozenCounts, 1)
+	end
+	return #frozenCounts == POSE_LAG + 1 and frozenCounts[2] > frozenCounts[1]
+end
+
 -- The walk's render step: the walk into the ring, or auto-perform's stick while a take records.
+-- It runs before every rig's step (walk.renderOrder), so the steps it reads are the ones this
+-- frame draws.
 local function inputStep(dt: number)
+	rigFrozen = localFrozen()
+	trackRest()
 	if phase == "Recording" then
 		stickStep()
 	else

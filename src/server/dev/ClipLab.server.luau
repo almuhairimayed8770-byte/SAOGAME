@@ -7,8 +7,10 @@
 	choice onto the workspace attribute of the same name, so server systems that run in dev
 	places can honour it (they read the attribute; nothing here touches them).
 
-	With `ClipLab`: builds the review stage from data: a pedestal per rig, a key and a fill light,
-	the lighting preset from lighting.luau, one Boar and one Kobold rig (through RigBuilder when it
+	With `ClipLab`: builds the review stage from data: a pedestal per rig, a key, a fill and a rim
+	light on the camera's side and behind the rigs, the backdrop's color, the lighting preset from
+	lighting.luau with the lab's brighter ambient over it (dev.luau clipLab.lighting: a dark outfit
+	has to read), one Boar and one Kobold rig (through RigBuilder when it
 	is in the build, otherwise a part-built fallback from rigs.luau), and puts every joining
 	player's own character on the PlayerR15 pedestal with the starter weapon in its right hand.
 	The enemy rigs pose through Motor6Ds; the player's character through AnimationConstraints
@@ -125,7 +127,15 @@ end
 
 pointLight("KeyLight", Lab.keyLight)
 pointLight("FillLight", Lab.fillLight)
+pointLight("RimLight", Lab.rimLight)
 stage.Parent = workspace
+
+-- The place's backdrop wall (places/ClipLab.project.json) takes its color from the data.
+local placeModel = workspace:FindFirstChild("ClipLab")
+local backdrop = if placeModel ~= nil then placeModel:FindFirstChild(Lab.backdrop.part) else nil
+if backdrop ~= nil and backdrop:IsA("BasePart") then
+	backdrop.Color = color(Lab.backdrop.color)
+end
 
 -- Lighting from lighting.luau (Technology is set in the place file; the rest is data).
 local function applyLighting()
@@ -161,6 +171,12 @@ local function applyLighting()
 		atmosphere.Color = Color3.new(preset.atmosphere[1], preset.atmosphere[2], preset.atmosphere[3])
 		atmosphere.Decay = Color3.new(preset.decay[1], preset.decay[2], preset.decay[3])
 	end
+	-- The lab's own light over the preset: a review stage, not a floor of the game.
+	local lab = Lab.lighting
+	LightingService.Ambient = Color3.new(lab.ambient[1], lab.ambient[2], lab.ambient[3])
+	LightingService.OutdoorAmbient = Color3.new(lab.outdoorAmbient[1], lab.outdoorAmbient[2], lab.outdoorAmbient[3])
+	LightingService.EnvironmentDiffuseScale = lab.environmentDiffuseScale
+	LightingService.ExposureCompensation = lab.exposureCompensation
 end
 applyLighting()
 

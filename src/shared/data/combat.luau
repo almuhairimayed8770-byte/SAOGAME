@@ -237,6 +237,13 @@ local Combat = {
 		-- with no number. At least the Kill hold, so a kill's word that comes inside it upgrades
 		-- the hold in place, never as a second freeze.
 		wordHoldSeconds = 0.2,
+		-- The walk's body shell (item 236, WalkShell): the local character's stick walk stops where
+		-- a box of its shell (rigs.luau PlayerR15.shell) would stand deeper than
+		-- standOff.wallGapStuds in a solid enemy's body face or in what it holds, and slides along
+		-- the rest; a walk never goes deeper than it already stands, and out is always free. The
+		-- longest share of a frame's move that fits is found in this many halvings (10: within half a
+		-- thousandth of a stud of a frame at the sprint cap, 0.4 studs at 60 fps).
+		walkShell = { halvings = 10 },
 		-- The Art stand-off (fix F1): an Art whose first cut would start with the blade already in
 		-- the target's body (the review's kobold at the hip or the shoulder) steps the body straight
 		-- away from the target over the anticipation, from the hold pose to the first window's
@@ -297,6 +304,46 @@ local Combat = {
 				-- within 0.006 of the hull).
 				maxTurnDegrees = 10,
 				maxPieces = 8,
+				-- What the body shows of the keep-out and the reach (item 285): never a move back or
+				-- aside faster than maxSpeedStudsPerSecond, the clip's own root motion and the blade
+				-- step counted in (a lunge held still is no move), measured over speedPieces pieces of
+				-- each sample, and led by leadSeconds, so each step back starts early enough to be
+				-- taken at that speed. Sharp Nail's own lunge moves the root 0.2 studs a frame (12 a
+				-- second); Studio read 0.44-0.64 studs a frame as a snap. Without it a basic beside
+				-- the kobold's axe stepped back 0.40 studs a frame for its first three frames and
+				-- Sharp Nail 0.26; the lead covers a whole stand-off step (standOff.maxStuds) at
+				-- that speed.
+				maxSpeedStudsPerSecond = 12,
+				leadSeconds = 0.15,
+				speedPieces = 4,
+				-- The reach (D-424): at each strike's key (the pose its hit-stop holds) the plan
+				-- holds the body back so that the blade (guard to tip) stands no deeper in any of
+				-- the target's body parts (what the blade may wound) than bladeDepthStuds, or than
+				-- it stood at the swing's start when a touch there put it deeper, and no hand or
+				-- arm (`limbs`) deeper than it stood at the start. A step has a price: each stud
+				-- of it counts as 1 / stepPerDepth of a stud of depth, and the plan takes the step
+				-- of standOff.stepStuds, at most standOff.maxStuds a strike, whose price and the
+				-- depth it leaves past those come to least (the least step that clears the key,
+				-- unless a shorter one leaves it a hair deep for far less ground). The body takes
+				-- that step over the strike's anticipation on standOff.easing, and holds it
+				-- through the hit-stop; a key the keep-out's aside carries deeper once the cut has
+				-- begun is posed again and takes the rest of its step in the frames left to it.
+				-- The reach never carries the body back faster than maxSpeedStudsPerSecond (the
+				-- aside's own step that sample counted in), and no key steps farther than that
+				-- speed reaches by it: the third basic at 3.5, whose aside grows 0.34 in its cut,
+				-- stepped 0.60 back in one 60 Hz frame and 1.00 in one 30 Hz frame before. The cut
+				-- meets the body at its surface and never sinks to its root: at a kobold staged
+				-- 3.5 studs ahead the frozen pose put Sharp Nail's right hand 0.82 into its torso
+				-- at the third thrust (the left 0.82 at the second) and the blade 0.36 deep there,
+				-- Rising Arc's 0.44, Vertical's 0.32 and a first basic's 0.43; every key there
+				-- more than 0.01 too deep clears for 1 to 5.5 studs of ground a stud of depth.
+				-- Without a price the first basic at 4.8 slid back 1.3 studs in its 0.15 s
+				-- anticipation (0.72 in one 30 Hz frame) for 0.04 of depth, and Rising Arc beside
+				-- a boar 1.5 for 0.03. A blade at this depth still touches the body, well inside
+				-- the sweep's promise, so the hit stands (the hit matrix checks every placement).
+				limbs = { "RightHand", "RightLowerArm", "RightUpperArm", "LeftHand", "LeftLowerArm", "LeftUpperArm" },
+				bladeDepthStuds = 0.2,
+				stepPerDepth = 8, -- unit: studs of step one stud of depth is worth
 			},
 		},
 		-- A contact is predicted to kill only when the hit cannot do less than the enemy has left:

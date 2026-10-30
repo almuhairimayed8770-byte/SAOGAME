@@ -4,6 +4,11 @@
 	right hand, breathing on the chest, the head scanning left and right, a weight shift at 2 s
 	and a hitch of the axe at 3 s. Rig: Kobold (rigs.luau). Root X- hunches forward; Shoulder
 	X+ swings an arm forward; Weapon X- tips the axe head down.
+	Feet: the rig's legs reach 0.2 below the field from its hip height, so the root stands 0.3
+	higher than the original keys and each foot stands on one corner on the field. The feet stay
+	on those corners: the breath and the weight shift turn the hips so each leg points its corner
+	back at its place (the root's X, Z and rotation are as before, so the blocker's box, which
+	rides on this loop, is unchanged).
 ]]
 
 local Types = require(script.Parent.Parent.Parent.Parent.types)
@@ -30,7 +35,7 @@ local clip: Types.ClipDef = {
 			time = 0,
 			easing = "SineInOut",
 			joints = {
-				Root = posRot(0, -0.05, 0, -8, 0, 0),
+				Root = posRot(0, 0.25, 0, -8, 0, 0),
 				Neck = rot(6, 0, 0),
 				LeftShoulder = rot(6, 0, -10),
 				RightShoulder = rot(10, 0, 12),
@@ -44,8 +49,10 @@ local clip: Types.ClipDef = {
 			time = 1.2,
 			easing = "SineInOut",
 			joints = {
-				Root = posRot(0, -0.02, 0, -6, 0, 0),
+				Root = posRot(0, 0.257, 0, -6, 0, 0),
 				Neck = rot(4, 22, 0),
+				LeftHip = rot(0.95, 0, -3.99),
+				RightHip = rot(-7.05, 0, 4.01),
 				LeftShoulder = rot(6, 0, -12),
 				RightShoulder = rot(12, 0, 13),
 			},
@@ -55,10 +62,10 @@ local clip: Types.ClipDef = {
 			time = 2,
 			easing = "SineInOut",
 			joints = {
-				Root = posRot(-0.1, -0.06, 0, -8, 0, 3),
+				Root = posRot(-0.1, 0.23, 0, -8, 0, 3),
 				Neck = rot(6, -4, -2),
-				LeftHip = rot(4, 0, 0),
-				RightHip = rot(-4, 0, 10),
+				LeftHip = rot(4.23, -0.22, -5.89),
+				RightHip = rot(-4.12, 0.21, 2.01),
 			},
 		},
 		{
@@ -83,7 +90,7 @@ local clip: Types.ClipDef = {
 			time = 3.6,
 			easing = "SineInOut",
 			joints = {
-				Root = posRot(0, -0.05, 0, -8, 0, 0),
+				Root = posRot(0, 0.25, 0, -8, 0, 0),
 				Neck = rot(6, -8, 0),
 				LeftHip = rot(4, 0, -4),
 				RightHip = rot(-4, 0, 4),

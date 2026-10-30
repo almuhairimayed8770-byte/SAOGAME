@@ -285,6 +285,61 @@ describe("CaptureLogic reactions, chains, standing rules and the stick (CF)", fu
 		expect(Logic.inside({ action = "Guard", hold = 0.3 }, 1e6)).toBe(true)
 	end)
 
+	-- EF: the fight's guard answers every overhead the take shows; its chain's Art stops at the
+	-- step's own `to`, so nothing launches past the cut.
+	it("keeps a chain step inside its own `to` too (EF)", function()
+		local step = { action = "Art", hold = 0.5, delay = 0.15, to = 19 }
+		expect(Logic.inside(step, 19)).toBe(true)
+		expect(Logic.inside(step, 19.01)).toBe(false)
+		expect(Logic.inside({ action = "Art", hold = 0.5, delay = 0.15 }, 1e6)).toBe(true)
+	end)
+
+	-- EF: a chain's held Art cancelled when a reaction drops the chain takes its queued key-up with it.
+	it("takes a key's queued let-go off the timed presses, the earliest only (EF)", function()
+		local queue = Logic.timedPresses({ { action = "LockOn", at = 5, hold = 0.05 } })
+		Logic.enqueue(queue, { at = 2, action = "ArtSlot2", down = false })
+		Logic.enqueue(queue, { at = 3, action = "ArtSlot2", down = true })
+		Logic.enqueue(queue, { at = 4, action = "ArtSlot2", down = false })
+		expect(Logic.unqueue(queue, "ArtSlot2")).toBe(true)
+		local order = {}
+		for _, entry in queue do
+			table.insert(order, ("%s%s@%g"):format(entry.action, if entry.down then "+" else "-", entry.at))
+		end
+		expect(table.concat(order, " ")).toBe("ArtSlot2+@3 ArtSlot2-@4 LockOn+@5 LockOn-@5.05")
+		expect(Logic.unqueue(queue, "Art")).toBe(false)
+	end)
+
+	-- EF: a basic pressed while the body plays an Art, holds one or guards does nothing; the rule's
+	-- beat is kept for the body's first free frame (ActionLogic's own rule for a basic).
+	it("lets a standing basic go only when the body could start a basic (EF)", function()
+		for _, state in { "Idle", "Basic" } do
+			expect(Logic.standingFree("BasicAttack", state)).toBe(true)
+		end
+		for _, state in { "Holding", "Art", "PostMotion", "Guard", "Dodge", "Stagger", "GuardBroken", "Dead" } do
+			expect(Logic.standingFree("BasicAttack", state)).toBe(false)
+		end
+		-- No body to ask (a controller without `state`): it presses, as before.
+		expect(Logic.standingFree("BasicAttack", nil)).toBe(true)
+		-- The lock rule never waits on the body.
+		expect(Logic.standingFree("LockOn", "Art")).toBe(true)
+	end)
+
+	-- EF: the lead a press needs is how long it takes to reach the server on the server's clock: a
+	-- staging reply's receivedAt less the ask's send time on this client's server clock.
+	it("reads the way up off a staging reply, inside 0 and its cap (EF)", function()
+		local cap = Dev.capture.perform.wayUpMax
+		expect(Logic.wayUp(100, { ok = true, receivedAt = 100.13 }, cap)).toBeCloseTo(0.13, 1e-9)
+		expect(Logic.wayUp(100, { ok = false, error = "busy", receivedAt = 100.05 }, cap)).toBeCloseTo(0.05, 1e-9)
+		-- A clock that runs ahead reads as none, a stall past the cap as the cap.
+		expect(Logic.wayUp(100, { receivedAt = 99.9 }, cap)).toBe(0)
+		expect(Logic.wayUp(100, { receivedAt = 100 + cap + 1 }, cap)).toBe(cap)
+		-- Nothing to read: no send time, no stamp, or not a reply.
+		expect(Logic.wayUp(nil, { receivedAt = 100.1 }, cap)).toBeNil()
+		expect(Logic.wayUp(100, { ok = true }, cap)).toBeNil()
+		expect(Logic.wayUp(100, { receivedAt = "100.1" }, cap)).toBeNil()
+		expect(Logic.wayUp(100, nil, cap)).toBeNil()
+	end)
+
 	it("presses once a play: the rest of a pressed play is not heard, the next play is (repeats)", function()
 		local reaction = Logic.reactions({
 			{ action = "Guard", onClip = Overhead.id, lead = 0.08, hold = 0.3, repeats = true },
@@ -533,6 +588,102 @@ describe("CaptureLogic walk into the stand ring (D-244)", function()
 		-- No look (a root with no facing): as far off as it gets.
 		studs, degrees = Logic.restOff(walk, walk.x, walk.z, 0, 0)
 		expect(degrees).toBe(180)
+	end)
+
+	it("walks onto the spot along the last leg, or the spot's facing on a route of the spot alone (CW)", function()
+		local walk = Logic.walkFrom(reply(false, 25, 30)) :: any
+		local lx, lz = StageLogic.look(walk.facing)
+		local ux, uz = Logic.approachDirection(walk)
+		expect(ux).toBeCloseTo(lx, 1e-9)
+		expect(uz).toBeCloseTo(lz, 1e-9)
+		local bare = Logic.walkFrom({
+			ok = false,
+			walk = { x = 0, y = 0, z = -10, facing = 90, radius = 3, tolerance = 1 },
+		}) :: any
+		ux, uz = Logic.approachDirection(bare)
+		local bx, bz = StageLogic.look(90)
+		expect(ux).toBeCloseTo(bx, 1e-9)
+		expect(uz).toBeCloseTo(bz, 1e-9)
+	end)
+
+	it("reads a body as near the spot within the studs and the ring's height tolerance (CW)", function()
+		local walk = Logic.walkFrom(reply(true, 0, 90)) :: any
+		expect(Logic.near(walk, walk.x + 3, walk.y, walk.z + 2, 4)).toBe(true)
+		expect(Logic.near(walk, walk.x + 3, walk.y, walk.z + 3, 4)).toBe(false)
+		expect(Logic.near(walk, walk.x, walk.y - walk.tolerance, walk.z, 4)).toBe(true)
+		-- Below the ledge, under its spot: never near it.
+		expect(Logic.near(walk, walk.x, walk.y - walk.tolerance - 0.1, walk.z, 4)).toBe(false)
+	end)
+
+	it("corrects at a walk: back behind the spot along the approach, then in at a falling pace (CW)", function()
+		local walk = Logic.walkFrom(reply(false, 25, 30)) :: any
+		local lx, lz = StageLogic.look(walk.facing)
+		local spot = walk.path[#walk.path]
+		local sideX, sideZ = -lz, lx
+		local function at(ahead: number, side: number): (number, number)
+			return spot[1] - lx * ahead + sideX * side, spot[2] - lz * ahead + sideZ * side
+		end
+		local function step(ahead: number, side: number): (number?, number?, number?)
+			local x, z = at(ahead, side)
+			return Logic.correctStep(walk, x, z, 2.5, 1, 1.5, 8, 0.2, 0.15)
+		end
+		-- Past the spot: back toward the point 2.5 behind it, at the walk's pace.
+		walk.backed = false
+		local dx, dz, pace = step(-1, 0)
+		expect((dx :: number) * lx + (dz :: number) * lz).toBeCloseTo(-1, 1e-9)
+		expect(pace).toBe(8)
+		expect(walk.backed).toBe(false)
+		-- Beside it, off the line: toward the point behind, across too.
+		dx, dz = step(0.5, 2)
+		expect((dx :: number) * sideX + (dz :: number) * sideZ).toBeLessThan(0)
+		expect((dx :: number) * lx + (dz :: number) * lz).toBeLessThan(0)
+		-- Within reach of the point behind: in along the approach, at ahead / creepSeconds, no faster
+		-- than the walk's pace.
+		dx, dz, pace = step(2.5 - 0.5, 0.3)
+		expect(walk.backed).toBe(true)
+		expect(pace).toBe(8)
+		expect((dx :: number) * lx + (dz :: number) * lz).toBeGreaterThan(0.9)
+		dx, dz, pace = step(1, 0)
+		expect(pace).toBeCloseTo(1 / 0.2, 1e-9)
+		expect((dx :: number) * lx + (dz :: number) * lz).toBeCloseTo(1, 1e-9)
+		dx, dz, pace = step(0.1, 0)
+		expect(pace).toBeCloseTo(0.1 / 0.2, 1e-9)
+		-- The pace asked falls under creepEndSpeed (the spot reached, or passed): let go.
+		expect(step(0.02, 0)).toBeNil()
+		expect(step(-0.3, 0)).toBeNil()
+		-- Already the distance behind it, on the line: straight in, no walk back.
+		walk.backed = false
+		dx, dz, pace = step(4, 0.5)
+		expect(walk.backed).toBe(true)
+		expect((dx :: number) * lx + (dz :: number) * lz).toBeGreaterThan(0)
+		expect(pace).toBe(8)
+	end)
+
+	it("turns a body at rest on the spot to its facing, the short way, at most a frame's turn (step 14)", function()
+		local walk = Logic.walkFrom(reply(false, 25, 30)) :: any
+		-- Ten degrees left of the facing: ten back to the right, or a frame's four of them.
+		local lx, lz = StageLogic.look(walk.facing + 10)
+		local turn, reached = Logic.faceTurn(walk, lx, lz, 30)
+		expect(turn).toBeCloseTo(-10, 1e-6)
+		expect(reached).toBe(true)
+		turn, reached = Logic.faceTurn(walk, lx, lz, 4)
+		expect(turn).toBeCloseTo(-4, 1e-9)
+		expect(reached).toBe(false)
+		-- 170 to the right: the short way is left.
+		lx, lz = StageLogic.look(walk.facing - 170)
+		turn, reached = Logic.faceTurn(walk, lx, lz, 360)
+		expect(turn).toBeCloseTo(170, 1e-6)
+		expect(reached).toBe(true)
+		-- The turn as the panel applies it (about +Y) brings the look onto the facing.
+		lx, lz = StageLogic.look(walk.facing + 14.5)
+		turn = Logic.faceTurn(walk, lx, lz, 360)
+		local turned = CFrame.Angles(0, math.rad(turn), 0):VectorToWorldSpace(Vector3.new(lx, 0, lz))
+		local _, degrees = Logic.restOff(walk, walk.x, walk.z, turned.X, turned.Z)
+		expect(degrees).toBeLessThan(1e-3)
+		-- No flat look: nothing to turn, never there.
+		turn, reached = Logic.faceTurn(walk, 0, 0, 360)
+		expect(turn).toBe(0)
+		expect(reached).toBe(false)
 	end)
 
 	it("waits out the server's rate before the next ask", function()

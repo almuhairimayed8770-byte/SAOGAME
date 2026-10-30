@@ -54,6 +54,14 @@
 		                               count; entityId (a player's entity) or player (a Name or
 		                               UserId) picks the player, the first player by default;
 		                               replies from, to and facing
+		"place" { ..., onWindUp, after? }
+		                               the same move timed on an enemy's beat (302(b)): waits on
+		                               Heartbeat for the next wind-up that enemy (an entity id)
+		                               starts, then moves the player `after` seconds into it (0 by
+		                               default, at most hooks.maxPlaceAfterSeconds) and tells the
+		                               anti-cheat on that frame; gives up with no move when no
+		                               wind-up starts within hooks.windUpWaitSeconds; replies
+		                               windUpAt and movedAt (seconds after the call)
 
 	The Studio test hooks (D-333; numbers in dev.luau hooks) put enemies and plain parts where a
 	check needs them, so it needs no hand-built scene. Every point is a Vector3 or {x, y, z}, each
@@ -90,6 +98,17 @@
 		                               after = seconds (at most hooks.maxAfterSeconds) makes it
 		                               that much later, into a rush's path; at most hooks.maxParts
 		"clearparts"                   removes every part (and a part still to come) and the folder
+		"pack" { enemy, position, count, facing? }
+		                               spawns a pack the way the world spawns one (item 315): count
+		                               members (1 to hooks.maxPackSize) of the enemy def `enemy`,
+		                               each through PlaygroundService.spawnCFrame (scattered round
+		                               the floor point by playground.spawnScatterRadius, clear of
+		                               every living fighter by playground.spawnSpacing, at the
+		                               rig's root height, facing `facing` degrees with the spawn
+		                               jitter) and EnemyService.spawn, so the members stand where a
+		                               natural pack's would (the Playground spawns its kobolds one
+		                               to a point); replies the ids and where each stands. They
+		                               are no spawn slot's: none respawns
 
 	The sink is set only while a trace is on or a swing is collecting, so CombatService measures
 	nothing for it the rest of the time; a sink someone else set is chained and given back. Nothing
@@ -130,6 +149,8 @@ local EntityService = require(Server.services.EntityService)
 local AntiCheatService = require(Server.services.AntiCheatService)
 local DevTrace = require(script.Parent.DevTrace)
 local PlaygroundLayout = require(Server.world.PlaygroundLayout)
+local PlaygroundService = require(Server.services.PlaygroundService)
+local Enemies = require(Shared.data.enemies)
 
 type Reply = { [string]: any }
 type TraceEvent = CombatService.TraceEvent
@@ -155,6 +176,7 @@ local COMMANDS = {
 	"charge",
 	"part",
 	"clearparts",
+	"pack",
 }
 -- One line per command for "help": its arguments (? = optional).
 local USAGE: { [string]: string } = {
@@ -167,12 +189,13 @@ local USAGE: { [string]: string } = {
 	hold = "hold { ids? | except?, all?, on? }: freeze enemies (no move, attack or regen)",
 	sethp = "sethp { entityId, hp }: HP clamped to [1, maxHp], never a kill",
 	heal = "heal { entityId? }: full HP",
-	place = "place { position = {x, y, z}, facing? = degrees, entityId? | player? }: move a player on the server; the anti-cheat lets it settle",
+	place = "place { position = {x, y, z}, facing? = degrees, entityId? | player?, onWindUp? = enemy id, after? = seconds }: move a player on the server (onWindUp: `after` into that enemy's next wind-up); the anti-cheat lets it settle",
 	enemy = "enemy { entityId, position = floor {x, y, z}, facing? = degrees, hold? }: stand a living enemy there, Idle (held if hold)",
 	walk = "walk { entityId, toward = floor {x, y, z}, hold?, wait? }: walk an enemy there at its own pace (held there if hold)",
 	charge = "charge { entityId, toward = {x, y, z} }: a Charger's real rush at the point; replies its launch and stops",
 	part = "part { size = {x, y, z}, cframe | position = {x, y, z}, tilt? = degrees or {x, y, z}, name?, after? = seconds }: an anchored part in the dev folder",
 	clearparts = "clearparts: remove every dev part (and any still to come)",
+	pack = "pack { enemy = def id, position = floor {x, y, z}, count, facing? = degrees }: spawn a pack the way the world does",
 }
 
 local printing = false
@@ -181,7 +204,7 @@ local listeners: { [number]: Sink } = {}
 local listenerCount = 0
 local previous: Sink? = nil
 local warnedSink = false
--- The waiting command ("basic", "art", "charge", or "walk" with wait), or nil.
+-- The waiting command ("basic", "art", "charge", "walk" with wait, or "place" on a wind-up), or nil.
 local busy: string? = nil
 -- "part": parts asked for with `after` still to come, and the token "clearparts" bumps to drop them.
 local pendingParts = 0
@@ -637,6 +660,42 @@ local function plainVector(value: Vector3): { number }
 	return { round(value.X) :: number, round(value.Y) :: number, round(value.Z) :: number }
 end
 
+-- The phase of a living enemy's brain, or nil once it is gone.
+local function phaseOf(id: number): string?
+	local brain = EnemyService.brainOf(id)
+	return if brain ~= nil then brain:getPhase() else nil
+end
+
+-- "place" on a wind-up (302(b)): waits for the enemy's next wind-up to start (one already under way
+-- started at no known time), then `after` seconds into it. Returns when it started and the error.
+local function waitForWindUp(id: number, after: number, calledAt: number): (number?, string?)
+	local deadline = calledAt + Hooks.windUpWaitSeconds
+	local was = phaseOf(id)
+	local startedAt: number? = nil
+	while startedAt == nil do
+		if os.clock() >= deadline then
+			return nil, ("no wind-up from enemy %d within %g s"):format(id, Hooks.windUpWaitSeconds)
+		end
+		task.wait()
+		local now = phaseOf(id)
+		if now == nil then
+			return nil, ("enemy %d died or left before its wind-up"):format(id)
+		end
+		if now == "WindUp" and was ~= "WindUp" then
+			startedAt = os.clock()
+		end
+		was = now
+	end
+	local at = startedAt :: number
+	while os.clock() < at + after - 1e-6 do
+		task.wait()
+		if phaseOf(id) == nil then
+			return nil, ("enemy %d died or left during its wind-up"):format(id)
+		end
+	end
+	return at, nil
+end
+
 local function place(args: { [string]: any }): Reply
 	local position, positionError = placePosition(args.position, "position")
 	if position == nil then
@@ -649,26 +708,54 @@ local function place(args: { [string]: any }): Reply
 	if record == nil then
 		return fail(recordError or "no player")
 	end
-	local model = record.model
+	local onWindUp = args.onWindUp
+	local windUpAt: number? = nil
+	local calledAt = os.clock()
+	if onWindUp ~= nil then
+		if typeof(onWindUp) ~= "number" or EnemyService.brainOf(onWindUp) == nil then
+			return fail("onWindUp must be a living enemy's entity id (a number; hp lists them)")
+		end
+		local after = if args.after == nil then 0 else args.after
+		if not isFinite(after) or after < 0 or after > Hooks.maxPlaceAfterSeconds then
+			return fail(("after must be a number of seconds from 0 to %g"):format(Hooks.maxPlaceAfterSeconds))
+		end
+		local startedAt, waitError = waitForWindUp(onWindUp, after, calledAt)
+		if startedAt == nil then
+			return fail(waitError or "no wind-up")
+		end
+		windUpAt = startedAt
+		-- The player may have died or left while it waited.
+		record, recordError = placedRecord(args)
+		if record == nil then
+			return fail(recordError or "no player")
+		end
+	elseif args.after ~= nil then
+		return fail("after times a move on onWindUp: give onWindUp too")
+	end
+	local placed = record :: Record
+	local model = placed.model
 	local root = model.PrimaryPart
 	if root == nil or model.Parent == nil then
-		return fail(("entity %d has no character root in the world (respawning?)"):format(record.id))
+		return fail(("entity %d has no character root in the world (respawning?)"):format(placed.id))
 	end
 	local from = root.Position
 	local facing: number = if args.facing ~= nil then args.facing else DevTrace.yawOf(root.CFrame.LookVector) or 0
 	-- The anti-cheat first: the move is the server's own, so no sample judges the jump or the
 	-- client's positions from before it.
-	local watched = AntiCheatService.serverMoved(record.player :: Player, Place.settleSeconds)
+	local watched = AntiCheatService.serverMoved(placed.player :: Player, Place.settleSeconds)
 	model:PivotTo(CFrame.new(position) * CFrame.Angles(0, math.rad(facing), 0))
 	return {
 		ok = true,
-		entityId = record.id,
-		name = record.name,
+		entityId = placed.id,
+		name = placed.name,
 		from = plainVector(from),
 		to = plainVector(position),
 		facing = round(facing),
 		settleSeconds = Place.settleSeconds,
 		anticheat = watched,
+		onWindUp = if windUpAt ~= nil then onWindUp else nil,
+		windUpAt = if windUpAt ~= nil then round(windUpAt - calledAt) else nil,
+		movedAt = if windUpAt ~= nil then round(os.clock() - calledAt) else nil,
 	}
 end
 
@@ -1035,6 +1122,41 @@ local function clearParts(): Reply
 	return { ok = true, removed = removed, cancelled = cancelled }
 end
 
+-- A pack the way the world spawns one (item 315): every member through the Playground's own
+-- spawn placement and EnemyService.spawn, one after another, so each clears the ones before.
+local function packCommand(args: { [string]: any }): Reply
+	local enemy = args.enemy
+	if typeof(enemy) ~= "string" or Enemies.byId(enemy) == nil then
+		return fail(("enemy must be an enemy def id from enemies.luau, not %s"):format(tostring(enemy)))
+	end
+	local count = args.count
+	if typeof(count) ~= "number" or count % 1 ~= 0 or count < 1 or count > Hooks.maxPackSize then
+		return fail(("count must be a whole number from 1 to %d (hooks.maxPackSize)"):format(Hooks.maxPackSize))
+	end
+	local floor, floorError = placePosition(args.position, "position")
+	if floor == nil then
+		return fail(floorError or "no position")
+	end
+	if args.facing ~= nil and not isFinite(args.facing) then
+		return fail("facing must be a number of degrees (0 looks along -Z, + turns left)")
+	end
+	local point = floor :: Vector3
+	local spawn = {
+		enemy = enemy,
+		position = { point.X, point.Y, point.Z },
+		facing = if args.facing ~= nil then args.facing else 0,
+		packSize = { min = count, max = count },
+	}
+	local ids: { number } = {}
+	local at: { { number } } = {}
+	for _ = 1, count do
+		local cframe = PlaygroundService.spawnCFrame(spawn :: any)
+		table.insert(ids, EnemyService.spawn(enemy, cframe, {}))
+		table.insert(at, plainVector(cframe.Position))
+	end
+	return { ok = true, enemy = enemy, ids = ids, at = at }
+end
+
 -- ------------------------------------------------------------------ the BindableFunction
 
 local HANDLERS: { [string]: (args: { [string]: any }) -> Reply } = {
@@ -1057,10 +1179,15 @@ local HANDLERS: { [string]: (args: { [string]: any }) -> Reply } = {
 	charge = chargeCommand,
 	part = partCommand,
 	clearparts = clearParts,
+	pack = packCommand,
 }
 -- The commands that wait (task.wait) before they reply: one at a time.
 local function yields(command: string, args: { [string]: any }): boolean
-	return command == "basic" or command == "art" or command == "charge" or (command == "walk" and args.wait == true)
+	return command == "basic"
+		or command == "art"
+		or command == "charge"
+		or (command == "walk" and args.wait == true)
+		or (command == "place" and args.onWindUp ~= nil)
 end
 
 local function invoke(command: unknown, rawArgs: unknown): Reply

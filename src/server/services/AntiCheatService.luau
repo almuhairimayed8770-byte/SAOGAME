@@ -30,8 +30,10 @@
 	Anomalies live combat.anomalyWindow seconds. At world.anticheat.shadowFraction of
 	combat.anomalyKickThreshold the player gets the attribute world.anticheat.shadowAttribute = true
 	(the shadow flag; Trial-server routing is a later phase). At the threshold, and never for a
-	single anomaly, the player receives a SystemLine and is kicked. Every flag is logged with the
-	player's UserId and the reason.
+	single anomaly, the player receives a SystemLine and is kicked. A watched stand-in that is no
+	Player instance (the playground smoke's cheater, a table) is shadowed, kicked and counted the
+	same, but no remote is fired at it (Deps.isPlayer). Every flag is logged with the player's
+	UserId and the reason.
 
 	The service only reads EntityService and CombatService; it never writes HP or positions.
 	Everything engine-facing comes through `Deps` (bind), so it runs under Lune with fakes.
@@ -57,6 +59,9 @@ export type Deps = {
 	setAttribute: (player: Player, name: string, value: any) -> (),
 	kick: (player: Player, text: string) -> (),
 	log: ((message: string) -> ())?,
+	-- Whether a remote can reach this player: a Player instance (a smoke's stand-in is a table,
+	-- and firing at one fails). nil: every watched player is one (tests).
+	isPlayer: ((player: Player) -> boolean)?,
 }
 
 export type Stats = {
@@ -267,8 +272,9 @@ local function kick(entry: Entry, reason: string)
 			reason
 		)
 	)
+	-- The system line goes only to a player a remote can reach: a stand-in gets none, quietly.
 	local net = d.net
-	if net ~= nil and net.fire ~= nil then
+	if net ~= nil and net.fire ~= nil and (d.isPlayer == nil or d.isPlayer(entry.player)) then
 		local ok, err = pcall(net.fire, SYSTEM_LINE, entry.player, { text = policy.kickText, token = policy.lineToken })
 		if not ok then
 			warn(("%s userId=%d system line failed: %s"):format(LOG_PREFIX, userIdOf(entry.player), tostring(err)))
@@ -498,6 +504,9 @@ function AntiCheatService.defaultDeps(overrides: { [string]: any }?): Deps
 			end)
 		end,
 		log = print,
+		isPlayer = function(player): boolean
+			return typeof(player) == "Instance" and (player :: Instance):IsA("Player")
+		end,
 	}
 	if overrides ~= nil then
 		for key, value in overrides do

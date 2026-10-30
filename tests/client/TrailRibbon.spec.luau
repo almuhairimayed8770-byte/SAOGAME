@@ -13,6 +13,22 @@
 	two frames' blades would cut inside it.
 ]]
 
+local function frameSignal(): any
+	return {
+		Connect = function()
+			return { Disconnect = function() end }
+		end,
+	}
+end
+Harness.stubService("RunService", {
+	RenderStepped = frameSignal(),
+	Heartbeat = frameSignal(),
+	PreSimulation = frameSignal(),
+	BindToRenderStep = function() end,
+	UnbindFromRenderStep = function() end,
+})
+-- The rig's animator Trails finds for itself (Choreo.find), loaded on the stubbed engine.
+local Choreo = Harness.load("src/client/choreo/Choreo")
 local Trails = Harness.load("src/client/fx/Trails")
 local Engine = Harness.load("src/client/fx/Engine")
 local BladeContact = Harness.load("src/shared/choreo/BladeContact")
@@ -93,7 +109,8 @@ type Drive = {
 
 -- The render step, Heartbeat, both clocks and the hit-stop read driven by hand: a frame runs the
 -- render step (the pose readers', where the module samples) and then Heartbeat.
-local function drive(): Drive
+-- `animatorHeld`: Trails reads the hold from the rig's animator itself (no `held` override).
+local function drive(animatorHeld: boolean?): Drive
 	local clock = 0
 	local held = false
 	local renderFn: ((dt: number) -> ())? = nil
@@ -121,9 +138,11 @@ local function drive(): Drive
 			end
 		end,
 		clear = function(_trail: Trail) end,
-		held = function(_model: Instance): boolean
-			return held
-		end,
+		held = if animatorHeld == true
+			then nil
+			else function(_model: Instance): boolean
+				return held
+			end,
 	})
 	return {
 		frame = function()
@@ -151,8 +170,8 @@ local function drive(): Drive
 end
 
 -- Runs `body` with a fresh drive and always puts the engine back.
-local function driven(body: (drive: Drive) -> ())
-	local current = drive()
+local function driven(body: (drive: Drive) -> (), animatorHeld: boolean?)
+	local current = drive(animatorHeld)
 	local ok, err = pcall(body, current)
 	current.finish()
 	if not ok then
@@ -360,6 +379,54 @@ describe("Trail ribbon from sub-frame blade samples (D-261)", function()
 			end
 			expect(countOf(target.model)).toBe(0)
 		end)
+	end)
+
+	-- Trails reads the hold from the rig's own animator (D-353): the frames its heldShown says draw
+	-- the blade held, from the first still frame to the last. Its pause flag rises on the contact's
+	-- step, a frame before the first frame that draws the rig held (impact.poseLagFrames), and
+	-- comes down a frame before the last one: on the flag the ribbon stood still a frame early,
+	-- over a blade still moving, and aged under a still one.
+	it("holds its ages on the frames the rig's animator draws held, not on its pause flag (D-353)", function()
+		local find = Choreo.find
+		local target = rig()
+		local shown, paused = false, false
+		local animator = {
+			heldShown = function(): boolean
+				return shown
+			end,
+			isPaused = function(): boolean
+				return paused
+			end,
+		}
+		Choreo.find = function(model: Model): any
+			return if model == target.model then animator else find(model)
+		end
+		local ok, err = pcall(driven, function(d)
+			Trails.attach(target.model)
+			d.frame()
+			Trails.setActive(target.model, true, "Art")
+			turn(target, 60)
+			d.frame()
+			Trails.setActive(target.model, false, "Art")
+			local count = countOf(target.model)
+			expect(count).toBeGreaterThan(1)
+			-- Drawn held, its flag already down: the ages stand.
+			shown, paused = true, false
+			for _ = 1, 20 do
+				d.frame()
+			end
+			expect(countOf(target.model)).toBe(count)
+			-- Flagged, not drawn held: the ribbon fades as it does on any moving frame.
+			shown, paused = false, true
+			for _ = 1, math.ceil(fx.trail.lifetime / FRAME) + 1 do
+				d.frame()
+			end
+			expect(countOf(target.model)).toBe(0)
+		end, true)
+		Choreo.find = find
+		if not ok then
+			error(err, 0)
+		end
 	end)
 
 	it("a render stall drops the ribbon; the first frame after it draws from where the blade is", function()

@@ -100,6 +100,19 @@
 	its rig only for what the hit-stop has beyond the hold after the snap its clip already showed
 	on the server's beat, a launched rush's not at all (D-176).
 
+	A hit's cues land on the first frame that shows its contact pose (D-342). A frame draws the
+	pose the rigs' step of the frame before wrote (the engine's Animator resets an animated rig
+	after the draw and Choreo writes it again on PreSimulation, impact.poseLagFrames), so the
+	holds start at once, on the step that posed the contact, while everything the screen shows of
+	the hit (the white flash, the director's moment: its picture, sound, accents and punch, the
+	camera's nudge, shake and tick, the number and the HP flash) waits for that frame
+	(deps.atPose: FrameClock.atPose). A contact's or a shown blow's cues that have not played when
+	its word comes are taken over by the word, which plays the hit whole once. The holds that
+	wait for their words go on every rendered frame right after the local fighter's step and its
+	contacts (deps.onFrame, D-347), so the flag a reader of the hold sees (Choreo isPaused) stays
+	up for the whole wait. A stronger tier whose word comes after its contact's freeze let go
+	plays no picture and no punch (D-348): the bodies have moved on.
+
 	Dependencies come in through `Replication.bind(deps)` so Lune tests dispatch payloads at fake
 	modules; `Replication.start()` binds the real ones.
 ]]
@@ -110,6 +123,7 @@ local Shared = ReplicatedStorage.Shared
 local Types = require(Shared.types)
 local Combat = require(Shared.data.combat)
 local ChoreoData = require(Shared.data.choreo)
+local ImpactData = require(Shared.data.impact)
 local Fx = require(Shared.data.fx)
 local UI = require(Shared.data.ui)
 local Moments = require(Shared.data.moments)
@@ -142,7 +156,8 @@ export type Deps = {
 	smear: any,
 	shatter: any,
 	sparks: any, -- Sparks-like: parry(position)
-	-- WallSlam-like: slam(point, normal) -> puffs, the dust of a rush's slam (D-217); none: no dust.
+	-- WallSlam-like: slam(point, normal) -> puffs, the dust of a rush's slam (D-217), and
+	-- skid(point, heading) -> puffs, a rush's skid (fx.rushSkid); none: no dust.
 	wallSlam: any?,
 	telegraphs: any,
 	outline: any,
@@ -165,10 +180,31 @@ export type Deps = {
 	-- Calls `fn` every Heartbeat (the clock the local predictions age on: a stall counts as at most
 	-- a jump); without it they age on `now` alone.
 	onHeartbeat: ((fn: (dt: number) -> ()) -> ())?,
+	-- FrameClock.atPose: runs `fn` on the first rendered frame that shows the pose the rigs hold
+	-- now and returns its cancel (D-342). A hit's cues go through it; without it they play at once.
+	atPose: ((fn: () -> ()) -> () -> ())?,
+	-- FrameClock.atStepPose: the same for a pose a rig's step writes now, asked from inside that
+	-- step (a rush's slam, D-343). Without it those cues play at once.
+	atStepPose: ((fn: () -> ()) -> () -> ())?,
+	-- FrameClock.pace: seconds a rendered frame takes on this screen (nil before any frame), the
+	-- pace the impact frames count their looks at; a word holds the rigs over its picture by it
+	-- (D-350). Without it the hold goes by the frame's own length.
+	pace: (() -> number?)?,
+	-- Calls `fn(dt)` every rendered frame right after the local fighter's step and its contacts
+	-- (CharacterController.afterContacts), before any reader of a rig's hold: the holds that wait
+	-- for their words go on there (D-312, D-347). Without it they go on at the Heartbeat.
+	onFrame: ((fn: (dt: number) -> ()) -> ())?,
 	-- The server's clock (workspace:GetServerTimeNow), the one remotes stamp serverTime on: enemy
 	-- telegraphs start on it and rushes are drawn on it. Without it a telegraph starts on receipt
 	-- and no rush is drawn.
 	serverNow: (() -> number)?,
+	-- Where a rushing enemy's root part stands on the frame that draws the pose its rig's step
+	-- writes now (D-438): Studio draws a pose on the frame after its step (impact.poseLagFrames),
+	-- after physics has moved the replicated root, so start() gives the root carried by the
+	-- velocity it has over the frame. The drawn rush's offset is written against it, so the body
+	-- is drawn where RushDraw puts it, not a frame of the root's own travel past it. Without it the
+	-- root stands where it is (a frame that draws the step's pose before the root moves).
+	rootAhead: ((root: BasePart, dt: number) -> CFrame)?,
 	-- The local fighter's defence as CharacterController knows it: its state now, and the time on
 	-- `now`'s clock it last stood in a guard or a dodge (nil: not since it spawned). Without it no
 	-- enemy blow on the local fighter shows before the server's word (D-258).
@@ -204,6 +240,10 @@ local SOUNDS = {
 -- wind-up telegraph comes down with them instead of glowing over a kneeling rig or a corpse.
 local TELEGRAPH_CANCEL: { [string]: boolean } = { Stagger = true, Break = true, GuardBroken = true, Dead = true }
 
+-- StateChanged states that take the body from a fighter (a hit's stagger, a guard or gauge break,
+-- death): the action it was playing comes down with them (D-422), as the local fighter's does.
+local STANCE_TAKEN: { [string]: boolean } = { Stagger = true, Break = true, GuardBroken = true, Dead = true }
+
 -- Trail kinds a clip's TrailOn may name in data.kind.
 local TRAIL_KINDS: { [string]: boolean } = { Art = true, Basic = true }
 
@@ -230,6 +270,9 @@ Replication.rushContact = Signal.new() :: Signal.Signal<any, string, Vector3, Ve
 
 local deps: Deps? = nil
 local stateClips: { [number]: any } = {} -- entity id -> handle of the reaction clip playing
+-- entity id -> the guard's own reaction playing over its Guard (a blocked hit's GuardHit, a
+-- parry's Parry): it coexists with the Guard loop, never replacing it (D-419).
+local guardReactions: { [number]: any } = {}
 local watched: { [number]: { Disconnect: (self: any) -> () }? } = {}
 local drivers: { [number]: any } = {} -- entity id -> locomotion driver on a rig this client does not own
 -- entity id -> the trail kind the playing clip's TrailOn named; HitWindowOpen / Close, TrailOff and
@@ -239,6 +282,9 @@ local trailKinds: { [number]: { clipId: string, kind: string } } = {}
 local switchOpeners: { [any]: { openerId: any } } = {}
 -- entity id -> the clip ActionStarted played on it and its speed (the activation riser's timing).
 local clipSpeeds: { [any]: { clipId: string, speed: number? } } = {}
+-- remote player id -> the handle of the action its last ActionStarted played (an Art, a basic
+-- swing): a state that takes the body from it lets that clip go (D-422).
+local remoteActions: { [number]: any } = {}
 -- Per attacker (its entity id, NO_ATTACKER when the payload names none): when its sweep's camera
 -- nudge was given (a sweep's hits confirm within a few frames and nudge once), and its sweep's
 -- hit-stop tick (when the sweep began and the strongest tier it ticked). A trade is two sweeps.
@@ -247,6 +293,9 @@ local lastNudges: { [any]: number } = {}
 local lastTicks: { [any]: { at: number, rank: number } } = {}
 -- death vocal name -> when it last played: one sweep's deaths of the same voice scream once.
 local deathVocals: { [string]: number } = {}
+-- A hit's cues asked for before the screen shows the pose they belong to (D-342): whether they
+-- played (or were taken over), and the cancel of the wait for the frame that shows it.
+type Cue = { played: boolean, cancel: (() -> ())? }
 -- The local fighter's predicted contacts (Replication.contact, issue 4) waiting for their
 -- HitConfirmed, oldest first, each kept combat.luau contact.confirmSeconds of play (`seen`, on
 -- playClock): the hit-stop tier, the moment the contact played, when (`at`, on the clock) and
@@ -268,10 +317,15 @@ type Prediction = {
 	-- Seconds of hold this contact asked of the local rig so far: its tier's, and every frame it
 	-- held on for the word (D-312). Less what the rig has left, it is what the hold has shown.
 	asked: number,
+	-- The steps the local rig's holds had frozen when it began (its animator's heldCount, D-354):
+	-- what the hold has shown since is counted in the rig's own frames. Nil: it cannot count.
+	heldMark: number?,
 	-- True while its hold may still hold on for the word: until the word comes, the hold has run
 	-- contact.wordHoldSeconds from the contact, a later hold's run began, or a word for a later
 	-- window of the same swing says the server did not count this one.
 	waiting: boolean,
+	-- Its cues, waiting for the frame that shows the contact pose (D-342).
+	cue: Cue?,
 }
 -- An enemy's attack this client knows of (D-172): when its wind-up began on the server's clock,
 -- its beats, the pause the server gave it so far (or a contact's provisional share), the attack
@@ -321,10 +375,15 @@ local holdEnds = -math.huge
 local playSeconds = 0
 local playWall: number? = nil
 local playTicking = false
--- The clock at the last Heartbeat and the length of the step it closed (D-312): a hold that holds
--- on for its word goes on one such step at a time, so it ends on the frame the word comes.
+-- The clock at the last Heartbeat and the length of the frame it closed (D-312): a hold that holds
+-- on for its word goes on one such frame at a time, so it ends on the frame the word comes.
 local beatAt: number? = nil
 local beatStep: number = ChoreoData.frameSeconds
+-- The holds that wait for their words go on in deps.onFrame's step, right after the local
+-- fighter's (D-347), a frame of `frameStep` (its render step's length) at a time; else on the
+-- Heartbeat by beatStep.
+local framed = false
+local frameStep: number = ChoreoData.frameSeconds
 -- The newest death owns the silence: how many deaths came so far, and when the silence a death
 -- started ends (nil while none holds).
 local deathCount = 0
@@ -356,15 +415,81 @@ local rushes: { [number]: Rush } = {}
 local launches: { [number]: number } = {}
 -- enemy id -> its blow on the local fighter shown on the strike's server frame (F16, D-258), until
 -- its HitConfirmed: when (`seen`, on playClock), the moment Impact played, the target and its
--- flinch clip.
-type Struck = { seen: number, moment: string?, targetId: number, handle: any? }
+-- flinch clip. Its freeze on both bodies (D-355) as a contact's (D-312): when it began on the clock
+-- (`at`), the run it is on the local rig, the seconds it asked of that rig so far, its tier, and
+-- whether it still holds on for the word.
+type Struck = {
+	seen: number,
+	moment: string?,
+	targetId: number,
+	handle: any?,
+	at: number,
+	run: number,
+	asked: number,
+	heldMark: number?, -- the fighter's rig's heldCount when it froze (D-354), as a contact's
+	tier: string,
+	waiting: boolean,
+	staggered: boolean, -- its target's Stagger word came while it was shown
+	cue: Cue?, -- its flash and moment, waiting for the frame that shows the strike (D-342)
+}
 local struck: { [number]: Struck } = {}
+-- target id -> the flinch of a blow shown on its strike frame whose word came before the target's
+-- Stagger word (the server sends HitConfirmed first): that Stagger, the next state word for the
+-- target, lets the flinch play on (D-355).
+local wordFlinch: { [number]: any } = {}
 
 local function dependencies(): Deps
 	if deps == nil then
 		error("Replication: call bind() or start() first")
 	end
 	return deps :: Deps
+end
+
+-- The length of the frame a hold that waits for its word goes on by (D-312): the render step's
+-- when the waits go on there (D-347), else the Heartbeat's.
+local function waitStep(): number
+	return if framed then frameStep else beatStep
+end
+
+-- True while a rig's own step runs a rush's drawing (stepRush): a hit it finds there (a rush's
+-- blow on the local fighter) poses on that step, so its cues wait for the frame that draws that
+-- step's pose (deps.atStepPose, D-343), not the pose the rigs held before it.
+local inRigStep = false
+
+-- Asks for a hit's cues on the first frame that shows the pose the rigs hold now (D-342): at once
+-- when that frame is the one a change made now shows on, else at its start (deps.atPose; inside a
+-- rig's step, deps.atStepPose).
+local function cueAtPose(fn: () -> ()): Cue
+	local cue: Cue = { played = false, cancel = nil }
+	local function play()
+		if cue.played then
+			return
+		end
+		cue.played = true
+		fn()
+	end
+	local d = dependencies()
+	local gate = if inRigStep and d.atStepPose ~= nil then d.atStepPose else d.atPose
+	if gate == nil then
+		play()
+	else
+		cue.cancel = gate(play)
+	end
+	return cue
+end
+
+-- Takes over cues that have not played yet: they never play, and the caller shows the hit whole.
+-- False when they played already (or there are none).
+local function takeCue(cue: Cue?): boolean
+	if cue == nil or cue.played then
+		return false
+	end
+	cue.played = true
+	local cancel = cue.cancel
+	if cancel ~= nil then
+		cancel()
+	end
+	return true
 end
 
 local function toVector(v: { number }?): Vector3
@@ -449,6 +574,32 @@ local function holdRemaining(animator: any, seconds: number, at: number): number
 		end
 	end
 	return math.max(0, seconds - (clock() - at))
+end
+
+-- The steps a rig's holds have frozen so far (its animator's heldCount, D-354), or nil when it
+-- cannot count them.
+local function heldCountOf(animator: any): number?
+	local read = if typeof(animator) == "table" then animator.heldCount else nil
+	if typeof(read) ~= "function" then
+		return nil
+	end
+	local count = read(animator)
+	return if typeof(count) == "number" then count else nil
+end
+
+-- Seconds a hold has shown on a rig since it began (D-354): the steps the rig has frozen since its
+-- heldCount was `mark`, at the pace the rig counts a hold's frames at (D-327). A rig that counts
+-- rounds a hold to whole frames (D-271: 3 frames at 60 are 2 at 30, 0.067 s against the 0.05
+-- asked), so what was asked less what is left is not what was shown; that is the answer only for
+-- a rig that cannot count, or has no pace yet.
+local function heldSince(animator: any, mark: number?, asked: number, remaining: number): number
+	local count = heldCountOf(animator)
+	local readPace = if typeof(animator) == "table" then animator.holdPace else nil
+	local pace = if typeof(readPace) == "function" then readPace(animator) else nil
+	if mark ~= nil and count ~= nil and count >= mark and typeof(pace) == "number" and pace > 0 then
+		return (count - mark) * pace
+	end
+	return math.max(0, asked - remaining)
 end
 
 -- The frames a hit's hold of `frames` asks a rig's animator for: combat.luau hitStopShaveFrames
@@ -767,13 +918,64 @@ local function holdOneStep(animator: any, step: number): number
 	return math.max(0, step - (left or 0))
 end
 
+-- An enemy's blow shown on its strike frame holds on for its word as a contact does (D-355): while
+-- it waits, its freeze is the run now on the local rig and it froze less than
+-- contact.wordHoldSeconds from its strike frame, the fighter and the striker (not a launched
+-- rush's body) hold one more step each.
+local function holdStruck(step: number)
+	local d = dependencies()
+	local now = clock()
+	local fighter: any = nil
+	local strikers: { any } = {}
+	local waiting: { Struck } = {}
+	for attackerId, shown in struck do
+		if not shown.waiting then
+			continue
+		end
+		if shown.run ~= holdRun or now + step - shown.at > Combat.contact.wordHoldSeconds + 1e-6 then
+			shown.waiting = false
+			continue
+		end
+		fighter = fighter or d.entities.get(shown.targetId)
+		table.insert(waiting, shown)
+		local striker = d.entities.get(attackerId)
+		if striker ~= nil and not rushRunning(striker.id) then
+			table.insert(strikers, striker)
+		end
+	end
+	if #waiting == 0 or fighter == nil then
+		return
+	end
+	local animator = animatorOf(fighter)
+	if animator == nil then
+		return
+	end
+	local added = holdOneStep(animator, step)
+	if added > 0 then
+		holdEnds = math.max(holdEnds, now + step)
+		for _, shown in waiting do
+			shown.asked += added
+		end
+	end
+	for _, striker in strikers do
+		local strikerAnimator = animatorOf(striker)
+		if strikerAnimator ~= nil then
+			holdOneStep(strikerAnimator, step)
+		end
+	end
+end
+
 -- A contact's hold waits for its word (D-312). Every Heartbeat, after the render step: while a
 -- contact of the hold now running on the local rig still waits for the server's HitConfirmed, has
 -- held less than contact.wordHoldSeconds from its contact frame and the hold would let go on the
 -- next frame, both rigs hold one more step. The word then lets them go (HitConfirmed: the frame
 -- that first shows its number is still held, a stronger tier runs on in place); a word that never
--- comes lets them go at the cap with no number.
+-- comes lets them go at the cap with no number. An enemy's blow shown on its strike frame holds on
+-- the same way (holdStruck).
 local function holdForWords(step: number)
+	if next(struck) ~= nil then
+		holdStruck(step)
+	end
 	if #predictions == 0 then
 		return
 	end
@@ -916,7 +1118,49 @@ local function slamCue(point: Vector3, normal: Vector3)
 	end
 end
 
--- One frame of a rush's drawing, from the animator's step (before it poses the rig).
+-- The rush's blow on the local fighter, shown on the frame its drawn snout meets the body (set below,
+-- with the other enemy blows shown before their word).
+local rushBlow: ((id: number, rush: Rush) -> ())? = nil
+
+-- The bodies a drawn rush shoulders past (RushDraw.Bystander): every living player's root this
+-- client tracks, at its half width (as the server's HitSweep.bodyRadius reads it); without the
+-- tracker's list, the local fighter's alone.
+type Bystander = { spot: Vector3, radius: number }
+local function bystanders(): { Bystander }
+	local d = dependencies()
+	local list: { Bystander } = {}
+	local function add(record: any)
+		if record == nil or record.kind ~= "Player" or record.state == "Dead" then
+			return
+		end
+		local model = record.model
+		local root = if typeof(model) == "Instance" and model:IsA("Model") then (model :: Model).PrimaryPart else nil
+		if root ~= nil then
+			local size = root.Size
+			table.insert(list, { spot = root.Position, radius = math.max(size.X, size.Z) / 2 })
+		end
+	end
+	local all = method(d.entities, "all")
+	if all ~= nil then
+		for _, record in all(d.entities) do
+			add(record)
+		end
+	else
+		local localId = d.localId()
+		add(if localId ~= nil then d.entities.get(localId) else nil)
+	end
+	return list
+end
+
+--- Where a replicated root part stands on the frame that draws the pose its rig's step writes now
+--- (start()'s rootAhead, D-438): carried by its velocity over the frame, as physics moves it
+--- between the step and the draw.
+function Replication.rootAhead(root: BasePart, dt: number): CFrame
+	return root.CFrame + root.AssemblyLinearVelocity * dt
+end
+
+-- One frame of a rush's drawing, from the animator's step (before it poses the rig). What it
+-- finds this step (a slam) shows on the frame that draws this step's pose (D-343).
 local function stepRush(id: number, rush: Rush, dt: number)
 	if rushes[id] ~= rush then
 		return
@@ -928,23 +1172,68 @@ local function stepRush(id: number, rush: Rush, dt: number)
 		return
 	end
 	local rootFrame = root.CFrame
+	-- Where the root stands when this step's pose is drawn (D-438), never past the server's stop.
+	local rootAhead = dependencies().rootAhead
+	if rootAhead ~= nil then
+		local ok, moved = pcall(rootAhead, root :: BasePart, dt)
+		if ok and typeof(moved) == "CFrame" then
+			rootFrame = RushDraw.ahead(rush.state, rootFrame, moved)
+		end
+	end
 	-- The velocity the late root carries (D-256), when the root can say.
 	local ok, carried = pcall(function(): any
 		return (root :: BasePart).AssemblyLinearVelocity
 	end)
 	local velocity: Vector3? = if ok and typeof(carried) == "Vector3" then carried else nil
-	local drawn = RushDraw.step(rush.state, now, dt, rootFrame, rush.room, rush.ground, velocity)
+	local bodies = if RushDraw.seeking(rush.state) then bystanders() else nil
+	local drawn = RushDraw.step(rush.state, now, dt, rootFrame, rush.room, rush.ground, velocity, bodies)
 	if drawn ~= nil then
 		rush.animator:setBodyOffset(rootFrame:Inverse() * drawn)
 		hideRoot(rush, true)
 	elseif rush.state.phase == "Done" then
 		endRush(id)
 	end
+	local blow = rushBlow
+	if blow ~= nil then
+		-- The snout this step draws on the body: its blow's cues show on the frame that draws it.
+		inRigStep = true
+		blow(id, rush)
+		inRigStep = false
+	end
+	-- The skid's dust under the hind hooves, a puff each fx.rushSkid.everyStuds the drawn body slid
+	-- from the strike beat to its rest (none past a slam's or a jam's stop), on the first frame that
+	-- draws the hooves this step slid there (D-343).
+	local skid = Fx.rushSkid
+	local puffs = RushDraw.takeDust(rush.state, skid.everyStuds, skid.rearShare)
+	local dust = dependencies().wallSlam
+	local kick = if dust ~= nil then method(dust, "skid") else nil
+	if kick ~= nil and #puffs > 0 then
+		local function throw()
+			for _, puff in puffs do
+				kick(puff.point, puff.heading)
+			end
+		end
+		local gate = dependencies().atStepPose
+		if gate == nil then
+			throw()
+		else
+			gate(throw)
+		end
+	end
 	-- The contacts the drawn body reached this frame, where it meets the face (D-208).
 	for _, cue in RushDraw.takeCues(rush.state) do
 		Replication.rushContact:Fire(rush.record, cue.kind, cue.point, cue.normal)
 		if cue.kind == "Slam" then
-			slamCue(cue.point, cue.normal)
+			-- On the first frame that draws the snout on the face (D-343): this step writes it.
+			local point, normal = cue.point, cue.normal
+			local gate = dependencies().atStepPose
+			if gate == nil then
+				slamCue(point, normal)
+			else
+				gate(function()
+					slamCue(point, normal)
+				end)
+			end
 		end
 	end
 end
@@ -1000,11 +1289,12 @@ local function armRush(record: any, line: any, since: number, launched: boolean)
 		rush.ground = function(spot: Vector3): number?
 			return RushDraw.ground(spot, cast, model)
 		end
-		RushDraw.setBody(
-			rush.state,
-			{ profile = RushWorld.profileOf(model :: Model), size = part.Size },
-			hoverOf(model :: Model, part)
-		)
+	end
+	if root ~= nil then
+		-- The body the world and the players' bodies are judged on (D-205; the pass's clearance),
+		-- walls on the poses it is drawn in as the server's (D-437).
+		local part = root :: BasePart
+		RushDraw.setBody(rush.state, RushWorld.bodyOf(model :: Model), hoverOf(model :: Model, part))
 	end
 	rushes[record.id] = rush
 	rush.unhook = animator:onStep(function(dt: number)
@@ -1097,6 +1387,15 @@ local function reactionClip(record: any, name: string): string?
 	return nil
 end
 
+-- Stops the guard's own reaction (GuardHit, Parry) on a rig, if one is playing.
+local function stopGuardReaction(record: any)
+	local previous = guardReactions[record.id]
+	if previous ~= nil then
+		animatorOf(record):stop(previous, Combat.locomotionBlendOut)
+		guardReactions[record.id] = nil
+	end
+end
+
 local function playReaction(record: any, name: string): boolean
 	local id = reactionClip(record, name)
 	if id == nil then
@@ -1107,7 +1406,28 @@ local function playReaction(record: any, name: string): boolean
 	if previous ~= nil then
 		animator:stop(previous, Combat.locomotionBlendOut)
 	end
+	stopGuardReaction(record)
 	stateClips[record.id] = animator:play(id)
+	return true
+end
+
+-- A guard's reaction to the blow it took (GuardHit) or turned (Parry), played over the Guard it
+-- answers (D-419). Both are UpperBody clips above the Guard loop's priority, so played as a
+-- reaction they stopped the Guard, and nothing played it again while the key stayed held: the arms
+-- came down after every block. They coexist with it instead: while one plays it lays its pose over
+-- the Guard, and as it blends out the Guard (or whatever the rig shows under it once the guard
+-- was let go) is there under it. A second one replaces the first.
+local function playGuardReaction(record: any, name: string): boolean
+	local id = reactionClip(record, name)
+	if id == nil then
+		return false
+	end
+	local animator = animatorOf(record)
+	local previous = guardReactions[record.id]
+	if previous ~= nil then
+		animator:stop(previous)
+	end
+	guardReactions[record.id] = animator:play(id, { coexist = true })
 	return true
 end
 
@@ -1117,6 +1437,7 @@ local function stopReaction(record: any)
 		animatorOf(record):stop(previous, Combat.locomotionBlendOut)
 		stateClips[record.id] = nil
 	end
+	stopGuardReaction(record)
 end
 
 -- Which reaction clip a StateChanged plays, or nil when the owner handles the state.
@@ -1146,10 +1467,29 @@ local function asOwn(own: boolean, fn: () -> ())
 	end
 end
 
+-- A hit's freeze holds the shot's follow (CameraController.holdFollow, D-357) for `seconds` and on
+-- while the local rig is drawn held. A camera without it is left alone.
+local function holdShot(seconds: number)
+	local camera = dependencies().camera
+	local hold = if typeof(camera) == "table" then camera.holdFollow else nil
+	if typeof(hold) == "function" then
+		hold(seconds)
+	end
+end
+
+-- True when the shot is locked on `model` (CameraController.lockedOn): a kill on it ends in the
+-- death's still shot (D-323).
+local function shotLockedOn(model: Instance): boolean
+	local camera = dependencies().camera
+	local query = if typeof(camera) == "table" then camera.lockedOn else nil
+	return typeof(query) == "function" and query(model) == true
+end
+
 -- The camera and the hit-stop tick of a hit the local player is in: one nudge toward it per sweep
 -- (twelve targets confirmed in one frame must not push twelve times; none when `nudge` is false),
--- the shake of its tier, and the tick once per sweep (a stronger tier's taking over).
-local function feelHit(sweepKey: any, position: Vector3, tier: string, tick: string, nudge: boolean)
+-- the shake of its tier (none when `shake` is false), and the tick once per sweep (a stronger
+-- tier's taking over).
+local function feelHit(sweepKey: any, position: Vector3, tier: string, tick: string, nudge: boolean, shake: boolean?)
 	local d = dependencies()
 	local at = clock()
 	if nudge then
@@ -1159,7 +1499,9 @@ local function feelHit(sweepKey: any, position: Vector3, tier: string, tick: str
 			d.camera.nudge(position, Combat.cameraNudgeStuds)
 		end
 	end
-	d.camera.shake(tier)
+	if shake ~= false then
+		d.camera.shake(tier)
+	end
 	local sound = if SOUNDS.hitStop[tick] ~= nil then tick else "Normal"
 	if ticksInSweep(sound, at, sweepKey) then
 		asOwn(true, function()
@@ -1240,6 +1582,8 @@ local function takeBack(attackerId: number)
 		return
 	end
 	struck[attackerId] = nil
+	-- Nothing of a blow the server did not land shows once it is taken back (D-342).
+	takeCue(shown.cue)
 	local handle = shown.handle
 	if handle ~= nil and stateClips[shown.targetId] == handle then
 		stateClips[shown.targetId] = nil
@@ -1287,8 +1631,10 @@ local function exposedTo(attacker: any, target: any, attack: Attack): boolean
 end
 
 -- Shows an enemy's blow on the local fighter on its strike's server frame (F16, D-258): the flinch
--- from the side it comes from, the white flash and the hit's moment (its sound). HP, the number and
--- the hit-stop wait for the server's word (HitConfirmed, heardStrike).
+-- from the side it comes from, the white flash, the hit's moment (its sound) and the freeze of both
+-- bodies for its tier from the next frame on (D-355), which holds on for the server's word as a
+-- contact's does (D-312, holdForWords). HP and the number wait for the word (HitConfirmed,
+-- heardStrike).
 local function showStrike(attacker: any, target: any)
 	local d = dependencies()
 	local from, body = primaryOf(attacker.model), primaryOf(target.model)
@@ -1314,16 +1660,38 @@ local function showStrike(attacker: any, target: any)
 		art = nil,
 		partner = nil,
 	}
-	if d.impact.ownsHighlight(info) ~= true then
-		d.outline.flash(target.model, "SystemWhite", Combat.highlightFlashFrames)
+	-- Both bodies freeze for the blow's tier on this frame base: the fighter's hold joins a run
+	-- already on, the striker's absorbs its clip's own hold after the snap (D-154). A launched
+	-- rush's body never stops (the server holds nothing of it).
+	local frames = Combat.hitStopFrames.Normal
+	local heldMark = heldCountOf(animatorOf(target))
+	local run = holdLocal(animatorOf(target), frames)
+	if not rushRunning(attacker.id) then
+		animatorOf(attacker):hitStop(heldFrames(frames))
 	end
-	local moment = d.impact.hit(info)
-	struck[attacker.id] = {
+	local shown: Struck = {
 		seen = playClock(),
-		moment = if typeof(moment) == "string" then moment else nil,
+		moment = nil,
 		targetId = target.id,
 		handle = stateClips[target.id],
+		at = clock(),
+		run = run,
+		asked = heldFrames(frames) * ChoreoData.frameSeconds,
+		heldMark = heldMark,
+		tier = "Normal",
+		waiting = playTicking,
+		staggered = false,
+		cue = nil,
 	}
+	struck[attacker.id] = shown
+	-- The white flash and the blow's moment on the first frame that shows the strike (D-342).
+	shown.cue = cueAtPose(function()
+		if d.impact.ownsHighlight(info) ~= true then
+			d.outline.flash(target.model, "SystemWhite", Combat.highlightFlashFrames)
+		end
+		local moment = d.impact.hit(info)
+		shown.moment = if typeof(moment) == "string" then moment else nil
+	end)
 end
 
 -- The server's word on an enemy's blow at the local fighter (D-258): the blow shown before it, or
@@ -1344,29 +1712,175 @@ local function heardStrike(payload: any): Struck?
 		return nil
 	end
 	struck[attackerId] = nil
+	if not shown.staggered and shown.handle ~= nil then
+		wordFlinch[shown.targetId] = shown.handle
+	end
 	return shown
 end
 
--- True while the flinch of a blow shown before its word plays on `targetId` (its Stagger word does
--- not restart it).
-local function flinchShown(targetId: number): boolean
+-- True while the flinch of a blow shown on its strike frame plays on `targetId`: its Stagger word,
+-- before the blow's word or right after it (`afterWord`, wordFlinch), does not restart it.
+local function flinchShown(targetId: number, afterWord: any): boolean
 	local handle = stateClips[targetId]
 	if handle == nil then
 		return false
 	end
+	if afterWord == handle then
+		return true
+	end
 	for _, shown in struck do
 		if shown.targetId == targetId and shown.handle == handle then
+			shown.staggered = true
 			return true
 		end
 	end
 	return false
 end
 
+-- The local fighter's id when this client judges enemy blows on it (F16, D-258), else nil.
+local function judgesStrikes(): number?
+	local d = dependencies()
+	if not AI.strikePrediction.enabled or d.localDefence == nil then
+		return nil
+	end
+	return d.localId()
+end
+
+-- The server time an enemy's attack strikes at once the server's clock `now` has reached it, or nil
+-- while it has not or when it holds no blow to judge (judged already, a rush, or no strike). Within
+-- choreo.luau pauseEpsilon counts as reached: the attack clip that drew the strike on this frame
+-- reads the same time down another sum of frames, and at the server clock's size (seconds since
+-- 1970) the two differ by float residue (D-355).
+local function strikeLands(attack: Attack, now: number): number?
+	if attack.judged == true or attack.rush or not (attack.strike > 0) then
+		return nil
+	end
+	local lands = attack.since + attack.windUp + attack.strike + attack.paused
+	return if now + ChoreoData.pauseEpsilon >= lands then lands else nil
+end
+
+-- Judges, once, an enemy's blow whose strike frame (`lands`) the server's clock `now` has reached:
+-- shown on the local fighter (`target`) when it is not late, none of its blows shows yet and the
+-- fighter stands open to it.
+local function judgeStrike(id: number, attack: Attack, now: number, lands: number, target: any)
+	attack.judged = true
+	if now - lands > AI.strikePrediction.lateSeconds or struck[id] ~= nil then
+		return
+	end
+	local attacker = dependencies().entities.get(id)
+	if target ~= nil and attacker ~= nil and target.kind == "Player" and exposedTo(attacker, target, attack) then
+		showStrike(attacker, target)
+	end
+end
+
+-- Judges the enemy blows due by the server's clock now (only `attackerId`'s when given). A word
+-- heard on a blow's own strike frame comes before that frame's Heartbeat would judge it: Roblox
+-- hears the network after the frame's render step (D-155), which already drew the strike. Judged
+-- first, the word finds the blow shown as on any later frame (D-355).
+local function judgeDue(attackerId: number?)
+	local now = serverClock()
+	local localId = judgesStrikes()
+	if now == nil or localId == nil then
+		return
+	end
+	local target: any = nil
+	for id, attack in attacks do
+		if attackerId ~= nil and id ~= attackerId then
+			continue
+		end
+		local lands = strikeLands(attack, now)
+		if lands ~= nil then
+			target = target or dependencies().entities.get(localId)
+			judgeStrike(id, attack, now, lands, target)
+		end
+	end
+end
+
+-- The server's word on an enemy's blow shown on its strike frame (D-355): the freeze on both
+-- bodies, while it is still on or holds on for this word, runs on to a stronger tier's length from
+-- the strike frame and holds the frame that first shows the number, never restarted; a freeze that
+-- already let go (the word came past the cap) is not frozen again. True while the freeze was
+-- still on (or waiting) for this word.
+local function holdShownWord(shown: Struck, striker: any, fighter: any, tier: string, frames: number): boolean
+	if shown.run ~= holdRun then
+		return false
+	end
+	local animator = animatorOf(fighter)
+	local remaining = holdRemaining(animator, shown.asked, shown.at)
+	if remaining <= 0 and not shown.waiting then
+		return false
+	end
+	-- What the freeze has shown since the strike frame: the fighter's rig's frozen steps since.
+	local held = heldSince(animator, shown.heldMark, shown.asked, remaining)
+	local upgraded = if tierRank(tier) > tierRank(shown.tier)
+		then heldFrames(frames) * ChoreoData.frameSeconds - held
+		else 0
+	-- The frame that first shows the number is held, whether the word came before this frame's
+	-- render step or after it.
+	local wordFrame = if shown.waiting then waitStep() else 0
+	shown.waiting = false
+	local left = math.max(upgraded, wordFrame)
+	if left > remaining + ChoreoData.pauseEpsilon then
+		animator:hitStop(left / ChoreoData.frameSeconds)
+		holdEnds = math.max(holdEnds, clock() + left)
+	end
+	if left > 0 and striker ~= nil and striker ~= fighter and not rushRunning(striker.id) then
+		animatorOf(striker):hitStop(left / ChoreoData.frameSeconds)
+	end
+	return true
+end
+
+-- Holds the bodies a word held on for (the attacker and its target, or a shown blow's fighter and
+-- striker) over the picture its moment just put on screen (D-350): a stronger tier's word that
+-- comes late inside the wait (a Kill at 0.12 s) starts its picture with the freeze nearly done,
+-- and the bodies would move on under its last frames. Each frame the picture still draws must
+-- show the struck pose: a step's pose is drawn impact.poseLagFrames later, so they hold the
+-- picture's frames less that many. A rig that counts steps holds that many steps (D-354): the
+-- overlay counts its looks in frames, and seconds at one clock's pace (the median frame) run out
+-- a frame or two early on a rig whose steps are uneven (a 45 fps cap's 1/60 and 2/60). One that
+-- cannot holds them at this screen's pace (deps.pace, the one the overlay counts its looks at). A
+-- longer hold already running is kept; no picture (Reduce flashing's dim, a spent flash budget)
+-- holds nothing more.
+local function holdOverPicture(rigs: { any })
+	local d = dependencies()
+	local read = method(d.impact, "hiddenFrames")
+	local hidden = if read ~= nil then read() else nil
+	if typeof(hidden) ~= "number" then
+		return
+	end
+	local frames = math.floor(hidden + 0.5) - ImpactData.poseLagFrames
+	if frames <= 0 then
+		return
+	end
+	local readPace = d.pace
+	local measured = if readPace ~= nil then readPace() else nil
+	local pace = if typeof(measured) == "number" and measured > 0 then measured else waitStep()
+	local seconds = frames * pace
+	local localId = d.localId()
+	for _, record in rigs do
+		local animator = animatorOf(record)
+		if animator == nil then
+			continue
+		end
+		local holdSteps = method(animator, "holdSteps")
+		if holdSteps ~= nil then
+			holdSteps(animator, frames)
+			if record.id == localId then
+				holdEnds = math.max(holdEnds, clock() + holdRemaining(animator, seconds, clock()))
+			end
+		elseif seconds > holdRemaining(animator, 0, clock()) + ChoreoData.pauseEpsilon then
+			animator:hitStop(seconds / ChoreoData.frameSeconds)
+			if record.id == localId then
+				holdEnds = math.max(holdEnds, clock() + seconds)
+			end
+		end
+	end
+end
+
 --- Judges, once, every known enemy blow whose strike frame the server's clock has reached, for the
 --- local fighter (F16, D-258), and takes back the blows shown that the server has not confirmed in
 --- ai.luau strikePrediction.confirmSeconds of play. Runs every Heartbeat; tests call it.
 function Replication.stepStrikes()
-	local d = dependencies()
 	local config = AI.strikePrediction
 	local seen = playClock()
 	for attackerId, shown in struck do
@@ -1374,29 +1888,127 @@ function Replication.stepStrikes()
 			takeBack(attackerId)
 		end
 	end
-	local now = serverClock()
-	local localId = d.localId()
-	if not config.enabled or now == nil or localId == nil or d.localDefence == nil then
+	judgeDue(nil)
+end
+
+-- True when the local fighter stands where a blow lands as far as this client can tell (D-258): in
+-- a state a blow lands on, and no guard or dodge let go within the grace (the server may hold it
+-- still).
+local function openToBlows(): boolean
+	local config = AI.strikePrediction
+	local defence = dependencies().localDefence
+	if defence == nil then
+		return false
+	end
+	local state, leftAt = defence()
+	if config.exposedStates[state] ~= true then
+		return false
+	end
+	return leftAt == nil or clock() - leftAt >= config.defenceGraceSeconds
+end
+
+-- A rush's blow on the local fighter shown before its word (D-258 for a rush): on the frame the drawn
+-- snout meets the body where the server's sweep will (RushDraw.contactAlong, the line's width and
+-- reach less ai.luau strikePrediction.marginStuds), so the flinch, the flash and the moment land on
+-- the body the snout reaches, not a latency or more after it. Once a rush: a word heard first, a
+-- body the line passes by, or one in a guard or a dodge leaves it to the word.
+rushBlow = function(id: number, rush: Rush)
+	local config = AI.strikePrediction
+	local attack = attacks[id]
+	if not config.enabled or attack == nil or not attack.rush or attack.judged == true or struck[id] ~= nil then
 		return
 	end
-	local target: any = nil
-	for id, attack in attacks do
-		if attack.judged == true or attack.rush or not (attack.strike > 0) then
-			continue
+	local def = attack.def
+	if def == nil or not RushDraw.running(rush.state) then
+		return
+	end
+	local d = dependencies()
+	local localId = d.localId()
+	local target = if localId ~= nil then d.entities.get(localId) else nil
+	local body = if target ~= nil and target.kind == "Player" then primaryOf(target.model) else nil
+	if body == nil then
+		return
+	end
+	local size = body.Size
+	local contact = RushDraw.contactAlong(
+		rush.state,
+		body.Position,
+		math.max(size.X, size.Z) / 2,
+		Combat.strikeLineWidth,
+		def.reach,
+		config.marginStuds
+	)
+	if contact == nil or rush.state.along < contact then
+		return
+	end
+	attack.judged = true
+	-- A body that came into the line well behind the snout (more than strikePrediction.lateSeconds of
+	-- the run's travel) is the word's to judge: the server's sweep may have passed it by.
+	if rush.state.along - contact <= rush.state.line.speed * config.lateSeconds and openToBlows() then
+		showStrike(rush.record, target)
+	end
+end
+
+-- True while a clip handle has not reached its clip's first damage frame (an Art in its stance:
+-- its blade light lit, its cut still ahead). False for a handle with no clip clock.
+local function beforeFirstWindow(handle: any): boolean
+	if typeof(handle) ~= "table" or typeof(handle.time) ~= "number" then
+		return false
+	end
+	local clip = handle.clip
+	if typeof(clip) ~= "table" or typeof(clip.events) ~= "table" then
+		return false
+	end
+	local first = math.huge
+	for _, event in clip.events do
+		if event.kind == "HitWindowOpen" then
+			first = math.min(first, event.time)
 		end
-		local lands = attack.since + attack.windUp + attack.strike + attack.paused
-		if now < lands then
-			continue
+	end
+	return handle.time < first
+end
+
+-- True for a handle whose clip lights the blade (an Art: its ActivationHold) and has reached that.
+local function lightsBlade(handle: any): boolean
+	local clip = if typeof(handle) == "table" then handle.clip else nil
+	if typeof(clip) ~= "table" or typeof(clip.events) ~= "table" or typeof(handle.time) ~= "number" then
+		return false
+	end
+	for _, event in clip.events do
+		if event.kind == "ActivationHold" and handle.time >= event.time then
+			return true
 		end
-		attack.judged = true
-		if now - lands > config.lateSeconds or struck[id] ~= nil then
-			continue
+	end
+	return false
+end
+
+-- A state the server sent takes the body from a remote player (D-422): the action its last
+-- ActionStarted played is let go, as CharacterController.takeArtAway lets the local fighter's go
+-- (D-340). An Art still in its stance comes down over combat.luau struckStanceBlendOut, inside
+-- the stagger, and its blade light fades now; what its fade crosses only closes, so it lights no
+-- trail (routeClipEvent, F5). Its clock stands from the word on (Mixer.hold, as Locomotion holds
+-- the local fighter's, D-294; D-423): the fade shows the pose it was let go in. With the clock running
+-- the stance swung on into its cut under the fade, the tip at 252 to 394 studs a second 10 to 11
+-- frames after the word. One past its first damage frame stops at the locomotion blend. A
+-- directional flinch rides the Additive layer and stops nothing, so without this the Art cut on
+-- through the stagger; the Stagger clip stopped it at its own 0.15 s blend.
+local function takeRemoteAction(record: any)
+	local handle = remoteActions[record.id]
+	remoteActions[record.id] = nil
+	if typeof(handle) ~= "table" or handle.done == true or handle.stopping == true then
+		return
+	end
+	local d = dependencies()
+	local animator = animatorOf(record)
+	if beforeFirstWindow(handle) then
+		animator:stop(handle, Combat.struckStanceBlendOut)
+		local mixer = if typeof(animator) == "table" then animator.mixer else nil
+		if typeof(mixer) == "table" and typeof(mixer.hold) == "function" then
+			mixer:hold(handle)
 		end
-		target = target or d.entities.get(localId)
-		local attacker = d.entities.get(id)
-		if target ~= nil and attacker ~= nil and target.kind == "Player" and exposedTo(attacker, target, attack) then
-			showStrike(attacker, target)
-		end
+		d.trails.activationLight(record.model, false, d.trailToken(record), true)
+	else
+		animator:stop(handle, Combat.locomotionBlendOut)
 	end
 end
 
@@ -1418,8 +2030,28 @@ function handlers.ActionStarted(payload: any)
 		return
 	end
 	local animator = animatorOf(record)
-	local handle = animator:play(payload.clipId, { serverTime = payload.serverTime, speed = payload.speed })
+	local options: { [string]: any } = { serverTime = payload.serverTime, speed = payload.speed }
+	if record.kind == "Player" then
+		-- A remote fighter's action takes the body from the one it cuts as the local fighter's
+		-- does (D-408, D-409): the cut clip holds its pose while the new one comes in as a snap.
+		-- Played over its own blend, the cut clip ran on under the fade into its strike and the
+		-- hand-over popped 24 to 31 degrees a frame after the snap.
+		options.handOver = true
+		local cut = remoteActions[record.id]
+		if typeof(cut) == "table" and cut.done ~= true then
+			options.cancels = { cut }
+			if cut.stopping ~= true and lightsBlade(cut) and beforeFirstWindow(cut) then
+				-- An Art cut in its stance: its clock stands, so no HitWindowOpen of its own puts
+				-- its blade light out (D-231); it fades now, as a cancelled hold's does.
+				d.trails.activationLight(record.model, false, d.trailToken(record), true)
+			end
+		end
+	end
+	local handle = animator:play(payload.clipId, options)
 	clipSpeeds[record.id] = { clipId = payload.clipId, speed = payload.speed }
+	if record.kind == "Player" then
+		remoteActions[record.id] = handle
+	end
 	replaySkipped(record, handle, payload.clipId)
 	local def, attackDef = attackDefOf(record, nil, payload.clipId)
 	if attackDef ~= nil and typeof(handle) == "table" then
@@ -1705,6 +2337,9 @@ function handlers.HitConfirmed(payload: any)
 	-- number and what it adds; one that guards or parries took the flinch back.
 	local shown: Struck? = nil
 	if localId ~= nil and payload.targetId == localId and payload.attackerId ~= nil then
+		if payload.parried ~= true and payload.guarded ~= true and payload.broke ~= true then
+			judgeDue(payload.attackerId)
+		end
 		shown = heardStrike(payload)
 	end
 	-- The pause the server gave the target's attack (D-172): a contact's provisional share gives way
@@ -1714,6 +2349,15 @@ function handlers.HitConfirmed(payload: any)
 	local upgrade = if predicted ~= nil
 		then (if Combat.hitStopFrames[tier] ~= nil then tierRank(tier) - tierRank(predicted.tier) else 0)
 		else 0
+	-- The contact's (or the shown blow's) cues have not played yet (D-342: they wait for the frame
+	-- that shows its pose, and this word came first): the word takes them over and plays the hit
+	-- whole, once, on that same frame.
+	local whole = takeCue(if predicted ~= nil then predicted.cue elseif shown ~= nil then shown.cue else nil)
+	-- Nothing of this hit has shown yet: the word plays all of it.
+	local alone = (predicted == nil and shown == nil) or whole
+	-- The freeze this word belongs to was still on, or waiting for it, when it came: a stronger
+	-- tier past it shows no picture and no punch (D-348).
+	local heldOn = false
 
 	if predicted ~= nil then
 		if attacker ~= nil and predicted.run == holdRun then
@@ -1725,12 +2369,13 @@ function handlers.HitConfirmed(payload: any)
 			local animator = animatorOf(attacker)
 			local remaining = holdRemaining(animator, predicted.asked, predicted.at)
 			if remaining > 0 or predicted.waiting then
-				-- What the hold has shown since the contact: all it asked for, less what is left.
-				local held = math.max(0, predicted.asked - remaining)
+				heldOn = true
+				-- What the hold has shown since the contact: the rig's frozen steps since (D-354).
+				local held = heldSince(animator, predicted.heldMark, predicted.asked, remaining)
 				local upgraded = if upgrade > 0 then heldFrames(frames) * ChoreoData.frameSeconds - held else 0
 				-- The frame that first shows the number is held, whether the word came before this
 				-- frame's render step or after it, on every rig that held on for the word.
-				local wordFrame = if predicted.waiting then beatStep else 0
+				local wordFrame = if predicted.waiting then waitStep() else 0
 				local left = math.max(upgraded, wordFrame)
 				if left > remaining + ChoreoData.pauseEpsilon then
 					animator:hitStop(left / ChoreoData.frameSeconds)
@@ -1761,16 +2406,23 @@ function handlers.HitConfirmed(payload: any)
 			if payload.attackerId == localId then
 				holdLocal(animatorOf(attacker), frames)
 			elseif attacker.kind == "Enemy" then
-				holdStriker(attacker, frames)
+				-- A blow shown on its strike frame froze its striker there (D-355): the word adds to
+				-- that freeze below (holdShownWord).
+				if shown == nil then
+					holdStriker(attacker, frames)
+				end
 			else
 				animatorOf(attacker):hitStop(heldFrames(frames))
 			end
 		end
 		if target ~= nil and target ~= attacker then
 			if payload.targetId == localId then
-				-- A blow shown on its strike frame holds nothing now: its flinch is under way (D-258).
+				-- A blow shown on its strike frame froze both bodies there (D-355): the word holds the
+				-- frame that first shows its number and what a stronger tier adds, on both.
 				if shown == nil then
 					holdLocal(animatorOf(target), frames)
+				else
+					heldOn = holdShownWord(shown, attacker, target, tier, frames)
 				end
 			elseif target.kind == "Enemy" then
 				holdTarget(target, frames)
@@ -1806,6 +2458,8 @@ function handlers.HitConfirmed(payload: any)
 		-- strike is neither.
 		art = if payload.artId ~= nil then true elseif attacker ~= nil and attacker.kind == "Player" then false else nil,
 		partner = if opener ~= nil then opener.model else nil,
+		-- A stronger tier than the one shown, come after that freeze let go (D-348).
+		late = not alone and not heldOn,
 	}
 	if payload.isSwitch then
 		switchOpeners[payload.targetId] = nil
@@ -1814,20 +2468,23 @@ function handlers.HitConfirmed(payload: any)
 	if payload.parried then
 		-- A perfect parry: the director's glint, inverted frame and ring; the spark burst and the
 		-- parrier's blade flash wait while that frame hides the world; a short shake; no number.
-		d.impact.hit(info)
-		local function accents()
-			if target ~= nil then
-				d.trails.flashWhite(target.model, Combat.highlightFlashFrames)
+		-- What the screen shows waits for the frame that shows the clash (D-342).
+		cueAtPose(function()
+			d.impact.hit(info)
+			local function accents()
+				if target ~= nil then
+					d.trails.flashWhite(target.model, Combat.highlightFlashFrames)
+				end
+				d.sparks.parry(position)
 			end
-			d.sparks.parry(position)
-		end
-		-- On the first frame after the inverted frame (the render step that takes it down).
-		d.impact.afterHidden(accents)
+			-- On the first frame after the inverted frame (the render step that takes it down).
+			d.impact.afterHidden(accents)
+			if involved then
+				d.camera.shake("Normal")
+			end
+		end)
 		if target ~= nil then
-			playReaction(target, "Parry")
-		end
-		if involved then
-			d.camera.shake("Normal")
+			playGuardReaction(target, "Parry")
 		end
 		Replication.hit:Fire(payload)
 		return
@@ -1841,17 +2498,12 @@ function handlers.HitConfirmed(payload: any)
 	elseif payload.crit then
 		kind = "Crit"
 	end
-	if payload.damage > 0 then
-		d.digits.show(position, payload.damage, kind)
-	end
+	-- The digit is the HP the hit took off (FK5): a kill shows the HP that was left, not its whole
+	-- damage, so the number matches what the bar lost.
+	local removed = if typeof(payload.hpRemoved) == "number" then payload.hpRemoved else payload.damage
 	if target ~= nil then
-		if predicted == nil and shown == nil and d.impact.ownsHighlight(info) ~= true and not breaksGuard then
-			-- FinalHit and Kill flash it themselves, white, after the impact frames. The blow that
-			-- breaks a guard leaves the guard break's red fill (StateChanged GuardBroken) showing.
-			d.outline.flash(target.model, "SystemWhite", Combat.highlightFlashFrames)
-		end
 		if payload.guarded then
-			playReaction(target, "GuardHit")
+			playGuardReaction(target, "GuardHit")
 		end
 		local direction = payload.staggerDirection
 		if target.kind == "Enemy" and direction ~= nil and not payload.killed and not payload.broke then
@@ -1869,29 +2521,78 @@ function handlers.HitConfirmed(payload: any)
 			end
 		end
 	end
-	if involved and (predicted == nil or upgrade > 0) then
-		-- The hit that breaks a player's guard ticks Final (the server keeps its hit-stop tier). A
-		-- contact's upgrade shakes and ticks at the stronger tier; the contact gave the nudge.
-		local tick = if breaksGuard and tier == "Normal" then "Final" else tier
-		local sweepKey = if payload.attackerId ~= nil then payload.attackerId else NO_ATTACKER
-		feelHit(sweepKey, position, tier, tick, predicted == nil)
-	end
-	if payload.targetId == localId and payload.damage > 0 then
-		d.hud.flashHp()
-	end
-	-- The hit's cue (block, basic, crit, final, kill, Switch land), glint, crescent, line, frames;
-	-- after a contact, only what the server's stronger tier adds to the moment it played.
-	if shown ~= nil then
-		-- Only what the word adds to the moment shown on the strike frame (a kill's), D-258.
-		local moment = shown.moment
-		if moment ~= nil then
-			d.impact.hit(info, moment)
+	-- What the screen shows of the hit, on the first frame that shows the pose its holds froze
+	-- (D-342): the number, the white flash, the camera and the tick, the HP flash and the moment.
+	cueAtPose(function()
+		if removed > 0 then
+			d.digits.show(position, removed, kind)
 		end
-	elseif predicted == nil then
-		d.impact.hit(info)
-	elseif upgrade > 0 then
-		d.impact.hit(info, predicted.moment)
-	end
+		if target ~= nil and alone and d.impact.ownsHighlight(info) ~= true and not breaksGuard then
+			-- FinalHit and Kill flash it themselves, white, after the impact frames. The blow that
+			-- breaks a guard leaves the guard break's red fill (StateChanged GuardBroken) showing.
+			d.outline.flash(target.model, "SystemWhite", Combat.highlightFlashFrames)
+		end
+		if involved and (predicted == nil or whole or upgrade > 0) then
+			-- The hit that breaks a player's guard ticks Final (the server keeps its hit-stop tier). A
+			-- contact's upgrade shakes and ticks at the stronger tier; the contact gave the nudge.
+			local tick = if breaksGuard and tier == "Normal" then "Final" else tier
+			local sweepKey = if payload.attackerId ~= nil then payload.attackerId else NO_ATTACKER
+			if predicted == nil or whole then
+				-- A hit shown whole holds the shot's follow with the bodies (D-357).
+				holdShot(
+					heldFrames(Combat.hitStopFrames[tier] or Combat.hitStopFrames.Normal) * ChoreoData.frameSeconds
+				)
+			end
+			feelHit(sweepKey, position, tier, tick, predicted == nil or whole)
+		end
+		if payload.targetId == localId and payload.damage > 0 then
+			d.hud.flashHp()
+		end
+		-- The hit's cue (block, basic, crit, final, kill, Switch land), glint, crescent, line, frames;
+		-- after a contact, only what the server's stronger tier adds to the moment it played.
+		local played = false
+		if alone then
+			d.impact.hit(info)
+			played = true
+		elseif shown ~= nil then
+			-- Only what the word adds to the moment shown on the strike frame (a kill's), D-258.
+			local moment = shown.moment
+			if moment ~= nil then
+				d.impact.hit(info, moment)
+				played = true
+			end
+		elseif predicted ~= nil and upgrade > 0 then
+			d.impact.hit(info, predicted.moment)
+			played = true
+		end
+		-- A word that joined a freeze still on, or waiting for it, holds its bodies over the picture
+		-- its moment put up (D-350).
+		if played and heldOn then
+			local rigs: { any } = {}
+			if predicted ~= nil then
+				if attacker ~= nil then
+					table.insert(rigs, attacker)
+				end
+				local attack = if target ~= nil then attacks[target.id] else nil
+				if
+					target ~= nil
+					and target ~= attacker
+					and not rushRunning(target.id)
+					and not (attack ~= nil and attackOpen(attack))
+				then
+					table.insert(rigs, target)
+				end
+			else
+				if target ~= nil then
+					table.insert(rigs, target)
+				end
+				if attacker ~= nil and attacker ~= target and not rushRunning(attacker.id) then
+					table.insert(rigs, attacker)
+				end
+			end
+			holdOverPicture(rigs)
+		end
+	end)
 	Replication.hit:Fire(payload)
 end
 
@@ -1923,10 +2624,21 @@ function handlers.StateChanged(payload: any)
 			end
 		end
 	end
+	if payload.state == "Stagger" and isLocal then
+		-- The Stagger of a blow heard on its strike frame: the blow shows first (D-355).
+		judgeDue(nil)
+	end
+	if STANCE_TAKEN[payload.state] == true and not isLocal then
+		-- Before the reaction plays, so its own blend stops nothing the stance's fade already holds.
+		takeRemoteAction(record)
+	end
+	-- The flinch of a blow whose word came first waits for this, the target's next state word.
+	local afterWord = wordFlinch[record.id]
+	wordFlinch[record.id] = nil
 	local clipName = stateClipName(payload.state, payload.direction, isLocal)
 	if clipName ~= nil then
-		-- The flinch of a blow shown on its strike frame plays on (D-258).
-		if not (payload.state == "Stagger" and flinchShown(record.id)) then
+		-- The flinch of a blow shown on its strike frame plays on (D-258, D-355).
+		if not (payload.state == "Stagger" and flinchShown(record.id, afterWord)) then
 			playReaction(record, clipName)
 		end
 	elseif payload.state ~= "Dead" then
@@ -2125,12 +2837,14 @@ function Replication.stepWords()
 end
 
 --- Plays one of the local fighter's predicted contacts (ContactPredictor, issue 4) on the frame
---- its blade touched the enemy: the hit-stop on both rigs at the contact's tier, the white flash
+--- its blade touched the enemy: the hit-stop on both rigs at the contact's tier from this step on,
+--- and on the first frame that shows the contact pose (the next one, D-342) the white flash
 --- (unless the moment owns it), the camera nudge and shake, the hit-stop tick and the director's
 --- moment (its cue, accents and impact frames). No number and no HP change: those wait for the
---- server's HitConfirmed, which then plays only what its tier adds. A contact the server never
---- confirms shows no number. False (nothing played) when this client does not track the local
---- fighter or the target yet: the confirmation then plays the hit whole.
+--- server's HitConfirmed, which then plays only what its tier adds (or the hit whole when it comes
+--- before the contact's cues played). A contact the server never confirms shows no number. False
+--- (nothing played) when this client does not track the local fighter or the target yet: the
+--- confirmation then plays the hit whole.
 function Replication.contact(contact: any): boolean
 	local d = dependencies()
 	local localId = d.localId()
@@ -2142,6 +2856,7 @@ function Replication.contact(contact: any): boolean
 	local tier = if Combat.hitStopFrames[contact.tier] ~= nil then contact.tier else "Normal"
 	local frames = Combat.hitStopFrames[tier]
 	local position: Vector3 = contact.position
+	local heldMark = heldCountOf(animatorOf(attacker))
 	local run = holdLocal(animatorOf(attacker), frames)
 	-- The target's hold stands for the pause the server will give its attack until the server says
 	-- (D-172); a launched rush is not held (the server holds nothing of it).
@@ -2169,14 +2884,9 @@ function Replication.contact(contact: any): boolean
 		art = contact.artId ~= nil,
 		partner = nil,
 	}
-	if d.impact.ownsHighlight(info) ~= true then
-		d.outline.flash(target.model, "SystemWhite", Combat.highlightFlashFrames)
-	end
-	feelHit(localId, position, tier, tier, true)
-	local moment = d.impact.hit(info)
 	local seen = playClock()
 	expirePredictions(seen)
-	table.insert(predictions, {
+	local prediction: Prediction = {
 		targetId = contact.targetId,
 		windowIndex = contact.windowIndex,
 		artId = contact.artId,
@@ -2185,13 +2895,34 @@ function Replication.contact(contact: any): boolean
 		seen = seen,
 		run = run,
 		tier = tier,
-		moment = if typeof(moment) == "string" then moment else nil,
+		moment = nil,
 		allowance = allowance,
 		attack = attack,
 		asked = heldFrames(frames) * ChoreoData.frameSeconds,
+		heldMark = heldMark,
 		-- Its hold waits for its word only on a client that ticks Heartbeat (holdForWords).
 		waiting = playTicking,
-	})
+		cue = nil,
+	}
+	table.insert(predictions, prediction)
+	-- The rigs hold from this step on; what the screen shows of the hit waits for the frame that
+	-- draws the pose this step wrote (D-342).
+	prediction.cue = cueAtPose(function()
+		if d.impact.ownsHighlight(info) ~= true then
+			d.outline.flash(target.model, "SystemWhite", Combat.highlightFlashFrames)
+		end
+		-- The shot's follow holds with the bodies from this frame, for the hold and its wait for the
+		-- word (D-357); asked before the nudge, which plays on it.
+		holdShot(prediction.asked)
+		-- A kill it proved on the target the shot is locked on is the death's still shot from here
+		-- (D-358): the word's holdLock takes the shot still (D-323), and nothing moves it before
+		-- that. Its Kill shake moved the camera 0.37 to 0.73 studs a frame on the frozen frames
+		-- until the word (1 to 6 of them at 17 to 100 ms), then stopped dead.
+		local still = tier == "Kill" and shotLockedOn(target.model)
+		feelHit(localId, position, tier, tier, not still, not still)
+		local moment = d.impact.hit(info)
+		prediction.moment = if typeof(moment) == "string" then moment else nil
+	end)
 	-- The server's word for this hit, held for its key (D-267), plays on it now: it finds the
 	-- contact just played and adds only what its tier adds.
 	for index, word in heldWords do
@@ -2298,6 +3029,27 @@ local function takenAway(record: any, clipId: string): boolean
 	return found
 end
 
+-- Stretches (or rests) a rig's blade for its smear on the first rendered frame that draws the pose
+-- of the step its event fired in (deps.atStepPose, D-345): a Part's size shows on the frame it is
+-- set, the step's pose a frame later (impact.poseLagFrames), so set at once the stretch led the
+-- snap by a frame (on the last anticipation frame and the first snap frame, the second drawn at
+-- rest). A rig let go before that frame keeps the rest size Replication.unwatch gave it.
+local function smearOnPose(record: any, on: boolean, axis: string?)
+	local d = dependencies()
+	local gate = d.atStepPose
+	if gate == nil then
+		d.smear.apply(record.model, on, axis)
+		return
+	end
+	local watching = watched[record.id]
+	gate(function()
+		if watching ~= nil and watched[record.id] ~= watching then
+			return
+		end
+		d.smear.apply(record.model, on, axis)
+	end)
+end
+
 --- Routes one clip event on a rig to the FX and audio packages (trails, smear, activation light,
 --- footsteps, clip sounds). `jumped`: a render stall's gap crossed it (D-132); only what it closes
 --- runs, as for a clip taken away (F5).
@@ -2323,11 +3075,11 @@ function Replication.routeClipEvent(record: any, clipId: string, event: any, jum
 		-- The smear frames run the trail at full width (section 10 beat 3) on top of any Art or
 		-- Basic kind; Trails keeps the trail lit while any kind is on.
 		if starts then
-			d.smear.apply(model, true, if event.data ~= nil then event.data.axis else nil)
+			smearOnPose(record, true, if event.data ~= nil then event.data.axis else nil)
 			d.trails.setActive(model, true, "Smear")
 		end
 	elseif kind == "SmearOff" then
-		d.smear.apply(model, false, if event.data ~= nil then event.data.axis else nil)
+		smearOnPose(record, false, if event.data ~= nil then event.data.axis else nil)
 		d.trails.setActive(model, false, "Smear")
 	elseif kind == "PostMotionStart" then
 		d.trails.activationLight(model, false, d.trailToken(record))
@@ -2458,8 +3210,11 @@ function Replication.unwatch(record: any)
 	attacks[record.id] = nil
 	launches[record.id] = nil
 	stateClips[record.id] = nil
+	guardReactions[record.id] = nil
+	wordFlinch[record.id] = nil
 	trailKinds[record.id] = nil
 	clipSpeeds[record.id] = nil
+	remoteActions[record.id] = nil
 	switchOpeners[record.id] = nil
 	lastNudges[record.id] = nil
 	lastTicks[record.id] = nil
@@ -2473,11 +3228,13 @@ end
 function Replication.bind(newDeps: Deps)
 	deps = newDeps
 	table.clear(stateClips)
+	table.clear(guardReactions)
 	table.clear(watched)
 	table.clear(drivers)
 	table.clear(trailKinds)
 	table.clear(switchOpeners)
 	table.clear(clipSpeeds)
+	table.clear(remoteActions)
 	table.clear(lastNudges)
 	table.clear(lastTicks)
 	table.clear(deathVocals)
@@ -2493,22 +3250,39 @@ function Replication.bind(newDeps: Deps)
 	table.clear(attacks)
 	table.clear(launches)
 	table.clear(struck)
+	table.clear(wordFlinch)
 	holdRun = 0
 	holdEnds = -math.huge
 	playSeconds = 0
 	playWall = nil
 	beatAt = nil
 	beatStep = ChoreoData.frameSeconds
+	frameStep = ChoreoData.frameSeconds
 	playTicking = typeof(newDeps.onHeartbeat) == "function"
+	framed = playTicking and typeof(newDeps.onFrame) == "function"
+	if framed then
+		local onFrame = newDeps.onFrame :: any
+		onFrame(function(dt: number?)
+			-- Right after the local fighter's step and its contacts, before any reader of a hold
+			-- (D-347): a hold still waiting for its word goes on for the next frame here, so the
+			-- frame it froze still says it holds (Choreo isPaused) and the wait never shows a gap.
+			frameStep = if typeof(dt) == "number" and dt > 0 then dt else ChoreoData.frameSeconds
+			holdForWords(frameStep)
+		end)
+	end
 	if playTicking then
 		local onHeartbeat = newDeps.onHeartbeat :: any
 		onHeartbeat(function(dt: number?)
-			-- The step this Heartbeat closes: the engine's, else the clock's since the last one.
+			-- The frame this Heartbeat closes: the clock's since the last one, else the engine's step.
+			-- The engine's is the simulation's, not the frame's: Studio steps the simulation in whole
+			-- 1/240 s substeps, so a 60 fps frame's Heartbeat may say 1/240, 1/120 or 1/40 s
+			-- (the PC's recorder dry run), and a hold held on for a step under half the next frame
+			-- lets that frame go (D-346).
 			local now = clock()
 			local last = beatAt
-			beatStep = if typeof(dt) == "number" and dt > 0
-				then dt
-				elseif last ~= nil and now > last then now - last
+			beatStep = if last ~= nil and now > last
+				then now - last
+				elseif typeof(dt) == "number" and dt > 0 then dt
 				else ChoreoData.frameSeconds
 			beatAt = now
 			tickPlay()
@@ -2516,8 +3290,11 @@ function Replication.bind(newDeps: Deps)
 			Replication.stepStrikes()
 			-- The server's words held for their strike's key (D-267).
 			Replication.stepWords()
-			-- Contacts' holds waiting for their words (D-312).
-			holdForWords(beatStep)
+			-- Contacts' holds waiting for their words (D-312), unless they go on in the frame's
+			-- own step (D-347).
+			if not framed then
+				holdForWords(beatStep)
+			end
 		end)
 	end
 	deathCount = 0
@@ -2627,6 +3404,34 @@ local function keyAheadOf(controller: any): ((windowIndex: number, artId: string
 	return if typeof(awaitsKey) == "function" then awaitsKey else nil
 end
 
+-- FrameClock.atPose (D-342), or nil when FrameClock is missing (a stub): the cues then play at once.
+local function atPoseOf(frameClock: any): ((fn: () -> ()) -> () -> ())?
+	if typeof(frameClock) ~= "table" or Siblings.isStub(frameClock) then
+		return nil
+	end
+	local atPose = rawget(frameClock, "atPose")
+	return if typeof(atPose) == "function" then atPose else nil
+end
+
+-- FrameClock's function `name` (atStepPose, pace), or nil when FrameClock is missing (a stub).
+local function frameClockFn(frameClock: any, name: string): any
+	if typeof(frameClock) ~= "table" or Siblings.isStub(frameClock) then
+		return nil
+	end
+	local fn = rawget(frameClock, name)
+	return if typeof(fn) == "function" then fn else nil
+end
+
+-- CharacterController.afterContacts (D-347), or nil when the controller is missing (a stub): the
+-- holds that wait for their words then go on at the Heartbeat.
+local function afterContactsOf(controller: any): ((fn: (dt: number) -> ()) -> ())?
+	if typeof(controller) ~= "table" or Siblings.isStub(controller) then
+		return nil
+	end
+	local afterContacts = rawget(controller, "afterContacts")
+	return if typeof(afterContacts) == "function" then afterContacts else nil
+end
+
 --- Binds the real modules (missing siblings become no-op stubs) and subscribes to the remotes.
 function Replication.start()
 	local Client = script.Parent.Parent
@@ -2638,6 +3443,7 @@ function Replication.start()
 	local choreo = Siblings.load(Client, "choreo.Choreo")
 	local clipLibrary = Siblings.load(Client, "choreo.ClipLibrary")
 	local controller = Siblings.load(script.Parent, "CharacterController")
+	local frameClock = Siblings.load(Client, "fx.FrameClock")
 	Replication.bind({
 		net = Net.client(),
 		entities = EntityTracker,
@@ -2684,10 +3490,18 @@ function Replication.start()
 		onHeartbeat = function(fn)
 			game:GetService("RunService").Heartbeat:Connect(fn)
 		end,
+		-- A hit's cues on the first frame that shows its contact pose (D-342).
+		atPose = atPoseOf(frameClock),
+		atStepPose = frameClockFn(frameClock, "atStepPose"),
+		pace = frameClockFn(frameClock, "pace"),
+		-- The waits for words right after the controller's contacts (D-347).
+		onFrame = afterContactsOf(controller),
 		serverNow = function(): number
 			return workspace:GetServerTimeNow()
 		end,
 		worldCast = worldCast,
+		-- Physics moves a replicated root by its velocity before the frame draws the rigs' pose.
+		rootAhead = Replication.rootAhead,
 		-- Loaded by name: CharacterController requires this module.
 		localDefence = defenceOf(controller),
 		keyAhead = keyAheadOf(controller),

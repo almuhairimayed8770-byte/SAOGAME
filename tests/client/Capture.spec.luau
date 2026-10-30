@@ -57,6 +57,18 @@ local function shotIndex(id: string): number
 	error("no shot " .. id)
 end
 
+-- A take's last counted frame at `dt` a frame (FK3): the first whose elapsed time, summed frame by
+-- frame as the panel sums it, reaches `seconds`. The take ends on the frame after it.
+local function lastCountedFrame(seconds: number, dt: number): number
+	local last = 0
+	local sum = 0
+	while sum < seconds do
+		sum += dt
+		last += 1
+	end
+	return last
+end
+
 -- The staging server as the panel meets it (DevStage.server.luau's handler): one staging at a
 -- time (a request while one runs is refused busy), and, when paced, one request a player per
 -- 1 / requestsPerSecond (a faster one is refused before anything else). A staging takes
@@ -73,9 +85,10 @@ type Server = {
 }
 
 -- The local character as the walk meets it: a root that moves SPEED studs a second along each
--- frame's Humanoid:Move (SPRINT while the sprint is held; none: it stops, after `carry` studs more
--- along its last move once, and `slide` studs more after every stop), standing on the field, the
--- ledge's top or its ramp; `stuck` keeps it where it is.
+-- frame's Humanoid:Move, times the move's length up to 1 (a part-pushed stick walks slower; SPRINT
+-- while the sprint is held, the Humanoid's WalkSpeed with it; none: it stops, after `carry` studs
+-- more along its last move once, and `slide` studs more after every stop), standing on the field,
+-- the ledge's top or its ramp; `stuck` keeps it where it is.
 type Body = {
 	root: any,
 	humanoid: any,
@@ -97,6 +110,9 @@ type World = {
 	counter: () -> any,
 	counterText: () -> string,
 	prompt: () -> any,
+	panel: () -> any,
+	-- Runs `count` rendered frames of `dt` seconds each (frames runs them at 1/60).
+	framesAt: (count: number, dt: number) -> (),
 	status: () -> string,
 	invokes: { { action: string, shotId: string?, at: number } },
 	reply: { [string]: any },
@@ -113,6 +129,11 @@ type World = {
 	replication: any,
 	-- The client's latency lead the fake Telegraphs reports (Telegraphs.glintLead, D-289).
 	lead: { seconds: number },
+	-- The local body's state as the fake character controller reports it (CharacterController.state).
+	bodyState: { value: string },
+	-- With a server clock (Options.clockLag): how long a request takes to reach the staging server;
+	-- each staging reply carries the server's clock at its receipt (receivedAt).
+	link: { up: number },
 	key: (name: string) -> (),
 	frames: (count: number) -> (),
 	seconds: (seconds: number) -> (),
@@ -128,7 +149,9 @@ type World = {
 	steps: { { name: string, priority: number, fn: (number) -> () } },
 }
 
-type Options = { remote: boolean?, capture: any }
+-- `clockLag`: the client has a server clock (workspace:GetServerTimeNow) that many seconds behind
+-- the server's, and the staging server stamps each reply with its clock at receipt.
+type Options = { remote: boolean?, capture: any, clockLag: number? }
 
 -- The floor under (x, z): the ledge's top, its ramp, or the field.
 local function floorAt(x: number, z: number): number
@@ -153,7 +176,7 @@ local function stepBody(body: Body, dt: number)
 	local speed = if body.sprinting then SPRINT else SPEED
 	if direction ~= nil and not body.stuck then
 		local flat = Vector3.new(direction.X, 0, direction.Z)
-		step = if flat.Magnitude > 0 then flat.Unit * speed * dt else Vector3.zero
+		step = if flat.Magnitude > 0 then flat.Unit * speed * math.min(flat.Magnitude, 1) * dt else Vector3.zero
 		body.lastDirection = flat
 		body.coast = body.slide
 	elseif direction == nil and body.carry + body.coast > 0 and body.lastDirection ~= nil then
@@ -204,6 +227,17 @@ local function load(options: Options?): World
 	local invokes: { { action: string, shotId: string?, at: number } } = {}
 	local reply: { [string]: any } = { ok = true, targetId = 21, ids = { 21 } }
 	local server: Server = { paced = false, stagingSeconds = 0, busyUntil = -math.huge, released = 0 }
+	local link = { up = 0 }
+	-- The reply as it leaves the server: with a server clock, stamped with the server's clock at its
+	-- receipt (DevStage's receivedAt), a request `link.up` after it left the client.
+	local function stamped(answer: any, receivedAt: number): any
+		if opts.clockLag == nil or typeof(answer) ~= "table" then
+			return answer
+		end
+		local copy = table.clone(answer)
+		copy.receivedAt = receivedAt
+		return copy
+	end
 	local remote = {
 		ClassName = "RemoteFunction",
 		IsA = function(_self: any, className: string): boolean
@@ -211,15 +245,16 @@ local function load(options: Options?): World
 		end,
 		InvokeServer = function(_self: any, action: string, shotId: string?): any
 			table.insert(invokes, { action = action, shotId = shotId, at = clock.now })
+			local receivedAt = clock.now + link.up
 			if server.paced then
 				local last = server.lastAt
 				if last ~= nil and clock.now - last < 1 / CAPTURE.stage.requestsPerSecond then
-					return { ok = false, error = "too many requests" }
+					return stamped({ ok = false, error = "too many requests" }, receivedAt)
 				end
 				server.lastAt = clock.now
 			end
 			if clock.now < server.busyUntil then
-				return { ok = false, error = "busy: a staging is still running" }
+				return stamped({ ok = false, error = "busy: a staging is still running" }, receivedAt)
 			end
 			if action == "stage" then
 				server.busyUntil = clock.now + server.stagingSeconds
@@ -231,12 +266,12 @@ local function load(options: Options?): World
 				-- The reply comes when the staging is done.
 				clock.now = math.max(clock.now, server.busyUntil)
 				local answer = server.stage
-				return if answer ~= nil then answer(shotId :: string) else world.reply
+				return stamped(if answer ~= nil then answer(shotId :: string) else world.reply, receivedAt)
 			end
 			if action == "release" then
 				server.released += 1
 			end
-			return { ok = true }
+			return stamped({ ok = true }, receivedAt)
 		end,
 	}
 	local realReplicated = Harness.game():GetService("ReplicatedStorage")
@@ -271,6 +306,7 @@ local function load(options: Options?): World
 		},
 		humanoid = {
 			HipHeight = HIP,
+			WalkSpeed = SPEED,
 			Move = function(_self: any, direction: Vector3, relative: boolean?)
 				table.insert(body.moves, { direction = direction, relative = relative, at = clock.now })
 				body.pending = direction
@@ -320,6 +356,7 @@ local function load(options: Options?): World
 			table.insert(handled, { action = action, state = state.Name, at = clock.now })
 			if action == WALK.sprintAction then
 				body.sprinting = state == Enum.UserInputState.Begin
+				body.humanoid.WalkSpeed = if body.sprinting then SPRINT else SPEED
 			end
 		end,
 	}
@@ -345,9 +382,13 @@ local function load(options: Options?): World
 			error("no clip " .. id)
 		end,
 	}
+	local bodyState = { value = "Idle" }
 	local character = {
 		setCaptureTimeScale = function(_scale: number): boolean
 			return true
+		end,
+		state = function(): string
+			return bodyState.value
 		end,
 		cancelArt = function(slot: number)
 			table.insert(cancels, { slot = slot, handledBefore = #handled })
@@ -411,6 +452,18 @@ local function load(options: Options?): World
 		end,
 	}
 	env.workspace = workspaceFolder
+	local clockLag = opts.clockLag
+	if clockLag ~= nil then
+		-- The client's Workspace with its server clock (the fight stages no walk, so no disc).
+		env.workspace = {
+			GetAttribute = function(_self: any, name: string): any
+				return workspaceFolder:GetAttribute(name)
+			end,
+			GetServerTimeNow = function(_self: any): number
+				return clock.now - clockLag
+			end,
+		}
+	end
 	env.task = {
 		spawn = function(fn: (...any) -> (), ...: any)
 			fn(...)
@@ -448,6 +501,19 @@ local function load(options: Options?): World
 		prompt = function(): any
 			return find("Prompt")
 		end,
+		panel = function(): any
+			return find("Panel")
+		end,
+		framesAt = function(count: number, dt: number)
+			for _ = 1, count do
+				clock.now += dt
+				for _, step in steps do
+					step.fn(dt)
+				end
+				stepBody(body, dt)
+				renderStepped:Fire(dt)
+			end
+		end,
 		status = function(): string
 			local panel = find("Panel")
 			local best = ""
@@ -470,6 +536,8 @@ local function load(options: Options?): World
 		userInput = userInput,
 		replication = replication,
 		lead = lead,
+		bodyState = bodyState,
+		link = link,
 		key = function(name: string)
 			inputBegan:Fire(
 				{ UserInputType = Enum.UserInputType.Keyboard, KeyCode = (Enum.KeyCode :: any)[name] },
@@ -669,9 +737,9 @@ describe("Capture: between takes (D-297)", function()
 		world.seconds(shot.seconds + 0.05)
 		local holds = asksOf(world, "hold")
 		expect(#holds).toBe(1)
-		-- Asked on the frame the take stopped, not later.
+		-- Asked on the frame the take stopped, not later: the frame after its last counted frame (FK3).
 		expect(holds[1].at - started).toBeGreaterThan(shot.seconds - 1e-6)
-		expect(holds[1].at - started).toBeLessThan(shot.seconds + 2 / 60)
+		expect(holds[1].at - started).toBeCloseTo((lastCountedFrame(shot.seconds, FRAME) + 1) * FRAME, 1e-6)
 		-- Stopped short with K, K: held at once too.
 		local again = load()
 		goTo(again, shot.id)
@@ -837,6 +905,40 @@ describe("Capture: the take (F12)", function()
 		expect(world.status():find("Shot done", 1, true)).never.toBeNil()
 		expect(world.stages[#world.stages].view).toBeNil()
 	end)
+
+	it(
+		"keeps the panel hidden until the frame after the take's last counted frame, at 30, 60 and 144 fps (FK3)",
+		function()
+			local shot = CAPTURE.shots[shotIndex("enemy-kobold-overhead")]
+			for _, fps in { 30, 60, 144 } do
+				local dt = 1 / fps
+				local last = lastCountedFrame(shot.seconds, dt)
+				local world = load()
+				goTo(world, shot.id)
+				world.key(KEYS.startCountdown)
+				world.untilRecording()
+				-- Frame 0: the counter up, the panel hidden.
+				expect(world.counter().Visible).toBe(true)
+				expect(world.panel().Visible).toBe(false)
+				for frame = 1, last do
+					world.framesAt(1, dt)
+					-- Every counted frame is drawn with its counter and without the panel, the last too.
+					expect(world.counter().Visible).toBe(true)
+					expect(world.counterText():match("f (%d+)")).toBe(tostring(frame))
+					expect(world.panel().Visible).toBe(false)
+				end
+				-- The shot's length in frames, or one more where the summed frames fall a hair short of it.
+				expect(last >= math.round(shot.seconds * fps)).toBe(true)
+				expect(last <= math.round(shot.seconds * fps) + 1).toBe(true)
+				-- The frame after it: the take is over, marked done, the panel back.
+				world.framesAt(1, dt)
+				expect(world.counter().Visible).toBe(false)
+				expect(world.prompt().Visible).toBe(false)
+				expect(world.panel().Visible).toBe(true)
+				expect(world.status():find("Shot done", 1, true)).never.toBeNil()
+			end
+		end
+	)
 
 	it("asks before K stops a take short of its target, and never marks that take done", function()
 		local world = load()
@@ -1496,6 +1598,155 @@ describe("Capture: the fight's auto-perform (CF)", function()
 	end)
 end)
 
+-- EF: shot 1 and the parry shot in Studio (build cebade4). At no lag the fight gave 7 hits (no
+-- basic, no Sharp Nail, Rising Arc after the fourth parry); at 0.05 s the sixth overhead got a basic
+-- instead of a guard and hit the player; at 0.1 s the parry shot's guard reached the server after
+-- the hit. Each case below failed at cebade4.
+local function guardEntry(): any
+	return fightEntry(function(entry: any): boolean
+		return entry.onClip == Overhead.id
+	end)
+end
+
+local function basicsEntry(): any
+	return fightEntry(function(entry: any): boolean
+		return entry.action == "BasicAttack" and entry.every ~= nil
+	end)
+end
+
+local function before(list: { any }, at: number): { any }
+	local kept = {}
+	for _, entry in list do
+		if entry.at < at then
+			table.insert(kept, entry)
+		end
+	end
+	return kept
+end
+
+describe("Capture: the fight's auto-perform in Studio (EF)", function()
+	-- Step 25(b): the guard's `to` (19 s) dropped the sixth overhead's guard (heard late at 0.05 s);
+	-- nothing waited, so the standing basic swung into the axe. The guard answers every overhead the
+	-- take shows; the chain's Art keeps its own `to`, so no Art launches past the cut (D-320).
+	it("guards an overhead heard past the chain's `to`, with no basic swung into it", function()
+		local world, start = fightTake()
+		local guard, basics = guardEntry(), basicsEntry()
+		local art = guard.chain[1]
+		expect(art.to).never.toBeNil()
+		local voice = Overhead.events[1]
+		local guardIn = openOf(Overhead) - voice.time - guard.lead
+		koboldAt(world, basics.within - 1)
+		untilElapsed(world, start, art.to + 0.3 - guardIn)
+		local heardAt = world.clock.now
+		world.replication.clipEvent:Fire(world.kobold, Overhead.id, voice, false)
+		world.seconds(guardIn + 0.1)
+		local downs = handledOf(world, "Guard", "Begin", heardAt)
+		expect(#downs).toBe(1)
+		expect(downs[1].at - heardAt).toBeCloseTo(guardIn, 2 * FRAME)
+		expect(#before(handledOf(world, "BasicAttack", "Begin", heardAt + FRAME / 2), downs[1].at)).toBe(0)
+		world.seconds(2)
+		for _, action in art.cycle do
+			for _, entry in handledOf(world, action, "Begin") do
+				expect(entry.at - start).toBeLessThanOrEqual(art.to + 1e-6)
+			end
+		end
+	end)
+
+	-- Step 23: a basic pressed while the body plays an Art does nothing, yet it spent the rule's
+	-- beat; the body's next free moment waited out `every`, the next overhead was heard first, and no
+	-- basic landed in the take. The rule presses only when the body could start a basic.
+	it("presses a standing basic only when the body could start one, on its first free frame", function()
+		local world = fightTake()
+		local basics = basicsEntry()
+		koboldAt(world, basics.within - 1)
+		world.bodyState.value = "Art"
+		world.seconds(1)
+		world.bodyState.value = "Holding"
+		world.seconds(0.5)
+		expect(#handledOf(world, "BasicAttack", "Begin")).toBe(0)
+		world.bodyState.value = "Idle"
+		local freeAt = world.clock.now
+		world.frames(1)
+		expect(#handledOf(world, "BasicAttack", "Begin", freeAt)).toBe(1)
+		-- Mid-basic the chain goes on at `every`.
+		world.bodyState.value = "Basic"
+		world.seconds(basics.every + 2 * FRAME)
+		expect(#handledOf(world, "BasicAttack", "Begin", freeAt)).toBe(2)
+	end)
+
+	-- Step 23: the boar's crouch was heard after the third chain's Art key had gone down. The chain
+	-- dropped, its Art stayed held, the dodge cleared the hold and the Art never launched, yet its
+	-- turn of the cycle was spent: no Sharp Nail, and every later parry pressed the Art after the one
+	-- meant. A reaction that drops the chain cancels the Art it holds (its key comes up launching
+	-- nothing, D-290) and gives its turn back.
+	it("cancels the chain's held Art when a reaction drops the chain, and gives its turn back", function()
+		local Input = Harness.load("src/shared/data/input")
+		local world = fightTake()
+		koboldAt(world, 20)
+		local art = guardEntry().chain[1]
+		local first = art.cycle[1]
+		local voice = Overhead.events[1]
+		world.seconds(0.5)
+		world.replication.clipEvent:Fire(world.kobold, Overhead.id, voice, false)
+		for _ = 1, 300 do
+			world.frames(1)
+			if #handledOf(world, first, "Begin") > 0 then
+				break
+			end
+		end
+		expect(#handledOf(world, first, "Begin")).toBe(1)
+		world.seconds(art.hold / 2)
+		local handledBefore = #world.handled
+		world.replication.clipEvent:Fire(world.boar, Charge.id, Charge.events[1], false)
+		expect(#world.cancels).toBe(1)
+		expect(world.cancels[1].slot).toBe(Input.artSlot(first))
+		expect(world.cancels[1].handledBefore).toBe(handledBefore)
+		local ups = handledOf(world, first, "End")
+		expect(#ups).toBe(1)
+		expect(ups[1].at).toBe(world.clock.now)
+		-- Its queued key-up never comes on top.
+		world.seconds(art.hold + 3)
+		expect(#handledOf(world, first, "End")).toBe(1)
+		-- The rest of the first play is heard, then the next play: its chain presses that Art again.
+		for _, event in Overhead.events do
+			if event.time >= openOf(Overhead) then
+				world.replication.clipEvent:Fire(world.kobold, Overhead.id, event, false)
+			end
+		end
+		local heard = world.clock.now
+		world.replication.clipEvent:Fire(world.kobold, Overhead.id, voice, false)
+		world.seconds(openOf(Overhead) - voice.time + 1.5)
+		expect(#handledOf(world, first, "Begin", heard)).toBe(1)
+		expect(#handledOf(world, art.cycle[2], "Begin", heard)).toBe(0)
+	end)
+
+	-- Step 25(a): the guard went down the glint lead early (the least lateness of the last tells:
+	-- the way down less this client's clock lag), while a press reaches the server the way up plus
+	-- that lag later; at 0.1 s the guard landed after the hit ("Busy:Stagger"). Each staging reply
+	-- carries the server's clock at the ask's receipt (DevStage receivedAt): the panel keeps the
+	-- least of it less the ask's send time on this client's server clock over the staging's asks,
+	-- the lead its presses need, and sets the guard that much early instead.
+	it("guards the way up early, read off this staging's replies, not the glint lead", function()
+		local world = load({ remote = true, capture = true, clockLag = 0.04 })
+		world.link.up = 0.5 -- the stage ask: a slow one, the go ask's is the least
+		world.lead.seconds = 0.02
+		local shot = CAPTURE.shots[shotIndex("parry-spark")]
+		goTo(world, shot.id)
+		world.key(KEYS.autoPerform)
+		world.key(KEYS.startCountdown)
+		world.link.up = 0.09
+		world.untilRecording()
+		world.seconds(0.5)
+		local first = Overhead.events[1]
+		local heardAt = world.clock.now
+		world.replication.clipEvent:Fire(world.kobold, Overhead.id, first, false)
+		world.seconds(2)
+		local down = handledOf(world, "Guard", "Begin")[1]
+		expect(down).never.toBeNil()
+		expect(down.at - heardAt).toBeCloseTo(openOf(Overhead) - first.time - shot.perform[1].lead - 0.13, 2 * FRAME)
+	end)
+end)
+
 -- CF: the locomotion pass holds the stick through the walk's render step (after the control
 -- script's Move, before the character controller reads MoveDirection): a part-pushed stick for
 -- the walks, a full one for the runs, the sprint held with it. At the snapshot its perform held
@@ -1813,19 +2064,60 @@ describe("Capture: the walk into the stand ring (D-244)", function()
 			end
 		end
 		expect(#stageAsks(world)).toBe(2)
-		-- One let-go for the walk and one for each second walk before the ask.
-		local lets = 0
-		for _, entry in world.handled do
-			if entry.action == WALK.sprintAction and entry.state == "End" then
+		-- One let-go for the walk and one for each second walk before the ask: the walk's runs of
+		-- moves, the first at the sprint, the corrections at a walk (CW: never the sprint again).
+		local lets, last = 0, -math.huge
+		for _, move in world.body.moves do
+			if move.at > last + 1.5 * FRAME then
 				lets += 1
 			end
+			last = move.at
 		end
 		expect(lets).toBe(1 + WALK.secondWalks)
+		local sprints = 0
+		for _, entry in world.handled do
+			if entry.action == WALK.sprintAction and entry.state == "Begin" then
+				sprints += 1
+			end
+		end
+		expect(sprints).toBe(1)
 		-- Never staged outside the ring: the reply walks it again.
 		expect(inRing(world, false)).toBe(false)
 		expect(world.ring() ~= nil).toBe(true)
 		local walked = #world.body.moves
 		world.frames(5)
 		expect(#world.body.moves).toBeGreaterThan(walked)
+	end)
+
+	it("walks a new walk in from beside the ring once the second walks are spent, never at the sprint (CW)", function()
+		local world = load()
+		ringServer(world)
+		world.standAt(25, 30)
+		-- Every stop slides on to stand just outside the ring but beside its spot (within
+		-- correctWithinStuds), until the second walks are spent.
+		world.body.slide = (STAGE.standRadius + WALK.correctWithinStuds) / 2
+		world.key(KEYS.startCountdown)
+		for _ = 1, math.ceil(WALK.timeoutSeconds / FRAME) do
+			world.frames(1)
+			if #stageAsks(world) >= 2 then
+				break
+			end
+		end
+		expect(#stageAsks(world)).toBe(2)
+		expect(inRing(world, false)).toBe(false)
+		-- The engine stops sliding: the new walk walks the body in from where it stands and the
+		-- shot stages (a body that only stood and asked again would never come in).
+		world.body.slide = 0
+		local walked = #world.body.moves
+		expect(untilCountdown(world, WALK.timeoutSeconds)).toBe(true)
+		expect(#world.body.moves).toBeGreaterThan(walked)
+		expect(inRing(world, false)).toBe(true)
+		local sprints = 0
+		for _, entry in world.handled do
+			if entry.action == WALK.sprintAction and entry.state == "Begin" then
+				sprints += 1
+			end
+		end
+		expect(sprints).toBe(1)
 	end)
 end)

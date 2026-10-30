@@ -9,12 +9,16 @@
 
 	The target is what the server's Drawn attribute (or the local player's own prediction) wants.
 	A "cut" is a live attack, Guard, GuardHit or Parry clip: those start with the sword in the hand
-	(a draw-cut), so the sword jumps there and no Draw clip plays. Otherwise a true target plays
-	Draw and the WeaponDraw event moves the sword to the hand; a target that stays false for
-	sheath.sheatheDelay plays Sheathe and its WeaponSheathe event moves the sword to the back. A
-	clip that ends before its event (cut short, or a Roblox clip without markers) still lands the
-	sword where the target wants it; a clip this state stopped itself does not count. Nothing
-	starts while the fighter is dead.
+	(a draw-cut), so the sword jumps there and no Draw clip plays. A guard (sheath.drawFirstClips)
+	raised with the sword on the back is the one exception: no blade comes from the back in one
+	frame while the arm hangs at the side, so the Draw plays over the guard (out.over), its
+	WeaponDraw moves the sword, and from sheath.handOverTime of the Draw's clock it blends out over
+	sheath.handOverBlend into the guard's own pose. An attack or a Parry still draw-cuts.
+	Otherwise a true target plays Draw and the WeaponDraw event moves the sword to the hand; a
+	target that stays false for sheath.sheatheDelay plays Sheathe and its WeaponSheathe event moves
+	the sword to the back. A clip that ends before its event (cut short, or a Roblox clip without
+	markers) still lands the sword where the target wants it; a clip this state stopped itself does
+	not count. Nothing starts while the fighter is dead.
 
 	A target that turns back while its clip plays stops that clip over sheath.cutBackBlend (out.blend),
 	not the shorter stopBlend a cut, a cover or the other clip taking over at once is given: nothing
@@ -51,10 +55,17 @@ export type Input = {
 	drawing: boolean, -- the Draw clip is playing and not stopping
 	sheathing: boolean, -- the Sheathe clip is playing and not stopping
 	hold: boolean, -- the fighter is Dead: nothing starts
+	-- The cut is a sheath.drawFirstClips clip (a guard) and nothing else: with the sword on the back
+	-- it waits for a Draw played over it instead of draw-cutting.
+	drawFirst: boolean?,
+	drawOver: boolean?, -- the live Draw plays over the cut (out.over: sheath.overPriority)
+	drawTime: number?, -- the live Draw's clock, in seconds
 }
 
--- blend: the blend-out the stopped clip takes, when it is not sheath.stopBlend (a cut back).
-export type Output = { place: Place?, play: Clip?, stop: Clip?, blend: number? }
+-- blend: the blend-out the stopped clip takes, when it is not sheath.stopBlend (a cut back or the
+-- hand-over). over: play the clip over the cut clips (sheath.overPriority, never stopped by them);
+-- from: the clip time it starts at (a Draw that plays on over a guard), 0 when nil.
+export type Output = { place: Place?, play: Clip?, stop: Clip?, blend: number?, over: boolean?, from: number? }
 
 export type Config = typeof(ChoreoData.sheath)
 
@@ -85,6 +96,7 @@ function SheathState.new(place: Place, config: Config?): SheathState
 		wasSheathing = false,
 		stoppedDraw = false, -- this state stopped the Draw clip itself
 		stoppedSheathe = false,
+		drawClock = 0, -- the Draw's clock as of the last step it played
 	}, SheathState)
 	return (self :: any) :: SheathState
 end
@@ -94,6 +106,11 @@ function SheathState.step(self: any, dt: number, input: Input): Output
 	-- A clip that ended on its own (not stopped here): it ran out or something else cut it short.
 	local drawEnded = self.wasDrawing and not input.drawing and not self.stoppedDraw
 	local sheatheEnded = self.wasSheathing and not input.sheathing and not self.stoppedSheathe
+	-- A guard's own play cut a live Draw short (the mixer fades out a lower clip on its layer): the
+	-- Draw plays on over the guard from where it was.
+	local resume = drawEnded and input.cut and input.drawFirst == true
+	local drawClock: number = self.drawClock
+	self.drawClock = if input.drawing then input.drawTime or 0 else 0
 	self.wasDrawing = input.drawing
 	self.wasSheathing = input.sheathing
 	if not input.drawing then
@@ -111,14 +128,39 @@ function SheathState.step(self: any, dt: number, input: Input): Output
 	-- cover the hand is elsewhere: the sword stays, and the clip plays again once the arm is free.
 	local covered = input.covered == true
 	if not covered then
-		if drawEnded and input.target and self.place == "Back" then
+		if drawEnded and input.target and self.place == "Back" and not resume then
 			self.place = "Hand"
 		elseif sheatheEnded and not input.target and not input.cut and self.place == "Hand" then
 			self.place = "Back"
 		end
 	end
 
-	if input.cut then
+	if input.cut and input.drawFirst == true and (self.place == "Back" or input.drawOver == true or resume) then
+		-- A guard raised with the sword on the back (sheath.drawFirstClips), or over a Draw: the Draw
+		-- plays over it (out.over, at sheath.overPriority) and its WeaponDraw takes the sword where
+		-- the hand is, then hands the arm to the guard from sheath.handOverTime over
+		-- sheath.handOverBlend.
+		self.falseFor = 0
+		if self.place == "Back" or resume then
+			if input.sheathing then
+				out.stop = "Sheathe"
+			elseif input.drawing and input.drawOver ~= true then
+				-- A Draw still under the guard plays on over it.
+				out.stop = "Draw"
+				out.from = input.drawTime
+			end
+			if resume then
+				out.from = drawClock
+			end
+			if not (input.drawing and input.drawOver == true) then
+				out.play = "Draw"
+				out.over = true
+			end
+		elseif input.drawing and (input.drawTime or 0) >= self.config.handOverTime then
+			out.stop = "Draw"
+			out.blend = self.config.handOverBlend
+		end
+	elseif input.cut then
 		-- The draw-cut: the clip starts with the sword in the hand.
 		self.falseFor = 0
 		if self.place == "Back" then

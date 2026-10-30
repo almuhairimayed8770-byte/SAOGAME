@@ -27,6 +27,11 @@ local CAPTURE = Dev.capture
 local STAGE = CAPTURE.stage
 local HIP = 2 -- the player's Humanoid.HipHeight in this world
 local ROOT_SIZE = Vector3.new(2, 2, 1)
+-- The body's extents (Model:GetExtentsSize) and its flat reach each way at any yaw: half the
+-- flat diagonal.
+local BODY_SIZE = Vector3.new(4, 5.5, 2)
+local BODY_REACH = math.sqrt(BODY_SIZE.X * BODY_SIZE.X + BODY_SIZE.Z * BODY_SIZE.Z) / 2
+local SERVER_CLOCK = 5000
 
 local function shotById(id: string): any
 	for _, shot in CAPTURE.shots do
@@ -42,6 +47,7 @@ type Model = {
 	Parent: any,
 	PivotTo: (self: Model, cframe: CFrame) -> (),
 	GetPivot: (self: Model) -> CFrame,
+	GetExtentsSize: (self: Model) -> Vector3,
 	FindFirstChildOfClass: (self: Model, className: string) -> any,
 }
 
@@ -62,6 +68,9 @@ local function model(cframe: CFrame): any
 		GetPivot = function(self: any): CFrame
 			return self.PrimaryPart.CFrame
 		end,
+		GetExtentsSize = function(_self: any): Vector3
+			return BODY_SIZE
+		end,
 		FindFirstChildOfClass = function(_self: any, className: string): any
 			return if className == "Humanoid" then { HipHeight = HIP } else nil
 		end,
@@ -69,7 +78,16 @@ local function model(cframe: CFrame): any
 	return m
 end
 
-type Enemy = { id: number, defId: string, model: any, phase: string, held: boolean, hp: number, maxHp: number }
+type Enemy = {
+	id: number,
+	defId: string,
+	model: any,
+	phase: string,
+	held: boolean,
+	hp: number,
+	maxHp: number,
+	attacks: number?, -- the attack limit EnemyService.limitAttacks set (FK2)
+}
 
 type World = {
 	clock: { now: number },
@@ -173,6 +191,15 @@ local function load(options: Options): World
 			table.insert(order, { kind = if on then "hold" else "release", id = id })
 			return true
 		end,
+		limitAttacks = function(id: number, count: number?): boolean
+			local enemy = living(id)
+			if enemy == nil then
+				return false
+			end
+			enemy.attacks = count
+			table.insert(order, { kind = "limit", id = id })
+			return true
+		end,
 		heldIds = function(): { number }
 			local ids = {}
 			for id, enemy in enemies do
@@ -265,6 +292,10 @@ local function load(options: Options): World
 	local workspaceFake = {
 		GetAttribute = function(_self: any, name: string): any
 			return attributes[name]
+		end,
+		-- The server's clock (workspace:GetServerTimeNow), SERVER_CLOCK ahead of os.clock here.
+		GetServerTimeNow = function(_self: any): number
+			return clock.now + SERVER_CLOCK
 		end,
 	}
 	local env = Harness.environment()
@@ -526,6 +557,45 @@ describe("DevStage: a shot stages itself (F12)", function()
 		expect(STAGE.awayStuds).toBeGreaterThan(Harness.load("src/shared/data/camera").lock.range)
 	end)
 
+	-- Within routeMarginStuds of the ledge's or its ramp's footprint (their flat bounding box).
+	local function nearLedge(position: Vector3): boolean
+		local ledge = STAGE.ledge
+		local half = math.max(ledge.size[1], ledge.ramp.size[1]) / 2 + STAGE.routeMarginStuds
+		local front = ledge.position[3] - ledge.size[3] / 2 - STAGE.routeMarginStuds
+		local back = ledge.position[3] + ledge.size[3] / 2 + ledge.ramp.size[3] + STAGE.routeMarginStuds
+		return math.abs(position.X - ledge.position[1]) <= half and position.Z >= front and position.Z <= back
+	end
+
+	it("moves a near field enemy on the ramp's line out past the ramp, never onto it (round E)", function()
+		local world = load({ studio = true, capture = true })
+		local area = STAGE.area
+		-- Straight out along +Z from the stage area's spot, awayStuds lands on the ramp.
+		local near = world.addEnemy("KoboldAxeman", Vector3.new(area.position[1], 2, area.position[3] + 30))
+		local reply = world.invoke("stage", "art-vertical")
+		expect(reply.ok).toBe(true)
+		expect(reply.moved).toBe(1)
+		local at = world.enemies[near].model.PrimaryPart.Position
+		local spot = Vector3.new(area.position[1], 0, area.position[3])
+		expect(flat(at - spot).Magnitude).toBeGreaterThan(STAGE.awayStuds - 1e-6)
+		expect(nearLedge(at)).toBe(false)
+		expect(at.Y).toBe(2)
+	end)
+
+	it("brings a held enemy moved off the ledge's top down to the field (round E)", function()
+		local world = load({ studio = true, capture = true })
+		-- The open shot builds the ledge (the player on the field is asked to walk up).
+		world.invoke("stage", "locomotion")
+		expect(world.ledge()).never.toBeNil()
+		local ledge = STAGE.ledge
+		local top = ledge.position[2] + ledge.size[2] / 2
+		local up = world.addEnemy("KoboldAxeman", Vector3.new(ledge.position[1], top + 2, ledge.position[3]))
+		local reply = world.invoke("stage", "art-vertical")
+		expect(reply.ok).toBe(true)
+		local at = world.enemies[up].model.PrimaryPart.Position
+		expect(nearLedge(at)).toBe(false)
+		expect(at.Y).toBeCloseTo(STAGE.area.position[2] + 2, 1e-6)
+	end)
+
 	it("waits out a wind-up before it holds (never a hold mid-attack, the phantom rush)", function()
 		local world = load({ studio = true, capture = true })
 		local boar = world.addEnemy("FrenzyBoar", Vector3.new(120, 2, 0), "WindUp")
@@ -650,6 +720,33 @@ describe("DevStage: a shot stages itself (F12)", function()
 		end
 	)
 
+	it("limits a let-go enemy to the attacks its shot stages: one for the overhead and parry shots (FK2)", function()
+		for _, shotId in { "enemy-kobold-overhead", "parry-spark" } do
+			local shot = shotById(shotId)
+			expect(shot.stage.enemies[1].attacks).toBe(1)
+			local world = load({ studio = true, capture = true })
+			local reply = world.invoke("stage", shotId)
+			expect(reply.ok).toBe(true)
+			expect(world.enemies[reply.targetId].attacks).toBe(1)
+			-- Set as it is staged, before the take lets it go.
+			expect(indexOf(world.order, "limit", reply.targetId) ~= nil).toBe(true)
+			expect(indexOf(world.order, "release", reply.targetId)).toBeNil()
+			world.invoke("go")
+			expect(world.enemies[reply.targetId].held).toBe(false)
+			expect(world.enemies[reply.targetId].attacks).toBe(1)
+		end
+		-- No limit where the shot stages none: the fight's enemies and a held Art target.
+		for _, shotId in { "fight-boar-kobold", "art-sharp-nail" } do
+			local world = load({ studio = true, capture = true })
+			local reply = world.invoke("stage", shotId)
+			expect(reply.ok).toBe(true)
+			for _, id in reply.ids do
+				expect(world.enemies[id].attacks).toBeNil()
+			end
+			expect(indexOf(world.order, "limit")).toBeNil()
+		end
+	end)
+
 	it("removes the last staging's enemies when the next shot stages", function()
 		local world = load({ studio = true, capture = true })
 		local first = world.invoke("stage", "parry-spark")
@@ -749,6 +846,89 @@ describe("DevStage: a shot stages itself (F12)", function()
 		expect(world.invoke("stage", "locomotion").ok).toBe(true)
 	end)
 
+	it("never builds the ledge or its ramp around the player's body: it walks clear to the stage area first", function()
+		local data = STAGE.ledge
+		local floor = data.position[2] - data.size[2] / 2
+		local _, _, rampZ = StageLogic.rampFrame(data)
+		local cases = {
+			-- On the field where the ledge goes, where the ramp goes, and beside the ledge's -X face
+			-- with its side (the body's reach) half a stud into where the ledge goes.
+			{ x = data.position[1], z = data.position[3], part = data.name },
+			{ x = data.position[1], z = rampZ, part = data.ramp.name },
+			{ x = data.position[1] - data.size[1] / 2 - BODY_REACH + 0.5, z = data.position[3], part = data.name },
+		}
+		for _, case in cases do
+			local world = load({ studio = true, capture = true })
+			world.standAt(case.x, floor, case.z, 0)
+			local root = world.record.model.PrimaryPart
+			local before = root.CFrame
+			local reply = world.invoke("stage", "locomotion")
+			expect(reply.ok).toBe(false)
+			expect(reply.error:find(case.part, 1, true)).never.toBeNil()
+			expect(world.ledge()).toBeNil()
+			expect(world.ramp()).toBeNil()
+			-- The walk: the stage area's ring (every other shot's, clear of both), straight there.
+			local walk = reply.walk
+			local x, y, z, facing = StageLogic.standSpot(false, STAGE.area, data)
+			expect(walk.x).toBe(x)
+			expect(walk.y).toBe(y)
+			expect(walk.z).toBe(z)
+			expect(walk.facing).toBe(facing)
+			expect(walk.radius).toBe(STAGE.standRadius)
+			expect(walk.tolerance).toBe(STAGE.standHeightTolerance)
+			expect(walk.over).toBeNil()
+			expect(walk.path).toEqual(StageLogic.route(false, STAGE, false, case.x, case.z))
+			-- Nothing spawned, the player neither moved nor healed.
+			expect(indexOf(world.order, "spawn")).toBeNil()
+			expect(indexOf(world.order, "pivotPlayer")).toBeNil()
+			expect(root.CFrame).toBe(before)
+			expect(world.record.hp).toBe(40)
+			-- Clear of them in the area's ring, the next ask builds them and asks for the climb.
+			world.standAt(x, y, z, facing)
+			local climb = world.invoke("stage", "locomotion")
+			expect(world.ledge()).never.toBeNil()
+			expect(world.ramp()).never.toBeNil()
+			expect(climb.error).toBe("walk into the ring first")
+			local _, topY = StageLogic.standSpot(true, STAGE.area, data)
+			expect(climb.walk.y).toBe(topY)
+			expect(climb.walk.path).toEqual(StageLogic.route(true, STAGE, true, x, z))
+		end
+	end)
+
+	it("builds the ledge beside a body that stands clear of it by more than its reach", function()
+		local data = STAGE.ledge
+		local world = load({ studio = true, capture = true })
+		world.standAt(
+			data.position[1] - data.size[1] / 2 - BODY_REACH - 0.1,
+			data.position[2] - data.size[2] / 2,
+			data.position[3],
+			0
+		)
+		local reply = world.invoke("stage", "locomotion")
+		expect(reply.error).toBe("walk into the ring first")
+		expect(world.ledge()).never.toBeNil()
+		expect(world.ramp()).never.toBeNil()
+	end)
+
+	it("refuses to stage around a body sunk into the ledge's top, though its ring takes the feet", function()
+		local world = load({ studio = true, capture = true })
+		world.invoke("stage", "locomotion") -- from the stage area: builds the ledge and its ramp
+		local x, y, z, facing = StageLogic.standSpot(true, STAGE.area, STAGE.ledge)
+		local sunk = y - STAGE.standHeightTolerance / 2
+		expect(StageLogic.inRing(StageLogic.ring(true, STAGE), x, sunk, z)).toBe(true)
+		world.standAt(x, sunk, z, facing)
+		local reply = world.invoke("stage", "locomotion")
+		expect(reply.ok).toBe(false)
+		expect(reply.walk).toBeNil()
+		expect(reply.error:find(STAGE.ledge.name, 1, true)).never.toBeNil()
+		expect(indexOf(world.order, "spawn")).toBeNil()
+		expect(indexOf(world.order, "pivotPlayer")).toBeNil()
+		expect(world.record.hp).toBe(40)
+		-- Feet on the top: staged.
+		world.standAt(x, y, z, facing)
+		expect(world.invoke("stage", "locomotion").ok).toBe(true)
+	end)
+
 	it("gives the field back on release: staged enemies gone, its holds let go, hold-new as it was", function()
 		local world = load({ studio = true, capture = true })
 		local alreadyHeld = world.addEnemy("KoboldAxeman", Vector3.new(-150, 2, 0))
@@ -816,6 +996,38 @@ describe("DevStage: a shot stages itself (F12)", function()
 		for _, id in second.ids do
 			expect(world.enemies[id]).toBeNil()
 		end
+	end)
+
+	-- EF: the panel learns from these stamps how long its presses take to reach the server on the
+	-- server's clock (the way up and its own server clock's lag), the lead its auto guard needs.
+	it("stamps every reply, a refusal's too, with the server's clock as the ask arrived", function()
+		local world = load({ studio = true, capture = true })
+		local boar = world.addEnemy("FrenzyBoar", Vector3.new(120, 2, 0), "WindUp")
+		local started = world.clock.now
+		world.onWait = function(now: number)
+			if now - started > 0.6 then
+				world.enemies[boar].phase = "Recover"
+			end
+		end
+		local remote = world.remote()
+		world.advance(1)
+		local arrived = world.clock.now
+		-- The staging waits out the wind-up: the stamp is the ask's arrival, not the reply's.
+		local reply = remote.OnServerInvoke(world.player, "stage", "art-horizontal")
+		expect(reply.ok).toBe(true)
+		expect(world.clock.now > arrived).toBe(true)
+		expect(reply.receivedAt).toBe(arrived + SERVER_CLOCK)
+		world.advance(1)
+		local goAt = world.clock.now
+		expect(remote.OnServerInvoke(world.player, "go").receivedAt).toBe(goAt + SERVER_CLOCK)
+		-- Refused: too soon after the last, and an unknown action.
+		local refused = remote.OnServerInvoke(world.player, "go")
+		expect(refused.ok).toBe(false)
+		expect(refused.receivedAt).toBe(goAt + SERVER_CLOCK)
+		world.advance(1)
+		local unknown = remote.OnServerInvoke(world.player, "dance")
+		expect(unknown.ok).toBe(false)
+		expect(unknown.receivedAt).toBe(world.clock.now + SERVER_CLOCK)
 	end)
 
 	it("refuses an unknown shot or action, a dead player, and requests faster than the rate", function()

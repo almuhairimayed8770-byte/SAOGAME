@@ -1112,6 +1112,120 @@ describe("EnemyService hold", function()
 	end)
 end)
 
+-- FK2: a staged shot's enemy shows the attacks its shot asks for and no more (dev.luau
+-- StagedEnemy.attacks): EnemyService.limitAttacks lets it begin that many, then holds it at the
+-- first tick it is free, so its last attack, a stagger and a recovery all play out whole. The live
+-- AI's timing is the same with or without a limit until it is spent.
+describe("EnemyService attack limit (FK2)", function()
+	local FREE = AI.spacing.freePhases
+
+	-- Ticks `seconds`, logging the phase each tick and the tick the enemy was first held.
+	local function watch(id: number, seconds: number): ({ string }, number?, string?)
+		local phases: { string } = {}
+		local heldAt: number? = nil
+		local heldFrom: string? = nil
+		local last = phaseOf(id) or "Gone"
+		local elapsed = 0
+		while elapsed < seconds do
+			advance(TICK)
+			elapsed += TICK
+			local phase = phaseOf(id) or "Gone"
+			if phase ~= phases[#phases] then
+				table.insert(phases, phase)
+			end
+			if heldAt == nil and EnemyService.isHeld(id) then
+				heldAt = elapsed
+				heldFrom = last
+			end
+			last = phase
+		end
+		return phases, heldAt, heldFrom
+	end
+
+	local function count(list: { string }, phase: string): number
+		local n = 0
+		for _, entry in list do
+			if entry == phase then
+				n += 1
+			end
+		end
+		return n
+	end
+
+	it("one attack left: the kobold plays it whole, then is held at its first free tick", function()
+		fresh()
+		local id = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -6))
+		expect(EnemyService.limitAttacks(id, 1)).toBe(true)
+		local cycle = OVERHEAD.windUp + OVERHEAD.strike + OVERHEAD.recovery
+		local phases, heldAt, heldFrom = watch(id, 3 * cycle + 4)
+		expect(telegraphsOf(id)).toBe(1)
+		expect(strikes).toHaveLength(1)
+		expect(count(phases, "WindUp")).toBe(1)
+		expect(table.find(phases, "Recover") ~= nil).toBe(true)
+		expect(heldAt ~= nil).toBe(true)
+		-- Held from a free phase, after the recovery: never mid-attack.
+		expect(FREE[heldFrom :: string]).toBe(true)
+		expect(EnemyService.isAwake(id)).toBe(false)
+		expect(EntityService.get(id).state).toBe("Idle")
+	end)
+
+	it("a stagger spends its attack: held once the stagger is over, never inside it", function()
+		fresh()
+		local id = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -6))
+		EnemyService.limitAttacks(id, 1)
+		expect(advanceUntil(function()
+			return phaseOf(id) == "WindUp"
+		end, 5)).toBe(true)
+		advance(0.3)
+		EntityService.setState(id, "Stagger", Combat.parryStagger)
+		expect(phaseOf(id)).toBe("Interrupted")
+		local phases, heldAt, heldFrom = watch(id, Combat.parryStagger + 6)
+		expect(strikes).toHaveLength(0)
+		expect(telegraphsOf(id)).toBe(1)
+		expect(count(phases, "WindUp")).toBe(0)
+		expect(heldAt ~= nil).toBe(true)
+		expect((heldAt :: number) >= Combat.parryStagger - TICK).toBe(true)
+		expect(FREE[heldFrom :: string]).toBe(true)
+	end)
+
+	it("two attacks left let two go; nil lifts the limit; the timing never changes before it is spent", function()
+		fresh()
+		local limited = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -6))
+		EnemyService.limitAttacks(limited, 2)
+		local cycle = OVERHEAD.windUp + OVERHEAD.strike + OVERHEAD.recovery
+		advance(4 * cycle + 6)
+		expect(telegraphsOf(limited)).toBe(2)
+		expect(EnemyService.isHeld(limited)).toBe(true)
+		local limitedTimes = {}
+		for _, payload in sentOf("Telegraph") do
+			if payload.entityId == limited then
+				table.insert(limitedTimes, payload.serverTime)
+			end
+		end
+		-- The same enemy unlimited: the same first two telegraphs, on the same beats, and more.
+		fresh()
+		local free = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -6))
+		EnemyService.limitAttacks(free, 3)
+		expect(EnemyService.limitAttacks(free, nil)).toBe(true)
+		advance(4 * cycle + 6)
+		local freeTimes = {}
+		for _, payload in sentOf("Telegraph") do
+			if payload.entityId == free then
+				table.insert(freeTimes, payload.serverTime)
+			end
+		end
+		expect(#freeTimes > 2).toBe(true)
+		expect(EnemyService.isHeld(free)).toBe(false)
+		expect(freeTimes[1]).toBeCloseTo(limitedTimes[1], 1e-6)
+		expect(freeTimes[2]).toBeCloseTo(limitedTimes[2], 1e-6)
+		expect(EnemyService.limitAttacks(999, 1)).toBe(false)
+	end)
+end)
+
 describe("EnemyService hit-stop (D-168)", function()
 	it("bind hands CombatService the pause; reset takes it back", function()
 		hitStopHooks = {}

@@ -46,6 +46,7 @@ local Locomotion = Harness.load("src/client/choreo/Locomotion")
 local Rigs = Harness.load("src/shared/data/rigs")
 local Fx = Harness.load("src/shared/data/fx")
 local CameraMath = Harness.load("src/client/camera/CameraMath")
+local FrameClock = Harness.load("src/client/fx/FrameClock")
 
 local FRAME = 1 / 60
 local TUNING = ChoreoData.enemy.rush
@@ -59,6 +60,8 @@ local FRAME_TRAVEL = SPEED * FRAME
 local EPSILON = 1e-4
 
 local clock = 0
+-- The rendered frame the measured half's loop is on (its recorders note it with each call).
+local frameNow = 0
 Choreo.configure({
 	now = function()
 		return clock
@@ -862,7 +865,7 @@ local function recorder(calls: { any }, name: string): any
 	return setmetatable({}, {
 		__index = function(_self: any, key: string): any
 			return function(...: any): any
-				table.insert(calls, { module = name, fn = key, args = { ... }, at = clock })
+				table.insert(calls, { module = name, fn = key, args = { ... }, at = clock, frame = frameNow })
 				return nil
 			end
 		end,
@@ -944,6 +947,9 @@ type Options = {
 	-- Degrees the server's body faced off the line at server time `t` (since the launch), which the
 	-- replicated root shows `lag` late (default: on the line throughout).
 	rootYaw: ((t: number) -> number)?,
+	-- The real FrameClock on the loop's render steps (its start, then the rigs' step, its posed
+	-- mark and its end), given to Replication as the client's start() does (D-342, D-343).
+	frameClock: boolean?,
 }
 
 local WIND_UP_START = 10
@@ -1048,6 +1054,38 @@ local function rush(options: Options): Run
 	}
 	local calls: { any } = {}
 	local casts: { Cast } = {}
+	local clockStart: ((dt: number) -> ())? = nil
+	local clockPosed: ((dt: number) -> ())? = nil
+	local clockEnd: ((dt: number) -> ())? = nil
+	if options.frameClock then
+		FrameClock.bind({
+			now = function(): number
+				return clock
+			end,
+			onFrameStart = function(fn: any): () -> ()
+				clockStart = fn
+				return function()
+					clockStart = nil
+				end
+			end,
+			onPosed = function(fn: any): () -> ()
+				clockPosed = fn
+				return function()
+					clockPosed = nil
+				end
+			end,
+			onFrameEnd = function(fn: any): () -> ()
+				clockEnd = fn
+				return function()
+					clockEnd = nil
+				end
+			end,
+			onHeartbeat = function(): () -> ()
+				return function() end
+			end,
+		} :: any)
+	end
+	local frameClock: any = if options.frameClock then FrameClock else {}
 	Replication.bind({
 		net = { on = function() end },
 		entities = {
@@ -1096,6 +1134,8 @@ local function rush(options: Options): Run
 		end,
 		worldCast = if options.wall ~= nil then wallCast(options.wall, casts, options.wallNormal) else nil,
 		wallSlam = options.wallSlam,
+		atPose = frameClock.atPose,
+		atStepPose = frameClock.atStepPose,
 	} :: any)
 	if options.gait then
 		Replication.watch(record)
@@ -1151,7 +1191,9 @@ local function rush(options: Options): Run
 
 	local frames: { Frame } = {}
 	local hit = false
+	frameNow = 0
 	for _ = 1, options.frames or 170 do
+		frameNow += 1
 		clock += FRAME
 		for _, message in messages do
 			if not message.sent and clock >= message.at - 1e-9 then
@@ -1171,7 +1213,17 @@ local function rush(options: Options): Run
 				position = root.Position,
 			})
 		end
+		-- The frame's render steps: FrameClock's start, the rigs' (this animator), its posed mark.
+		if clockStart ~= nil then
+			clockStart(FRAME)
+		end
 		animator:step(FRAME)
+		if clockPosed ~= nil then
+			clockPosed(FRAME)
+		end
+		if clockEnd ~= nil then
+			clockEnd(FRAME)
+		end
 		local offset: CFrame? = (animator :: any).bodyOffset
 		local drawn = root.CFrame * (offset or CFrame.identity)
 		local solved = solve(model, root.CFrame)
@@ -1205,6 +1257,9 @@ local function rush(options: Options): Run
 	end
 	if options.gait then
 		Replication.unwatch(record)
+	end
+	if options.frameClock then
+		FrameClock.bind(nil)
 	end
 	return { frames = frames, front = front, model = model, root = root, calls = calls, casts = casts }
 end
@@ -1754,7 +1809,11 @@ end)
 
 describe("a Boar's slam drawn through Replication and Choreo (D-205, D-208, D-210)", function()
 	local WORLD = AI.rushWorld
-	local FRONT: number = EnemyService.bodyExtents(RigBuilder.build("Boar"))
+	-- The snout a slam rests on the face: the farthest ahead the body reaches in any pose its rush
+	-- draws it in (RushWorld.bodyOf, the body the server's Charger and every client judge a wall on,
+	-- D-437).
+	local RushWorld = Harness.load("src/shared/choreo/RushWorld")
+	local FRONT: number = RushWorld.front((RushWorld.bodyOf(RigBuilder.build("Boar")) :: any).poses)
 	-- What the server says of a slam into a wall `face` studs down the line: "Wall" as soon as its cast
 	-- sees the face (lookAheadStuds past the clock's snout), with the body's stop (its snout on the
 	-- face) and where it meets the face; then, once the timeline brings the snout there, the daze's
@@ -1936,6 +1995,72 @@ describe("a Boar's slam drawn through Replication and Choreo (D-205, D-208, D-21
 				end
 			)
 		end
+	end
+
+	-- The engine draws a step's pose on the next frame (D-342: Choreo writes it again on
+	-- PreSimulation, after the draw), so the frame whose rig step puts the snout on the face still
+	-- draws it short. The slam's dust, thud and shake wait for the next frame, the first that draws
+	-- the snout on the face, never one ahead of it (D-343).
+	local ENGINE_LAG = 1
+	for _, case in slamCases do
+		it(
+			("shows the slam's dust, thud and shake on the first frame that draws the snout on the face (%.2f s late, %s)"):format(
+				case.lag,
+				if case.seen then "this client sees the wall" else "the server's word alone"
+			),
+			function()
+				local SLAM = Fx.wallSlam
+				local face = 8
+				local stop = face - FRONT
+				local contact = ORIGIN + DIRECTION * face
+				local dust: { number } = {}
+				local run = rush({
+					latency = case.lag,
+					lag = case.lag,
+					stopAt = stop,
+					wall = if case.seen then face else nil,
+					events = slam(face),
+					wallSlam = {
+						slam = function(_point: Vector3, _normal: Vector3): number
+							table.insert(dust, frameNow)
+							return 0
+						end,
+					},
+					me = contact - DIRECTION * (SLAM.shakeRadius - 1),
+					frameClock = true,
+				})
+				-- The step that writes the snout on the face, and the first frame that draws it.
+				local wrote: number? = nil
+				for index, frame in run.frames do
+					if wrote == nil and frame.along >= stop - EPSILON then
+						wrote = index
+					end
+				end
+				expect(wrote).never.toBeNil()
+				local drawn = (wrote :: number) + ENGINE_LAG
+				expect(#dust).toBe(1)
+				if dust[1] ~= drawn then
+					error(
+						("the slam's dust showed on frame %d, the snout first drawn on the face on %d"):format(
+							dust[1],
+							drawn
+						)
+					)
+				end
+				local thuds, shakes = {}, {}
+				for _, call in run.calls do
+					if call.module == "sfx" and call.fn == "cue" and call.args[1] == SLAM.cue then
+						table.insert(thuds, call.frame)
+					elseif call.module == "camera" and call.fn == "shake" then
+						table.insert(shakes, call.frame)
+					end
+				end
+				expect(#thuds).toBe(1)
+				expect(thuds[1]).toBe(drawn)
+				expect(#shakes).toBe(1)
+				expect(shakes[1]).toBe(drawn)
+			end
+		)
 	end
 
 	-- The slam's shake fades with distance (D-288): the whole Kill tier up to shakeFullRadius from

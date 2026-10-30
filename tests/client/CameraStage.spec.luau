@@ -226,6 +226,38 @@ describe("CameraController staged views (F12)", function()
 		end
 	end)
 
+	it(
+		"ThreeQuarter, read at the kobold: off its facing by the view's angle seen from 4.5 studs (shot 7, M8)",
+		function()
+			-- The view's degrees are measured at its anchor, the player (D-299). Read at the kobold, which
+			-- faces the player along the line, the same lens sits atan2(d sin a, d cos a + gap) off its
+			-- facing: 59.0 degrees at the shot's 4.5 studs, 64.0 at the 2.96 the owner's PC staged on
+			-- 1cf87aa (the stale read EN fixed), never 75.
+			local view = CAMERAS.ThreeQuarter
+			local a = math.rad(view.degrees)
+			for _, gap in { 4.5, 2.96 } do
+				local fixture = load()
+				local kobold = character("Kobold", ROOT + Vector3.new(0, 0, -gap), fixture.world, 180)
+				fixture.controller.setStage(view, kobold, -1)
+				fixture.frames(120)
+				local position: Vector3 = fixture.camera.CFrame.Position
+				local koboldRoot = kobold.PrimaryPart :: BasePart
+				local atPlayer = angleBetween(position - ROOT, Vector3.new(0, 0, 1))
+				local atKobold = angleBetween(position - koboldRoot.Position, koboldRoot.CFrame.LookVector)
+				local expected = math.deg(math.atan2(view.distance * math.sin(a), view.distance * math.cos(a) + gap))
+				print(
+					("[shot 7] gap %.2f: %.1f deg off the line at the player, %.1f off the kobold's facing"):format(
+						gap,
+						atPlayer,
+						atKobold
+					)
+				)
+				expect(atPlayer).toBeCloseTo(view.degrees, 1)
+				expect(atKobold).toBeCloseTo(expected, 1)
+			end
+		end
+	)
+
 	it("never aims nearer the lens than its anchor: a target that runs to the camera's side", function()
 		local fixture = load()
 		local kobold = character("Kobold", ROOT + Vector3.new(0, 0, -4.5), fixture.world, 180)
@@ -259,47 +291,55 @@ describe("CameraController staged views (F12)", function()
 		expect(offLine).toBeLessThan(CameraData.lock.closeSwingDegrees + 1)
 	end)
 
-	it("Behind follows the boar from its tail and pans, never whips, as it runs past and turns", function()
-		local fixture = load()
-		-- The boar 18 studs out along -Z, facing the player (+Z).
-		local boar = character("Boar", ROOT + Vector3.new(0, 0, -18), fixture.world, 180)
-		local boarRoot = boar.PrimaryPart :: BasePart
-		fixture.controller.setStage(CAMERAS.Behind, boar, 1)
-		fixture.frames(120)
-		local position: Vector3 = fixture.camera.CFrame.Position
-		-- Behind the tail: further from the player than the boar, within the view's degrees of its back.
-		expect(angleBetween(position - boarRoot.Position, -boarRoot.CFrame.LookVector)).toBeCloseTo(
-			CAMERAS.Behind.degrees,
-			1
-		)
-		local _, _, depth = onScreen(fixture.camera, boarRoot.Position)
-		expect(depth).toBeGreaterThan(0)
-		-- The rush: 30 studs along +Z in 1 s, through the player, then the turn back (180 degrees
-		-- in 0.3 s). The camera's bearing around the boar never turns faster than the cap.
-		local cap = CameraData.lock.maxTurnDegreesPerSecond
-		local last = bearingOf(fixture.camera.CFrame.Position, boarRoot.Position)
-		local worst = 0
-		local start = boarRoot.Position
-		for frame = 1, 120 do
-			if frame <= 60 then
-				place(boarRoot, CFrame.new(start + Vector3.new(0, 0, 30 * frame / 60)) * boarRoot.CFrame.Rotation)
-			elseif frame <= 78 then
-				place(
-					boarRoot,
-					CFrame.new(boarRoot.Position) * CFrame.Angles(0, math.rad(10), 0) * boarRoot.CFrame.Rotation
-				)
+	it(
+		"Behind stands its degrees off the boar's tail and holds still, the boar ahead, through the run and the turn",
+		function()
+			local fixture = load()
+			-- The boar 18 studs out along -Z, facing the player (+Z).
+			local boar = character("Boar", ROOT + Vector3.new(0, 0, -18), fixture.world, 180)
+			local boarRoot = boar.PrimaryPart :: BasePart
+			fixture.controller.setStage(CAMERAS.Behind, boar, 1)
+			fixture.frames(120)
+			local position: Vector3 = fixture.camera.CFrame.Position
+			-- Behind the tail: further from the player than the boar, within the view's degrees of its back.
+			expect(angleBetween(position - boarRoot.Position, -boarRoot.CFrame.LookVector)).toBeCloseTo(
+				CAMERAS.Behind.degrees,
+				1
+			)
+			local _, _, depth = onScreen(fixture.camera, boarRoot.Position)
+			expect(depth).toBeGreaterThan(0)
+			-- The rush: 30 studs along +Z in 1 s, through the player, then the turn back (180 degrees
+			-- in 0.3 s). The camera's bearing around the boar never turns faster than the cap.
+			local cap = CameraData.lock.maxTurnDegreesPerSecond
+			local last = bearingOf(fixture.camera.CFrame.Position, boarRoot.Position)
+			local worst = 0
+			local start = boarRoot.Position
+			-- Fixed (FB4): the lens never moves while the boar runs and turns.
+			local held: Vector3 = fixture.camera.CFrame.Position
+			local drift = 0
+			for frame = 1, 120 do
+				if frame <= 60 then
+					place(boarRoot, CFrame.new(start + Vector3.new(0, 0, 30 * frame / 60)) * boarRoot.CFrame.Rotation)
+				elseif frame <= 78 then
+					place(
+						boarRoot,
+						CFrame.new(boarRoot.Position) * CFrame.Angles(0, math.rad(10), 0) * boarRoot.CFrame.Rotation
+					)
+				end
+				fixture.frames(1)
+				drift = math.max(drift, (fixture.camera.CFrame.Position - held).Magnitude)
+				local now = bearingOf(fixture.camera.CFrame.Position, boarRoot.Position)
+				worst = math.max(worst, math.abs(CameraMath.shortestDelta(last, now)) / F)
+				last = now
+				-- The aim never comes in under the lens: the boar stays ahead of the camera.
+				local _, _, ahead = onScreen(fixture.camera, boarRoot.Position)
+				expect(ahead).toBeGreaterThan(0)
 			end
-			fixture.frames(1)
-			local now = bearingOf(fixture.camera.CFrame.Position, boarRoot.Position)
-			worst = math.max(worst, math.abs(CameraMath.shortestDelta(last, now)) / F)
-			last = now
-			-- The aim never comes in under the lens: the boar stays ahead of the camera.
-			local _, _, ahead = onScreen(fixture.camera, boarRoot.Position)
-			expect(ahead).toBeGreaterThan(0)
+			-- The follow spring's lag lets the measured bearing run a little past the cap.
+			expect(worst).toBeLessThan(cap * 1.25)
+			expect(drift).toBeLessThan(1e-3)
 		end
-		-- The follow spring's lag lets the measured bearing run a little past the cap.
-		expect(worst).toBeLessThan(cap * 1.25)
-	end)
+	)
 
 	it("Open watches the run from the player's +X, so a run along -Z crosses the screen", function()
 		local fixture = load()

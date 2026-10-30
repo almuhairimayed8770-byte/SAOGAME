@@ -74,6 +74,10 @@ export type Output = {
 	drawnSprint: number,
 	phase: Phase,
 	airborne: boolean,
+	-- A standing turn under way (323(b)): the facing turns faster than stride.turnYawRate, or a
+	-- turn past turnInPlaceDegrees is owed a turn clip. Locomotion holds a Draw or Sheathe back over
+	-- it as it does under the turn clip itself.
+	turnUnderWay: boolean,
 }
 
 --- Where a clip has one foot: studs from the root (forward, right) and, for a gait clip, the cycle
@@ -620,6 +624,7 @@ function LocomotionState.update(self: any, dt: number, input: Input): Output
 			drawnSprint = 0,
 			phase = "Air",
 			airborne = true,
+			turnUnderWay = false,
 		}
 	end
 
@@ -661,6 +666,7 @@ function LocomotionState.update(self: any, dt: number, input: Input): Output
 	self.previousSpeed = speed
 
 	local drawnSprint = 0
+	local turnUnderWay = false
 	if moving then
 		local sprint = moveWeights(self, weights, speed, input, dt)
 		if input.drawn then
@@ -682,6 +688,11 @@ function LocomotionState.update(self: any, dt: number, input: Input): Output
 			self.turnTimer = Config.turnClipDuration
 			self.turnAccumulated = 0
 		end
+		-- The turn clip comes once the body has turned turnInPlaceDegrees, frames after a lock
+		-- starts turning it (323(b)): until then the turn is under way all the same, and a Draw
+		-- started now would be cut by the clip before its grab and play again after it.
+		turnUnderWay = not pushed
+			and (math.abs(input.yawRate) > Stride.turnYawRate or math.abs(turn) > Config.turnInPlaceDegrees)
 	end
 
 	return {
@@ -692,6 +703,7 @@ function LocomotionState.update(self: any, dt: number, input: Input): Output
 		drawnSprint = drawnSprint,
 		phase = self.phase,
 		airborne = false,
+		turnUnderWay = turnUnderWay,
 	}
 end
 

@@ -655,3 +655,70 @@ describe("ReviewMarkers sheath mount", function()
 		end
 	end)
 end)
+
+describe("ReviewMarkers.hitStopPreview: the ClipLab holds the pose the game holds (D-412)", function()
+	-- The game freezes a swing on its strike key (ContactPredictor.strikeKey, the snap's landing)
+	-- and lets the hit-stop stand in for the authored Hold after it. The lab played a snap with no
+	-- Hold after it frozen on the HitWindowOpen frame: the snap's first frame, a pose the game never
+	-- holds.
+	local ContactPredictor = Harness.load("src/client/controllers/ContactPredictor")
+	local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
+	local Combat = Harness.load("src/shared/data/combat")
+	local FINAL = Combat.hitStopFrames.Final
+
+	local function copyOf(id: string): any
+		local clip = table.clone(ClipLibrary.get(id))
+		local keys = {}
+		for index, key in clip.keys do
+			keys[index] = table.clone(key)
+		end
+		clip.keys = keys
+		return clip
+	end
+
+	it("with no Hold after the snap, pauses the whole hit-stop on the strike key", function()
+		local clip = copyOf("player/OneHandedSword/Basic1")
+		local hold = ClipSampler.strikeHoldAfter(clip, 0.1)
+		expect(hold).never.toBeNil()
+		clip.keys[hold :: number].easing = "SineInOut"
+		expect(ClipSampler.strikeHoldAfter(clip, 0.1)).toBeNil()
+		local window = ClipSampler.hitWindows(clip)[1]
+		local key = ContactPredictor.strikeKey(clip, window)
+		expect(key > window.open).toBe(true)
+		local at, frames = ReviewMarkers.hitStopPreview(clip, window.open, FINAL)
+		expect(at).toBe(key)
+		expect(frames).toBe(FINAL)
+		-- Opened a frame late (the event fires on the frame the clock passes it): the same key.
+		local late = ReviewMarkers.hitStopPreview(clip, window.open + F * 0.5, FINAL)
+		expect(late).toBe(key)
+	end)
+
+	it("with a Hold, pauses what the hit-stop has beyond it on the strike key, then plays the Hold", function()
+		-- It paused at the Hold's end before: the next key's pose, a still the game never holds.
+		local clip = ClipLibrary.get("player/OneHandedSword/Basic1")
+		local window = ClipSampler.hitWindows(clip)[1]
+		local key = ContactPredictor.strikeKey(clip, window)
+		local hold = ClipSampler.strikeHoldAfter(clip, key) :: number
+		expect(clip.keys[hold - 1].time).toBe(key)
+		local holdFrames = (clip.keys[hold].time - key) / F
+		local at, frames = ReviewMarkers.hitStopPreview(clip, window.open, FINAL)
+		expect(at).toBe(key)
+		expect(frames).toBeCloseTo(FINAL - holdFrames, 1e-6)
+		-- A hit-stop no longer than the Hold leaves nothing to pause.
+		local none, left = ReviewMarkers.hitStopPreview(clip, window.open, holdFrames)
+		expect(none).toBeNil()
+		expect(left).toBe(0)
+	end)
+
+	it("pauses every audited clip's window on its strike key", function()
+		for _, id in Dev.review.audit.clips do
+			local clip = ClipLibrary.get(id)
+			for _, window in ClipSampler.hitWindows(clip) do
+				local at = ReviewMarkers.hitStopPreview(clip, window.open, FINAL)
+				if at ~= nil then
+					expect(math.abs(at - ContactPredictor.strikeKey(clip, window)) < 1e-9).toBe(true)
+				end
+			end
+		end
+	end)
+end)

@@ -1369,6 +1369,23 @@ function ImpactFrames.hiddenSeconds(): number
 	return remainingOf(current, now())
 end
 
+--- Drawn frames the opaque impact frames still hide the 3D world for on this screen, from the next
+--- one they draw (0 while idle or dimming): before the first, every look's frames at this screen's
+--- pace, as the overlay will count them (D-159). Replication holds the bodies a word froze over
+--- them (D-350), so no frame of the picture draws a body that moved on.
+function ImpactFrames.hiddenFrames(): number
+	local current = showing
+	if current == nil or current.kind ~= "Sequence" then
+		return 0
+	end
+	local quotas = current.quotas or quotasFor(current.frames, currentPace())
+	local left = quotas[current.index] - current.drawnInLook
+	for index = current.index + 1, #quotas do
+		left += quotas[index]
+	end
+	return math.max(0, left)
+end
+
 --- Hides whatever is showing at once and returns its clones to the pool.
 function ImpactFrames.cancel()
 	finish()

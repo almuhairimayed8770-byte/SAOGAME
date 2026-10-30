@@ -109,6 +109,10 @@ export type PlayOptions = {
 	coexist: boolean?,
 	loop: boolean?, -- Roblox Animation fallback only
 	mask: { [string]: number }?, -- Additive clips: joint name -> weight multiplier (Mixer)
+	-- A cancel (Mixer.PlayOptions handOver, D-408): the clip takes the body from the live action it
+	-- cuts on its layer and from each handle `cancels` lists, as a snap.
+	handOver: boolean?,
+	cancels: { Handle }?,
 }
 
 export type Handle = Mixer.Handle
@@ -124,6 +128,10 @@ export type Animator = {
 	hitStop: (self: Animator, frames: number) -> (),
 	isPaused: (self: Animator) -> boolean,
 	pauseRemaining: (self: Animator) -> number,
+	heldShown: (self: Animator) -> boolean,
+	heldCount: (self: Animator) -> number,
+	holdPace: (self: Animator) -> number?,
+	holdSteps: (self: Animator, steps: number) -> (),
 	setTimeScale: (self: Animator, scale: number) -> (),
 	isPlaying: (self: Animator, clipId: string) -> boolean,
 	currentRootMotionDelta: (self: Animator) -> Vector3,
@@ -506,6 +514,8 @@ function AnimatorClass.play(self: any, clipId: string, opts: PlayOptions?): Hand
 		weight = options.weight,
 		coexist = options.coexist,
 		mask = options.mask,
+		handOver = options.handOver,
+		cancels = options.cancels,
 	}
 	local now = engine.now()
 	if options.serverTime ~= nil then
@@ -557,6 +567,42 @@ end
 --- contact's hold reads how much of it is left.
 function AnimatorClass.pauseRemaining(self: any): number
 	return self.mixer:pauseRemaining()
+end
+
+--- True when this frame draws the pose the frame before drew: the step that wrote it held the rig
+--- (Mixer.heldShown, D-353). isPaused rises on the contact's own step, a frame before the screen
+--- shows the freeze, and falls a frame before its last still frame.
+function AnimatorClass.heldShown(self: any): boolean
+	return self.mixer:heldShown()
+end
+
+--- How many steps the rig's holds have frozen so far, a running count (Mixer.heldCount, D-354).
+function AnimatorClass.heldCount(self: any): number
+	return self.mixer:heldCount()
+end
+
+--- The step length the rig's holds count their frames at, nil before it is known (Mixer.holdPace).
+function AnimatorClass.holdPace(self: any): number?
+	return self.mixer:holdPace()
+end
+
+--- Holds the rig `steps` more steps whatever their length (Mixer.holdSteps, D-354); engine
+--- tracks stand still for those steps at the rig's pace.
+function AnimatorClass.holdSteps(self: any, steps: number)
+	self.mixer:holdSteps(steps)
+	if next(self.rbxTracks) ~= nil and self.mixer:pauseRemaining() > 0 then
+		for _, track in self.rbxTracks do
+			track:AdjustSpeed(0)
+		end
+		task.delay(self.mixer:pauseRemaining(), function()
+			if self.mixer:pauseRemaining() > 0 then
+				return
+			end
+			for handle, track in self.rbxTracks do
+				track:AdjustSpeed(handle.speed * self.mixer:timeScale())
+			end
+		end)
+	end
 end
 
 function AnimatorClass.setTimeScale(self: any, scale: number)

@@ -93,6 +93,10 @@ export type HitInfo = {
 	-- false for a player's basic swing (BasicHit), nil for anything else (an enemy's strike).
 	art: boolean?,
 	partner: Model?, -- the Switch window's opener, whose trail also flashes when the Switch lands
+	-- A stronger tier than the contact's (or the shown blow's) come after that freeze let go
+	-- (D-348): the bodies moved on, so it plays its sound, accents and flash but no impact picture
+	-- and no punch.
+	late: boolean?,
 }
 
 export type Deps = {
@@ -468,6 +472,19 @@ function Impact.hiddenSeconds(): number
 	return if typeof(hidden) == "number" and hidden > 0 then hidden else 0
 end
 
+--- Drawn frames the impact frames still hide the 3D world for on this screen, from the next one
+--- they draw (0 when none, or with an overlay that cannot say): Replication holds the bodies a word
+--- froze over them (D-350).
+function Impact.hiddenFrames(): number
+	local frames = deps.impactFrames
+	local read = if typeof(frames) == "table" then rawget(frames :: any, "hiddenFrames") else nil
+	if typeof(read) ~= "function" then
+		return 0
+	end
+	local ok, hidden = pcall(read)
+	return if ok and typeof(hidden) == "number" and hidden > 0 then hidden else 0
+end
+
 -- Runs `fn` once no impact frames hide the world on this screen. ImpactFrames.whenVisible runs it
 -- in the render step that takes the picture down, so what it shows (the white flash, the glint)
 -- is on the first frame after the picture (issue 3: a timer landed it a few frames late). Without
@@ -597,7 +614,11 @@ local function playHit(info: HitInfo, before: Moments.Moment?): string
 		and stronger
 		and (before == nil or before.slashLine == nil)
 		and allowed(name, "SlashLine", involved, position)
-	local wantsFrames = row.impactSequence ~= nil and stronger and allowed(name, "ImpactFrames", involved, position)
+	-- A stronger tier past the freeze it belongs to draws no picture over bodies that moved on (D-348).
+	local wantsFrames = row.impactSequence ~= nil
+		and stronger
+		and info.late ~= true
+		and allowed(name, "ImpactFrames", involved, position)
 	if wantsFrames and not strongestInSweep(info, "Frames", row.hitStop) and Impact.hiddenSeconds() <= 0 then
 		-- One sweep, one picture: a later hit of it joins the picture while it shows, and once that
 		-- has ended only a stronger hit-stop draws again (a sweep confirmed over frames never twice).
@@ -651,7 +672,9 @@ local function playHit(info: HitInfo, before: Moments.Moment?): string
 				call("slashArc", "line", position, tangent, line.size)
 			end
 		end
-		local highlight = if before == nil then row.highlight else nil
+		-- A stronger tier's own flash comes after its picture (D-349: a Kill's Black, Dark, Ink, then
+		-- white), even after the contact's flash.
+		local highlight = if stronger then row.highlight else nil
 		if highlight ~= nil and info.target ~= nil and allowed(name, "Highlight", involved, position) then
 			local token = if highlight.trailTint then info.trailToken else highlight.token
 			call("outline", "flash", info.target, token, highlight.frames)
@@ -674,6 +697,7 @@ local function playHit(info: HitInfo, before: Moments.Moment?): string
 	if
 		punch ~= nil
 		and stronger
+		and info.late ~= true
 		and allowed(name, "Punch", involved, position)
 		and strongestInSweep(info, "Punch", row.hitStop)
 	then
@@ -688,9 +712,10 @@ end
 --- `previous` is the moment the local fighter's predicted contact already played for this hit
 --- (Replication.contact, issue 4). The server's confirmation then plays only what its moment
 --- adds, and only when its hit-stop is stronger (a Kill the contact could not prove): its cue,
---- impact frames, contour and punch, and a crescent or slash line the contact's moment did not
---- have. Never a second glint, the white flash (the contact flashed the target) or the Switch
---- layer; a crit the contact could not know shows in its number only.
+--- impact frames, contour and punch, its own white flash after the frames (D-349), and a crescent
+--- or slash line the contact's moment did not have. Never a second glint or the Switch layer; a
+--- crit the contact could not know shows in its number only. With `info.late` (the word came
+--- after the contact's freeze let go, D-348) it draws no picture and no punch.
 function Impact.hit(info: HitInfo, previous: string?): string
 	local name = ""
 	local before = previousRow(previous)

@@ -833,6 +833,7 @@ local function zeroHit(target: Record, hit: Types.HitRequest): Types.AppliedHit
 		attackerId = hit.attackerId,
 		targetId = target.id,
 		damage = 0,
+		hpRemoved = 0,
 		crit = false,
 		gaugeDamage = 0,
 		killed = false,
@@ -911,6 +912,8 @@ function EntityService.applyHit(targetId: number, hit: Types.HitRequest): Types.
 		result.gaugeDamage = gaugeDamage
 	end
 
+	-- What the HP bar loses (FK5): all of the damage, or only the HP that was left when it kills.
+	result.hpRemoved = math.min(damage, target.hp)
 	setHp(target, target.hp - damage)
 	if target.kind == "Enemy" and attacker ~= nil then
 		EntityService.addThreat(target.id, attacker.id, damage * Combat.threatPerDamage)

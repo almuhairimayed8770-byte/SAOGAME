@@ -4,6 +4,7 @@
 -- parry, dispatched at fake modules on a fake server clock.
 local Replication = Harness.load("src/client/controllers/Replication")
 local Enemies = Harness.load("src/shared/data/enemies")
+local Combat = Harness.load("src/shared/data/combat")
 
 -- A recorder module: every field is a function that logs its call.
 local function recorder(moduleName: string, calls: { any }): any
@@ -473,12 +474,21 @@ describe("an enemy's blow on the local fighter, shown on its strike frame (F16)"
 	it("the server's word then brings the number and nothing that already played", function()
 		local t = stage("Basic")
 		at(t, lands + 0.004)
+		-- Both bodies froze for the blow's tier on its strike frame (D-355), once each.
+		local tier = Combat.hitStopFrames.Normal - Combat.hitStopShaveFrames
+		local mine, theirs = t.find("animator:me", "hitStop"), t.find("animator:axeman", "hitStop")
+		expect(#mine).toBe(1)
+		expect(mine[1].args[1]).toBe(tier)
+		expect(#theirs).toBe(1)
+		expect(theirs[1].args[1]).toBe(tier)
 		t.state.server = lands + 0.06
 		Replication.dispatch("StateChanged", { entityId = 1, state = "Stagger", duration = 0.4, direction = "Front" })
 		Replication.dispatch("HitConfirmed", confirmed())
 		expect(#plays(t, FLINCH)).toBe(1)
 		expect(#t.find("animator:me", "stop")).toBe(0)
-		expect(#t.find("animator:me", "hitStop")).toBe(0)
+		-- The word freezes nothing again.
+		expect(#t.find("animator:me", "hitStop")).toBe(1)
+		expect(#t.find("animator:axeman", "hitStop")).toBe(1)
 		expect(#t.find("outline", "flash")).toBe(1)
 		expect(#t.moments).toBe(2)
 		expect(t.moments[2].previous).toBe("Hit")

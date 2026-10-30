@@ -116,6 +116,9 @@ local Remotes: { [string]: RemoteDef } = {
 			attackerId = entityId,
 			targetId = entityId,
 			damage = Check.number(0),
+			-- FK5: the HP the hit took off (its damage, or the HP left when it kills); the floating
+			-- digit shows it. The server always sends it; a payload without it shows the damage.
+			hpRemoved = Check.optional(Check.number(0)),
 			crit = Check.boolean,
 			gaugeDamage = Check.number(0),
 			killed = Check.boolean,

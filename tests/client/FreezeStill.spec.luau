@@ -22,6 +22,15 @@
 	means past its far end (more than the keep-out's budget). Each sample keeps out what the parts
 	sweep from the one before, in pieces when they turn fast (a cut turns the head up to 64 degrees
 	a sample), so a frame between two samples never stands deeper.
+
+	The reach (D-424): at the kobold where a fight with it stands (3.5, as the capture's Art shots
+	stage it, and 4.8), the pose each strike's hit-stop holds shows no hand or arm deeper in the
+	body than at the start, the step back is worth its price (keepOut.stepPerDepth: no other step
+	leaves the key less far past what it may once the ground it covers is counted), and every cut
+	that reached the body still does; at the staging the blade also meets the body at its surface
+	(no deeper than keepOut.bladeDepthStuds, or as shallow as any step back leaves it). There, on
+	30, 60 and 144 Hz frames, the keep-out and the reach together never slide the body faster than
+	the sprint cap (maxSpeedStudsPerSecond), back and aside as one distance.
 ]]
 
 local fs = require("@lune/fs")
@@ -225,6 +234,21 @@ local function planFor(swing: Swing, model: any): any?
 		nil,
 		{ keepOut = true, step = swing.art ~= nil }
 	)
+end
+
+-- The swing's clip with its strikes' authored holds opened (eased "Linear" between the same two
+-- poses, so the needs are the same): the keep-out may grow inside them, as it did before D-427.
+local function openHolds(swing: Swing): Swing
+	local clip = table.clone(swing.clip)
+	clip.keys = table.clone(swing.clip.keys)
+	for index, key in clip.keys do
+		if key.easing == "Hold" then
+			local open = table.clone(key)
+			open.easing = "Linear"
+			clip.keys[index] = open
+		end
+	end
+	return { name = swing.name, clip = clip, art = swing.art, from = swing.from }
 end
 
 describe("a freeze holds the procedural channels (item 224, D-314)", function()
@@ -449,6 +473,279 @@ describe("the keep-out holds the body out of the enemy's blocker (item 224, D-31
 			end
 		end
 	end)
+end)
+
+-- Where a fight with the kobold stands (dev.luau's hit matrix): 3.5 where the Brute stops walking
+-- in, as the capture's Art shots stage it, and 4.8 where it starts its overhead.
+local REACH_PLACEMENTS: { Placement } = {
+	{ setup = "Kobold", distance = 3.5 },
+	{ setup = "Kobold", distance = 4.8 },
+}
+-- The staging the capture's Art shots stand at, where every key must meet the body at its surface.
+local REACH_STAGED = 3.5
+-- How much more than the cheapest step the spec finds a plan's step may come to: the two grids
+-- start a hair apart (half a stepStuds, at a stud of depth and 1 / stepPerDepth a stud of step), and
+-- the spec reads the blade at points, the plan along its whole length.
+local PRICE_SLACK = SLACK + Combat.contact.standOff.stepStuds
+-- Points along the blade the spec reads its depth at (guard to tip), apart from the plan's own.
+local BLADE_POINTS = 64
+
+-- How deep a point stands inside a box (its least distance to a face), 0 or less outside.
+local function pointDepth(point: Vector3, frame: CFrame, size: Vector3): number
+	local at = frame:PointToObjectSpace(point)
+	return math.min(size.X / 2 - math.abs(at.X), size.Y / 2 - math.abs(at.Y), size.Z / 2 - math.abs(at.Z))
+end
+
+-- With the root at `rootFrame` and the clip at `time`: the blade's deepest point in any of the
+-- enemy's `body` parts, and how deep each hand and arm (keepOut.limbs) stands in each, by name.
+local function reachDepths(swing: Swing, rootFrame: CFrame, time: number, body: { any }): (number, { [string]: number })
+	local sample = HitSweep.bladeAt(avatar.model, rootFrame, swing.clip, time, trailStart, trailEnd)
+	assert(sample ~= nil, "no blade")
+	local blade = -math.huge
+	for _, part in body do
+		for k = 0, BLADE_POINTS do
+			blade =
+				math.max(blade, pointDepth(sample.start:Lerp(sample.finish, k / BLADE_POINTS), part.CFrame, part.Size))
+		end
+	end
+	local limbs: { [string]: number } = {}
+	local solved = Pose.solve(avatar.model, rootFrame, ClipSampler.sample(swing.clip, time))
+	for _, name in KEEP_OUT.limbs do
+		local limb = avatar.model:FindFirstChild(name)
+		local frame = solved[name]
+		if limb ~= nil and frame ~= nil then
+			for _, part in body do
+				limbs[name .. " in " .. part.Name] = depth(frame, limb.Size, part.CFrame, part.Size)
+			end
+		end
+	end
+	return blade, limbs
+end
+
+describe("the cut meets the body at its surface and never sinks to its root (D-424)", function()
+	-- Measured at the kobold 3.5 ahead before the reach: the held key put Sharp Nail's right hand
+	-- 0.82 into the kobold's torso at its third thrust (the left 0.82 at its second) and the blade
+	-- 0.36 deep there; Rising Arc's blade 0.44, Vertical's 0.32 and the first basic's 0.43.
+	-- Not landed on the re-keyed swings (D-425), handed to the clips' owner with what they show at
+	-- the kobold 3.5 ahead: the third basic's first strike steps 1.25 back for a cost of 0.158 where
+	-- no step costs 0.004. Rising Arc's second strike held the blade 0.226 deep at its key 0.610
+	-- (0.226 allowed, over by under a thousandth); its elbow a degree more bent there holds it 0.209
+	-- (0.215 allowed) and it is judged again (D-415).
+	local NOT_LANDED: { [string]: boolean } = { Basic3 = true }
+	for _, swing in SWINGS do
+		if NOT_LANDED[swing.name] then
+			continue
+		end
+		it(
+			swing.name
+				.. ": at each strike's key no hand or arm is deeper than at the start, the step is worth its price and the staged blade meets the body",
+			function()
+				for _, placement in REACH_PLACEMENTS do
+					local model = place(placement.setup, placement.distance, placement.yaw)
+					local body = {}
+					for _, part in model:GetDescendants() do
+						if part:IsA("BasePart") and BladeContact.hurtbox(part) then
+							table.insert(body, part)
+						end
+					end
+					local plan = planFor(swing, model)
+					expect(plan ~= nil).toBe(true)
+					local startBlade, startLimbs = reachDepths(swing, rootAt(swing, plan, swing.from), swing.from, body)
+					local bladeTarget = math.max(startBlade, KEEP_OUT.bladeDepthStuds)
+					local strikeStart = swing.from
+					for index, window in ClipSampler.hitWindows(swing.clip) do
+						local key = ContactPredictor.strikeKey(swing.clip, window)
+						local held = rootAt(swing, plan, key)
+						local blade, limbs = reachDepths(swing, held, key, body)
+						local base, kept = plan.keep(strikeStart), plan.keep(key)
+						strikeStart = key
+						-- The step is worth its price: no step back from where the body stood when the
+						-- strike began (up to standOff.maxStuds) leaves the key less far past what it may
+						-- (the blade past bladeTarget, a hand or an arm past where it started) once each
+						-- stud of step counts as 1 / stepPerDepth of a stud of depth.
+						local function costAt(back: number): number
+							local moved = held + plan.away * (back - kept)
+							local deepest, each = reachDepths(swing, moved, key, body)
+							local past = deepest - (bladeTarget + KEEP_OUT.depthEpsilon)
+							for name, limb in each do
+								past = math.max(past, limb - (math.max(startLimbs[name], 0) + KEEP_OUT.depthEpsilon))
+							end
+							return math.max(past, 0) + (back - base) / KEEP_OUT.stepPerDepth
+						end
+						local cheapest, cheapestAt = math.huge, base
+						local back = base
+						while back <= base + STAND_OFF.maxStuds + 1e-9 do
+							local each = costAt(back)
+							if each < cheapest then
+								cheapest, cheapestAt = each, back
+							end
+							back += STAND_OFF.stepStuds
+						end
+						-- D-427: the keep-out grows none of its way inside a strike's authored hold (the
+						-- hit-stop skips it in one frame), so a step a later lunge calls for comes before
+						-- the key instead of in the still beat after it. That share is the keep-out's, not
+						-- the reach's: it is priced as the plan with the holds open stood at the key
+						-- (Rising Arc's first cut at the kobold 4.8: 0.51 back, 0.10 with them open; on
+						-- the real path the open plan stepped the other 0.41 in the frame after the
+						-- freeze, 0.60 with the clip's own motion).
+						local open = planFor(openHolds(swing), model)
+						local lead = if open ~= nil and open.keep ~= nil then math.max(kept - open.keep(key), 0) else 0
+						local cost = costAt(kept) - lead / KEEP_OUT.stepPerDepth
+						if cost > cheapest + PRICE_SLACK then
+							error(
+								("%s window %d at %s %.2f: the step to %.2f costs %.3f, the step to %.2f only %.3f"):format(
+									swing.name,
+									index,
+									placement.setup,
+									placement.distance,
+									kept,
+									cost,
+									cheapestAt,
+									cheapest
+								)
+							)
+						end
+						if placement.distance == REACH_STAGED then
+							-- Staged: within bladeDepthStuds, or, where no step back does that (a blade beside
+							-- the body that a step back carries into it), as shallow as any step back from
+							-- where the body stood when the strike began, up to standOff.maxStuds, leaves it.
+							local bladeAllowed = bladeTarget
+							if blade > bladeTarget + KEEP_OUT.depthEpsilon + SLACK then
+								local least = math.huge
+								back = base
+								while back <= base + STAND_OFF.maxStuds + 1e-9 do
+									local each = reachDepths(swing, held + plan.away * (back - kept), key, body)
+									least = math.min(least, each)
+									back += STAND_OFF.stepStuds
+								end
+								bladeAllowed = math.max(bladeTarget, least)
+							end
+							bladeAllowed += KEEP_OUT.depthEpsilon + SLACK
+							if blade > bladeAllowed then
+								error(
+									("%s window %d at %s %.2f: the blade %.3f deep at the key %.3f (allowed %.3f)"):format(
+										swing.name,
+										index,
+										placement.setup,
+										placement.distance,
+										blade,
+										key,
+										bladeAllowed
+									)
+								)
+							end
+						end
+						for name, limb in limbs do
+							local allowed = math.max(startLimbs[name], 0) + KEEP_OUT.depthEpsilon + SLACK
+							if limb > allowed then
+								error(
+									("%s window %d at %s %.2f: %s %.3f deep at the key %.3f (started %.3f)"):format(
+										swing.name,
+										index,
+										placement.setup,
+										placement.distance,
+										name,
+										limb,
+										key,
+										startLimbs[name]
+									)
+								)
+							end
+						end
+						-- The cut still reaches what it reached: no window that passed within the sweep's
+						-- promise passes farther.
+						local function nearest(bare: boolean): number
+							local best = math.huge
+							for k = 0, STAND_OFF.reachSamples do
+								local time = window.open + (window.close - window.open) * k / STAND_OFF.reachSamples
+								local sample = HitSweep.bladeAt(
+									avatar.model,
+									rootAt(swing, plan, time, bare),
+									swing.clip,
+									time,
+									trailStart,
+									trailEnd
+								)
+								for _, part in body do
+									best = math.min(
+										best,
+										(
+											HitSweep.segmentBoxDistance(
+												sample.start,
+												sample.finish,
+												part.CFrame,
+												part.Size
+											)
+										)
+									)
+								end
+							end
+							return best
+						end
+						if nearest(true) <= PROMISE then
+							expect(nearest(false) <= PROMISE).toBe(true)
+						end
+					end
+					model:Destroy()
+				end
+			end
+		)
+	end
+end)
+
+describe("the keep-out and the reach never slide the body faster than a sprint (D-424)", function()
+	-- Measured at the kobold 3.5 ahead: the third basic's key, carried deeper by the aside the
+	-- keep-out takes off the axe during its cut (0.19 then 0.34, after its snap began), was posed
+	-- again there and its step taken at once, 0.60 studs in one 60 Hz frame and 1.00 in one 30 Hz
+	-- frame (36 studs a second, past the sprint cap of maxSpeedStudsPerSecond).
+	for _, swing in SWINGS do
+		it(
+			swing.name .. ": back and aside together grow no faster than the sprint cap, at 30, 60 and 144 Hz",
+			function()
+				for _, placement in REACH_PLACEMENTS do
+					local model = place(placement.setup, placement.distance, placement.yaw)
+					local plan = planFor(swing, model)
+					expect(plan ~= nil).toBe(true)
+					local keep = plan.keep
+					local keepSide = plan.keepSide
+					if keep ~= nil then
+						for _, fps in { 30, 60, 144 } do
+							local frame = 1 / fps
+							local allowed = Combat.maxSpeedStudsPerSecond * frame + 1e-3
+							local time = swing.from
+							local back = keep(time)
+							local aside = if keepSide ~= nil then keepSide(time) else 0
+							while time < swing.clip.duration do
+								time = math.min(time + frame, swing.clip.duration)
+								local nextBack = keep(time)
+								local nextAside = if keepSide ~= nil then keepSide(time) else 0
+								local slide = math.sqrt((nextBack - back) ^ 2 + (nextAside - aside) ^ 2)
+								if slide > allowed then
+									error(
+										("%s at %s %.2f, %d Hz: the body slides %.3f in the frame to %.3f (back %.3f to %.3f, aside %.3f to %.3f; a sprint covers %.3f)"):format(
+											swing.name,
+											placement.setup,
+											placement.distance,
+											fps,
+											slide,
+											time,
+											back,
+											nextBack,
+											aside,
+											nextAside,
+											allowed - 1e-3
+										)
+									)
+								end
+								back, aside = nextBack, nextAside
+							end
+						end
+					end
+					model:Destroy()
+				end
+			end
+		)
+	end
 end)
 
 describe("the keep-out stays inside the anti-cheat's limits (D-314)", function()

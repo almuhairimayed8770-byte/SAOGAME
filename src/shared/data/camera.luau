@@ -101,6 +101,12 @@ local Camera = {
 		-- linear wobble: {frequency multiplier, phase offset in radians}.
 		lanes = { { 1.0, 0.0 }, { 0.731, 1.7 }, { 1.318, 2.9 } },
 		cutoff = 0.004, -- studs; energy below this is zeroed
+		-- Seconds into the noise a shake from rest starts at (312): the same shake moves the camera
+		-- the same way whenever it comes, and one scaled down by a falloff is the same moves,
+		-- smaller. Here the first frame is the shake's biggest move (a hit lands, then rings out):
+		-- 0.423 studs for the wall slam at full strength, the median peak it had on the camera's
+		-- running clock (0.425; 0.310 to 0.625 over 24 takes).
+		startPhase = 0.025,
 	},
 
 	-- Orbit presets. Default is the field camera, low over the right shoulder; Duel is lower and
@@ -223,6 +229,21 @@ local Camera = {
 
 	scripted = {
 		blendOut = 0.6, -- seconds to ease from a scripted shot back to the follow
+	},
+
+	-- A fixed staged view (CameraController.setStage, dev.luau StageCamera.fixed: the capture's
+	-- Behind). It frames as any staged view while the player and its target settle where the
+	-- staging put them (a staged enemy's replicated place comes over a few frames, the camera's
+	-- blend eases in, its bearing pans round when staged over a live view), and once none of the
+	-- player, the target and the view's own spot has moved more than fixStillStuds for
+	-- fixAfterSeconds it holds that camera spot and aim in the world, still through the whole
+	-- take, until the next staging. Well inside the capture's countdown (dev.luau
+	-- capture.countdownSeconds).
+	stage = {
+		fixAfterSeconds = 0.5,
+		-- A standing body's drift: over fixAfterSeconds, slower than choreo.luau
+		-- locomotion.idleSpeedThreshold, so any walk starts the wait again.
+		fixStillStuds = 0.1,
 	},
 
 	-- Render stalls (a display asleep, a minimised window, a long hitch): RenderStepped stops

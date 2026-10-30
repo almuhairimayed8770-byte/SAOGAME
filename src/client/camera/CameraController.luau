@@ -128,6 +128,17 @@ local lockPoint: Vector3? = nil
 local wasLocked = false
 -- A lock held past its target's death (F4): the shot stays on it until this os.clock, then lets go.
 local holdUntil: number? = nil
+-- A hit's freeze (holdFollow, D-357): until when (os.clock) at least, and on while the subject's
+-- rig is drawn held. While it holds, the follow rests where it stood (frozenRest, carried by what
+-- the body did since frozenPivot) and what it was doing waits (frozenVelocity) for the freeze's
+-- end; a nudge plays about the rest. Nil: no freeze.
+local followHeldUntil: number? = nil
+local frozenRest: Vector3? = nil
+local frozenPivot: Vector3? = nil
+local frozenVelocity = Vector3.zero
+-- Choreo, found when first wanted (nil when it cannot load: the follow then holds for the seconds).
+local choreoTried = false
+local choreoModule: any = nil
 -- The still shot (D-323): the true pivot it stood on last frame (it moves with the body alone), and
 -- the look input added up while it holds (D-324): the degrees moved, and the move to turn by when a
 -- deliberate look lets it go.
@@ -145,6 +156,15 @@ local stagePoint: Vector3? = nil
 local stageLook: Vector3? = nil
 local stageCamera = Vector3.zero -- the staged rig relative to the pivot, kept to ease out from
 local stageAim = Vector3.zero
+-- A fixed view (StageView.fixed): where the player's root, the target's drawn body and the view's
+-- own spot stood and since when (os.clock), and the camera spot and aim it holds in the world once
+-- all three have stood camera.luau stage.fixAfterSeconds, until the next setStage.
+local fixedPlayer: Vector3? = nil
+local fixedTarget: Vector3? = nil
+local fixedSpot: Vector3? = nil
+local fixedSince = 0
+local fixedCamera: Vector3? = nil
+local fixedAim: Vector3? = nil
 -- The last frame's view yaw (the free camera takes it when a lock lets go) and camera spot.
 local viewYaw = 0
 local cameraSpot: Vector3? = nil
@@ -159,6 +179,9 @@ local punchParams: CameraMath.PunchParams? = nil
 local punchAt = 0
 local punchFrom = 0
 local shakeTime = 0
+-- A shake from rest asked for before this frame's step: the step shows its noise at
+-- camera.shake.startPhase, then the clock runs on (312).
+local shakeFresh = false
 local lastStepAt: number? = nil -- os.clock of the last render step
 local scripted: Scripted? = nil
 local blendBack: BlendBack? = nil
@@ -252,6 +275,40 @@ local function subjectRoot(): BasePart?
 	end
 	local root = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart")
 	return if root ~= nil and root:IsA("BasePart") then root else nil
+end
+
+-- Whether this frame draws the subject's rig held (Choreo heldShown: the step that wrote the pose
+-- it draws held the rig, D-353). False with no rig, or one that cannot say.
+local function subjectHeld(): boolean
+	local model = subject
+	if model == nil then
+		return false
+	end
+	if not choreoTried then
+		choreoTried = true
+		local ok, loaded = pcall(function(): any
+			return require(script.Parent.Parent.choreo.Choreo) :: any
+		end)
+		choreoModule = if ok then loaded else nil
+	end
+	local module = choreoModule
+	if module == nil then
+		return false
+	end
+	local animator = module.find(model)
+	local shown = if animator ~= nil then (animator :: any).heldShown else nil
+	return typeof(shown) == "function" and shown(animator) == true
+end
+
+-- Lets a hit's freeze go: the follow goes on with what it was doing (D-357).
+local function letGoFreeze(spring: Spring.Spring<Vector3>?)
+	if frozenRest ~= nil and spring ~= nil then
+		spring.velocity += frozenVelocity
+	end
+	followHeldUntil = nil
+	frozenRest = nil
+	frozenPivot = nil
+	frozenVelocity = Vector3.zero
 end
 
 local function lockRoot(): BasePart?
@@ -625,6 +682,15 @@ local function rig(root: BasePart, span: number, settle: boolean): (Vector3, Vec
 	return freeCamera:Lerp(lockCamera, weight), freeLook:Lerp(lockLook, weight)
 end
 
+-- Whether a point a fixed view watches has left where it stood by more than `studs` (or came or
+-- went: a target that appears or is gone).
+local function moved(from: Vector3?, to: Vector3?, studs: number): boolean
+	if from == nil or to == nil then
+		return from ~= to
+	end
+	return ((to :: Vector3) - (from :: Vector3)).Magnitude > studs
+end
+
 -- The staged view over the rig `rig` built (F12): the camera and its aim relative to the true
 -- pivot, eased in and out on the stage's blend.
 local function staged(
@@ -690,8 +756,31 @@ local function staged(
 	-- side leaves it at the anchor's depth, never a look back down under the lens.
 	aim = CameraMath.holdAimDepth(cameraAt, anchor, aim, CameraData.lock.aimDepthFraction)
 	local pivot = pivotOf(root)
-	stageCamera = toVector(cameraAt) - pivot
-	stageAim = toVector(aim) - pivot
+	local spot, spotAim = toVector(cameraAt), toVector(aim)
+	if view.fixed == true then
+		-- A fixed view frames as above while the player and the target settle where the staging put
+		-- them (a staged enemy's replicated place comes over a few frames) and its bearing pans round
+		-- to its spot (staged over a live view); once none of the three has moved fixStillStuds for
+		-- fixAfterSeconds it takes that spot and aim, and holds them in the world.
+		local heldCamera, heldAim = fixedCamera, fixedAim
+		if heldCamera == nil or heldAim == nil then
+			local at = now()
+			local still = CameraData.stage.fixStillStuds
+			if
+				moved(fixedPlayer, root.Position, still)
+				or moved(fixedTarget, stagePoint, still)
+				or moved(fixedSpot, spot, still)
+			then
+				fixedPlayer, fixedTarget, fixedSpot, fixedSince = root.Position, stagePoint, spot, at
+			elseif at - fixedSince >= CameraData.stage.fixAfterSeconds then
+				fixedCamera, fixedAim = spot, spotAim
+			end
+		else
+			spot, spotAim = heldCamera, heldAim
+		end
+	end
+	stageCamera = spot - pivot
+	stageAim = spotAim - pivot
 	return cameraOffset:Lerp(stageCamera, weight), lookOffset:Lerp(stageAim, weight)
 end
 
@@ -752,9 +841,22 @@ local function step(dt: number)
 	local still = holdUntil ~= nil
 	if still then
 		stillSprings()
+		-- The still shot takes over a hit's freeze: nothing of the follow waits for its end.
+		frozenVelocity = Vector3.zero
+		followHeldUntil, frozenRest, frozenPivot = nil, nil, nil
 	end
-	local rigSpan = if still then 0 else span
-	local rigSettle = settle and not still
+	-- A hit's freeze (D-357): from the frame its cue shows on, as long as asked and on while this
+	-- frame draws the subject's rig held, the rig's springs stand (they go on from where they
+	-- were once it ends) and the follow rests; the shake and the nudge still play on it.
+	local frozen = false
+	if followHeldUntil ~= nil then
+		frozen = at < (followHeldUntil :: number) or subjectHeld()
+		if not frozen then
+			letGoFreeze(pivotSpring)
+		end
+	end
+	local rigSpan = if still or frozen then 0 else span
+	local rigSettle = settle and not (still or frozen)
 
 	local pivot = pivotOf(root)
 	local cameraOffset, lookOffset = rig(root, rigSpan, rigSettle)
@@ -779,10 +881,23 @@ local function step(dt: number)
 		end
 		follow.velocity = Vector3.zero
 		trailing = follow.position
+	elseif frozen then
+		-- The follow rests where the freeze found it, carried by what the body does; a nudge asked
+		-- on the freeze swings about the rest and comes back to it.
+		local rest = frozenRest or follow.position
+		local from = frozenPivot
+		if from ~= nil then
+			rest += pivot - from
+			follow.position += pivot - from
+		end
+		frozenRest = rest
+		follow.target = rest
+		trailing = advanceSpring(follow, span, false)
 	else
 		trailing = advanceSpring(follow, span, settle)
 	end
 	stillPivot = if still then pivot else nil
+	frozenPivot = if frozen then pivot else nil
 	local view = lookOffset - cameraOffset
 	local forward = Vector3.new(view.X, 0, view.Z)
 	local anchor = trailing
@@ -834,7 +949,11 @@ local function step(dt: number)
 
 	-- Shake: noise scaled by a decaying energy, in the camera's own axes.
 	local shakeEnergy = if still then 0 else shakeValue(at)
-	shakeTime += span
+	if shakeFresh then
+		shakeFresh = false
+	else
+		shakeTime += span
+	end
 	local axes = camera.CFrame
 	local shakeVector = shakeIn(axes, shakeEnergy, shakeTime)
 
@@ -929,6 +1048,10 @@ local function lateStep(_dt: number)
 		cameraSpot = position
 	end
 	local shakeVector = shakeIn(drawn.axes, shakeValue(drawn.at), drawn.shakeTime)
+	if shook then
+		-- A shake from rest is shown here at its start phase: the next step runs its clock on (312).
+		shakeFresh = false
+	end
 	local followCFrame = CFrame.lookAt(position + shakeVector, lookAt + shakeVector)
 	local blendFrom = drawn.blendFrom
 	if blendFrom ~= nil then
@@ -972,10 +1095,24 @@ function CameraController.shake(tier: string, scale: number?)
 		return
 	end
 	local at = now()
+	local fromRest = shakeValue(at) <= 0
 	shakePeak = math.max(shakeValue(at), amplitude)
 	shakeAt = at
+	if fromRest then
+		-- From rest the noise starts at one phase (312), so the first frames of a shake move the
+		-- camera the same way whenever it comes: on the camera's running clock a shake's peak ran
+		-- from 0.54 to 1.46 times the median, and a slam at 28 studs out-moved one at 22. A shake raised
+		-- while it runs carries on from where its noise is.
+		shakeTime = CameraData.shake.startPhase
+		shakeFresh = true
+	end
 	if drawn.live then
 		lateShake = true
+		if fromRest then
+			-- The late pass shows it on this frame at the start phase, and the next step runs on
+			-- from it; a frame with no late pass shows it at the start phase on the next step.
+			drawn.shakeTime = shakeTime
+		end
 	end
 end
 
@@ -1031,6 +1168,32 @@ function CameraController.holdLock(seconds: number)
 	heldLookDegrees, heldLookX, heldLookY = 0, 0, 0
 end
 
+--- A hit's freeze holds the follow (D-357): from now for at least `seconds`, and on while the frame
+--- draws the subject's rig held (its hit-stop, however long it waits for its word), the follow
+--- rests where it stands and the rig's springs stand; what they were doing goes on once it ends.
+--- The shake and the nudge still play on it (section 10's hold), so ask it before the hit's nudge.
+--- The kill's still shot (holdLock) takes over from it.
+function CameraController.holdFollow(seconds: number)
+	local spring = pivotSpring
+	if spring == nil or holdUntil ~= nil then
+		return
+	end
+	local untilAt = now() + math.max(seconds, 0)
+	followHeldUntil = math.max(followHeldUntil or untilAt, untilAt)
+	if frozenRest == nil then
+		-- What the follow was doing waits for the freeze's end; it stops where it stands.
+		frozenRest = spring.position
+		frozenVelocity = spring.velocity
+		spring.velocity = Vector3.zero
+	end
+end
+
+--- Whether the shot is locked on `model`: a kill on it ends in the death's still shot (holdLock,
+--- D-323), so a kill this client proves on it holds the shot still from its contact (D-358).
+function CameraController.lockedOn(model: Instance?): boolean
+	return model ~= nil and lockTarget == model
+end
+
 --- Whether the shot frames a target the player still holds a lock on (not one held for a freeze).
 function CameraController.lockLive(): boolean
 	return lockTarget ~= nil and holdUntil == nil
@@ -1067,7 +1230,9 @@ end
 --- player, the target or the middle of the two as `view` says, on the `side` (1 or -1) of its
 --- reference, and holds that over the free camera and the lock's two-shot until setStage(nil). It
 --- eases on and off on the lock's blend, its bearing turns no faster than the lock's cap, the look
---- input waits while it holds, and a target that is gone keeps the spot it was last drawn at.
+--- input waits while it holds, and a target that is gone keeps the spot it was last drawn at. A
+--- `fixed` view stands still in the world once both have stood (camera.luau stage), until the next
+--- setStage.
 function CameraController.setStage(view: CameraMath.StageView?, target: Model?, side: number?)
 	if view == nil then
 		if stage ~= nil then
@@ -1084,6 +1249,8 @@ function CameraController.setStage(view: CameraMath.StageView?, target: Model?, 
 	if stage == nil then
 		stageLive = false
 	end
+	-- Every staging is a new take: a fixed view takes its spot again once both stand.
+	fixedPlayer, fixedTarget, fixedSpot, fixedCamera, fixedAim = nil, nil, nil, nil, nil
 	stage = { view = view, target = target, side = if side ~= nil and side < 0 then -1 else 1 }
 end
 
@@ -1113,6 +1280,8 @@ end
 --- Sets which model the camera follows (the local character by default).
 function CameraController.setSubject(model: Model?)
 	subject = model
+	followHeldUntil, frozenRest, frozenPivot = nil, nil, nil
+	frozenVelocity = Vector3.zero
 	resetFilter()
 	reachSpring:Snap(1)
 	local spring = pivotSpring

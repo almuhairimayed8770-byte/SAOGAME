@@ -2,9 +2,11 @@
 --[[
 	DevStageLogic: the pure rules under the capture's staging (F12, DevStage.server.luau): where
 	the player should stand (the stand spot and its ring) and whether it does, the route a walk into
-	the ring takes round the ledge and up its ramp, where the ramp goes, where each staged enemy
-	stands and which way it faces, where a field enemy that stands too near is moved to, when an
-	enemy may be held, and the request rate. Plain numbers in and out, so it runs in Lune.
+	the ring takes round the ledge and up its ramp, where the ramp goes, the boxes the ledge and its
+	ramp fill and whether a body reaches into one (they are never built around it, and no shot
+	stages around a body inside one), where each staged enemy stands and which way it faces, where
+	a field enemy that stands too near is moved to, when an enemy may be held, and the request
+	rate. Plain numbers in and out, so it runs in Lune.
 
 	Facings are degrees, 0 looking along -Z and + turning left: the look of CFrame.Angles(0,
 	rad(f), 0), the playground's convention (playground.luau spawns, DevCombat "place").
@@ -27,6 +29,9 @@ export type Ring = {
 
 -- A flat box { minX, maxX, minZ, maxZ }.
 type Box = { minX: number, maxX: number, minZ: number, maxZ: number }
+
+-- The box a staged part fills: its instance name and its corners { x, y, z }.
+export type PartBox = { name: string, min: { number }, max: { number } }
 
 -- The phases an enemy is never held in: inside a wind-up the client already draws the telegraph
 -- (a Charger's crouch and red line) and Brain.sleep cancels the attack, so the rush the player saw
@@ -54,19 +59,76 @@ function DevStageLogic.facingFrom(fromX: number, fromZ: number, toX: number, toZ
 	return math.deg(math.atan2(-dx, -dz))
 end
 
+-- The flat footprint of the ledge and its ramp together (their bounding box), grown by `grow`.
+local function footprint(ledge: any, grow: number): Box
+	local position, size, ramp = ledge.position, ledge.size, ledge.ramp.size
+	local half = math.max(size[1], ramp[1]) / 2 + grow
+	local front = position[3] - size[3] / 2
+	local back = position[3] + size[3] / 2 + ramp[3]
+	return { minX = position[1] - half, maxX = position[1] + half, minZ = front - grow, maxZ = back + grow }
+end
+
 --- Where a field enemy at (x, z) goes so it stands `away` studs (flat) from the spot (spotX,
 --- spotZ), straight out along the line from the spot (along +X when it stands on it); nil when it
---- already stands that far or further.
-function DevStageLogic.awaySpot(spotX: number, spotZ: number, x: number, z: number, away: number): (number?, number?)
+--- already stands that far or further. With `stage` (capture.stage), a spot that lands within
+--- stage.routeMarginStuds of the ledge's and its ramp's footprint goes on out along the same line
+--- until it clears that grown footprint by routeMarginStuds again, so a moved enemy is never put
+--- on or into the ledge or its ramp (round E: the ramp stands along +Z from the stage area's spot).
+function DevStageLogic.awaySpot(
+	spotX: number,
+	spotZ: number,
+	x: number,
+	z: number,
+	away: number,
+	stage: any?
+): (number?, number?)
 	local dx, dz = x - spotX, z - spotZ
 	local distance = math.sqrt(dx * dx + dz * dz)
 	if distance >= away then
 		return nil, nil
 	end
-	if distance <= 0 then
-		return spotX + away, spotZ
+	local ux, uz = 1, 0
+	if distance > 0 then
+		ux, uz = dx / distance, dz / distance
 	end
-	return spotX + dx / distance * away, spotZ + dz / distance * away
+	local out = away
+	if stage ~= nil then
+		local margin = stage.routeMarginStuds
+		local keep = footprint(stage.ledge, margin)
+		local px, pz = spotX + ux * out, spotZ + uz * out
+		if px >= keep.minX and px <= keep.maxX and pz >= keep.minZ and pz <= keep.maxZ then
+			-- Where the line leaves the grown footprint (the spot's ray through the box).
+			local exit = math.huge
+			if ux ~= 0 then
+				exit = math.min(exit, math.max((keep.minX - spotX) / ux, (keep.maxX - spotX) / ux))
+			end
+			if uz ~= 0 then
+				exit = math.min(exit, math.max((keep.minZ - spotZ) / uz, (keep.maxZ - spotZ) / uz))
+			end
+			out = math.max(out, exit + margin)
+		end
+	end
+	return spotX + ux * out, spotZ + uz * out
+end
+
+--- The floor height under the flat point (x, z): the ledge's top or its ramp's slope once they are
+--- built (`built`), else the stage area's floor.
+function DevStageLogic.floorAt(stage: any, built: boolean, x: number, z: number): number
+	local ledge = stage.ledge
+	local field = stage.area.position[2]
+	if not built then
+		return field
+	end
+	local position, size, ramp = ledge.position, ledge.size, ledge.ramp.size
+	local floor = position[2] - size[2] / 2
+	if DevStageLogic.onLedge(ledge, x, z) then
+		return floor + size[2]
+	end
+	if DevStageLogic.onRamp(ledge, x, z) then
+		local back = position[3] + size[3] / 2
+		return floor + ramp[2] * (1 - (z - back) / ramp[3])
+	end
+	return field
 end
 
 --- Where the player stands for a shot: the floor point (x, floor y, z) and the facing. The open
@@ -103,6 +165,62 @@ function DevStageLogic.onRamp(ledge: any, x: number, z: number): boolean
 	return math.abs(x - position[1]) <= ramp[1] / 2 and z >= back and z <= back + ramp[3]
 end
 
+--- The boxes the staging's parts fill, in build order: the ledge's, then its ramp's (the wedge's
+--- bounding box: from the ledge's floor up its height, from the ledge's +Z face back its length).
+function DevStageLogic.partBoxes(ledge: any): { PartBox }
+	local position, size, ramp = ledge.position, ledge.size, ledge.ramp.size
+	local floor = position[2] - size[2] / 2
+	local back = position[3] + size[3] / 2
+	return {
+		{
+			name = ledge.name,
+			min = { position[1] - size[1] / 2, floor, position[3] - size[3] / 2 },
+			max = { position[1] + size[1] / 2, floor + size[2], back },
+		},
+		{
+			name = ledge.ramp.name,
+			min = { position[1] - ramp[1] / 2, floor, back },
+			max = { position[1] + ramp[1] / 2, floor + ramp[2], back + ramp[3] },
+		},
+	}
+end
+
+--- The name of the staged part (the ledge or its ramp, by partBoxes) a body reaches into, or nil.
+--- The body is a box `reach` studs out from its root's flat point (x, z) each way along X and Z
+--- (half its flat diagonal, so any yaw fits) and `height` tall from the floor its Humanoid holds it
+--- over (floorY). It is inside a part when it overlaps the part's box by more than `touch` studs on
+--- every axis: feet on the top, or a side against a face, only touch. `names`: only those parts
+--- (nil: both).
+function DevStageLogic.bodyInside(
+	ledge: any,
+	x: number,
+	floorY: number,
+	z: number,
+	reach: number,
+	height: number,
+	touch: number,
+	names: { string }?
+): string?
+	local low = { x - reach, floorY, z - reach }
+	local high = { x + reach, floorY + height, z + reach }
+	for _, box in DevStageLogic.partBoxes(ledge) do
+		if names ~= nil and table.find(names, box.name) == nil then
+			continue
+		end
+		local inside = true
+		for axis = 1, 3 do
+			if math.min(high[axis], box.max[axis]) - math.max(low[axis], box.min[axis]) <= touch then
+				inside = false
+				break
+			end
+		end
+		if inside then
+			return box.name
+		end
+	end
+	return nil
+end
+
 --- The stand ring of a shot (open: on the ledge's top) from capture.stage.
 function DevStageLogic.ring(open: boolean, stage: any): Ring
 	local x, y, z, facing = DevStageLogic.standSpot(open, stage.area, stage.ledge)
@@ -136,15 +254,6 @@ function DevStageLogic.inRing(ring: Ring, x: number, floorY: number, z: number):
 	end
 	local over = ring.over
 	return over == nil or (x >= over[1] and x <= over[2] and z >= over[3] and z <= over[4])
-end
-
--- The flat footprint of the ledge and its ramp together (their bounding box), grown by `grow`.
-local function footprint(ledge: any, grow: number): Box
-	local position, size, ramp = ledge.position, ledge.size, ledge.ramp.size
-	local half = math.max(size[1], ramp[1]) / 2 + grow
-	local front = position[3] - size[3] / 2
-	local back = position[3] + size[3] / 2 + ramp[3]
-	return { minX = position[1] - half, maxX = position[1] + half, minZ = front - grow, maxZ = back + grow }
 end
 
 --- Whether the flat segment from (ax, az) to (bx, bz) runs through the inside of the box

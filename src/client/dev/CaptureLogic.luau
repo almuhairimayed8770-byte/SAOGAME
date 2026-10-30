@@ -5,16 +5,19 @@
 	line at a moment of the take, auto-perform's presses (a shot's timed keys and stick, the
 	reactions timed off an enemy's attack clip the client is drawing and moved on by its hit-stop,
 	their chains and Art cycle, the standing rules, the stick on the camera's frame, the lock
-	presses on a staged enemy and the let-go of the keys a stopped take holds, D-290, CF), and the
-	walk into the stand ring a
-	staging asks for (D-244): the walk read off the reply, whether the feet stand in the ring, where
-	the auto-walk steers and where it lets go (the stop's carry ahead of the spot along the last
-	leg), how far a body at rest is off the spot and its facing, and when the next staging may be
-	asked.
+	presses on a staged enemy and the let-go of the keys a stopped take holds, D-290, CF; when a
+	standing basic may go, a chain Art's queued let-go taken back and the way up a staging reply
+	reads, EF), and the walk into the stand ring a
+	staging asks for (D-244): the walk read off the reply, whether the feet stand in the ring or
+	near its spot, where the auto-walk steers and where it lets go (the stop's carry ahead of the
+	spot along the last leg), the correction's walk back behind the spot and its creep in (CW), how
+	far a body at rest is off the spot and its facing, the turn on the spot to that facing, and when
+	the next staging may be asked.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Types = require(ReplicatedStorage.Shared.types)
+local ActionLogic = require(script.Parent.Parent.controllers.ActionLogic)
 
 local CaptureLogic = {}
 
@@ -28,6 +31,7 @@ export type PerformStep = {
 	stick: { number }?,
 	sprint: boolean?,
 	within: number?,
+	to: number?,
 }
 
 -- One entry of a shot's perform list (dev.luau Perform).
@@ -75,6 +79,8 @@ export type Walk = {
 	over: { number }?,
 	path: { { number } },
 	index: number,
+	-- A correction (CaptureLogic.correctStep) has reached its point behind the spot.
+	backed: boolean?,
 }
 
 export type Counter = {
@@ -217,8 +223,9 @@ end
 --- time `elapsed`. An event earlier than the last heard starts a new play. Until the play's press
 --- (and on the first play only, unless the entry repeats) the press is set `lead` before the
 --- clip's hit window, from this event: each later event moves it on, since the client holds an
---- attack's clip through its attacker's hit-stop. `early` (the client's latency lead,
---- Telegraphs.glintLead, D-289) sets a Guard that much earlier still, as the glint comes, so it
+--- attack's clip through its attacker's hit-stop. `early` (how long a press takes to reach the
+--- server on the server's clock: the way up a staging reply read, CaptureLogic.wayUp, else the
+--- glint lead, Telegraphs.glintLead, D-289, EF) sets a Guard that much earlier still, so it
 --- reaches the server inside the parry window as a press with no latency would (the server judges
 --- that window on its own clock); never before `elapsed`. Any other press stays on the clip as
 --- drawn (a dodge and its chain meet the body this client draws, D-319). A press that would come
@@ -254,7 +261,9 @@ end
 
 --- Whether a reaction's key, or a step of its chain, may go down at take time `at`: at most its
 --- entry's `to` (no limit without one), so what it launches lands before the take's cut (D-320).
-function CaptureLogic.inside(entry: PerformEntry, at: number): boolean
+--- A chain step is held to its own `to` as well (EF): the fight's guard answers every overhead the
+--- take shows while the Art after it stops early enough to land before the cut.
+function CaptureLogic.inside(entry: PerformEntry | PerformStep, at: number): boolean
 	local to = entry.to
 	return to == nil or at <= to + 1e-9
 end
@@ -273,6 +282,46 @@ function CaptureLogic.pressed(reaction: Reaction)
 	reaction.at = nil
 	reaction.pressed = true
 	reaction.count += 1
+end
+
+--- Takes the earliest queued let-go of `action` off `queue` (a key let go early: a chain's held Art
+--- cancelled when a reaction drops the chain, EF). True when there was one.
+function CaptureLogic.unqueue(queue: { Press }, action: string): boolean
+	for index, press in queue do
+		if press.action == action and not press.down then
+			table.remove(queue, index)
+			return true
+		end
+	end
+	return false
+end
+
+--- Whether a standing rule's key may go down while the local body is in `state`
+--- (CharacterController.state; nil when there is no body to ask): a BasicAttack only when the body
+--- could start a basic (ActionLogic.canStart). A basic pressed in an Art, a hold, a guard or a
+--- dodge does nothing, and spending the rule's beat on it left the body's next free moment waiting
+--- out `every` (EF: no basic landed in Studio's fight). The lock rule never waits on the body.
+function CaptureLogic.standingFree(action: string, state: unknown): boolean
+	if action ~= "BasicAttack" or typeof(state) ~= "string" then
+		return true
+	end
+	return (ActionLogic.canStart(state :: any, "Basic", 0, 0))
+end
+
+--- The way up a staging reply reads (EF): how long the ask sent at `sentAt` on this client's server
+--- clock (workspace:GetServerTimeNow) took to reach the server on its own clock (the reply's
+--- `receivedAt`, DevStage): the way up plus this client's clock lag behind the server's, the lead
+--- a press needs to reach the server when one with no latency would. Within 0 and `max`; nil with
+--- nothing to read.
+function CaptureLogic.wayUp(sentAt: number?, reply: unknown, max: number): number?
+	if sentAt == nil or typeof(reply) ~= "table" then
+		return nil
+	end
+	local receivedAt = (reply :: any).receivedAt
+	if typeof(receivedAt) ~= "number" then
+		return nil
+	end
+	return math.clamp(receivedAt - sentAt, 0, max)
 end
 
 --- The standing rules (`every`) of a shot's perform list, in list order, none pressed yet.
@@ -532,6 +581,78 @@ function CaptureLogic.steer(
 	return aimX / length, aimZ / length
 end
 
+--- The flat unit direction a body walks onto the spot along: the route's last leg, or for a route
+--- of the spot alone the spot's facing (0 looks along -Z, + turns left).
+function CaptureLogic.approachDirection(walk: Walk): (number, number)
+	local ux, uz = CaptureLogic.lastLeg(walk)
+	if ux ~= nil and uz ~= nil then
+		return ux, uz
+	end
+	local radians = math.rad(walk.facing)
+	return -math.sin(radians), -math.cos(radians)
+end
+
+--- Whether feet at (x, floorY, z) stand within `studs` (flat) of the walk's spot and within its
+--- ring's height tolerance of the spot's floor (a body below the ledge is never near its top).
+function CaptureLogic.near(walk: Walk, x: number, floorY: number, z: number, studs: number): boolean
+	local dx, dz = x - walk.x, z - walk.z
+	return dx * dx + dz * dz <= studs * studs and math.abs(floorY - walk.y) <= walk.tolerance
+end
+
+--- The correction (a second walk, or a walk asked for while the root stands beside the spot,
+--- CW): never a sprint, and never a turn-round near the spot at speed. Unless the root already
+--- stands `back` studs or more behind the spot along the approach (CaptureLogic.approachDirection)
+--- and within `reach` of its line, it first walks to the point `back` studs behind the spot at
+--- `pace` (studs per second, 1x) until within `reach` of it (walk.backed). Then it walks in along
+--- the approach at a pace that falls with the distance left (ahead / creepSeconds, at most
+--- `pace`), so the body arrives as good as stopped and the two-step stop has nothing to carry: it
+--- aims `lookahead` along the line past the root's foot on it, and straight along it over the
+--- last `lookahead` studs, so the body ends square to the spot's facing. Returns the flat unit
+--- direction and the pace to walk it at, or nil once the pace asked falls under `endPace` (the
+--- spot reached or passed): let go.
+function CaptureLogic.correctStep(
+	walk: Walk,
+	x: number,
+	z: number,
+	back: number,
+	reach: number,
+	lookahead: number,
+	pace: number,
+	creepSeconds: number,
+	endPace: number
+): (number?, number?, number?)
+	local spot = walk.path[#walk.path]
+	local ux, uz = CaptureLogic.approachDirection(walk)
+	local ahead = (spot[1] - x) * ux + (spot[2] - z) * uz
+	local side = (x - spot[1]) * uz - (z - spot[2]) * ux
+	if walk.backed ~= true then
+		if ahead >= back and math.abs(side) <= reach then
+			walk.backed = true
+		else
+			local dx, dz = spot[1] - ux * back - x, spot[2] - uz * back - z
+			local distance = math.sqrt(dx * dx + dz * dz)
+			if distance > reach then
+				return dx / distance, dz / distance, pace
+			end
+			walk.backed = true
+		end
+	end
+	local speed = ahead / creepSeconds
+	if speed < endPace then
+		return nil, nil, nil
+	end
+	if ahead <= lookahead then
+		return ux, uz, math.min(pace, speed)
+	end
+	local aimX = spot[1] - ux * (ahead - lookahead) - x
+	local aimZ = spot[2] - uz * (ahead - lookahead) - z
+	local length = math.sqrt(aimX * aimX + aimZ * aimZ)
+	if length < 1e-6 then
+		return ux, uz, math.min(pace, speed)
+	end
+	return aimX / length, aimZ / length, math.min(pace, speed)
+end
+
 --- How far a body at rest at (x, z), looking along (lookX, lookZ), is off the walk's spot: the
 --- flat studs from it and the degrees from the spot's facing (as DevStageLogic.look reads it:
 --- 0 looks along -Z, + turns left).
@@ -545,6 +666,23 @@ function CaptureLogic.restOff(walk: Walk, x: number, z: number, lookX: number, l
 	local radians = math.rad(walk.facing)
 	local dot = (lookX * -math.sin(radians) + lookZ * -math.cos(radians)) / length
 	return studs, math.deg(math.acos(math.clamp(dot, -1, 1)))
+end
+
+--- The turn on the spot for a body at rest looking along (lookX, lookZ) toward the walk's spot's
+--- facing: the yaw (degrees about +Y, + turns left as the facing does) to turn it by this frame,
+--- the shorter way and at most `most`, and whether that turn reaches the facing. A look with no
+--- flat direction turns nothing and never reaches it.
+function CaptureLogic.faceTurn(walk: Walk, lookX: number, lookZ: number, most: number): (number, boolean)
+	if lookX * lookX + lookZ * lookZ < 1e-12 then
+		return 0, false
+	end
+	local facing = math.deg(math.atan2(-lookX, -lookZ))
+	local left = (walk.facing - facing + 180) % 360 - 180
+	local step = math.max(most, 0)
+	if math.abs(left) <= step then
+		return left, true
+	end
+	return if left > 0 then step else -step, false
 end
 
 --- Seconds to wait before the next request may go, the last having gone at `lastAt` (nil: none):

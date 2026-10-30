@@ -83,8 +83,10 @@ local Types = require(Shared.types)
 local ClipSampler = require(Shared.choreo.ClipSampler)
 local Easing = require(Shared.util.Easing)
 local ClipLibrary = require(script.Parent.ClipLibrary)
+local GaitHandOff = require(script.Parent.GaitHandOff)
 local LocomotionState = require(script.Parent.LocomotionState)
 local SheathState = require(script.Parent.SheathState)
+local TurnPlant = require(script.Parent.TurnPlant)
 local WeaponMount = require(script.Parent.WeaponMount)
 
 local Config = ChoreoData.locomotion
@@ -116,6 +118,11 @@ for _, name in Sheath.drawCutClips do
 	DRAW_CUT_NAMES[name] = true
 end
 local drawCutById: { [string]: boolean } = {}
+-- Of those, the ones a Draw plays over when the sword is on the back (a guard raised sheathed).
+local DRAW_FIRST_NAMES: { [string]: boolean } = {}
+for _, name in Sheath.drawFirstClips do
+	DRAW_FIRST_NAMES[name] = true
+end
 
 export type State = {
 	moveDir: Vector3, -- world-space move direction (any length; zero when still)
@@ -166,6 +173,12 @@ local function isDrawCut(clip: Types.ClipDef): boolean
 	return cached :: boolean
 end
 
+-- True for a sheath.drawFirstClips clip (never an attack): with the sword on the back the Draw
+-- plays over it, where any other draw-cut takes the sword to the hand at once.
+local function isDrawFirst(clip: Types.ClipDef): boolean
+	return clip.attack ~= true and DRAW_FIRST_NAMES[clip.id:match("[^/]+$") or clip.id] == true
+end
+
 -- An attack clip's first damage frame: the time of its first HitWindowOpen, TrailOn or SmearOn
 -- (the first thing it lights after the activation), math.huge for a clip with none.
 local firstStrikeById: { [string]: number } = {}
@@ -200,6 +213,98 @@ local function holdCutAttacks(mixer: any, handles: { any })
 			end
 		end
 	end
+end
+
+-- An attack that starts while a gait clip shows takes the body from it (D-404, GaitHandOff): on
+-- its first step its legs, root and arms get their own blend in (choreo.luau locomotion.handOff),
+-- and the gait's phase stands where the attack found it until the attack lets go, so the feet
+-- stay where they were and no stride is crossed into the attack's first pose in a frame. An
+-- attack chained over one that held the gait holds it on. Runs before the mixer steps (a handle
+-- played this frame has not stepped yet).
+local function handOffAttacks(self: any, mixer: any, handles: { any })
+	local holder = self.gaitHeldBy
+	if holder ~= nil and (holder.stopping or holder.done) then
+		self.gaitHeldBy = nil
+	end
+	for _, handle in handles do
+		local clip = handle.clip
+		if
+			handle.fresh
+			and not handle.stopping
+			and not handle.done
+			and typeof(clip) == "table"
+			and GaitHandOff.applies(clip)
+		then
+			if self.gaitShown > 0 then
+				mixer:handOff(handle, GaitHandOff.blends(clip))
+				self.gaitHeldBy = handle
+			elseif holder ~= nil then
+				self.gaitHeldBy = handle
+			end
+		end
+	end
+end
+
+-- The turn plant (D-416, TurnPlant): before every step the hips hold the yaw they stood at while
+-- the root turns, and come round between a turn clip's two Footsteps on the pivot foot. It holds
+-- while the body stands (update sets plantHolds) and no full-body clip but the turn or a standing
+-- Land has it; else its lag lets go over locomotion.turnPlant.plantSeconds.
+local PLANT_CHANNEL = "turnPlant"
+local function stepTurnPlant(self: any, dt: number, handles: { any }?)
+	local root: BasePart? = self.character.PrimaryPart
+	if root == nil then
+		return
+	end
+	local yaw = math.deg(math.atan2(-root.CFrame.LookVector.X, -root.CFrame.LookVector.Z))
+	local last = self.plantYaw
+	self.plantYaw = yaw
+	local turned = if last ~= nil then (yaw - last + 180) % 360 - 180 else 0
+	local turn = self.turnHandle
+	local holds = self.plantHolds == true and handles ~= nil
+	if holds then
+		for _, handle in handles :: { any } do
+			if
+				handle.layer == "FullBody"
+				and not handle.done
+				and handle.weight > 0
+				and handle ~= turn
+				and handle ~= self.landHandle
+			then
+				holds = false
+				break
+			end
+		end
+	end
+	local clip: Types.ClipDef? = nil
+	local from, to = 0, 0
+	if turn ~= nil and not turn.done and not turn.stopping then
+		local mixer = self.animator.mixer
+		clip = turn.clip
+		from = turn.time
+		to = from
+		if mixer:pauseRemaining() <= ChoreoData.pauseEpsilon then
+			to = math.min(from + dt * mixer:timeScale() * turn.speed, turn.clip.duration)
+		end
+	end
+	TurnPlant.step(self.turnPlant, dt, turned, holds, clip, from, to)
+	self.animator:setProcedural(PLANT_CHANNEL, TurnPlant.offsets(self.turnPlant))
+end
+
+-- The turn in place for the stance the body stands in (D-416): over the drawn idle the drawn
+-- turn (its feet start and end where the drawn stance has them), else the sheathed one.
+local function turnClipName(self: any, name: string): string
+	local drawnIdle = self.handles[LocomotionState.clipFor("Idle", true)]
+	local idle = self.handles.Idle
+	local drawnName = name .. "Drawn"
+	if
+		drawnIdle ~= nil
+		and idle ~= nil
+		and drawnIdle.weight > idle.weight
+		and (Config.clips :: any)[drawnName] ~= nil
+	then
+		return drawnName
+	end
+	return name
 end
 
 -- The arm joints the Draw and Sheathe clips move (the sword's own joint left out). Read once from
@@ -332,6 +437,8 @@ end
 -- Sheathe clip; and the target.
 local function scanClips(self: any, handles: { any }?): SheathState.Input
 	local cut, covered, drawing, sheathing = false, false, false, false
+	-- firstCut: a sheath.drawFirstClips clip (a guard) cuts; otherCut: anything else does.
+	local firstCut, otherCut, drawOver, drawTime = false, false, false, 0
 	local sheatheShown = 0
 	for _, handle in handles or self.animator.mixer:handles() do
 		if handle.done or handle.stopping then
@@ -339,17 +446,33 @@ local function scanClips(self: any, handles: { any }?): SheathState.Input
 		end
 		if handle.clipId == DRAW_ID then
 			drawing = true
+			if handle.priority > ChoreoData.priority.Sheath then
+				drawOver = true
+			end
+			drawTime = math.max(drawTime, handle.time)
 		elseif handle.clipId == SHEATHE_ID then
 			sheathing = true
 			sheatheShown = math.max(sheatheShown, handle.fade * handle.weight)
 		else
+			-- A guard raised sheathed waits for the Draw played over it: it does not hide the hand.
+			local first = isDrawFirst(handle.clip)
 			if isDrawCut(handle.clip) then
 				cut = true
+				if first then
+					firstCut = true
+				else
+					otherCut = true
+				end
 			end
-			if handle.weight > 0 and coversArm(handle) then
+			if handle.weight > 0 and coversArm(handle) and not first then
 				covered = true
 			end
 		end
+	end
+	-- A standing turn under way covers the arm before its turn clip starts (323(b)): the lock's
+	-- draw waits for the turn, and one Draw plays once it is over.
+	if self.turnUnderWay == true then
+		covered = true
 	end
 	local input: SheathState.Input = {
 		target = self.drawn,
@@ -358,6 +481,9 @@ local function scanClips(self: any, handles: { any }?): SheathState.Input
 		drawing = drawing,
 		sheathing = sheathing,
 		hold = self.dead,
+		drawFirst = firstCut and not otherCut,
+		drawOver = drawOver,
+		drawTime = drawTime,
 	}
 	self.sheatheShown = sheatheShown
 	return input
@@ -395,11 +521,23 @@ local function showsDrawn(self: any): boolean
 	return self.mount:sheathable() and self.sheath.place == "Hand" and self.sheatheShown < 1
 end
 
--- Plays a sheath clip; a build without the clip moves the sword at once instead.
-local function playSheathClip(self: any, clip: SheathState.Clip)
+-- Plays a sheath clip; a build without the clip moves the sword at once instead. Over the cut
+-- clips (SheathState's out.over) it plays at sheath.overPriority and no clip of theirs stops it;
+-- from out.from it carries on a Draw the arm already showed, so it takes the arm at once.
+local function playSheathClip(self: any, clip: SheathState.Clip, over: boolean?, from: number?)
 	local id = sheathClipId(clip)
 	if ClipLibrary.has(id) then
-		self.animator:play(id)
+		local opts: { [string]: any }? = nil
+		if over then
+			local carried = from ~= nil and from > 0
+			opts = {
+				priority = Sheath.overPriority,
+				coexist = true,
+				startTime = from,
+				blendIn = if carried then 0 else nil,
+			}
+		end
+		self.animator:play(id, opts)
 	else
 		self.sheath.place = if clip == "Draw" then "Hand" else "Back"
 	end
@@ -467,7 +605,7 @@ local function stepSheath(self: any, dt: number, handles: { any }?)
 		end
 	end
 	if out.play ~= nil then
-		playSheathClip(self, out.play)
+		playSheathClip(self, out.play, out.over, out.from)
 	end
 	if mount:get() ~= self.sheath.place then
 		mount:set(self.sheath.place)
@@ -558,7 +696,9 @@ local function stepGait(self: any, dt: number)
 	local pace = self.gaitPace or Stride.rateFloor / gaits.WalkForward.duration
 	local mixer = self.animator.mixer
 	local scale = mixer:timeScale()
-	local running = mixer:pauseRemaining() <= ChoreoData.pauseEpsilon
+	-- A hit-stop holds the phase, and so does an attack taking the body (D-404).
+	local running = mixer:pauseRemaining() <= ChoreoData.pauseEpsilon and self.gaitHeldBy == nil
+	self.gaitShown = gaitShown
 	if gaitShown > 0 then
 		natural /= gaitShown
 		stride = math.max(stride / baseShown, Stride.minGroundSpeed * natural)
@@ -646,6 +786,8 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		runAlong = 1,
 		gaitPhase = Stride.startPhase, -- the shared gait phase: 0..1 of a cycle, 0 at every left Footstep
 		gaitPace = nil :: number?, -- cycles per second the phase last advanced at
+		gaitShown = 0, -- the gait clips' shown share at the last step
+		gaitHeldBy = nil :: any, -- the attack the gait's phase stands for (D-404)
 		-- The root's own travel (stepTravel, D-334): where the root stood at the last update, how
 		-- far its travel along the move has run ahead of its speed's (studs, within
 		-- stride.travelSlipSeconds of travel at the speed), and this frame's part of that.
@@ -667,6 +809,12 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		-- An attack clip let go before its first damage frame fades out where it stood (D-294);
 		-- false on a rig Locomotion.attach drives.
 		holdsCutAttacks = true,
+		-- The turn plant (D-416): the hips' lag, the root's yaw at the last step, and whether the
+		-- body stands for it (set by update).
+		turnPlant = TurnPlant.new(),
+		plantYaw = nil :: number?,
+		plantHolds = false,
+		turnUnderWay = false, -- LocomotionState's last word on a standing turn (323(b))
 		destroyed = false,
 	}, Locomotion)
 	if self.raycast == nil and self.footIK then
@@ -697,8 +845,12 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 			if self.holdsCutAttacks and handles ~= nil then
 				holdCutAttacks(mixer, handles)
 			end
+			if handles ~= nil then
+				handOffAttacks(self, mixer, handles)
+			end
 			stepSheath(self, dt, handles)
 			stepGait(self, dt)
+			stepTurnPlant(self, dt, handles)
 		end
 	end)
 	self.clipEvents = animator.events:Connect(function(eventClipId: string, event: Types.ClipEvent)
@@ -862,7 +1014,9 @@ end
 -- its velocity); blocked (D-144) it is the move along the velocity the gait follows (followX,
 -- followZ: a unit world direction, or zero while that velocity goes nowhere). The running
 -- difference stays within stride.travelSlipSeconds of travel at the speed (a teleport or a shove
--- past it is dropped) and starts over standing, in the air, on a stalled frame or held still.
+-- past it is dropped), forgets itself over stride.travelSlipDecaySeconds (a lasting bias in the
+-- root's travel never pins it at the bound, D-411) and starts over standing, in the air, on a
+-- stalled frame or held still.
 local function stepTravel(self: any, root: BasePart, state: State, dt: number, followX: number?, followZ: number?)
 	local position = root.CFrame.Position
 	local from = self.travelFrom
@@ -882,9 +1036,19 @@ local function stepTravel(self: any, root: BasePart, state: State, dt: number, f
 			then moveX * followX + moveZ * followZ
 			else math.sqrt(moveX * moveX + moveZ * moveZ)
 		local bound = Stride.travelSlipSeconds * speed
-		local slip = math.clamp(self.travelSlip + along - speed * dt, -bound, bound)
-		extra = slip - self.travelSlip
-		self.travelSlip = slip
+		local step = along - speed * dt
+		local kept = self.travelSlip * (1 - math.min(1, dt / Stride.travelSlipDecaySeconds))
+		if math.abs(kept + step) <= bound then
+			-- Inside the bound the frame's step is taken up whole and the memory forgets itself.
+			extra = step
+			self.travelSlip = kept + step
+		else
+			-- Past it the overrun is dropped and the memory holds: a lasting one (a stuck or shoved
+			-- root) moves the phase no more than it ever did.
+			local slip = math.clamp(self.travelSlip + step, -bound, bound)
+			extra = slip - self.travelSlip
+			self.travelSlip = slip
+		end
 	else
 		self.travelSlip = 0
 	end
@@ -968,6 +1132,7 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 	}
 	local output = self.state:update(dt, input)
 	self.runAlong = LocomotionState.runAlong(input)
+	self.turnUnderWay = output.turnUnderWay
 
 	for name, weight in output.weights do
 		animator:setWeight(self.handles[name], weight)
@@ -1005,7 +1170,17 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 		local land = playOneShot(self, "Land", output.oneShotWeight)
 		self.landHandle = if output.oneShotWeight > 0 then land else nil
 	elseif oneShot == "TurnLeft" or oneShot == "TurnRight" then
-		self.turnHandle = playOneShot(self, oneShot)
+		-- A turn steps round what the hips still hold (D-416): the root's yaw the plant has not
+		-- taken, or the facing the controller asks for. A turn the last one already took (the
+		-- yaw counted on while it played) does not step again.
+		local pending = self.turnPlant.lag
+		if root ~= nil and self.plantYaw ~= nil then
+			pending -= wrapDegrees(yawOf(root.CFrame) - self.plantYaw)
+		end
+		local half = Config.turnInPlaceDegrees / 2
+		if math.abs(pending) > half or math.abs(state.turning) > half then
+			self.turnHandle = playOneShot(self, turnClipName(self, oneShot))
+		end
 	elseif oneShot ~= nil then
 		playOneShot(self, oneShot)
 	end
@@ -1021,6 +1196,8 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 			self.landHandle = nil
 		end
 	end
+	-- The turn plant holds the hips while the body stands on the ground (D-416).
+	self.plantHolds = output.phase == "Idle" and state.grounded
 
 	animator:setProcedural(
 		"lean",
@@ -1079,7 +1256,7 @@ function Locomotion.destroy(self: any)
 	if self.fallHandle ~= nil then
 		self.animator:stop(self.fallHandle)
 	end
-	for _, name in { "lean", "drawnSprint", "footIK" } do
+	for _, name in { "lean", "drawnSprint", "footIK", PLANT_CHANNEL } do
 		self.animator:setProcedural(name, nil)
 	end
 	table.clear(self.handles)

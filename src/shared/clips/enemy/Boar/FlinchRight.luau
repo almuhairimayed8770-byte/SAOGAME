@@ -1,8 +1,13 @@
 --!strict
 --[[
-	enemy/Boar/FlinchRight: additive hit reaction, a hit from the right: the body is shoved left, the head swings right to see it. Two frames of ExpoOut snap away
-	from the hit, a BackOut counter-swing, a spring back to zero. Rides on the Additive layer so
-	it works over the idle, the walk or an attack. Rig: Boar.
+	enemy/Boar/FlinchRight: additive hit reaction, a hit from the right: the body tips left over its left legs, the right legs come up off the field and splay, the head swings right to see it. A three-frame QuadOut snap away
+	from the hit, a BackOut settle, a spring back to zero. Rides on the Additive layer so it
+	works over the idle, the walk or an attack. Rig: Boar.
+	Four rigid legs on the field let the torso neither pitch nor roll about its centre, so the
+	body turns about a line of hips: the root's shift keeps that line where the stance has it and
+	every hip turns against the root, so the planted legs keep their stance and the lifted ones
+	rise straight up and come down where they stood. The settle keeps the turn's sign (a smaller
+	turn about the same hips), so no planted foot is pushed into the field.
 ]]
 
 local Types = require(script.Parent.Parent.Parent.Parent.types)
@@ -31,7 +36,6 @@ local clip: Types.ClipDef = {
 			joints = {
 				Root = posRot(0, 0, 0, 0, 0, 0),
 				Neck = rot(0, 0, 0),
-				Jaw = rot(0, 0, 0),
 				FrontLeftHip = rot(0, 0, 0),
 				FrontRightHip = rot(0, 0, 0),
 				BackLeftHip = rot(0, 0, 0),
@@ -40,13 +44,15 @@ local clip: Types.ClipDef = {
 			},
 		},
 		{
-			time = 0.04,
-			easing = "ExpoOut",
+			time = 0.05,
+			easing = "QuadOut",
 			joints = {
-				Root = posRot(-0.14, 0, 0, 0, 0, 7),
+				Root = posRot(-0.1303, 0.1, 0.0007, 0, 0, 7),
 				Neck = rot(2, -16, 0),
-				FrontRightHip = rot(0, 0, 6),
-				BackRightHip = rot(0, 0, 6),
+				FrontLeftHip = rot(-0.02, -0.36, -6.99),
+				FrontRightHip = rot(0.03, 0.48, -0.98),
+				BackLeftHip = rot(0.01, 0.24, -7),
+				BackRightHip = rot(-0.01, -0.24, -1),
 				TailJoint = rot(0, -10, 0),
 			},
 		},
@@ -54,10 +60,12 @@ local clip: Types.ClipDef = {
 			time = 0.16,
 			easing = "BackOut",
 			joints = {
-				Root = posRot(0.035, 0, 0, 0, 0, -1.75),
+				Root = posRot(-0.0215, 0.0183, 0.0001, 0, 0, 1.2),
 				Neck = rot(-0.5, 4, 0),
-				FrontRightHip = rot(0, 0, -1.5),
-				BackRightHip = rot(0, 0, -1.5),
+				FrontLeftHip = rot(0, -0.06, -1.2),
+				FrontRightHip = rot(0, 0.08, -0.2),
+				BackLeftHip = rot(0, 0.04, -1.2),
+				BackRightHip = rot(0, -0.04, -0.2),
 				TailJoint = rot(0, 2.5, 0),
 			},
 		},
@@ -67,7 +75,6 @@ local clip: Types.ClipDef = {
 			joints = {
 				Root = posRot(0, 0, 0, 0, 0, 0),
 				Neck = rot(0, 0, 0),
-				Jaw = rot(0, 0, 0),
 				FrontLeftHip = rot(0, 0, 0),
 				FrontRightHip = rot(0, 0, 0),
 				BackLeftHip = rot(0, 0, 0),

@@ -13,6 +13,8 @@
 	  the start, the launch, the hit and the skid past the player, once.
 	- The take's end holds every staged enemy (D-297): nothing of the take hits, telegraphs or starts
 	  an action between takes.
+	- The overhead and parry shots show one overhead (FK2, dev.luau StagedEnemy.attacks): the kobold
+	  plays it whole and is held once it is over, so no second wind-up fills the take's end.
 ]]
 
 local luau = require("@lune/luau")
@@ -249,6 +251,9 @@ local function loadStage(): any
 		GetAttribute = function(_self: any, name: string): any
 			return name == Dev.attributes.capture
 		end,
+		GetServerTimeNow = function(_self: any): number
+			return clock.t
+		end,
 	}
 	env.Instance = {
 		new = function(className: string): any
@@ -322,6 +327,7 @@ type Take = {
 	ids: { number },
 	phases: { [number]: { Phase } }, -- each staged enemy's phase changes, `at` from the "go"
 	hits: { any }, -- HitConfirmed on the player inside the take, `at` from the "go"
+	heldAt: { [number]: number }, -- when each staged enemy was first held inside the take, from the "go"
 	held: any, -- the "hold" reply
 	after: { hits: number, telegraphs: number, actions: number },
 }
@@ -347,6 +353,7 @@ local function runTake(shotId: string): Take
 	assert(go.ok == true, "go refused: " .. tostring(go.error))
 	local t0 = clock.t
 	local phases: { [number]: { Phase } } = {}
+	local heldAt: { [number]: number } = {}
 	local last: { [number]: string } = {}
 	for _, id in staged.ids do
 		phases[id] = {}
@@ -365,6 +372,9 @@ local function runTake(shotId: string): Take
 					position = if body ~= nil then body.position else Vector3.zero,
 				})
 				last[id] = phase
+			end
+			if heldAt[id] == nil and EnemyService.isHeld(id) then
+				heldAt[id] = clock.t - t0
 			end
 		end
 		local record = EntityService.get(playerId)
@@ -397,6 +407,7 @@ local function runTake(shotId: string): Take
 		ids = staged.ids,
 		phases = phases,
 		hits = hits,
+		heldAt = heldAt,
 		held = held,
 		after = {
 			hits = after,
@@ -423,6 +434,15 @@ local function countOf(list: { Phase }, phase: string): number
 		end
 	end
 	return count
+end
+
+local function attackOf(enemy: string, attackId: string): any
+	for _, attack in Enemies.byId(enemy).attacks do
+		if attack.id == attackId then
+			return attack
+		end
+	end
+	error("no attack " .. attackId)
 end
 
 local function rushOf(enemy: string): any
@@ -499,6 +519,30 @@ describe("Staged takes on the real services (F12, CS)", function()
 			end
 		end
 		expect(checked >= 2).toBe(true) -- the charge shot and the fight
+	end)
+
+	it("the overhead and parry shots show one overhead: the kobold is held once it is over (FK2)", function()
+		for _, shotId in { "enemy-kobold-overhead", "parry-spark" } do
+			local take = runTake(shotId)
+			local koboldId = take.ids[1]
+			local log = take.phases[koboldId]
+			local overhead = attackOf("KoboldAxeman", "Overhead")
+			-- One wind-up inside the take: the second overhead (PC cebade4-e: from about 3.6 s, hitting
+			-- on the take's last frame) never starts.
+			expect(countOf(log, "WindUp")).toBe(1)
+			local windUp = firstOf(log, "WindUp") :: Phase
+			expect(windUp.at < 1).toBe(true)
+			-- The one overhead plays whole: its strike, then its recovery, before the hold.
+			local strike = firstOf(log, "Strike", windUp.at) :: Phase
+			expect(strike).toBeTruthy()
+			expect(strike.at - windUp.at).toBeCloseTo(overhead.windUp, 1e-6)
+			local recover = firstOf(log, "Recover", strike.at) :: Phase
+			expect(recover).toBeTruthy()
+			local heldAt = take.heldAt[koboldId]
+			expect(heldAt ~= nil).toBe(true)
+			expect((heldAt :: number) >= recover.at + overhead.recovery - 1e-6).toBe(true)
+			expect((heldAt :: number) < take.shot.seconds).toBe(true)
+		end
 	end)
 
 	it("a take's end holds every staged enemy: nothing hits, telegraphs or acts between takes (D-297)", function()

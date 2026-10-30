@@ -1119,6 +1119,8 @@ describe("data validators on the real tables", function()
 			"dev",
 			"contact",
 			"telegraph",
+			"trail",
+			"clipAudit",
 		}
 	do
 		it(name .. " is clean", function()
@@ -1189,12 +1191,20 @@ describe("impact validator", function()
 	end
 
 	-- Runs the impact validator on a copy of the real impact.luau that `mutate` breaks.
-	local function runImpact(mutate: (impact: any) -> (), mutateCombat: ((combat: any) -> ())?): { string }
+	local function runImpact(
+		mutate: (impact: any) -> (),
+		mutateCombat: ((combat: any) -> ())?,
+		mutateFx: ((fx: any) -> ())?
+	): { string }
 		local impact = deepCopy(Harness.load("src/shared/data/impact"))
 		mutate(impact)
 		local combat = deepCopy(Harness.load("src/shared/data/combat"))
 		if mutateCombat ~= nil then
 			mutateCombat(combat)
+		end
+		local fx = deepCopy(Harness.load("src/shared/data/fx"))
+		if mutateFx ~= nil then
+			mutateFx(fx)
 		end
 		local validate = loadTool("tools/validators/impact")
 		return validate({
@@ -1204,6 +1214,9 @@ describe("impact validator", function()
 				end
 				if path == "src/shared/data/combat" then
 					return combat
+				end
+				if path == "src/shared/data/fx" then
+					return fx
 				end
 				return Harness.load(path)
 			end,
@@ -1425,6 +1438,98 @@ describe("impact validator", function()
 			})
 		end
 	)
+
+	it("keeps the pose lag whole, at most 2 frames and no longer than the shortest hit-stop (D-342)", function()
+		local function lagProblem(lag: any, shortest: number): string
+			return ("impact: poseLagFrames %s must be a whole number from 0 to 2 and no more than the shortest hit-stop (%d frames): a cue must land inside the freeze"):format(
+				tostring(lag),
+				shortest
+			)
+		end
+		for _, lag in { 0, 1, 2 } do
+			expect(runImpact(function(impact)
+				impact.poseLagFrames = lag
+			end)).toEqual({})
+		end
+		for _, lag in { -1, 0.5, 3, "1" } do
+			expect(runImpact(function(impact)
+				impact.poseLagFrames = lag
+			end)).toEqual({ lagProblem(lag, 3) })
+		end
+		expect(runImpact(function(impact)
+			impact.poseLagFrames = nil
+		end)).toEqual({ lagProblem(nil, 3) })
+		-- A hit-stop shorter than the lag would let its cues come after its last frozen step.
+		expect(runImpact(function(impact)
+			impact.poseLagFrames = 2
+		end, function(combat)
+			combat.hitStopFrames.Blink = 1
+		end)).toEqual({ lagProblem(2, 1) })
+	end)
+
+	-- The hold and picture pace keys (D-327, D-341, D-351) choose how many frames every hit-stop
+	-- freezes and how many drawn frames each impact look shows; each broken one is named (D-352).
+	it("keeps the hold's and the picture's pace keys in their ranges (D-327, D-341)", function()
+		local messages = {
+			paceFrames = "impact: hold.paceFrames %s must be a whole number of at least 3: the steps a hold's pace is the mean of",
+			hitchFactor = "impact: hold.hitchFactor %s must be over 2 and under 3: a frame of two refreshes is the pace (D-341), one of three a hitch",
+			tieFrames = "impact: hold.tieFrames %s must be from 0 up to under 0.5 of a frame",
+			paceSamples = "impact: timing.paceSamples %s must be a whole number of at least 1",
+			maxPaceSeconds = "impact: timing.maxPaceSeconds %s must be over 1/30 s and at most 0.1 s (D-122): a 30 fps frame is the pace, one slower than 10 fps a hitch",
+		}
+		local cases = {
+			{ block = "hold", key = "paceFrames", good = { 3, 32, 64 }, bad = { 0, 2, 2.5, -4, "32" } },
+			{ block = "hold", key = "hitchFactor", good = { 2.01, 2.5, 2.99 }, bad = { 1, 0.5, 0, 2, 3, "2.5" } },
+			{ block = "hold", key = "tieFrames", good = { 0, 0.08, 0.49 }, bad = { -0.01, 0.5, 0.6, "0.08" } },
+			{ block = "timing", key = "paceSamples", good = { 1, 5 }, bad = { 0, 1.5, -1, "5" } },
+			{
+				block = "timing",
+				key = "maxPaceSeconds",
+				good = { 0.034, 0.1 },
+				bad = { 0, -0.1, 1 / 60, 1 / 30, 0.11 },
+			},
+		}
+		for _, case in cases do
+			for _, value in case.good do
+				expect(runImpact(function(impact)
+					impact[case.block][case.key] = value
+				end)).toEqual({})
+			end
+			local broken: { any } = table.clone(case.bad)
+			table.insert(broken, "missing")
+			for _, value in broken do
+				local set = if value == "missing" then nil else value
+				expect(runImpact(function(impact)
+					impact[case.block][case.key] = set
+				end)).toEqual({ messages[case.key]:format(tostring(set)) })
+			end
+		end
+	end)
+
+	it("puts FrameClock's posed mark after the rigs' step and before the controller's (D-342)", function()
+		local problem =
+			"impact: fx.renderOrder.posed must run after choreo renderOrder.rigs and before renderOrder.character"
+		for _, row in
+			{
+				{ base = "Camera", offset = -1 }, -- with the rigs: not after them
+				{ base = "Camera", offset = -5 },
+				{ base = "Character", offset = 1 }, -- with the controller: its contact would count as before
+				{ base = "Last", offset = 0 },
+				{ base = "Nowhere", offset = 0 },
+				{ base = "Camera" },
+			}
+		do
+			expect(runImpact(function() end, nil, function(fx)
+				fx.renderOrder.posed = row
+			end)).toEqual({ problem })
+		end
+		expect(runImpact(function() end, nil, function(fx)
+			fx.renderOrder.posed = nil
+		end)).toEqual({ problem })
+		expect(runImpact(function() end, nil, function(fx)
+			fx.renderOrder.posed = { base = "Camera", offset = 50 }
+		end)).toEqual({})
+	end)
 end)
 
 describe("accents validator: the swing memory and the crescent's tilt", function()
@@ -1990,6 +2095,446 @@ describe("choreo validator: the render-stall jump", function()
 	end)
 end)
 
+describe("choreo validator: the cancel hand-over and the gait hand-off (D-408, D-404)", function()
+	-- The real choreo table with handOver and locomotion.handOff edited by `edit`, and dev.luau's
+	-- cancel.snapFrames replaced when `snapFrames` is given.
+	local function runWith(edit: (choreo: any) -> (), snapFrames: number?): { string }
+		local real = Harness.load("src/shared/data/choreo")
+		local copy = table.clone(real)
+		copy.handOver = table.clone(real.handOver)
+		copy.locomotion = table.clone(real.locomotion)
+		copy.locomotion.handOff = table.clone(real.locomotion.handOff)
+		copy.locomotion.handOff.joints = table.clone(real.locomotion.handOff.joints)
+		edit(copy)
+		local dev = Harness.load("src/shared/data/dev")
+		if snapFrames ~= nil then
+			dev = table.clone(dev)
+			dev.review = table.clone(dev.review)
+			dev.review.audit = table.clone(dev.review.audit)
+			dev.review.audit.cancel = { snapFrames = snapFrames }
+		end
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/choreo" then
+				return copy
+			elseif path == "src/shared/data/dev" then
+				return dev
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/choreo")(context)
+	end
+
+	it("passes the real tables", function()
+		expect(runWith(function() end)).toEqual({})
+	end)
+
+	it("keeps the hand-over a snap: above 0 and within cancel.snapFrames frames", function()
+		for _, bad in { 0, -0.05, 0 / 0, "0.05" } :: { any } do
+			expect(hasProblem(
+				runWith(function(c)
+					c.handOver.seconds = bad
+				end),
+				"handOver.seconds"
+			)).toBe(true)
+		end
+		-- Four frames is past a three-frame snap; with snapFrames 4 it is one.
+		expect(hasProblem(
+			runWith(function(c)
+				c.handOver.seconds = 4 / 60
+			end),
+			"handOver.seconds"
+		)).toBe(true)
+		expect(runWith(function(c)
+			c.handOver.seconds = 4 / 60
+		end, 4)).toEqual({})
+		expect(hasProblem(
+			runWith(function(c)
+				c.handOver = nil
+			end),
+			"handOver is missing"
+		)).toBe(true)
+	end)
+
+	it("eases the hand-over by a curve, never Linear nor Hold", function()
+		for _, bad in { "Linear", "Hold", "Wobble", 3 } :: { any } do
+			expect(hasProblem(
+				runWith(function(c)
+					c.handOver.easing = bad
+				end),
+				"handOver.easing"
+			)).toBe(true)
+		end
+		expect(runWith(function(c)
+			c.handOver.easing = "QuadOut"
+		end)).toEqual({})
+	end)
+
+	it("lists PlayerR15 joints with factors in (0, 3]", function()
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.handOff.joints.Tail = 1
+			end),
+			"names Tail, not a PlayerR15 joint"
+		)).toBe(true)
+		for _, bad in { 0, -1, 3.5, 0 / 0 } :: { any } do
+			expect(hasProblem(
+				runWith(function(c)
+					c.locomotion.handOff.joints.LeftKnee = bad
+				end),
+				"locomotion.handOff.joints.LeftKnee"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.handOff.seconds = 0
+			end),
+			"locomotion.handOff.seconds"
+		)).toBe(true)
+	end)
+
+	it("ends every attack's hand-off by its first strike key, where the hit is drawn", function()
+		-- The basics' key is 0.15 s and their base 0.1 s: a factor of 1.5 ends on it, 2 is 0.05 s late.
+		local problems = runWith(function(c)
+			c.locomotion.handOff.joints.RightShoulder = 2
+		end)
+		expect(
+			hasProblem(problems, "player/OneHandedSword/Basic1 blending 0.200 s, past its first strike key at 0.150 s")
+		).toBe(true)
+		-- A longer base does it too.
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.handOff.seconds = 0.12
+			end),
+			"past its first strike key"
+		)).toBe(true)
+		-- The Arts' keys are later: their own longest hand-off is inside them.
+		for _, line in problems do
+			expect(line:find("Horizontal", 1, true)).toBeNil()
+		end
+	end)
+end)
+
+describe("choreo validator: the turn plant (D-416)", function()
+	-- The real choreo table with locomotion.turnPlant (and the turn clips' names) edited by
+	-- `edit`, dev.luau's popDegrees replaced when `pop` is given, and clips replaced by `clips`.
+	local function runWith(edit: (choreo: any) -> (), pop: number?, clips: { [string]: any }?): { string }
+		local real = Harness.load("src/shared/data/choreo")
+		local copy = table.clone(real)
+		copy.locomotion = table.clone(real.locomotion)
+		copy.locomotion.turnPlant = table.clone(real.locomotion.turnPlant)
+		copy.locomotion.clips = table.clone(real.locomotion.clips)
+		edit(copy)
+		local dev = Harness.load("src/shared/data/dev")
+		if pop ~= nil then
+			dev = table.clone(dev)
+			dev.review = table.clone(dev.review)
+			dev.review.audit = table.clone(dev.review.audit)
+			dev.review.audit.popDegrees = pop
+		end
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/choreo" then
+				return copy
+			elseif path == "src/shared/data/dev" then
+				return dev
+			elseif clips ~= nil and clips[path] ~= nil then
+				return clips[path]
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/choreo")(context)
+	end
+	local PREFIX = "src/shared/clips/player/OneHandedSword/"
+	-- A copy of a real turn clip with its Footstep events replaced.
+	local function turnWith(name: string, steps: { { number | string } }): any
+		local clip = table.clone(Harness.load(PREFIX .. name))
+		clip.events = {}
+		for _, step in steps do
+			table.insert(clip.events, { time = step[1], kind = "Footstep", data = { foot = step[2] } })
+		end
+		return clip
+	end
+
+	it("passes the real tables", function()
+		expect(runWith(function() end)).toEqual({})
+	end)
+
+	it("wants the block, and turns the hips at most a pop a frame", function()
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.turnPlant = nil
+			end),
+			"locomotion.turnPlant is missing"
+		)).toBe(true)
+		for _, bad in { 0, -5, 0 / 0, "20" } :: { any } do
+			expect(hasProblem(
+				runWith(function(c)
+					c.locomotion.turnPlant.stepDegrees = bad
+				end),
+				"locomotion.turnPlant.stepDegrees"
+			)).toBe(true)
+		end
+		-- 20 a frame is a pop's bound; under a 15 degree bound it is a pop.
+		expect(hasProblem(runWith(function() end, 15), "locomotion.turnPlant.stepDegrees (20)")).toBe(true)
+	end)
+
+	it("keeps the Waist's lead a twist and the curve eased", function()
+		for _, bad in { -1, 91, "45" } :: { any } do
+			expect(hasProblem(
+				runWith(function(c)
+					c.locomotion.turnPlant.twistDegrees = bad
+				end),
+				"locomotion.turnPlant.twistDegrees"
+			)).toBe(true)
+		end
+		for _, bad in { "Linear", "Hold", "Wobble" } do
+			expect(hasProblem(
+				runWith(function(c)
+					c.locomotion.turnPlant.easing = bad
+				end),
+				"locomotion.turnPlant.easing"
+			)).toBe(true)
+		end
+	end)
+
+	it("lets a standing lag go by every attack's first strike key", function()
+		-- The basics' first strike key is at 0.15 s.
+		local problems = runWith(function(c)
+			c.locomotion.turnPlant.plantSeconds = 0.2
+		end)
+		expect(hasProblem(problems, "lets go past player/OneHandedSword/Basic1's first strike key at 0.150 s")).toBe(
+			true
+		)
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.turnPlant.plantSeconds = 0
+			end),
+			"locomotion.turnPlant.plantSeconds (0)"
+		)).toBe(true)
+	end)
+
+	it("wants each turn clip's pivot foot down first, then the other, over a long enough window", function()
+		-- The other foot first: no window.
+		local swapped = runWith(function() end, nil, {
+			[PREFIX .. "TurnRight"] = turnWith("TurnRight", { { 0.1, "Left" }, { 0.36, "Right" } }),
+		})
+		expect(hasProblem(swapped, "TurnRight must step the pivot foot (Right) and then the other (Left)")).toBe(true)
+		-- One Footstep: no window.
+		expect(hasProblem(
+			runWith(function() end, nil, {
+				[PREFIX .. "TurnLeftDrawn"] = turnWith("TurnLeftDrawn", { { 0.1, "Left" } }),
+			}),
+			"TurnLeftDrawn must step the pivot foot (Left)"
+		)).toBe(true)
+		-- Half a turn on SineInOut at 20 a frame needs 180 x (pi / 2) / (20 x 60) = 0.236 s.
+		local short = runWith(function() end, nil, {
+			[PREFIX .. "TurnLeft"] = turnWith("TurnLeft", { { 0.1, "Left" }, { 0.3, "Right" }, { 0.46, "Left" } }),
+		})
+		expect(hasProblem(short, "TurnLeft's window between its first two Footsteps (0.200 s) is under 0.236 s")).toBe(
+			true
+		)
+		-- A slower cap wants a longer window: the real 0.26 s is short at 10 a frame.
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.turnPlant.stepDegrees = 10
+			end),
+			"is under 0.471 s"
+		)).toBe(true)
+		-- A turn clip the data names must exist.
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.clips.TurnRightDrawn = "NoSuchTurn"
+			end),
+			"locomotion.clips.TurnRightDrawn (NoSuchTurn) must name a clip"
+		)).toBe(true)
+	end)
+
+	it("never lets a second turn cut a turn's own steps", function()
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.turnClipDuration = 0.4
+			end),
+			"locomotion.turnClipDuration (0.4) must be at least TurnLeft's duration (0.5)"
+		)).toBe(true)
+	end)
+end)
+
+describe("rushDraw validator: the drawn rush's pass and its skid's dust (FB1, FB2)", function()
+	-- The real choreo and fx tables with enemy.rush.pass and rushSkid replaced (nil keeps the real).
+	local function runRush(pass: any?, skid: any?, dropPass: boolean?, dropSkid: boolean?): { string }
+		local choreo = Harness.load("src/shared/data/choreo")
+		local fx = Harness.load("src/shared/data/fx")
+		local choreoCopy = table.clone(choreo)
+		choreoCopy.enemy = table.clone(choreo.enemy)
+		choreoCopy.enemy.rush = table.clone(choreo.enemy.rush)
+		if dropPass then
+			choreoCopy.enemy.rush.pass = nil
+		elseif pass ~= nil then
+			local row = table.clone(choreo.enemy.rush.pass)
+			for key, value in pass do
+				row[key] = value
+			end
+			choreoCopy.enemy.rush.pass = row
+		end
+		local fxCopy = table.clone(fx)
+		if dropSkid then
+			fxCopy.rushSkid = nil
+		elseif skid ~= nil then
+			local row = table.clone(fx.rushSkid)
+			for key, value in skid do
+				row[key] = value
+			end
+			fxCopy.rushSkid = row
+		end
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/choreo" then
+				return choreoCopy
+			elseif path == "src/shared/data/fx" then
+				return fxCopy
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/rushDraw")(context)
+	end
+
+	it("passes the real tables", function()
+		expect(runRush()).toEqual({})
+	end)
+
+	it("wants the pass block with positive studs, lead under full and the centre band inside the line", function()
+		expect(hasProblem(runRush(nil, nil, true), "enemy.rush.pass is missing")).toBe(true)
+		for _, key in { "leadStuds", "fullStuds", "returnStuds" } do
+			for _, bad in { 0, -1, 0 / 0, math.huge, "3" } do
+				expect(hasProblem(runRush({ [key] = bad }), "enemy.rush.pass." .. key .. " must be a positive")).toBe(
+					true
+				)
+			end
+		end
+		for _, key in { "marginStuds", "centreStuds" } do
+			expect(hasProblem(runRush({ [key] = -0.1 }), "enemy.rush.pass." .. key .. " must be a number")).toBe(true)
+			expect(runRush({ [key] = 0 })).toEqual({})
+		end
+		-- Half done or more at the meet: the snout would swing off a body on the line.
+		expect(hasProblem(runRush({ leadStuds = 4, fullStuds = 4 }), "leadStuds 4.00 must be under fullStuds 4.00")).toBe(
+			true
+		)
+		expect(runRush({ leadStuds = 3.9, fullStuds = 4 })).toEqual({})
+		local half = Harness.load("src/shared/data/combat").strikeLineWidth / 2
+		expect(hasProblem(runRush({ centreStuds = half + 0.1 }), "wider than half the strike line")).toBe(true)
+		expect(runRush({ centreStuds = half })).toEqual({})
+	end)
+
+	it("wants the skid's dust: spacing, a share of the back, few puffs, never light, sane ranges", function()
+		expect(hasProblem(runRush(nil, nil, false, true), "fx rushSkid is missing")).toBe(true)
+		expect(hasProblem(runRush(nil, { everyStuds = 0 }), "rushSkid.everyStuds must be a positive")).toBe(true)
+		expect(hasProblem(runRush(nil, { rearShare = 1.2 }), "rushSkid.rearShare must be a share")).toBe(true)
+		expect(hasProblem(runRush(nil, { rearShare = -0.1 }), "rushSkid.rearShare must be a share")).toBe(true)
+		expect(hasProblem(runRush(nil, { particles = 2.5 }), "rushSkid.particles must be a positive whole")).toBe(true)
+		local slam = Harness.load("src/shared/data/fx").wallSlam
+		expect(hasProblem(runRush(nil, { particles = slam.particles + 1 }), "is more than a slam's")).toBe(true)
+		expect(hasProblem(runRush(nil, { lightEmission = 0.5 }), "rushSkid.lightEmission must be 0")).toBe(true)
+		expect(hasProblem(runRush(nil, { token = "NotAToken" }), "'NotAToken' is not a palette token")).toBe(true)
+		expect(hasProblem(runRush(nil, { lifetime = { min = 0.8, max = 0.4 } }), "rushSkid.lifetime.min is over max")).toBe(
+			true
+		)
+		expect(hasProblem(runRush(nil, { speed = { min = 3 } }), "rushSkid.speed needs min and max")).toBe(true)
+		expect(hasProblem(runRush(nil, { size = { birth = 0, death = 2 } }), "rushSkid.size needs birth and death")).toBe(
+			true
+		)
+		expect(hasProblem(runRush(nil, { transparency = { birth = 0.4, death = 1.5 } }), "rushSkid.transparency")).toBe(
+			true
+		)
+		expect(hasProblem(runRush(nil, { spreadAngle = 200 }), "rushSkid.spreadAngle must be within")).toBe(true)
+		expect(hasProblem(runRush(nil, { drag = -1 }), "rushSkid.drag must be a number at least 0")).toBe(true)
+		expect(hasProblem(runRush(nil, { emitterSize = 0 }), "rushSkid.emitterSize must be a positive")).toBe(true)
+		expect(
+			hasProblem(
+				runRush(nil, { folderName = slam.folderName }),
+				"rushSkid.folderName must be a folder name of its own"
+			)
+		).toBe(true)
+	end)
+end)
+
+describe("stageView validator: a fixed staged view holds before the take (FB4)", function()
+	-- The real camera and dev tables with camera.stage and capture.cameras.Behind replaced.
+	local function runStage(stage: any?, behind: any?, dropStage: boolean?): { string }
+		local camera = Harness.load("src/shared/data/camera")
+		local dev = Harness.load("src/shared/data/dev")
+		local cameraCopy = table.clone(camera)
+		if dropStage then
+			cameraCopy.stage = nil
+		elseif stage ~= nil then
+			local row = table.clone(camera.stage)
+			for key, value in stage do
+				row[key] = value
+			end
+			cameraCopy.stage = row
+		end
+		local devCopy = table.clone(dev)
+		if behind ~= nil then
+			devCopy.capture = table.clone(dev.capture)
+			devCopy.capture.cameras = table.clone(dev.capture.cameras)
+			local row = table.clone(dev.capture.cameras.Behind)
+			for key, value in behind do
+				row[key] = value
+			end
+			devCopy.capture.cameras.Behind = row
+		end
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/camera" then
+				return cameraCopy
+			elseif path == "src/shared/data/dev" then
+				return devCopy
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/stageView")(context)
+	end
+
+	it("passes the real tables", function()
+		expect(runStage()).toEqual({})
+	end)
+
+	it("wants the hold's wait and drift: positive, held before the take, and a drift that is standing", function()
+		expect(hasProblem(runStage(nil, nil, true), "camera stage is missing")).toBe(true)
+		for _, bad in { 0, -1, 0 / 0, math.huge, "0.5" } do
+			expect(hasProblem(runStage({ fixAfterSeconds = bad }), "stage.fixAfterSeconds must be a positive")).toBe(
+				true
+			)
+			expect(hasProblem(runStage({ fixStillStuds = bad }), "stage.fixStillStuds must be a positive")).toBe(true)
+		end
+		local countdown = Harness.load("src/shared/data/dev").capture.countdownSeconds
+		expect(
+			hasProblem(
+				runStage({ fixAfterSeconds = countdown, fixStillStuds = 0.01 }),
+				("must be under capture.countdownSeconds %.2f"):format(countdown)
+			)
+		).toBe(true)
+		expect(runStage({ fixAfterSeconds = countdown - 0.1, fixStillStuds = 0.01 })).toEqual({})
+		-- A drift faster than the locomotion's standing threshold would hold on a moving body.
+		local standing = Harness.load("src/shared/data/choreo").locomotion.idleSpeedThreshold
+		expect(
+			hasProblem(
+				runStage({ fixAfterSeconds = 1, fixStillStuds = standing * 1.5 }),
+				"faster than locomotion.idleSpeedThreshold"
+			)
+		).toBe(true)
+		expect(runStage({ fixAfterSeconds = 1, fixStillStuds = standing })).toEqual({})
+	end)
+
+	it("wants a view's fixed to be a boolean or left out", function()
+		expect(
+			hasProblem(runStage(nil, { fixed = "yes" }), "capture.cameras.Behind.fixed must be true, false or left out")
+		).toBe(true)
+		expect(hasProblem(runStage(nil, { fixed = 1 }), "capture.cameras.Behind.fixed")).toBe(true)
+		expect(runStage(nil, { fixed = false })).toEqual({})
+	end)
+end)
+
 -- ------------------------------------------------------------------------------------------
 -- AI: the rush's jam lag, the hit-stop pause cap and the fighter collision groups (D-167..D-169, D-190)
 -- ------------------------------------------------------------------------------------------
@@ -2393,6 +2938,25 @@ describe("camera, dev capture and sfx shatter rules", function()
 		expect(telegraph("src/shared/data/fx")).toEqual({})
 	end)
 
+	it("camera: a shake from rest starts its noise inside the base lane's period (312)", function()
+		for _, bad in { -0.001, 1, "0.01" } do
+			expect(hasProblem(
+				camera(function(copy)
+					copy.shake = table.clone(copy.shake)
+					copy.shake.startPhase = bad
+				end),
+				"shake.startPhase"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			camera(function(copy)
+				copy.shake = table.clone(copy.shake)
+				copy.shake.startPhase = nil
+			end),
+			"shake.startPhase"
+		)).toBe(true)
+	end)
+
 	it("camera: the close shot opens from closeGap to openGap, both positive", function()
 		expect(hasProblem(
 			camera(function(copy)
@@ -2492,6 +3056,64 @@ describe("camera, dev capture and sfx shatter rules", function()
 			end),
 			"takes the Lock camera on a shot that does not lock on"
 		)).toBe(true)
+	end)
+
+	it("dev: the ClipLab's key and fill light the faces the camera sees, the rim stands behind", function()
+		-- the original key light, behind the rigs from the lab camera's side: the faces read black
+		expect(hasProblem(
+			dev(function(copy)
+				copy.clipLab.keyLight.position = { 12, 18, 16 }
+			end),
+			"clipLab.keyLight must stand in front of the rigs"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.clipLab.rimLight.position = { 0, 12, -12 }
+			end),
+			"clipLab.rimLight must stand behind the rigs"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.clipLab.fillLight.brightness = 0
+			end),
+			"clipLab.fillLight needs a positive range and brightness"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.clipLab.rimLight.color = "Gold"
+			end),
+			"clipLab.rimLight.color 'Gold' is not a palette token"
+		)).toBe(true)
+	end)
+
+	it("dev: the ClipLab's backdrop and lighting overrides are a part, a palette color and engine ranges", function()
+		expect(hasProblem(
+			dev(function(copy)
+				copy.clipLab.backdrop.color = "Black"
+			end),
+			"clipLab.backdrop.color 'Black' is not a palette token"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.clipLab.lighting.ambient = { 0.5, 1.2, 0.5 }
+			end),
+			"clipLab.lighting.ambient must be three numbers in [0, 1]"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.clipLab.lighting.exposureCompensation = 5
+			end),
+			"clipLab.lighting.exposureCompensation must be a number in [-3, 3]"
+		)).toBe(true)
+		-- The hotkeys bind above the character scripts' arrows and Space (LabKeys, D-413).
+		for _, bad in { "Highest", 3000, "Medium", "Low" } :: { any } do
+			expect(hasProblem(
+				dev(function(copy)
+					copy.clipLab.actionPriority = bad
+				end),
+				("clipLab.actionPriority '%s'"):format(tostring(bad))
+			)).toBe(true)
+		end
 	end)
 
 	it("dev: prompt beats start at 0, run in order and show inside the take", function()
@@ -3094,6 +3716,40 @@ describe("camera, dev capture and sfx shatter rules", function()
 		)).toBe(true)
 	end)
 
+	-- EF: the fight's guard answers every overhead of the take while its chain's Art stops at the
+	-- step's own `to`, so the Art never launches past the cut.
+	it("dev: a chain step may end at its own `to` inside the take, and is still timed by its delay (EF)", function()
+		expect(hasProblem(
+			dev(function(copy)
+				guardReaction(copy).chain[1].to = 19
+			end),
+			"chain[1].to"
+		)).toBe(false)
+		for _, bad in { 25, 0, -1, "19" } :: { any } do
+			expect(hasProblem(
+				dev(function(copy)
+					guardReaction(copy).chain[1].to = bad
+				end),
+				"nothing of the step goes down past it"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			dev(function(copy)
+				guardReaction(copy).chain[1].from = 1
+			end),
+			"a chain step is timed by its delay alone"
+		)).toBe(true)
+		-- The guard's lead read off the staging replies (the way up) is capped.
+		for _, bad in { 0, -0.1, "0.5" } :: { any } do
+			expect(hasProblem(
+				dev(function(copy)
+					copy.capture.perform.wayUpMax = bad
+				end),
+				"capture.perform.wayUpMax"
+			)).toBe(true)
+		end
+	end)
+
 	it("dev: an enemy let go partway through says when, inside the take, under a prompt beat (CF)", function()
 		for _, bad in { 20, -1 } do
 			expect(hasProblem(
@@ -3115,6 +3771,34 @@ describe("camera, dev capture and sfx shatter rules", function()
 			end),
 			"needs a prompt beat at that moment"
 		)).toBe(true)
+	end)
+
+	it("dev: a staged enemy's attack limit is a whole number of 1 or more, on one let go only (FK2)", function()
+		local function overheadKobold(copy: any): any
+			return shotNamed(copy, "enemy-kobold-overhead").stage.enemies[1]
+		end
+		expect(hasProblem(dev(function(_copy) end), ".attacks")).toBe(false)
+		for _, bad in { 0, -1, 1.5, "1" } do
+			expect(hasProblem(
+				dev(function(copy)
+					overheadKobold(copy).attacks = bad
+				end),
+				".attacks (" .. tostring(bad) .. ") must be a whole number of 1 or more"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			dev(function(copy)
+				overheadKobold(copy).held = true
+			end),
+			".attacks is only for an enemy the shot lets go (held = false)"
+		)).toBe(true)
+		-- A held enemy with no limit stays fine; a limit of 2 on a let-go one is fine.
+		expect(hasProblem(
+			dev(function(copy)
+				overheadKobold(copy).attacks = 2
+			end),
+			".attacks"
+		)).toBe(false)
 	end)
 
 	it("dev: the hotkeys are distinct, off the game's bindings and never a function key", function()
@@ -3155,6 +3839,65 @@ describe("camera, dev capture and sfx shatter rules", function()
 		)).toBe(true)
 	end)
 
+	it("dev: the stage area's ring stands clear of the ledge and its ramp (a body walks there first)", function()
+		local ledge = Harness.load("src/shared/data/dev").capture.stage.ledge
+		local front = ledge.position[3] - ledge.size[3] / 2
+		local needle = "capture.stage.area's ring must stand routeMarginStuds"
+		expect(hasProblem(
+			dev(function(copy)
+				-- Off the ledge's top, but its ring inside the route's margin of the ledge's -Z face.
+				copy.capture.stage.area.position = { ledge.position[1], 0, front - 1 }
+			end),
+			needle
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.stage.area.position = { ledge.position[1], 0, front - 1 }
+			end),
+			"clear of " .. ledge.name
+		)).toBe(true)
+		local back = ledge.position[3] + ledge.size[3] / 2 + ledge.ramp.size[3]
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.stage.area.position = { ledge.position[1], 0, back + 1 }
+			end),
+			"clear of " .. ledge.ramp.name
+		)).toBe(true)
+	end)
+
+	it("dev: no dev key is one Studio keeps for its own shortcuts (it never reaches the game)", function()
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.hotkeys.cycleTimeScale = "O"
+			end),
+			"capture.hotkeys.cycleTimeScale (O) is a key Studio keeps for its own shortcuts"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.hotkeys.markDone = "PageUp"
+			end),
+			"capture.hotkeys.markDone (PageUp) is a key Studio keeps for its own shortcuts"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.clipLab.hotkeys.restart = "Home"
+			end),
+			"clipLab.hotkeys.restart (Home) is a key Studio keeps for its own shortcuts"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.clipLab.hotkeys.abToggle = "F11"
+			end),
+			"clipLab.hotkeys.abToggle (F11) is a key Studio keeps for its own shortcuts"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.cancelKeys[1] = "I"
+			end),
+			"capture.walk.cancelKeys[1] (I) is a key Studio keeps for its own shortcuts"
+		)).toBe(true)
+	end)
+
 	it("dev: field enemies move past the lock's range, and the stage's numbers are sane", function()
 		local cameraData = Harness.load("src/shared/data/camera")
 		expect(hasProblem(
@@ -3162,6 +3905,25 @@ describe("camera, dev capture and sfx shatter rules", function()
 				copy.capture.stage.awayStuds = cameraData.lock.range
 			end),
 			"must be past camera.luau lock.range"
+		)).toBe(true)
+		-- The turn on the spot (step 14).
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.faceDegreesPerSecond = 0
+			end),
+			"capture.walk.faceDegreesPerSecond must be a positive number"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.faceSettleSeconds = -0.1
+			end),
+			"capture.walk.faceSettleSeconds must be a number of 0 or more"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.faceDegreesPerSecond = 12
+			end),
+			"a half turn on the spot at faceDegreesPerSecond (12)"
 		)).toBe(true)
 		expect(hasProblem(
 			dev(function(copy)
@@ -3174,6 +3936,32 @@ describe("camera, dev capture and sfx shatter rules", function()
 				copy.capture.stage.holdWaitSeconds = copy.capture.stageTimeoutSeconds
 			end),
 			"capture.stage.holdWaitSeconds must be under capture.stageTimeoutSeconds"
+		)).toBe(true)
+		-- The settled read of the player's root (D-447).
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.stage.settleStuds = 0
+			end),
+			"capture.stage.settleStuds must be a positive number"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.stage.settleSeconds = copy.capture.stage.settleTimeoutSeconds
+			end),
+			"capture.stage.settleSeconds must be under settleTimeoutSeconds"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.stage.settleNearStuds = copy.capture.stage.standRadius - 0.5
+			end),
+			"capture.stage.settleNearStuds must be at least standRadius"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.stage.settleTimeoutSeconds = copy.capture.stageTimeoutSeconds
+					- copy.capture.stage.holdWaitSeconds
+			end),
+			"holdWaitSeconds + settleTimeoutSeconds must be under capture.stageTimeoutSeconds"
 		)).toBe(true)
 		expect(hasProblem(
 			dev(function(copy)
@@ -3282,6 +4070,120 @@ describe("camera, dev capture and sfx shatter rules", function()
 			)).toBe(true)
 		end
 	)
+
+	it("dev: a correction waits for the server's view, walks back along the last leg and creeps in (CW)", function()
+		local locomotion = Harness.load("src/shared/data/choreo").locomotion
+		for _, key in
+			{
+				"askSettleSeconds",
+				"correctWithinStuds",
+				"correctBackStuds",
+				"correctSpeed",
+				"creepSeconds",
+				"creepEndSpeed",
+			}
+		do
+			expect(hasProblem(
+				dev(function(copy)
+					copy.capture.walk[key] = 0
+				end),
+				("capture.walk.%s must be a positive number"):format(key)
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.askSettleSeconds = copy.capture.walk.timeoutSeconds
+					/ (copy.capture.walk.secondWalks + 2)
+			end),
+			"x (secondWalks + 2) must be under timeoutSeconds"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.correctWithinStuds = copy.capture.stage.standRadius - 0.5
+			end),
+			"capture.walk.correctWithinStuds (2.5) must be from capture.stage.standRadius"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.correctWithinStuds = copy.capture.stage.approachStuds + 1
+			end),
+			"capture.walk.correctWithinStuds (7) must be from capture.stage.standRadius"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.correctBackStuds = copy.capture.walk.waypointStuds
+			end),
+			"capture.walk.correctBackStuds (1) must be over waypointStuds"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.correctBackStuds = copy.capture.stage.approachStuds + 1
+			end),
+			"capture.walk.correctBackStuds (7) must be over waypointStuds"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.correctSpeed = locomotion.runSpeed + 1
+			end),
+			"never at the sprint"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.creepEndSpeed = locomotion.idleSpeedThreshold
+			end),
+			"must be under choreo locomotion.idleSpeedThreshold"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.creepSeconds = copy.capture.walk.restStuds / copy.capture.walk.creepEndSpeed
+			end),
+			"the correction lets go on the spot"
+		)).toBe(true)
+		-- The shipped numbers pass.
+		expect(hasProblem(dev(function() end), "capture.walk")).toBe(false)
+	end)
+
+	it("dev: a walk the world stops lets go well inside the timeout, never while it creeps (316(b))", function()
+		for _, key in { "blockedSeconds", "blockedStuds" } do
+			expect(hasProblem(
+				dev(function(copy)
+					copy.capture.walk[key] = 0
+				end),
+				("capture.walk.%s must be a positive number"):format(key)
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.blockedSeconds = copy.capture.walk.timeoutSeconds
+			end),
+			"capture.walk.blockedSeconds (15) must be under timeoutSeconds"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.blockedStuds = copy.capture.walk.restStuds
+			end),
+			"capture.walk.blockedStuds (1) must be under restStuds"
+		)).toBe(true)
+		expect(hasProblem(
+			dev(function(copy)
+				-- The creep's last 0.25 studs take 0.447 s.
+				copy.capture.walk.blockedSeconds = 0.4
+			end),
+			"the creep is never read as blocked"
+		)).toBe(true)
+		expect(hasProblem(dev(function() end), "capture.walk.blocked")).toBe(false)
+	end)
+
+	it("dev: the walk's rest is the Locomotion's standing speed (round E)", function()
+		local locomotion = Harness.load("src/shared/data/choreo").locomotion
+		expect(hasProblem(
+			dev(function(copy)
+				copy.capture.walk.restSpeed = locomotion.idleSpeedThreshold * 2
+			end),
+			"capture.walk.restSpeed (0.5) must be at most choreo locomotion.idleSpeedThreshold"
+		)).toBe(true)
+		expect(hasProblem(dev(function() end), "capture.walk.restSpeed")).toBe(false)
+	end)
 
 	it("dev: the stage's spots stand on the field, its enemies off the ledge, the ledge off the spawns", function()
 		local playground = Harness.load("src/shared/data/playground")
@@ -3405,6 +4307,96 @@ describe("camera, dev capture and sfx shatter rules", function()
 		expect(hasProblem(plan, "keepOut.maxPieces must be a whole number")).toBe(true)
 	end)
 
+	it("contact: the keep-out shows within a speed and starts a whole step ahead (item 285)", function()
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.maxSpeedStudsPerSecond = copy.maxSpeedStudsPerSecond + 1
+			end),
+			"keepOut.maxSpeedStudsPerSecond (25) must be above 0 and within maxSpeedStudsPerSecond"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.maxSpeedStudsPerSecond = 0
+			end),
+			"keepOut.maxSpeedStudsPerSecond (0) must be above 0"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.leadSeconds = 0
+			end),
+			"keepOut.leadSeconds (0) must be at least sampleSeconds"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.leadSeconds = 0.05
+			end),
+			"keepOut.leadSeconds (0.05) at maxSpeedStudsPerSecond must cover standOff.maxStuds"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.speedPieces = 0.5
+			end),
+			"keepOut.speedPieces must be a whole number"
+		)).toBe(true)
+	end)
+
+	it("contact: the reach holds the hands and arms and a blade that still touches (D-424)", function()
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				table.insert(copy.contact.standOff.keepOut.limbs, "Sword")
+			end),
+			"keepOut.limbs[7] 'Sword' is not a PlayerR15 part"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				table.insert(copy.contact.standOff.keepOut.limbs, "UpperTorso")
+			end),
+			"keepOut.limbs[7] 'UpperTorso' is one of keepOut.parts"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				table.insert(copy.contact.standOff.keepOut.limbs, "RightHand")
+			end),
+			"keepOut.limbs[7] 'RightHand' is named twice"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.limbs = {}
+			end),
+			"keepOut.limbs must name the hands and arms"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.bladeDepthStuds = -0.1
+			end),
+			"keepOut.bladeDepthStuds (-0.1) must be 0 or more"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.bladeDepthStuds = copy.hitSphereRadius
+			end),
+			"must be within the sweep's promise"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.stepPerDepth = 0.5
+			end),
+			"keepOut.stepPerDepth (0.5) must be 1 or more"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.stepPerDepth = nil
+			end),
+			"keepOut.stepPerDepth (nil) must be 1 or more"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.stepPerDepth = math.huge
+			end),
+			"keepOut.stepPerDepth (inf) must be 1 or more"
+		)).toBe(true)
+	end)
+
 	it("contact: a rig's blocker poses its own rig's clips, every one there (D-315)", function()
 		expect(hasProblem(
 			contact("src/shared/data/rigs", function(copy)
@@ -3425,6 +4417,136 @@ describe("camera, dev capture and sfx shatter rules", function()
 			"rigs.Boar.blocker.sampleSeconds must be above 0"
 		)).toBe(true)
 	end)
+
+	it("contact: a rig's rush poses its own rig's clips, at least one, every one there (D-437)", function()
+		expect(hasProblem(
+			contact("src/shared/data/rigs", function(copy)
+				copy.Boar.rush.clips = { "enemy/Kobold/Idle" }
+			end),
+			"rigs.Boar.rush.clips[1] 'enemy/Kobold/Idle' must be one of the rig's own clips"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/rigs", function(copy)
+				copy.Boar.rush.clips = { "enemy/Boar/NoSuchCharge" }
+			end),
+			"'enemy/Boar/NoSuchCharge' is not a clip file"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/rigs", function(copy)
+				copy.Boar.rush.clips = {}
+			end),
+			"rigs.Boar.rush.clips must list the clips the rig rushes in"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/rigs", function(copy)
+				copy.Boar.rush.sampleSeconds = 0
+			end),
+			"rigs.Boar.rush.sampleSeconds must be above 0"
+		)).toBe(true)
+	end)
+
+	it(
+		"contact: the walk shell boxes the body's own free parts over its stance clips, and meets held parts as slices (item 236, D-430)",
+		function()
+			local cases: { { mutate: (any) -> (), needle: string } } = {
+				{
+					mutate = function(copy)
+						copy.Kobold.blocker.heldSlices = 0
+					end,
+					needle = "rigs.Kobold.blocker.heldSlices must be a whole number of at least 1",
+				},
+				{
+					mutate = function(copy)
+						copy.Kobold.blocker.heldSlices = 2.5
+					end,
+					needle = "rigs.Kobold.blocker.heldSlices must be a whole number of at least 1",
+				},
+				{
+					mutate = function(copy)
+						copy.Kobold.blocker.heldSlices = nil
+					end,
+					needle = "rigs.Kobold.blocker.heldSlices must be set",
+				},
+				{
+					mutate = function(copy)
+						table.insert(copy.PlayerR15.shell.parts, "Sword")
+					end,
+					needle = "rigs.PlayerR15.shell.parts[7] 'Sword' is not a PlayerR15 part",
+				},
+				{
+					mutate = function(copy)
+						table.insert(copy.PlayerR15.shell.parts, "UpperTorso")
+					end,
+					needle = "rigs.PlayerR15.shell.parts[7] 'UpperTorso' is one of keepOut.parts",
+				},
+				{
+					mutate = function(copy)
+						table.insert(copy.PlayerR15.shell.parts, "LeftHand")
+					end,
+					needle = "rigs.PlayerR15.shell.parts[7] 'LeftHand' is named twice",
+				},
+				{
+					mutate = function(copy)
+						copy.PlayerR15.shell.parts = {}
+					end,
+					needle = "rigs.PlayerR15.shell.parts must name the parts the shell boxes",
+				},
+				{
+					mutate = function(copy)
+						copy.PlayerR15.shell.drawn = {}
+					end,
+					needle = "rigs.PlayerR15.shell.drawn must list the clips the drawn stance stands in",
+				},
+				{
+					mutate = function(copy)
+						copy.PlayerR15.shell.sheathed = { "player/OneHandedSword/NoSuchIdle" }
+					end,
+					needle = "rigs.PlayerR15.shell.sheathed[1] 'player/OneHandedSword/NoSuchIdle' is not a clip file",
+				},
+				{
+					mutate = function(copy)
+						copy.PlayerR15.shell.drawn = { "enemy/Kobold/Idle" }
+					end,
+					needle = "rigs.PlayerR15.shell.drawn[1] 'enemy/Kobold/Idle' plays on rig 'Kobold', not PlayerR15",
+				},
+				{
+					mutate = function(copy)
+						copy.PlayerR15.shell.sampleSeconds = 0
+					end,
+					needle = "rigs.PlayerR15.shell.sampleSeconds must be above 0",
+				},
+				{
+					mutate = function(copy)
+						copy.PlayerR15.shell.padStuds = -0.1
+					end,
+					needle = "rigs.PlayerR15.shell.padStuds must be a finite 0 or more",
+				},
+				{
+					mutate = function(copy)
+						copy.PlayerR15.shell.padStuds = math.huge
+					end,
+					needle = "rigs.PlayerR15.shell.padStuds must be a finite 0 or more",
+				},
+			}
+			for _, case in cases do
+				expect(hasProblem(contact("src/shared/data/rigs", case.mutate), case.needle)).toBe(true)
+			end
+			for _, halvings in { 0, 2.5, -1 } do
+				expect(hasProblem(
+					contact("src/shared/data/combat", function(copy)
+						copy.contact.walkShell.halvings = halvings
+					end),
+					"walkShell.halvings must be a whole number of at least 1"
+				)).toBe(true)
+			end
+			expect(hasProblem(
+				contact("src/shared/data/combat", function(copy)
+					copy.contact.walkShell = nil
+				end),
+				"walkShell.halvings must be a whole number of at least 1"
+			)).toBe(true)
+		end
+	)
 
 	it("telegraph: the glint's own numbers, and never on an Unblockable blow (D-316, D-317, D-289)", function()
 		local shape = telegraph("src/shared/data/fx", function(copy)
@@ -3648,6 +4770,20 @@ describe("camera, dev capture and sfx shatter rules", function()
 				("stride: heldRiseSeconds (%s) must be a positive number of seconds"):format(tostring(bad))
 			)).toBe(true)
 		end
+		-- The travel slip's decay (D-411): a few frames at least, short enough for a 1% bias.
+		for _, bad in { 0, -0.25, 0 / 0, 0.05, 2, "0.25" } :: { any } do
+			expect(hasProblem(
+				stride(function(copy)
+					copy.locomotion.stride.travelSlipDecaySeconds = bad
+				end),
+				("stride: travelSlipDecaySeconds (%s) must be at least 4 frames"):format(tostring(bad))
+			)).toBe(true)
+		end
+		for _, good in { 4 / 60, 1.5 } do
+			expect(stride(function(copy)
+				copy.locomotion.stride.travelSlipDecaySeconds = good
+			end)).toEqual({})
+		end
 	end)
 
 	it("dev: the Studio test hooks' numbers fit the game they wait on (D-333)", function()
@@ -3752,6 +4888,24 @@ describe("camera, dev capture and sfx shatter rules", function()
 					copy.hooks.partMaterial = "Cheese"
 				end,
 			},
+			{
+				needle = "hooks.maxPackSize (30) must be a whole number from 2 to 25",
+				mutate = function(copy)
+					copy.hooks.maxPackSize = 30
+				end,
+			},
+			{
+				needle = "hooks.maxPackSize (1) must be a whole number from 2 to 25",
+				mutate = function(copy)
+					copy.hooks.maxPackSize = 1
+				end,
+			},
+			{
+				needle = "hooks.maxPackSize (2.5) must be a whole number",
+				mutate = function(copy)
+					copy.hooks.maxPackSize = 2.5
+				end,
+			},
 		}
 		for _, case in cases do
 			local problems = dev(case.mutate)
@@ -3765,6 +4919,154 @@ describe("camera, dev capture and sfx shatter rules", function()
 			copy.hooks.arriveStuds = 2.99
 			copy.hooks.walkTimeoutSeconds = 24
 		end)).toEqual({})
+	end)
+
+	it("dev: a place on a wind-up reaches through any wind-up and its strike, inside its wait (302(b))", function()
+		local function problemsWith(after: any, wait: any): { string }
+			return runWith("dev", "src/shared/data/dev", function(copy)
+				copy.hooks = table.clone(copy.hooks)
+				copy.hooks.maxPlaceAfterSeconds = after
+				copy.hooks.windUpWaitSeconds = wait
+			end)
+		end
+		expect(
+			hasProblem(problemsWith(0.5, 10), "hooks.maxPlaceAfterSeconds (0.5) must reach past every enemy wind-up")
+		).toBe(true)
+		expect(hasProblem(problemsWith(3, 1), "hooks.windUpWaitSeconds (1) must outlast every enemy attack's")).toBe(
+			true
+		)
+		expect(
+			hasProblem(problemsWith(5, 5), "hooks.maxPlaceAfterSeconds (5) must be under hooks.windUpWaitSeconds (5)")
+		).toBe(true)
+		expect(hasProblem(problemsWith(nil, 10), "hooks.maxPlaceAfterSeconds (nil)")).toBe(true)
+		expect(problemsWith(3, 10)).toEqual({})
+	end)
+
+	it("dev: the Studio frame cap holds 30 and runs after every step of the frame (303)", function()
+		local function problemsWith(mutate: (cap: any) -> ()): { string }
+			return runWith("dev", "src/shared/data/dev", function(copy)
+				copy.frameCap = table.clone(copy.frameCap)
+				copy.frameCap.priority = table.clone(copy.frameCap.priority)
+				mutate(copy.frameCap)
+			end)
+		end
+		local range = "frameCap.least and most must be whole frames a second"
+		for _, bad in
+			{
+				function(cap)
+					cap.least = 31
+				end,
+				function(cap)
+					cap.most = 29
+				end,
+				function(cap)
+					cap.least = 0
+				end,
+				function(cap)
+					cap.most = 300
+				end,
+				function(cap)
+					cap.least = 15.5
+				end,
+			}
+		do
+			expect(hasProblem(problemsWith(bad), range)).toBe(true)
+		end
+		expect(hasProblem(
+			problemsWith(function(cap)
+				cap.attribute = "DevCapture"
+			end),
+			"frameCap.attribute must be a plain attribute name"
+		)).toBe(true)
+		expect(hasProblem(
+			problemsWith(function(cap)
+				cap.priority.offset = 0
+			end),
+			"frameCap.priority (2000) must run after camera renderOrder.late (2000)"
+		)).toBe(true)
+		expect(hasProblem(
+			problemsWith(function(cap)
+				cap.priority.base = "Later"
+			end),
+			"frameCap.priority must be"
+		)).toBe(true)
+		expect(problemsWith(function() end)).toEqual({})
+	end)
+
+	it("choreo: the guard raised sheathed waits for a Draw played over it (D-420)", function()
+		local function choreo(mutate: (any) -> ()): { string }
+			return runWith("choreo", "src/shared/data/choreo", mutate)
+		end
+		expect(choreo(function() end)).toEqual({})
+		expect(hasProblem(
+			choreo(function(copy)
+				copy.sheath.drawFirstClips = { "Guard", "Block" }
+			end),
+			"choreo: sheath.drawFirstClips 'Block' must be one of sheath.drawCutClips"
+		)).toBe(true)
+		expect(hasProblem(
+			choreo(function(copy)
+				copy.sheath.drawCutClips = { "Guard", "GuardHit", "Parry", "Missing" }
+				copy.sheath.drawFirstClips = { "Missing" }
+			end),
+			"choreo: sheath.drawFirstClips 'Missing' is not a clip under player/OneHandedSword/"
+		)).toBe(true)
+		expect(hasProblem(
+			choreo(function(copy)
+				copy.sheath.drawFirstClips = { "Guard" }
+				copy.sheath.overPriority = 10
+			end),
+			"choreo: sheath.overPriority (10) must be above Guard's priority (10)"
+		)).toBe(true)
+		expect(hasProblem(
+			choreo(function(copy)
+				copy.sheath.overPriority = 12
+			end),
+			"choreo: sheath.overPriority (12) must be above GuardHit's priority (12)"
+		)).toBe(true)
+		-- Only Guard draws first: 12 lays the Draw over it and under everything else.
+		expect(choreo(function(copy)
+			copy.sheath.drawFirstClips = { "Guard" }
+			copy.sheath.overPriority = 12
+		end)).toEqual({})
+		for _, bad in { 8, 15, 0 / 0 } :: { any } do
+			expect(
+				hasProblem(
+					choreo(function(copy)
+						copy.sheath.overPriority = bad
+					end),
+					("choreo: sheath.overPriority (%s) must be above priority.Sheath (8) and below priority.Basic (15)"):format(
+						tostring(bad)
+					)
+				)
+			).toBe(true)
+		end
+		for _, bad in { 0.22, 0.97, 0.1, -1 } :: { any } do
+			expect(
+				hasProblem(
+					choreo(function(copy)
+						copy.sheath.handOverTime = bad
+					end),
+					("choreo: sheath.handOverTime (%s) must be after the Draw's WeaponDraw (0.22 s) and before its end (0.97 s)"):format(
+						tostring(bad)
+					)
+				)
+			).toBe(true)
+		end
+		for _, bad in { 0, -0.25, math.huge } :: { any } do
+			expect(hasProblem(
+				choreo(function(copy)
+					copy.sheath.handOverBlend = bad
+				end),
+				("choreo: sheath.handOverBlend (%s) must be a positive number of seconds"):format(tostring(bad))
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			choreo(function(copy)
+				copy.sheath.drawFirstClips = nil
+			end),
+			"choreo: sheath.drawFirstClips must list the guard clips the Draw plays over"
+		)).toBe(true)
 	end)
 
 	it("wallSlam: the shake fades from shakeFullRadius to nothing at shakeRadius (D-296)", function()
@@ -3800,5 +5102,494 @@ describe("camera, dev capture and sfx shatter rules", function()
 		expect(wallSlam("src/shared/data/fx", function(copy)
 			copy.wallSlam.shakeFullRadius = 0
 		end)).toEqual({})
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- The ribbon's window close and edge-on width (D-360, D-361): tests/client/TrailWindows measures
+-- both on screen through the real Trails module
+-- ------------------------------------------------------------------------------------------
+
+describe("trail validator: the ribbon's window close and edge-on width", function()
+	local FX = "src/shared/data/fx"
+	local FAKE = "src/shared/clips/test/FakeGaps"
+
+	local function deepCopy(value: any): any
+		if typeof(value) ~= "table" then
+			return value
+		end
+		local copy = {}
+		for key, element in value do
+			copy[key] = deepCopy(element)
+		end
+		return setmetatable(copy, getmetatable(value))
+	end
+
+	-- Runs the trail validator on a mutated copy of fx.luau; `events`, when given, adds one clip
+	-- with those events to the real clips.
+	local function trail(mutate: ((any) -> ())?, events: { any }?): { string }
+		local copy = deepCopy(Harness.load(FX))
+		if mutate ~= nil then
+			mutate(copy)
+		end
+		return loadTool("tools/validators/trail")({
+			load = function(path: string): any
+				if path == FX then
+					return copy
+				elseif path == FAKE then
+					return { id = "test/FakeGaps", events = events }
+				end
+				return Harness.load(path)
+			end,
+			listFiles = function(directory: string, pattern: string?): { string }
+				local files = Harness.listFiles(directory, pattern)
+				if events ~= nil and directory == "src/shared/clips" then
+					files = table.clone(files)
+					table.insert(files, FAKE .. ".luau")
+				end
+				return files
+			end,
+			readFile = Harness.readFile,
+			repoRoot = root,
+		})
+	end
+
+	it("is clean on a copy of the real table", function()
+		expect(trail()).toEqual({})
+	end)
+
+	it("closeSeconds is a number from 0 up to under the trail's lifetime", function()
+		expect(hasProblem(
+			trail(function(copy)
+				copy.trail.ribbon.closeSeconds = "0.04"
+			end),
+			"ribbon.closeSeconds must be a number"
+		)).toBe(true)
+		expect(hasProblem(
+			trail(function(copy)
+				copy.trail.ribbon.closeSeconds = -0.01
+			end),
+			"ribbon.closeSeconds must be a number"
+		)).toBe(true)
+		expect(hasProblem(
+			trail(function(copy)
+				copy.trail.ribbon.closeSeconds = copy.trail.lifetime
+			end),
+			"must be under trail.lifetime"
+		)).toBe(true)
+		expect(hasProblem(
+			trail(function(copy)
+				copy.trail.ribbon.closeSeconds = nil
+			end),
+			"ribbon.closeSeconds must be a number"
+		)).toBe(true)
+		-- 0: the arc goes on the frame its window goes out.
+		expect(trail(function(copy)
+			copy.trail.ribbon.closeSeconds = 0
+		end)).toEqual({})
+	end)
+
+	it("closeSeconds and a frame fit in every gap a clip leaves between its lit spans", function()
+		-- Rising Arc leaves 0.11 s between its windows (0.45 to 0.56), Sharp Nail 0.13 and 0.15.
+		local problems = trail(function(copy)
+			copy.trail.ribbon.closeSeconds = 0.1
+		end)
+		expect(hasProblem(problems, "player/OneHandedSword/RisingArc: the gap at 0.4500")).toBe(true)
+		expect(hasProblem(problems, "player/OneHandedSword/SharpNail")).toBe(false)
+		-- 0.095 and a frame (0.1117) overrun 0.11 by under two thousandths.
+		expect(hasProblem(
+			trail(function(copy)
+				copy.trail.ribbon.closeSeconds = 0.095
+			end),
+			"player/OneHandedSword/RisingArc: the gap at 0.4500 between two lit spans is 0.110 s"
+		)).toBe(true)
+		expect(hasProblem(
+			trail(function(copy)
+				copy.trail.ribbon.closeSeconds = 0.12
+			end),
+			"player/OneHandedSword/SharpNail: the gap at 0.4500"
+		)).toBe(true)
+	end)
+
+	it("a smear keeps the trail lit; an off and an on at the same time leave no gap", function()
+		-- The window closes at 0.40, its smear at 0.42: the gap to 0.46 is 0.04 s.
+		local bridged = {
+			{ time = 0.3, kind = "TrailOn", data = { kind = "Art" } },
+			{ time = 0.3, kind = "HitWindowOpen", data = { hit = 1 } },
+			{ time = 0.38, kind = "SmearOn", data = { axis = "X" } },
+			{ time = 0.4, kind = "HitWindowClose", data = { hit = 1 } },
+			{ time = 0.42, kind = "SmearOff" },
+			{ time = 0.46, kind = "HitWindowOpen", data = { hit = 2 } },
+			{ time = 0.5, kind = "PostMotionStart" },
+		}
+		expect(hasProblem(trail(nil, bridged), "test/FakeGaps: the gap at 0.4200 between two lit spans is 0.040 s")).toBe(
+			true
+		)
+		local back = {
+			{ time = 0.3, kind = "TrailOn", data = { kind = "Art" } },
+			{ time = 0.4, kind = "TrailOff" },
+			{ time = 0.4, kind = "TrailOn", data = { kind = "Art" } },
+			{ time = 0.5, kind = "TrailOff" },
+		}
+		expect(trail(nil, back)).toEqual({})
+	end)
+
+	it("edgeOn holds 0 <= edgeAt < fullAt <= 1 and a minShare above 0 and at most 1", function()
+		expect(hasProblem(
+			trail(function(copy)
+				copy.trail.ribbon.edgeOn = nil
+			end),
+			"ribbon.edgeOn must be a table"
+		)).toBe(true)
+		expect(hasProblem(
+			trail(function(copy)
+				copy.trail.ribbon.edgeOn.fullAt = copy.trail.ribbon.edgeOn.edgeAt
+			end),
+			"ribbon.edgeOn needs 0 <= edgeAt < fullAt <= 1"
+		)).toBe(true)
+		expect(hasProblem(
+			trail(function(copy)
+				copy.trail.ribbon.edgeOn.fullAt = 1.2
+			end),
+			"ribbon.edgeOn needs 0 <= edgeAt < fullAt <= 1"
+		)).toBe(true)
+		expect(hasProblem(
+			trail(function(copy)
+				copy.trail.ribbon.edgeOn.edgeAt = -0.1
+			end),
+			"ribbon.edgeOn needs 0 <= edgeAt < fullAt <= 1"
+		)).toBe(true)
+		expect(hasProblem(
+			trail(function(copy)
+				copy.trail.ribbon.edgeOn.minShare = 0
+			end),
+			"ribbon.edgeOn.minShare must be above 0"
+		)).toBe(true)
+		expect(hasProblem(
+			trail(function(copy)
+				copy.trail.ribbon.edgeOn.minShare = 1.5
+			end),
+			"ribbon.edgeOn.minShare must be above 0"
+		)).toBe(true)
+		-- minShare 1: no narrowing at all, still a valid table.
+		expect(trail(function(copy)
+			copy.trail.ribbon.edgeOn.minShare = 1
+		end)).toEqual({})
+	end)
+
+	it("ownerAttribute names the host attribute with a non-empty string (D-362)", function()
+		local message = "ribbon.ownerAttribute must be a non-empty string"
+		expect(hasProblem(
+			trail(function(copy)
+				copy.trail.ribbon.ownerAttribute = nil
+			end),
+			message
+		)).toBe(true)
+		for _, bad: any in { "", 5, true } do
+			expect(hasProblem(
+				trail(function(copy)
+					copy.trail.ribbon.ownerAttribute = bad
+				end),
+				message
+			)).toBe(true)
+		end
+		expect(hasProblem(trail(), message)).toBe(false)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- The clip audit's numbers and part groups (dev.luau review.audit)
+-- ------------------------------------------------------------------------------------------
+
+describe("clipAudit validator: the clip audit's thresholds and rigs", function()
+	local function deepCopy(value: any): any
+		if typeof(value) ~= "table" then
+			return value
+		end
+		local copy = {}
+		for key, element in value do
+			copy[key] = deepCopy(element)
+		end
+		return setmetatable(copy, getmetatable(value))
+	end
+
+	-- Runs the validator over a deep copy of the real dev.luau with review.audit mutated.
+	local function audit(mutate: ((any) -> ())?): { string }
+		local copy = deepCopy(Harness.load("src/shared/data/dev"))
+		if mutate ~= nil then
+			mutate(copy.review.audit)
+		end
+		return loadTool("tools/validators/clipAudit")({
+			load = function(path: string): any
+				if path == "src/shared/data/dev" then
+					return copy
+				end
+				return Harness.load(path)
+			end,
+			listFiles = Harness.listFiles,
+			readFile = Harness.readFile,
+			repoRoot = root,
+		})
+	end
+	local function flags(mutate: (any) -> (), needle: string)
+		local problems = audit(mutate)
+		if not hasProblem(problems, needle) then
+			error(("expected a problem with %q, got:\n%s"):format(needle, table.concat(problems, "\n")))
+		end
+	end
+
+	it("is clean on a copy of the real table", function()
+		expect(audit()).toEqual({})
+	end)
+
+	it("samples whole 60 Hz frames, at the game's rate and every frame of the slowest review", function()
+		flags(function(a)
+			a.sampleHz = { 60, 90, 240 }
+		end, "sampleHz[2] must be a whole multiple of 60")
+		flags(function(a)
+			a.sampleHz = { 60, 120 }
+		end, "sampleHz must hold 240")
+		flags(function(a)
+			a.sampleHz = { 240 }
+		end, "sampleHz must hold 60")
+	end)
+
+	it("keeps the pop bound inside a half turn and the report floor under it", function()
+		flags(function(a)
+			a.popDegrees = 0
+		end, "popDegrees must be in")
+		flags(function(a)
+			a.popDegrees = 180
+		end, "popDegrees must be in")
+		flags(function(a)
+			a.reportDegrees = a.popDegrees + 1
+		end, "reportDegrees must be in")
+	end)
+
+	it("keeps every depth and distance positive", function()
+		for _, key in { "overlapStuds", "weaponStuds", "footSinkStuds", "returnStuds" } do
+			flags(function(a)
+				a[key] = 0
+			end, key .. " must be a number above 0")
+		end
+	end)
+
+	it("bars the tip's step out of a freeze above 0 and at no more than a tenth of a snap (D-405)", function()
+		flags(function(a)
+			a.afterFreezeTipSpeed = nil
+		end, "afterFreezeTipSpeed must be in")
+		flags(function(a)
+			a.afterFreezeTipSpeed = 0
+		end, "afterFreezeTipSpeed must be in")
+		flags(function(a)
+			a.afterFreezeTipSpeed = 60
+		end, "afterFreezeTipSpeed must be in")
+	end)
+
+	it("keeps a cancel's hand-over a snap of 2 to 4 whole frames (D-408)", function()
+		for _, bad in { 1, 5, 2.5, 0, "3" } :: { any } do
+			flags(function(a)
+				a.cancel.snapFrames = bad
+			end, "cancel.snapFrames must be a whole number of frames in [2, 4]")
+		end
+		flags(function(a)
+			a.cancel = nil
+		end, "cancel.snapFrames must be a whole number of frames in [2, 4]")
+		for _, good in { 2, 4 } do
+			local problems = audit(function(a)
+				a.cancel.snapFrames = good
+			end)
+			for _, line in problems do
+				expect(line:find("cancel.snapFrames", 1, true)).toBeNil()
+			end
+		end
+	end)
+
+	it("plays only cancels of a rig's own clips, cut inside the clip they cut (D-408)", function()
+		flags(function(a)
+			table.insert(
+				a.rigs.PlayerR15.cancels,
+				{ clip = "enemy/Boar/Charge", over = "player/OneHandedSword/Basic1", gap = 0.1 }
+			)
+		end, "rigs.PlayerR15.cancels[12].clip names enemy/Boar/Charge, a Boar clip")
+		flags(function(a)
+			a.rigs.PlayerR15.cancels[1].over = "player/OneHandedSword/Nothing"
+		end, "rigs.PlayerR15.cancels[1].over names player/OneHandedSword/Nothing, which has no clip file")
+		for _, bad in { -0.1, 5, 0 / 0 } :: { any } do
+			flags(function(a)
+				a.rigs.PlayerR15.cancels[1].gap = bad
+			end, "rigs.PlayerR15.cancels[1].gap must be at least 0 and inside player/OneHandedSword/Basic1")
+		end
+		flags(function(a)
+			a.rigs.PlayerR15.cancels[2] = "Horizontal"
+		end, "rigs.PlayerR15.cancels[2] must be a table of clip, over and gap")
+	end)
+
+	it("never lets a planted foot slide looser than the gaits' bar, nor drift less than it slides", function()
+		flags(function(a)
+			a.footSlideStuds = 0.2
+		end, "footSlideStuds must be in")
+		flags(function(a)
+			a.footDriftStuds = a.footSlideStuds / 2
+		end, "footDriftStuds must be at least footSlideStuds")
+	end)
+
+	it("keeps the anticipation a pull against the cut, slower than the snap and seen", function()
+		flags(function(a)
+			a.anticipation.maxCosine = 0
+		end, "anticipation.maxCosine must be in")
+		flags(function(a)
+			a.anticipation.maxCosine = -1.5
+		end, "anticipation.maxCosine must be in")
+		flags(function(a)
+			a.anticipation.minTravel = 0
+		end, "anticipation.minTravel must be a number above 0")
+		flags(function(a)
+			a.anticipation.maxSpeedShare = 1
+		end, "anticipation.maxSpeedShare must be in")
+		flags(function(a)
+			a.anticipation.maxHiddenShare = 0
+		end, "anticipation.maxHiddenShare must be in")
+		flags(function(a)
+			a.recoveryFaceShare = 1
+		end, "recoveryFaceShare must be in")
+	end)
+
+	it("leads every clip in past its blend in and keeps the trace's other numbers sane", function()
+		flags(function(a)
+			a.leadSeconds = 0.01
+		end, "leadSeconds must be above 0 and at least the longest clip blendIn")
+		flags(function(a)
+			a.settleSeconds = 0
+		end, "settleSeconds must be a number above 0")
+		flags(function(a)
+			a.loopOverSeconds = 0
+		end, "loopOverSeconds must be a number above 0")
+		flags(function(a)
+			a.maxTraceSeconds = 2
+		end, "maxTraceSeconds must be above the longest trace")
+		flags(function(a)
+			a.maxTraceSeconds = nil
+		end, "maxTraceSeconds must be above the longest trace")
+		flags(function(a)
+			a.segmentSamples = 0.5
+		end, "segmentSamples must be a whole number")
+		flags(function(a)
+			a.idlePhases = { -1 }
+		end, "idlePhases[1] must be in")
+		flags(function(a)
+			a.runPhases = { 1 }
+		end, "runPhases[1] must be in")
+	end)
+
+	it("chains a basic no sooner than the game lets it, inside the chain window", function()
+		local Combat = Harness.load("src/shared/data/combat")
+		flags(function(a)
+			a.chainSeconds = Combat.basicHitDuration / 2
+		end, "chainSeconds must be in")
+		flags(function(a)
+			a.chainSeconds = Combat.basicChainWindow
+		end, "chainSeconds must be in")
+	end)
+
+	it("lists exactly the kinds ClipAudit reports, once each", function()
+		flags(function(a)
+			table.remove(a.kinds, table.find(a.kinds, "Pop"))
+		end, "kinds must list Pop once")
+		flags(function(a)
+			table.insert(a.kinds, "Slide")
+		end, "kinds must list Slide once")
+		flags(function(a)
+			table.insert(a.kinds, "Wobble")
+		end, "kinds lists Wobble")
+	end)
+
+	it("names only real rigs and their own parts", function()
+		flags(function(a)
+			a.rigs.Dragon = a.rigs.Boar
+		end, "rigs.Dragon is not a rigs.luau rig")
+		flags(function(a)
+			table.insert(a.rigs.PlayerR15.body, "Tail")
+		end, "rigs.PlayerR15.body[16] names Tail, not a PlayerR15 part")
+		flags(function(a)
+			table.insert(a.rigs.PlayerR15.body, "HumanoidRootPart")
+		end, "body lists HumanoidRootPart, which is not drawn")
+		flags(function(a)
+			a.rigs.Kobold.pairs[1].b = { "Weapon" }
+		end, "rigs.Kobold.pairs[1].b[1] names Weapon, which body does not list")
+		flags(function(a)
+			a.rigs.Boar.feet = {}
+		end, "rigs.Boar.feet must list the parts that stand on the field")
+		flags(function(a)
+			a.rigs.PlayerR15.weapon = { "Hilt" }
+		end, "rigs.PlayerR15.weapon[1] names Hilt, not a weapon piece")
+		flags(function(a)
+			a.rigs.Boar.tip = { part = "Horn", offset = { 0, 0, -1 } }
+		end, "rigs.Boar.tip.part names Horn")
+		flags(function(a)
+			a.rigs.Boar.tip.offset = { 0, -1 }
+		end, "rigs.Boar.tip.offset must be three numbers")
+		flags(function(a)
+			a.rigs.PlayerR15.visible.Head = { 0.6, 0, 1 }
+		end, "rigs.PlayerR15.visible.Head must be three shares above 0")
+		flags(function(a)
+			a.rigs.Kobold.views = { "Side" }
+		end, "rigs.Kobold.views[1] must be Behind or Front")
+		-- The views each tell is judged from (D-414): at least one, each once.
+		flags(function(a)
+			a.rigs.Kobold.views = nil
+		end, "rigs.Kobold.views must list the views")
+		flags(function(a)
+			a.rigs.Boar.views = {}
+		end, "rigs.Boar.views must list the views")
+		flags(function(a)
+			a.rigs.Boar.views = { "Front", "Front" }
+		end, "rigs.Boar.views lists Front twice")
+		local both = audit(function(a)
+			a.rigs.Boar.views = { "Front", "Behind" }
+		end)
+		for _, line in both do
+			expect(line:find("views", 1, true)).toBeNil()
+		end
+	end)
+
+	it("names clip files of the rig, loops where it stands and one-shots where it chains", function()
+		flags(function(a)
+			a.rigs.PlayerR15.idle = "player/OneHandedSword/Nap"
+		end, "names player/OneHandedSword/Nap, which has no clip file")
+		flags(function(a)
+			a.rigs.PlayerR15.drawnIdle = "player/OneHandedSword/Basic1"
+		end, "rigs.PlayerR15.drawnIdle names player/OneHandedSword/Basic1, which does not loop")
+		flags(function(a)
+			a.rigs.Kobold.walk = "enemy/Boar/Walk"
+		end, "rigs.Kobold.walk names enemy/Boar/Walk, a Boar clip")
+		flags(function(a)
+			a.rigs.PlayerR15.chain["player/OneHandedSword/IdleDrawn"] = "player/OneHandedSword/Basic1"
+		end, "rigs.PlayerR15.chain names player/OneHandedSword/IdleDrawn, which loops")
+		flags(function(a)
+			a.rigs.PlayerR15.airborne = { "player/OneHandedSword/Hover" }
+		end, "rigs.PlayerR15.airborne[1] names player/OneHandedSword/Hover")
+	end)
+
+	it("audits only clip files of a rig it has, each once", function()
+		flags(function(a)
+			table.insert(a.clips, "player/OneHandedSword/Cartwheel")
+		end, "names player/OneHandedSword/Cartwheel, which has no clip file")
+		flags(function(a)
+			table.insert(a.clips, a.clips[1])
+		end, "lists " .. Harness.load("src/shared/data/dev").review.audit.clips[1] .. " twice")
+		flags(function(a)
+			a.rigs.Kobold = nil
+			a.clips = { "enemy/Kobold/Idle" }
+		end, "a Kobold clip the audit has no rig for")
+	end)
+
+	it("carries a rush only for a Charger's real attack", function()
+		flags(function(a)
+			a.rigs.Boar.rush["enemy/Boar/Charge"] = { enemy = "KoboldAxeman", attack = "Charge" }
+		end, "must name an enemies.luau Charger (got KoboldAxeman)")
+		flags(function(a)
+			a.rigs.Boar.rush["enemy/Boar/Charge"] = { enemy = "FrenzyBoar", attack = "Bite" }
+		end, "names Bite, not an attack of FrenzyBoar")
 	end)
 end)

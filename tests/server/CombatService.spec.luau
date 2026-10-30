@@ -605,6 +605,7 @@ describe("CombatService Art timeline", function()
 			local confirmed = sentOf("HitConfirmed")
 			expect(#confirmed).toBe(1)
 			expect(confirmed[1].damage).toBe(HORIZONTAL_DAMAGE)
+			expect(confirmed[1].hpRemoved).toBe(HORIZONTAL_DAMAGE) -- FK5: all of it, the boar lives
 			expect(confirmed[1].crit).toBe(false)
 			expect(confirmed[1].parried).toBe(false)
 			expect(#confirmed[1].position).toBe(3)
@@ -699,6 +700,10 @@ describe("CombatService Art timeline", function()
 		local hit = lastOf("HitConfirmed")
 		expect(hit.killed).toBe(true)
 		expect(hit.hitStop).toBe("Kill")
+		-- The word carries the HP the kill took beside its damage (FK5): the 1 left, plus what the
+		-- out-of-combat regen gave back before the blow.
+		expect(hit.damage).toBe(HORIZONTAL_DAMAGE)
+		expect(hit.hpRemoved >= 1 and hit.hpRemoved < 2).toBe(true)
 		expect(#sentOf("EntityDied")).toBe(1)
 		expect(#sentOf("SwitchWindow")).toBe(0) -- no window on a corpse
 		advance(0.2)

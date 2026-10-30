@@ -193,6 +193,9 @@ local MAX_TARGETS: number = Combat.maxTargetsPerWindow
 -- steps lands a hair short of a key written to four decimals.
 local KEY_EPSILON: number = Combat.contact.keyEpsilon
 local STAND_OFF = Combat.contact.standOff
+-- The fastest the reach (D-424) carries the body back: the sprint cap outside root motion, the
+-- speed the stand-off's own step keeps under over the shortest anticipation.
+local SPRINT: number = Combat.maxSpeedStudsPerSecond
 local MIN_FACE_DISTANCE: number = Combat.aim.minFaceDistance
 -- How deep a blade must pass into a body for the server's sweep to promise the hit (HitSweep:
 -- every point the blade passes lies within half a step of a sample).
@@ -739,6 +742,36 @@ local function boxDepth(a: CFrame, aSize: Vector3, b: CFrame, bSize: Vector3): n
 	return least
 end
 
+-- How deep the segment `a` to `b` reaches into the box `frame` (`half`: half its size): its
+-- deepest point's least distance in from a face, 0 or less when it stays out. Each face's distance
+-- is linear along the segment, so the deepest point is an end or where two of them meet.
+local function segmentDepth(a: Vector3, b: Vector3, frame: CFrame, half: Vector3): number
+	local p, q = frame:PointToObjectSpace(a), frame:PointToObjectSpace(b)
+	local d = q - p
+	local c0 = { half.X - p.X, half.X + p.X, half.Y - p.Y, half.Y + p.Y, half.Z - p.Z, half.Z + p.Z }
+	local c1 = { -d.X, d.X, -d.Y, d.Y, -d.Z, d.Z }
+	local function at(s: number): number
+		local least = math.huge
+		for face, base in c0 do
+			least = math.min(least, base + c1[face] * s)
+		end
+		return least
+	end
+	local deepest = math.max(at(0), at(1))
+	for i = 1, #c0 - 1 do
+		for j = i + 1, #c0 do
+			local slope = c1[i] - c1[j]
+			if math.abs(slope) > 1e-6 then
+				local s = (c0[j] - c0[i]) / slope
+				if s > 0 and s < 1 then
+					deepest = math.max(deepest, at(s))
+				end
+			end
+		end
+	end
+	return deepest
+end
+
 -- The least step at or past `from` along `away` (flat, unit) that leaves the box `aSize` as it
 -- passes from `a0` to `a1` (the hull of the two: what a part sweeps between two poses), both moved
 -- by `shift` first, at most `allowed` deep in the box `b` (`bSize`), math.huge for none. Two convex shapes are that far apart
@@ -805,12 +838,13 @@ local function stepOut(
 end
 
 -- One part of the body the engine collides (combat.contact.standOff.keepOut.parts): its size and
--- the joints from the root part out to it.
-type BodyPart = { size: Vector3, links: { BladeContact.Link } }
+-- the joints from the root part out to it, and where on that part a box of its own sits (the
+-- blade: keepOut.bladeDepthStuds), nil for the part's own box.
+type BodyPart = { size: Vector3, links: { BladeContact.Link }, offset: CFrame? }
 
--- The body's colliding parts the model has, each with its joint path from the root part (a part
--- no joint path reaches is left out; the root part itself has none).
-local function bodyParts(model: Model): { BodyPart }
+-- The parts named `names` the model has, each with its joint path from the root part (a part no
+-- joint path reaches is left out; the root part itself has none).
+local function bodyParts(model: Model, names: { string }): { BodyPart }
 	local root = model.PrimaryPart
 	local list: { BodyPart } = {}
 	if root == nil then
@@ -823,7 +857,7 @@ local function bodyParts(model: Model): { BodyPart }
 			placing[each.part1] = each
 		end
 	end
-	for _, name in KEEP_OUT.parts :: { string } do
+	for _, name in names do
 		local found = model:FindFirstChild(name)
 		if found == nil or not found:IsA("BasePart") then
 			continue
@@ -850,6 +884,31 @@ local function bodyParts(model: Model): { BodyPart }
 	return list
 end
 
+-- The blade the trails draw (BladeContact.chain: TrailStart, the guard, to TrailEnd, the tip) as a
+-- box with no width along it, on its part's joint path; nil when the model holds none.
+local function bladePart(model: Model): BodyPart?
+	local blade = BladeContact.chain(model)
+	if blade == nil then
+		return nil
+	end
+	local guard, tip = blade.start.Position, blade.finish.Position
+	local length = (tip - guard).Magnitude
+	if length < 1e-6 then
+		return nil
+	end
+	-- Its own Z along the blade (a frame built square to it, off whichever of the part's up and
+	-- right axes the blade is nearer square to: lookAt has no answer for a blade along the part's
+	-- up axis, as a sword's is).
+	local look = (tip - guard) / length
+	local helper = if math.abs(look.Y) < 0.5 then Vector3.new(0, 1, 0) else Vector3.new(1, 0, 0)
+	local right = look:Cross(helper).Unit
+	return {
+		size = Vector3.new(0, 0, length),
+		links = blade.links,
+		offset = CFrame.fromMatrix((guard + tip) / 2, right, right:Cross(look), -look),
+	}
+end
+
 -- A keep-out plan (keepOutOf): how far back along `away`, and aside along `side`, the body stands
 -- at a clip time.
 type KeepOut = {
@@ -858,10 +917,29 @@ type KeepOut = {
 	keepSide: ((clipTime: number) -> number)?,
 }
 
+-- Poses `list` with the root at `rootFrame` and the clip's joints at `offsets` into `into`.
+local function placeParts(list: { BodyPart }, rootFrame: CFrame, offsets: ClipSampler.Offsets, into: { CFrame })
+	for index, body in list do
+		local frame = rootFrame
+		for _, link in body.links do
+			local offset = offsets[link.joint.Name]
+			local transform = if offset ~= nil then ClipSampler.toCFrame(offset) else CFrame.identity
+			frame = frame * link.c0 * transform * link.c1Inverse
+		end
+		into[index] = if body.offset ~= nil then frame * body.offset else frame
+	end
+end
+
+-- A strike the reach is kept out at (keepOutOf): the clip time its hit-stop holds (`key`), and the
+-- span the body takes its step over (`start` to `ready`: from the strike before, or the release,
+-- to where its snap begins), and the step once it is known, with the aside it was found at.
+type Strike = { key: number, start: number, ready: number, need: number?, aside: number }
+
 -- The keep-out (D-314) of a swing whose body stands at `rootCFrame` at clip time `from` and steps
 -- `distance` along `away` by clip time `to` (the blade step): how much farther along `away` the
 -- body stands at each clip time, and how far aside, so that no colliding part goes deeper into the
--- target's blocker (as its faces stood when the plan was made) than at `from`. The body's face
+-- target's blocker (as its faces stood when the plan was made) than at `from`, and none deeper
+-- than depthEpsilon from the first cut's key on (item 286: a freeze holds no overlap). The body's face
 -- (keepOut.bodyFace) holds the body back along `away`. A face over a part the target holds
 -- (keepOut.heldFace, D-315: a kobold's axe, which hangs beside a body at its front) holds it back
 -- or aside, whichever is the shorter step: aside along `side`, square to `away` and off the held
@@ -872,8 +950,27 @@ type KeepOut = {
 -- not the release for the whole clip); each sample keeps out what every part sweeps from the
 -- sample before (the hull of the two poses), and a clip time between two samples reads one sample
 -- ahead, so the body is back before the pose goes in; a sample whose parts turn fast (a spin) is
--- swept in pieces, none turning more than maxTurnDegrees, so the hulls hold the arc. Nil when the
--- target has no blocker.
+-- swept in pieces, none turning more than maxTurnDegrees, so the hulls hold the arc.
+--
+-- The reach (D-424): at each strike's key (ContactPredictor.strikeKey, the pose the hit-stop
+-- holds) the blade (BladeContact.chain, guard to tip) stands no deeper in any of the target's body
+-- parts (`hurt`: what the blade may wound, as they stood when the plan was made) than
+-- keepOut.bladeDepthStuds, or than it stood at `from` when a touch at the start pose put it
+-- deeper, and no hand or arm (keepOut.limbs) deeper than it stood at `from`: the cut meets the
+-- body at its surface and never sinks to its root. The body takes that step back over the strike's
+-- anticipation, from the strike before (or the release) to where its snap begins, on
+-- standOff.easing, as the blade step does, and is still through the hit-stop; the step a key posed
+-- again in its cut calls for (an aside that grew there) is taken in the frames left to it. The
+-- reach never carries the body back faster than the sprint cap (maxSpeedStudsPerSecond, with the
+-- aside's step that sample counted in), and no key steps farther than it reaches by then. A step
+-- has a price, a keepOut.stepPerDepth-th of a stud of depth for each stud of ground: of the steps
+-- of standOff.stepStuds, at most standOff.maxStuds a strike, the plan takes the one whose price
+-- and the depth it leaves past those come to least (the least step that keeps the key out, unless
+-- a shorter one leaves it a hair deep for far less ground, or none that short does: a blade beside
+-- the body whose step back carries it into the torso, or along an arm whose end is a stud and more
+-- away). The key is posed when the swing first reaches that strike's anticipation, and again when
+-- the aside grows before the key. The reach is a ramp of its own and needs no head start, so a
+-- frame reads it at its own clip time, not a sample ahead. Nil when the target has no blocker.
 local function keepOutOf(
 	model: Model,
 	clip: Types.ClipDef,
@@ -882,7 +979,8 @@ local function keepOutOf(
 	target: Model,
 	away: Vector3,
 	distance: number,
-	to: number
+	to: number,
+	hurt: { BasePart }
 ): KeepOut?
 	-- The faces as they stand now: a frame, a size and whether it is over a held part, each.
 	local faceFrames: { CFrame } = {}
@@ -898,7 +996,7 @@ local function keepOutOf(
 	if #faceFrames == 0 then
 		return nil
 	end
-	local parts = bodyParts(model)
+	local parts = bodyParts(model, KEEP_OUT.parts)
 	local budget: number = KEEP_OUT.maxStuds
 	local most = math.max(0, budget - distance)
 	if #parts == 0 or most <= 0 then
@@ -929,32 +1027,220 @@ local function keepOutOf(
 	local before: { CFrame } = table.create(#parts)
 	local chain: { { CFrame } } = { before }
 	local pieces = 1
+	-- The reach: the hands and arms, then the blade, against the target's body parts as they stand
+	-- now (none when it has none), and the strikes it is kept out at.
+	local reach: { BodyPart } = {}
+	local hurtFrames: { CFrame } = {}
+	local hurtSizes: { Vector3 } = {}
+	for _, part in hurt do
+		table.insert(hurtFrames, part.CFrame)
+		table.insert(hurtSizes, part.Size)
+	end
+	local bladeIndex = 0
+	local strikes: { Strike } = {}
+	if #hurtFrames > 0 then
+		reach = bodyParts(model, KEEP_OUT.limbs)
+		local blade = bladePart(model)
+		if blade ~= nil then
+			table.insert(reach, blade)
+			bladeIndex = #reach
+		end
+		local last = from
+		for _, window in ClipSampler.hitWindows(clip) do
+			local key = ContactPredictor.strikeKey(clip, window)
+			if key > from + KEY_EPSILON then
+				-- Where the strike's snap begins: the key before its own (the window's open for a
+				-- window with no snap); the step is taken before it, or through the snap when the
+				-- strike follows the one before with no anticipation between.
+				local snap = window.open
+				for index = 2, #clip.keys do
+					if
+						math.abs(clip.keys[index].time - key) <= KEY_EPSILON and ClipSampler.isStrikeSnap(clip, index)
+					then
+						snap = clip.keys[index - 1].time
+					end
+				end
+				local ready = if snap > last + KEY_EPSILON then math.min(snap, key) else key
+				table.insert(strikes, { key = key, start = last, ready = ready, aside = 0 })
+				last = key
+			end
+		end
+	end
 	-- Poses the colliding parts at clip time `time` (the clip's root motion and the blade step)
-	-- into `into`.
-	local function pose(time: number, into: { CFrame })
+	-- into `into`, and the reach into `reachInto`.
+	local function pose(time: number, into: { CFrame }?, reachInto: { CFrame }?)
 		local motion = ClipSampler.rootMotionAt(clip, time)
 		local stepped = AimLogic.standOffAt(distance, from, to, time, STAND_OFF.easing)
 		local rootFrame = rootCFrame * CFrame.new(motion[1] - start[1], motion[2] - start[2], motion[3] - start[3])
 			+ away * stepped
 		local offsets = ClipSampler.sample(clip, time)
-		for index, body in parts do
-			local frame = rootFrame
-			for _, link in body.links do
-				local offset = offsets[link.joint.Name]
-				local transform = if offset ~= nil then ClipSampler.toCFrame(offset) else CFrame.identity
-				frame = frame * link.c0 * transform * link.c1Inverse
-			end
-			into[index] = frame
+		if into ~= nil then
+			placeParts(parts, rootFrame, offsets, into)
+		end
+		if reachInto ~= nil then
+			placeParts(reach, rootFrame, offsets, reachInto)
 		end
 	end
-	pose(from, frames)
+	local reachFrames: { CFrame } = table.create(#reach)
+	pose(from, frames, if #reach > 0 then reachFrames else nil)
 	local deepest = 0
 	for index, body in parts do
 		for face, faceFrame in faceFrames do
 			deepest = math.max(deepest, boxDepth(frames[index], body.size, faceFrame, faceSizes[face]))
 		end
 	end
-	local allowed = deepest + KEEP_OUT.depthEpsilon
+	-- How deep a part may stand: as deep as the swing found it until its first cut's key, and out
+	-- (depthEpsilon) from then on (item 286): a freeze holds the body where its key stands, and an
+	-- overlap held there is the engine's to push out through the freeze (Rising Arc at a side-on
+	-- boar crept 0.034-0.038 studs a frame in Studio). The lead below starts that step early.
+	local startAllowed = deepest + KEEP_OUT.depthEpsilon
+	local allowed = startAllowed
+	local firstKey = math.huge
+	for _, window in ClipSampler.hitWindows(clip) do
+		local key = ContactPredictor.strikeKey(clip, window)
+		if key > from + KEY_EPSILON then
+			firstKey = math.min(firstKey, key)
+		end
+	end
+	-- How deep a piece of the reach, posed at `frame` and moved by `moved`, stands in body part
+	-- `part`: a hand or an arm the boxes' overlap (boxDepth), the blade its deepest point's distance
+	-- in from the part's nearest face (segmentDepth), how buried it looks: a blade along a thin arm
+	-- a hair under its skin is not one through it.
+	local function depthIn(index: number, frame: CFrame, moved: Vector3, part: number): number
+		local hurtFrame = hurtFrames[part]
+		if index ~= bladeIndex then
+			return boxDepth(frame + moved, reach[index].size, hurtFrame, hurtSizes[part])
+		end
+		local half = frame.LookVector * (reach[index].size.Z * 0.5)
+		local middle = frame.Position + moved
+		return segmentDepth(middle - half, middle + half, hurtFrame, hurtSizes[part] * 0.5)
+	end
+	-- How deep each piece of the reach may stand in each body part (reachAllowed[index][part]),
+	-- read off the start pose the first time a strike's key brings the two near each other.
+	local startFrames = table.clone(reachFrames)
+	local reachAllowed: { { number } } = table.create(#reach)
+	for index in reach do
+		reachAllowed[index] = {}
+	end
+	local function allowedOf(index: number, part: number): number
+		local known = reachAllowed[index][part]
+		if known ~= nil then
+			return known
+		end
+		local floor: number = if index == bladeIndex then KEEP_OUT.bladeDepthStuds else 0
+		local depth = math.max(depthIn(index, startFrames[index], Vector3.zero, part), floor) + KEEP_OUT.depthEpsilon
+		reachAllowed[index][part] = depth
+		return depth
+	end
+	-- Each piece's and each body part's bounding radius: a pair whose spheres never meet over a
+	-- strike's steps stands apart at every one of them (no depth), so its key leaves it out.
+	local reachRadii: { number } = table.create(#reach)
+	for index, piece in reach do
+		reachRadii[index] = piece.size.Magnitude * 0.5
+	end
+	local hurtRadii: { number } = table.create(#hurtSizes)
+	for part, size in hurtSizes do
+		hurtRadii[part] = size.Magnitude * 0.5
+	end
+	-- The pairs a strike's key could bring together (piece, part, flattened), its allowed depth each.
+	local nearPieces: { number } = {}
+	local nearParts: { number } = {}
+	local nearAllowed: { number } = {}
+	-- How much deeper than allowed the near pairs, as posed in reachFrames, stand at their worst with
+	-- the body stepped `back` and `shift` aside (0 or less when each is within its depth), or the
+	-- first excess at or past `enough` (a step that can do no better than one already found). A
+	-- depth moves no farther than the body does (each is a least distance to a face along unit
+	-- axes), so a pair last found well under the worst at a step nearby is not posed again: what it
+	-- was, plus how far the body has moved since, bounds it. The pair that was worst last time is
+	-- tried first: it is most often the one that settles it.
+	local worstPair = 1
+	local pairExcess: { number } = {}
+	local pairBack: { number } = {}
+	local function reachExcess(back: number, shift: Vector3, enough: number): number
+		local moved = away * back + shift
+		local function excessOf(pair: number): number
+			local index = nearPieces[pair]
+			local excess = depthIn(index, reachFrames[index], moved, nearParts[pair]) - nearAllowed[pair]
+			pairExcess[pair], pairBack[pair] = excess, back
+			return excess
+		end
+		local worst = excessOf(worstPair)
+		if worst >= enough then
+			return worst
+		end
+		for pair in nearPieces do
+			if pair == worstPair then
+				continue
+			end
+			local known = pairExcess[pair]
+			if known ~= nil and known + math.abs(back - pairBack[pair]) <= math.max(worst, 0) then
+				continue
+			end
+			local excess = excessOf(pair)
+			if excess > worst then
+				worst, worstPair = excess, pair
+				if worst >= enough then
+					return worst
+				end
+			end
+		end
+		return worst
+	end
+	-- The step back at or past `at`, and no farther than `top`, a strike's key calls for (see
+	-- above): of the steps of stepStuds, the one whose depth past what the key may (0 when within)
+	-- and price (a stepPerDepth-th of the ground it covers) come to least, the shorter on a tie. A
+	-- step that clears the key ends the search (each farther one costs more), and so does one whose
+	-- price alone comes to the least found.
+	local reachStep: number = STAND_OFF.stepStuds
+	local reachMost: number = STAND_OFF.maxStuds
+	local reachPrice: number = KEEP_OUT.stepPerDepth
+	local function strikeStep(key: number, at: number, shift: Vector3, top: number): number
+		pose(key, nil, reachFrames)
+		local steps = math.floor(math.max(math.min(reachMost, most - at, top - at), 0) / reachStep + 1e-6)
+		-- The pairs whose spheres meet somewhere along the steps; none: the key is clear as it is.
+		table.clear(nearPieces)
+		table.clear(nearParts)
+		table.clear(nearAllowed)
+		local reachLine = away * (steps * reachStep)
+		for index, frame in reachFrames do
+			local first = frame.Position + away * at + shift
+			for part, hurtFrame in hurtFrames do
+				local along = math.clamp(
+					(hurtFrame.Position - first):Dot(reachLine) / math.max(reachLine:Dot(reachLine), 1e-6),
+					0,
+					1
+				)
+				local gap = (first + reachLine * along - hurtFrame.Position).Magnitude
+				if gap <= reachRadii[index] + hurtRadii[part] then
+					table.insert(nearPieces, index)
+					table.insert(nearParts, part)
+					table.insert(nearAllowed, allowedOf(index, part))
+				end
+			end
+		end
+		if #nearPieces == 0 then
+			return at
+		end
+		worstPair = 1
+		table.clear(pairExcess)
+		table.clear(pairBack)
+		local best, bestCost = at, math.huge
+		for k = 0, steps do
+			local price = k * reachStep / reachPrice
+			if price >= bestCost - 1e-6 then
+				break
+			end
+			local back = at + k * reachStep
+			local excess = reachExcess(back, shift, bestCost - price - 1e-6)
+			if math.max(excess, 0) + price < bestCost - 1e-6 then
+				best, bestCost = back, math.max(excess, 0) + price
+			end
+			if excess <= 0 then
+				break
+			end
+		end
+		return best
+	end
 	local step: number = KEEP_OUT.sampleSeconds
 	local count = math.max(0, math.ceil((clip.duration - from) / step - 1e-6))
 	-- back[k + 1], aside[k + 1]: the keep-out at sample k (clip time from + k * step); sample 0 is
@@ -1003,12 +1289,49 @@ local function keepOutOf(
 		end
 		return math.deg(math.acos(math.clamp(most, -1, 1)))
 	end
+	-- How far back the reach holds the body at clip time `time` with the body `sideways` aside:
+	-- each strike's step, taken over its anticipation (a strike's key is posed the first time a
+	-- sample reaches its start, and again, from the step it found, when the aside grows before the
+	-- key: a step aside can carry the blade deeper), never faster than the sprint cap from `body`,
+	-- where the body stood `span` seconds before, with what the aside took this sample
+	-- (`sidestep`) spent of it. A key is stepped no farther than the cap reaches by then: an aside
+	-- that grows in the cut leaves its step only the frames to the key.
+	local function reachAt(
+		time: number,
+		at: number,
+		sideways: number,
+		body: number,
+		span: number,
+		sidestep: number
+	): number
+		local held = 0
+		for _, strike in strikes do
+			if time < strike.start - KEY_EPSILON then
+				break
+			end
+			local shift = if side ~= nil then side * sideways else Vector3.zero
+			local top = body + SPRINT * (strike.key - time + span)
+			if strike.need == nil then
+				strike.need = strikeStep(strike.key, math.max(at, held), shift, top)
+				strike.aside = sideways
+			elseif sideways > strike.aside + 1e-6 and time <= strike.key + KEY_EPSILON then
+				strike.need = strikeStep(strike.key, math.max(strike.need :: number, held), shift, top)
+				strike.aside = sideways
+			end
+			local need = strike.need :: number
+			held = held + AimLogic.standOffAt(need - held, strike.start, strike.ready, time, STAND_OFF.easing)
+		end
+		local stride = SPRINT * span
+		return math.min(held, body + math.sqrt(math.max(stride * stride - sidestep * sidestep, 0)))
+	end
 	local function fill(last: number)
 		for k = #back, math.min(last, count) do
 			if not done then
 				table.move(frames, 1, #parts, 1, before)
 				local time = math.min(from + k * step, clip.duration)
 				local previous = math.min(from + (k - 1) * step, clip.duration)
+				-- The sample whose sweep reaches the first key is the first held out.
+				allowed = if time >= firstKey - KEY_EPSILON then KEEP_OUT.depthEpsilon else startAllowed
 				pose(time, frames)
 				-- A fast turn (a spin) is cut into pieces no part turns more than maxTurnDegrees in.
 				pieces = math.clamp(math.ceil(turnOf(before, frames) / KEEP_OUT.maxTurnDegrees), 1, KEEP_OUT.maxPieces)
@@ -1042,6 +1365,15 @@ local function keepOutOf(
 						break
 					end
 				end
+				-- Then the reach, no nearer than the strikes call for (a step back only parts the
+				-- colliding parts from the faces more), as it stands a sample before: the series is
+				-- read a sample ahead, and the reach is a ramp of its own that needs no head start,
+				-- so a frame shows it at its own clip time (the first frame never takes two samples
+				-- of it), and its sprint is counted from the sample before's.
+				if #strikes > 0 then
+					local span = previous - math.min(from + (k - 2) * step, clip.duration)
+					b = math.max(b, reachAt(previous, b, a, currentBack, span, math.max(a - currentAside, 0)))
+				end
 				-- Back and aside are square to each other: together with the step, one distance.
 				local backMost = math.sqrt(math.max(budget * budget - currentAside * currentAside, 0)) - distance
 				currentBack = math.max(currentBack, math.min(b, backMost))
@@ -1053,6 +1385,113 @@ local function keepOutOf(
 			aside[k + 1] = currentAside
 		end
 	end
+	-- What the body shows (D-426): the series above as the engine would have it, eased so that the
+	-- root never moves back or aside faster than keepOut.maxSpeedStudsPerSecond, the clip's own
+	-- root motion and the blade step counted in (a lunge the keep-out holds still is no move), and
+	-- led by keepOut.leadSeconds: each sample stands as far back as any sample that far ahead
+	-- calls for, less what the speed covers in between, so the step back starts early instead of
+	-- landing in one frame. The keep-out and the reach still only grow, the sprint cap still
+	-- holds, and a sample is never farther back than one within the lead calls for. The first
+	-- sample is the start (the swing's first frame moves no more than the speed allows).
+	local speed: number = KEEP_OUT.maxSpeedStudsPerSecond
+	local lead = math.max(1, math.ceil(KEEP_OUT.leadSeconds / step - 1e-6))
+	local speedPieces: number = KEEP_OUT.speedPieces
+	-- The clip's authored holds after its strike snaps (ClipSampler.strikeHoldAfter), as clip-time
+	-- spans: a contact's hit-stop stands in for one, and the step after the hit-stop skips it in a
+	-- single frame (Mixer.hitStop), so what the series grew across one would land in that frame
+	-- (D-427: Sharp Nail stepped back 0.50 studs in the frame after its second cut's freeze at
+	-- 60 Hz). The series grows none of its way inside them.
+	local stills: { { number } } = {}
+	local keys = clip.keys
+	for index = 3, #keys do -- index: a hold key, after its snap key and the key before that
+		if keys[index].easing == "Hold" and ClipSampler.isStrikeSnap(clip, index - 1) then
+			table.insert(stills, { keys[index - 1].time, keys[index].time })
+		end
+	end
+	-- The clip time from `first` to `last` outside those holds.
+	local function openBetween(first: number, last: number): number
+		local open = last - first
+		for _, span in stills do
+			open -= math.max(0, math.min(last, span[2]) - math.max(first, span[1]))
+		end
+		return math.max(open, 0)
+	end
+	local shownBack: { number } = { 0 }
+	local shownAside: { number } = { 0 }
+	-- room[k]: the most the series may grow into sample k, back and aside, as read between clip
+	-- times from + (k - 2) * step and from + (k - 1) * step (a sample ahead).
+	local backRoom: { [number]: number } = {}
+	local asideRoom: { [number]: number } = {}
+	-- How far back along `away` and aside along `side` the clip and the step carry the root at a
+	-- clip time, from where it stood at `from`.
+	local function carried(time: number): (number, number)
+		local motion = ClipSampler.rootMotionAt(clip, time)
+		local moved =
+			rootCFrame:VectorToWorldSpace(Vector3.new(motion[1] - start[1], motion[2] - start[2], motion[3] - start[3]))
+		local stepped = AimLogic.standOffAt(distance, from, to, time, STAND_OFF.easing)
+		return moved:Dot(away) + stepped, if side ~= nil then moved:Dot(side) else 0
+	end
+	local function roomOf(k: number): (number, number)
+		local known = backRoom[k]
+		if known ~= nil then
+			return known, asideRoom[k]
+		end
+		local first = math.min(from + (k - 2) * step, clip.duration)
+		local last = math.min(from + (k - 1) * step, clip.duration)
+		-- The clip's fastest move back and aside over the stretch, in pieces.
+		local fastestBack, fastestAside = -math.huge, -math.huge
+		local wasBack, wasAside = carried(first)
+		local piece = (last - first) / speedPieces
+		for index = 1, speedPieces do
+			local nowBack, nowAside = carried(first + piece * index)
+			if piece > 0 then
+				fastestBack = math.max(fastestBack, (nowBack - wasBack) / piece)
+				fastestAside = math.max(fastestAside, (nowAside - wasAside) / piece)
+			end
+			wasBack, wasAside = nowBack, nowAside
+		end
+		if fastestBack == -math.huge then
+			fastestBack, fastestAside = 0, 0
+		end
+		local roomBack = math.clamp((speed - fastestBack) * step, 0, SPRINT * step)
+		local roomAside = math.clamp((speed - fastestAside) * step, 0, SPRINT * step)
+		-- Only the share of the stretch outside the strikes' holds (D-427).
+		if last > first then
+			local share = openBetween(first, last) / (last - first)
+			roomBack *= share
+			roomAside *= share
+		end
+		backRoom[k], asideRoom[k] = roomBack, roomAside
+		return roomBack, roomAside
+	end
+	local function show(last: number)
+		for k = #shownBack, math.min(last, count) do
+			local ahead = math.min(k + lead, count)
+			fill(ahead)
+			local wasBack, wasAside = shownBack[k], shownAside[k]
+			if k == 1 then
+				shownBack[2], shownAside[2] = 0, 0
+				continue
+			end
+			-- As far as any sample within the lead calls for, less what the speed covers to it.
+			local wantBack, wantAside = back[k + 1], aside[k + 1]
+			local spentBack, spentAside = 0, 0
+			for j = k + 1, ahead do
+				local roomBack, roomAside = roomOf(j)
+				spentBack += roomBack
+				spentAside += roomAside
+				wantBack = math.max(wantBack, back[j + 1] - spentBack)
+				wantAside = math.max(wantAside, aside[j + 1] - spentAside)
+			end
+			local roomBack, roomAside = roomOf(k)
+			local grewAside = math.clamp(wantAside - wasAside, 0, roomAside)
+			-- Back and aside are one slide: together within the sprint cap.
+			local sprint = SPRINT * step
+			roomBack = math.min(roomBack, math.sqrt(math.max(sprint * sprint - grewAside * grewAside, 0)))
+			shownBack[k + 1] = wasBack + math.clamp(wantBack - wasBack, 0, roomBack)
+			shownAside[k + 1] = wasAside + grewAside
+		end
+	end
 	-- A series read at a clip time, a sample ahead.
 	local function reader(series: { number }): (clipTime: number) -> number
 		return function(clipTime: number): number
@@ -1061,18 +1500,28 @@ local function keepOutOf(
 			end
 			local position = math.min((clipTime - from) / step + 1, count)
 			local index = math.floor(position)
-			fill(index + 1)
+			show(index + 1)
 			if index >= count then
 				return series[count + 1]
 			end
 			local below = series[index + 1]
-			return below + (series[index + 2] - below) * (position - index)
+			-- Between two samples the series moves on with the clip time outside the strikes'
+			-- holds (D-427), so a hold the hit-stop skips carries none of it.
+			local fraction = position - index
+			if #stills > 0 then
+				local first = from + (index - 1) * step
+				local whole = openBetween(first, first + step)
+				if whole > 0 and whole < step then
+					fraction = math.clamp(openBetween(first, clipTime) / whole, 0, 1)
+				end
+			end
+			return below + (series[index + 2] - below) * fraction
 		end
 	end
 	return {
-		keep = reader(back),
+		keep = reader(shownBack),
 		side = side,
-		keepSide = if side ~= nil then reader(aside) else nil,
+		keepSide = if side ~= nil then reader(shownAside) else nil,
 	}
 end
 
@@ -1139,7 +1588,7 @@ function ContactPredictor.standOff(
 	local window = ClipSampler.hitWindows(clip)[1]
 	local to = if distance ~= nil and window ~= nil then window.open else from
 	local keepOut = if opts.keepOut == true
-		then keepOutOf(model, clip, from, rootCFrame, target, away, distance or 0, to)
+		then keepOutOf(model, clip, from, rootCFrame, target, away, distance or 0, to, parts)
 		else nil
 	if distance == nil and keepOut == nil then
 		return nil

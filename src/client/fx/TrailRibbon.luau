@@ -18,6 +18,18 @@
 	later one is joined to it. `push(..., joined = false)` starts a new stroke (a new swing): the
 	last swing's tail fades where it is, never joined to the new one (issue 11's streak).
 
+	A window's arc goes with its window (D-360): `close` marks every live sample at the ribbon-clock
+	time the trail went out, and a closed sample fades out over the style's closeSeconds (two
+	60 fps frames) and goes, whatever its age; the next window draws a fresh arc, never under the
+	last one's tail. The close runs on the ribbon clock, so a hit-stop holds it like everything else.
+
+	A Beam faces the camera, so its width always stands across the screen; a cut seen edge-on (a
+	horizontal swing filmed from beside it) drew a sheet as tall as the band, though the blade's
+	own sweep there is a line (D-361). Each sample's width is scaled by how squarely its swept
+	surface (the plane of the blade and the way its tip moves) faces the style's viewer: full from
+	trail.ribbon.edgeOn.fullAt, down to edgeOn.minShare near edge-on, so the part of a cut seen
+	edge-on reads as a streak along the blade's path at the blade's height.
+
 	Every Instance is made once per ribbon and reused; Trails keeps a pool of ribbons. Attachments
 	are laid by Position on an anchored host with no turn (moved only while the ribbon is empty), so
 	a frame builds no CFrame. Pure apart from the Instances it owns: the clock is the caller's.
@@ -36,6 +48,8 @@ export type Style = {
 	whiteBlend: number, -- how far the saturated color then moves toward TrailWhite (a Basic swing)
 	width: number, -- studs: the body's width at the head (weapon trailWidth x kind width x thickness)
 	lifetime: number, -- seconds a sample lives
+	closeSeconds: number, -- seconds a closed sample takes to fade out and go (D-360)
+	viewer: Vector3?, -- where the camera is (the swept surface's facing, D-361); nil: full width
 }
 
 --- What a spec reads of a ribbon: the live samples' layer points (oldest first) and the Beams on.
@@ -53,6 +67,8 @@ export type Ribbon = {
 	guard: { Vector3 },
 	tip: { Vector3 },
 	born: { number },
+	closed: { number }, -- ribbon-clock time the slot's window went out (math.huge while open)
+	facing: { number }, -- this draw's width share by facing, per slot (scratch)
 	joined: { boolean }, -- the slot's sample continues the stroke of the slot before it
 	shown: { boolean }, -- the slot's Beams are on
 	fade: { { number } }, -- [layer][slot]: the transparency step the Beam wears (-1 before any)
@@ -66,6 +82,10 @@ export type Ribbon = {
 local RIBBON = Fx.trail.ribbon
 local SLOTS = math.max(2, RIBBON.maxSamples)
 local STEPS = math.max(1, RIBBON.transparencySteps)
+local EDGE_ON = RIBBON.edgeOn
+-- A close is whole once this much short of closeSeconds: a frame clock summed from 1/60 steps
+-- lands a hair under 2/60.
+local CLOSE_SLACK = 1e-6
 
 local TrailRibbon = {}
 
@@ -189,6 +209,8 @@ function TrailRibbon.new(): Ribbon
 		guard = table.create(SLOTS, Vector3.zero),
 		tip = table.create(SLOTS, Vector3.zero),
 		born = table.create(SLOTS, 0),
+		closed = table.create(SLOTS, math.huge),
+		facing = table.create(SLOTS, 1),
 		joined = table.create(SLOTS, false),
 		shown = table.create(SLOTS, false),
 		fade = fade,
@@ -247,12 +269,52 @@ function TrailRibbon.push(ribbon: Ribbon, guard: Vector3, tip: Vector3, born: nu
 	ribbon.guard[slot] = guard
 	ribbon.tip[slot] = tip
 	ribbon.born[slot] = born
+	ribbon.closed[slot] = math.huge
 	ribbon.joined[slot] = joined and ribbon.count > 1
 	ribbon.last = tip
 	for layerIndex, layer in RIBBON.layers do
 		ribbon.attachments[layerIndex][slot].Position = guard:Lerp(tip, layer.fraction) - origin
 	end
 	return true
+end
+
+--- The trail went out at ribbon-clock time `clock` (its window closed): every live sample not yet
+--- closed fades out from there over the style's closeSeconds and goes (D-360). Samples pushed
+--- after this are a new window's and stay until their own close or lifetime.
+function TrailRibbon.close(ribbon: Ribbon, clock: number)
+	for back = 0, ribbon.count - 1 do
+		local slot = (ribbon.head - 1 - back) % SLOTS + 1
+		if ribbon.closed[slot] == math.huge then
+			ribbon.closed[slot] = clock
+		end
+	end
+end
+
+-- The share of the full width a slot's sample draws at from `viewer` (D-361). Its facing is |cos|
+-- of the angle between the normal of the sheet the blade sweeps there (the blade, and the way the
+-- tip moved through the sample) and the line to the viewer: 0 edge-on, 1 face-on. Full from
+-- edgeOn.fullAt up, edgeOn.minShare from edgeOn.edgeAt down, straight between. A sample with no
+-- move on either side (a stroke's lone first) draws full.
+local function facingShare(ribbon: Ribbon, slot: number, viewer: Vector3, point: Vector3): number
+	local before = (slot - 2) % SLOTS + 1
+	local after = slot % SLOTS + 1
+	local motion: Vector3? = nil
+	if ribbon.joined[slot] then
+		motion = ribbon.tip[slot] - ribbon.tip[before]
+	elseif slot ~= ribbon.head and ribbon.joined[after] then
+		motion = ribbon.tip[after] - ribbon.tip[slot]
+	end
+	if motion == nil then
+		return 1
+	end
+	local normal = (ribbon.tip[slot] - ribbon.guard[slot]):Cross(motion :: Vector3)
+	local toViewer = viewer - point
+	local scale = normal.Magnitude * toViewer.Magnitude
+	if scale < 1e-6 then
+		return 1
+	end
+	local facing = math.abs(normal:Dot(toViewer)) / scale
+	return math.clamp((facing - EDGE_ON.edgeAt) / (EDGE_ON.fullAt - EDGE_ON.edgeAt), EDGE_ON.minShare, 1)
 end
 
 local function recolor(ribbon: Ribbon, color: Color3, whiteBlend: number)
@@ -269,14 +331,31 @@ local function recolor(ribbon: Ribbon, color: Color3, whiteBlend: number)
 	end
 end
 
+-- How far a slot's close has gone at `clock`: 0 open (or closed this instant), 1 gone.
+local function closing(ribbon: Ribbon, slot: number, clock: number, closeSeconds: number): number
+	local closed = ribbon.closed[slot]
+	if closed == math.huge then
+		return 0
+	end
+	local spent = clock - closed + CLOSE_SLACK
+	if closeSeconds <= 0 or spent >= closeSeconds then
+		return 1
+	end
+	return math.max(0, spent / closeSeconds)
+end
+
 --- Lays the Beams for ribbon-clock time `clock`: samples older than the style's lifetime go, and
---- every Beam between two live, joined samples shows with its widths and transparency by age.
+--- so do closed ones whose close has run its closeSeconds; every Beam between two live, joined
+--- samples shows with its widths and transparency by age (a closing pair fading out on top), its
+--- widths scaled by how squarely the cut faces the style's viewer.
 function TrailRibbon.draw(ribbon: Ribbon, clock: number, style: Style)
 	local lifetime = math.max(1e-6, style.lifetime)
-	-- The oldest live samples that have aged out go first.
+	local closeSeconds = style.closeSeconds
+	-- The oldest live samples that have aged out, or whose window closed and faded, go first. A
+	-- close marks every live sample at once, so the closed ones are always the oldest.
 	while ribbon.count > 0 do
 		local oldest = (ribbon.head - ribbon.count) % SLOTS + 1
-		if clock - ribbon.born[oldest] < lifetime then
+		if clock - ribbon.born[oldest] < lifetime and closing(ribbon, oldest, clock, closeSeconds) < 1 then
 			break
 		end
 		hide(ribbon, oldest)
@@ -288,6 +367,16 @@ function TrailRibbon.draw(ribbon: Ribbon, clock: number, style: Style)
 	end
 	recolor(ribbon, style.color, style.whiteBlend)
 	local widthKeys = Fx.trail.widthKeys
+	local facing = ribbon.facing
+	local viewer = style.viewer
+	local origin = ribbon.host.Position
+	local body = ribbon.attachments[1]
+	for back = ribbon.count - 1, 0, -1 do
+		local slot = (ribbon.head - 1 - back) % SLOTS + 1
+		facing[slot] = if viewer ~= nil
+			then facingShare(ribbon, slot, viewer :: Vector3, origin + body[slot].Position)
+			else 1
+	end
 	for back = ribbon.count - 1, 1, -1 do
 		local slot = (ribbon.head - 1 - back) % SLOTS + 1 -- the older end
 		local nextSlot = slot % SLOTS + 1
@@ -297,16 +386,20 @@ function TrailRibbon.draw(ribbon: Ribbon, clock: number, style: Style)
 		end
 		local ageA = math.clamp((clock - ribbon.born[slot]) / lifetime, 0, 1)
 		local ageB = math.clamp((clock - ribbon.born[nextSlot]) / lifetime, 0, 1)
-		local widthA = style.width * TrailRibbon.evaluate(widthKeys, ageA)
-		local widthB = style.width * TrailRibbon.evaluate(widthKeys, ageB)
+		local widthA = style.width * TrailRibbon.evaluate(widthKeys, ageA) * facing[slot]
+		local widthB = style.width * TrailRibbon.evaluate(widthKeys, ageB) * facing[nextSlot]
 		local mean = (ageA + ageB) * 0.5
+		-- A closing pair keeps this much of its opacity (both ends close together).
+		local remaining = 1
+			- math.max(closing(ribbon, slot, clock, closeSeconds), closing(ribbon, nextSlot, clock, closeSeconds))
 		for layerIndex, layer in RIBBON.layers do
 			local beam = ribbon.beams[layerIndex][slot]
 			beam.Width0 = widthA * layer.width
 			beam.Width1 = widthB * layer.width
 			-- Written only when the snapped step or the shown state changes: a frame writes the
 			-- two widths of each Beam and little else.
-			local step = fadeStep(TrailRibbon.evaluate(layer.transparencyKeys, mean))
+			local opacity = 1 - TrailRibbon.evaluate(layer.transparencyKeys, mean)
+			local step = fadeStep(1 - opacity * remaining)
 			local layerFade = ribbon.fade[layerIndex]
 			if layerFade[slot] ~= step then
 				layerFade[slot] = step

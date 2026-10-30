@@ -5,7 +5,8 @@
 	the KillVolume under workspace.Playground) inside the part budget, that the first spawn wave put
 	a Frenzy Boar in workspace.Enemies with an EntityId attribute, and that a cheat script that
 	teleports a registered player stand-in 200 studs five times inside a second is shadow-flagged
-	and kicked by AntiCheatService through a system line (never on the first teleport).
+	and kicked by AntiCheatService (never on the first teleport). The stand-in is no Player
+	instance, so the service fires no system line at it (a real player gets one before the kick).
 
 	Run: tools/smoke.sh playground (installs this file as a server Script in a Run session of the
 	Playground; see tools/smoke/SmokeRunner.luau). Errors on the first failed assertion, which the
@@ -137,7 +138,8 @@ local standInRoot = standInRootPart :: BasePart
 standIn.PrimaryPart = standInRoot -- EntityService reads the root through PrimaryPart
 standInRoot.Anchored = true
 
--- A player-like stand-in: Kick and SetAttribute record what the service did (no real Player here).
+-- A player-like stand-in: Kick and SetAttribute record what the service did (no real Player here,
+-- so AntiCheatService fires no remote at it: no system line, no "Unable to cast" warning).
 local kickedWith: string? = nil
 local fakePlayer: any = {
 	Name = "Cheater",

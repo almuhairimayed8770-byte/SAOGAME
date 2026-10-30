@@ -87,6 +87,17 @@ export type PlayOptions = {
 	sinceStep: number?,
 	-- Additive clips only: joint name -> weight multiplier (a joint not listed keeps 1).
 	mask: { [string]: number }?,
+	-- Override layers only: joint name -> seconds that joint blends in over instead of `blendIn`
+	-- (a longer one: the hand-off from a moving gait, Mixer.handOff). It fades out with the clip.
+	jointBlendIn: { [string]: number }?,
+	-- A cancel (D-408): this play takes the body from the live action it cuts. Each clip it stops
+	-- on its layer, and each live handle `cancels` lists (one on another layer: the basic a guard
+	-- cuts), holds its pose there (Mixer.hold) and fades out over choreo.luau handOver.seconds,
+	-- while this one fades in over no longer than that, eased by handOver.easing and laid over
+	-- its priority peers: a snap (section 10 beat 2) the cut clip's own motion never shows
+	-- through. With nothing live to cut, the play blends in as ever.
+	handOver: boolean?,
+	cancels: { Handle }?,
 }
 
 -- The server's beat a handle keeps (Mixer.keepBeat): the clip time it is kept up to and the real
@@ -124,8 +135,17 @@ export type Handle = {
 	absorbKey: number,
 	absorbSeconds: number,
 	mask: { [string]: number }?, -- PlayOptions.mask (Additive only)
+	-- PlayOptions.jointBlendIn and each listed joint's own envelope (nil: every joint has `fade`).
+	jointBlendIn: { [string]: number }?,
+	jointFade: { [string]: number }?,
 	beat: Beat?, -- the server's beat it keeps (keepBeat), nil once past the mark
 	held: boolean, -- Mixer.hold: the clock stands still (a stopped clip fading out where it was)
+	-- PlayOptions.handOver cut a live clip: the fade in is eased by choreo.handOver.easing and the
+	-- handle lies over its priority peers until it is in (D-408).
+	handOver: boolean,
+	-- A hand-over cut it (D-408): its clock stands, so its next step fires the close events past
+	-- where it stands (closeKinds), once (D-410).
+	closes: boolean,
 	-- The clock before the latest step moved it (the start time before the first step; a seek's
 	-- time after one): the clip time the frame before showed. A reader of this step's pose samples
 	-- the clip between the two (the trail ribbon's in-betweens, D-269).
@@ -149,9 +169,15 @@ export type Mixer = {
 	stop: (self: Mixer, target: Handle | string, blendOut: number?) -> (),
 	hold: (self: Mixer, handle: Handle) -> (),
 	setWeight: (self: Mixer, handle: Handle, weight: number, immediate: boolean?) -> (),
+	handOff: (self: Mixer, handle: Handle, jointBlendIn: { [string]: number }) -> (),
+	blendingIn: (self: Mixer, handle: Handle) -> boolean,
 	setSpeed: (self: Mixer, handle: Handle, speed: number) -> (),
 	hitStop: (self: Mixer, frames: number) -> (),
 	pauseRemaining: (self: Mixer) -> number,
+	heldShown: (self: Mixer) -> boolean,
+	heldCount: (self: Mixer) -> number,
+	holdPace: (self: Mixer) -> number?,
+	holdSteps: (self: Mixer, steps: number) -> (),
 	setTimeScale: (self: Mixer, scale: number) -> (),
 	timeScale: (self: Mixer) -> number,
 	setProcedural: (self: Mixer, name: string, offsets: Offsets?, weight: number?) -> (),
@@ -173,6 +199,10 @@ local REST: ClipSampler.Offset = { pos = ZERO, rot = ZERO }
 -- How a hold's frames are counted (D-327): impact.luau hold.
 local HOLD = ImpactData.hold
 local PACE_FRAMES: number = HOLD.paceFrames
+-- The steps a frame's drawn pose trails the step that wrote it (impact.luau poseLagFrames, D-342),
+-- and the ring of each step's held flag that heldShown reads back (one longer than the lag).
+local POSE_LAG: number = ImpactData.poseLagFrames
+local HELD_RING = POSE_LAG + 1
 local LAYER_ORDER: { Types.ClipLayer } = ChoreoData.layerOrder
 local BEAT = ChoreoData.enemy.beat
 
@@ -285,6 +315,12 @@ function Mixer.new(): Mixer
 		_paceCount = 0,
 		_paceNext = 1,
 		_paceSorted = table.create(PACE_FRAMES, 0) :: { number },
+		-- Whether each of the last steps held the pose (a hit-stop froze it), a ring from
+		-- _heldNext (D-353): Mixer.heldShown reads the one poseLagFrames back.
+		_heldSteps = table.create(HELD_RING, false) :: { boolean },
+		_heldNext = 1,
+		-- Every step a hold has frozen so far (D-354): Mixer.heldCount, a running count.
+		_frozenSteps = 0,
 		_timeScale = 1,
 		_last = {} :: Offsets,
 	}, Mixer)
@@ -311,12 +347,43 @@ function Mixer.play(self: any, clip: Types.ClipDef, opts: PlayOptions?): Handle
 	end
 
 	local coexist = options.coexist == true or options.fallback == true
+	-- A cancel holds what it cuts and takes the body over handOver.seconds (D-408).
+	local handOverSeconds = ChoreoData.handOver.seconds
+	local handingOver = false
+	local function cut(other: Handle)
+		if options.handOver == true and not other.done and not other.stopping then
+			other.held = true
+			other.closes = true
+			self:stop(other, handOverSeconds)
+			handingOver = true
+		else
+			self:stop(other, blendOut)
+		end
+	end
 	if not coexist then
 		for _, other in self._handles do
 			if other.layer == layer and not other.stopping and not other.coexist and other.priority <= priority then
-				self:stop(other, blendOut)
+				cut(other)
 			end
 		end
+	end
+	if options.handOver == true and options.cancels ~= nil then
+		-- Named by the caller: cut even when it was let go this frame (an Art's hold a dodge clears).
+		for _, other in options.cancels do
+			if not other.done then
+				other.held = true
+				other.closes = true
+				if other.stopping then
+					other.blendOut = math.min(other.blendOut, handOverSeconds)
+				else
+					self:stop(other, handOverSeconds)
+				end
+				handingOver = true
+			end
+		end
+	end
+	if handingOver then
+		blendIn = math.min(blendIn, handOverSeconds)
 	end
 
 	-- A freeze clip (DeathFreeze) holds every other clock for its duration and rides on top.
@@ -353,12 +420,63 @@ function Mixer.play(self: any, clip: Types.ClipDef, opts: PlayOptions?): Handle
 		absorbKey = 0,
 		absorbSeconds = 0,
 		mask = options.mask,
+		jointBlendIn = nil,
+		jointFade = nil,
 		beat = nil,
 		held = false,
+		handOver = handingOver,
+		closes = false,
 		lastTime = startTime,
 	}
 	table.insert(self._handles, handle)
+	if options.jointBlendIn ~= nil then
+		Mixer.handOff(self, handle, options.jointBlendIn)
+	end
 	return handle
+end
+
+--- Gives the joints `jointBlendIn` lists their own blend in (seconds each; one no longer than the
+--- handle's blendIn keeps the handle's): from now on each fades in from where its envelope stands
+--- over its own time, and they all fade out with the handle. A handle that has started moving its
+--- envelope keeps it for every joint. The hand-off from a moving gait (D-404): Locomotion gives an
+--- attack that cuts a run its legs' blend from choreo.luau locomotion.handOff.
+function Mixer.handOff(_self: any, handle: Handle, jointBlendIn: { [string]: number })
+	if handle.done or handle.stopping then
+		return
+	end
+	local blends: { [string]: number } = {}
+	local fades: { [string]: number } = handle.jointFade or {}
+	local any = false
+	for name, seconds in jointBlendIn do
+		if seconds > handle.blendIn then
+			blends[name] = seconds
+			fades[name] = fades[name] or handle.fade
+			any = true
+		end
+	end
+	if any then
+		handle.jointBlendIn = blends
+		handle.jointFade = fades
+	end
+end
+
+--- True while the handle or any joint of it is still blending in (its envelope below 1).
+function Mixer.blendingIn(_self: any, handle: Handle): boolean
+	if handle.done or handle.stopping then
+		return false
+	end
+	if handle.fade < 1 then
+		return true
+	end
+	local fades = handle.jointFade
+	if fades ~= nil then
+		for _, fade in fades do
+			if fade < 1 then
+				return true
+			end
+		end
+	end
+	return false
 end
 
 function Mixer.stop(self: any, target: Handle | string, blendOut: number?)
@@ -404,18 +522,8 @@ function Mixer.setSpeed(_self: any, handle: Handle, speed: number)
 	handle.speed = math.clamp(speed, ChoreoData.minSpeed, ChoreoData.maxSpeed)
 end
 
---- Holds the rig `frames` frames (a hit-stop; a longer one already running is kept, never
---- restarted). The hold is the strike's beat 4 (section 10): an attack clip whose strike snap is
---- followed by an authored hold (a "Hold" key after the snap, the still beat a whiff shows) skips
---- up to the hit-stop's length of that hold when its clock reaches it, so a hit holds once, for
---- the longer of the two, never for both in a row (issue 6). The skipped stretch is still, so no
---- frame shows the skip; the events in it still fire.
-function Mixer.hitStop(self: any, frames: number)
-	local seconds = math.max(0, frames) * ChoreoData.frameSeconds
-	holdFor(self, seconds)
-	if seconds <= 0 then
-		return
-	end
+-- The authored hold after a strike snap absorbs up to `seconds` of a hit's hold (issue 6).
+local function absorbHold(self: any, seconds: number)
 	for _, handle in self._handles do
 		if handle.done or handle.ignorePause then
 			continue
@@ -434,8 +542,90 @@ function Mixer.hitStop(self: any, frames: number)
 	end
 end
 
+--- Holds the rig `frames` frames (a hit-stop; a longer one already running is kept, never
+--- restarted). The hold is the strike's beat 4 (section 10): an attack clip whose strike snap is
+--- followed by an authored hold (a "Hold" key after the snap, the still beat a whiff shows) skips
+--- up to the hit-stop's length of that hold when its clock reaches it, so a hit holds once, for
+--- the longer of the two, never for both in a row (issue 6). The skipped stretch is still, so no
+--- frame shows the skip; the events in it still fire.
+function Mixer.hitStop(self: any, frames: number)
+	local seconds = math.max(0, frames) * ChoreoData.frameSeconds
+	holdFor(self, seconds)
+	if seconds <= 0 then
+		return
+	end
+	absorbHold(self, seconds)
+end
+
+-- The length of this rig's steps a hold of whole steps is reckoned at: its pace (D-327), else,
+-- before it has paceFrames steps, the mean of those it has, else a 60 Hz frame.
+local function stepLength(self: any): number
+	local pace = paceOf(self)
+	if pace ~= nil then
+		return pace
+	end
+	local count = self._paceCount
+	if count <= 0 then
+		return ChoreoData.frameSeconds
+	end
+	local sum = 0
+	for index = 1, count do
+		sum += self._paces[index]
+	end
+	return sum / count
+end
+
+--- Holds the rig for `steps` more steps, whatever their length (D-354): a hold counted in the
+--- frames a picture draws, not in seconds (two clocks' paces differ under uneven frames). A longer
+--- hold already running is kept. Its seconds (pauseRemaining) are the steps at the rig's pace.
+function Mixer.holdSteps(self: any, steps: number)
+	local count = math.floor(steps + 0.5)
+	if count <= 0 then
+		return
+	end
+	local pace = stepLength(self)
+	local running = self._pauseFrames
+	if running == nil then
+		-- A hold counted on no pace yet: the steps its seconds last at the rig's steps so far.
+		running = if self._pause > ChoreoData.pauseEpsilon then framesAt(self._pause, pace) else 0
+	end
+	if running >= count then
+		return
+	end
+	local seconds = count * pace
+	self._pause = math.max(self._pause, seconds)
+	self._pauseFrames = count
+	self._pausePer = self._pause / count
+	absorbHold(self, seconds)
+end
+
+--- How many steps this rig's holds have frozen so far (D-354): a running count, so what a hold
+--- has shown since some step is the count now less the count then, in the rig's own frames.
+function Mixer.heldCount(self: any): number
+	return self._frozenSteps
+end
+
+--- The length of a step the rig's holds count their frames at (D-327: the mean of its recent steps,
+--- hitches left out; before it has paceFrames steps, the mean of those it has), nil before its
+--- first step. What a hold has shown is the steps it froze (heldCount) times it.
+function Mixer.holdPace(self: any): number?
+	return if self._paceCount > 0 then stepLength(self) else nil
+end
+
 function Mixer.pauseRemaining(self: any): number
 	return self._pause
+end
+
+--- True when the pose the screen draws this frame is the one it drew the frame before: the step
+--- that wrote it held the rig (D-353). A frame draws the pose its rigs' step of
+--- impact.luau poseLagFrames frames ago wrote (D-342), so the hold as drawn runs that many frames
+--- behind pauseRemaining's flag, which rises on the contact's own step (whose picture still shows
+--- the swing arriving) and falls a frame before the last still frame. A reader of what the screen
+--- shows held (the ribbon's ages, a per-frame logger) asks this after the rig's step.
+function Mixer.heldShown(self: any): boolean
+	-- The newest step sits just before _heldNext; the one POSE_LAG steps older is that far back.
+	local index = (self._heldNext - 2 - POSE_LAG) % HELD_RING + 1
+	return self._heldSteps[index] == true
 end
 
 --- Keeps a handle on the server's beat up to clip time `untilTime` (D-172): from now on every step
@@ -513,6 +703,8 @@ function Mixer.clear(self: any)
 	self._heldCount = -1
 	self._pause = 0
 	self._pauseFrames = nil
+	table.clear(self._heldSteps)
+	self._heldNext = 1
 end
 
 -- Copies a procedural channel into slot `index` of `held` (D-314), reusing the slot's tables: the
@@ -548,6 +740,22 @@ end
 
 -- Where a hidden fallback idle's crossed events go: dropped, cleared every step.
 local hiddenEvents: { FiredEvent } = {}
+
+-- The events that close what an earlier one of the clip opened: its damage window, its trail, its
+-- smear. A clip a hand-over cuts stands (D-408), so the fade a cut clip's running clock crossed
+-- them in no longer does: its next step fires the ones past where it stands (closeCut, D-410).
+local CLOSE_KINDS: { [string]: boolean } = { HitWindowClose = true, TrailOff = true, SmearOff = true }
+
+-- A cut clip's close events past its stood clock, in clip order, unmarked: what it opened (or was
+-- about to) closes on the step after the cut rather than never, before any event of the clip that
+-- cut it (handles fire in play order).
+local function closeCut(handle: Handle, into: { FiredEvent })
+	for _, event in handle.clip.events do
+		if CLOSE_KINDS[event.kind] == true and event.time > handle.time then
+			table.insert(into, { clipId = handle.clipId, event = event, handle = handle, jumped = false })
+		end
+	end
+end
 
 -- Events with time in (from, to], or [from, to] when `inclusive` (the first step after play).
 local function collectEvents(
@@ -657,7 +865,10 @@ end
 -- What the limbs see of a handle: its eased envelope times its external weight. Root motion
 -- reads the raw envelope instead (a gameplay displacement, validated by the server).
 local function visibleWeight(handle: Handle): number
-	return Easing.evaluate(ChoreoData.blendEasing, handle.fade) * handle.weight
+	local easing = if handle.handOver and not handle.stopping
+		then ChoreoData.handOver.easing
+		else ChoreoData.blendEasing
+	return Easing.evaluate(easing, handle.fade) * handle.weight
 end
 
 -- The rule one step follows, in pieces Mixer.step and Mixer.preview share, so a caller that reads
@@ -784,11 +995,21 @@ local function weightAfter(handle: Handle, handleDt: number, baseActive: boolean
 	return handle.weight
 end
 
+-- Where a handle composes among its layer's: its priority, a cancel still coming in just above
+-- its peers (laid over the clip it cut by its own weight, never mixed with it, D-408).
+local function composeRank(handle: Handle): number
+	if handle.handOver and handle.fade < 1 and not handle.stopping then
+		return handle.priority + 0.5
+	end
+	return handle.priority
+end
+
 local function byPriority(a: Handle, b: Handle): boolean
-	if a.priority == b.priority then
+	local rankA, rankB = composeRank(a), composeRank(b)
+	if rankA == rankB then
 		return a.id < b.id
 	end
-	return a.priority < b.priority
+	return rankA < rankB
 end
 
 -- Adds `offsets` scaled by `weight` into `result`, replacing each touched entry with a new table:
@@ -820,6 +1041,63 @@ local function addInto(result: Offsets, offsets: Offsets, weight: number, mask: 
 				base.rot[3] + offset.rot[3] * scaled,
 			},
 		}
+	end
+end
+
+-- What the limbs see of one joint of a handle: a hand-off joint's own eased envelope (no more than
+-- the handle's while it fades out) times the external weight, else the handle's (D-404).
+local function jointWeight(handle: Handle, name: string, whole: number): number
+	local fades = handle.jointFade
+	if fades == nil then
+		return whole
+	end
+	local fade = fades[name]
+	if fade == nil then
+		return whole
+	end
+	if handle.stopping then
+		fade = math.min(fade, handle.fade)
+	end
+	return Easing.evaluate(ChoreoData.blendEasing, fade) * handle.weight
+end
+
+-- One priority group whose handles have hand-off joints: each joint mixed by its own weights,
+-- laid over `result` by its own total.
+local function composeJointGroup(result: Offsets, handles: { Handle }, first: number, last: number)
+	local totals: { [string]: number } = {}
+	local samples: { Offsets } = {}
+	for index = first, last do
+		local handle = handles[index]
+		local whole = visibleWeight(handle)
+		local pose = ClipSampler.sample(handle.clip, handle.time)
+		samples[index - first + 1] = pose
+		for name in pose do
+			totals[name] = (totals[name] or 0) + jointWeight(handle, name, whole)
+		end
+	end
+	local mixed: Offsets = {}
+	for index = first, last do
+		local handle = handles[index]
+		local whole = visibleWeight(handle)
+		for name, offset in samples[index - first + 1] do
+			local total = totals[name]
+			if total > 0 then
+				local share = jointWeight(handle, name, whole) / total
+				if first == last then
+					mixed[name] = offset
+				else
+					addInto(mixed, { [name] = offset }, share)
+				end
+			end
+		end
+	end
+	for name, offset in mixed do
+		local alpha = math.min(1, totals[name])
+		if alpha >= 1 then
+			result[name] = offset
+		else
+			result[name] = lerpOffset(result[name] or REST, offset, alpha)
+		end
 	end
 end
 
@@ -857,8 +1135,19 @@ local function composeOverrideLayer(result: Offsets, handles: { Handle })
 	local first = 1
 	while first <= #active do
 		local last = first
-		while last < #active and active[last + 1].priority == active[first].priority do
+		while last < #active and composeRank(active[last + 1]) == composeRank(active[first]) do
 			last += 1
+		end
+		local jointed = false
+		for index = first, last do
+			if active[index].jointFade ~= nil then
+				jointed = true
+			end
+		end
+		if jointed then
+			composeJointGroup(result, active, first, last)
+			first = last + 1
+			continue
 		end
 		local pose, total = mixGroup(active, first, last)
 		local alpha = math.min(1, total)
@@ -977,6 +1266,11 @@ function Mixer.step(self: any, dt: number): StepResult
 	if not jumped and dt > 0 then
 		notePace(self, dt)
 	end
+	self._heldSteps[self._heldNext] = paused
+	self._heldNext = self._heldNext % HELD_RING + 1
+	if paused then
+		self._frozenSteps += 1
+	end
 	local timeScale = self._timeScale
 
 	-- Fallback idle: visible only while no other Base clip is active.
@@ -998,6 +1292,11 @@ function Mixer.step(self: any, dt: number): StepResult
 		local handleDt, handleJumped = handleStep(handle, dt, clockDt, jumped)
 		handle.sinceStep = 0
 		handle.lastTime = handle.time
+		if handle.closes then
+			-- Before its envelope: a step at or past the hand-over's length ends it in this step.
+			handle.closes = false
+			closeCut(handle, events)
+		end
 		local beat = handle.beat
 		if beat ~= nil and (handle.stopping or handle.done or handle.time >= beat.untilTime) then
 			-- Past the mark (or stopped): the beat is the strike's own from here.
@@ -1005,8 +1304,17 @@ function Mixer.step(self: any, dt: number): StepResult
 			beat = nil
 		end
 		if not frozen then
-			-- Envelope
+			-- Envelope (and each hand-off joint's own, D-404)
 			handle.fade = fadeAfter(handle, handleDt)
+			local jointFade = handle.jointFade
+			if jointFade ~= nil and not handle.stopping then
+				local blends = handle.jointBlendIn :: { [string]: number }
+				for name, fade in jointFade do
+					if fade < 1 then
+						jointFade[name] = math.min(1, fade + handleDt / blends[name])
+					end
+				end
+			end
 			if handle.stopping and handle.fade <= 0 then
 				handle.done = true
 			end

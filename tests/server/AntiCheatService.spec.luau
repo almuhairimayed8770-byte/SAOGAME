@@ -65,7 +65,8 @@ local logs: { string } = {}
 local abuse: any = nil
 local removing: any = nil
 
-local function fresh()
+-- `overrides` replaces fields of the fake deps (the default: every watched player is reachable).
+local function fresh(overrides: { [string]: any }?)
 	AntiCheatService.reset()
 	EntityService.reset()
 	clock.t = 1000
@@ -91,7 +92,7 @@ local function fresh()
 		respawn = function() end,
 		playerRemoving = nil,
 	})
-	AntiCheatService.bind({
+	local deps: { [string]: any } = {
 		now = function()
 			return clock.t
 		end,
@@ -119,7 +120,11 @@ local function fresh()
 		log = function(message)
 			table.insert(logs, message)
 		end,
-	})
+	}
+	for key, value in overrides or {} do
+		deps[key] = value
+	end
+	AntiCheatService.bind(deps :: any)
 end
 
 local function character(name: string?): (any, any)
@@ -511,6 +516,53 @@ describe("AntiCheatService teleports and the kick", function()
 		end
 		expect(#kicks).toBe(0)
 		expect(#AntiCheatService.flagsOf(slow)).toBeLessThan(Combat.anomalyKickThreshold)
+	end)
+end)
+
+describe("AntiCheatService stand-ins (no Player instance)", function()
+	it("a stand-in is shadowed, kicked and recorded as a player is, with no system line fired at it", function()
+		local standIns: { [any]: boolean } = {}
+		fresh({
+			isPlayer = function(who: any): boolean
+				return not standIns[who]
+			end,
+		})
+		local who, _, root = fighter()
+		standIns[who] = true
+		local kicked: { any } = {}
+		AntiCheatService.Kicked:Connect(function(kickedPlayer, reason)
+			table.insert(kicked, { player = kickedPlayer, reason = reason })
+		end)
+		for _ = 1, 5 do
+			move(who, root, TELEPORT, 0.2)
+		end
+		task.wait()
+		expect(AntiCheatService.isKicked(who)).toBe(true)
+		expect(#lines).toBe(0)
+		expect(#kicks).toBe(1)
+		expect(kicks[1].player).toBe(who)
+		expect(kicks[1].text).toBe(World.anticheat.kickText)
+		expect(#kicked).toBe(1)
+		expect(attributes[who][World.anticheat.shadowAttribute]).toBe(true)
+		local stats = AntiCheatService.stats()
+		expect(stats.kicked).toBe(1)
+		expect(stats.shadowed).toBe(1)
+		-- A real player beside it still gets the line before its kick.
+		local real = player()
+		for _ = 1, Combat.anomalyKickThreshold do
+			AntiCheatService.reportAbuse(real, "GuardRequest", "schema: bad payload")
+		end
+		expect(#lines).toBe(1)
+		expect(lines[1].player).toBe(real)
+		expect(#kicks).toBe(2)
+	end)
+
+	it("the engine's deps reach only a Player instance with a remote (a smoke's stand-in is a table)", function()
+		local engine = AntiCheatService.defaultDeps({ log = function() end })
+		expect(typeof(engine.isPlayer)).toBe("function")
+		expect(engine.isPlayer({ Name = "Cheater", DisplayName = "Cheater", UserId = 0 } :: any)).toBe(false)
+		expect(engine.isPlayer(Instance.new("Folder") :: any)).toBe(false)
+		expect(engine.isPlayer(Instance.new("Player") :: any)).toBe(true)
 	end)
 end)
 

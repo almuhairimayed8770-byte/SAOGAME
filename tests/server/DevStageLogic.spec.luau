@@ -160,6 +160,64 @@ describe("DevStageLogic ramp", function()
 	end)
 end)
 
+describe("DevStageLogic body: never inside the ledge or its ramp", function()
+	local LEDGE = STAGE.ledge
+	-- A body: its flat reach each way from the root, its height, and how deep a face may touch it.
+	local REACH, HEIGHT, TOUCH = 2.2, 5.5, 0.05
+	local FLOOR = LEDGE.position[2] - LEDGE.size[2] / 2
+
+	it("boxes the ledge, and its ramp by the wedge's bounding box", function()
+		local boxes = Logic.partBoxes(LEDGE)
+		expect(#boxes).toBe(2)
+		local ledgeBox, rampBox = boxes[1], boxes[2]
+		expect(ledgeBox.name).toBe(LEDGE.name)
+		for axis = 1, 3 do
+			expect(ledgeBox.min[axis]).toBe(LEDGE.position[axis] - LEDGE.size[axis] / 2)
+			expect(ledgeBox.max[axis]).toBe(LEDGE.position[axis] + LEDGE.size[axis] / 2)
+		end
+		local ramp = LEDGE.ramp.size
+		local edge = LEDGE.position[3] + LEDGE.size[3] / 2
+		expect(rampBox.name).toBe(LEDGE.ramp.name)
+		expect(rampBox.min).toEqual({ LEDGE.position[1] - ramp[1] / 2, FLOOR, edge })
+		expect(rampBox.max).toEqual({ LEDGE.position[1] + ramp[1] / 2, FLOOR + ramp[2], edge + ramp[3] })
+	end)
+
+	it("finds a body standing on the field where the ledge or its ramp goes", function()
+		local x, z = LEDGE.position[1], LEDGE.position[3]
+		expect(Logic.bodyInside(LEDGE, x, FLOOR, z, REACH, HEIGHT, TOUCH)).toBe(LEDGE.name)
+		local _, _, rampZ = Logic.rampFrame(LEDGE)
+		expect(Logic.bodyInside(LEDGE, x, FLOOR, rampZ, REACH, HEIGHT, TOUCH)).toBe(LEDGE.ramp.name)
+		-- Only the parts asked about.
+		expect(Logic.bodyInside(LEDGE, x, FLOOR, rampZ, REACH, HEIGHT, TOUCH, { LEDGE.name })).toBeNil()
+		expect(Logic.bodyInside(LEDGE, x, FLOOR, z, REACH, HEIGHT, TOUCH, {})).toBeNil()
+	end)
+
+	it("counts the body's reach: its side past a face is inside, a body against the face only touches", function()
+		local minX = LEDGE.position[1] - LEDGE.size[1] / 2
+		local z = LEDGE.position[3]
+		-- The root stands outside the ledge, its side half a stud into it.
+		expect(Logic.bodyInside(LEDGE, minX - REACH + 0.5, FLOOR, z, REACH, HEIGHT, TOUCH)).toBe(LEDGE.name)
+		-- Its side against the face, within the touch.
+		expect(Logic.bodyInside(LEDGE, minX - REACH + TOUCH / 2, FLOOR, z, REACH, HEIGHT, TOUCH)).toBeNil()
+		expect(Logic.bodyInside(LEDGE, minX - REACH - 0.01, FLOOR, z, REACH, HEIGHT, TOUCH)).toBeNil()
+	end)
+
+	it("feet on the ledge's top only touch it (over the ramp's high end too); feet sunk into it are inside", function()
+		local x, y, z = Logic.standSpot(true, STAGE.area, LEDGE)
+		local edge = LEDGE.position[3] + LEDGE.size[3] / 2
+		expect(Logic.bodyInside(LEDGE, x, y, z, REACH, HEIGHT, TOUCH)).toBeNil()
+		expect(Logic.bodyInside(LEDGE, x, y, edge, REACH, HEIGHT, TOUCH)).toBeNil()
+		expect(Logic.bodyInside(LEDGE, x, y - STAGE.standHeightTolerance / 2, z, REACH, HEIGHT, TOUCH)).toBe(LEDGE.name)
+	end)
+
+	it("a body in the stage area's ring stands clear of both", function()
+		local x, y, z = Logic.standSpot(false, STAGE.area, LEDGE)
+		for _, offset in { { 0, 0 }, { STAGE.standRadius, 0 }, { 0, STAGE.standRadius }, { -STAGE.standRadius, 0 } } do
+			expect(Logic.bodyInside(LEDGE, x + offset[1], y, z + offset[2], REACH, HEIGHT, TOUCH)).toBeNil()
+		end
+	end)
+end)
+
 -- The flat footprint of the ledge and its ramp (their bounding box), as crosses takes it.
 local function footprint(grow: number): { number }
 	local ledge = STAGE.ledge

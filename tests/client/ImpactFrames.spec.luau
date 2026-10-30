@@ -2110,3 +2110,110 @@ describe("ImpactFrames staleness per sequence (D-122)", function()
 		end)
 	end)
 end)
+
+describe("ImpactFrames at the screen's own pace (D-351)", function()
+	it("a jittery 60 fps screen read through FrameClock.pace draws a Final 2 and a Kill 2/2/2", function()
+		local FrameClock = Harness.load("src/client/fx/FrameClock")
+		-- Frames whose mean is 60 fps, in every phase: alternating early and late, two short and one
+		-- long, one short and two long. Off a median of the last 5 the Final drew 3 frames on one
+		-- phase and 1 or 2 on the next, the Kill 3/3/3 or 1/1/1.
+		for _, pattern in { { 0.7, 1.3 }, { 0.6, 1.4 }, { 0.75, 0.75, 1.5 }, { 0.5, 1.25, 1.25 } } do
+			for phase = 0, #pattern - 1 do
+				for _, case in
+					{ { "Final", { "Dark", "Dark" } }, { "Kill", { "Black", "Black", "Dark", "Dark", "Ink", "Ink" } } }
+				do
+					local sequence, want = case[1] :: string, case[2] :: { string }
+					local clock = 100
+					local frameStart: ((number) -> ())? = nil
+					local overlay: ((number) -> ())? = nil
+					FrameClock.bind({
+						now = function(): number
+							return clock
+						end,
+						onFrameStart = function(fn)
+							frameStart = fn
+							return function() end
+						end,
+						onFrameEnd = function()
+							return function() end
+						end,
+						onHeartbeat = function()
+							return function() end
+						end,
+					})
+					local camera = Instance.new("Camera")
+					ImpactFrames.bind({
+						now = function(): number
+							return clock
+						end,
+						onRender = function(step: (dt: number) -> ())
+							overlay = step
+							return function()
+								overlay = nil
+							end
+						end,
+						onHeartbeat = function(_step: (dt: number) -> ())
+							return function() end
+						end,
+						playerGui = function()
+							return Instance.new("Folder")
+						end,
+						camera = function()
+							return camera
+						end,
+						project = function(_position: Vector3)
+							return HIT_POINT
+						end,
+						aspect = function()
+							return ASPECT
+						end,
+						quality = function()
+							return "High"
+						end,
+						random = Random.new(7),
+					})
+					FlashBudget.reset()
+					local index = phase
+					local function frame()
+						local dt = pattern[index % #pattern + 1] * F
+						index += 1
+						clock += dt
+						local start = frameStart :: (number) -> ()
+						start(dt)
+						local draw = overlay
+						if draw ~= nil then
+							draw(dt)
+						end
+					end
+					for _ = 1, 2 * impact.hold.paceFrames do
+						frame()
+					end
+					ImpactFrames.play(sequence, { rig("Fighter", Vector3.new(0, 3, 0)) })
+					local seen: { string } = {}
+					for _ = 1, 20 do
+						frame()
+						local look = ImpactFrames.look()
+						if look == nil then
+							break
+						end
+						table.insert(seen, look)
+					end
+					ImpactFrames.bind(nil)
+					FrameClock.bind(nil)
+					FlashBudget.reset()
+					if table.concat(seen, ",") ~= table.concat(want, ",") then
+						error(
+							("%s under %s (phase %d) drew %s, want %s"):format(
+								sequence,
+								table.concat(pattern, "/"),
+								phase,
+								table.concat(seen, ","),
+								table.concat(want, ",")
+							)
+						)
+					end
+				end
+			end
+		end
+	end)
+end)

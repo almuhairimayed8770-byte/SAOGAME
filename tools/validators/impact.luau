@@ -24,6 +24,15 @@
 	- A picture waits for its first drawn frame as long as its own hit-stop (a dim: its own
 	  length; D-122), so the old single overlay.staleFrames must be gone, and every hit-stop a
 	  sequence rides on is at least MIN_STALE_FRAMES long so a 30 fps first frame still plays.
+	- poseLagFrames (D-342) is a whole number of frames from 0 to MAX_POSE_LAG_FRAMES and no more
+	  than the shortest hit-stop in combat.hitStopFrames, so a hit's cues, which wait that many
+	  frames after the contact's step, never come after the freeze's last frozen step; and FrameClock's mark
+	  (fx.luau renderOrder.posed) runs after the rigs' step (choreo.luau renderOrder.rigs) and
+	  before the character's (renderOrder.character), whose contact asks for the cues.
+	- The pace keys (D-327, D-341, D-351, D-352): hold.paceFrames a whole number of at least
+	  MIN_PACE_FRAMES, hold.hitchFactor strictly between 2 and 3 (a two-refresh frame is the pace,
+	  a three-refresh one a hitch), 0 <= hold.tieFrames < 0.5, timing.paceSamples a whole number of
+	  at least 1, and 1/30 s < timing.maxPaceSeconds <= 0.1 s (D-122).
 ]]
 
 local roblox = require("@lune/roblox")
@@ -46,6 +55,18 @@ local PLAIN_LOOK_MAX_LUMINANCE = 0.2
 -- A 30 fps first frame comes at most this many 60 fps frames after the hit: every picture's
 -- wait for its first drawn frame (its own hit-stop) must still let it play.
 local MIN_STALE_FRAMES = 2
+-- The engine draws a pose on the frame after its PreSimulation write (D-053); two frames is the
+-- most a pose may trail its step before the cues would be timed by a guess, not the engine.
+local MAX_POSE_LAG_FRAMES = 2
+-- The hold's pace (D-327) is a mean over at least this many steps, with a median between them.
+local MIN_PACE_FRAMES = 3
+-- A frame two refreshes long is the pace on a vsync display that cannot hold its rate (D-341);
+-- one of three refreshes is a hitch: the hitch bar lies strictly between.
+local MIN_HITCH_FACTOR = 2
+local MAX_HITCH_FACTOR = 3
+-- A picture's pace never forgets a 30 fps frame, nor remembers one slower than 10 fps (D-122).
+local SLOWEST_PACE_SECONDS = 1 / 30
+local MAX_PACE_SECONDS = 0.1
 
 local function isWhole(value: any): boolean
 	return typeof(value) == "number" and value == value and value % 1 == 0
@@ -373,6 +394,80 @@ return function(ctx: Context): { string }
 			end
 		end
 	end
+
+	-- The hold's pace (D-327, D-341): how many frames every hit-stop freezes is chosen from these.
+	local hold = if typeof(impact.hold) == "table" then impact.hold else {}
+	check(
+		isWhole(hold.paceFrames) and hold.paceFrames >= MIN_PACE_FRAMES,
+		("hold.paceFrames %s must be a whole number of at least %d: the steps a hold's pace is the mean of"):format(
+			tostring(hold.paceFrames),
+			MIN_PACE_FRAMES
+		)
+	)
+	check(
+		typeof(hold.hitchFactor) == "number"
+			and hold.hitchFactor > MIN_HITCH_FACTOR
+			and hold.hitchFactor < MAX_HITCH_FACTOR,
+		("hold.hitchFactor %s must be over %d and under %d: a frame of two refreshes is the pace (D-341), one of three a hitch"):format(
+			tostring(hold.hitchFactor),
+			MIN_HITCH_FACTOR,
+			MAX_HITCH_FACTOR
+		)
+	)
+	check(
+		typeof(hold.tieFrames) == "number" and hold.tieFrames >= 0 and hold.tieFrames < 0.5,
+		("hold.tieFrames %s must be from 0 up to under 0.5 of a frame"):format(tostring(hold.tieFrames))
+	)
+	-- The picture's pace (D-351): how many drawn frames each look shows.
+	local timing = if typeof(impact.timing) == "table" then impact.timing else {}
+	check(
+		isWhole(timing.paceSamples) and timing.paceSamples >= 1,
+		("timing.paceSamples %s must be a whole number of at least 1"):format(tostring(timing.paceSamples))
+	)
+	check(
+		typeof(timing.maxPaceSeconds) == "number"
+			and timing.maxPaceSeconds > SLOWEST_PACE_SECONDS
+			and timing.maxPaceSeconds <= MAX_PACE_SECONDS,
+		("timing.maxPaceSeconds %s must be over 1/30 s and at most 0.1 s (D-122): a 30 fps frame is the pace, one slower than 10 fps a hitch"):format(
+			tostring(timing.maxPaceSeconds)
+		)
+	)
+
+	-- The pose lag (D-342): the frames a hit's cues wait after the step that posed the contact.
+	local lag = impact.poseLagFrames
+	local shortest = math.huge
+	for _, frames in combat.hitStopFrames do
+		if typeof(frames) == "number" then
+			shortest = math.min(shortest, frames)
+		end
+	end
+	check(
+		isWhole(lag) and lag >= 0 and lag <= MAX_POSE_LAG_FRAMES and lag <= shortest,
+		("poseLagFrames %s must be a whole number from 0 to %d and no more than the shortest hit-stop (%s frames): a cue must land inside the freeze"):format(
+			tostring(lag),
+			MAX_POSE_LAG_FRAMES,
+			tostring(shortest)
+		)
+	)
+	local choreo = ctx.load("src/shared/data/choreo")
+	local function priority(row: any): number?
+		if typeof(row) ~= "table" or typeof(row.base) ~= "string" or typeof(row.offset) ~= "number" then
+			return nil
+		end
+		-- An unknown name is a problem to report, not a crash (the Enum throws on a missing item).
+		local ok, item = pcall(function()
+			return (roblox.Enum.RenderPriority :: any)[row.base]
+		end)
+		return if ok and item ~= nil then item.Value + row.offset else nil
+	end
+	local order = if typeof(fx.renderOrder) == "table" then fx.renderOrder else {}
+	local posedAt = priority(order.posed)
+	local rigsAt = priority(choreo.renderOrder.rigs)
+	local characterAt = priority(choreo.renderOrder.character)
+	check(
+		posedAt ~= nil and rigsAt ~= nil and characterAt ~= nil and posedAt > rigsAt and posedAt < characterAt,
+		"fx.renderOrder.posed must run after choreo renderOrder.rigs and before renderOrder.character"
+	)
 
 	-- Quality
 	for _, tier in sortedKeys(fx.quality) do

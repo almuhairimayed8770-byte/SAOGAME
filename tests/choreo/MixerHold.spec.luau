@@ -360,3 +360,86 @@ describe("a hold's frames are counted once, at its start, from the rig's pace (D
 		expect(mixer:pauseRemaining()).toBe(0)
 	end)
 end)
+
+-- Steps a mixer playing the long loop `warm` times at `nextDt`, returning it and the loop's handle.
+local function warmed(nextDt: () -> number, warm: number): (any, any)
+	local mixer = Mixer.new()
+	local handle = mixer:play(longClip)
+	for _ = 1, warm do
+		mixer:step(nextDt())
+	end
+	assert(not handle.done and handle.time < 6, "the warm-up ran the clip out")
+	return mixer, handle
+end
+
+-- The steps the clip's clock stands still from now on (at most 200).
+local function stillSteps(mixer: any, handle: any, nextDt: () -> number): number
+	local still = 0
+	for _ = 1, 200 do
+		local before = handle.time
+		mixer:step(nextDt())
+		if handle.time > before + 1e-12 then
+			break
+		end
+		still += 1
+	end
+	return still
+end
+
+describe("a hold counted in steps, and the steps a rig's holds froze (D-354)", function()
+	it("holdSteps freezes exactly that many steps, whatever their length", function()
+		for _, warm in { 0, 3, 40 } do
+			for _, pacing in { "even", "alt45", "hitchy" } do
+				local f = 0
+				local function nextDt(): number
+					f += 1
+					if pacing == "alt45" then
+						return if f % 2 == 0 then 1 / 60 else 2 / 60
+					elseif pacing == "hitchy" then
+						local k = f % 5
+						return if k == 0 then 3 / 60 elseif k == 3 then 2 / 60 else 1 / 60
+					end
+					return 1 / 60
+				end
+				for _, steps in { 1, 4, 9 } do
+					local mixer, handle = warmed(nextDt, warm)
+					mixer:holdSteps(steps)
+					local still = stillSteps(mixer, handle, nextDt)
+					if still ~= steps then
+						error(("%s, %d steps in: holdSteps(%d) froze %d steps"):format(pacing, warm, steps, still), 0)
+					end
+				end
+			end
+		end
+	end)
+
+	it("keeps a longer hold already running, counted or not", function()
+		-- 144 Hz: a Kill's seconds are 24 steps; a picture's 14 steps must not cut it short, with or
+		-- without the rig's pace (D-327) to count it by.
+		for _, warm in { 3, 40 } do
+			local mixer, handle = warmed(steady(144), warm)
+			mixer:hitStop(Combat.hitStopFrames.Kill - Combat.hitStopShaveFrames)
+			mixer:holdSteps(14)
+			expect(stillSteps(mixer, handle, steady(144))).toBe(24)
+		end
+	end)
+
+	it("heldCount counts every step a hold froze, and holdPace the length they are counted at", function()
+		local mixer = Mixer.new()
+		expect(mixer:holdPace()).toBe(nil)
+		local handle = mixer:play(longClip)
+		for _ = 1, 3 do
+			mixer:step(1 / 30)
+		end
+		local mark = mixer:heldCount()
+		expect(math.abs((mixer:holdPace() :: number) - 1 / 30) < 1e-9).toBe(true)
+		-- A Normal at 30 fps freezes 2 steps (D-271): 0.067 s shown against the 0.05 s asked.
+		mixer:hitStop(Combat.hitStopFrames.Normal - Combat.hitStopShaveFrames)
+		local still = stillSteps(mixer, handle, function(): number
+			return 1 / 30
+		end)
+		expect(still).toBe(2)
+		expect(mixer:heldCount() - mark).toBe(2)
+		expect(math.abs((mixer:heldCount() - mark) * (mixer:holdPace() :: number) - 2 / 30) < 1e-9).toBe(true)
+	end)
+end)

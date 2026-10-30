@@ -30,7 +30,10 @@
 local Shared = script.Parent.Parent
 
 local AI = require(Shared.data.ai)
+local Rigs = require(Shared.data.rigs)
+local Types = require(Shared.types)
 local Pose = require(script.Parent.Pose)
+local ClipSampler = require(script.Parent.ClipSampler)
 
 local TUNING = AI.rushWorld
 
@@ -47,10 +50,13 @@ export type Leg = {
 	facing: Vector3, -- flat unit vector the body faces while on it
 }
 
---- The body a contact is judged on: its corners at rest in its root's space and its root's size.
+--- The body a contact is judged on: its corners at rest in its root's space and its root's size,
+--- and the corners of every pose its rush draws it in (RushWorld.posesOf, D-437): a wall is judged
+--- on those when they are given, so no pose the clients draw stands in the face the body stops at.
 export type Body = {
 	profile: { Vector3 },
 	size: Vector3,
+	poses: { Vector3 }?,
 }
 
 export type Kind = "Slam" | "Glance" | "Clip"
@@ -202,6 +208,145 @@ function RushWorld.profileOf(model: Model): { Vector3 }
 	return corners
 end
 
+-- A clip by id ("enemy/Boar/Charge") under Shared.clips, or nil.
+local function clipById(id: string): Types.ClipDef?
+	local node: Instance? = Shared:FindFirstChild("clips")
+	for segment in id:gmatch("[^/]+") do
+		if node == nil then
+			return nil
+		end
+		node = (node :: Instance):FindFirstChild(segment)
+	end
+	if node == nil or not (node :: Instance):IsA("ModuleScript") then
+		return nil
+	end
+	local ok, clip = pcall(require, node :: ModuleScript)
+	if not ok or typeof(clip) ~= "table" then
+		return nil
+	end
+	return clip :: Types.ClipDef
+end
+
+-- The flat convex hull of `points` (X and Z; each kept point keeps its own Y), counter-clockwise
+-- from above. A flat reach (support, leadCorner, front) over the hull is the reach over them all.
+local function flatHull(points: { Vector3 }): { Vector3 }
+	local sorted = table.clone(points)
+	table.sort(sorted, function(a: Vector3, b: Vector3): boolean
+		if a.X ~= b.X then
+			return a.X < b.X
+		end
+		return a.Z < b.Z
+	end)
+	if #sorted <= 2 then
+		return sorted
+	end
+	local function cross(o: Vector3, a: Vector3, b: Vector3): number
+		return (a.X - o.X) * (b.Z - o.Z) - (a.Z - o.Z) * (b.X - o.X)
+	end
+	local hull: { Vector3 } = {}
+	for _, point in sorted do
+		while #hull >= 2 and cross(hull[#hull - 1], hull[#hull], point) <= 0 do
+			table.remove(hull)
+		end
+		table.insert(hull, point)
+	end
+	local lower = #hull + 1
+	for index = #sorted - 1, 1, -1 do
+		local point = sorted[index]
+		while #hull >= lower and cross(hull[#hull - 1], hull[#hull], point) <= 0 do
+			table.remove(hull)
+		end
+		table.insert(hull, point)
+	end
+	table.remove(hull)
+	return hull
+end
+
+-- Each rig's rush poses, measured once (the geometry is the rig's, wherever its model stands).
+local measuredPoses: { [string]: { Vector3 } } = {}
+
+--- The corners of every pose a rushing body is drawn in, in its root's space (D-437): the rest
+--- pose's (profileOf) and those of every pose of its rig's rush clips (rigs.luau `rush`), posed every
+--- sampleSeconds, each clip's end included, as their flat hull (a wall judges a body by how far it
+--- reaches flat; each corner kept keeps its height). Nil for a model with no rig, or a rig with no
+--- rush clips: its rest corners are its poses. The server and every client read the same rig, so
+--- they judge the same body. A clip that does not load is left out.
+function RushWorld.posesOf(model: Model): { Vector3 }?
+	local rigId = model:GetAttribute("Rig")
+	local rig = if typeof(rigId) == "string" then (Rigs :: any)[rigId] else nil
+	local def = if rig ~= nil then rig.rush else nil
+	if def == nil then
+		return nil
+	end
+	local known = measuredPoses[rigId :: string]
+	if known ~= nil then
+		return known
+	end
+	local root = model.PrimaryPart
+	if root == nil then
+		return nil
+	end
+	local corners = RushWorld.profileOf(model)
+	local chain = Pose.chain(model)
+	local parts: { BasePart } = {}
+	for _, part in model:GetDescendants() do
+		if part:IsA("BasePart") and part.CollisionGroup ~= AI.collision.blockers then
+			table.insert(parts, part)
+		end
+	end
+	local step: number = def.sampleSeconds
+	for _, id in def.clips :: { string } do
+		local clip = clipById(id)
+		if clip == nil or not (step > 0) then
+			continue
+		end
+		local count = math.max(1, math.ceil(clip.duration / step - 1e-6))
+		for k = 0, count do
+			local time = math.min(k * step, clip.duration)
+			local ok, solved = pcall(Pose.solve, model, CFrame.identity, ClipSampler.sample(clip, time), chain)
+			if not ok then
+				continue
+			end
+			for _, part in parts do
+				local frame = (solved :: Pose.Solved)[part.Name]
+				if frame == nil then
+					continue
+				end
+				local half = part.Size / 2
+				for _, x in CORNERS do
+					for _, y in CORNERS do
+						for _, z in CORNERS do
+							table.insert(
+								corners,
+								frame:PointToWorldSpace(Vector3.new(half.X * x, half.Y * y, half.Z * z))
+							)
+						end
+					end
+				end
+			end
+		end
+	end
+	local hull = flatHull(corners)
+	measuredPoses[rigId :: string] = hull
+	return hull
+end
+
+--- The body a rush is judged on (Body): the model's rest corners, its root's size and the corners
+--- of the poses its rush draws it in (posesOf). Nil without a root. The server's Charger and every
+--- client's RushDraw judge walls on the same one.
+function RushWorld.bodyOf(model: Model): Body?
+	local root = model.PrimaryPart
+	if root == nil then
+		return nil
+	end
+	return { profile = RushWorld.profileOf(model), size = root.Size, poses = RushWorld.posesOf(model) }
+end
+
+-- The corners a wall judges a body on: the poses its rush draws it in when known, else its rest.
+local function wallCorners(body: Body): { Vector3 }
+	return body.poses or body.profile
+end
+
 --- How far a body facing the flat `facing` reaches from its root's centre along `direction`
 --- (flattened), over its corners; 0 for no corners.
 function RushWorld.support(profile: { Vector3 }, facing: Vector3, direction: Vector3): number
@@ -248,11 +393,12 @@ function RushWorld.pullBack(body: Body, facing: Vector3, heading: Vector3, norma
 	local into = -unitFlat(normal, -run)
 	local closing = run:Dot(into)
 	local frame = CFrame.lookAt(Vector3.zero, look)
-	local most = math.max(0, RushWorld.support(body.profile, look, run) - boxReach(frame, body.size, run))
+	local corners = wallCorners(body)
+	local most = math.max(0, RushWorld.support(corners, look, run) - boxReach(frame, body.size, run))
 	if closing <= EPSILON then
 		return 0
 	end
-	local past = RushWorld.support(body.profile, look, into) - boxReach(frame, body.size, into)
+	local past = RushWorld.support(corners, look, into) - boxReach(frame, body.size, into)
 	return math.clamp(past / closing, 0, most)
 end
 
@@ -404,7 +550,7 @@ function RushWorld.contact(
 		local legsNow = keep(legs, index)
 		local start = RushWorld.pointAt(legs, at)
 		table.insert(legsNow, { at = at, from = start, heading = tangent, facing = tangent })
-		local corner = leadCorner(body.profile, leg.facing, -face)
+		local corner = leadCorner(wallCorners(body), leg.facing, -face)
 		return {
 			kind = "Glance",
 			at = at,
@@ -443,14 +589,14 @@ function RushWorld.contact(
 			local frame = CFrame.lookAt(Vector3.zero, leg.facing)
 			local wider = math.max(
 				0,
-				RushWorld.support(body.profile, leg.facing, right * -bestSide) - boxReach(frame, body.size, right)
+				RushWorld.support(wallCorners(body), leg.facing, right * -bestSide) - boxReach(frame, body.size, right)
 			)
 			local shift = right * (bestSide * (overlap + wider + TUNING.clipMarginStuds))
 			-- The sidestep is done when the body's front (the snout, ahead of the root's box by
 			-- `lead`) reaches the corner's face, over the clipRunStuds before that; one steeper than
 			-- it is wide (a corner seen too late) is no shoulder past it: a slam.
 			local reach = boxReach(frame, body.size, heading)
-			local lead = math.max(0, RushWorld.support(body.profile, leg.facing, heading) - reach)
+			local lead = math.max(0, RushWorld.support(wallCorners(body), leg.facing, heading) - reach)
 			local sideEnd = touch - lead
 			local a1 = math.max(along, sideEnd - TUNING.clipRunStuds)
 			local run = sideEnd - a1
@@ -477,7 +623,7 @@ function RushWorld.contact(
 	end
 
 	local stop = math.max(along, touch - pull)
-	local corner = leadCorner(body.profile, leg.facing, -face)
+	local corner = leadCorner(wallCorners(body), leg.facing, -face)
 	return {
 		kind = "Slam",
 		at = stop,

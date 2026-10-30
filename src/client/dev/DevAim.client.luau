@@ -31,6 +31,12 @@
 		                               the server states seen
 		"guard" { held }               fires InputController.guardChanged(held)
 		"dodge"                        fires InputController.dodge
+		"draw"                         shows the sword drawn through CharacterController.predictDraw
+		                               (the path a lock-on takes, 297): the Draw clip plays from where
+		                               the body is, sprinting or not, with no swing behind it; the
+		                               server's word follows a request, else the sword goes back after
+		                               choreo.luau sheath.predictSeconds + sheatheDelay. No input
+		                               signal, no lock, no request
 
 	Every request goes out through CharacterController exactly as a key press sends it (its aim
 	snap, its rate drop, its prediction), so every server check runs unchanged; nothing here fires
@@ -499,6 +505,13 @@ local function dodge(): Reply
 	end)
 end
 
+-- A draw on its own (297): the controller's prediction, nothing sent.
+local function draw(): Reply
+	return settle(function()
+		CharacterController.predictDraw()
+	end)
+end
+
 -- ------------------------------------------------------------------ the BindableFunction
 
 local HANDLERS: { [string]: (args: { [string]: any }) -> Reply } = {
@@ -509,8 +522,10 @@ local HANDLERS: { [string]: (args: { [string]: any }) -> Reply } = {
 	swing = swing,
 	guard = guard,
 	dodge = dodge,
+	draw = draw,
 }
-local YIELDS: { [string]: boolean } = { lock = true, face = true, swing = true, guard = true, dodge = true }
+local YIELDS: { [string]: boolean } =
+	{ lock = true, face = true, swing = true, guard = true, dodge = true, draw = true }
 
 local function invoke(command: unknown, rawArgs: unknown): Reply
 	local handler = if typeof(command) == "string" then HANDLERS[command] else nil

@@ -38,6 +38,7 @@ local EntityService = Harness.load("src/server/services/EntityService")
 local CombatService = Harness.load("src/server/services/CombatService")
 local EnemyService = Harness.load("src/server/services/EnemyService")
 local RigBuilder = Harness.load("src/server/world/RigBuilder")
+local RushWorld = Harness.load("src/shared/choreo/RushWorld")
 local CollisionGroups = Harness.load("src/server/world/CollisionGroups")
 local AI = Harness.load("src/shared/data/ai")
 local Enemies = Harness.load("src/shared/data/enemies")
@@ -621,13 +622,16 @@ describe("A stopped rush never carries a player (D-190)", function()
 				return hit, sentOf("RushEnded"), front
 			end
 			for _, face in { 8, 7.5 } do
-				local hit, ended, front = run(face)
+				local hit, ended = run(face)
 				expect(hit).toEqual({ [5] = true, [6.5] = true, [9.5] = false, [12] = false })
 				-- A slam with the snout on the face (D-205), then the daze's stop at that same spot (D-210);
 				-- no stretch past the face.
 				expect(#ended).toBe(2)
 				expect(ended[1].payload.reason).toBe("Wall")
-				expect(ended[1].payload.distance + front).toBeCloseTo(face, 0.05)
+				-- The snout a slam rests on the face: the farthest the body reaches in any pose its rush draws
+				-- it in (D-437).
+				local slamFront = RushWorld.front((RushWorld.bodyOf(RigBuilder.build("Boar")) :: any).poses)
+				expect(ended[1].payload.distance + slamFront).toBeCloseTo(face, 0.05)
 				expect(ended[2].payload.reason).toBe("Interrupted")
 				expect(ended[2].payload.distance).toBeCloseTo(ended[1].payload.distance, 1e-6)
 				for _, span in spans do
@@ -716,7 +720,10 @@ describe("A stopped rush never carries a player (D-190)", function()
 				local ended = sentOf("RushEnded")
 				expect(#ended).toBe(2)
 				expect(ended[1].payload.reason).toBe("Wall")
-				expect(ended[1].payload.distance + front).toBeCloseTo(face, 1e-3)
+				-- The snout a slam rests on the face: the farthest the body reaches in any pose its rush draws
+				-- it in (D-437).
+				local slamFront = RushWorld.front((RushWorld.bodyOf(boar) :: any).poses)
+				expect(ended[1].payload.distance + slamFront).toBeCloseTo(face, 1e-3)
 				expect(ended[2].payload.reason).toBe("Interrupted")
 				expect(ended[2].payload.distance).toBeCloseTo(ended[1].payload.distance, 1e-6)
 				-- The line resolves on the clock up to the face, where every client draws the snout, and no

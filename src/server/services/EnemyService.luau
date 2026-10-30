@@ -57,6 +57,11 @@
 	EntityService.setState call (EntityService fires StateChanged itself). EntityService's Died and
 	StateChanged signals stop a brain or interrupt its attack (Stagger, Break, GuardBroken).
 
+	An attack limit (limitAttacks, FK2; the staged shots, dev.luau StagedEnemy.attacks) lets an
+	enemy begin that many attacks and then holds it at the first tick it is free (ai.spacing
+	freePhases): its last attack, a stagger and the recovery play out whole, and its timing until
+	then is the live AI's. The game never sets one.
+
 	Everything engine-facing goes through `Deps` / `Engine` (bind), so the whole service runs in
 	Lune with a fake world; `start()` binds the real engine.
 ]]
@@ -107,14 +112,15 @@ export type Engine = {
 	-- root collides with in its own group: a rushing body's walls, never a player or an enemy), its
 	-- box moved by `offset` first when given, within `distance` studs, whether that face is ground it
 	-- runs over (D-204, D-209) and the face's normal; nil when nothing is in the way
-	-- (EnemyService.worldAhead). `walk`: a walking body's question (its snout's room): the world
-	-- alone, with the root's box turned to face `direction`. Nil: no world.
+	-- (EnemyService.worldAhead). `walk`: a walking body's question (D-435), the facing it asks with:
+	-- the world alone, and the first value is how far the body turned that way walks before a part of
+	-- it meets the face (less than 0: it stands that far inside it). Nil: no world.
 	worldAhead: ((
 		model: Model,
 		direction: Vector3,
 		distance: number,
 		offset: Vector3?,
-		walk: boolean?
+		walk: Vector3?
 	) -> (number?, boolean?, Vector3?))?,
 	-- Stops the body dead (no skid): its flat velocity is zeroed and it holds where it stands, or on
 	-- `position` when given (a goal it would pass before the next frame). Nil: `stop` stands in.
@@ -122,6 +128,16 @@ export type Engine = {
 	-- Moves a placed body to `cframe` (Model:PivotTo; the Studio test hook place, D-333). Nil:
 	-- Model:PivotTo itself.
 	pivot: ((model: Model, cframe: CFrame) -> ())?,
+	-- Carries the body onto `position` (its height kept) by its own velocity over `seconds`, the way
+	-- it was going (D-431): a strike's own movement about to reach its exact stop gets there by its
+	-- own motion, never by a CFrame write, which every client shows as a teleport of the replicated
+	-- root (a 5-6 stud jump past its interpolation). The service stops it dead (halt) once the time
+	-- is over. Nil: `halt` onto the position stands in.
+	land: ((model: Model, position: Vector3, seconds: number) -> ())?,
+	-- Anchors (true) or frees (false) the body's root (D-436): a held enemy stands where it was held
+	-- and no player walking into it shoves it; freed, the server simulates it again (network owner
+	-- nil) and it stands where it is. Nil: never anchored.
+	anchor: ((model: Model, anchored: boolean) -> ())?,
 }
 
 -- The world cast worldAhead makes: a box of `size` at `start` moved by `vector`, colliding as
@@ -185,6 +201,20 @@ type Mover = {
 	exact: boolean,
 	-- The exact goal the body was stopped dead on (Engine.halt, arrive); nil until it is reached.
 	halted: Vector3?,
+	-- A landing in flight (Engine.land, arrive): the server time it is over, when the body is stopped
+	-- dead where it got to (D-431). Nil: none.
+	landingUntil: number?,
+	-- A plain stop asked for while an exact run was still under way (D-432): it applies once the body
+	-- is on its stop.
+	stopAfter: boolean,
+	-- Where a wall cut the walk short (snoutRoom, D-435): the body lands on it as on an exact stop
+	-- (arrive), so it stands with its snout at the face, never a skid past it. Nil: no cut.
+	cutStop: Vector3?,
+	-- The wall faces near the body (nearFaces, D-435): a point on each and the flat way into it, and
+	-- the server time they were found (once per AI tick).
+	nearPoints: { Vector3 },
+	nearInto: { Vector3 },
+	nearAt: number,
 }
 
 export type Entry = {
@@ -196,6 +226,10 @@ export type Entry = {
 	mover: Mover,
 	awake: boolean,
 	held: boolean, -- the cinematic / dev hold: asleep, and the sleep check never wakes it
+	anchored: boolean, -- its root is anchored (Engine.anchor): held, where nothing shoves it (D-436)
+	-- Attacks it may still begin before it is held at its next free tick (limitAttacks, FK2); nil:
+	-- no limit (every enemy the game runs by itself).
+	attacksLeft: number?,
 	home: Vector3,
 	front: number, -- studs the body reaches ahead of its root (the snout), measured at spawn
 	back: number, -- studs it reaches behind its root
@@ -239,6 +273,40 @@ local ALIGN_NAME = "SkyspireYaw"
 local CORNER_SIGNS = { -1, 1 }
 
 local INTERRUPTING: { [string]: boolean } = { Stagger = true, Break = true, GuardBroken = true }
+
+-- Each spawned enemy's body as one box in its root's space (its corners at rest, the root's own
+-- height), with the corners themselves: what a walking body's cast carries (worldAhead, D-435).
+-- Weak keys: a model that is gone drops out.
+type WalkBox = { centre: Vector3, size: Vector3, profile: { Vector3 }, radius: number, swing: number }
+local walkBoxes: { [Model]: WalkBox } = setmetatable({} :: any, { __mode = "k" })
+
+-- The body's box (walkBoxes) from its corners at rest: their flat bounds, the root's own
+-- height (what the root's box clears, the legs' ground is the engine's). Nil with no corners.
+local function walkBoxOf(body: RushWorld.Body): WalkBox?
+	local profile = body.profile
+	if #profile == 0 then
+		return nil
+	end
+	local low, high = profile[1], profile[1]
+	local swing = 0
+	for _, corner in profile do
+		low = low:Min(corner)
+		high = high:Max(corner)
+		swing = math.max(swing, Vector3.new(corner.X, 0, corner.Z).Magnitude)
+	end
+	local centre = Vector3.new((low.X + high.X) / 2, 0, (low.Z + high.Z) / 2)
+	local size = Vector3.new(high.X - low.X, body.size.Y, high.Z - low.Z)
+	return {
+		centre = centre,
+		size = size,
+		profile = profile,
+		-- How far the box's farthest corner stands from the root's centre, flat.
+		radius = Vector3.new(math.abs(centre.X) + size.X / 2, 0, math.abs(centre.Z) + size.Z / 2).Magnitude,
+		-- How far the body's farthest corner stands from the root's centre, flat: as far as a turn in
+		-- place swings any part of it.
+		swing = swing,
+	}
+end
 
 local ARCHETYPES: { [string]: Brain.Archetype } = {
 	Charger = Charger,
@@ -316,6 +384,11 @@ local function newMover(model: Model, speed: number, body: RushWorld.Body?): Mov
 		body = body,
 		exact = false,
 		halted = nil,
+		stopAfter = false,
+		cutStop = nil,
+		nearPoints = {},
+		nearInto = {},
+		nearAt = -math.huge,
 	}
 end
 
@@ -336,6 +409,7 @@ end
 -- `direct`: a strike's own movement, straight at the goal and never along a path (D-183). `exact`
 -- (direct only): the goal is where the body stops, and it stops dead on it (arrive).
 local function moverRequest(mover: Mover, goal: Vector3, speed: number, direct: boolean?, exact: boolean?)
+	mover.stopAfter = false
 	local isDirect = direct == true
 	mover.exact = isDirect and exact == true
 	if isDirect ~= mover.direct then
@@ -351,8 +425,23 @@ end
 
 -- `dead`: the body stops dead where it stands (Engine.halt: a jammed or cancelled rush rests where its
 -- end told every client, not a skid past it); otherwise it stops as the engine does (Humanoid:MoveTo
--- where it stands).
+-- where it stands). A plain stop never cuts short a strike's own run onto the exact stop it told
+-- every client (D-432: a slam's stop, a finished rush's line end): a recovery or a daze beginning
+-- while the body is still on its way leaves it to get there and stop dead on it (arrive). A dead
+-- stop (a cancel, a jam, a hold, a death) does cut it, and so does the stuck clock (moverUpdate). An
+-- engine that cannot stop a body dead on a goal (no land, no halt) stops it as it always did.
 local function moverStop(mover: Mover, dead: boolean?)
+	local engine = dependencies().engine
+	local lands = engine.land ~= nil or engine.halt ~= nil
+	local underWay = mover.halted == nil or mover.landingUntil ~= nil
+	if dead ~= true and lands and mover.direct and mover.exact and mover.goal ~= nil and underWay then
+		mover.stopAfter = true
+		return
+	end
+	mover.stopAfter = false
+	mover.landingUntil = nil
+	mover.cutStop = nil
+	mover.nearAt = -math.huge -- the next movement looks round afresh (a hold, a place)
 	mover.goal = nil
 	mover.pending = false
 	mover.direct = false
@@ -363,7 +452,6 @@ local function moverStop(mover: Mover, dead: boolean?)
 		mover.issuedGoal = nil
 		-- A path still computing is for a goal that no longer exists; its result is dropped.
 		dropPath(mover)
-		local engine = dependencies().engine
 		local halt = engine.halt
 		if dead == true and halt ~= nil then
 			halt(mover.model, nil)
@@ -373,39 +461,100 @@ local function moverStop(mover: Mover, dead: boolean?)
 	end
 end
 
--- How far a body facing `facing` walks along the flat unit `direction` before its leading corner meets
--- the face the walk cast found (`travelled`: how far the root's box, turned to face `direction` and
--- starting with its front at the root's centre, ran before it met a face of normal `normal`; nil:
--- head on): where the box would touch, moved by how much further than the box the body reaches
--- toward the face, over how fast the walk closes on it. Huge for a walk along the face.
-local function walkRoom(
-	body: RushWorld.Body,
-	facing: Vector3,
-	direction: Vector3,
-	travelled: number,
-	normal: Vector3?
-): number
-	local into = if normal ~= nil then Brain.horizontal(-normal) else nil
-	local inward: Vector3 = into or direction
-	local closing = direction:Dot(inward)
-	if closing <= AI.flatEpsilon then
-		return math.huge
+-- One look for wall faces near the body (nearFaces) along `axis`: its box, as it faces `look`, cast
+-- back onto where it stands from `back` studs away and `ahead` past it. A face found is kept as a
+-- plane: a point on it and the flat way into it. Ground it runs over is no wall.
+local function lookNear(mover: Mover, look: Vector3, axis: Vector3, back: number, ahead: number, position: Vector3)
+	local body = mover.body
+	local cast = dependencies().engine.worldAhead
+	if body == nil or cast == nil then
+		return
 	end
+	local room, ground, normal = cast(mover.model, axis, back + ahead, -axis * back, look)
+	if room == nil or ground == true or normal == nil then
+		return
+	end
+	local into = Brain.horizontal(-normal)
+	if into == nil then
+		return
+	end
+	local closing = axis:Dot(into)
+	if closing <= AI.flatEpsilon then
+		return
+	end
+	-- The body walks `room - back` from where it stands before its corner meets the face, so the
+	-- face stands that much (across it) past the body's own reach toward it.
+	local across = RushWorld.support(body.profile, look, into) + (room - back) * closing
+	table.insert(mover.nearPoints, position + into * across)
+	table.insert(mover.nearInto, into)
+end
+
+-- The wall faces near the body (D-435), found once per AI tick: its box cast along its four ways
+-- (ahead, behind, either side) back onto where it stands from twice its reach away, so a face it
+-- stands against, or a box corner where the body has none stands in, is seen too (a cast never sees
+-- what it starts in), and as far past it as a turn swings a part of it and a tick's walk carries it.
+-- Every walk and turn question until the next look is answered on these planes (snoutWalk, bodyIn).
+local function nearFaces(mover: Mover)
+	local d = dependencies()
+	local now = d.serverTime()
+	if now - mover.nearAt < AI.tickSeconds() then
+		return
+	end
+	mover.nearAt = now
+	table.clear(mover.nearPoints)
+	table.clear(mover.nearInto)
+	local body = mover.body
+	if body == nil or d.engine.worldAhead == nil then
+		return
+	end
+	local box = walkBoxes[mover.model]
 	local half = body.size / 2
-	local square = CFrame.lookAt(Vector3.zero, direction)
-	local boxInto = math.abs(square.RightVector:Dot(inward)) * half.X + math.abs(square.LookVector:Dot(inward)) * half.Z
-	local bodyInto = RushWorld.support(body.profile, facing, inward)
-	return travelled - half.Z + (boxInto - bodyInto) / closing
+	local radius = if box ~= nil then box.radius else Vector3.new(half.X, 0, half.Z).Magnitude
+	local swing = if box ~= nil then box.swing else radius
+	local back = 2 * radius
+	local ahead = swing + mover.speed * AI.tickSeconds()
+	local look = Brain.horizontal(d.engine.facing(mover.model)) or FORWARD
+	local right = look:Cross(Vector3.yAxis)
+	local position = d.engine.position(mover.model)
+	lookNear(mover, look, look, back, ahead, position)
+	lookNear(mover, look, -look, back, ahead, position)
+	lookNear(mover, look, right, back, ahead, position)
+	lookNear(mover, look, -right, back, ahead, position)
+end
+
+-- How far the body, facing `facing` with its root moved by `offset` from where it stands, walks
+-- along `direction` before a corner of it meets one of the near faces (less than 0: it already
+-- stands that far inside one), and that face's normal; math.huge when none is ahead.
+local function nearRoom(mover: Mover, facing: Vector3, direction: Vector3, offset: Vector3?): (number, Vector3?)
+	local body = mover.body
+	if body == nil then
+		return math.huge, nil
+	end
+	local position = dependencies().engine.position(mover.model) + (offset or Vector3.zero)
+	local best, normal = math.huge, nil
+	for index, point in mover.nearPoints do
+		local into = mover.nearInto[index]
+		local closing = direction:Dot(into)
+		if closing > AI.flatEpsilon then
+			local gap = (point - position):Dot(into) - RushWorld.support(body.profile, facing, into)
+			local room = gap / closing
+			if room < best then
+				best, normal = room, -into
+			end
+		end
+	end
+	return best, normal
 end
 
 -- How far the body, facing `facing`, can walk along `direction` (flat, unit) within `distance` before
--- its snout meets a wall: `distance` when nothing is in the way or it is ground the body climbs (a
--- slope, a step), less than 0 when the snout would already stand inside one. A long body's head
--- reaches past its root's box, the only part that collides with the world (RigBuilder), so the
--- engine alone lets it walk its head into a wall. The cast asks about the world alone (players,
--- enemies and blockers are the engine's and Spacing's), with the root's box turned to face the walk,
--- moved by `offset` first when given (where the body is on its way to). The second value: the normal
--- of the face that cut the walk (nil when nothing did).
+-- a part of it meets a wall: `distance` when nothing is in the way or it is ground the body climbs (a
+-- slope, a step), less than 0 when a part would already stand inside one. A long body's head reaches
+-- past its root's box, the only part that collides with the world (RigBuilder), so the engine alone
+-- lets it walk its head into a wall. The walk is cast ahead (worldAhead's walk: the world alone,
+-- players, enemies and blockers being the engine's and Spacing's, with the body as it faces, D-435)
+-- and checked against the faces near it (nearFaces), moved by `offset` first when given (where the
+-- body is on its way to). The second value: the normal of the face that cut the walk (nil when
+-- nothing did).
 local function snoutWalk(
 	mover: Mover,
 	facing: Vector3,
@@ -413,17 +562,16 @@ local function snoutWalk(
 	distance: number,
 	offset: Vector3?
 ): (number, Vector3?)
-	local body = mover.body
 	local cast = dependencies().engine.worldAhead
-	if body == nil or cast == nil then
+	if mover.body == nil or cast == nil then
 		return distance, nil
 	end
-	local lead = RushWorld.support(body.profile, facing, direction)
-	local face, ground, normal = cast(mover.model, direction, distance + lead, offset, true)
-	if face == nil or ground == true then
-		return distance, nil
+	nearFaces(mover)
+	local room, normal = nearRoom(mover, facing, direction, offset)
+	local ahead, ground, face = cast(mover.model, direction, distance, offset, facing)
+	if ahead ~= nil and ground ~= true and ahead < room then
+		room, normal = ahead, face
 	end
-	local room = walkRoom(body, facing, direction, face, normal)
 	if room >= distance then
 		return distance, nil
 	end
@@ -470,34 +618,40 @@ local function snoutRoom(mover: Mover, position: Vector3, target: Vector3): (Vec
 	return Vector3.new(position.X + stop.X, target.Y, position.Z + stop.Z), true
 end
 
--- How far the body, turned to `facing` where it stands, could walk that way before its snout meets a
--- wall (negative: the snout would stand inside it); its whole front's reach when nothing is that near.
--- A walking body is judged where it stands, not where it is walking to (D-295): the walk to a stop by
--- a wall is cut so the snout as it faces now just meets the face there, so at that stop nearly every
--- other facing reads deeper and a body on its way could not turn at all. The walk itself is checked
--- again with the facing it then has (snoutRoom, every AI tick), which cuts it at once if a turn on
--- the way would carry the snout into the wall.
-local function snoutAhead(mover: Mover, facing: Vector3): number
+-- How deep the body, turned to `facing` where it stands, would stand in a wall: the deepest any
+-- corner of it goes into a near face (nearFaces), so a turn that swings its snout or its rear into a
+-- wall reads as deep as it goes (D-435). A walking body is judged where it stands, not where it is
+-- walking to (D-295): the walk to a stop by a wall is cut so the body as it faces now just meets the
+-- face there, so at that stop nearly every other facing reads deeper and a body on its way could not
+-- turn at all. The walk itself is checked again with the facing it then has (snoutRoom, every AI
+-- tick), which cuts it at once if a turn on the way would carry a part of it into the wall.
+local function bodyIn(mover: Mover, facing: Vector3): number
 	local body = mover.body
 	if body == nil then
-		return math.huge
+		return 0
 	end
-	local room = snoutWalk(mover, facing, facing, RushWorld.support(body.profile, facing, facing))
-	return room
+	nearFaces(mover)
+	local position = dependencies().engine.position(mover.model)
+	local deepest = 0
+	for index, point in mover.nearPoints do
+		local into = mover.nearInto[index]
+		deepest = math.max(deepest, RushWorld.support(body.profile, facing, into) - (point - position):Dot(into))
+	end
+	return deepest
 end
 
--- Whether a walking body may turn to `facing`: not when the turn would swing its snout more than
+-- Whether a walking body may turn to `facing`: not when the turn would swing a part of it more than
 -- movement.snoutSlackStuds into a wall, unless it stands no deeper than it does now (a turn away). A
 -- strike's own movement turns by its own rules (RushWorld, D-206).
 local function canFace(mover: Mover, facing: Vector3): boolean
 	if mover.direct then
 		return true
 	end
-	local room = snoutAhead(mover, facing)
-	if room >= -AI.movement.snoutSlackStuds then
+	local depth = bodyIn(mover, facing)
+	if depth <= AI.movement.snoutSlackStuds then
 		return true
 	end
-	return room >= snoutAhead(mover, dependencies().engine.facing(mover.model))
+	return depth <= bodyIn(mover, dependencies().engine.facing(mover.model))
 end
 
 -- `urgent`: a goal that must be heard at once (a walk cut short at a wall), whatever the re-issue rule.
@@ -583,6 +737,21 @@ local function firstAhead(path: { Vector3 }, index: number, position: Vector3, f
 	return i
 end
 
+-- The stuck clock (D-183) at `position`: whether the body has made no stuckProgressStuds of progress
+-- for stuckSeconds.
+local function stuckAt(mover: Mover, position: Vector3, now: number): boolean
+	local movement = AI.movement
+	local lastProgress = mover.lastProgressPosition
+	if lastProgress == nil or (position - lastProgress).Magnitude >= movement.stuckProgressStuds then
+		mover.lastProgressAt = now
+		mover.lastProgressPosition = position
+		mover.stuck = false
+	elseif now - mover.lastProgressAt >= movement.stuckSeconds then
+		mover.stuck = true
+	end
+	return mover.stuck
+end
+
 -- Applies the tick's request: direct MoveTo inside pathfindPastStuds, a path beyond it or when stuck;
 -- a strike's own movement (direct) always goes straight.
 local function moverUpdate(mover: Mover, now: number)
@@ -605,24 +774,25 @@ local function moverUpdate(mover: Mover, now: number)
 		mover.walkSpeed = mover.speed
 	end
 	if mover.direct then
+		mover.cutStop = nil
+		if mover.exact and mover.halted == nil and stuckAt(mover, engine.position(mover.model), now) then
+			-- An exact run the body cannot finish (D-432) ends where it stands once the stuck clock
+			-- says so (D-183), whatever stop kept it going.
+			moverStop(mover, true)
+			return
+		end
 		issue(mover, goal, now)
 		return
 	end
 
 	local position = engine.position(mover.model)
-	local lastProgress = mover.lastProgressPosition
-	if lastProgress == nil or (position - lastProgress).Magnitude >= movement.stuckProgressStuds then
-		mover.lastProgressAt = now
-		mover.lastProgressPosition = position
-		mover.stuck = false
-	elseif now - mover.lastProgressAt >= movement.stuckSeconds then
-		mover.stuck = true
-	end
+	stuckAt(mover, position, now)
 
 	local distance = Brain.horizontalDistance(position, goal)
 	if distance <= movement.arriveRadius then
 		mover.path = nil
 		local room, cut = snoutRoom(mover, position, goal)
+		mover.cutStop = if cut then room else nil
 		issue(mover, room, now, cut)
 		return
 	end
@@ -651,6 +821,7 @@ local function moverUpdate(mover: Mover, now: number)
 			end
 			if mover.pathIndex <= #path then
 				local room, cut = snoutRoom(mover, position, path[mover.pathIndex])
+				mover.cutStop = if cut then room else nil
 				issue(mover, room, now, cut)
 				return
 			end
@@ -658,21 +829,40 @@ local function moverUpdate(mover: Mover, now: number)
 		end
 	end
 	local room, cut = snoutRoom(mover, position, goal)
+	mover.cutStop = if cut then room else nil
 	issue(mover, room, now, cut)
 end
 
--- A strike's own movement to where it stops (`exact`: a slam's stop) that would reach it before the
--- next server frame (at its speed over this frame's seconds, at most movement.haltLeadSeconds) stops
--- dead on it (Engine.halt): the body rests on the stop the rush told every client (D-208), never a
--- skid past it. Once per goal.
-local function arrive(mover: Mover, dt: number)
-	local goal = mover.goal
-	if not mover.exact or not mover.moving or goal == nil then
+-- Where the body's movement stops dead: an exact goal (a strike's own stop), or the cut a wall made
+-- in a walk (cutStop). Nil: a walk that ends as the engine ends it.
+local function stopOf(mover: Mover): Vector3?
+	if mover.exact then
+		return mover.goal
+	end
+	if not mover.direct and mover.goal ~= nil then
+		return mover.cutStop
+	end
+	return nil
+end
+
+-- A strike's own movement to where it stops (`exact`: a slam's stop, a finished rush's line end) that
+-- would reach it before the next server frame (at its speed over this frame's seconds, at most
+-- movement.haltLeadSeconds) lands on it (Engine.land, D-431): the body runs the rest of the way at its
+-- own pace and is stopped dead there once that time is over (landed), so it rests on the stop the rush
+-- told every client (D-208), never a skid past it, and gets there by its own motion: a CFrame write is
+-- a teleport of the root on every client. An engine with no land is stopped dead on it (Engine.halt).
+-- A walk a wall cut short lands on its cut the same way (D-435), with an engine that lands a body (a
+-- halt onto it would be a CFrame write): it stands with its snout at the face, not a skid past it.
+-- Once per stop.
+local function arrive(mover: Mover, dt: number, now: number)
+	local goal = stopOf(mover)
+	if not mover.moving or goal == nil then
 		return
 	end
 	local engine = dependencies().engine
-	local halt = engine.halt
-	if halt == nil then
+	local halt = if mover.exact then engine.halt else nil
+	local land = engine.land
+	if halt == nil and land == nil then
 		return
 	end
 	local halted = mover.halted
@@ -680,9 +870,45 @@ local function arrive(mover: Mover, dt: number)
 		return
 	end
 	local lead = mover.speed * math.clamp(dt, 0, AI.movement.haltLeadSeconds)
-	if Brain.horizontalDistance(engine.position(mover.model), goal) <= lead + AI.flatEpsilon then
-		mover.halted = goal
+	local left = Brain.horizontalDistance(engine.position(mover.model), goal)
+	if left > lead + AI.flatEpsilon then
+		return
+	end
+	mover.halted = goal
+	if land ~= nil then
+		local seconds = if mover.speed > 0 then left / mover.speed else 0
+		land(mover.model, goal, seconds)
+		mover.landingUntil = now + seconds
+		mover.walkSpeed = nil -- the landing sets its own pace; the next movement sets its own again
+	elseif halt ~= nil then
 		halt(mover.model, goal)
+		if mover.stopAfter then
+			moverStop(mover)
+		end
+	end
+end
+
+-- A landing whose time is over (arrive) stops the body dead where it got to (Engine.halt), unless a
+-- new movement took over meanwhile (it carries the body on from there).
+local function landed(mover: Mover, now: number)
+	local untilAt = mover.landingUntil
+	if untilAt == nil or now < untilAt then
+		return
+	end
+	mover.landingUntil = nil
+	local goal, halted = stopOf(mover) or mover.goal, mover.halted
+	if goal ~= nil and (halted == nil or Brain.horizontalDistance(halted, goal) >= AI.flatEpsilon) then
+		return
+	end
+	local engine = dependencies().engine
+	local halt = engine.halt
+	if halt ~= nil then
+		halt(mover.model, nil)
+	else
+		engine.stop(mover.model)
+	end
+	if mover.stopAfter then
+		moverStop(mover)
 	end
 end
 
@@ -1130,6 +1356,11 @@ local function makeContext(entry: Entry): Brain.Context
 			d.entities.setState(id, state, duration)
 		end,
 		actionStarted = function(clipId, facing)
+			-- Every attack begins here (Brain.beginAttack): one more of a limit spent (FK2).
+			local left = entry.attacksLeft
+			if left ~= nil then
+				entry.attacksLeft = left - 1
+			end
 			fireActionStarted(entry, clipId, facing)
 		end,
 		random = d.random,
@@ -1251,16 +1482,37 @@ local function sweepCorpses(now: number)
 	end
 end
 
--- Holds an enemy: its brain sleeps (it stops and forgets its target), its mover stops and its HP
--- stops regenerating.
+-- Anchors (true) or frees (false) an enemy's root once per change (Engine.anchor, D-436).
+local function anchorBody(entry: Entry, anchored: boolean)
+	if entry.anchored == anchored then
+		return
+	end
+	entry.anchored = anchored
+	local anchor = dependencies().engine.anchor
+	if anchor ~= nil then
+		anchor(entry.model, anchored)
+	end
+end
+
+-- Holds an enemy: its brain sleeps (it stops and forgets its target), its body stops dead and is
+-- anchored where it stands (D-436: a player walking or sprinting into a held enemy shoves an
+-- unanchored body 2-5 studs) and its HP stops regenerating.
 local function hold(entry: Entry)
 	entry.held = true
 	if entry.awake then
 		entry.awake = false
 		entry.brain:sleep()
 	end
-	moverStop(entry.mover)
+	moverStop(entry.mover, true)
+	anchorBody(entry, true)
 	holdRegen(entry.id, true)
+end
+
+-- Ends a hold: the body goes back to the server's physics where it stands, and its HP regenerates.
+local function unhold(entry: Entry)
+	entry.held = false
+	anchorBody(entry, false)
+	holdRegen(entry.id, false)
 end
 
 --- The scaled, variant-applied def an enemy spawns with (what EntityService registers).
@@ -1309,9 +1561,11 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 	-- Measured on the rig as built (every part at its rest pose around the root), before it moves.
 	local front, back = EnemyService.bodyExtents(model)
 	local root = model.PrimaryPart
-	local body: RushWorld.Body? = if root ~= nil
-		then { profile = RushWorld.profileOf(model), size = root.Size }
-		else nil
+	-- The rush judges walls on the poses its clients draw it in too (D-437).
+	local body: RushWorld.Body? = if root ~= nil then RushWorld.bodyOf(model) else nil
+	if body ~= nil then
+		walkBoxes[model] = walkBoxOf(body)
+	end
 	-- What players bump into instead of the root (D-198); the enemies group switches it on.
 	if typeof(d.rigBuilder.addBlocker) == "function" then
 		d.rigBuilder.addBlocker(model)
@@ -1334,6 +1588,8 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 		mover = newMover(model, def.moveSpeed, body),
 		awake = true,
 		held = false,
+		anchored = false,
+		attacksLeft = nil,
 		home = d.engine.position(model),
 		front = front,
 		back = back,
@@ -1415,12 +1671,25 @@ function EnemyService.setHeld(id: number, held: boolean): boolean
 	if held then
 		hold(entry)
 	elseif entry.held then
-		entry.held = false
-		holdRegen(id, false)
+		unhold(entry)
 		-- Asleep until the sleep check says otherwise: run it on the next tick, not in up to
 		-- ai.sleepCheckInterval.
 		lastSleepCheck = -math.huge
 	end
+	return true
+end
+
+--- An attack limit (FK2, the staged shots: dev.luau StagedEnemy.attacks): the enemy may begin
+--- `count` more attacks (the wind-up's ActionStarted spends one), then it is held (as setHeld) at
+--- the first tick it is free (ai.spacing.freePhases), so the last attack, a stagger after it and
+--- its recovery play out whole; nothing is cut and the live AI's timing is untouched until then.
+--- nil lifts the limit. Dev and cinematic use only. Returns false when `id` is no living enemy.
+function EnemyService.limitAttacks(id: number, count: number?): boolean
+	local entry = entries[id]
+	if entry == nil then
+		return false
+	end
+	entry.attacksLeft = count
 	return true
 end
 
@@ -1492,19 +1761,36 @@ end
 local function rouse(entry: Entry)
 	entry.walk = nil
 	hold(entry)
-	entry.held = false
-	holdRegen(entry.id, false)
+	unhold(entry)
 	entry.awake = true
 	entry.brain:wake()
 end
 
--- Why a living enemy cannot take a dev walk or charge now (staggered, dazed or dead), or nil.
+-- Why a living enemy cannot take a dev walk or charge now (staggered, dazed or dead), or nil. An
+-- interrupt whose time is over ends first (Brain.settle, D-433): a held brain never ticks it away.
 local function busyFor(entry: Entry): string?
+	local d = dependencies()
+	entry.brain:settle(d.serverTime(), d.entities.get(entry.id))
 	local phase = entry.brain:getPhase()
 	if phase == "Interrupted" or phase == "Dead" then
 		return ("it is %s (%s); try again once it recovers"):format(phase, tostring(entry.brain.interruptState))
 	end
 	return nil
+end
+
+-- Whether a wall cut the body's walk short and it stands at the cut (D-435): landed on it and
+-- stopped dead there (arrive, landed), or, with an engine that lands no body, stuck short of it
+-- (the stuck clock, D-183). A dev walk is over then, not at its timeout.
+local function standsAtCut(mover: Mover): boolean
+	local cut = mover.cutStop
+	if cut == nil then
+		return false
+	end
+	local halted = mover.halted
+	if halted ~= nil and mover.landingUntil == nil and Brain.horizontalDistance(halted, cut) < AI.flatEpsilon then
+		return true
+	end
+	return mover.stuck
 end
 
 -- A dev walk's tick (EnemyService.walk), in place of the brain's: the body turns toward the goal at
@@ -1521,7 +1807,11 @@ local function walkTick(entry: Entry, now: number, step: number): boolean
 		return true
 	end
 	local position = dependencies().engine.position(entry.model)
-	if Brain.horizontalDistance(position, walk.goal) <= walk.arriveStuds or now >= walk.endsAt then
+	if
+		Brain.horizontalDistance(position, walk.goal) <= walk.arriveStuds
+		or now >= walk.endsAt
+		or standsAtCut(entry.mover)
+	then
 		entry.walk = nil
 		brain:enterIdle(now) -- stops the mover and the turn
 		entry.home = position
@@ -1577,8 +1867,7 @@ function EnemyService.place(id: number, cframe: CFrame, held: boolean?): boolean
 	entry.stepping = false
 	entry.home = engine.position(model)
 	if held ~= true then
-		entry.held = false
-		holdRegen(id, false)
+		unhold(entry)
 		lastSleepCheck = -math.huge
 	end
 	return true
@@ -1726,6 +2015,12 @@ local function tickAll(step: number)
 			continue
 		end
 		rejoin(entry, now) -- asleep or held too: a stopped rush still waits for a clear body
+		local left = entry.attacksLeft
+		if left ~= nil and left <= 0 and not entry.held and AI.spacing.freePhases[entry.brain:getPhase()] == true then
+			-- Its attack limit is spent and it is free (FK2): held before it can begin another.
+			hold(entry)
+			continue
+		end
 		if not entry.awake then
 			continue
 		end
@@ -1770,9 +2065,12 @@ local function frameAll(dt: number)
 		if entry.mover.pending then
 			moverUpdate(entry.mover, now)
 		end
-		arrive(entry.mover, dt)
+		arrive(entry.mover, dt, now)
 	end
 	table.clear(frameList)
+	for _, entry in entries do
+		landed(entry.mover, now) -- asleep or held too: a landing still ends stopped dead
+	end
 end
 
 --- Advances the service by a frame's dt: whole AI ticks run at ai.tickHz (perception, decisions,
@@ -1979,6 +2277,14 @@ function EnemyService.isGround(normal: Vector3?): boolean
 	return RushWorld.isGround(normal)
 end
 
+-- How far a box of `size` at `frame` reaches from its centre along `direction`.
+local function boxReach(frame: CFrame, size: Vector3, direction: Vector3): number
+	local half = size / 2
+	return math.abs(frame.RightVector:Dot(direction)) * half.X
+		+ math.abs(frame.UpVector:Dot(direction)) * half.Y
+		+ math.abs(frame.LookVector:Dot(direction)) * half.Z
+end
+
 --- How far ahead of a model's root centre along `direction` (flattened) the world stops the root,
 --- within `distance` studs, or nil when nothing does (D-197). The root's own box is cast in the
 --- root's own collision group (a rushing body's group collides with the world only), from where its
@@ -1989,13 +2295,20 @@ end
 --- treads ahead. A rush's line still never resolves past it (whatever stands behind it is unseen),
 --- but it stops no body. The third is the face's normal (nil: named no way). `cast` stands in for
 --- workspace:Blockcast.
+---
+--- `walk` (D-435): a walking body's question, the facing it asks with. The world alone is cast (the
+--- rushing group), with the body's own box as it faces (its corners at rest, spawn) set back along
+--- `direction` by its reach that way, so whatever it stands against is seen. The first value is then
+--- how far the body walks before its leading corner meets the face, over the corners themselves
+--- rather than their box (a face is taken for a plane): less than 0 when a part already stands
+--- inside it, by that much along `direction`.
 function EnemyService.worldAhead(
 	model: Model,
 	direction: Vector3,
 	distance: number,
 	cast: WorldCast?,
 	offset: Vector3?,
-	walk: boolean?
+	walk: Vector3?
 ): (number?, boolean?, Vector3?)
 	local root = model.PrimaryPart
 	local flat = Brain.horizontal(direction)
@@ -2003,23 +2316,48 @@ function EnemyService.worldAhead(
 		return nil, nil, nil
 	end
 	local engineCast: WorldCast = cast or defaultWorldCast
-	local group = if walk == true then AI.collision.rushing else root.CollisionGroup
+	local look = if walk ~= nil then Brain.horizontal(walk) or flat else nil
+	local group = if look ~= nil then AI.collision.rushing else root.CollisionGroup
 	local bound: RushWorld.Cast = function(start: CFrame, size: Vector3, vector: Vector3): (number?, Vector3?)
 		return engineCast(start, size, vector, group, model)
 	end
 	local frame = root.CFrame + (offset or Vector3.zero)
-	local reach = EnemyService.rootReach(model, flat)
-	if walk == true then
-		frame = CFrame.lookAt(frame.Position, frame.Position + flat)
-		reach = root.Size.Z / 2
+	if look == nil then
+		local reach = EnemyService.rootReach(model, flat)
+		local ok, travelled, normal = pcall(bound, frame - flat * reach, root.Size, flat * distance)
+		if not ok or typeof(travelled) ~= "number" then
+			return nil, nil, nil
+		end
+		local face: Vector3? = if typeof(normal) == "Vector3" then normal else nil
+		local free = math.max(0, travelled) - reach
+		return math.max(0, travelled), RushWorld.runsOver(bound, frame, root.Size, flat, free, face), face
 	end
-	local ok, travelled, normal = pcall(bound, frame - flat * reach, root.Size, flat * distance)
+	local centre = frame.Position
+	local box = walkBoxes[model]
+	local size = if box ~= nil then box.size else root.Size
+	frame = CFrame.lookAt(centre, centre + look)
+	if box ~= nil then
+		frame *= CFrame.new(box.centre)
+	end
+	local reach = boxReach(frame, size, flat)
+	local ok, travelled, normal = pcall(bound, frame - flat * reach, size, flat * (reach + distance))
 	if not ok or typeof(travelled) ~= "number" then
 		return nil, nil, nil
 	end
 	local face: Vector3? = if typeof(normal) == "Vector3" then normal else nil
-	local free = math.max(0, travelled) - reach
-	return math.max(0, travelled), RushWorld.runsOver(bound, frame, root.Size, flat, free, face), face
+	local free = travelled - reach
+	local room = free
+	local into = if face ~= nil then Brain.horizontal(-face) else nil
+	if box ~= nil and into ~= nil then
+		local closing = flat:Dot(into)
+		if closing > AI.flatEpsilon then
+			-- The box reaches toward the face past the corners by this much: the body itself goes on
+			-- that much further before its own corner meets the face.
+			local boxInto = (frame.Position - centre):Dot(into) + boxReach(frame, size, into)
+			room += (boxInto - RushWorld.support(box.profile, look, into)) / closing
+		end
+	end
+	return room, RushWorld.runsOver(bound, frame, size, flat, free, face), face
 end
 
 --- How far a model's root box reaches from its centre along `direction` (flattened): half its extent
@@ -2139,6 +2477,45 @@ local function defaultEngine(groups: any?): Engine
 		end,
 		pivot = function(model, cframe)
 			model:PivotTo(cframe)
+		end,
+		land = function(model, position, seconds)
+			local root = model.PrimaryPart
+			if root == nil then
+				return
+			end
+			-- The rest of the way at the pace that covers it in `seconds`, the Humanoid walking it there:
+			-- the body is never moved by a CFrame write (D-431).
+			local at = root.Position
+			local offset = Vector3.new(position.X - at.X, 0, position.Z - at.Z)
+			local pace = if seconds > 0 then offset / seconds else Vector3.zero
+			local velocity = root.AssemblyLinearVelocity
+			root.AssemblyLinearVelocity = Vector3.new(pace.X, velocity.Y, pace.Z)
+			local humanoid = humanoidOf(model)
+			if humanoid ~= nil then
+				humanoid.WalkSpeed = pace.Magnitude
+				humanoid:MoveTo(Vector3.new(position.X, at.Y, position.Z))
+			end
+		end,
+		anchor = function(model, anchored)
+			local root = model.PrimaryPart
+			if root == nil then
+				return
+			end
+			root.Anchored = anchored
+			if anchored then
+				return
+			end
+			-- Freed: the server simulates it again, standing where it is (a Humanoid walks back to the
+			-- last spot it was sent to).
+			local owned, err = pcall(root.SetNetworkOwner, root, nil)
+			if not owned then
+				warn(("[EnemyService] %s: SetNetworkOwner failed: %s"):format(model.Name, tostring(err)))
+			end
+			root.AssemblyLinearVelocity = Vector3.zero
+			local humanoid = humanoidOf(model)
+			if humanoid ~= nil then
+				humanoid:MoveTo(root.Position)
+			end
 		end,
 	}
 end
@@ -2271,6 +2648,7 @@ function EnemyService.reset()
 	end
 	table.clear(entries)
 	table.clear(corpses)
+	table.clear(walkBoxes)
 	currentPlayers = {}
 	accumulator = 0
 	lastSleepCheck = -math.huge

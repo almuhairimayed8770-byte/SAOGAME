@@ -1001,3 +1001,93 @@ describe("Mixer across a render stall", function()
 		expect(handle.time).toBeCloseTo(FRAME, 1e-9)
 	end)
 end)
+
+--[[
+	A cut it hands over takes the cut clip's open trail, window and smear with it (D-408, D-410).
+
+	A cancel holds the clip it cuts (its clock stands while it hands the body over), so the clip's
+	own close events (HitWindowClose, TrailOff, SmearOff) are never crossed. A basic a dodge cut
+	between its SmearOn and SmearOff kept its trail lit and its blade stretched for as long as the
+	rig lived (the merged round-E tree: Basic and Smear still on 90 frames after the cut, local and
+	remote alike); one a later basic cut kept its trail through the new swing's anticipation (15
+	frames against 6 when the cut clip's fade still ran its clock). The cut clip's next step fires
+	its close events past where it stands, once, unmarked, before any event of the clip that cut it.
+]]
+describe("Mixer hand-over cut closes what the cut clip opened (D-410)", function()
+	local function swing()
+		return clip("swing", {
+			blendOut = 0.2,
+			events = {
+				{ time = 0.1, kind = "TrailOn", data = { kind = "Basic" } },
+				{ time = 0.1, kind = "HitWindowOpen", data = { hit = 1 } },
+				{ time = 0.1083, kind = "SmearOn", data = { axis = "X" } },
+				{ time = 0.1417, kind = "SmearOff" },
+				{ time = 0.24, kind = "HitWindowClose", data = { hit = 1 } },
+				{ time = 0.27, kind = "TrailOff" },
+				{ time = 0.3, kind = "PostMotionStart" },
+				{ time = 0.5, kind = "Sfx", data = { name = "whoosh.Medium" } },
+			},
+		})
+	end
+	local function next(id: string)
+		return clip(id, { events = { { time = 0.1, kind = "TrailOn", data = { kind = "Basic" } } } })
+	end
+
+	for _, rate in { 15, 30, 60, 144, 240 } do
+		it(("at %d Hz: the closes past the stood clock fire on the cut clip's next step, once"):format(rate), function()
+			local mixer = Mixer.new()
+			local cut = mixer:play(swing())
+			while cut.time < 0.12 do
+				mixer:step(1 / rate)
+			end
+			local stood = cut.time
+			mixer:play(next("cutter"), { handOver = true, cancels = { cut } })
+			local fired = {}
+			local cutterAt = nil
+			for step = 1, math.ceil(rate * 0.5) do
+				for _, event in mixer:step(1 / rate).events do
+					if event.clipId == "swing" then
+						table.insert(
+							fired,
+							("%d:%s%s"):format(step, event.event.kind, if event.jumped then "!" else "")
+						)
+					elseif cutterAt == nil then
+						cutterAt = #fired
+					end
+				end
+			end
+			expect(cut.time).toBeCloseTo(stood, 1e-9)
+			expect(table.concat(fired, " ")).toBe("1:SmearOff 1:HitWindowClose 1:TrailOff")
+			-- The cutter's own trail lights after them, never under a close of the clip it cut.
+			expect(cutterAt).toBe(3)
+		end)
+	end
+
+	it("a stop, a hold or a cut that is not a hand-over closes nothing it did not cross", function()
+		for _, how in { "stop", "hold", "cut" } do
+			local mixer = Mixer.new()
+			local cut = mixer:play(swing())
+			stepFrames(mixer, 8)
+			if how == "stop" then
+				mixer:stop(cut, 0.2)
+				mixer:hold(cut)
+			elseif how == "hold" then
+				mixer:hold(cut)
+			else
+				mixer:play(clip("cutter", { blendOut = 0.2 }))
+			end
+			local fired = {}
+			for _ = 1, 30 do
+				for _, event in mixer:step(FRAME).events do
+					if event.clipId == "swing" then
+						table.insert(fired, event.event.kind)
+					end
+				end
+			end
+			-- A held clip crosses nothing; a plain cut's fade runs its clock over its own closes.
+			expect(table.concat(fired, " ")).toBe(
+				if how == "cut" then "SmearOff HitWindowClose TrailOff PostMotionStart" else ""
+			)
+		end
+	end)
+end)

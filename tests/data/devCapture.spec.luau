@@ -470,6 +470,42 @@ describe("dev.luau capture hotkeys", function()
 	it("auto-perform starts off", function()
 		expect(Capture.perform.defaultOn).toBe(false)
 	end)
+
+	-- Studio's "Respect Studio shortcuts when game has focus" keeps these keys for itself: pressed in
+	-- Play they never reach the game (measured in Studio on Windows).
+	it("no dev key is one Studio keeps for its own shortcuts", function()
+		local studioKeys = { "I", "O", "Home", "End", "PageUp", "PageDown", "F1", "F2", "F11", "F12" }
+		local keys: { { where: string, key: string } } = {}
+		for name, key in Capture.hotkeys do
+			table.insert(keys, { where = "capture.hotkeys." .. name, key = key })
+		end
+		for name, key in Dev.clipLab.hotkeys do
+			table.insert(keys, { where = "clipLab.hotkeys." .. name, key = key })
+		end
+		for index, key in Walk.cancelKeys do
+			table.insert(keys, { where = ("capture.walk.cancelKeys[%d]"):format(index), key = key })
+		end
+		expect(#keys).toBeGreaterThan(0)
+		for _, entry in keys do
+			if table.find(studioKeys, entry.key) ~= nil then
+				error(("%s is %s, a key Studio keeps for its own shortcuts"):format(entry.where, entry.key))
+			end
+		end
+	end)
+
+	it("the time-scale key is free while the capture panel is up", function()
+		local key = Capture.hotkeys.cycleTimeScale
+		expect((Enum.KeyCode :: any)[key] ~= nil).toBe(true)
+		for _, bound in Input.keyboard do
+			expect(table.find(bound, key)).toBeNil()
+		end
+		for name, other in Capture.hotkeys do
+			if name ~= "cycleTimeScale" then
+				expect(other ~= key).toBe(true)
+			end
+		end
+		expect(table.find(Walk.cancelKeys, key)).toBeNil()
+	end)
 end)
 
 describe("dev.luau capture staging", function()

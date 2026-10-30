@@ -6,7 +6,7 @@ local ChoreoData = Harness.load("src/shared/data/choreo")
 local FRAME = 1 / 60
 local DELAY = ChoreoData.sheath.sheatheDelay
 
-local function input(overrides: { [string]: boolean }?)
+local function input(overrides: { [string]: any }?)
 	local base = { target = false, cut = false, covered = false, drawing = false, sheathing = false, hold = false }
 	for key, value in overrides or {} do
 		(base :: any)[key] = value
@@ -265,6 +265,86 @@ describe("SheathState: a clip that hides the arm", function()
 		local state = SheathState.new("Back")
 		local out = state:step(FRAME, input({ cut = true, covered = true }))
 		expect(out.place).toBe("Hand")
+	end)
+end)
+
+describe("SheathState: a guard raised with the sword on the back (D-420)", function()
+	local HAND_OVER = ChoreoData.sheath.handOverTime
+
+	it("plays the Draw over the guard instead of draw-cutting, and the event takes the sword", function()
+		local state = SheathState.new("Back")
+		local guard = input({ cut = true, target = true, drawFirst = true })
+		local out = state:step(FRAME, guard)
+		expect(out.play).toBe("Draw")
+		expect(out.over).toBe(true)
+		expect(out.from).toBeNil()
+		expect(out.place).toBeNil()
+		expect(state.place).toBe("Back")
+		-- The Draw over it plays on: nothing more until its event.
+		local drawing =
+			input({ cut = true, target = true, drawFirst = true, drawing = true, drawOver = true, drawTime = 0.1 })
+		expect(state:step(FRAME, drawing)).toEqual({})
+		expect(state:onEvent("WeaponDraw", drawing)).toBe("Hand")
+	end)
+
+	it("hands the arm to the guard from handOverTime, once, over handOverBlend", function()
+		local state = SheathState.new("Hand")
+		local early = input({
+			cut = true,
+			target = true,
+			drawFirst = true,
+			drawing = true,
+			drawOver = true,
+			drawTime = HAND_OVER - 0.01,
+		})
+		expect(state:step(FRAME, early)).toEqual({})
+		local late = input({
+			cut = true,
+			target = true,
+			drawFirst = true,
+			drawing = true,
+			drawOver = true,
+			drawTime = HAND_OVER,
+		})
+		local out = state:step(FRAME, late)
+		expect(out.stop).toBe("Draw")
+		expect(out.blend).toBe(ChoreoData.sheath.handOverBlend)
+		expect(out.play).toBeNil()
+		-- Stopping, it is no longer live: the guard holds the sword in the hand.
+		expect(state:step(FRAME, input({ cut = true, target = true, drawFirst = true }))).toEqual({})
+		expect(state.place).toBe("Hand")
+	end)
+
+	it("carries on a lock-on's Draw the guard's play cut short, from where it was", function()
+		for _, place in { "Back", "Hand" } :: { any } do
+			local state = SheathState.new(place)
+			state:step(FRAME, input({ target = true, drawing = true, drawTime = 0.1 }))
+			state:step(FRAME, input({ target = true, drawing = true, drawTime = 0.3 }))
+			-- The guard's play faded the Draw out (the mixer, not this state): it is not live now.
+			local out = state:step(FRAME, input({ cut = true, target = true, drawFirst = true }))
+			expect(out.play).toBe("Draw")
+			expect(out.over).toBe(true)
+			expect(out.from).toBe(0.3)
+			expect(out.place).toBeNil() -- a cut short Draw does not land the sword while it plays on
+			expect(state.place).toBe(place)
+		end
+	end)
+
+	it("stops a Sheathe that put the sword away and draws over the guard", function()
+		local state = SheathState.new("Back")
+		local out = state:step(FRAME, input({ cut = true, target = true, drawFirst = true, sheathing = true }))
+		expect(out.stop).toBe("Sheathe")
+		expect(out.play).toBe("Draw")
+		expect(out.over).toBe(true)
+	end)
+
+	it("an attack or a Parry with it still draw-cuts: the sword is in the hand at once", function()
+		local state = SheathState.new("Back")
+		local out =
+			state:step(FRAME, input({ cut = true, target = true, drawFirst = false, drawing = true, drawOver = true }))
+		expect(out.place).toBe("Hand")
+		expect(out.stop).toBe("Draw")
+		expect(out.play).toBeNil()
 	end)
 end)
 
