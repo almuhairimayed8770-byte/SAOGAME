@@ -2161,6 +2161,8 @@ describe("choreo validator: the cancel hand-over and the gait hand-off (D-408, D
 		copy.locomotion = table.clone(real.locomotion)
 		copy.locomotion.handOff = table.clone(real.locomotion.handOff)
 		copy.locomotion.handOff.joints = table.clone(real.locomotion.handOff.joints)
+		copy.locomotion.dodgeHandOff = table.clone(real.locomotion.dodgeHandOff)
+		copy.locomotion.dodgeHandOff.joints = table.clone(real.locomotion.dodgeHandOff.joints)
 		edit(copy)
 		local dev = Harness.load("src/shared/data/dev")
 		if snapFrames ~= nil then
@@ -2226,6 +2228,30 @@ describe("choreo validator: the cancel hand-over and the gait hand-off (D-408, D
 		end)).toEqual({})
 	end)
 
+	it("takes as the snap with nothing to cut only clips under clipPrefix that are not attacks (D-527)", function()
+		expect(hasProblem(
+			runWith(function(c)
+				c.handOver.snapClips = { "Guard", "Nope" }
+			end),
+			"handOver.snapClips 'Nope' is not a clip under player/OneHandedSword/"
+		)).toBe(true)
+		expect(hasProblem(
+			runWith(function(c)
+				c.handOver.snapClips = { "Basic1" }
+			end),
+			"handOver.snapClips 'Basic1' is an attack"
+		)).toBe(true)
+		expect(hasProblem(
+			runWith(function(c)
+				c.handOver.snapClips = nil
+			end),
+			"handOver.snapClips must list"
+		)).toBe(true)
+		expect(runWith(function(c)
+			c.handOver.snapClips = {}
+		end)).toEqual({})
+	end)
+
 	it("lists PlayerR15 joints with factors in (0, 3]", function()
 		expect(hasProblem(
 			runWith(function(c)
@@ -2246,6 +2272,45 @@ describe("choreo validator: the cancel hand-over and the gait hand-off (D-408, D
 				c.locomotion.handOff.seconds = 0
 			end),
 			"locomotion.handOff.seconds"
+		)).toBe(true)
+	end)
+
+	it("takes a dodge over PlayerR15 joints' blends done by its move end, from dodge clips (D-528)", function()
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.dodgeHandOff.joints.Tail = 0.1
+			end),
+			"dodgeHandOff.joints names Tail, not a PlayerR15 joint"
+		)).toBe(true)
+		-- combat.luau dodgeDuration is 0.25 s: a blend longer than the move leaves the dodge half shown.
+		for _, bad in { 0, -0.1, 0.3, 0 / 0, "0.1" } :: { any } do
+			expect(hasProblem(
+				runWith(function(c)
+					c.locomotion.dodgeHandOff.joints.LeftShoulder = bad
+				end),
+				"locomotion.dodgeHandOff.joints.LeftShoulder"
+			)).toBe(true)
+		end
+		expect(runWith(function(c)
+			c.locomotion.dodgeHandOff.joints.LeftShoulder = 0.25
+		end)).toEqual({})
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.dodgeHandOff.clips = { "DodgeForward", "DodgeUp" }
+			end),
+			"dodgeHandOff.clips 'DodgeUp' is not a clip under player/OneHandedSword/"
+		)).toBe(true)
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.dodgeHandOff.clips = { "Basic2" }
+			end),
+			"dodgeHandOff.clips 'Basic2' is an attack"
+		)).toBe(true)
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.dodgeHandOff = nil
+			end),
+			"locomotion.dodgeHandOff is missing"
 		)).toBe(true)
 	end)
 

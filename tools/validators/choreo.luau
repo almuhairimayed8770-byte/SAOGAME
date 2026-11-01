@@ -24,14 +24,20 @@
 	sheath.handOverBlend is a positive number of seconds.
 
 	And the cancel hand-over (D-408): handOver.seconds is above 0 and at most dev.luau
-	review.audit.cancel.snapFrames 60 Hz frames (a cancel is a snap, section 10 beat 2), and
-	handOver.easing a util/Easing curve other than Linear and Hold.
+	review.audit.cancel.snapFrames 60 Hz frames (a cancel is a snap, section 10 beat 2),
+	handOver.easing a util/Easing curve other than Linear and Hold, and every handOver.snapClips
+	name (a clip that comes up as the snap with nothing to cut, the guard, D-527) a clip under
+	locomotion.clipPrefix that is not an attack.
 
 	And the gait hand-off (D-404): locomotion.handOff.seconds is above 0; every joint it lists is
 	a PlayerR15 joint (rigs.luau) with a factor in (0, 3]; and for every attack clip under
 	locomotion.clipPrefix the longest hand-off blend (its blendIn or seconds, the longer, times the
 	largest factor) ends by its first strike key (the first strike snap key in its first damage
 	window, ContactPredictor.strikeKey): the hit is drawn on that key's pose, the clip's own.
+
+	And the dodge's hand-off (D-528): every locomotion.dodgeHandOff.clips name is a clip under
+	locomotion.clipPrefix that is not an attack; every joint it lists is a PlayerR15 joint whose
+	seconds are above 0 and at most combat.luau dodgeDuration.
 ]]
 
 local TIERS = { "High", "Medium", "Low" }
@@ -212,6 +218,30 @@ return function(ctx: any): { string }
 			typeof(curve) == "string" and curve ~= "Linear" and curve ~= "Hold" and (pcall(Easing.get, curve)),
 			("handOver.easing '%s' must be a util/Easing curve other than Linear and Hold"):format(tostring(curve))
 		)
+		-- The clips that always come up as the snap (D-527): each a clip under
+		-- locomotion.clipPrefix and not an attack (an attack's hit is drawn on its own pose, and
+		-- its hand-off from the gait is locomotion.handOff's).
+		local snapPrefix = if typeof(choreo.locomotion) == "table" then choreo.locomotion.clipPrefix else nil
+		if typeof(handOver.snapClips) ~= "table" then
+			check(false, "handOver.snapClips must list the clips that come up as the snap with nothing to cut")
+		else
+			for _, name in handOver.snapClips do
+				local ok, clip = pcall(ctx.load, "src/shared/clips/" .. tostring(snapPrefix) .. tostring(name))
+				if not ok or typeof(clip) ~= "table" then
+					check(
+						false,
+						("handOver.snapClips '%s' is not a clip under %s"):format(tostring(name), tostring(snapPrefix))
+					)
+				else
+					check(
+						clip.attack ~= true,
+						("handOver.snapClips '%s' is an attack: its hand-off is locomotion.handOff's"):format(
+							tostring(name)
+						)
+					)
+				end
+			end
+		end
 	end
 
 	-- The gait hand-off (D-404): every listed joint a PlayerR15 joint with a factor in (0, 3], and
@@ -260,6 +290,59 @@ return function(ctx: any): { string }
 					)
 				)
 			end
+		end
+	end
+
+	-- The dodge's hand-off (D-528): each clip a dodge under locomotion.clipPrefix (not an attack),
+	-- each joint a PlayerR15 joint, and each blend above 0 and done by the dodge's move end
+	-- (combat.luau dodgeDuration): the body reads as the dodge while it moves.
+	local dodgeHandOff = if typeof(choreo.locomotion) == "table" then choreo.locomotion.dodgeHandOff else nil
+	if
+		typeof(dodgeHandOff) ~= "table"
+		or typeof(dodgeHandOff.clips) ~= "table"
+		or typeof(dodgeHandOff.joints) ~= "table"
+	then
+		check(false, "locomotion.dodgeHandOff is missing (the dodge clips and the joints' seconds)")
+	else
+		local prefix = choreo.locomotion.clipPrefix
+		for _, name in dodgeHandOff.clips do
+			local ok, clip = pcall(ctx.load, "src/shared/clips/" .. tostring(prefix) .. tostring(name))
+			if not ok or typeof(clip) ~= "table" then
+				check(
+					false,
+					("locomotion.dodgeHandOff.clips '%s' is not a clip under %s"):format(
+						tostring(name),
+						tostring(prefix)
+					)
+				)
+			else
+				check(
+					clip.attack ~= true,
+					("locomotion.dodgeHandOff.clips '%s' is an attack: its hand-off is locomotion.handOff's"):format(
+						tostring(name)
+					)
+				)
+			end
+		end
+		local Rigs = ctx.load("src/shared/data/rigs")
+		local jointNames: { [string]: boolean } = {}
+		for _, joint in Rigs.PlayerR15.joints do
+			jointNames[joint.name] = true
+		end
+		local dodgeSeconds = ctx.load("src/shared/data/combat").dodgeDuration
+		for name, seconds in dodgeHandOff.joints do
+			check(
+				jointNames[name] == true,
+				("locomotion.dodgeHandOff.joints names %s, not a PlayerR15 joint"):format(tostring(name))
+			)
+			check(
+				positive(seconds) and positive(dodgeSeconds) and seconds <= dodgeSeconds + 1e-9,
+				("locomotion.dodgeHandOff.joints.%s (%s) must be above 0 and at most combat.luau dodgeDuration (%s): the body reads as the dodge while it moves"):format(
+					tostring(name),
+					tostring(seconds),
+					tostring(dodgeSeconds)
+				)
+			)
 		end
 	end
 

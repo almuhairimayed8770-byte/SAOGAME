@@ -27,6 +27,15 @@ local Choreo = {
 	handOver = {
 		seconds = 0.05,
 		easing = "ExpoOut",
+		-- Clips (names under locomotion.clipPrefix) that come up as this snap even with nothing
+		-- live to cut (D-527, Locomotion): the guard is raised in 2 to 4 frames (section 10 beat
+		-- 2) whether it cuts a basic or rises from the stance with the sword in the hand. Blended
+		-- over its own 0.08 s from the stance, the arms turned 11.3 / 28.4 / 32.7 / 24.1 / 6.6
+		-- degrees on the rows after the press (the owner's PC 9.5 / 29.6 / 29.8 / 25.6 / 7.7):
+		-- five moving rows, three over review.audit.popDegrees. With the sword on the back, or
+		-- over a Draw or a Sheathe, it keeps its blend (the sheath's limits, D-420). Not an attack
+		-- (tools/validators/choreo.luau).
+		snapClips = { "Guard" },
 	},
 
 	-- Clip clock
@@ -179,6 +188,34 @@ local Choreo = {
 				RightShoulder = 1.5,
 				RightElbow = 1.5,
 				RightWrist = 1.5,
+			} :: { [string]: number },
+		},
+		-- A dodge that cuts nothing (D-528): pressed from the stance or a gait it was not authored
+		-- from (the sheathed stance, a walk, a run), its own 0.05 s blend in crossed the arms and the
+		-- stride into its first pose in two rows: up to 58.6 degrees a row on the arms and 40.2 on
+		-- the legs (the owner's PC 30.9 to 60.3, before the State read Dodge). So the dodge takes
+		-- each joint listed here over these seconds (Mixer.handOff); the gait's phase and blend stand
+		-- where the dodge found them until it lets go (the root's dodge speed is not a run). A dodge
+		-- that cuts an action keeps the cancel's snap (handOver, D-408). Each blend is done by the
+		-- dodge's move end, combat.luau dodgeDuration (tools/validators/choreo.luau).
+		dodgeHandOff = {
+			clips = { "DodgeForward", "DodgeBack", "DodgeLeft", "DodgeRight" },
+			joints = {
+				Root = 0.12,
+				Waist = 0.12,
+				Neck = 0.12,
+				LeftHip = 0.12,
+				RightHip = 0.12,
+				LeftKnee = 0.12,
+				RightKnee = 0.12,
+				LeftAnkle = 0.12,
+				RightAnkle = 0.12,
+				LeftShoulder = 0.18,
+				LeftElbow = 0.18,
+				LeftWrist = 0.18,
+				RightShoulder = 0.18,
+				RightElbow = 0.18,
+				RightWrist = 0.18,
 			} :: { [string]: number },
 		},
 		skidSpeedThreshold = 18, -- above run speed: stopping plays Skid

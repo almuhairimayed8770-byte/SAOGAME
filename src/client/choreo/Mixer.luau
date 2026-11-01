@@ -460,6 +460,21 @@ function Mixer.handOff(_self: any, handle: Handle, jointBlendIn: { [string]: num
 	end
 end
 
+--- Takes a handle that has not stepped yet in as a cancel's snap with nothing to cut (D-527):
+--- it blends in over no longer than choreo.luau handOver.seconds, eased by handOver.easing and laid
+--- over its priority peers, as a play that cut a live clip does (D-408). A handle that already
+--- stepped, or is going, keeps its blend.
+function Mixer.snapIn(_self: any, handle: Handle)
+	if handle.done or handle.stopping or not handle.fresh then
+		return
+	end
+	handle.blendIn = math.min(handle.blendIn, ChoreoData.handOver.seconds)
+	handle.handOver = true
+	if handle.blendIn <= 0 then
+		handle.fade = 1
+	end
+end
+
 --- True while the handle or any joint of it is still blending in (its envelope below 1).
 function Mixer.blendingIn(_self: any, handle: Handle): boolean
 	if handle.done or handle.stopping then

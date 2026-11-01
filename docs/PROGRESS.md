@@ -903,16 +903,29 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - Checks: ALL GREEN (full): 3898 specs passed in 233 spec files, 0 failed; 41 validators, 0 problems; the hit matrix passes; gaitgen matches 12 gait clips; ANIMATION_REVIEW.md is current (66 clips).
 - Still open: the PC's cause for 425 (a dropped first turn-off, the connection order, or watch never running; item 442(c) names it); the studio Humanoid's arrival braking is a fit to the PC's 60 fps rows (at 144 Hz it predicted −0.219 on 4b18b5c where round G measured 0.015–0.03 past), so items 440 and 441 decide; a hitch longer than twice the last frame can carry a landing past its stop; D-514's redraw does not show, so 422(a), 423(b) and 424 are being re-worked; the fails in 430 to 437; and every line of section AJ.
 
+## Section AI fixes, second part (2026-11-01, D-527 to D-529)
+
+- Why: the PC's section AI run on 4b18b5c (items 433 to 436) found the drawn guard raise still turning the arms 24–34° a row on its 4th row (436(c)), the dodges turning the arms 30.9–60.3° a row before State read Dodge (436(d)), and a set of feet and tip lines that Lune either matched or could not reproduce (433(b)(d), 434(a), 435(a)(c)(d), 436(a)).
+- The guard raise is a snap (D-527): raised drawn with nothing to cut, it comes in as the cancel's hand-over (0.05 s, ExpoOut, D-408). Largest upper-body turn on the 4th row after the press: standing 24.1° → 0.1°, walking 33.5° → 0.8°; done in 2 rows. A guard raised sheathed keeps D-420's Draw over it.
+- A dodge takes the body without a pop (D-528): a dodge that cuts nothing takes each joint over its own blend (arms 0.18 s, legs, spine, neck and root 0.12 s), with the gait's phase, pace and weights held under it. Worst turn a row from any stance, walk or run: arms 58.6° → 19.6° (the dodge's own recovery row), legs 40.2° → 18.9°.
+- Pass-line fixes with no code change (D-529): 435(a) exempts the drawn stance's heel-up rear foot (D-417), 435(c)'s planted share band is 55–65% (Lune 59–61%, the PC 58–61%), 435(d) and 436(a) judge against the sprint's own foot turn at 24 (31.3), and 433(b) judges only presses made sheathed.
+- Needs Studio: 433(b) and (d) (the PC's tip peaks of 301 and 171 against Lune's 61–75) and 434(a) (the PC's pivot slide 0.097 against Lune's 0.005) are not reproduced in Lune; the likeliest cause, an assumption, is frames that get 0 or 2 physics substeps. Items 444 to 446 count the substeps on each row.
+- Studio: section AK (items 444 to 452), run after section AJ. Section AI marks each line they replace "Superseded by item …".
+- Merge: F2's patch went on 9063a60 with no conflicts. Its specs pass with the first part's; no existing spec, bound or data value changed.
+
 ## Next three tasks
 
 1. Run section AJ (items 439 to 443) of `docs/STUDIO_TASKS.md` on the owner's PC on the build with these fixes:
    item 442 (enemies upright, reading UprightClient, UprightClientWhy and UprightClientTries) and item 439's server
    log first, then 440, 441 and 443, every item with item 397's frame names, at the frame rates and lags each names.
    Report every pass line with its numbers and the reports AJ asks for (440(h), 441(e), 442(c) and (d), 443(b)).
-   Section AI's lines not superseded stand as written.
-2. Fix the remaining section AI fails, 430 to 437 (in progress), and re-work 422(a), 423(b) and 424 after the render
-   check (in progress); their re-tests follow as the second part of section AJ. The owner's calls (below, and in AI)
-   go to the owner.
+   Section AI's lines not superseded stand as written. Then section AK (items 444 to 452), the second part, with each
+   row's physics substep count where an item asks for it.
+2. Fix the remaining section AI fails (430, 431 and 437: the body against the kobold and walls, in progress), re-work
+   422(a), 423(b) and 424 after the render check (in progress), and fix the AG fails the PC found on 4b18b5c (376(a),
+   no remote ribbon under lag; 383 and 384, ribbon segments after the stroke; 391(c), the boar Stagger's rear; 392(b),
+   the boar's walk start; in progress); their re-tests follow as later parts of section AK. The owner's calls (below,
+   and in AI) go to the owner.
 3. The rehearsal and the recording (item 438), once every line passes: rehearse the 11 shots in dev.luau order with the
    frame-tick square on and log any take that fails its own pass lines; if all pass, record each with Game Bar at 60
    fps, High quality, with **View > Stats** open during the fight for the fps reading, and hand the files over (here in
@@ -920,7 +933,21 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
    of `docs/ANIMATION_REVIEW.md` are filled (with AG item 391(f)'s enemy cells), and anything that reads wrong is fixed
    with the PoseEditor and recorded again. The section 16 numbers and the merge into `main` follow (Open items).
 
-### Open items (after the section AI fixes, first part, not in the three above)
+### Open items (after the section AI fixes, second part, not in the three above)
+
+- **Owner calls from the section AI fixes, second part (the default is chosen; say if not).**
+  - The drawn guard raise is a 2-row snap (the arms turn 89–116° on the press row), kept as D-408's hand-over snap,
+    which section 10 beat 2 asks for (a guard comes up in 2–4 frames), not eased over 3 rows (D-527).
+  - A dodge's arms reach its pose by 0.18 s and its legs, spine and root by 0.12 s, not 0.05 s (kept); its move and
+    i-frames are unchanged, and a dodge out of an attack still snaps (D-528).
+  - The stride-own rule for one-shots out of a sprint (a row's foot turn within the shown gait's own per-row turn
+    + 1°), already open from 436(b), now also reads 435(d) and 436(a) (D-529).
+- **From the section AI fixes, second part.** At 144 fps the drawn walk's planted foot slides 0.050 p90 a row on
+  screen (0.019 at 60): the gait builds its pose for the last frame's root travel (D-334) and physics moves the root
+  over 1 or 2 substeps a frame. Proposed: build the pose for this frame's physics travel; item 448(c) first confirms
+  the substep pattern. Out of a drawn sprint into an attack the arms still turn 21–22° a row (the Sprint@ hand-off);
+  proposed: stretch locomotion.handOff's arm factors when the gait shown is a sprint, within the first strike key.
+  A drawn guard's tip moves 340–358 studs/s for its one snap row at 60 Hz, by design, and no line judges it.
 
 - **Owner calls from the section AI fixes, first part (the default is chosen; say if not).**
   - A client copy of an enemy found already fallen stands up to Running (chosen), not GettingUp: Running is the

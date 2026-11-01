@@ -1797,27 +1797,27 @@ Run these on the build with the section AH fixes (D-508 to D-522) on the owner's
    (d) Pass: once, release the button inside a stagger: the guard stays down after it. 413(b) as written (not run on 0582a04).
 433. [ ] **Where the sword hangs, and the sheathed guard's tip (D-519; replaces item 415).** Setup C, 240 fps capture, sheathed, with item 420 columns 5 and 6. Item 415's presses: (i) guard pressed and held 5 times standing and 5 times walking; (ii) 5 times on the row a jump lands, released 0.5 s later; (iii) 5 times while a lock 135° off turns the body; then item 345's Draws, standing and at a sprint.
    (a) Pass: sheathed, before the first press, WeaponMount reads "Back", WeaponMountWhy is nil and Part0 is UpperTorso on every row (the PC: Part0 RightHand on every row, so the sword most likely never went to the back).
-   (b) Pass (415(a)): on a guard press while sheathed, the tip's speed in the root's frame (column 6's tip through the root's PointToObjectSpace, divided by the row's dt) is ≤ 84 studs/s on every row (choreo sheath.drawTipSpeed; Lune 61.1 standing, 62.0 walking 16 → 8, 66.6 on a Land, 61.2 under the lock at 135, 68.4 the Draw; the PC 321 over 22 rows).
+   (b) Pass (415(a)): on a guard press while sheathed, the tip's speed in the root's frame (column 6's tip through the root's PointToObjectSpace, divided by the row's dt) is ≤ 84 studs/s on every row (choreo sheath.drawTipSpeed; Lune 61.1 standing, 62.0 walking 16 → 8, 66.6 on a Land, 61.2 under the lock at 135, 68.4 the Draw; the PC 321 over 22 rows). Superseded by item 444.
    (c) Report: if WeaponMount reads "Hand", WeaponMountWhy's text and the row it first reads so.
-   (d) Pass (415(b), (c), once (a) passes): as written in item 415. 415(d) as written.
+   (d) Pass (415(b), (c), once (a) passes): as written in item 415. 415(d) as written. Superseded by item 445.
 434. [ ] **Lock-turn feet (no code change; corrects 416(a) and (c)).** Setup D, 60 fps, as item 416: stand drawn and lock a target 90°, 135° and 180° off each way. Log each foot's four sole corners every row.
-   (a) Pass (416(a), corrected): the pivot foot's least-moving grounded corner moves ≤ 0.01 a row (Lune 0.002–0.005; the PC's pivot ≤ 0.03).
+   (a) Pass (416(a), corrected): the pivot foot's least-moving grounded corner moves ≤ 0.01 a row (Lune 0.002–0.005; the PC's pivot ≤ 0.03). Superseded by item 446.
    (b) Report, not judged: the whole-foot slide (Lune 0.150–0.433; the PC 0.15–0.43), which is the pivot foot turning flat on its sole (D-416), and each foot's end-to-end move (Lune 0.80–1.96; the PC 1.8–3.3), which a turn in place has to make.
    (c) Pass (416(c), corrected): with a 0.05 lift bar (the lowest corner more than 0.05 over the floor), the non-pivot foot lifts at most once per turn clip and the pivot foot at most twice (Lune: the pivot twice, the other once). With a lower bar the drawn stance's rear ball, 0.037 up (D-417), counts as lifted. 416(b) passed; 416(d) as written.
 435. [ ] **Feet on the floor, the landing on the move and the held-at-spawn kobold (D-520, D-521; replaces item 417 and AG 390(b) to (d)).** Setup C at 60 and 144 Hz with the owner's avatar, item 420 column 5. Draw first by locking a target (F) and check that WeaponMount reads "Hand": the logger's Drawn column is the server's combat tag, and on 0582a04 it read false at W 16 although the sword was in hand. For the kobolds, item 390's Server command bar print.
-   (a) Pass (417(a), drawn): on a still drawn idle, each foot's lowest sole corner is within ±0.02 of the floor on every row (Lune −0.007).
+   (a) Pass (417(a), drawn): on a still drawn idle, each foot's lowest sole corner is within ±0.02 of the floor on every row (Lune −0.007). Superseded by item 447.
    (b) Report (417(a), sheathed): the corner reads about −0.061 to −0.068 (the sheathed Idle's Root y −0.05 with the ankles at 4–8°; a clip re-key, still open). The PC's 0.06–0.10 below was most likely this stance.
-   (c) Pass (417(b), as written): the drawn walk at 8 is planted on 63–75% of rows with step p90 < 0.02 (not run on 0582a04: the take moved at 16, sheathed).
-   (d) Pass (417(c); D-521): landing at W 16 and 24 from 0.25 and 0.5 s falls, on the touch-down row and the 0.35 s after it, no foot turns more than max(20, the stride's own) + 1° a row (Lune 19.3–20.3 against the stride's own 19.6–22.8; the PC 25.3° and 27.2°).
+   (c) Pass (417(b), as written): the drawn walk at 8 is planted on 63–75% of rows with step p90 < 0.02 (not run on 0582a04: the take moved at 16, sheathed). Superseded by item 448.
+   (d) Pass (417(c); D-521): landing at W 16 and 24 from 0.25 and 0.5 s falls, on the touch-down row and the 0.35 s after it, no foot turns more than max(20, the stride's own) + 1° a row (Lune 19.3–20.3 against the stride's own 19.6–22.8; the PC 25.3° and 27.2°). Superseded by item 449.
    (e) Pass (417(d), drawn): standing drawn, the rear heel stays up, its ball ≤ 0.05 over the floor (Lune's drawn stance 0.037).
    (f) Pass (417(e), AG 390(c); D-520): a held-at-spawn kobold released does not drop (Δ root y ≤ 0.005; the PC 0.066 at the first start).
    (g) Pass (AG 390(b), (c), corrected): item 390's print reads every kobold's HumanoidRootPart Y 3.400 over the floor, held at spawn or pack-spawned alike (the PC's held ones read 3.45), and its lowest leg corner 0.000 ± 0.005 on all four kobolds (the PC +0.050 on the held ones).
    (h) Report (AG 390(d)): on the client during Idle, each kobold foot's lowest corner. The + side (the PC +0.018 to +0.044) was the 0.05 spawn lift and should read 0; the − side (the PC −0.033 to −0.006) is the kobold Idle clip's 0.032 sink, still open. Superseded by item 443.
 436. [ ] **One-shot bars and Basic3's step back (no code change; corrects 418(d), (e) and AG 396).** Setup C: item 418's moves for 418, and a held kobold 3.5 studs in front for 396.
-   (a) Report (418(d)): out of a sprint, the arms against the Sprint@ hand-off (the PC 21.2°, Lune 20.4–21.9°; still open). The feet pass under popDegrees 20 (the PC 18.0).
+   (a) Report (418(d)): out of a sprint, the arms against the Sprint@ hand-off (the PC 21.2°, Lune 20.4–21.9°; still open). The feet pass under popDegrees 20 (the PC 18.0). Superseded by item 450.
    (b) Pass (418(e), the Skid): each row's foot turn is within the sprint's own per-row foot turn + 1° (the sprint's feet turn 31.8–33.2° a frame by themselves; the PC's Skid 20.9 passes).
-   (c) Pass (418(e), the guard raise): the snap ends within cancel.snapFrames, 3 rows (D-408: it is a hand-over snap), not judged against 20° (the PC 31.7).
-   (d) Pass (418(e)): F and the dodges turn under 20° a row (the PC 1.7–12.8 and ≤ 17.4).
+   (c) Pass (418(e), the guard raise): the snap ends within cancel.snapFrames, 3 rows (D-408: it is a hand-over snap), not judged against 20° (the PC 31.7). Superseded by item 451.
+   (d) Pass (418(e)): F and the dodges turn under 20° a row (the PC 1.7–12.8 and ≤ 17.4). Superseded by item 452.
    (e) Pass (AG 396, corrected; Basic3 started with you exactly 3.5 away): the root's net move back from Basic3's first row, minus the clip's own root motion (0 to 0.10 s, then 0.50 toward the kobold by 0.15 and 0.60 by 0.25), reads the keep-out's step: 1.00 by the key at 0.15. The root's raw net move is +0.60 at 0.10, +0.50 at 0.15 and +0.40 at the end.
    (f) Pass (AG 396, the chain): with three presses from 3.5, Basic3 starts about 3.75 away; its raw net move is +0.35 at 0.10, +0.25 at the key and +0.15 at the end, with a 0.75 keep-out step (the PC's 0.178 is in this band). The old line read the root's travel as the keep-out's step.
    (g) Pass: your head stays clear of the axe tip (the PC ≥ 2.78).
@@ -1935,3 +1935,45 @@ Run these on the build with the first part of the section AI fixes (D-523 to D-5
 443. [ ] **The kobolds' client copies (D-523; replaces 435(h)).** Item 435's setup C with its kobolds, as 435(h): on the client during Idle, each kobold foot's lowest corner (440 rows a kobold, as the PC's K435 log), plus, on every row for every kobold, the client GetState(), GetStateEnabled(FallingDown), the root's Anchored and item 442's three attributes. Say how each kobold came: pack-spawned before the client joined, a respawn, held at spawn (placed with held = true, or hold-new), or held later by S("hold").
    (a) Pass: no kobold's client Humanoid reads FallingDown on any row (the PC on 4b18b5c: kobold #23 on 331 of 440 rows), and UprightClient reads "Off" on every row, "StoodUp" allowed on its first row only (Lune, 7 arrival orders: 0 rows in each, from 196 in the 6 late ones).
    (b) Report: each kobold's lowest leg corner range against 4b18b5c (#5 −0.033 to −0.006; #23 −0.057 to +0.024, 161 rows outside ±0.02). If #23 narrows to the Idle sink (about −0.033 to −0.006), its FallingDown copy was moving its drawn feet; the Idle clip's 0.032 sink itself is still open.
+
+## AK. Section AI re-test after the fixes, second part (D-527 to D-529)
+
+Run these on the build with the second part of the section AI fixes (D-527 to D-529) on the owner's PC, after section AJ. Frame names stay exactly as item 397 defines them (a row is the logger's at Last+2), and item 420's columns stand as item 439 left them. Judge every pose on the BasePart read at Last+2, which is what the screen shows (section AJ's intro); log the joint-chain read beside it for diagnosis. Report every pass line with its numbers. Section AI's lines that these replace are marked "Superseded by item …"; the rest of 433 to 437 stand.
+
+444. [ ] **The sheathed guard's tip, presses judged only when sheathed (D-529; replaces 433(b)).** Setup C, 240 fps capture, sheathed, item 420 columns 1, 5, 6 and 7.
+   1. Before each press wait until column 5 reads WeaponMount "Back" (about 7.2 s after the last guard release: the 6 s combat tag, sheatheDelay 0.3 and the Sheathe's 0.815 s), or space the presses 9 s apart.
+   2. Each row, the screen tip in the root's frame: HumanoidRootPart.CFrame:PointToObjectSpace(the Weapon part's BasePart CFrame × TrailEnd), both read at Last+2; divide its step by the row's column-1 frame time. Log column 6's chain tip through the same root beside it.
+   3. Count the PreSimulation callbacks between consecutive Last+2 rows (the row's physics substeps) and log the count.
+   (a) Pass: on presses whose press row reads "Back", the screen tip is ≤ 84 studs/s on every row with exactly 1 substep (Lune 61.5 standing, 64.1 walking 16; the PC on 4b18b5c 301 at peak, 135 rows over 84, most of them on presses that were drawn).
+   (b) Report: rows with 0 or 2 substeps, apart, with their tip step. If a 0-substep row shows no tip step and the next row shows two rows' worth, the PC's 301 is frame pacing, not the clip.
+   (c) Report: presses whose press row reads "Hand", apart. A drawn guard is now a snap (D-527): Lune 340–358 studs/s on 1 row at 60 Hz, 914–1070 on 4 rows at 240 Hz; not judged.
+   (d) Report (433(c)): the first row column 5 reads "Hand" after a sheathed press, and WeaponMountWhy (Lune: at the Draw's WeaponDraw, 0.22 s after the press, about 53 rows at 240 fps; Why nil).
+445. [ ] **The Draw's tip with the substep count (replaces the PC's 433(d) Draw reading).** Item 345's Draws, standing and at a sprint, 240 fps, with item 444's screen tip and substep count (444 steps 2 and 3).
+   (a) Pass: ≤ 84 studs/s on rows with exactly 1 substep (Lune 73–75 at 240 Hz, 68.4 standing, ≤ 73.8 over a sprint's cycle; the PC on 4b18b5c 171 at peak, 63 rows over 84).
+   (b) Report: 0- and 2-substep rows apart, with the root's PreSimulation-to-PostSimulation move on that row (column 3; at 24 studs/s 0, 0.1 or 0.2 studs).
+446. [ ] **The lock turn's pivot foot against the yaw physics applied (replaces 434(a)).** Setup C, lock a target 90°, 135° and 179° off each way, 60 fps.
+   1. Each row log the pivot foot's grounded corners from the foot's BasePart at Last+2 (the screen) and from the chain beside, and the root's yaw at PreSimulation before the lock write, after it (pendingLockYaw flushed), and at PostSimulation (column 3).
+   (a) Pass: the pivot foot's least-moving grounded corner moves ≤ 0.01 a row on the BasePart read through the turn (Lune 0.003–0.005; the PC on 4b18b5c 0.097 at +90, 0.010–0.025 elsewhere).
+   (b) Report if (a) fails: each row's yaw physics applied (PostSimulation minus PreSimulation after the write) minus the yawAhead the pose was built with. A gap that is not zero means the turn the body shows is not the turn the pose expected.
+   (c) Report: the lifts (Lune and the PC: L2 and R1 on + turns, L1 and R2 on − turns).
+447. [ ] **The drawn idle's feet (D-529; replaces 435(a)).** The drawn idle, 60 fps, 300 rows.
+   (a) Pass: on the BasePart read, every foot's lowest corner is within ±0.02 of the floor on every row, except the drawn stance's rear (right) foot, which D-417 sets heel-up (Lune LeftFoot −0.003 to 0.000).
+   (b) Pass (435(e), as written): the rear foot's ball ≤ 0.05 over the floor with its heel up (Lune ball +0.033 to +0.038, heel about 0.13; the PC 0.033–0.038).
+448. [ ] **The drawn walk's plants (D-529; replaces 435(c)).** The drawn walk at 8, 60 and 144 fps, 10 s each.
+   (a) Pass: each foot is planted (a grounded corner within 0.02 and the least-moving corner ≤ 0.02 a row) on 55–65% of rows (Lune 60% and 60% at 60 fps, 61% and 59% at 144; the PC 58–61%).
+   (b) Pass: at 60 fps the step p90 of the least-moving grounded corner is < 0.02 on the BasePart read (Lune 0.0187 and 0.0191; log the chain beside).
+   (c) Report: at 144 fps the p90 (Lune's screen model 0.0504, chain 0.0200; the PC 0.050–0.052) with each row's PreSimulation count. Lune expects 1 or 2 substeps alternating (1 on about a third of the rows) and the large steps on the rows whose count differs from the row before. Not judged until the gait builds its pose for the frame's own physics travel (Open items in PROGRESS).
+449. [ ] **The landing on the move at W 24 (D-529; replaces 435(d)).** The landing at W 24 from 0.25 s and 0.5 s falls, 60 and 144 fps.
+   (a) Pass: each row's foot turn ≤ max(20, the sprint's own per-row foot turn) + 1° (Lune sprint's own 31.3 drawn, 31.1 sheathed; the PC's sprint 33–35.3 gives a bar of 34.3–36.3, so its 33.22 and 31.13 pass).
+   (b) Report: the sprint's own foot turn over one cycle before the jump, on the same take.
+450. [ ] **Out of a drawn sprint into an attack (D-529; replaces 436(a)).** Out of a drawn sprint at 24 into Basic1 and into Horizontal, 60 fps.
+   (a) Pass: each row's foot turn ≤ the sprint's own per-row foot turn + 1° on the rows the sprint still shows (Lune feet 26.7 and 26.1 into Basic1, 26.4 and 24.9 into Horizontal; the sprint's own 31.3; the PC 26.9 and 26.0).
+   (b) Report: the arms (Lune 21.2 and 20.9, up to 21.8; the PC under 20; still open).
+451. [ ] **The drawn guard raise is a snap (D-527; replaces 436(c)).** The guard raised drawn, standing and walking at 8, with nothing to cut, 60 fps.
+   (a) Pass: from the 4th row after the press (cancel.snapFrames 3) every upper-body part turns ≤ 8° a row (review.audit.reportDegrees) on the BasePart read (Lune after D-527: standing 89.3 / 8.9 / 0.9 / 0.1 / 0.1, walking 115.7 / 11.6 / 1.5 / 0.8 / 0.5; the PC on 4b18b5c 9.5 / 29.6 / 29.8 / 25.6 / 7.7).
+   (b) Report: the first rows (the snap itself; not judged against 20°).
+   (c) A guard pressed sheathed: item 444 instead (D-420's Draw over it, unchanged).
+452. [ ] **A dodge takes the body without a pop (D-528; replaces 436(d)).** The four dodges from the drawn and the sheathed stance, standing, walking at 8 and running at 16 (stick held), 60 fps; mark the press row and the row State first reads Dodge.
+   (a) Pass: from the press row until the dodge clip lets go, every body part turns ≤ 20° a row on the BasePart read (Lune after D-528: arms ≤ 19.6, legs ≤ 18.9, torso and head ≤ 8.4; the PC on 4b18b5c 30.9–60.3 on the arms).
+   (b) Report: the rows between the press and the Dodge state (Lune: the clip plays from the press row).
+   (c) Report: the dodge reaches its pose by 0.18 s (arms) and 0.12 s (legs, spine and root); its move and i-frames are unchanged. A dodge out of a basic is a cancel (the snap, D-408): report it apart.

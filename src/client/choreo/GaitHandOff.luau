@@ -16,6 +16,10 @@
 
 		local blends = GaitHandOff.blends(clip) -- { [joint]: seconds }
 		if GaitHandOff.applies(clip) then mixer:handOff(handle, blends) end
+
+	A dodge (D-528) takes the body the same way from any stance or gait it cuts nothing in, over
+	choreo.luau locomotion.dodgeHandOff's per-joint seconds, and the gait's phase and blend stand
+	under it until it lets go (Locomotion).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -29,6 +33,35 @@ local GaitHandOff = {}
 --- True for a clip the hand-off takes the body for: an attack.
 function GaitHandOff.applies(clip: Types.ClipDef): boolean
 	return clip.attack == true
+end
+
+-- The dodge clips' ids (choreo.luau locomotion.dodgeHandOff.clips) and their joints' blends.
+local DODGES: { [string]: boolean } = {}
+for _, name in ChoreoData.locomotion.dodgeHandOff.clips do
+	DODGES[ChoreoData.locomotion.clipPrefix .. name] = true
+end
+
+--- True for a dodge clip (D-528): it takes the body over locomotion.dodgeHandOff's blends from
+--- any stance or gait, and the gait stands under it until it lets go.
+function GaitHandOff.dodges(clip: Types.ClipDef): boolean
+	return DODGES[clip.id] == true
+end
+
+--- True while a dodge clip plays on `mixer` and holds the body (not letting go). No allocation.
+function GaitHandOff.dodgeLive(mixer: any): boolean
+	for id in DODGES do
+		local handle = mixer:find(id)
+		if handle ~= nil and not handle.done then
+			return true
+		end
+	end
+	return false
+end
+
+--- Each listed joint's blend in (seconds) for a dodge taking the body (D-528): the data's own
+--- table, read only.
+function GaitHandOff.dodgeBlends(): { [string]: number }
+	return ChoreoData.locomotion.dodgeHandOff.joints
 end
 
 --- Each listed joint's blend in (seconds) for `clip` taking the body from a moving gait. A fresh

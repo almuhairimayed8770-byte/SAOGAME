@@ -131,6 +131,13 @@ for _, name in Sheath.drawFirstClips do
 	DRAW_FIRST_NAMES[name] = true
 end
 
+-- Clip ids that come up as the cancel's snap with nothing to cut (choreo.luau
+-- handOver.snapClips, D-527): the guard.
+local SNAP_IDS: { [string]: boolean } = {}
+for _, name in ChoreoData.handOver.snapClips do
+	SNAP_IDS[Config.clipPrefix .. name] = true
+end
+
 export type State = {
 	moveDir: Vector3, -- world-space move direction (any length; zero when still)
 	speed: number, -- horizontal studs per second
@@ -253,6 +260,53 @@ local function handOffAttacks(self: any, mixer: any, handles: { any })
 			elseif holder ~= nil then
 				self.gaitHeldBy = handle
 			end
+		elseif
+			handle.fresh
+			and not handle.stopping
+			and not handle.done
+			and typeof(clip) == "table"
+			and GaitHandOff.dodges(clip)
+		then
+			-- A dodge (D-528) takes every stance and gait over its joints' own blends, unless it
+			-- cuts an action (the cancel's snap, D-408); a gait's phase stands under it.
+			if not handle.handOver then
+				mixer:handOff(handle, GaitHandOff.dodgeBlends())
+			end
+			if self.gaitShown > 0 or holder ~= nil then
+				self.gaitHeldBy = handle
+			end
+		end
+	end
+end
+
+-- The guard comes up as a snap (D-527, choreo.luau handOver.snapClips): raised with the sword in
+-- the hand and no Draw or Sheathe under way, a guard that cut nothing takes the body over the
+-- cancel's handOver.seconds (Mixer.snapIn) as one out of a basic does (D-408), not its own 0.08 s
+-- blend: blended, the arms turned 24 to 34 degrees a 60 Hz row on the fourth row after the press.
+-- With the sword on the back the Draw plays over it (SheathState, D-420), and over a Draw or a
+-- Sheathe it keeps its blend: the sheath's tip and turn limits hold the blade there. Runs before
+-- the sheath step and the mixer (a handle played this frame has not stepped yet).
+local function snapRaises(self: any, mixer: any, handles: { any })
+	local fresh = false
+	for _, handle in handles do
+		if handle.fresh and SNAP_IDS[handle.clipId] == true and not handle.handOver then
+			fresh = true
+		end
+	end
+	if not fresh then
+		return
+	end
+	if self.mount:sheathable() and self.sheath.place ~= "Hand" then
+		return
+	end
+	for _, handle in handles do
+		if (handle.clipId == DRAW_ID or handle.clipId == SHEATHE_ID) and not handle.done then
+			return
+		end
+	end
+	for _, handle in handles do
+		if handle.fresh and SNAP_IDS[handle.clipId] == true and not handle.handOver then
+			mixer:snapIn(handle)
 		end
 	end
 end
@@ -743,7 +797,12 @@ local function stepGait(self: any, dt: number)
 		-- The clips run on the mixer's scaled clock (dev slow motion), the root on real time.
 		local speed = if scale > 0 then self.speed / scale else self.speed
 		local rate = math.clamp(speed * natural / stride, Stride.rateFloor, Stride.rateCeiling)
-		pace = math.clamp(rate / natural, minPace, maxPace)
+		-- A dodge holding the gait holds its pace too (D-528): the root's dodge speed and way are
+		-- no stride's, and a pace turned to them moved the held legs a row.
+		local holder = self.gaitHeldBy
+		if not (holder ~= nil and typeof(holder.clip) == "table" and GaitHandOff.dodges(holder.clip)) then
+			pace = math.clamp(rate / natural, minPace, maxPace)
+		end
 		if running and dt > 0 and scale > 0 then
 			-- Last step's weight change pulled the planted foot along the move by `moved` studs;
 			-- the phase takes it up (never backwards) on top of this step's advance.
@@ -889,6 +948,7 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 			end
 			if handles ~= nil then
 				handOffAttacks(self, mixer, handles)
+				snapRaises(self, mixer, handles)
 			end
 			stepSheath(self, dt, handles)
 			stepGait(self, dt)
@@ -1256,6 +1316,11 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 		forward, right = self.travelForward, self.travelRight
 	end
 
+	-- While a dodge holds the body the gait's weights stand where the dodge found them (D-528;
+	-- its pace, stepGait): the root's dodge speed is no run, and a blend that turned to it under
+	-- the dodge's fade crossed the legs to another stride in a row. The blend still hears the root
+	-- (a stop under the dodge is over when it lets go: no Skid after it, D-472).
+	local dodging = typeof(animator.mixer) == "table" and GaitHandOff.dodgeLive(animator.mixer)
 	local input: LocomotionState.Input = {
 		forward = forward,
 		right = right,
@@ -1272,8 +1337,10 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 	self.runAlong = LocomotionState.runAlong(input)
 	self.turnUnderWay = output.turnUnderWay
 
-	for name, weight in output.weights do
-		animator:setWeight(self.handles[name], weight)
+	if not dodging then
+		for name, weight in output.weights do
+			animator:setWeight(self.handles[name], weight)
+		end
 	end
 
 	local oneShot = output.oneShot
