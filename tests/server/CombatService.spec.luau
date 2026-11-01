@@ -3003,3 +3003,107 @@ describe("CombatService guard break hit-stop (D-471)", function()
 		expect(lastOf("HitConfirmed").hitStop).toBe("Kill")
 	end)
 end)
+
+describe("CombatService a guard held through its own break (item 413(a), D-516)", function()
+	local KOBOLD_CFRAME = CFrame.lookAt(Vector3.new(0, 2.2, -4), Vector3.new(0, 2.2, 0))
+	local function overhead(koboldId)
+		return CombatService.enemyStrike(koboldId, OVERHEAD, Vector3.new(0, 2.2, -4), Vector3.new(0, 0, 1))[1]
+	end
+
+	it("each of five Overheads breaks a guard held all along: it is back up as each stagger ends", function()
+		fresh()
+		local playerId, player = spawnPlayer()
+		local koboldId = spawnKobold(KOBOLD_CFRAME)
+		EntityService.get(playerId).hp = 1000
+		EntityService.get(playerId).maxHp = 1000
+		handlers.GuardRequest(player, { held = true, facing = FORWARD, clientTime = clock.t })
+		advance(1)
+		-- Each blow's reaction, and the guard as its stagger ends: the button never let go, so it is
+		-- up again, with a full gauge and no parry window (a parry is a tap, section 6; this raise
+		-- is no tap).
+		local reactions, after = {}, {}
+		for _ = 1, 5 do
+			local hit = overhead(koboldId)
+			table.insert(reactions, if hit.broke then "GuardBreak" else EntityService.get(playerId).state)
+			expect(EntityService.get(playerId).guardHeld).toBe(false) -- the stagger takes the body
+			advance(Combat.guardBreakStagger + 0.05)
+			local record = EntityService.get(playerId)
+			table.insert(
+				after,
+				("%s/%s/%s/%s"):format(
+					record.state,
+					tostring(record.guardHeld),
+					tostring(record.guardSince),
+					tostring(record.gauge == record.maxGauge)
+				)
+			)
+			advance(1.2) -- the Overhead's recovery and its next wind-up
+		end
+		print(
+			("[guard held] reactions %s; as each stagger ends %s"):format(
+				table.concat(reactions, ","),
+				table.concat(after, ",")
+			)
+		)
+		expect(table.concat(reactions, ",")).toBe("GuardBreak,GuardBreak,GuardBreak,GuardBreak,GuardBreak")
+		for _, each in after do
+			expect(each).toBe("Guard/true/nil/true")
+		end
+		-- Both stagger ends told every client the state: Idle, then Guard.
+		local states = {}
+		for _, each in sentOf("StateChanged") do
+			if each.entityId == playerId then
+				table.insert(states, each.state)
+			end
+		end
+		expect(table.concat(states, ","):find("GuardBroken,Idle,Guard,GuardBroken", 1, true)).never.toBeNil()
+	end)
+
+	it("a held guard struck from behind comes back up when the stagger ends", function()
+		fresh()
+		local playerId, player = spawnPlayer()
+		local koboldId = spawnKobold(CFrame.lookAt(Vector3.new(0, 2.2, 4), Vector3.new(0, 2.2, 0)))
+		handlers.GuardRequest(player, { held = true, facing = FORWARD, clientTime = clock.t })
+		advance(1)
+		CombatService.enemyStrike(koboldId, OVERHEAD, Vector3.new(0, 2.2, 4), Vector3.new(0, 0, -1))
+		expect(EntityService.get(playerId).state).toBe("Stagger")
+		advance(Combat.staggerDuration + 0.05)
+		expect(EntityService.get(playerId).state).toBe("Guard")
+		expect(EntityService.get(playerId).guardSince).toBeNil()
+	end)
+
+	it("a release during the stagger keeps it down, and a press during it is still refused", function()
+		fresh()
+		local playerId, player = spawnPlayer()
+		local koboldId = spawnKobold(KOBOLD_CFRAME)
+		handlers.GuardRequest(player, { held = true, facing = FORWARD, clientTime = clock.t })
+		advance(1)
+		overhead(koboldId)
+		advance(0.3)
+		handlers.GuardRequest(player, { held = false, facing = FORWARD, clientTime = clock.t })
+		advance(Combat.guardBreakStagger)
+		expect(EntityService.get(playerId).state).toBe("Idle")
+		expect(EntityService.get(playerId).guardHeld).toBe(false)
+		-- A raise asked inside the stagger is refused and never remembered (EntityService.setGuard).
+		handlers.GuardRequest(player, { held = true, facing = FORWARD, clientTime = clock.t })
+		advance(2)
+		overhead(koboldId)
+		advance(0.3)
+		local rejected = #sentOf("ActionRejected")
+		handlers.GuardRequest(player, { held = false, facing = FORWARD, clientTime = clock.t })
+		handlers.GuardRequest(player, { held = true, facing = FORWARD, clientTime = clock.t })
+		expect(#sentOf("ActionRejected")).toBe(rejected + 1)
+		advance(Combat.guardBreakStagger)
+		expect(EntityService.get(playerId).state).toBe("Idle")
+	end)
+
+	it("a dodge, an Art or a death ends the guard for good", function()
+		fresh()
+		local playerId, player = spawnPlayer()
+		handlers.GuardRequest(player, { held = true, facing = FORWARD, clientTime = clock.t })
+		advance(1)
+		EntityService.setState(playerId, "Dodge", Combat.dodgeDuration)
+		advance(Combat.dodgeDuration + 0.05)
+		expect(EntityService.get(playerId).state).toBe("Idle")
+	end)
+end)

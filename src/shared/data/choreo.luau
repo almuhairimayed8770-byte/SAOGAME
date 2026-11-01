@@ -133,6 +133,12 @@ local Choreo = {
 		directions = { Forward = 0, Right = 90, Back = 180, Left = 270 },
 		turnInPlaceDegrees = 45,
 		turnClipDuration = 0.5,
+		-- A landing on the move (D-521): Land plays with no weight there (its sounds only), so the
+		-- Fall's pose hands the legs straight to the stride. It lets go over this many seconds, as
+		-- long as it took them (the Fall clip's own blendIn), not oneShotBlendIn: over 0.05 s a run
+		-- landing turned a foot 24 to 39 degrees on the touch-down frame, past the stride's own 15
+		-- to 33. At most landOnMoveBlendMost (tools/validators/choreo.luau).
+		landOnMoveBlend = 0.15,
 		-- A standing body's feet hold the ground while its root turns (D-416, TurnPlant): the hips
 		-- keep the yaw they stood at, the Waist turns the upper body on toward the root's facing by
 		-- up to twistDegrees, and the hips come round only between a turn clip's two Footsteps

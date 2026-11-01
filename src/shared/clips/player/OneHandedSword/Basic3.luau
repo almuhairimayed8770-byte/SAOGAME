@@ -22,6 +22,10 @@
 	rolls on through the settle (Weapon Z to 25, the waist turning on to 46) and a SineInOut key at
 	0.32 lifts it before the recovery; the blade stood 0.44 in the right leg 6 frames past the hold,
 	now -0.10 (clear).
+	Settle (D-522): that roll is eased SineInOut instead of Spring (the same poses), so it starts
+	from rest at the window's close: the Spring threw six times the segment's mean speed into its
+	first frame and the tip ran 395 studs/s against the snap's 391 (240 Hz), now 102 there; the
+	fastest the tip moves after the snap is the recovery's start at 0.325 (229).
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -193,7 +197,7 @@ local clip: Types.ClipDef = {
 		{
 			-- settle
 			time = 0.28,
-			easing = "Spring",
+			easing = "SineInOut",
 			joints = {
 				Root = posRot(-0.074, -0.26, -0.1, 0, 7.4, 2.7),
 				Waist = rot(-13.2, 46, 8.5),

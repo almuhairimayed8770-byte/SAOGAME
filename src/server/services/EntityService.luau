@@ -77,6 +77,10 @@ local LOCK_STATES: { [string]: boolean } = {
 -- States a guard can be raised from (and that a held guard returns to).
 local FREE_STATES: { [string]: boolean } = { Idle = true, Moving = true, Guard = true }
 
+-- The stagger states a blow puts a held guard into (D-516): the body is taken while they last, and
+-- the guard comes back up when one ends with the button still held (section 6: guard is held).
+local GUARD_RESUME_STATES: { [string]: boolean } = { Stagger = true, GuardBroken = true }
+
 -- States that keep a player's combat tag (and so the drawn sword) fresh for as long as they last.
 local HOLD_STATES: { [string]: boolean } = { Art = true, PostMotion = true, Guard = true }
 
@@ -350,6 +354,7 @@ local function baseRecord(kind: Kind, model: Model): Record
 		guardHeld = false,
 		guardSince = nil,
 		guardReleasedAt = nil,
+		guardResume = false,
 		hasShield = false,
 		invulnerableUntil = now,
 		combatUntil = now,
@@ -589,6 +594,8 @@ function EntityService.setState(id: number, state: State, duration: number?, dir
 	record.stateTag = tag
 	record.stateUntil = if duration ~= nil then now + duration else nil
 	if LOCK_STATES[state] then
+		-- A blow's stagger keeps a held guard's button in mind (D-516); any other lock forgets it.
+		record.guardResume = GUARD_RESUME_STATES[state] == true and (record.guardHeld or record.guardResume)
 		record.guardHeld = false
 		record.guardSince = nil
 		record.lockUntil = if duration ~= nil then now + duration else record.lockUntil
@@ -629,13 +636,24 @@ function EntityService.extendState(id: number, seconds: number): boolean
 	return true
 end
 
--- A timed state ran out: Break and GuardBroken refill the gauge; everything returns to Idle.
+-- A timed state ran out: Break and GuardBroken refill the gauge; everything returns to Idle. A
+-- guard a blow's stagger took while its button was still held comes back up (D-516: section 6's
+-- guard is held, so it is up whenever the body is free and the button is down). It opens no parry
+-- window: a parry is a tap inside the 150 ms before a hit, and this raise is no tap.
 local function expireState(record: Record)
 	if record.state == "Break" or record.state == "GuardBroken" then
 		record.gauge = record.maxGauge
 	end
 	record.stateUntil = nil
+	local resume = record.guardResume and GUARD_RESUME_STATES[record.state] == true
+	record.guardResume = false
 	EntityService.setState(record.id, "Idle")
+	if resume and record.state == "Idle" then
+		record.guardHeld = true
+		record.guardSince = nil
+		refreshTag(record, dependencies().now())
+		EntityService.setState(record.id, "Guard")
+	end
 end
 
 --- True when a guard can be raised from the fighter's current state (free, or cancelling a basic swing).
@@ -680,6 +698,8 @@ function EntityService.setGuard(id: number, held: boolean): boolean
 	end
 	record.guardHeld = false
 	record.guardSince = nil
+	-- A release inside a blow's stagger lets the button go: the guard stays down when it ends.
+	record.guardResume = false
 	if record.state == "Guard" then
 		EntityService.setState(id, "Idle")
 	end

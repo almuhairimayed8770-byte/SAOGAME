@@ -176,6 +176,11 @@ describe("ActionLogic", function()
 		expect(ActionLogic.reconcile("Guard", "GuardBroken")).toBe("GuardBroken")
 		expect(ActionLogic.reconcile("Art", "Break")).toBe("Break")
 		expect(ActionLogic.reconcile("Dodge", "Dead")).toBe("Die")
+		-- A stagger the server ends by raising a guard still held (D-516); a guard already up stays.
+		expect(ActionLogic.reconcile("GuardBroken", "Guard")).toBe("EndAction")
+		expect(ActionLogic.reconcile("Stagger", "Guard")).toBe("EndAction")
+		expect(ActionLogic.reconcile("Guard", "Guard")).toBe("None")
+		expect(ActionLogic.reconcile("Idle", "Guard")).toBe("None")
 		expect(ActionLogic.reconcile("Basic", "Idle")).toBe("None")
 	end)
 

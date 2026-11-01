@@ -64,6 +64,10 @@ describe("dev.luau capture shots", function()
 				expect(def ~= nil).toBe(true)
 				expect(entry.distance).toBeGreaterThan(0)
 				expect(math.abs(entry.side)).toBeLessThanOrEqual(180)
+				-- Turned off facing the player by at most a quarter turn (D-518).
+				if entry.yaw ~= nil then
+					expect(math.abs(entry.yaw)).toBeLessThanOrEqual(90)
+				end
 				expect(typeof(entry.held)).toBe("boolean")
 				if entry.hp ~= nil then
 					expect(entry.hp).toBeGreaterThan(0)

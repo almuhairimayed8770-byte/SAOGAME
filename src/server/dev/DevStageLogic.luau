@@ -4,7 +4,8 @@
 	the player should stand (the stand spot and its ring) and whether it does, the route a walk into
 	the ring takes round the ledge and up its ramp, where the ramp goes, the boxes the ledge and its
 	ramp fill and whether a body reaches into one (they are never built around it, and no shot
-	stages around a body inside one), where each staged enemy stands and which way it faces, where
+	stages around a body inside one), where each staged enemy stands and which way it faces (its
+	yaw off facing the player, D-518), where
 	a field enemy that stands too near is moved to, when an enemy may be held, and the request
 	rate. Plain numbers in and out, so it runs in Lune.
 
@@ -57,6 +58,22 @@ function DevStageLogic.facingFrom(fromX: number, fromZ: number, toX: number, toZ
 		return nil
 	end
 	return math.deg(math.atan2(-dx, -dz))
+end
+
+--- Where a staged enemy stands and faces for a player at (x, z) facing `facing` (dev.luau
+--- StagedEnemy): `distance` studs out at `side` degrees off the facing, facing the player, turned
+--- `yaw` degrees toward its own left (D-518; nil or 0 square to the player).
+function DevStageLogic.placeStaged(
+	x: number,
+	z: number,
+	facing: number,
+	side: number,
+	distance: number,
+	yaw: number?
+): (number, number, number)
+	local ex, ez = DevStageLogic.around(x, z, facing, side, distance)
+	local face = DevStageLogic.facingFrom(ex, ez, x, z) or facing
+	return ex, ez, face + (yaw or 0)
 end
 
 -- The flat footprint of the ledge and its ramp together (their bounding box), grown by `grow`.

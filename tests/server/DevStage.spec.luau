@@ -475,7 +475,7 @@ describe("DevStage: a shot stages itself (F12)", function()
 			expect(indexOf(world.order, "pivotPlayer")).toBeNil()
 			expect(world.record.hp).toBe(world.record.maxHp)
 			-- The target: the shot's first enemy, its distance out ahead of the actual facing, facing
-			-- the player, on the field, held.
+			-- the player turned by its yaw (D-518), on the field, held.
 			local entry = shot.stage.enemies[1]
 			local target = world.enemies[reply.targetId]
 			expect(target.defId).toBe(entry.enemy)
@@ -483,7 +483,8 @@ describe("DevStage: a shot stages itself (F12)", function()
 			expect(flat(offset).Magnitude).toBeCloseTo(entry.distance, 1e-6)
 			local look = CFrame.Angles(0, math.rad(facing), 0).LookVector
 			expect(flat(offset).Unit:Dot(look)).toBeGreaterThan(0.9999)
-			expect(target.model.PrimaryPart.CFrame.LookVector:Dot(-flat(offset).Unit)).toBeGreaterThan(0.9999)
+			local faced = CFrame.Angles(0, math.rad(entry.yaw or 0), 0):VectorToWorldSpace(-flat(offset).Unit)
+			expect(target.model.PrimaryPart.CFrame.LookVector:Dot(faced)).toBeGreaterThan(0.9999)
 			expect(target.model.PrimaryPart.Position.Y).toBeCloseTo(area.position[2] + rootHeight(entry.enemy), 1e-6)
 			expect(target.held).toBe(true)
 		end

@@ -155,6 +155,7 @@ export type State = {
 	handFrom: CFrame?, -- where the hand-back started
 	handAt: number,
 	handSeconds: number,
+	handWeight: number, -- how far onto the root the hand-back's last step slid the body (0 to 1)
 	drawn: CFrame?, -- the CFrame last drawn (Frozen keeps it)
 	shown: Vector3?, -- where the root stood on the last frame drawn before the rush (RushDraw.new)
 	released: boolean, -- an Armed crouch that will not launch (RushDraw.release)
@@ -338,6 +339,7 @@ function RushDraw.new(line: Line, shown: Vector3?): State
 		handFrom = nil,
 		handAt = 0,
 		handSeconds = 0,
+		handWeight = 0,
 		drawn = nil,
 		shown = shown,
 		released = false,
@@ -582,6 +584,7 @@ local function handBack(state: State, drawn: CFrame, now: number, root: CFrame?)
 	state.handAt = now
 	local pace = math.max(TUNING.catchUpFraction * state.line.speed, 1e-6)
 	state.handSeconds = math.max(TUNING.handBackSeconds, gap / pace)
+	state.handWeight = 0
 end
 
 --- The rush will not run as drawn: its wind-up was dropped or cut before the server launched it (a
@@ -1142,9 +1145,27 @@ function RushDraw.step(
 		state.drawn = nil
 		return nil
 	end
-	local drawn = from:Lerp(root, Easing.evaluate(TUNING.handBackEasing, u))
+	local weight = Easing.evaluate(TUNING.handBackEasing, u)
+	state.handWeight = weight
+	local drawn = from:Lerp(root, weight)
 	state.drawn = drawn
 	return drawn
+end
+
+--- Where the last step's body is drawn against `root`, the root part as physics left it after that
+--- step (Replication's redraw on PostSimulation, D-514): on the server's timeline (Run, Settle) or
+--- frozen, the step's own drawn CFrame, which the root's move never carries; sliding back, the
+--- step's share of the way from where it stood onto `root` itself. Nil while the body stands on its
+--- root (Armed, Done).
+function RushDraw.redrawn(state: State, root: CFrame): CFrame?
+	local phase = state.phase
+	if phase == "Run" or phase == "Settle" or phase == "Frozen" then
+		return state.drawn
+	elseif phase == "HandBack" then
+		local from = state.handFrom
+		return if from ~= nil then from:Lerp(root, state.handWeight) else nil
+	end
+	return nil
 end
 
 return RushDraw

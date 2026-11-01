@@ -72,7 +72,9 @@
 	the real input path (InputController.handle, as a key's binding does), only at 1x:
 	- a timed press (`at`): a key held `hold` seconds; a Move press holds the stick instead
 	  (capture.perform.moveAction: Humanoid:Move on the camera's frame from this script's render
-	  step, after the control script's, half pushed to walk), with the sprint key when it sprints;
+	  step, after the control script's, half pushed to walk), with the sprint key when it sprints,
+	  and held as MoveInput's scripted stick the same frames, so the character controller reads
+	  it as the stick a held key gives (D-512: the control module never sees a script's Move);
 	- a reaction (`onClip`): the press `lead` seconds before the hit window of a staged enemy's
 	  attack clip as this client draws it (Replication.clipEvent; each later event of the clip sets
 	  it again, and its attacker's hit-stop, HitConfirmed attackPause, moves it on as the client
@@ -126,6 +128,7 @@ local TargetController = require(Client.controllers.TargetController)
 local InputController = require(Client.controllers.InputController)
 local EntityTracker = require(Client.controllers.EntityTracker)
 local Replication = require(Client.controllers.Replication)
+local MoveInput = require(Client.controllers.MoveInput)
 local ClipLibrary = require(Client.choreo.ClipLibrary)
 local FrameOrder = require(Client.fx.FrameOrder)
 local Telegraphs = require(Client.fx.Telegraphs)
@@ -900,6 +903,7 @@ end
 -- path, so the hold there ends too. The stick lets go with them.
 local function releaseKeys()
 	stickHeld = nil
+	MoveInput.script(nil)
 	chain = nil
 	chainMove = nil
 	chainArt = nil
@@ -921,6 +925,7 @@ local function armPerform(shot: Dev.Shot)
 	chainMove = nil
 	chainArt = nil
 	stickHeld = nil
+	MoveInput.script(nil)
 	table.clear(stepCounts)
 end
 
@@ -1104,31 +1109,39 @@ local function stepPerform()
 end
 
 -- The stick auto-perform holds, each frame of the take from the walk's render step: after the
--- control script's Move and before the character controller reads MoveDirection, as a held key's.
+-- control script's Move and before the character controller reads the stick, as a held key's.
+-- The same move is MoveInput's scripted stick for exactly the frames it Moves the Humanoid
+-- (D-512): the controller reads the control module, which never sees this Move, so in Studio a
+-- perform's sprint read as a let-go stick (the lock's walk speed, off its frame) and never
+-- reached the boar's skid.
 local function stickStep()
 	local held = stickHeld
 	local stick = if held ~= nil then held.stick else nil
 	if not performing or stick == nil then
+		MoveInput.script(nil)
 		return
 	end
 	local character = player.Character
 	local humanoid = if character ~= nil then character:FindFirstChildOfClass("Humanoid") else nil
 	if humanoid == nil then
+		MoveInput.script(nil)
 		return
 	end
 	local x, z = CaptureLogic.stickMove(stick)
-	humanoid:Move(Vector3.new(x, 0, z), true)
+	local move = Vector3.new(x, 0, z)
+	humanoid:Move(move, true)
+	MoveInput.script(move, true)
 end
 
 -- What this client draws: each reaction hears its clip on its staged enemy, and sets its key
 -- `lead` before the clip's hit window from whichever event comes (each later one moves it on),
 -- a guard the way up earlier still (guardLead: the staging replies' way up, else the glint lead,
 -- D-289, EF): it reaches the server that long after it leaves. One heard drops the chain running;
--- with `lock` the lock goes to its enemy.
-Replication.clipEvent:Connect(function(record: any, clipId: string, event: any, jumped: boolean)
-	if phase ~= "Recording" or not performing or jumped or record == nil then
-		return
-	end
+-- with `lock` the lock goes to its enemy. The clip's start is heard too, at the clip time it
+-- starts from (D-513): the network catch-up starts a late clip past its first events, which
+-- never fire, so at Studio's 0.1 s lag the Charge clip (its only events before the hit window at
+-- 0.1 and 0.11 s) set no dodge and the boar ran the player down.
+local function hearClip(record: any, clipId: string, clipTime: number)
 	local clip: any = nil
 	for _, reaction in reactions do
 		local entry = reaction.entry
@@ -1142,13 +1155,27 @@ Replication.clipEvent:Connect(function(record: any, clipId: string, event: any, 
 			end
 			clip = found
 		end
-		if CaptureLogic.hear(reaction, clip.events, event.time, elapsed, guardLead()) then
+		if CaptureLogic.hear(reaction, clip.events, clipTime, elapsed, guardLead()) then
 			dropChain()
 			if entry.lock == true and lockedId() ~= record.id then
 				TargetController.lockOn(record.id)
 			end
 		end
 	end
+end
+
+Replication.clipEvent:Connect(function(record: any, clipId: string, event: any, jumped: boolean)
+	if phase ~= "Recording" or not performing or jumped or record == nil then
+		return
+	end
+	hearClip(record, clipId, event.time)
+end)
+
+Replication.clipStarted:Connect(function(record: any, clipId: string, clipTime: number)
+	if phase ~= "Recording" or not performing or record == nil then
+		return
+	end
+	hearClip(record, clipId, clipTime)
 end)
 
 -- A hit on a reaction's enemy mid-attack: the server paused its attack (attackPause) and this
@@ -1735,6 +1762,8 @@ local function inputStep(dt: number)
 	if phase == "Recording" then
 		stickStep()
 	else
+		-- Out of a take auto-perform holds no stick (the walk Moves the body in world space).
+		MoveInput.script(nil)
 		walkStep(dt)
 	end
 end

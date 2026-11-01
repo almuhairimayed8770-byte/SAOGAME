@@ -98,6 +98,12 @@ type Rig = {
 	-- The control module's active controller comes and goes (the controls disabled, a menu): with
 	-- none, the control script Moves nothing and its move vector is zero (D-474).
 	setControls: (active: boolean) -> (),
+	-- One frame with no key held (the control module reads zero and Moves zero) and a script's
+	-- Humanoid:Move after it at the world direction `move` (the dev capture's auto-perform stick);
+	-- `scripted` also holds it as MoveInput's scripted stick (D-512).
+	frameScripted: (move: Vector3, scripted: boolean) -> (),
+	-- The controller's MoveInput copy (its control module bound to the spec's).
+	moveInput: any,
 	-- One frame with the display asleep: the clock moves and Heartbeat fires, no render step runs.
 	heartbeat: () -> (),
 	humanoid: any,
@@ -620,12 +626,16 @@ local function load(options: Options?): Rig
 	-- One rendered frame of `dt`: the control script's Move, the render step and Choreo's
 	-- RenderStepped connection in the order the spec picked, the physics, then Heartbeat and the
 	-- timers due by now (task.delay resumes there).
-	local function render(stick: Vector3, dt: number)
+	local function render(stick: Vector3, dt: number, scriptedMove: Vector3?)
 		if controlsActive then
 			stickNow = stick
 			humanoid:Move(stick)
 		else
 			stickNow = Vector3.zero
+		end
+		if scriptedMove ~= nil then
+			-- A script's Move after the control script's (the capture's walk render step).
+			humanoid:Move(scriptedMove)
 		end
 		local runStep = step :: (dt: number) -> ()
 		if opts.renderOrder == "connections" then
@@ -708,6 +718,19 @@ local function load(options: Options?): Rig
 		setControls = function(active: boolean)
 			controlsActive = active
 		end,
+		frameScripted = function(move: Vector3, scripted: boolean)
+			clock += FRAME
+			local hold = moveInput.script
+			if scripted then
+				-- The camera is at rest (looking down -Z): its camera-relative move is the world's.
+				hold(move, true)
+			end
+			render(Vector3.zero, FRAME, move)
+			if scripted then
+				hold(nil)
+			end
+		end,
+		moveInput = moveInput,
 		now = function(): number
 			return clock
 		end,
@@ -3434,6 +3457,54 @@ describe("CharacterController: under a live lock the stick walks the lock's fram
 	end)
 end)
 
+describe("CharacterController: a script's stick held through MoveInput (D-512)", function()
+	-- AH 400 at lag 0 on 0582a04: the fight's run at the boar's skid (the capture's auto-perform,
+	-- Humanoid:Move with the sprint held) under the lock on the boar. The control module read no
+	-- key, so the controller read the stick let go: it faced the lock at the walk speed and never
+	-- turned the run onto the lock's frame, and the boar was never reached or killed.
+	local function quarterLeft(direction: Vector3): Vector3
+		return Vector3.new(direction.Z, direction.Y, -direction.X)
+	end
+
+	it("runs a scripted sprint at the lock at the sprint speed, on the lock's frame, as a held key would", function()
+		local function run(scripted: boolean): any
+			local rig = load()
+			rig.frame(STILL)
+			rig.setLock(pointAt(rig, 0, 12))
+			rig.setLockMove(quarterLeft)
+			rig.controller.setSprinting(true)
+			for _ = 1, 20 do
+				rig.frameScripted(FORWARD, scripted)
+			end
+			return rig
+		end
+		local keyed = load()
+		keyed.frame(STILL)
+		keyed.setLock(pointAt(keyed, 0, 12))
+		keyed.setLockMove(quarterLeft)
+		keyed.controller.setSprinting(true)
+		for _ = 1, 20 do
+			keyed.frame(FORWARD)
+		end
+		local rig = run(true)
+		-- As the held key: the sprint's speed, the facing handed to the stick, the walk turned onto
+		-- the lock's frame (here a quarter turn left), and Locomotion told it sprints.
+		expect(rig.humanoid.WalkSpeed).toBe(ChoreoData.locomotion.sprintSpeed)
+		expect(rig.humanoid.WalkSpeed).toBe(keyed.humanoid.WalkSpeed)
+		expect(rig.humanoid.AutoRotate).toBe(true)
+		expect(rig.humanoid.MoveDirection.X).toBeCloseTo(-1, 1e-6)
+		expect(rig.humanoid.MoveDirection.Z).toBeCloseTo(0, 1e-6)
+		expect((rig.root.Position - keyed.root.Position).Magnitude).toBeCloseTo(0, 1e-6)
+		expect(rig.locomotionInput().sprinting).toBe(true)
+		-- A script's Move the controller is not told of reads as the stick let go (the PC's run):
+		-- the walk speed facing the lock, along the camera's forward, off the lock's frame.
+		local unseen = run(false)
+		expect(unseen.humanoid.WalkSpeed).toBe(ChoreoData.locomotion.walkSpeed)
+		expect(unseen.humanoid.AutoRotate).toBe(false)
+		expect(unseen.humanoid.MoveDirection.Z).toBeCloseTo(-1, 1e-6)
+	end)
+end)
+
 describe("CharacterController: the stop reads the control module's stick (D-474)", function()
 	-- Walks FORWARD for 10 frames, lets go with the stick at zero for `zeroFrames` frames (the
 	-- control script still Moving), then the control module has no active controller (no Move, a
@@ -3569,5 +3640,71 @@ describe("CharacterController: the root holds on a freeze's still frames (D-496)
 			-- Nothing is lost: the body ends where the same swing without the freeze ends.
 			expect((last - lastBare).Magnitude).toBeLessThan(1e-3)
 		end
+	end)
+end)
+
+describe("CharacterController: a guard held through a blow's stagger comes back up (item 413(a), D-516)", function()
+	-- The GuardRequests the controller sent, as "held" or "released", in order.
+	local function guardSends(rig: Rig): string
+		local out = {}
+		for _, entry in rig.sent do
+			if entry.name == "GuardRequest" then
+				table.insert(out, if entry.payload.held then "held" else "released")
+			end
+		end
+		return table.concat(out, ",")
+	end
+
+	it("the button held through a guard break: the guard is raised again as the stagger ends", function()
+		for _, ending in { { "Idle", "Guard" }, { "Guard" } } do
+			local rig = load({ impact = true })
+			rig.frame(STILL)
+			rig.controller.setGuard(true)
+			for _ = 1, 30 do
+				rig.frame(STILL)
+			end
+			rig.serverState("GuardBroken")
+			expect(rig.controller.state()).toBe("GuardBroken")
+			for _ = 1, 70 do
+				rig.frame(STILL)
+			end
+			-- The server ends the stagger and raises the guard the button still holds (one or both
+			-- of its two states may reach this client).
+			for _, value in ending do
+				rig.serverState(value)
+			end
+			rig.frame(STILL)
+			expect(rig.controller.state()).toBe("Guard")
+			expect(#impactCalls(rig, "guardRaise")).toBe(2)
+			expect(guardSends(rig)).toBe("held,held")
+		end
+	end)
+
+	it("a release inside the stagger tells the server, and the guard stays down", function()
+		local rig = load()
+		rig.frame(STILL)
+		rig.controller.setGuard(true)
+		rig.frame(STILL)
+		rig.serverState("Stagger")
+		for _ = 1, 10 do
+			rig.frame(STILL)
+		end
+		rig.controller.setGuard(false)
+		for _ = 1, 30 do
+			rig.frame(STILL)
+		end
+		rig.serverState("Idle")
+		rig.frame(STILL)
+		expect(rig.controller.state()).toBe("Idle")
+		expect(guardSends(rig)).toBe("held,released")
+		-- A press inside the next stagger, held to its end, raises the guard when the body is free.
+		rig.serverState("Stagger")
+		rig.frame(STILL)
+		rig.controller.setGuard(true)
+		expect(rig.controller.state()).toBe("Stagger")
+		rig.serverState("Idle")
+		rig.frame(STILL)
+		expect(rig.controller.state()).toBe("Guard")
+		expect(guardSends(rig)).toBe("held,released,held")
 	end)
 end)

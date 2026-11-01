@@ -10,7 +10,9 @@
 	snap, no body part sinks into another nor the weapon into the body past their bounds, no planted
 	foot slides or drifts nor sinks below the field, the first strike's anticipation pulls against
 	the cut, travels, stays slower than the snap and is seen from the gameplay camera, the blend
-	back to the stance is a settle, and the Recovery does not hold the blade across the face.
+	back to the stance is a settle, and the Recovery does not hold the blade across the face. No
+	settle or Recovery moves the weapon's tip as fast as the clip's own snap (D-522: section 10
+	beat 2, the snap is "the fastest motion in the game").
 
 	PENDING (below) is the one list of what the clips do not meet yet, by clip, kind and plan, with
 	how far past its bound each is: a pending clip must fail exactly that (a new kind, a kind in
@@ -97,9 +99,24 @@ local function bodyOf(rig: string): any
 	return found
 end
 
+-- One audit a library clip (the tests below read its reports and its findings); a changed copy
+-- is audited each time.
+local audited: { [string]: { reports: { any }, findings: { any } } } = {}
+local function auditOf(clip: any): { reports: { any }, findings: { any } }
+	local cached = audited[clip.id]
+	if cached ~= nil and ClipLibrary.get(clip.id) == clip then
+		return cached
+	end
+	local reports, findings = ClipAudit.audit(bodyOf(clip.rig), clip, ClipLibrary.get)
+	local result = { reports = reports, findings = findings }
+	if ClipLibrary.get(clip.id) == clip then
+		audited[clip.id] = result
+	end
+	return result
+end
+
 local function findingsOf(clip: any): { any }
-	local _, findings = ClipAudit.audit(bodyOf(clip.rig), clip, ClipLibrary.get)
-	return findings
+	return auditOf(clip).findings
 end
 
 local function listed(findings: { any }, keep: (string) -> boolean): string
@@ -189,6 +206,42 @@ describe("ClipAudit: every audited clip", function()
 			local problems = unmet(id, findingsOf(ClipLibrary.get(id)))
 			if #problems > 0 then
 				error(table.concat(problems, "\n"))
+			end
+		end)
+	end
+
+	-- D-522: every player Art and basic, in every plan and at every sampleHz, moves the tip slower
+	-- from its snap to the next strike's anticipation (and after the last, to its end) than in
+	-- any of its snaps. Before the re-key Basic1's Spring settle flicked the blade back at 727
+	-- studs/s against its snap's 303 (the Lab at 240 Hz; the PC's 3.99 and 4.94 a 30 fps row) and
+	-- Basic3's at 395 against 391.
+	for _, id in Audit.clips do
+		local clip = ClipLibrary.get(id)
+		if clip.rig ~= "PlayerR15" or not clip.attack then
+			continue
+		end
+		it(id .. ": no settle or Recovery moves the tip as fast as the clip's snap (D-522)", function()
+			local lines = {}
+			for _, report in auditOf(clip).reports do
+				local settle, snap = report.settlePeak, report.snapSpeed
+				if settle == nil or snap == nil then
+					table.insert(lines, ("  %s %d Hz: no settle or no snap read"):format(report.label, report.hz))
+				elseif settle.speed >= snap then
+					table.insert(
+						lines,
+						("  %s %d Hz: %.0f studs/s at %.3f after strike %d, the snap %.0f"):format(
+							report.label,
+							report.hz,
+							settle.speed,
+							settle.clipTime or -1,
+							settle.strike,
+							snap
+						)
+					)
+				end
+			end
+			if #lines > 0 then
+				error("the tip outruns the snap:\n" .. table.concat(lines, "\n"))
 			end
 		end)
 	end
@@ -533,6 +586,35 @@ describe("ClipAudit: the rules catch what they are for", function()
 		expect(ClipAudit.findings(horizontal, later)).toEqual({})
 	end)
 
+	it("a settle or Recovery past settle.maxSpeedShare of the snap fails; one under it does not (D-522)", function()
+		local snap = 300
+		local fast = report(function(r: any)
+			r.strikes = { strike(1, {}) }
+			r.snapSpeed = snap
+			r.settlePeak = { speed = snap * Audit.settle.maxSpeedShare + 1, clipTime = 0.5, strike = 1 }
+		end)
+		expect(whats(ClipAudit.findings(horizontal, fast))).toEqual({ "Settle tip speed" })
+		local slow = report(function(r: any)
+			r.strikes = { strike(1, {}) }
+			r.snapSpeed = snap
+			r.settlePeak = { speed = snap * Audit.settle.maxSpeedShare - 1, clipTime = 0.5, strike = 1 }
+		end)
+		expect(ClipAudit.findings(horizontal, slow)).toEqual({})
+	end)
+
+	it("a real swing whose settle flicks the blade back faster than its snap fails (D-522)", function()
+		-- Horizontal's Recovery with the sword arm and the blade each thrown a third of a turn in
+		-- one frame and back in the next: a flick the eye reads as faster than the cut.
+		local clip = oneFrameChangeAt(ClipLibrary.get("player/OneHandedSword/Horizontal"), 0.7, function(joints: any)
+			for _, name in { "RightShoulder", "Weapon" } do
+				local joint = joints[name] or { rot = { 0, 0, 0 } }
+				local rot = joint.rot or { 0, 0, 0 }
+				joints[name] = { pos = joint.pos, rot = { rot[1] + 120, rot[2], rot[3] } }
+			end
+		end)
+		expect(hasFinding(findingsOf(clip), "Settle", "tip speed", "Lab")).toBe(true)
+	end)
+
 	it("the return and the Recovery fail past their bounds", function()
 		local bad = report(function(r: any)
 			r.returnTip = Audit.returnStuds + 1
@@ -574,6 +656,10 @@ describe("ClipAudit: the rules catch what they are for", function()
 			}
 			r.returnTip = 2.7 -- Basic1's blade 2.7 studs from where it started
 			r.recoveryFaceShare = 0.97 -- RisingArc across the face (the audit on cebade4)
+			-- Basic1's settle flick (D-522): the PC's 3.99 and 4.94 studs a 30 fps row (item
+			-- 407(d)); 727 studs/s against its snap's 303 at 240 Hz (the audit on d06ff43).
+			r.snapSpeed = 303
+			r.settlePeak = { speed = 727, clipTime = 0.246, strike = 1 }
 		end)
 		expect(whats(ClipAudit.findings(horizontal, seen))).toEqual({
 			"Anticipation strike 1 direction",
@@ -584,6 +670,7 @@ describe("ClipAudit: the rules catch what they are for", function()
 			"Pop RightUpperArm",
 			"Recovery blade across the face",
 			"Return tip",
+			"Settle tip speed",
 			"Slide BackLeftLeg",
 		})
 	end)

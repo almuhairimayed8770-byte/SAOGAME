@@ -188,6 +188,24 @@ describe("Brain perception", function()
 		expect(w.brain:getTarget().id).toBe(1)
 	end)
 
+	it("chases on the alert's fifth tick when the ticks land a hair under 0.05 s apart (D-509)", function()
+		-- A real server runs its 20 Hz ticks on 60 Hz frames: frames a hair under 1/60 s put five
+		-- ticks a hair under the 0.25 s alert, which on 0582a04 waited a sixth tick (0.05 s late).
+		local w = world("FrenzyBoar")
+		w.players = { player(1, 0, -32) }
+		w.step(1)
+		expect(w.brain:getPhase()).toBe("Alert")
+		local alertTicks = math.round(AI.perception.alertDelay / TICK)
+		for index = 1, alertTicks do
+			w.time -= 1e-4 -- each tick 0.1 ms sooner than the last
+			w.step(1)
+			expect(w.brain:getPhase()).toBe(if index < alertTicks then "Alert" else "Chase")
+		end
+		expect(Brain.ticksWaited(10 + 0.2496, 10, AI.perception.alertDelay)).toBe(true)
+		expect(Brain.ticksWaited(10 + 0.2165, 10, AI.perception.alertDelay)).toBe(false)
+		expect(Brain.ticksWaited(10 + 0.2834, 10, AI.perception.alertDelay)).toBe(true)
+	end)
+
 	it("nobody inside aggroRange keeps it Idle", function()
 		local w = world("FrenzyBoar")
 		w.players = { player(1, 0, -(Enemies.byId("FrenzyBoar").aggroRange + 5)) }

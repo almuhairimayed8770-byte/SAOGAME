@@ -425,6 +425,7 @@ export type EntityRecord = {
 	guardHeld: boolean,
 	guardSince: number?, -- server receipt time of GuardRequest {held = true}; nil while the raise cannot parry
 	guardReleasedAt: number?, -- last release; a raise inside combat.parryRearmTime after it cannot parry
+	guardResume: boolean, -- a blow's stagger took a held guard and no release came: it comes back up (D-516)
 	hasShield: boolean,
 	invulnerableUntil: number,
 	combatUntil: number, -- in combat while now < combatUntil

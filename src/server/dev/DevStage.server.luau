@@ -39,7 +39,7 @@
 		                    is refused: { ok = false, error = "the body stands inside <part>: ..." };
 		                 6. inside it the player is healed to full and the shot's enemies spawn
 		                    around where its root stands and faces, at their distance and side, facing
-		                    the player, held; `hp` sets one's HP (the kill shot). The first is the
+		                    the player turned by their yaw (D-518), held; `hp` sets one's HP (the kill shot). The first is the
 		                    shot's target. One let go with `attacks` (FK2) may begin that many attacks,
 		                    then is held at its next free moment (EnemyService.limitAttacks), so the
 		                    overhead and parry shots show one overhead.
@@ -280,8 +280,7 @@ local function spawnStaged(shot: Dev.Shot, x: number, z: number, facing: number)
 		end
 		local rootSpec = if rig.parts ~= nil then (rig.parts :: any)[rig.rootPart] else nil
 		local rootHeight = if rootSpec ~= nil then rootSpec.size[2] else 0
-		local ex, ez = DevStageLogic.around(x, z, facing, entry.side, entry.distance)
-		local face = DevStageLogic.facingFrom(ex, ez, x, z) or facing
+		local ex, ez, face = DevStageLogic.placeStaged(x, z, facing, entry.side, entry.distance, entry.yaw)
 		local y = groundY + PlaygroundLayout.rootHeight(rig.hipHeight, rootHeight, World.spawn.groundEpsilon)
 		local id = EnemyService.spawn(entry.enemy, CFrame.new(ex, y, ez) * CFrame.Angles(0, math.rad(face), 0))
 		EnemyService.setHeld(id, true)

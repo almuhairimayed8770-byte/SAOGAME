@@ -336,6 +336,58 @@ describe("a hit's freeze holds the shot's follow with the bodies (D-357, 300)", 
 		end
 	end)
 
+	-- Item 405(a) (D-515): at 0.05 and 0.1 s of lag the still shot came on a row the body moved (an
+	-- unproven kill's word after its hold let go; the keep-out and the clip's root motion), and on
+	-- that first still row the camera stood where it was: the follow was carried by the body's move
+	-- only from the second still row on (its last pivot was forgotten when the shot took hold), so
+	-- the camera fell one step behind the root, 0.129 studs here. The freeze's first frame did the
+	-- same. Both now carry the follow by what the body did since the frame before, from their first
+	-- frame.
+	it("the still shot and the freeze move with the body from their first frame (405(a))", function()
+		local STEP = Vector3.new(0.05, 0, 0.12)
+		for _, case in { "still", "freeze" } do
+			for _, startAt in { 3, 8 } do
+				local fixture = intoContact()
+				local controller = fixture.controller
+				local lastCam: Vector3 = fixture.camera.CFrame.Position
+				local lastRoot: Vector3 = fixture.root.Position
+				local worst, worstAt = 0, 0
+				for f = 1, startAt + 20 do
+					fixture.frame(function()
+						if f == startAt then
+							if case == "still" then
+								controller.holdLock(0.5)
+							else
+								controller.holdFollow(asked("Normal"))
+							end
+						end
+					end, function()
+						-- The body moves on every frame (the clip's root motion and the keep-out).
+						fixture.root.Position += STEP
+					end)
+					local cam: Vector3 = fixture.camera.CFrame.Position
+					local now: Vector3 = fixture.root.Position
+					local apart = ((cam - lastCam) - (now - lastRoot)).Magnitude
+					local held = case == "still" or f < startAt + Combat.hitStopFrames.Normal
+					if f >= startAt and held and apart > worst then
+						worst, worstAt = apart, f - startAt
+					end
+					lastCam, lastRoot = cam, now
+				end
+				if worst > STILL then
+					error(
+						("%s from frame %d: on its frame %d the camera moved %.4f studs apart from the body"):format(
+							case,
+							startAt,
+							worstAt,
+							worst
+						)
+					)
+				end
+			end
+		end
+	end)
+
 	it("lets a Normal's follow go once the rig is drawn moving again, and the shot follows again", function()
 		local fixture = intoContact()
 		local run = play(fixture, "Normal", 14, 0)

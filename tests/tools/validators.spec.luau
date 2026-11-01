@@ -5627,6 +5627,21 @@ describe("clipAudit validator: the clip audit's thresholds and rigs", function()
 		end, "recoveryFaceShare must be in")
 	end)
 
+	it("keeps the settle and the Recovery under the snap's speed (D-522)", function()
+		flags(function(a)
+			a.settle = nil
+		end, "settle is missing")
+		flags(function(a)
+			a.settle.maxSpeedShare = 0
+		end, "settle.maxSpeedShare must be in")
+		flags(function(a)
+			a.settle.maxSpeedShare = 1.2
+		end, "settle.maxSpeedShare must be in")
+		flags(function(a)
+			a.settle.maxSpeedShare = "1"
+		end, "settle.maxSpeedShare must be in")
+	end)
+
 	it("leads every clip in past its blend in and keeps the trace's other numbers sane", function()
 		flags(function(a)
 			a.leadSeconds = 0.01

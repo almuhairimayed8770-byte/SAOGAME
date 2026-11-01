@@ -11,6 +11,7 @@ end
 Harness.stubService("RunService", {
 	RenderStepped = fakeSignal(),
 	Heartbeat = fakeSignal(),
+	PreSimulation = fakeSignal(), -- Choreo's pose rewrite: run alone, the spec needs it too
 	-- Choreo's rig step (bound just before the camera's): the spec steps the rigs itself.
 	BindToRenderStep = function() end,
 	UnbindFromRenderStep = function() end,
@@ -282,6 +283,83 @@ describe("WeaponMount", function()
 			check(buildRig(ROW.part))
 		end
 	)
+
+	it(
+		"a weapon category or a back part that arrives after the motor still takes the sword to the back (D-519)",
+		function()
+			-- On d06ff43 the mount worked out once per new motor whether it could sheathe, so a motor
+			-- seen before its weapon's category attribute or the sheath row's body part kept the sword
+			-- in the hand for good (the owner's PC: Part0 RightHand on every row, sheathed or not).
+			local lateCategory = buildRig()
+			local weapon = lateCategory:FindFirstChild(WeaponModels.modelName)
+			weapon:SetAttribute(WeaponModels.attributes.category, nil)
+			local animator = Choreo.get(lateCategory)
+			local motor = motorOf(lateCategory)
+			local mount = WeaponMount.new(animator, lateCategory)
+			mount:set("Back")
+			animator:step(FRAME)
+			expect(mount:sheathable()).toBe(false)
+			expect(motor.Part0).toBe(lateCategory:FindFirstChild("RightHand"))
+			weapon:SetAttribute(WeaponModels.attributes.category, SWORD.category)
+			animator:step(FRAME)
+			expect(mount:sheathable()).toBe(true)
+			expect(motor.Part0).toBe(lateCategory:FindFirstChild(ROW.part))
+			expect(sameFrame(motor.C0, ClipSampler.toCFrame(ROW.mount), STORED)).toBe(true)
+			mount:destroy()
+			Choreo.release(lateCategory)
+
+			local latePart = buildRig(ROW.part)
+			local animator2 = Choreo.get(latePart)
+			local motor2 = motorOf(latePart)
+			local mount2 = WeaponMount.new(animator2, latePart)
+			mount2:set("Back")
+			animator2:step(FRAME)
+			expect(motor2.Part0).toBe(latePart:FindFirstChild("RightHand"))
+			local body = Instance.new("Part")
+			body.Name = ROW.part
+			body.Parent = latePart
+			animator2:step(FRAME)
+			expect(motor2.Part0).toBe(body)
+			mount2:destroy()
+			Choreo.release(latePart)
+		end
+	)
+
+	it("names where this client hangs the blade, and why it cannot sheathe, on the character (D-519)", function()
+		local MOUNT, WHY = WeaponModels.attributes.mount, WeaponModels.attributes.mountWhy
+		local model = buildRig()
+		local animator = Choreo.get(model)
+		local mount = WeaponMount.new(animator, model)
+		expect(model:GetAttribute(MOUNT)).toBe("Hand")
+		expect(model:GetAttribute(WHY)).toBeNil()
+		mount:set("Back")
+		expect(model:GetAttribute(MOUNT)).toBe("Back")
+		mount:set("Hand")
+		animator:step(FRAME)
+		expect(model:GetAttribute(MOUNT)).toBe("Hand")
+		mount:destroy()
+		expect(model:GetAttribute(MOUNT)).toBeNil()
+		Choreo.release(model)
+
+		local noRow = buildRig()
+		noRow:FindFirstChild(WeaponModels.modelName):SetAttribute(WeaponModels.attributes.category, "Rapier")
+		local animator2 = Choreo.get(noRow)
+		local mount2 = WeaponMount.new(animator2, noRow)
+		mount2:set("Back")
+		expect(noRow:GetAttribute(MOUNT)).toBe("Hand")
+		expect(noRow:GetAttribute(WHY)).toBe("no sheath row for Rapier")
+		mount2:destroy()
+		Choreo.release(noRow)
+
+		local noBack = buildRig(ROW.part)
+		local animator3 = Choreo.get(noBack)
+		local mount3 = WeaponMount.new(animator3, noBack)
+		mount3:set("Back")
+		expect(noBack:GetAttribute(MOUNT)).toBe("Hand")
+		expect(noBack:GetAttribute(WHY)).toBe("no " .. ROW.part)
+		mount3:destroy()
+		Choreo.release(noBack)
+	end)
 
 	it("looks the hand and the back part up once per new motor, not on every step", function()
 		local model = buildRig()

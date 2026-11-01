@@ -517,9 +517,11 @@ local function stage(shotId: string, speed: number, lag: number): Staging
 			end
 		end
 	end
-	-- How far the kobold's facing is off the line to where the body rests (it turns to it if not).
+	-- How far the kobold's facing is turned off the line to where the body rests, toward its own
+	-- left (+): the shot's yaw (D-518; it turns to the body if not).
 	local toRest = ((rest - bodies[model].position) * Vector3.new(1, 0, 1)).Unit
-	local turn = math.deg(math.acos(math.clamp(yawOf(model):Dot(toRest), -1, 1)))
+	local look = yawOf(model)
+	local turn = math.deg(math.atan2(toRest:Cross(look).Y, math.clamp(look:Dot(toRest), -1, 1)))
 	return { staged = true, distance = distance, nearest = nearest, face = face, turn = turn }
 end
 
@@ -532,17 +534,26 @@ local function shotDistance(shotId: string): number
 	error("no shot " .. shotId)
 end
 
+local function shotYaw(shotId: string): number
+	for _, shot in CAPTURE.shots do
+		if shot.id == shotId then
+			return shot.stage.enemies[1].yaw or 0
+		end
+	end
+	error("no shot " .. shotId)
+end
+
 describe("A staged kobold stands off where the player rests, clear of the body (316(a), M8)", function()
 	-- { the walk's speed on its last leg, the replication's lag }, as tests/server/DevStageSettle.
 	for _, shotId in SHOTS do
 		for _, case in { { SPRINT, 0 }, { SPRINT, 0.1 }, { 16, 0.2 }, { SPRINT, 0.3 } } do
 			local speed, lag = case[1], case[2]
 			local name =
-				"%s at %g studs/s with %g s of replication: the kobold %g studs off the rest, facing it, no blocker on the body"
-			it(name:format(shotId, speed, lag, shotDistance(shotId)), function()
+				"%s at %g studs/s with %g s of replication: the kobold %g studs off the rest, turned %g degrees off facing it, no blocker on the body"
+			it(name:format(shotId, speed, lag, shotDistance(shotId), shotYaw(shotId)), function()
 				local result = stage(shotId, speed, lag)
 				print(
-					("[316(a) kobold] %s %g studs/s, %g s: staged %s, %.2f studs from the rest, %.1f deg off facing it, nearest face %s %.2f studs off the root box"):format(
+					("[316(a) kobold] %s %g studs/s, %g s: staged %s, %.2f studs from the rest, turned %.1f deg off facing it, nearest face %s %.2f studs off the root box"):format(
 						shotId,
 						speed,
 						lag,
@@ -555,7 +566,7 @@ describe("A staged kobold stands off where the player rests, clear of the body (
 				)
 				expect(result.staged).toBe(true)
 				expect(math.abs(result.distance - shotDistance(shotId)) <= 0.25).toBe(true)
-				expect(result.turn).toBeLessThan(2)
+				expect(math.abs(result.turn - shotYaw(shotId))).toBeLessThan(2)
 				expect(result.nearest).toBeGreaterThan(0)
 			end)
 		end

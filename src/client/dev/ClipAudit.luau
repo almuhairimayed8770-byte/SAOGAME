@@ -53,6 +53,11 @@
 	  .views: Behind the player; in Front of an enemy, where the player stands), the worst of them
 	  judged (D-414). The rules read the first strike's (one anticipation an attack); the later
 	  strikes' are reported.
+	- The settle and the Recovery (section 10 beats 5 and 6, D-522): the tip's fastest speed
+	  (studs a second, sample to sample: at 240 Hz a flick inside one 60 Hz frame shows) from each
+	  strike's snap to the next strike's anticipation (after the last, to the clip's end; the
+	  clip's own samples, not its blend-out), against the tip's fastest speed in any of the clip's
+	  snaps, read the same way (beat 2: "the fastest motion in the game").
 	- The return: the tip's distance from the end pose to the settled pose, in the root's frame, and
 	  the largest part step of the blend-out (degrees a frame).
 	- The Recovery: the share of its frames with the blade in front of the face.
@@ -211,6 +216,11 @@ export type Report = {
 	strikes: { Strike },
 	returnTip: number?, -- studs from the end pose's tip to the settled tip (root frame)
 	returnPeak: Pop?, -- the largest part step of the blend-out (degrees a frame)
+	-- The tip's fastest speed (studs a second, sample to sample) after a strike's snap and before
+	-- the next one's anticipation (the settle and the Recovery; the clip's own samples), with the
+	-- strike it follows, and its fastest in a step that touches a snap (nil: no strike, or no tip).
+	settlePeak: { speed: number, clipTime: number?, strike: number }?,
+	snapSpeed: number?,
 	turnBacks: { Pop }?, -- a cancel's hand-over: each part's worst turn back inside it (degrees; nil off a cancel)
 	recoveryFaceShare: number?, -- share of the Recovery's samples with the blade across the face
 }
@@ -1386,6 +1396,44 @@ function ClipAudit.measure(body: Body, clip: Types.ClipDef, plan: Plan, frames: 
 		end
 	end
 
+	-- The settle and the Recovery (D-522), sample to sample: from each strike's snap to the next
+	-- strike's anticipation, the last's to the clip's end, every step whose two samples are the
+	-- measured clip's own (not its blend-out, which the return measures); and each snap's, a step
+	-- that touches it.
+	if body.tip ~= nil and #report.strikes > 0 then
+		local spans = strikeSpans(clip)
+		local peak: { speed: number, clipTime: number?, strike: number }? = nil
+		local snapSpeed = 0
+		local last = tipOf(body, frames[first])
+		for index = first + 1, #frames do
+			local now, before = frames[index], frames[index - 1]
+			local tip = tipOf(body, now)
+			local from = last
+			last = tip
+			local clipTime, previous = now.clipTime, before.clipTime
+			if clipTime == nil or previous == nil or now.ended or before.ended or tip == nil or from == nil then
+				continue
+			end
+			local speed = ((tip :: Vector3) - (from :: Vector3)).Magnitude * hz
+			if inSnap(clipTime, previous, snaps) then
+				snapSpeed = math.max(snapSpeed, speed)
+				continue
+			end
+			for strikeIndex, span in spans do
+				local following = spans[strikeIndex + 1]
+				local finish = if following ~= nil then following.anticipation.start else math.huge
+				if previous >= span.snap.finish - EPSILON and clipTime <= finish + EPSILON then
+					if peak == nil or speed > (peak :: any).speed then
+						peak = { speed = speed, clipTime = clipTime, strike = strikeIndex }
+					end
+					break
+				end
+			end
+		end
+		report.settlePeak = peak
+		report.snapSpeed = if snapSpeed > 0 then snapSpeed else nil
+	end
+
 	-- The return to what plays under it (not judged on the Lab's cut).
 	if endIndex ~= nil and not plan.cutIn then
 		local last = math.max(first, (endIndex :: number) - 1)
@@ -1639,6 +1687,27 @@ function ClipAudit.findings(clip: Types.ClipDef, report: Report): { Finding }
 			("tip behind the body from the gameplay camera %.0f%% of the beat (max %.0f%%)"):format(
 				strike.hidden * 100,
 				rules.maxHiddenShare * 100
+			)
+		)
+	end
+	-- Section 10 beat 2: the snap is the fastest motion in the game, so no settle or Recovery step
+	-- moves the tip faster than settle.maxSpeedShare of the clip's fastest snap (D-522).
+	local settle, snapSpeed = report.settlePeak, report.snapSpeed
+	if settle ~= nil and snapSpeed ~= nil then
+		local share = settle.speed / snapSpeed
+		add(
+			"Settle",
+			"tip speed",
+			share,
+			Audit.settle.maxSpeedShare,
+			true,
+			frameLabel(settle.clipTime),
+			("after strike %d the tip moves %.0f studs/s, %.0f%% of the snap's %.0f (max %.0f%%)"):format(
+				settle.strike,
+				settle.speed,
+				share * 100,
+				snapSpeed,
+				Audit.settle.maxSpeedShare * 100
 			)
 		)
 	end

@@ -478,13 +478,33 @@ describe("the Art stand-off never steps into the world (D-235 amended)", functio
 		expect(far.distance).toBeCloseTo(need, 1e-9)
 		expect(typeof(far.room)).toBe("function")
 		expect(far.room(avatar.base, 0.2)).toBeCloseTo(0.2, 1e-9)
-		-- A wall nearer than the step: the longest whole step that keeps the gap.
+		-- A wall nearer than the step: the longest whole step that keeps the gap, from whichever
+		-- colliding part stands farthest back (D-517: the matrix avatar's Head, 0.055 behind the
+		-- root's box; the root's box alone let the step take that 0.055 too).
+		local behind = 0
+		local rootFrame = avatar.model.PrimaryPart.CFrame
+		for _, name in STAND_OFF.keepOut.parts do
+			local part = avatar.model:FindFirstChild(name)
+			if part ~= nil and part:IsA("BasePart") then
+				local frame = rootFrame:ToObjectSpace(part.CFrame)
+				local half = part.Size / 2
+				for _, x in { -1, 1 } do
+					for _, y in { -1, 1 } do
+						for _, z in { -1, 1 } do
+							local corner = frame * Vector3.new(x * half.X, y * half.Y, z * half.Z)
+							behind = math.max(behind, corner.Z - rootSize.Z / 2)
+						end
+					end
+				end
+			end
+		end
+		expect(behind > 0.05).toBe(true)
 		for _, wall in { 0.3, 0.17, need - 0.01 } do
 			local plan = planWith({ wallBehind(wall) })
-			local fits = math.floor((wall - GAP) / STAND_OFF.stepStuds + 1e-6) * STAND_OFF.stepStuds
+			local fits = math.floor((wall - behind - GAP) / STAND_OFF.stepStuds + 1e-6) * STAND_OFF.stepStuds
 			expect(plan).never.toBeNil()
 			expect(plan.distance).toBeCloseTo(fits, 1e-6)
-			expect(wall - plan.distance >= GAP - 0.003).toBe(true)
+			expect(wall - behind - plan.distance >= GAP - 0.003).toBe(true)
 			-- The frames that take it meet the same wall: the rest of the step is not there.
 			expect(plan.room(avatar.base + AWAY * plan.distance, need) <= 0.003 + STAND_OFF.stepStuds).toBe(true)
 			-- Still never a hit lost: a shorter step leaves every cut at least as deep as the full one.
@@ -510,6 +530,106 @@ describe("the Art stand-off never steps into the world (D-235 amended)", functio
 		local beside = planWith({ pillarBehind(0.1, rootSize.X / 2 + 0.6) })
 		expect(beside.distance).toBeCloseTo(need, 1e-9)
 		model:Destroy()
+	end)
+
+	-- Item 410 (D-517): with the back flush to a wall the drawn body touches it with its torso,
+	-- which the idle leans 0.28 behind the root's box. The room was cast with the root's box alone,
+	-- so the keep-out's step back carried the torso into the wall for the engine to push out (the
+	-- PC: the root box 0.48 in and the body slid 3.1 to 3.4 along the wall), and a torso the clip
+	-- had already leant into the wall was never met (a cast never meets a part it starts in).
+	it("never steps a torso or the head into a wall the root's box stands clear of (item 410)", function()
+		local swings = {
+			{ name = "Basic1", clip = Harness.load("src/shared/clips/player/OneHandedSword/Basic1"), art = false },
+			{ name = "SharpNail", clip = artClip("OneHandedSword.SharpNail"), art = true },
+		}
+		local saved: { [BasePart]: CFrame } = {}
+		for _, part in avatar.model:GetDescendants() do
+			if part:IsA("BasePart") then
+				saved[part] = part.CFrame
+			end
+		end
+		local enemy = place(setupOf("Kobold"), 2.3)
+		RigBuilder.addBlocker(enemy)
+		for _, child in enemy:GetChildren() do
+			if child:IsA("BasePart") and child.Name == STAND_OFF.keepOut.bodyFace then
+				child.CanCollide = true
+			end
+		end
+		for _, swing in swings do
+			local from = if swing.art then holdTime(swing.clip) else 0
+			-- The body in the swing's own start pose, as the plan finds it.
+			for name, solved in Pose.solve(avatar.model, avatar.base, ClipSampler.sample(swing.clip, from)) do
+				local part = avatar.model:FindFirstChild(name)
+				if part ~= nil and part:IsA("BasePart") then
+					part.CFrame = solved
+				end
+			end
+			-- How far the column's backmost corner stands behind the root's box.
+			local behind, who = 0, ""
+			for _, name in STAND_OFF.keepOut.parts do
+				local part = avatar.model:FindFirstChild(name) :: BasePart
+				local frame = avatar.base:ToObjectSpace(part.CFrame)
+				local half = part.Size / 2
+				for _, x in { -1, 1 } do
+					for _, y in { -1, 1 } do
+						for _, z in { -1, 1 } do
+							local back = (frame * Vector3.new(x * half.X, y * half.Y, z * half.Z)).Z - rootSize.Z / 2
+							if back > behind then
+								behind, who = back, name
+							end
+						end
+					end
+				end
+			end
+			-- A wall the clip has already leant the part 0.1 into, one it touches, one 0.3 behind it.
+			for _, clear in { -0.1, 0, 0.3 } do
+				local wall = wallBehind(behind + clear)
+				local cast = ContactPredictor.worldCast(avatar.model, engineCast({ wall }), { avatar.model })
+				local plan = ContactPredictor.standOff(
+					avatar.model,
+					swing.clip,
+					from,
+					avatar.base,
+					enemy,
+					cast,
+					{ keepOut = true, step = swing.art }
+				)
+				expect(plan).never.toBeNil()
+				expect(typeof(plan.room)).toBe("function")
+				local step = plan.room(avatar.base, 1)
+				-- After the step, how deep the backmost part stands in the wall (negative: short of it):
+				-- the gap short of it, or no step at all from a wall it already touches.
+				local into = behind + step - (behind + clear)
+				local allowed = if clear >= GAP then -GAP else -clear
+				print(
+					("[410] %s, %s %.3f behind the root's box, wall %.2f past it: step %.3f, %s %.3f into the wall"):format(
+						swing.name,
+						who,
+						behind,
+						clear,
+						step,
+						who,
+						into
+					)
+				)
+				if into > allowed + 0.003 then
+					error(
+						("%s: the step %.3f put %s %.3f into a wall %.2f behind it"):format(
+							swing.name,
+							step,
+							who,
+							into,
+							clear
+						)
+					)
+				end
+				wall:Destroy()
+			end
+		end
+		for part, frame in saved do
+			part.CFrame = frame
+		end
+		enemy:Destroy()
 	end)
 end)
 

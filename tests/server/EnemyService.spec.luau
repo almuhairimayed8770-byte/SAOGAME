@@ -995,6 +995,58 @@ describe("EnemyService hold", function()
 		expect(EntityService.get(held).hp).toBeGreaterThan(1)
 	end)
 
+	it(
+		"a body held before its first physics step stands on the floor, not the spawn's groundEpsilon over it (D-520)",
+		function()
+			-- AG 390(c) on the owner's PC: held-at-spawn kobolds' roots read 3.450 and their legs +0.050
+			-- over the floor (pack-spawned ones 3.400 and 0.000), and 417(e)'s first walk start dropped
+			-- 0.066: the spawn stands the root world.spawn.groundEpsilon high, and an anchor on its first
+			-- physics step kept it there. The engine's settle lowers it by that lift, only then.
+			fresh()
+			local World = Harness.load("src/shared/data/world")
+			local lift = World.spawn.groundEpsilon
+			local settled: { [any]: number } = {}
+			engine.settle = function(model, studs)
+				settled[model] = (settled[model] or 0) + studs
+				local body = bodyOf(model)
+				body.position -= Vector3.new(0, studs, 0)
+				writeRoot(model, body)
+			end
+			engine.pivot = function(model, cframe)
+				local body = bodyOf(model)
+				body.position = cframe.Position
+				writeRoot(model, body)
+			end
+			local spawnY = 3.4 + lift
+			-- Held from its spawn (hold-new: the Playground's respawns under S("hold")).
+			EnemyService.setHoldNew(true)
+			local heldNew, heldModel = spawnAt("KoboldAxeman", Vector3.new(0, spawnY, 0))
+			EnemyService.setHoldNew(false)
+			expect(settled[heldModel]).toBeCloseTo(lift, 1e-9)
+			expect(bodyOf(heldModel).position.Y).toBeCloseTo(3.4, 1e-6)
+			expect(EnemyService.isHeld(heldNew)).toBe(true)
+			-- Spawned, then held in the same frame (DevStage's staged enemies).
+			local staged, stagedModel = spawnAt("KoboldAxeman", Vector3.new(10, spawnY, 0))
+			EnemyService.setHeld(staged, true)
+			expect(settled[stagedModel]).toBeCloseTo(lift, 1e-9)
+			-- Held after a Heartbeat let it down: left where it stands.
+			local free, freeModel = spawnAt("KoboldAxeman", Vector3.new(20, spawnY, 0))
+			EnemyService.step(TICK)
+			EnemyService.setHeld(free, true)
+			expect(settled[freeModel]).toBeNil()
+			-- Placed and held (DevCombat's enemy hook, whose cframe stands the root as a spawn's does).
+			EnemyService.setHeld(free, false)
+			EnemyService.place(free, CFrame.new(30, spawnY, 0), true)
+			expect(settled[freeModel]).toBeCloseTo(lift, 1e-9)
+			expect(bodyOf(freeModel).position.Y).toBeCloseTo(3.4, 1e-6)
+			-- Placed free: physics lets it down, nothing is lowered.
+			EnemyService.place(staged, CFrame.new(40, spawnY, 0), false)
+			expect(settled[stagedModel]).toBeCloseTo(lift, 1e-9)
+			engine.settle = nil
+			engine.pivot = nil
+		end
+	)
+
 	it("an enemy that starts held under hold-new never regenerates either", function()
 		fresh()
 		EnemyService.setHoldNew(true)

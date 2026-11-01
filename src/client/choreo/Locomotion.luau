@@ -1297,7 +1297,10 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 	elseif oneShot == "Land" then
 		dropJumpHandoff(self)
 		if self.fallHandle ~= nil then
-			animator:stop(self.fallHandle, ChoreoData.oneShotBlendIn)
+			-- On the move nothing covers the legs (D-521): the Fall hands them to the stride over
+			-- locomotion.landOnMoveBlend. Standing, the Land takes them over oneShotBlendIn.
+			local moving = output.oneShotWeight <= 0
+			animator:stop(self.fallHandle, if moving then Config.landOnMoveBlend else ChoreoData.oneShotBlendIn)
 			self.fallHandle = nil
 		end
 		if self.jumpHandle ~= nil then

@@ -21,6 +21,12 @@
 
 	A place with no control module (no default PlayerModule) answers the Humanoid's MoveDirection,
 	as before. `bind` replaces the control module and the camera (specs); nil restores them.
+
+	A scripted stick (`script`: the dev capture's auto-perform, Capture.client.luau) is a move a
+	script gives Humanoid:Move each frame after the control module's, in place of a held key. The
+	control module never reads it, so the controller saw the stick let go while the Humanoid walked
+	it: no sprint, no lock frame, the lock's walk speed (D-512). While one is held it is the stick,
+	read as the control module's would be (camera-relative unless said otherwise).
 ]]
 
 local Players = game:GetService("Players")
@@ -84,8 +90,14 @@ end
 
 local deps: Deps = { controls = defaultControls, camera = defaultCamera }
 
---- Replaces the control module or the camera (specs); nil restores the engine's.
+-- The scripted stick held now (MoveInput.script), or nil.
+type Scripted = { move: Vector3, relative: boolean }
+local scripted: Scripted? = nil
+
+--- Replaces the control module or the camera (specs); nil restores the engine's. Either way a
+--- scripted stick held is let go.
 function MoveInput.bind(overrides: { controls: (() -> any)?, camera: (() -> CFrame?)? }?)
+	scripted = nil
 	deps = {
 		controls = if overrides ~= nil and overrides.controls ~= nil then overrides.controls else defaultControls,
 		camera = if overrides ~= nil and overrides.camera ~= nil then overrides.camera else defaultCamera,
@@ -120,9 +132,26 @@ local function direction(move: Vector3): Vector3
 	return flat / length
 end
 
+--- Holds a scripted stick (D-512): `move` as Humanoid:Move takes it, camera-relative unless
+--- `relative` is false, until the next call; nil (or a zero move) lets it go. The script Moves the
+--- Humanoid itself; this only says what it holds, so the controller reads it as the stick.
+function MoveInput.script(move: Vector3?, relative: boolean?)
+	if move == nil or Vector3.new(move.X, 0, move.Z).Magnitude < 1e-6 then
+		scripted = nil
+		return
+	end
+	scripted = { move = move, relative = relative ~= false }
+end
+
 --- The stick this frame in world space: unit length, or zero while it is let go (or no controller
---- is active). With no control module, the Humanoid's MoveDirection.
+--- is active). A scripted stick held (MoveInput.script) is the stick; with no control module, the
+--- Humanoid's MoveDirection.
 function MoveInput.world(humanoid: Humanoid): Vector3
+	local held = scripted
+	if held ~= nil then
+		local camera = if held.relative then deps.camera() else nil
+		return direction(if camera ~= nil then MoveInput.toWorld(held.move, camera) else held.move)
+	end
 	local controls = deps.controls() :: Controls?
 	if controls == nil then
 		return humanoid.MoveDirection

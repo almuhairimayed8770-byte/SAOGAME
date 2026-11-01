@@ -206,6 +206,11 @@ export type Deps = {
 	-- is drawn where RushDraw puts it, not a frame of the root's own travel past it. Without it the
 	-- root stands where it is (a frame that draws the step's pose before the root moves).
 	rootAhead: ((root: BasePart, dt: number) -> CFrame)?,
+	-- Calls `fn` every frame after physics has moved the replicated roots, before the frame is drawn
+	-- (start(): RunService.PostSimulation): a rush drawn on the server's timeline is drawn again
+	-- there against its root as physics left it (Replication.redrawRushes, D-514). Without it the
+	-- body stays where the step put it against the root rootAhead foretold.
+	afterPhysics: ((fn: () -> ()) -> ())?,
 	-- The local fighter's defence as CharacterController knows it: its state now, and the time on
 	-- `now`'s clock it last stood in a guard or a dodge (nil: not since it spawned). Without it no
 	-- enemy blow on the local fighter shows before the server's word (D-258).
@@ -225,6 +230,12 @@ export type Deps = {
 		group: string,
 		exclude: Instance
 	) -> (number?, Vector3?))?,
+	-- Keeps an enemy body's Humanoid on this client out of the engine's fall states (ai.upright
+	-- .offStates, D-508: Humanoid:SetStateEnabled false, Replication.keepUpright), asked once as the
+	-- rig is first watched, the frame this client first meets the model. The server's own call
+	-- (D-494) does not replicate: Studio's client copy of a held, anchored enemy read FallingDown
+	-- from its spawn to its release. Never asked for a player's character. Without it: never asked.
+	keepUpright: ((model: Model) -> ())?,
 }
 
 -- Sound names (family.Name in sfx.luau) the reactions play; Replication.spec checks each resolves.
@@ -258,6 +269,10 @@ Replication.rejected = Signal.new() :: Signal.Signal<string, string, number?>
 --- Fires (record, clipId, event, jumped) for every clip event on every tracked rig; jumped is true
 --- for an event a render stall's gap crossed (D-132).
 Replication.clipEvent = Signal.new() :: Signal.Signal<any, string, any, boolean>
+--- Fires (record, clipId, clipTime) when a remote rig's action clip starts (ActionStarted),
+--- `clipTime` seconds into the clip: the network catch-up's start, whose first step fires only the
+--- events from there on, so a listener timing off an event before it hears it here (D-513).
+Replication.clipStarted = Signal.new() :: Signal.Signal<any, string, number>
 --- Fires (record, state, duration?, direction?) on every StateChanged.
 Replication.stateChanged = Signal.new() :: Signal.Signal<any, string, number?, string?>
 --- Fires the raw HitConfirmed payload after the reactions ran (the character controller tracks parries).
@@ -408,6 +423,9 @@ type Rush = {
 	shownAs: number?,
 	room: ((from: CFrame, direction: Vector3, distance: number) -> (number?, Vector3?))?,
 	ground: ((spot: Vector3) -> number?)?,
+	-- This frame's step drew the body away from its root: redrawRushes draws it again after
+	-- physics (D-514).
+	redraw: boolean?,
 }
 local rushes: { [number]: Rush } = {}
 -- enemy id -> the server time of the last rush launch heard (RushStarted), or of the last drop of
@@ -1188,6 +1206,7 @@ local function stepRush(id: number, rush: Rush, dt: number)
 	local velocity: Vector3? = if ok and typeof(carried) == "Vector3" then carried else nil
 	local bodies = if RushDraw.seeking(rush.state) then bystanders() else nil
 	local drawn = RushDraw.step(rush.state, now, dt, rootFrame, rush.room, rush.ground, velocity, bodies)
+	rush.redraw = drawn ~= nil
 	if drawn ~= nil then
 		rush.animator:setBodyOffset(rootFrame:Inverse() * drawn)
 		hideRoot(rush, true)
@@ -1234,6 +1253,31 @@ local function stepRush(id: number, rush: Rush, dt: number)
 				gate(function()
 					slamCue(point, normal)
 				end)
+			end
+		end
+	end
+end
+
+--- After physics (deps.afterPhysics, RunService.PostSimulation in start()): every rush whose step
+--- drew the body away from its root this frame is drawn again against the root part as physics
+--- left it, the root the frame draws (D-438), where RushDraw.redrawn puts it. The step wrote the
+--- offset against the root rootAhead foretold from the replicated velocity, which in Studio
+--- under-reads the move physics gives a late root (AH 401(c): (velocity x dt) minus the move read
+--- -0.12 to -0.43 a row at 60 fps), and the body was carried by that error: the snout up to 0.34
+--- through a wall's face, steps of 0.75 to 0.82 a row. Drawn again here it shows where its step put
+--- it on the server's timeline, and a hand-back slides onto the root where it is (D-514). Once a
+--- step.
+function Replication.redrawRushes()
+	for _, rush in rushes do
+		local due = rush.redraw
+		rush.redraw = false
+		local root = rush.root
+		local redraw = method(rush.animator, "redrawBody")
+		if due and root ~= nil and root.Parent ~= nil and redraw ~= nil then
+			local rootFrame = (root :: BasePart).CFrame
+			local drawn = RushDraw.redrawn(rush.state, rootFrame)
+			if drawn ~= nil then
+				redraw(rush.animator, rootFrame:Inverse() * drawn)
 			end
 		end
 	end
@@ -2146,6 +2190,10 @@ function handlers.ActionStarted(payload: any)
 		-- dodge the catch-up started late runs its cue that much late too, so the landing keeps the
 		-- clip's clock and never sounds after the clip's own footstep.
 		d.impact.dodge(record.model, false, lateOf(handle))
+	end
+	if typeof(handle) == "table" and typeof(handle.time) == "number" then
+		-- Where the clip stands as it starts, its beat kept (D-513).
+		Replication.clipStarted:Fire(record, payload.clipId, handle.time)
 	end
 end
 
@@ -3300,12 +3348,33 @@ local function attachDriver(record: any, animator: any)
 	end
 end
 
---- Starts watching a tracked rig: outline, trail attachment, clip events, and the locomotion
---- driver when the rig is not the local player's own.
+--- Turns the engine's fall states (ai.upright.offStates) off on a Humanoid (D-508), as the
+--- server's Engine.keepUpright does on its own copy (D-494).
+function Replication.keepUpright(humanoid: any)
+	for _, name in AI.upright.offStates do
+		humanoid:SetStateEnabled((Enum.HumanoidStateType :: any)[name], false)
+	end
+end
+
+-- An enemy's body as the server published it (EntityKind "Enemy", never the tracker's default for a
+-- missing attribute) and not the local player's own.
+local function enemyBody(record: any): boolean
+	local model = record.model
+	return typeof(model) == "Instance" and model:GetAttribute("EntityKind") == "Enemy" and not isLocalRecord(record)
+end
+
+--- Starts watching a tracked rig: the enemy body's fall states off (D-508), outline, trail
+--- attachment, clip events, and the locomotion driver when the rig is not the local player's own.
 function Replication.watch(record: any)
 	local d = dependencies()
 	if watched[record.id] ~= nil then
 		return
+	end
+	-- First, on the frame this client meets the model: its copy of the Humanoid steps on this
+	-- client's physics from then on.
+	local keepUpright = d.keepUpright
+	if keepUpright ~= nil and enemyBody(record) then
+		keepUpright(record.model)
 	end
 	d.outline.register(record.model)
 	d.trails.attach(record.model)
@@ -3393,6 +3462,9 @@ function Replication.bind(newDeps: Deps)
 			frameStep = if typeof(dt) == "number" and dt > 0 then dt else ChoreoData.frameSeconds
 			holdForWords(frameStep)
 		end)
+	end
+	if typeof(newDeps.afterPhysics) == "function" then
+		(newDeps.afterPhysics :: any)(Replication.redrawRushes)
 	end
 	if playTicking then
 		local onHeartbeat = newDeps.onHeartbeat :: any
@@ -3559,7 +3631,8 @@ end
 --- Binds the real modules (missing siblings become no-op stubs) and subscribes to the remotes.
 function Replication.start()
 	local Client = script.Parent.Parent
-	local player = game:GetService("Players").LocalPlayer
+	local Players = game:GetService("Players")
+	local player = Players.LocalPlayer
 	local Net = require(Shared.net.Net)
 	local EntityTracker = require(script.Parent.EntityTracker)
 	local WeaponInfo = require(script.Parent.WeaponInfo)
@@ -3626,9 +3699,23 @@ function Replication.start()
 		worldCast = worldCast,
 		-- Physics moves a replicated root by its velocity before the frame draws the rigs' pose.
 		rootAhead = Replication.rootAhead,
+		-- A drawn rush again against the root physics moved (D-514).
+		afterPhysics = function(fn)
+			(game:GetService("RunService") :: any).PostSimulation:Connect(fn)
+		end,
 		-- Loaded by name: CharacterController requires this module.
 		localDefence = defenceOf(controller),
 		keyAhead = keyAheadOf(controller),
+		-- An enemy's fall states off on this client's copy too (D-508); never a player's character.
+		keepUpright = function(model: Model)
+			if Players:GetPlayerFromCharacter(model) ~= nil then
+				return
+			end
+			local humanoid = model:FindFirstChildOfClass("Humanoid")
+			if humanoid ~= nil then
+				Replication.keepUpright(humanoid)
+			end
+		end,
 	})
 	Replication.subscribe()
 end

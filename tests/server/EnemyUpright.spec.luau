@@ -20,6 +20,11 @@
 	kobold stood 3 s after "go" before it walked. EnemyService keeps every enemy's Humanoid out of the
 	fall states from the frame its model is made (Engine.keepUpright) and stands up a fallen body on
 	every release (Engine.standUp).
+
+	The staged charge's beat on Studio's own frames (item 398(c), D-509): the server steps the AI on
+	60 Hz frames, its 20 Hz ticks on whichever frame the accumulated time crosses a tick, read on the
+	server's clock. The alert's 0.25 s is five ticks; on 0582a04 its plain >= waited a sixth whenever
+	the five spanned a hair under 0.25 s, so the telegraph came 0.05 s late.
 ]]
 
 local luau = require("@lune/luau")
@@ -552,6 +557,60 @@ local function firstCharge(seams: Seams): Charge
 	}
 end
 
+-- One server frame of `dt` the way Studio runs it (item 398(c), D-509): the clock moves on, then
+-- the Heartbeat steps the AI (whole 20 Hz ticks from the accumulated frames, then the frame pass) on
+-- the server's clock as it reads then, then physics.
+local function frameStep(dt: number)
+	clock.t += dt
+	EnemyService.step(dt)
+	physics(dt)
+	EntityService.tick(dt)
+	CombatService.tick()
+	local index = 1
+	while index <= #timers do
+		local timer = timers[index]
+		if timer.at <= clock.t + 1e-9 then
+			table.remove(timers, index)
+			timer.fn()
+		else
+			index += 1
+		end
+	end
+end
+
+-- Shot 6 staged on server frames of `frameSeconds()` each, its "go" arriving at the start of a
+-- frame `lead` frames into the take's countdown (so every phase of the 20 Hz tick against the go
+-- comes up): seconds from the go to the boar's Telegraph and to its hit on the player (the remotes'
+-- send times).
+local function frameTake(lead: number, frameSeconds: () -> number): (number, number)
+	fresh(BOTH)
+	local shot = shotById("enemy-boar-charge")
+	local remote = loadStage()
+	local playerId = spawnPlayer()
+	local who = EntityService.get(playerId).player
+	local staged = remote.OnServerInvoke(who, "stage", shot.id)
+	assert(staged.ok == true, "the staging refused: " .. tostring(staged.error))
+	for _ = 1, math.ceil(CAPTURE.countdownSeconds * 60) + lead do
+		frameStep(frameSeconds())
+	end
+	local go = remote.OnServerInvoke(who, "go")
+	assert(go.ok == true, "go refused: " .. tostring(go.error))
+	local t0 = clock.t
+	while clock.t - t0 < 1.6 do
+		frameStep(frameSeconds())
+	end
+	local telegraph = sentOf("Telegraph", t0)[1]
+	assert(telegraph ~= nil, "no telegraph")
+	local hit: number? = nil
+	for _, entry in sentOf("HitConfirmed", t0) do
+		if entry.payload.attackerId == staged.ids[1] and hit == nil then
+			hit = entry.time - t0
+		end
+	end
+	assert(hit ~= nil, "no hit")
+	return telegraph.time - t0, hit :: number
+end
+
 describe("Enemies stand upright through a hold (D-494)", function()
 	it("the staged charge shot runs its first charge Done at the full length, one hit, never down", function()
 		local charge = firstCharge(BOTH)
@@ -653,5 +712,59 @@ describe("Enemies stand upright through a hold (D-494)", function()
 		expect(boarEntry.charge).toBe("Meets")
 		expect(fromBoar).toBe(1)
 		expect(table.concat(bodies[take.models[2]].states, ",")).toBe("Running")
+	end)
+
+	it("tells the charge 0.30 to 0.35 s after the go on Studio's 60 Hz frames, whatever their jitter", function()
+		-- Item 398(c) on 0582a04: the telegraph reached the client 23 to 25 rows after the take's
+		-- start. The ticks run on the frames, so five of them can span a hair under the 0.25 s
+		-- alert, and the alert's plain >= waited a sixth tick (D-509).
+		local frame = 1 / 60
+		local cases: { { name: string, seconds: () -> number } } = {
+			-- Frames a hair short of 1/60 s (0582a04: every take 0.366 to 0.399 s).
+			{
+				name = "short",
+				seconds = function()
+					return frame - 5e-5
+				end,
+			},
+			-- A hair long (0582a04 too: 0.318 to 0.351 s).
+			{
+				name = "long",
+				seconds = function()
+					return frame + 5e-5
+				end,
+			},
+		}
+		local rng = Random.new(7)
+		-- Jittered by up to 0.3 ms a frame (0582a04: 0.300 to 0.401 s, 10 of 24 a tick late).
+		table.insert(cases, {
+			name = "jittered",
+			seconds = function()
+				return frame + (rng:NextNumber() * 2 - 1) * 3e-4
+			end,
+		})
+		local tick = AI.tickSeconds()
+		for _, case in cases do
+			local earliest, latest, gap = math.huge, 0, 0
+			for lead = 0, 23 do
+				local telegraph, hit = frameTake(lead, case.seconds)
+				earliest = math.min(earliest, telegraph)
+				latest = math.max(latest, telegraph)
+				gap = math.max(gap, math.abs(hit - telegraph - 0.8))
+			end
+			print(
+				("  %s frames: go to telegraph %.3f to %.3f s, hit 0.8 s after it within %.3f"):format(
+					case.name,
+					earliest,
+					latest,
+					gap
+				)
+			)
+			-- The first tick after the go (one to three frames), five alert ticks and the chase's tick.
+			expect(earliest >= AI.perception.alertDelay + tick - 1e-3).toBe(true)
+			expect(latest <= AI.perception.alertDelay + 2 * tick + 2e-3).toBe(true)
+			-- The 0.6 s crouch and 12 studs at the rush speed: the hit on the first frame at its beat.
+			expect(gap <= frame + 1e-3).toBe(true)
+		end
 	end)
 end)

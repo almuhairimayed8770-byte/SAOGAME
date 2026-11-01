@@ -13,9 +13,13 @@
 	(it sat 0.36 inside it); the recovery ends 40% of the way back to the ready guard; a 0.09 s
 	blend in.
 	Follow-through (D-487): the cut carries on out of the kobold instead of stopping in it. A key
-	at the window's close keeps the contact line, then the wrist lifts the blade up and out through
-	the settle (Weapon X -56 to 15) and a SineInOut key at 0.32 rolls it flat as the waist unwinds
-	(30.5 to 14.5); the blade stood 0.48 in the torso 6 frames past the hold, now -0.10 (clear).
+	at the window's close keeps the contact line; the blade stood 0.48 in the torso 6 frames past
+	the hold, now clear.
+	Settle (D-522): from the window's close the blade rolls flat out of the body (Weapon Z -14 to
+	-70, eased SineInOut by 0.28) and is held flat as the waist unwinds (30 to 14.5 by 0.32), then
+	rolls back to the guard. It used to lift up through the torso (Weapon X -56 to 15) on a Spring,
+	which threw six times the segment's mean speed into its first frame: the tip ran 727 studs/s
+	against the snap's 303 (240 Hz), now 154. Out of the body by 0.267 (-0.01 at the kobold 3.5).
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -167,14 +171,14 @@ local clip: Types.ClipDef = {
 		{
 			-- settle
 			time = 0.28,
-			easing = "Spring",
+			easing = "SineInOut",
 			joints = {
 				Root = posRot(-0.05, -0.14, -0.04, 0, 5, 2),
 				Waist = rot(-9, 26.5, 7),
 				Neck = rot(10, -18.5, -2.5),
 				RightShoulder = rot(18.2, 11.6, -1.5),
 				RightElbow = rot(53.5, 0, 0),
-				Weapon = rot(15, 0, 6),
+				Weapon = rot(-56, 0, -70),
 				LeftShoulder = rot(-6, 0, -24),
 				LeftAnkle = rot(18.6, -3.5, 2.7),
 				LeftHip = rot(27.1, -0.8, -4.9),
@@ -193,7 +197,7 @@ local clip: Types.ClipDef = {
 				Neck = rot(10, -26.5, -2.5),
 				RightShoulder = rot(24.2, 7.6, -1.5),
 				Waist = rot(-9, 14.5, 7),
-				Weapon = rot(15, 0, -39),
+				Weapon = rot(-56, 0, -70),
 			},
 			root = { pos = { 0, 0, -0.4 } },
 		},

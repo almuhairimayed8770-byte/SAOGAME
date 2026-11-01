@@ -131,6 +131,64 @@ describe("DevFrameCap (Studio item 303)", function()
 		expect(math.abs(fps - 30) <= 0.1).toBe(true)
 	end)
 
+	it("spaces its own releases 1/cap apart whatever runs around it; a later reader sees that run vary", function()
+		-- Item 397(b) (D-510): the PC's logger at Last+2 read frames as short as 31.94 ms at the 30
+		-- cap. Each frame here: work before the cap (2 to 12 ms), the cap's step, a gap before a
+		-- reader bound after it (0, or up to 1.5 ms), then the rest of the frame before the engine's
+		-- next frame starts (the draw, physics, the Heartbeat: 1 to 3 ms). The engine's render step
+		-- dt is the time from one frame's start to the next.
+		local rng = Random.new(3)
+		local fixture = load(true, true)
+		local cap = fixture.binds[1].fn
+		fixture.attributes[Dev.frameCap.attribute] = 30
+		local function run(gapMost: number): (number, number, number, number, number)
+			local clock = fixture.clock
+			local lastStart, lastRelease, lastRead = nil :: number?, nil :: number?, nil :: number?
+			local releaseLeast, readLeast, dtLeast, dtMost = math.huge, math.huge, math.huge, 0
+			local dtSum, dtCount = 0, 0
+			for frame = 1, 300 do
+				local start = clock.now
+				local dt = if lastStart ~= nil then start - lastStart else 1 / 30
+				lastStart = start
+				clock.now += 0.002 + rng:NextNumber() * 0.010
+				cap(dt)
+				local release = clock.now
+				clock.now += rng:NextNumber() * gapMost
+				clock.now += SPIN -- the reader's own os.clock read
+				local read = clock.now
+				clock.now += 0.001 + rng:NextNumber() * 0.002
+				if frame > 2 then
+					releaseLeast = math.min(releaseLeast, release - (lastRelease :: number))
+					readLeast = math.min(readLeast, read - (lastRead :: number))
+					dtLeast, dtMost = math.min(dtLeast, dt), math.max(dtMost, dt)
+					dtSum += dt
+					dtCount += 1
+				end
+				lastRelease, lastRead = release, read
+			end
+			return releaseLeast, readLeast, dtLeast, dtMost, dtSum / dtCount
+		end
+		for _, gapMost in { 0, 0.0015 } do
+			local release, read, dtLeast, dtMost, dtMean = run(gapMost)
+			print(
+				("  gap to %.1f ms: releases >= %.3f ms, the reader's os.clock >= %.3f, dt %.3f to %.3f (mean %.3f)"):format(
+					gapMost * 1000,
+					release * 1000,
+					read * 1000,
+					dtLeast * 1000,
+					dtMost * 1000,
+					dtMean * 1000
+				)
+			)
+			-- The cap's guarantee is its own release spacing.
+			expect(release >= 1 / 30 - 1e-9).toBe(true)
+			-- A reader right after it sees it as it is, less what varies between the two.
+			expect(read >= 1 / 30 - gapMost - 1e-9).toBe(true)
+			-- The engine's dt keeps the mean, not each frame.
+			expect(math.abs(dtMean - 1 / 30) <= 1e-4).toBe(true)
+		end
+	end)
+
 	it("lets a frame that took longer go at once, and never holds without a cap in range", function()
 		local fixture = load(true, true)
 		fixture.attributes[Dev.frameCap.attribute] = 30

@@ -352,7 +352,7 @@ local function load(options: Options?): World
 			return if id == kobold.id then kobold elseif id == boar.id then boar else nil
 		end,
 	}
-	local replication = { clipEvent = Signal.new(), hit = Signal.new() }
+	local replication = { clipEvent = Signal.new(), clipStarted = Signal.new(), hit = Signal.new() }
 	local lead = { seconds = 0 }
 	local telegraphs = {
 		glintLead = function(): number

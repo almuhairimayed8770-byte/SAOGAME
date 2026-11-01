@@ -154,7 +154,11 @@ end
 -- falls for landing.fallSeconds at landing.fallSpeed and lands; the most any leg part turns in
 -- one frame from the touch-down on, scaled to a 60 Hz frame.
 local LEGS = { "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot" }
-local function land(drawn: boolean, hz: number): (number, string)
+local function land(
+	drawn: boolean,
+	hz: number,
+	moving: { speed: number, fallSeconds: number, grounded: boolean }?
+): (number, string)
 	local avatar, field = HitMatrix.standing(Harness)
 	local model = avatar.model
 	model:SetAttribute("Rig", "PlayerR15")
@@ -179,22 +183,25 @@ local function land(drawn: boolean, hz: number): (number, string)
 	local chain = Pose.chain(model)
 	local last: any = nil
 	local worst, worstPart = 0, ""
-	local landAt = Stand.settle + landing.fallSeconds
-	for frame = 1, math.floor((landAt + landing.after) * hz + 0.5) do
+	local landAt = Stand.settle + (if moving ~= nil then moving.fallSeconds else landing.fallSeconds)
+	local speed = if moving ~= nil then moving.speed else 0
+	local window = if moving ~= nil then landing.moveWindow else landing.after
+	for frame = 1, math.floor((landAt + window) * hz + 0.5) do
 		local t = frame * dt
-		local airborne = t > Stand.settle and t < landAt
+		-- `grounded`: the same stride with no fall, for the stride's own most.
+		local airborne = t > Stand.settle and t < landAt and not (moving ~= nil and moving.grounded)
 		-- Locomotion reads the fall's height on the frame grounded turns true.
 		local touchDown = not airborne and t >= landAt and t < landAt + dt
 		locomotion:update(dt, {
-			moveDir = Vector3.zero,
-			speed = 0,
-			sprinting = false,
+			moveDir = if speed > 0 then Vector3.new(0, 0, -1) else Vector3.zero,
+			speed = speed,
+			sprinting = speed > ChoreoData.locomotion.runSpeed,
 			grounded = not airborne,
 			drawn = drawn,
 			turning = 0,
 			verticalVelocity = if airborne then -landing.fallSpeed else 0,
 			fallHeight = if airborne or touchDown then landing.fallHeight else nil,
-			velocity = Vector3.new(0, if airborne then -landing.fallSpeed else 0, 0),
+			velocity = Vector3.new(0, if airborne then -landing.fallSpeed else 0, -speed),
 		})
 		animator:step(dt)
 		local solved = Pose.solve(model, avatar.base, animator.mixer:lastOffsets(), chain)
@@ -237,6 +244,44 @@ describe("StandHeight", function()
 			end
 		end
 		print("StandHeight landing: " .. table.concat(report, "; "))
+	end)
+
+	it("a landing on the move hands the legs to the stride without a pop (D-521)", function()
+		-- Studio 417(c) on 0582a04: landings turned a leg part 25.3 and 27.2 degrees a frame. On the
+		-- move Land has no weight, and the Fall let go of the legs over oneShotBlendIn (0.05 s): a
+		-- run's touch-down frame turned a foot 24 to 35 degrees against the stride's own 23.
+		local landing = Stand.landing
+		local report = {}
+		local problems = {}
+		for _, drawn in { false, true } do
+			for _, speed in landing.moveSpeeds do
+				for _, fallSeconds in landing.moveFallSeconds do
+					local worst, part = land(drawn, 60, { speed = speed, fallSeconds = fallSeconds, grounded = false })
+					local own = land(drawn, 60, { speed = speed, fallSeconds = fallSeconds, grounded = true })
+					local bar = math.max(Dev.review.audit.popDegrees, own) + landing.moveSlack
+					local label = ("%s at %d after a %.2f s fall"):format(
+						if drawn then "drawn" else "sheathed",
+						speed,
+						fallSeconds
+					)
+					table.insert(report, ("%s: %.1f (%s; the stride's own %.1f)"):format(label, worst, part, own))
+					if worst > bar then
+						table.insert(
+							problems,
+							("%s: the %s turns %.1f degrees in a 60 Hz frame after the touch-down (the stride's own most %.1f, bar %.1f)"):format(
+								label,
+								part,
+								worst,
+								own,
+								bar
+							)
+						)
+					end
+				end
+			end
+		end
+		print("StandHeight landing on the move:\n  " .. table.concat(report, "\n  "))
+		expect(table.concat(problems, "\n")).toBe("")
 	end)
 
 	it("the planted soles stand on the floor the Humanoid holds the root over, drawn, standing and walking", function()

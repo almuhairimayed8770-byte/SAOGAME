@@ -32,7 +32,8 @@
 	a step past 1x would move it faster than the anti-cheat's sprint cap.
 
 	The capture's shots (F12, tests/data/devCapture.spec.luau): every shot stages at least one
-	enemy the game has (a positive distance, a side within a half turn, held a boolean, hp above 0
+	enemy the game has (a positive distance, a side within a half turn, a yaw (if any) within a
+	quarter turn, held a boolean, hp above 0
 	and at most the enemy's own, a `releaseAfter` only on one let go, inside the take, under a
 	prompt beat at that moment, an `attacks` limit only on one let go, a whole number of 1 or
 	more: FK2), takes the Lock camera only when it locks on or else a
@@ -560,6 +561,26 @@ local function checkStandHeight(ctx: Context, dev: any, problem: (message: strin
 			if not isNumber(landing[key]) or landing[key] <= 0 then
 				problem(("groundClearance.standHeight.landing.%s must be a number above 0"):format(key))
 			end
+		end
+		for _, key in { "moveSpeeds", "moveFallSeconds" } do
+			local list = landing[key]
+			if typeof(list) ~= "table" or #list == 0 then
+				problem(("groundClearance.standHeight.landing.%s must list at least one value"):format(key))
+			else
+				for index, value in list do
+					if not isNumber(value) or value <= 0 then
+						problem(
+							("groundClearance.standHeight.landing.%s[%d] must be a number above 0"):format(key, index)
+						)
+					end
+				end
+			end
+		end
+		if not isNumber(landing.moveWindow) or landing.moveWindow <= 0 or landing.moveWindow > landing.after then
+			problem("groundClearance.standHeight.landing.moveWindow must be above 0 and at most landing.after")
+		end
+		if not isNumber(landing.moveSlack) or landing.moveSlack < 0 or landing.moveSlack > 2 then
+			problem("groundClearance.standHeight.landing.moveSlack must be in [0, 2] degrees")
 		end
 		if typeof(landing.stepHz) ~= "table" or #landing.stepHz == 0 then
 			problem("groundClearance.standHeight.landing.stepHz must list at least one rate")
@@ -1437,6 +1458,19 @@ return function(ctx: Context): { string }
 								entryLabel,
 								HALF_TURN_DEGREES,
 								HALF_TURN_DEGREES
+							)
+						)
+					end
+					-- Turned off facing the player (D-518): never more than a quarter turn, so it still
+					-- stands to the player.
+					if
+						entry.yaw ~= nil and (not isNumber(entry.yaw) or math.abs(entry.yaw) > HALF_TURN_DEGREES / 2)
+					then
+						problem(
+							("%s.yaw must be in [-%d, %d] degrees"):format(
+								entryLabel,
+								HALF_TURN_DEGREES / 2,
+								HALF_TURN_DEGREES / 2
 							)
 						)
 					end

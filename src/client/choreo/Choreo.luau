@@ -77,6 +77,9 @@
 	Nil puts the body back on its root. The offset is written every step and on PreSimulation
 	with the rest of the pose. The step that writes it publishes it (DrawnBody.publish, D-193), so
 	every reader of where the body is drawn, and every billboard over it, follows the body.
+	`redrawBody` writes a new offset into the root joint after the step, on that step's pose (its
+	clips' key there kept): Replication draws a rush again on PostSimulation against the root part
+	physics moved, the one the frame draws (D-514).
 
 	The engine surface (clocks, camera, frame signals) is one small table that tests replace with
 	Choreo.configure; the logic underneath is the Lune-tested Mixer.
@@ -140,6 +143,7 @@ export type Animator = {
 	shiftBeat: (self: Animator, handle: Handle, seconds: number) -> (),
 	setBodyOffset: (self: Animator, offset: CFrame?) -> (),
 	getBodyOffset: (self: Animator) -> CFrame?,
+	redrawBody: (self: Animator, offset: CFrame) -> boolean,
 	setWeight: (self: Animator, handle: Handle, weight: number, immediate: boolean?) -> (),
 	setSpeed: (self: Animator, handle: Handle, speed: number) -> (),
 	setProcedural: (self: Animator, name: string, offsets: ClipSampler.Offsets?, weight: number?) -> (),
@@ -311,6 +315,7 @@ local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 	local touched: { [string]: boolean } = self.touchedScratch
 	local pose: { [string]: CFrame } = self.pose
 	local drawnAt: CFrame? = nil
+	self.drawnKeyed = nil
 	table.clear(touched)
 	if not self.rbxActive then
 		for name, offset in offsets do
@@ -334,6 +339,7 @@ local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 				pose[name] = transform
 				touched[name] = true
 				drawnAt = body
+				self.drawnKeyed = keyed
 			end
 		end
 	end
@@ -838,6 +844,31 @@ function AnimatorClass.setBodyOffset(self: any, offset: CFrame?)
 	self.bodyOffset = offset
 end
 
+--- Draws the body `offset` away from the root part now, on the pose the last step wrote (the clips'
+--- key in the root joint kept), as if that step had set it: for a caller that learns after the step
+--- where the root part is drawn from (Replication's PostSimulation redraw of a rush, D-514). The
+--- next step writes its own. False, writing nothing, unless the last step drew the body away from
+--- its root.
+function AnimatorClass.redrawBody(self: any, offset: CFrame): boolean
+	local keyed: CFrame? = self.drawnKeyed
+	if self.destroyed or self.rbxActive or keyed == nil then
+		return false
+	end
+	local name = rootJointName(self)
+	local motor = if name ~= nil then self.motors[name] else nil
+	if name == nil or motor == nil or self.pinned[name] then
+		return false
+	end
+	local c0 = Joints.frames(motor)
+	local transform = c0:Inverse() * offset * c0 * keyed
+	motor.Transform = transform
+	self.pose[name] = transform
+	self.bodyOffset = offset
+	self.drawnPublished = true
+	DrawnBody.publish(self.model, offset)
+	return true
+end
+
 --- The offset the body is drawn at from its root part (setBodyOffset), nil while it is on its root.
 --- A step hook added after the one that sets it reads this step's (newer hooks run first).
 function AnimatorClass.getBodyOffset(self: any): CFrame?
@@ -928,6 +959,7 @@ local function newAnimator(model: Model): any
 		rootJoint = nil :: string?, -- the joint hanging the body on the root part (rootJointName)
 		bodyOffset = nil :: CFrame?, -- where the body is drawn from its root part (setBodyOffset)
 		drawnPublished = false, -- the last step published a body offset to DrawnBody
+		drawnKeyed = nil :: CFrame?, -- the clips' key in the root joint under the last step's offset
 		stepHooks = {} :: { (dt: number) -> () },
 		rootDelta = Vector3.zero,
 		rootDeltaAt = engine.now(), -- engine.now() of the last step (the one that wrote rootDelta)

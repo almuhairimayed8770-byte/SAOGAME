@@ -45,6 +45,10 @@ local MAX_TURN_TWIST = 90
 local HALF_TURN = 180
 local SLOPE_SAMPLES = 1000
 
+-- The longest locomotion.landOnMoveBlend (seconds): by then the stride sets its next foot down
+-- under a Fall pose still showing.
+local LAND_ON_MOVE_BLEND_MOST = 0.25
+
 local function positive(value: any): boolean
 	return typeof(value) == "number" and value == value and value > 0 and value < math.huge
 end
@@ -384,6 +388,21 @@ return function(ctx: any): { string }
 			)
 		end
 	end
+
+	-- A landing on the move (D-521): the Fall lets go of the legs over landOnMoveBlend, no faster
+	-- than a one-shot cuts in and no slower than LAND_ON_MOVE_BLEND_MOST.
+	local landBlend = loco.landOnMoveBlend
+	check(
+		positive(landBlend)
+			and typeof(choreo.oneShotBlendIn) == "number"
+			and landBlend >= choreo.oneShotBlendIn
+			and landBlend <= LAND_ON_MOVE_BLEND_MOST,
+		("locomotion.landOnMoveBlend (%s) must be in [oneShotBlendIn %s, %s] seconds"):format(
+			tostring(landBlend),
+			tostring(choreo.oneShotBlendIn),
+			tostring(LAND_ON_MOVE_BLEND_MOST)
+		)
+	)
 
 	local stall = choreo.stall
 	if typeof(stall) ~= "table" then

@@ -25,6 +25,9 @@ export type StagedEnemy = {
 	enemy: string, -- enemies.luau def id
 	distance: number, -- studs, root to root, flat, from the player
 	side: number, -- degrees off the player's facing to it (+ = left)
+	-- Degrees it stands turned off facing the player (+ = toward its own left, as hitMatrix yaw);
+	-- nil faces the player square.
+	yaw: number?,
 	held: boolean, -- true: stands still and never attacks; false: let go as the take starts
 	-- A let-go enemy only: let go this many seconds after the take starts, not at its start (the
 	-- server times it from the "go"; the fight's boar joins after the kobold's third overhead).
@@ -146,6 +149,14 @@ export type StageCamera = {
 	lookHeight: number,
 	fixed: boolean?,
 }
+
+-- The held kobold of the Art and kill shots (D-518): turned as a drawn walk-in leaves it, the
+-- player off its axe 10.35 degrees on its left (yaw -10.35; tests/client/HandsOut.spec.luau pins it
+-- to WalkShell's walk-in rest), and 4.2 studs out, root to root, the nearest tenth at which no hand
+-- or arm touches it or its axe on any frame of a take while it idles (the lock turns the body to its
+-- root). From the walk-in's own 3.27 a hand went 0.143 into its arm and 0.098 into its axe on
+-- Horizontal; 3.5 square on was 0.430 in the axe on Rising Arc and 0.124 standing.
+local GATE_KOBOLD = { enemy = "KoboldAxeman", distance = 4.2, side = 0, yaw = -10.35 }
 
 local Dev = {
 	-- Workspace attributes that switch the dev scripts on (set in the dev place project files).
@@ -378,6 +389,14 @@ local Dev = {
 			-- Recovery's frames (a cut through the face line on the way to the stance is fine; a
 			-- held guard across it is not).
 			recoveryFaceShare = 0.5,
+			-- Section 10 beat 2: the snap is "the fastest motion in the game" (D-522). From a strike's
+			-- snap to the next strike's anticipation (the settle, then the Recovery after the last),
+			-- the tip never moves faster in a frame than maxSpeedShare of the clip's fastest snap. A
+			-- Spring settle that flicked the blade back to the guard ran Basic1's tip 2.5 times its
+			-- snap.
+			settle = {
+				maxSpeedShare = 1,
+			},
 			-- Section 10 beats 4 and 5: the blade leaves a hit-stop eased (D-405). On the first frame
 			-- the rig moves after a freeze, the weapon's tip moves at most this many studs a second
 			-- times the frame (0.25 a 60 Hz frame; Horizontal's QuadIn settle shows 0.11). A Spring
@@ -422,7 +441,18 @@ local Dev = {
 			runPhases = { 0, 0.5 },
 			chainSeconds = 0.35,
 			-- The kinds a finding has (the spec's pending list names them).
-			kinds = { "Pop", "Overlap", "Weapon", "Slide", "Drift", "Sink", "Anticipation", "Return", "Recovery" },
+			kinds = {
+				"Pop",
+				"Overlap",
+				"Weapon",
+				"Slide",
+				"Drift",
+				"Sink",
+				"Anticipation",
+				"Settle",
+				"Return",
+				"Recovery",
+			},
 			-- The clips the audit plays (tests/choreo/ClipAudit.spec.luau, the review's Problems
 			-- column): every player attack and every player one-shot (the dodges, guard, parry,
 			-- reactions, death, jump, landing, fall, skid and breathing), and every boar and kobold
@@ -737,6 +767,17 @@ local Dev = {
 				realFight = { min = 1.3, max = 5.25 },
 				distances = { 1.3, 2.3, 3.5, 4.8, 5.25, 6.5 },
 			},
+			-- The gate shots' kobold (D-518, capture shots 2 to 5 and 9): turned toward its own right
+			-- as a drawn walk-in leaves it, staged at 4.2.
+			{
+				id = "KoboldGate",
+				enemy = "KoboldAxeman",
+				yaw = -10.35,
+				-- Turned, the head reaches 0.867 in front of the root, touching at 1.403; the body is at
+				-- reach from 5.367.
+				realFight = { min = 1.45, max = 5.35 },
+				distances = { 1.45, 4.2, 5.35 },
+			},
 			-- Point-blank (fix F2): the enemy at the player's shoulder, `bearing` degrees right of the
 			-- look (negative: left), outside the aim assist's cone (combat.aim.assistConeDegrees), so
 			-- nothing turns the body to it. 75 degrees puts it inside the blade's start pose: the
@@ -912,7 +953,22 @@ local Dev = {
 			seconds = 3,
 			-- A standing body falls for `fallSeconds` at `fallSpeed` (studs a second, from
 			-- `fallHeight` studs: a Land) and lands, read for `after` seconds, at each of `stepHz`.
-			landing = { fallSeconds = 0.5, fallSpeed = 25, fallHeight = 8, after = 0.8, stepHz = { 60, 144 } },
+			landing = {
+				fallSeconds = 0.5,
+				fallSpeed = 25,
+				fallHeight = 8,
+				after = 0.8,
+				stepHz = { 60, 144 },
+				-- On the move (D-521): a body running off a ledge at each of `moveSpeeds`, falling for
+				-- each of `moveFallSeconds`, lands into the stride; over `moveWindow` seconds from the
+				-- touch-down no leg part turns more in a 60 Hz frame than review.audit.popDegrees or
+				-- the stride's own most at that speed (a run's foot turns 20 to 33 a frame), plus
+				-- `moveSlack` degrees.
+				moveSpeeds = { 8, 16, 24 },
+				moveFallSeconds = { 0.25, 0.5 },
+				moveWindow = 0.35,
+				moveSlack = 1,
+			},
 		},
 		-- From a WeaponDraw until the blade is clear of the scabbard, and back from a WeaponSheathe
 		-- to where it first meets it, every long edge of the blade that is partly inside the
@@ -1343,7 +1399,15 @@ local Dev = {
 				stage = {
 					open = false,
 					lock = true,
-					enemies = { { enemy = "KoboldAxeman", distance = 3.5, side = 0, held = true } },
+					enemies = {
+						{
+							enemy = GATE_KOBOLD.enemy,
+							distance = GATE_KOBOLD.distance,
+							side = GATE_KOBOLD.side,
+							yaw = GATE_KOBOLD.yaw,
+							held = true,
+						},
+					},
 				},
 				camera = "Side",
 				cameraSide = 1,
@@ -1364,7 +1428,15 @@ local Dev = {
 				stage = {
 					open = false,
 					lock = true,
-					enemies = { { enemy = "KoboldAxeman", distance = 3.5, side = 0, held = true } },
+					enemies = {
+						{
+							enemy = GATE_KOBOLD.enemy,
+							distance = GATE_KOBOLD.distance,
+							side = GATE_KOBOLD.side,
+							yaw = GATE_KOBOLD.yaw,
+							held = true,
+						},
+					},
 				},
 				camera = "Side",
 				cameraSide = 1,
@@ -1384,7 +1456,15 @@ local Dev = {
 				stage = {
 					open = false,
 					lock = true,
-					enemies = { { enemy = "KoboldAxeman", distance = 3.5, side = 0, held = true } },
+					enemies = {
+						{
+							enemy = GATE_KOBOLD.enemy,
+							distance = GATE_KOBOLD.distance,
+							side = GATE_KOBOLD.side,
+							yaw = GATE_KOBOLD.yaw,
+							held = true,
+						},
+					},
 				},
 				camera = "Side",
 				cameraSide = 1,
@@ -1404,7 +1484,15 @@ local Dev = {
 				stage = {
 					open = false,
 					lock = true,
-					enemies = { { enemy = "KoboldAxeman", distance = 3.5, side = 0, held = true } },
+					enemies = {
+						{
+							enemy = GATE_KOBOLD.enemy,
+							distance = GATE_KOBOLD.distance,
+							side = GATE_KOBOLD.side,
+							yaw = GATE_KOBOLD.yaw,
+							held = true,
+						},
+					},
 				},
 				camera = "Side",
 				cameraSide = 1,
@@ -1486,7 +1574,16 @@ local Dev = {
 				stage = {
 					open = false,
 					lock = true,
-					enemies = { { enemy = "KoboldAxeman", distance = 3.5, side = 0, held = true, hp = 1 } },
+					enemies = {
+						{
+							enemy = GATE_KOBOLD.enemy,
+							distance = GATE_KOBOLD.distance,
+							side = GATE_KOBOLD.side,
+							yaw = GATE_KOBOLD.yaw,
+							held = true,
+							hp = 1,
+						},
+					},
 				},
 				camera = "Side",
 				cameraSide = 1,

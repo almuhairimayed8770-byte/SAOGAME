@@ -611,6 +611,39 @@ function ContactPredictor.worldCast(model: Model, blockcast: Blockcast?, exclude
 	end
 end
 
+-- ContactPredictor.room's cast, for a box at `frame`. A box turned to `away` (a leaning torso,
+-- D-517) shrinks along it by more than the gap, and that is counted back, so the gap holds at any
+-- turn. With `inside` the cast starts a whole box ahead (toward the target, its own depth along
+-- `away`), so a world part the box already stands in is met at once (no room) instead of missed:
+-- the engine's Blockcast never meets a part it starts in.
+local function boxRoom(
+	frame: CFrame,
+	size: Vector3,
+	away: Vector3,
+	distance: number,
+	cast: BoxCast,
+	inside: boolean
+): number
+	if distance <= 0 then
+		return 0
+	end
+	local shrunk = Vector3.new(
+		math.max(size.X - 2 * WALL_GAP, WALL_GAP),
+		math.max(size.Y - 2 * WALL_GAP, WALL_GAP),
+		math.max(size.Z - 2 * WALL_GAP, WALL_GAP)
+	)
+	local right, up, look =
+		math.abs(frame.RightVector:Dot(away)), math.abs(frame.UpVector:Dot(away)), math.abs(frame.LookVector:Dot(away))
+	-- How far the shrunk box's face along `away` stands inside the box's own (the gap, square on).
+	local short = (size.X - shrunk.X) / 2 * right + (size.Y - shrunk.Y) / 2 * up + (size.Z - shrunk.Z) / 2 * look
+	local lead = if inside then size.X * right + size.Y * up + size.Z * look else 0
+	local hit = cast(frame - away * lead, shrunk, away * (lead + distance + WALL_GAP + short))
+	if hit == nil then
+		return distance
+	end
+	return math.clamp(hit - lead - WALL_GAP - short, 0, distance)
+end
+
 --- How far a body whose root's box is `size` at `rootCFrame` may step along `away` (flat, unit),
 --- at most `distance`, and still stand combat.contact.standOff.wallGapStuds short of the world
 --- `cast` meets: the box is cast shrunk by that gap on every side, so a body already touching a
@@ -623,19 +656,51 @@ function ContactPredictor.room(
 	distance: number,
 	cast: BoxCast
 ): number
-	if distance <= 0 then
-		return 0
+	return boxRoom(rootCFrame, size, away, distance, cast, false)
+end
+
+-- The parts of `model` that collide with the world (keepOut.parts: the root, the torsos and the
+-- head), the root first.
+local function columnOf(model: Model): { BasePart }
+	local list: { BasePart } = {}
+	local rootPart = model.PrimaryPart
+	if rootPart ~= nil then
+		table.insert(list, rootPart)
 	end
-	local shrunk = Vector3.new(
-		math.max(size.X - 2 * WALL_GAP, WALL_GAP),
-		math.max(size.Y - 2 * WALL_GAP, WALL_GAP),
-		math.max(size.Z - 2 * WALL_GAP, WALL_GAP)
-	)
-	local hit = cast(rootCFrame, shrunk, away * (distance + 2 * WALL_GAP))
-	if hit == nil then
-		return distance
+	for _, name in KEEP_OUT.parts do
+		local found = model:FindFirstChild(name)
+		if found ~= nil and found:IsA("BasePart") and found ~= rootPart then
+			table.insert(list, found :: BasePart)
+		end
 	end
-	return math.clamp(hit - 2 * WALL_GAP, 0, distance)
+	return list
+end
+
+-- ContactPredictor.room for the whole column (D-517): the root's box as before, and each torso
+-- and the head posed where it stands now relative to `rootPart`, cast along `along` from the root
+-- at `at`; the least room any leaves. A torso or head the clip has already leant into the world
+-- leaves none: the step never carries it deeper.
+local function columnRoom(
+	rootPart: BasePart,
+	column: { BasePart },
+	at: CFrame,
+	along: Vector3,
+	distance: number,
+	cast: BoxCast
+): number
+	local most = distance
+	local rootFrame = rootPart.CFrame
+	for _, part in column do
+		if most <= 0 then
+			return 0
+		end
+		if part == rootPart then
+			most = boxRoom(at, part.Size, along, most, cast, false)
+		else
+			most = boxRoom(at * rootFrame:ToObjectSpace(part.CFrame), part.Size, along, most, cast, true)
+		end
+	end
+	return most
 end
 
 -- The Art's blade step (fix F1, ContactPredictor.standOff): the step along `away` that leaves the
@@ -1650,13 +1715,16 @@ function ContactPredictor.standOff(
 	local away = if flat.Magnitude >= MIN_FACE_DISTANCE
 		then flat.Unit
 		else -Vector3.new(rootCFrame.LookVector.X, 0, rootCFrame.LookVector.Z).Unit
-	-- How far the world behind lets the body go (the root's own box, cast back along the step).
+	-- How far the world behind lets the body go: each colliding part (keepOut.parts, the root, the
+	-- torsos and the head) cast back along the step from where it stands as the step is taken
+	-- (D-517). The root's box alone let a step carry the drawn idle's UpperTorso, 0.26 behind it,
+	-- into a wall flush behind, and the engine then pushed the body along the wall.
 	local room: ((at: CFrame, distance: number) -> number)? = nil
 	local rootPart = model.PrimaryPart
+	local column = columnOf(model)
 	if cast ~= nil and rootPart ~= nil then
-		local size = rootPart.Size
 		room = function(at: CFrame, distance: number): number
-			return ContactPredictor.room(at, size, away, distance, cast)
+			return columnRoom(rootPart, column, at, away, distance, cast)
 		end
 	end
 	local opts: StandOffOptions = options or {}
@@ -1672,9 +1740,9 @@ function ContactPredictor.standOff(
 	local side = if keepOut ~= nil then keepOut.side else nil
 	local roomSide: ((at: CFrame, distance: number) -> number)? = nil
 	if side ~= nil and cast ~= nil and rootPart ~= nil then
-		local size = rootPart.Size
+		local along: Vector3 = side
 		roomSide = function(at: CFrame, distance: number): number
-			return ContactPredictor.room(at, size, side, distance, cast)
+			return columnRoom(rootPart, column, at, along, distance, cast)
 		end
 	end
 	return {

@@ -74,6 +74,19 @@ describe("dev.luau aim and trace", function()
 		expect(table.concat(runValidator(nil), "\n")).toBe("")
 	end)
 
+	it("holds a staged enemy's yaw within a quarter turn, and lets one go without it (D-518)", function()
+		local function withYaw(yaw: any): { string }
+			return runValidator(function(dev: any)
+				dev.capture.shots[2].stage.enemies[1].yaw = yaw
+			end)
+		end
+		expect(hasProblem(withYaw(91), "stage.enemies[1].yaw must be in [-90, 90] degrees")).toBe(true)
+		expect(hasProblem(withYaw(-91), "stage.enemies[1].yaw must be in [-90, 90] degrees")).toBe(true)
+		expect(hasProblem(withYaw("left"), "stage.enemies[1].yaw must be in [-90, 90] degrees")).toBe(true)
+		expect(table.concat(withYaw(-90), "\n")).toBe("")
+		expect(table.concat(withYaw(nil), "\n")).toBe("")
+	end)
+
 	it("names a BindableFunction for each helper, and they differ", function()
 		expect(typeof(Dev.aim.bindableName)).toBe("string")
 		expect(typeof(Dev.trace.bindableName)).toBe("string")

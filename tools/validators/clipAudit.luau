@@ -13,6 +13,8 @@
 	- anticipation: maxCosine in [-1, 0) (a pull against the cut), minTravel above 0, maxSpeedShare
 	  and maxHiddenShare in (0, 1) (under the snap's speed; seen for some of the beat);
 	- recoveryFaceShare in [0, 1);
+	- settle.maxSpeedShare in (0, 1] (D-522: no settle or Recovery moves the tip faster than the
+	  clip's snap, section 10 beat 2's "the fastest motion in the game");
 	- cancel.snapFrames a whole number in [2, 4] (a cancel's hand-over is a snap, section 10 beat 2);
 	- afterFreezeTipSpeed in (0, 20] studs a second (the tip's step on the first frame after a
 	  hit-stop, tests/choreo/PostFreezeStep.spec.luau; a tenth of a snap's peak at most);
@@ -26,7 +28,7 @@
 	- idlePhases 0 or more, runPhases shares in [0, 1), chainSeconds inside combat.luau's chain
 	  (at least basicHitDuration: the swing's beat; under basicChainWindow; the mashed chain, one
 	  BasicAttackRequest refill after the swing, is the audit's other chain plan);
-	- kinds: exactly the nine kinds ClipAudit.findings reports, once each;
+	- kinds: exactly the ten kinds ClipAudit.findings reports, once each;
 	- rigs: each a rigs.luau rig; every body, pair, foot, weaponFree, visible, head and tip part one
 	  of its parts (the weapon's pieces the rig's or weaponModels.luau guardPart / gripPart); the
 	  tip an attachment name or a part with a three-number offset; visible shares above 0; every
@@ -49,7 +51,7 @@ type Context = {
 local CLIPS = "src/shared/clips/"
 local GAME_HZ = 60
 local HALF_TURN_DEGREES = 180
-local KINDS = { "Pop", "Overlap", "Weapon", "Slide", "Drift", "Sink", "Anticipation", "Return", "Recovery" }
+local KINDS = { "Pop", "Overlap", "Weapon", "Slide", "Drift", "Sink", "Anticipation", "Settle", "Return", "Recovery" }
 local VIEWS = { "Behind", "Front" }
 -- Studs a second: a tenth of a one-handed snap's peak (about 190 studs a second at 60 Hz).
 local MAX_AFTER_FREEZE_TIP_SPEED = 20
@@ -163,6 +165,13 @@ return function(ctx: Context): { string }
 		inRange("anticipation.maxHiddenShare", anticipation.maxHiddenShare, 0, 1, false, false)
 	end
 	inRange("recoveryFaceShare", audit.recoveryFaceShare, 0, 1, true, false)
+	-- The settle and the Recovery stay under the snap (D-522): a share of its speed, never past it.
+	local settle = audit.settle
+	if typeof(settle) ~= "table" then
+		problem("settle is missing")
+	else
+		inRange("settle.maxSpeedShare", settle.maxSpeedShare, 0, 1, false, true)
+	end
 	-- The tip's step out of a freeze: above 0, and under what one held frame's settle would take
 	-- at the slowest snap (a bar the snap's own speed could pass is no bar).
 	inRange("afterFreezeTipSpeed", audit.afterFreezeTipSpeed, 0, MAX_AFTER_FREEZE_TIP_SPEED, false, true)

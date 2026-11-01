@@ -229,6 +229,9 @@ function ActionLogic.reconcile(localState: LocalState, serverState: string): Rec
 		then
 			return "EndAction"
 		end
+	elseif serverState == "Guard" and (localState == "Stagger" or localState == "GuardBroken") then
+		-- A stagger the server ended by raising the guard the button still held (D-516).
+		return "EndAction"
 	end
 	return "None"
 end

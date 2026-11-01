@@ -577,7 +577,13 @@ end
 -- release always arrives, so tapping guard cannot leave the server holding a guard (and the sword
 -- drawn) the client let go of. The facing and clock are read when the request goes out.
 local guardSender: TrailingSend.TrailingSend? = nil
+-- The guard button as the input last left it, and the last guard state sent (D-516): a guard a
+-- blow's stagger took comes back up when the stagger ends with the button still down, and a
+-- release inside the stagger is sent so the server keeps it down.
+local guardButton = false
+local guardSent = false
 local function sendGuard(held: boolean)
+	guardSent = held
 	if guardSender == nil then
 		guardSender = TrailingSend.new({
 			gap = TrailingSend.gapOf("GuardRequest"),
@@ -976,8 +982,10 @@ function CharacterController.basicAttack()
 	fire("BasicAttackRequest", { facing = aimForRequest(), clientTime = serverNow(), swing = sequence })
 end
 
---- Guard held or released; a tap inside the parry window is the server's call.
+--- Guard held or released; a tap inside the parry window is the server's call. The button is
+--- remembered through a blow's stagger (D-516): the guard comes back up when the body is free.
 function CharacterController.setGuard(held: boolean)
+	guardButton = held
 	if animator == nil then
 		return
 	end
@@ -1012,6 +1020,9 @@ function CharacterController.setGuard(held: boolean)
 			predicted = nil
 		end
 		setState("Idle")
+		sendGuard(false)
+	elseif (state == "Stagger" or state == "GuardBroken") and guardSent then
+		-- The stagger took the guard but the server keeps the button in mind: let it go there too.
 		sendGuard(false)
 	end
 end
@@ -1198,6 +1209,7 @@ local function onServerState(serverState: string)
 	if serverState == "Art" and predicted ~= nil then
 		(predicted :: Predicted).confirmed = true
 	end
+	local was = state
 	local verb = ActionLogic.reconcile(state, serverState)
 	if verb == "None" then
 		return
@@ -1217,6 +1229,11 @@ local function onServerState(serverState: string)
 			takeArtAway(current)
 		end
 		endAction()
+		if guardButton and (was == "Stagger" or was == "GuardBroken") then
+			-- A blow's stagger is over and the guard button never let go: the guard is up again
+			-- (D-516; the server raised it as the stagger ended, this shows it and agrees).
+			CharacterController.setGuard(true)
+		end
 		return
 	end
 	-- Stagger, GuardBroken, Break, Die: the body is taken from the player; Replication plays the clip.

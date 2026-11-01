@@ -675,7 +675,7 @@ local function load(): World
 				return if id == kobold.id then kobold else nil
 			end,
 		},
-		Replication = { clipEvent = Signal.new(), hit = Signal.new() },
+		Replication = { clipEvent = Signal.new(), clipStarted = Signal.new(), hit = Signal.new() },
 		ClipLibrary = {
 			get = function(id: string): any
 				error("no clip " .. id)

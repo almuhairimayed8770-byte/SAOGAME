@@ -132,3 +132,63 @@ describe("MoveInput.world", function()
 		near(MoveInput.world(humanoid(Vector3.new(1, 0, 0))), Vector3.new(1, 0, 0))
 	end)
 end)
+
+describe("MoveInput.script (D-512)", function()
+	-- The dev capture's auto-perform Moves the Humanoid itself after the control module's Move, and
+	-- the control module never reads that: in Studio its GetMoveVector was zero all through the
+	-- fight's run at the boar, so the controller read the stick let go.
+	it(
+		"is the stick while held, over a control module that reads no key, as the control module would read it",
+		function()
+			MoveInput.bind({
+				controls = function(): any
+					return controls(Vector3.zero)
+				end,
+				camera = function(): CFrame?
+					return CFrame.Angles(0, math.pi / 2, 0) -- looks down -X
+				end,
+			})
+			near(MoveInput.world(humanoid(Vector3.zero)), Vector3.zero)
+			-- Forward on a camera-relative stick walks the camera's way; half pushed, still unit.
+			MoveInput.script(Vector3.new(0, 0, -0.5), true)
+			near(MoveInput.world(humanoid(Vector3.zero)), Vector3.new(-1, 0, 0))
+			-- Right of the camera looking down -X is -Z; a world-space stick is left as it is.
+			MoveInput.script(Vector3.new(1, 0, 0))
+			near(MoveInput.world(humanoid(Vector3.zero)), Vector3.new(0, 0, -1))
+			MoveInput.script(Vector3.new(1, 0, 0), false)
+			near(MoveInput.world(humanoid(Vector3.zero)), Vector3.new(1, 0, 0))
+			-- Let go (nil, or a zero move): the control module's stick again.
+			MoveInput.script(nil)
+			near(MoveInput.world(humanoid(Vector3.new(0, 0, -1))), Vector3.zero)
+			MoveInput.script(Vector3.new(0, 0, -1))
+			MoveInput.script(Vector3.zero)
+			near(MoveInput.world(humanoid(Vector3.new(0, 0, -1))), Vector3.zero)
+		end
+	)
+
+	it(
+		"wins over a held key while held (the script's Move comes after the control module's), and bind lets it go",
+		function()
+			MoveInput.bind({
+				controls = function(): any
+					return controls(Vector3.new(1, 0, 0))
+				end,
+				camera = function(): CFrame?
+					return CFrame.identity
+				end,
+			})
+			MoveInput.script(Vector3.new(0, 0, -1))
+			near(MoveInput.world(humanoid(Vector3.zero)), Vector3.new(0, 0, -1))
+			MoveInput.bind({
+				controls = function(): any
+					return controls(Vector3.new(1, 0, 0))
+				end,
+				camera = function(): CFrame?
+					return CFrame.identity
+				end,
+			})
+			near(MoveInput.world(humanoid(Vector3.zero)), Vector3.new(1, 0, 0))
+			MoveInput.bind(nil)
+		end
+	)
+end)

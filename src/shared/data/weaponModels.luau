@@ -57,7 +57,15 @@ local WeaponModels = {
 	colors = { blade = "PlaceholderSteel", guard = "PlaceholderSteel", grip = "PlaceholderWood" },
 
 	-- Attributes WeaponBuilder writes: on the weapon Model (id and category) and on the character.
-	attributes = { weaponId = "WeaponId", category = "WeaponCategory" },
+	-- mount and mountWhy are a client-only log aid WeaponMount writes on the character (D-519):
+	-- where this client hangs the blade ("Back" or "Hand") and why it cannot sheathe it (nil when
+	-- it can).
+	attributes = {
+		weaponId = "WeaponId",
+		category = "WeaponCategory",
+		mount = "WeaponMount",
+		mountWhy = "WeaponMountWhy",
+	},
 
 	partsPerWeapon = 3, -- blade, guard, grip
 

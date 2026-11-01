@@ -143,6 +143,10 @@ local choreoModule: any = nil
 -- the look input added up while it holds (D-324): the degrees moved, and the move to turn by when a
 -- deliberate look lets it go.
 local stillPivot: Vector3? = nil
+-- The true pivot the last main step framed (D-515): a still shot or a freeze that takes hold on
+-- this frame carries its follow by what the body did since then, so its first frame moves with the
+-- body too. Nil before a framed step, and after a step that framed none (a scripted shot).
+local lastPivot: Vector3? = nil
 -- The shake's offset the still shot stands on (D-497): the one the frame before it drew, held in
 -- the world while it holds (nil when no still shot holds), and what is left of it once it lets go,
 -- ringing out at the shake's own decay (camera.luau shake.decay) rather than dropping in a frame.
@@ -818,12 +822,14 @@ local function step(dt: number)
 	camera.FieldOfView = advanceSpring(fovSpring, span, settle) + punchValue(at)
 
 	if scripted ~= nil then
+		lastPivot = nil
 		stepScripted(span, camera)
 		return
 	end
 
 	local root = subjectRoot()
 	if root == nil then
+		lastPivot = nil
 		return
 	end
 
@@ -878,11 +884,13 @@ local function step(dt: number)
 	local follow = spring :: Spring.Spring<Vector3>
 	if (pivot - follow.position).Magnitude > CameraData.follow.snapDistance then
 		follow:Snap(pivot)
+		lastPivot = nil
 	end
 	follow.target = pivot
 	local trailing: Vector3
 	if still then
-		local from = stillPivot
+		-- On its first frame, what the body did since the last framed step (D-515).
+		local from = stillPivot or lastPivot
 		if from ~= nil then
 			follow.position += pivot - from
 		end
@@ -892,7 +900,7 @@ local function step(dt: number)
 		-- The follow rests where the freeze found it, carried by what the body does; a nudge asked
 		-- on the freeze swings about the rest and comes back to it.
 		local rest = frozenRest or follow.position
-		local from = frozenPivot
+		local from = frozenPivot or lastPivot
 		if from ~= nil then
 			rest += pivot - from
 			follow.position += pivot - from
@@ -905,6 +913,7 @@ local function step(dt: number)
 	end
 	stillPivot = if still then pivot else nil
 	frozenPivot = if frozen then pivot else nil
+	lastPivot = pivot
 	local view = lookOffset - cameraOffset
 	local forward = Vector3.new(view.X, 0, view.Z)
 	local anchor = trailing
@@ -1310,6 +1319,7 @@ end
 function CameraController.setSubject(model: Model?)
 	subject = model
 	followHeldUntil, frozenRest, frozenPivot = nil, nil, nil
+	lastPivot = nil
 	frozenVelocity = Vector3.zero
 	resetFilter()
 	reachSpring:Snap(1)

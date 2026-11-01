@@ -147,6 +147,8 @@ type World = {
 	-- Stands the body with its feet on the floor under (x, z).
 	standAt: (x: number, z: number) -> (),
 	steps: { { name: string, priority: number, fn: (number) -> () } },
+	-- Every MoveInput.script call (D-512): the move (nil: let go), relative, and the clock.
+	scripted: { { move: Vector3?, relative: boolean?, at: number } },
 }
 
 -- `clockLag`: the client has a server clock (workspace:GetServerTimeNow) that many seconds behind
@@ -365,7 +367,7 @@ local function load(options: Options?): World
 			return if id == kobold.id then kobold elseif id == boar.id then boar else nil
 		end,
 	}
-	local replication = { clipEvent = Signal.new(), hit = Signal.new() }
+	local replication = { clipEvent = Signal.new(), clipStarted = Signal.new(), hit = Signal.new() }
 	local lead = { seconds = 0 }
 	local telegraphs = {
 		glintLead = function(): number
@@ -406,12 +408,19 @@ local function load(options: Options?): World
 			return if typeof(fn) == "function" then fn(...) else nil
 		end,
 	}
+	local scripted: { { move: Vector3?, relative: boolean?, at: number } } = {}
+	local moveInput = {
+		script = function(move: Vector3?, relative: boolean?)
+			table.insert(scripted, { move = move, relative = relative, at = clock.now })
+		end,
+	}
 	local fakes: { [string]: any } = {
 		CameraController = camera,
 		TargetController = target,
 		InputController = input,
 		EntityTracker = tracker,
 		Replication = replication,
+		MoveInput = moveInput,
 		Telegraphs = telegraphs,
 		ClipLibrary = clipLibrary,
 		Siblings = siblings,
@@ -586,6 +595,7 @@ local function load(options: Options?): World
 			body.root.AssemblyLinearVelocity = Vector3.zero
 		end,
 		steps = steps,
+		scripted = scripted,
 	}
 	-- On the stage area's spot until a test stands it elsewhere.
 	world.standAt(STAGE.area.position[1], STAGE.area.position[3])
@@ -1595,6 +1605,141 @@ describe("Capture: the fight's auto-perform (CF)", function()
 		local moves = #world.body.moves
 		world.seconds(0.5)
 		expect(#world.body.moves).toBe(moves)
+	end)
+
+	-- D-512 (AH 400 at lag 0 on 0582a04): the character controller reads the control module's
+	-- stick (D-474), which never sees a script's Humanoid:Move. The run at the boar's skid read
+	-- as a let-go stick: the lock's walk speed, off the lock's frame, and the boar never died.
+	it("holds the run as MoveInput's scripted stick on exactly the frames it Moves the Humanoid", function()
+		local world = fightTake()
+		koboldAt(world, 20)
+		world.seconds(1)
+		world.replication.clipEvent:Fire(world.boar, Charge.id, Charge.events[1], false)
+		for _ = 1, 240 do
+			world.frames(1)
+			if #handledOf(world, "Sprint", "Begin") > 0 then
+				break
+			end
+		end
+		world.frames(2)
+		-- Each frame of the run: the Move and the scripted stick, the same move, the same frame.
+		local move = world.body.moves[#world.body.moves]
+		local held = world.scripted[#world.scripted]
+		expect(held).never.toBeNil()
+		expect(held.move).never.toBeNil()
+		expect(held.relative).toBe(true)
+		expect(held.at).toBe(move.at)
+		expect(((held.move :: Vector3) - move.direction).Magnitude).toBeCloseTo(0, 1e-9)
+		-- Every frame that Moved the body held it.
+		local movedFrames = 0
+		for _, entry in world.body.moves do
+			if entry.at > held.at - 0.5 then
+				movedFrames += 1
+				local found = false
+				for _, call in world.scripted do
+					if call.at == entry.at and call.move ~= nil then
+						found = true
+					end
+				end
+				expect(found).toBe(true)
+			end
+		end
+		expect(movedFrames > 0).toBe(true)
+		-- The boar in reach: the run lets go, and so does the scripted stick, from the next frame on.
+		local root = world.body.root.Position
+		local run = fightEntry(function(entry: any): boolean
+			return entry.onClip == Charge.id
+		end).chain[2]
+		world.boar.model.PrimaryPart.Position = Vector3.new(root.X + run.within - 0.5, 3, root.Z)
+		world.seconds(0.1)
+		expect(#handledOf(world, "Sprint", "End")).toBe(1)
+		local last = world.scripted[#world.scripted]
+		expect(last.move).toBeNil()
+		local moves = #world.body.moves
+		local from = world.clock.now
+		world.seconds(0.5)
+		expect(#world.body.moves).toBe(moves)
+		for _, call in world.scripted do
+			if call.at > from then
+				expect(call.move).toBeNil()
+			end
+		end
+	end)
+
+	it("lets the scripted stick go when the take stops mid-run", function()
+		local world = fightTake()
+		koboldAt(world, 20)
+		world.seconds(1)
+		world.replication.clipEvent:Fire(world.boar, Charge.id, Charge.events[1], false)
+		for _ = 1, 240 do
+			world.frames(1)
+			if #handledOf(world, "Sprint", "Begin") > 0 then
+				break
+			end
+		end
+		world.frames(2)
+		expect((world.scripted[#world.scripted] :: any).move).never.toBeNil()
+		world.key(KEYS.markDone)
+		world.key(KEYS.markDone)
+		expect((world.scripted[#world.scripted] :: any).move).toBeNil()
+		local from = world.clock.now
+		world.seconds(0.5)
+		for _, call in world.scripted do
+			if call.at > from then
+				expect(call.move).toBeNil()
+			end
+		end
+	end)
+
+	-- D-513 (AH 400 at 0.1 s lag on 0582a04): the network catch-up started the boar's Charge
+	-- clip past 0.11 s, so its only events before the hit window (0.1 and 0.11 s) never fired, the
+	-- dodge was never set, and the boar ran the player down at 9.9 s.
+	it("times the dodge off the start of a Charge clip the catch-up started past its first events", function()
+		local world = fightTake()
+		koboldAt(world, 20)
+		local dodge = fightEntry(function(entry: any): boolean
+			return entry.onClip == Charge.id
+		end)
+		local open = openOf(Charge)
+		local late = 0.15
+		for _, event in Charge.events do
+			if event.time < open then
+				expect(event.time < late).toBe(true) -- no event before the window fires
+			end
+		end
+		world.seconds(1)
+		local startedAt = world.clock.now
+		-- Another enemy's start is not the boar's.
+		world.replication.clipStarted:Fire(world.kobold, Charge.id, late)
+		world.replication.clipStarted:Fire(world.boar, Charge.id, late)
+		world.seconds(open - late)
+		-- The window's own event, as the catch-up's step fires it, moves nothing.
+		for _, event in Charge.events do
+			if event.kind == "HitWindowOpen" then
+				world.replication.clipEvent:Fire(world.boar, Charge.id, event, false)
+			end
+		end
+		world.seconds(0.2)
+		local dodges = handledOf(world, "Dodge", "Begin")
+		expect(#dodges).toBe(1)
+		expect(dodges[1].at - startedAt).toBeCloseTo(open - late - dodge.lead, 2 * FRAME)
+	end)
+
+	it("hears the kobold's overhead from its late start as from its first event", function()
+		local world = fightTake()
+		koboldAt(world, 20)
+		local guard = fightEntry(function(entry: any): boolean
+			return entry.onClip == Overhead.id
+		end)
+		local open = openOf(Overhead)
+		local late = 0.12
+		world.seconds(0.5)
+		local startedAt = world.clock.now
+		world.replication.clipStarted:Fire(world.kobold, Overhead.id, late)
+		world.seconds(open - late)
+		local guards = handledOf(world, "Guard", "Begin")
+		expect(#guards).toBe(1)
+		expect(guards[1].at - startedAt).toBeCloseTo(open - late - guard.lead, 2 * FRAME)
 	end)
 end)
 

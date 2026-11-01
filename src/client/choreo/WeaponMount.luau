@@ -27,6 +27,17 @@
 
 	One mount drives an animator at a time. A second mount on the same animator takes over until it
 	is destroyed; then the one before it takes the sword back.
+
+	A piece the back mount needs that is not there yet (the weapon Model or its category attribute,
+	the sheath row's body part) is looked for again on every step until it comes (D-519):
+	the mount used to work this out once per new motor, so a motor seen before the rest of its
+	weapon or body kept the sword in the hand for good. A category with no sheath row, or a joint
+	that is no Motor6D, is final.
+
+	A log aid (D-519, like D-362's TrailOwner): the driving mount writes on the character Model,
+	on this client only, weaponModels.attributes.mount ("Back" or "Hand": where this client hangs
+	the blade now, the motor's Part0) and attributes.mountWhy (why the sword cannot go on the back,
+	nil while it can). destroy clears both.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -49,6 +60,8 @@ export type WeaponMount = {
 }
 
 local MOTOR = WeaponModels.motorName
+local MOUNT_ATTRIBUTE = WeaponModels.attributes.mount
+local WHY_ATTRIBUTE = WeaponModels.attributes.mountWhy
 
 local WeaponMount = {}
 WeaponMount.__index = WeaponMount
@@ -105,44 +118,70 @@ local function weaponModelOf(model: Model, motor: Motor6D): Instance?
 	return if named ~= nil and named:IsA("Model") then named else nil
 end
 
--- Re-reads the joint; on a new one, works out again whether it can go on the back.
-local function sync(self: any)
-	local joint = self.animator:joint(MOTOR)
-	if joint == self.joint then
-		return
-	end
-	self.joint = joint
+-- Works out whether the current joint can go on the back. Returns why not (nil when it can) and
+-- whether that may still change (a piece not there yet: looked for again on the next sync).
+local function resolve(self: any): (string?, boolean)
 	self.canSheathe = false
 	self.handPart = nil
 	self.backPart = nil
 	self.backC0 = nil
-	self.appliedPlace = nil
-	self.appliedC0 = nil
+	local joint = self.joint
 	if joint == nil then
-		return
+		return "no Weapon joint", false
 	end
-	self.generationCount += 1
 	if not joint:IsA("Motor6D") then
-		return
+		return "the Weapon joint is not a Motor6D", false
 	end
 	local weapon = weaponModelOf(self.model, joint :: Motor6D)
 	local category = if weapon ~= nil then weapon:GetAttribute(WeaponModels.attributes.category) else nil
 	if typeof(category) ~= "string" then
-		return
+		return "no weapon category", true
 	end
 	local partName, frame = WeaponMount.backFrame(category :: Types.WeaponCategory)
 	if partName == nil or frame == nil then
-		return
+		return "no sheath row for " .. category, false
 	end
 	local part = self.model:FindFirstChild(partName)
 	if part == nil or not part:IsA("BasePart") then
-		return
+		return "no " .. partName, true
 	end
 	local hand = self.model:FindFirstChild(GRIP.part0)
 	self.handPart = if hand ~= nil and hand:IsA("BasePart") then hand else nil
 	self.backPart = part
 	self.backC0 = frame
 	self.canSheathe = true
+	return nil, false
+end
+
+-- Re-reads the joint; on a new one, works out again whether it can go on the back, and while a
+-- piece it needs is missing, looks for it again (D-519).
+local function sync(self: any)
+	local joint = self.animator:joint(MOTOR)
+	if joint == self.joint then
+		if self.retry then
+			self.why, self.retry = resolve(self)
+		end
+		return
+	end
+	self.joint = joint
+	self.appliedPlace = nil
+	self.appliedC0 = nil
+	if joint ~= nil then
+		self.generationCount += 1
+	end
+	self.why, self.retry = resolve(self)
+end
+
+-- The log aid (D-519): where this client hangs the blade and why it cannot go on the back, on
+-- the character Model, written only when it changes. Nil clears both.
+local function publish(self: any, place: Place?, why: string?)
+	if self.published == place and self.publishedWhy == why then
+		return
+	end
+	self.published = place
+	self.publishedWhy = why
+	self.model:SetAttribute(MOUNT_ATTRIBUTE, place)
+	self.model:SetAttribute(WHY_ATTRIBUTE, why)
 end
 
 -- Puts the motor where the wish says. A rig that cannot sheathe keeps its sword in the hand as
@@ -150,6 +189,7 @@ end
 local function apply(self: any)
 	if not self.canSheathe then
 		self.animator:pin(MOTOR, false)
+		publish(self, if self.joint ~= nil then "Hand" else nil, self.why)
 		return
 	end
 	local motor = self.joint :: Motor6D
@@ -165,6 +205,7 @@ local function apply(self: any)
 		self.appliedPlace = place
 	end
 	self.animator:pin(MOTOR, back)
+	publish(self, place, nil)
 end
 
 --- Creates the mount for an animator and its character model; the sword starts in the hand.
@@ -180,6 +221,10 @@ function WeaponMount.new(animator: any, model: Model): WeaponMount
 		backC0 = nil :: CFrame?,
 		appliedPlace = nil :: Place?, -- the place this mount last wrote onto the joint
 		appliedC0 = nil :: CFrame?, -- the joint's C0 as read back after that write
+		why = nil :: string?, -- why the sword cannot go on the back (nil when it can)
+		retry = false, -- a piece the back mount needs is missing: looked for again on every sync
+		published = nil :: Place?, -- the log aid as last written (D-519)
+		publishedWhy = nil :: string?,
 		generationCount = 0,
 		unhook = nil :: (() -> ())?,
 		destroyed = false,
@@ -263,6 +308,7 @@ function WeaponMount.destroy(self: any)
 			self.wish = "Hand"
 			apply(self)
 		end
+		publish(self, nil, nil)
 	end
 	self.animator:pin(MOTOR, false)
 	local below = if stack ~= nil then stack[#stack] else nil

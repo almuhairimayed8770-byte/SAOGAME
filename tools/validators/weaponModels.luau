@@ -103,6 +103,19 @@ local function validate(ctx: Context): { string }
 	then
 		problem("attachment names must be WeaponGrip / TrailStart / TrailEnd (section 10)")
 	end
+	-- The attributes: WeaponBuilder's two and WeaponMount's client-only log aid (D-519), each a
+	-- distinct non-empty name (a logger reads the character's mount and mountWhy by name).
+	local attributeNames: { [string]: string } = {}
+	for _, field in { "weaponId", "category", "mount", "mountWhy" } do
+		local name = (WeaponModels.attributes :: any)[field]
+		if typeof(name) ~= "string" or name == "" then
+			problem(("attributes.%s must be a non-empty attribute name"):format(field))
+		elseif attributeNames[name] ~= nil then
+			problem(("attributes.%s '%s' is also attributes.%s"):format(field, name, attributeNames[name]))
+		else
+			attributeNames[name] = field
+		end
+	end
 	if WeaponModels.tag ~= "Placeholder" then
 		problem("stand-in weapons must carry the Placeholder tag (section 19)")
 	end

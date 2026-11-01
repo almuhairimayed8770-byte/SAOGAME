@@ -75,6 +75,7 @@ local Combat = require(Shared.data.combat)
 local Enemies = require(Shared.data.enemies)
 local Moments = require(Shared.data.moments)
 local Rigs = require(Shared.data.rigs)
+local World = require(Shared.data.world)
 local Signal = require(Shared.util.Signal)
 local RushWorld = require(Shared.choreo.RushWorld)
 local Brain = require(script.Parent.Parent.ai.Brain)
@@ -128,6 +129,9 @@ export type Engine = {
 	-- Moves a placed body to `cframe` (Model:PivotTo; the Studio test hook place, D-333). Nil:
 	-- Model:PivotTo itself.
 	pivot: ((model: Model, cframe: CFrame) -> ())?,
+	-- D-520: lowers a body `studs` (Model:PivotTo), the spawn's lift over where its Humanoid holds
+	-- it, when it is anchored before its first physics step has let it down. Nil: left where it is.
+	settle: ((model: Model, studs: number) -> ())?,
 	-- Carries the body onto `position` (its height kept) by its own velocity over `seconds`, the way
 	-- it was going (D-431): a strike's own movement about to reach its exact stop gets there by its
 	-- own motion, never by a CFrame write, which every client shows as a teleport of the replicated
@@ -238,6 +242,9 @@ export type Entry = {
 	awake: boolean,
 	held: boolean, -- the cinematic / dev hold: asleep, and the sleep check never wakes it
 	anchored: boolean, -- its root is anchored (Engine.anchor): held, where nothing shoves it (D-436)
+	-- D-520: studs its root still stands over where the Humanoid holds it, from the spawn's
+	-- world.spawn.groundEpsilon, until a Heartbeat's physics has let it down (0 after that).
+	spawnLift: number,
 	-- Attacks it may still begin before it is held at its next free tick (limitAttacks, FK2); nil:
 	-- no limit (every enemy the game runs by itself).
 	attacksLeft: number?,
@@ -1500,6 +1507,18 @@ local function anchorBody(entry: Entry, anchored: boolean)
 	end
 	entry.anchored = anchored
 	local engine = dependencies().engine
+	-- D-520: a body anchored before its first physics step (held from its spawn) would stand the
+	-- spawn's groundEpsilon over the floor for as long as it is held, then drop it at the release:
+	-- it is put where the Humanoid holds it first.
+	local lift = entry.spawnLift
+	if anchored and lift > 0 then
+		entry.spawnLift = 0
+		local settle = engine.settle
+		if settle ~= nil then
+			settle(entry.model, lift)
+			entry.home = engine.position(entry.model)
+		end
+	end
 	local anchor = engine.anchor
 	if anchor ~= nil then
 		anchor(entry.model, anchored)
@@ -1613,6 +1632,9 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 		awake = true,
 		held = false,
 		anchored = false,
+		-- Every spawn's cframe stands the root world.spawn.groundEpsilon over its ground
+		-- (PlaygroundLayout.rootHeight), until its first physics step lets it down.
+		spawnLift = World.spawn.groundEpsilon,
 		attacksLeft = nil,
 		home = d.engine.position(model),
 		front = front,
@@ -1889,6 +1911,14 @@ function EnemyService.place(id: number, cframe: CFrame, held: boolean?): boolean
 	restartClock(entry.mover)
 	entry.mover.halted = nil
 	entry.stepping = false
+	-- D-520: the cframe stands the root as a spawn's does (PlaygroundLayout.rootHeight, the
+	-- spawn's groundEpsilon over its ground); a body held there never falls that onto the floor,
+	-- so it is put on it.
+	entry.spawnLift = 0
+	local settle = engine.settle
+	if held == true and settle ~= nil then
+		settle(model, World.spawn.groundEpsilon)
+	end
 	entry.home = engine.position(model)
 	if held ~= true then
 		unhold(entry)
@@ -2115,6 +2145,12 @@ function EnemyService.step(dt: number)
 		accumulator = 0
 	end
 	frameAll(dt)
+	-- A Heartbeat comes after the frame's physics: a free body has been let down on its feet.
+	for _, entry in entries do
+		if not entry.anchored then
+			entry.spawnLift = 0
+		end
+	end
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -2528,6 +2564,9 @@ local function defaultEngine(groups: any?): Engine
 			for _, name in AI.upright.offStates do
 				humanoid:SetStateEnabled((Enum.HumanoidStateType :: any)[name], false)
 			end
+		end,
+		settle = function(model, studs)
+			model:PivotTo(CFrame.new(0, -studs, 0) * model:GetPivot())
 		end,
 		standUp = function(model)
 			local humanoid = humanoidOf(model)

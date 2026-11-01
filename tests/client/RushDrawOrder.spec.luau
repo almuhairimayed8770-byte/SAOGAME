@@ -162,6 +162,10 @@ type Options = {
 	-- Where the replicated root stands at client time `t` (default: the server's body `lag` late).
 	rootAt: ((t: number) -> CFrame)?,
 	fps: number?, -- the loop's frame rate (default 60)
+	-- The share of the server body's velocity the replicated root reports on the loop's frame n
+	-- (default all of it). Studio's under-reads the move physics gives the root: (velocity x dt)
+	-- minus the PostSimulation-PreSimulation move read -0.12 to -0.43 a row at 60 fps (AH 401(c)).
+	velocityScale: ((frame: number) -> number)?,
 }
 
 local WIND_UP_START = 10
@@ -240,7 +244,9 @@ local function rush(options: Options): Run
 			else frame
 		root.CFrame = turned
 		root.Position = frame.Position -- Lune keeps the two apart; the engine does not
+		local scale = options.velocityScale
 		root.AssemblyLinearVelocity = velocityAt(clock - options.lag, options.stopAt)
+			* (if scale ~= nil then scale(frameNow) else 1)
 	end
 	if options.gait then
 		local humanoid = model:FindFirstChildOfClass("Humanoid") :: any
@@ -273,6 +279,8 @@ local function rush(options: Options): Run
 	local clockStart: ((dt: number) -> ())? = nil
 	local clockPosed: ((dt: number) -> ())? = nil
 	local clockEnd: ((dt: number) -> ())? = nil
+	-- Replication's PostSimulation hook (start() binds it to RunService.PostSimulation, D-514).
+	local afterPhysics: (() -> ())? = nil
 	if options.frameClock then
 		FrameClock.bind({
 			now = function(): number
@@ -355,6 +363,11 @@ local function rush(options: Options): Run
 		-- Studio's order: the root the frame draws is the one physics moved after the step, as
 		-- start() binds it (D-438).
 		rootAhead = if options.studioOrder then Replication.rootAhead else nil,
+		afterPhysics = if options.studioOrder
+			then function(fn: () -> ())
+				afterPhysics = fn
+			end
+			else nil,
 	} :: any)
 	if options.gait then
 		Replication.watch(record)
@@ -447,6 +460,9 @@ local function rush(options: Options): Run
 		end
 		if options.studioOrder then
 			place(bodyAt(clock - options.lag, options.stopAt))
+			if afterPhysics ~= nil then
+				afterPhysics()
+			end
 		end
 		local offset: CFrame? = (animator :: any).bodyOffset
 		local drawn = root.CFrame * (offset or CFrame.identity)
@@ -756,5 +772,102 @@ describe("a rush's first drawn step (D-480)", function()
 				end
 			)
 		end
+	end
+end)
+
+-- The largest backward step of the drawn body down the line over the `rows` frames after the
+-- replicated root comes to rest (its last move), the slam's settle.
+local function backAfterStop(run: Run, rows: number): number
+	local frames = run.frames
+	local stopped: number? = nil
+	for index = #frames, 2, -1 do
+		if (frames[index].root - frames[index - 1].root).Magnitude > 1e-4 then
+			stopped = index
+			break
+		end
+	end
+	local worst = 0
+	if stopped ~= nil then
+		for index = stopped + 1, math.min(#frames, stopped + rows) do
+			worst = math.max(worst, frames[index - 1].along - frames[index].along)
+		end
+	end
+	return worst
+end
+
+describe("a drawn rush whose replicated velocity under-reads the root's move (AH 401(c), D-514)", function()
+	-- The PC's log on 0582a04: (velocity x dt) minus the PostSimulation-PreSimulation move read
+	-- -0.12 to -0.43 a row at 60 fps and -0.01 to -0.05 at 144 once the root ran. Here the root
+	-- reports that share of the server body's velocity, row by row, while physics moves it at the
+	-- server's pace. The step's offset, written against the root that velocity foretold, carried the
+	-- body by the error (0582a04, 60 fps: the snout 0.31 to 0.34 past the face at lags 0 to 0.25 s,
+	-- drawn steps of 0.62 to 0.86); Replication draws it again after physics against the root
+	-- where physics left it.
+	local function underRead(fps: number): (frame: number) -> number
+		local low, high = if fps < 100 then 0.08 else 0.74, if fps < 100 then 0.74 else 0.95
+		return function(frame: number): number
+			return low + (high - low) * ((frame * 7) % 10) / 9
+		end
+	end
+
+	-- The run's drawn steps, the deepest snout past `face` (nil: none), and whether the body was
+	-- back on its root by the end.
+	local function measure(run: Run, face: number?): (number, number, boolean)
+		local worst = 0
+		local frames = run.frames
+		for index = 2, #frames do
+			worst = math.max(worst, (frames[index].drawn - frames[index - 1].drawn).Magnitude)
+		end
+		return worst, if face ~= nil then pastFace(run, face) else 0, not frames[#frames].offset
+	end
+
+	for _, lag in { 0, 0.1, 0.25 } do
+		it(
+			("keeps the snout off the wall's face on every row and slides back without a step, root %.2f s late"):format(
+				lag
+			),
+			function()
+				for _, fps in { 60, 144 } do
+					local face = 12
+					local stop = stopFor(face)
+					local run = rush({
+						latency = 0,
+						lag = lag,
+						events = slam(face),
+						stopAt = stop,
+						wall = face,
+						frames = 3 * fps,
+						fps = fps,
+						studioOrder = true,
+						velocityScale = underRead(fps),
+					})
+					local worst, past, home = measure(run, face)
+					expect(home).toBe(true)
+					expect(past).toBeLessThanOrEqual(0.05)
+					expect(backAfterStop(run, 10)).toBeLessThanOrEqual(0.02)
+					expect(worst).toBeLessThanOrEqual(SPEED / fps + 0.05)
+				end
+			end
+		)
+
+		it(
+			("moves the drawn body no more than a frame of the run's travel on every row, root %.2f s late"):format(lag),
+			function()
+				for _, fps in { 60, 144 } do
+					local run = rush({
+						latency = 0,
+						lag = lag,
+						frames = 3 * fps,
+						fps = fps,
+						studioOrder = true,
+						velocityScale = underRead(fps),
+					})
+					local worst, _, home = measure(run, nil)
+					expect(home).toBe(true)
+					-- The root's first move from rest included: nothing the root does carries the body.
+					expect(worst).toBeLessThanOrEqual(SPEED / fps + 0.05)
+				end
+			end
+		)
 	end
 end)

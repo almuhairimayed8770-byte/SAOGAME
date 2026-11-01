@@ -240,6 +240,17 @@ function Brain.signedAngle(from: Vector3, to: Vector3): number
 	return math.deg(math.atan2(cross.Y, from:Dot(to)))
 end
 
+--- Whether a wait of `seconds` that the AI tick judges (the alert's head turn) is over: the time
+--- since `since` and the wait, each counted in whole ticks to the nearest one (D-509). The ticks
+--- run on the server's frames, so on a real Heartbeat five of them can span a hair under 0.25 s
+--- (frames a hair under 1/60 s, or a frame's jitter), and a plain `>=` waited a sixth tick: the
+--- alert ran 0.25 or 0.30 s from frame jitter alone. Counted, it ends on the tick it is due, as on
+--- the even clock the specs step.
+function Brain.ticksWaited(now: number, since: number, seconds: number): boolean
+	local tick = AI.tickSeconds()
+	return math.round((now - since) / tick) >= math.round(seconds / tick)
+end
+
 --- Horizontal distance between two points.
 function Brain.horizontalDistance(a: Vector3, b: Vector3): number
 	local dx, dz = a.X - b.X, a.Z - b.Z
@@ -1091,7 +1102,7 @@ function Brain.tick(self: Brain, dt: number)
 			return
 		end
 		self:turnToward(target.direction, tuning.turnRate, dt)
-		if now - self.phaseStart >= AI.perception.alertDelay then
+		if Brain.ticksWaited(now, self.phaseStart, AI.perception.alertDelay) then
 			self:enterChase(now)
 		end
 	elseif phase == "Chase" then
