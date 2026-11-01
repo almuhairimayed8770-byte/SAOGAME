@@ -25,8 +25,9 @@ export type Pivot = "heel" | "toe" | "center" | "left" | "right"
 export type SwingPoint = { t: number, x: number, y: number, z: number, pitch: number, roll: number }
 
 --- A swing key whose hip, knee and ankle X are set by hand; hip Y/Z and ankle Z blend from the
---- lift-off solution to the strike solution.
-export type SwingJoint = { t: number, hip: number, knee: number, ankle: number }
+--- lift-off solution to the strike solution. `out` (degrees, default 0) turns the hip out on Z on top
+--- of that blend, away from the other leg, so the swinging leg passes the planted one outside it.
+export type SwingJoint = { t: number, hip: number, knee: number, ankle: number, out: number? }
 
 --- The toe-off of a fast gait: for `duration` s after the lift the foot keeps going back with the
 --- ground while the pivot rises `rise` studs and the foot rolls `angle` degrees further (both eased
@@ -86,6 +87,8 @@ export type Gait = {
 	sheathed: boolean,
 	-- Solved as given, then every joint mirrored left <-> right (WalkRight is WalkLeft mirrored).
 	mirrored: boolean,
+	-- How much of its plans' swing `out` this gait turns the hip (default 1; D-481).
+	swingOut: number?,
 }
 
 local Keys = {}

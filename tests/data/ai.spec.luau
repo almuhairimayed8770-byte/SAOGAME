@@ -110,6 +110,15 @@ describe("ai data", function()
 		end
 	end)
 
+	it("every enemy body keeps out of the engine's falls: FallingDown and Ragdoll (D-494)", function()
+		-- Section 10: "Death is a 0.5 s freeze in the last pose (no ragdoll)"; the brain owns the body.
+		expect(table.find(AI.upright.offStates, "FallingDown")).toBeTruthy()
+		expect(table.find(AI.upright.offStates, "Ragdoll")).toBeTruthy()
+		for _, name in AI.upright.offStates do
+			expect(name ~= "Running" and name ~= "GettingUp" and name ~= "Freefall" and name ~= "Dead").toBe(true)
+		end
+	end)
+
 	it("interrupt fallbacks are the section 6 durations", function()
 		expect(AI.interrupt.durations.Stagger).toBe(Combat.staggerDuration)
 		expect(AI.interrupt.durations.Break).toBe(Combat.breakDuration)

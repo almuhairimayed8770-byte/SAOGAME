@@ -748,4 +748,82 @@ describe("the keep-out with the world flush behind (item 287, D-276, D-314)", fu
 			end
 		end
 	)
+
+	-- Item 337 (D-502): in Studio the root box went 0.48 into a wall flush behind and the body was
+	-- squeezed 5.4 studs along it. The world's real room (ContactPredictor.room, cast from where the
+	-- root stands) opens as far as the frame's own lunge carried the root off the wall; the step
+	-- took that room, and then the hold (D-429) took the same lunge back again with no cast, so the
+	-- root went past where it stood, into the wall, by the frame's lunge.
+	it(
+		"the step and the hold never take the same lunge twice: the root box stays out of a wall flush behind",
+		function()
+			local ContactPredictor = Harness.load("src/client/controllers/ContactPredictor")
+			local away = Vector3.new(0, 0, 1)
+			local art = load({ choreo = true }).controller.slots()[1]
+			assert(art ~= nil, "no Art in slot 1")
+			local clipDef = Harness.load("src/shared/clips/" .. art.clip)
+			local from = 0
+			-- What the swing's motion would carry the parts in, and a step back before the lunge starts
+			-- (Basic1 at a held kobold asks 0.72 studs over its first six frames), which the wall takes.
+			local function keep(t: number): number
+				return math.max(0, lungeOf(clipDef, from, t)) + math.clamp((t - from) * 6, 0, 0.5)
+			end
+			-- A wall square to `away`, the root box's back face on it at the release.
+			local ROOT_SIZE = Vector3.new(2, 2, 1)
+			local wallAt = math.huge
+			local function cast(start: CFrame, size: Vector3, vector: Vector3): number?
+				local length = vector.Magnitude
+				local direction = vector / length
+				local reach = math.abs(start.RightVector:Dot(away)) * size.X / 2
+					+ math.abs(start.UpVector:Dot(away)) * size.Y / 2
+					+ math.abs(start.LookVector:Dot(away)) * size.Z / 2
+				local gap = wallAt - (start.Position:Dot(away) + reach)
+				local rate = direction:Dot(away)
+				if gap >= -1e-9 and rate > 1e-9 and gap / rate <= length then
+					return gap / rate
+				end
+				return nil
+			end
+			local plan = {
+				distance = 0,
+				away = away,
+				to = 0,
+				keep = keep,
+				keepUntil = 10,
+				room = function(at: CFrame, distance: number): number
+					return ContactPredictor.room(at, ROOT_SIZE, away, distance, cast)
+				end,
+			}
+			local rig = load({ choreo = true, impact = true, standOff = plan })
+			for _ = 1, 40 do
+				rig.frame(STILL)
+			end
+			rig.setLock(Vector3.new(0, 0, -1.9))
+			rig.controller.beginArt(1)
+			for _ = 1, 12 do
+				rig.frame(STILL)
+			end
+			rig.controller.releaseArt(1, 12 * FRAME)
+			local handle = rig.animator.mixer:find(art.clip)
+			from = handle.time
+			local start = rig.root.Position:Dot(away)
+			wallAt = start + ROOT_SIZE.Z / 2
+			local inWall, toward, lunged = 0, 0, 0
+			for _ = 1, 120 do
+				rig.frame(STILL)
+				lunged = math.max(lunged, keep(handle.time))
+				inWall = math.max(inWall, rig.root.Position:Dot(away) + ROOT_SIZE.Z / 2 - wallAt)
+				toward = math.max(toward, start - rig.root.Position:Dot(away))
+				if handle.time >= clipDef.duration - 1e-6 or rig.controller.state() ~= "Art" then
+					break
+				end
+			end
+			print(
+				("[337] keep %.3f: root box %.3f into the wall, %.3f toward the target"):format(lunged, inWall, toward)
+			)
+			expect(lunged > 0.3).toBe(true)
+			expect(inWall <= 1e-3).toBe(true)
+			expect(toward <= Harness.load("src/shared/data/combat").contact.standOff.wallGapStuds + 1e-3).toBe(true)
+		end
+	)
 end)

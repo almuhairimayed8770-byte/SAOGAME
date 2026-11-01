@@ -1121,6 +1121,7 @@ describe("data validators on the real tables", function()
 			"telegraph",
 			"trail",
 			"clipAudit",
+			"outline",
 		}
 	do
 		it(name .. " is clean", function()
@@ -1404,6 +1405,35 @@ describe("impact validator", function()
 		end)).toEqual({})
 	end)
 
+	it("keeps the overlay edge to edge on a notched phone (D-475)", function()
+		local problems = runImpact(function(impact)
+			impact.overlay.screenInsets = "DeviceSafeInsets"
+			impact.overlay.clipToDeviceSafeArea = true
+		end)
+		expect(problems).toEqual({
+			"impact: overlay.screenInsets must be None: the picture covers the whole screen, past the safe area",
+			"impact: overlay.clipToDeviceSafeArea must be false: the picture is not clipped to the device's safe area",
+		})
+	end)
+
+	it("warms the figures a few parts a frame, re-ranked on a positive interval (D-477)", function()
+		local problems = runImpact(function(impact)
+			impact.silhouette.prewarmPerFrame = 0
+			impact.silhouette.prewarmInterval = 0
+		end)
+		expect(problems).toEqual({
+			"impact: silhouette.prewarmPerFrame must be a whole number of at least 1: a warming rig's figure is cloned a few parts a frame, never on its hit's frame (D-477)",
+			"impact: silhouette.prewarmInterval must be a positive number of seconds (D-477)",
+		})
+		expect(runImpact(function(impact)
+			impact.silhouette.prewarmPerFrame = 2.5
+			impact.silhouette.prewarmInterval = "0.5"
+		end)).toEqual({
+			"impact: silhouette.prewarmPerFrame must be a whole number of at least 1: a warming rig's figure is cloned a few parts a frame, never on its hit's frame (D-477)",
+			"impact: silhouette.prewarmInterval must be a positive number of seconds (D-477)",
+		})
+	end)
+
 	it("keeps the overlay above the HUD and every quality tier covered, each drawing the figures", function()
 		local problems = runImpact(function(impact)
 			impact.overlay.displayOrder = 5
@@ -1528,6 +1558,32 @@ describe("impact validator", function()
 		end)).toEqual({ problem })
 		expect(runImpact(function() end, nil, function(fx)
 			fx.renderOrder.posed = { base = "Camera", offset = 50 }
+		end)).toEqual({})
+	end)
+
+	it("reads the drawn pose after FrameClock's frame start and before the rigs' step (D-479)", function()
+		local problem =
+			"impact: fx.renderOrder.drawnPose must run after FrameClock's frame start (First) and before choreo renderOrder.rigs"
+		for _, row in
+			{
+				{ base = "First", offset = 0 }, -- with FrameClock's start: its due cues may come after
+				{ base = "First", offset = -1 },
+				{ base = "Camera", offset = -1 }, -- with the rigs: may read the pose they write now
+				{ base = "Camera", offset = 0 },
+				{ base = "Character", offset = 4 },
+				{ base = "Nowhere", offset = 1 },
+				{ base = "First" },
+			}
+		do
+			expect(runImpact(function() end, nil, function(fx)
+				fx.renderOrder.drawnPose = row
+			end)).toEqual({ problem })
+		end
+		expect(runImpact(function() end, nil, function(fx)
+			fx.renderOrder.drawnPose = nil
+		end)).toEqual({ problem })
+		expect(runImpact(function() end, nil, function(fx)
+			fx.renderOrder.drawnPose = { base = "Input", offset = 50 }
 		end)).toEqual({})
 	end)
 end)
@@ -2620,6 +2676,26 @@ describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", fun
 		)
 	end)
 
+	it("enemies keep out of FallingDown, and only ever out of fall states (D-494)", function()
+		local function withOff(states: any): { string }
+			return runAi(function(copy)
+				copy.upright = { offStates = states }
+			end)
+		end
+		expect(withOff({ "FallingDown" })).toEqual({})
+		expect(hasProblem(withOff({}), "upright.offStates must be a non-empty list of Humanoid state names")).toBe(true)
+		expect(hasProblem(withOff(nil), "upright.offStates must be a non-empty list of Humanoid state names")).toBe(
+			true
+		)
+		expect(hasProblem(withOff({ "Ragdoll" }), "upright.offStates must hold FallingDown")).toBe(true)
+		expect(hasProblem(withOff({ "FallingDown", "Running" }), "upright.offStates: Running is not a fall state")).toBe(
+			true
+		)
+		expect(hasProblem(withOff({ "FallingDown", "FallingDown" }), "upright.offStates names FallingDown twice")).toBe(
+			true
+		)
+	end)
+
 	it("a Charger needs a positive jamLagStuds", function()
 		expect(hasProblem(
 			runAi(function(copy)
@@ -2731,9 +2807,9 @@ describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", fun
 		)).toBe(true)
 		expect(hasProblem(
 			runAi(function(copy)
-				copy.collision.blockerHeight = 4.1
+				copy.collision.blockerHeight = 4.3
 			end),
-			"must reach above rig Kobold's root top (4.2)"
+			"must reach above rig Kobold's root top (4.4)"
 		)).toBe(true)
 		expect(hasProblem(
 			runAi(function(copy)
@@ -2929,6 +3005,9 @@ describe("camera, dev capture and sfx shatter rules", function()
 	local function telegraph(dataPath: string, mutate: ((any) -> ())?): { string }
 		return runWith("telegraph", dataPath, mutate)
 	end
+	local function outline(mutate: ((any) -> ())?): { string }
+		return runWith("outline", "src/shared/data/fx", mutate)
+	end
 
 	it("each is clean on a copy of the real table", function()
 		expect(camera()).toEqual({})
@@ -2936,6 +3015,52 @@ describe("camera, dev capture and sfx shatter rules", function()
 		expect(sfx()).toEqual({})
 		expect(contact("src/shared/data/combat")).toEqual({})
 		expect(telegraph("src/shared/data/fx")).toEqual({})
+		expect(outline()).toEqual({})
+	end)
+
+	it("outline: a flash ranks between the always-on and a resting outline, inside the cap (D-476)", function()
+		for _, bad in { 2, 3, 1, -1, "2.5" } do
+			expect(
+				hasProblem(
+					outline(function(copy)
+						copy.outline.signalRank = bad
+					end),
+					"signalRank ("
+						.. tostring(bad)
+						.. ") must rank after every always-on importance (2) and before Normal (3)"
+				)
+			).toBe(true)
+		end
+		expect(hasProblem(
+			outline(function(copy)
+				copy.outline.signalRank = nil
+			end),
+			"signalRank (nil)"
+		)).toBe(true)
+		expect(hasProblem(
+			outline(function(copy)
+				copy.outline.budget = copy.budgets.highlights + 1
+			end),
+			"budget (32) must be a whole number from 1 to budgets.highlights (31)"
+		)).toBe(true)
+		expect(hasProblem(
+			outline(function(copy)
+				copy.outline.importanceRank.Party = 4
+			end),
+			"importanceRank.Party (4) must rank before Normal (3)"
+		)).toBe(true)
+		expect(hasProblem(
+			outline(function(copy)
+				copy.outline.alwaysOn.Normal = true
+			end),
+			"alwaysOn must not hold Normal"
+		)).toBe(true)
+		expect(hasProblem(
+			outline(function(copy)
+				copy.outline.alwaysOn.Elite = true
+			end),
+			"alwaysOn.Elite is not an importance importanceRank ranks"
+		)).toBe(true)
 	end)
 
 	it("camera: a shake from rest starts its noise inside the base lane's period (312)", function()
@@ -4889,13 +5014,13 @@ describe("camera, dev capture and sfx shatter rules", function()
 				end,
 			},
 			{
-				needle = "hooks.maxPackSize (30) must be a whole number from 2 to 25",
+				needle = "hooks.maxPackSize (30) must be a whole number from 2 to 6",
 				mutate = function(copy)
 					copy.hooks.maxPackSize = 30
 				end,
 			},
 			{
-				needle = "hooks.maxPackSize (1) must be a whole number from 2 to 25",
+				needle = "hooks.maxPackSize (1) must be a whole number from 2 to 6",
 				mutate = function(copy)
 					copy.hooks.maxPackSize = 1
 				end,
@@ -5295,6 +5420,25 @@ describe("trail validator: the ribbon's window close and edge-on width", functio
 		end
 		expect(hasProblem(trail(), message)).toBe(false)
 	end)
+
+	it("litAttribute names a second host attribute with a non-empty string (D-498)", function()
+		local message = "ribbon.litAttribute must be a non-empty string other than ownerAttribute"
+		expect(hasProblem(
+			trail(function(copy)
+				copy.trail.ribbon.litAttribute = nil
+			end),
+			message
+		)).toBe(true)
+		for _, bad: any in { "", 5, true, "TrailOwner" } do
+			expect(hasProblem(
+				trail(function(copy)
+					copy.trail.ribbon.litAttribute = bad
+				end),
+				message
+			)).toBe(true)
+		end
+		expect(hasProblem(trail(), message)).toBe(false)
+	end)
 end)
 
 -- ------------------------------------------------------------------------------------------
@@ -5401,6 +5545,34 @@ describe("clipAudit validator: the clip audit's thresholds and rigs", function()
 			end)
 			for _, line in problems do
 				expect(line:find("cancel.snapFrames", 1, true)).toBeNil()
+			end
+		end
+	end)
+
+	it("gives the follow-through beat 5's 6 to 12 frames and a touch no deeper than an overlap (D-484)", function()
+		flags(function(a)
+			a.followThrough = nil
+		end, "followThrough is missing")
+		for _, bad in { 5, 13, 6.5, 0, "6" } :: { any } do
+			flags(function(a)
+				a.followThrough.exitFrames = bad
+			end, "followThrough.exitFrames must be a whole number of frames in [6, 12]")
+		end
+		for _, bad in { 0, -0.05, 0.11, 0 / 0 } :: { any } do
+			flags(function(a)
+				a.followThrough.touchStuds = bad
+			end, "followThrough.touchStuds must be in")
+		end
+		-- the touch follows the overlap bar: a tighter overlap tightens it too
+		flags(function(a)
+			a.overlapStuds = 0.05
+		end, "followThrough.touchStuds must be in")
+		for _, good in { 6, 12 } do
+			local problems = audit(function(a)
+				a.followThrough.exitFrames = good
+			end)
+			for _, line in problems do
+				expect(line:find("followThrough", 1, true)).toBeNil()
 			end
 		end
 	end)
@@ -5591,5 +5763,76 @@ describe("clipAudit validator: the clip audit's thresholds and rigs", function()
 		flags(function(a)
 			a.rigs.Boar.rush["enemy/Boar/Charge"] = { enemy = "FrenzyBoar", attack = "Bite" }
 		end, "names Bite, not an attack of FrenzyBoar")
+	end)
+end)
+
+describe("rigs validator: every rest pose stands on the floor (D-483)", function()
+	local function runRigs(mutate: ((rigs: any) -> ())?): { string }
+		local real = Harness.load("src/shared/data/rigs")
+		local copy = {}
+		for id, rig in real do
+			copy[id] = if typeof(rig) == "table" then table.clone(rig) else rig
+		end
+		if mutate ~= nil then
+			mutate(copy)
+		end
+		return loadTool("tools/validators/rigs")({
+			load = function(path: string): any
+				if path == "src/shared/data/rigs" then
+					return copy
+				end
+				return Harness.load(path)
+			end,
+			listFiles = Harness.listFiles,
+			readFile = Harness.readFile,
+			repoRoot = root,
+		})
+	end
+
+	it("is clean on the real rigs", function()
+		expect(runRigs()).toEqual({})
+	end)
+
+	it("fails a rest pose with a foot in the field: the kobold at hipHeight 2.2", function()
+		expect(hasProblem(
+			runRigs(function(rigs)
+				rigs.Kobold.hipHeight = 2.2
+			end),
+			"Kobold's rest pose at hipHeight 2.2 has its lowest corner (LeftLeg) 0.200 studs below the floor"
+		)).toBe(true)
+	end)
+
+	it("fails a rest pose floating over its feet: the boar at hipHeight 1.7", function()
+		expect(hasProblem(
+			runRigs(function(rigs)
+				rigs.Boar.hipHeight = 1.7
+			end),
+			"Boar's rest pose at hipHeight 1.7 has its lowest corner"
+		)).toBe(true)
+		expect(hasProblem(
+			runRigs(function(rigs)
+				rigs.Boar.hipHeight = 1.7
+			end),
+			"0.100 studs above the floor"
+		)).toBe(true)
+	end)
+
+	it("holds within locomotion.stride.contact of the floor, not further", function()
+		local contact = Harness.load("src/shared/data/choreo").locomotion.stride.contact
+		expect(runRigs(function(rigs)
+			rigs.Boar.hipHeight = 1.6 + contact * 0.9
+		end)).toEqual({})
+		expect(#runRigs(function(rigs)
+			rigs.Boar.hipHeight = 1.6 + contact * 1.5
+		end)).toBe(1)
+	end)
+
+	it("fails a root part that is not one of the rig's parts", function()
+		expect(hasProblem(
+			runRigs(function(rigs)
+				rigs.Kobold.rootPart = "Pelvis"
+			end),
+			"Kobold's rootPart Pelvis is not one of its parts"
+		)).toBe(true)
 	end)
 end)

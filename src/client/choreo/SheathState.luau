@@ -28,7 +28,9 @@
 	The sword only changes hands where the hand is. While a clip above the sheath clips hides the
 	right arm ("covered": a turn, a landing, a dodge, a stagger), the hand is not at the hilt, so
 	Draw and Sheathe wait; one that has not moved the sword yet stops and plays again once the arm
-	is free, and an event fired under the cover is ignored.
+	is free, and an event fired under the cover is ignored. That holds for the Draw played over a
+	guard too (D-504): it used to run on under the cover, its WeaponDraw ignored, and its end put
+	the sword in a hand 7.4 studs from the hilt in one frame.
 
 	Each step first settles the clips that just ended, then applies the cut, then the target, so a
 	clip that ends without its event never plays again in the same step.
@@ -141,7 +143,17 @@ function SheathState.step(self: any, dt: number, input: Input): Output
 		-- the hand is, then hands the arm to the guard from sheath.handOverTime over
 		-- sheath.handOverBlend.
 		self.falseFor = 0
-		if self.place == "Back" or resume then
+		if covered and self.place == "Back" then
+			-- D-504: the hand cannot reach the hilt under the cover, so a Draw that has not taken
+			-- the sword stops (its WeaponDraw would be ignored, and the Draw's end would then snap
+			-- the sword into a hand away from the hilt), and plays over the guard from its start
+			-- once the arm is free.
+			if input.drawing then
+				out.stop = "Draw"
+			elseif input.sheathing then
+				out.stop = "Sheathe"
+			end
+		elseif self.place == "Back" or resume then
 			if input.sheathing then
 				out.stop = "Sheathe"
 			elseif input.drawing and input.drawOver ~= true then

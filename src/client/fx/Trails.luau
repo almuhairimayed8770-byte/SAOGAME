@@ -60,12 +60,15 @@
 	draw, never on Heartbeat, where a remote's root has already moved on under last frame's pose.
 	It answers with the unit motion from the oldest of those samples to the newest, or nil when
 	the tip moved less than accents.swing.minTravel (or jumped more than maxTravel: a respawn, a
-	teleport).
+	teleport). A sword WeaponMount moved between the back and the hand since the last sample (its
+	Weapon joint's Part0 changed) starts the ring over: that move is never a swing (D-473).
 	The snap: when a strike begins (an Art or Basic kind turns on: TrailOn, or a HitWindowOpen,
 	which opens with the snap), the tip's chord over its first accents.swing.snapFrames (the
 	smear's two snap frames, section 10 beat 3) is kept with its time: the chord from the tip's
 	last sample before the strike to its first sample past those frames, so a low frame rate
-	still reads the strike, not the settle. It answers for
+	still reads the strike, not the settle. A strike whose first frame also pulls the sword from
+	its sheath (an opener caught up past its TrailOn's frame) measures from its first sample in
+	the hand (D-473). It answers for
 	accents.swing.memorySeconds after it was sampled, while the trail is still on in the
 	overshoot and settle and once the swing is over, so a HitConfirmed that arrives a round trip
 	late still gets the swing that hit, never the settle. The last good direction sampled while a
@@ -98,6 +101,7 @@ local Accents = require(Shared.data.accents)
 local ChoreoData = require(Shared.data.choreo)
 local Palette = require(Shared.data.palette)
 local Weapons = require(Shared.data.weapons)
+local WeaponModels = require(Shared.data.weaponModels)
 local Easing = require(Shared.util.Easing)
 local Assets = require(Shared.data.assets)
 local BladeContact = require(Shared.choreo.BladeContact)
@@ -122,6 +126,10 @@ export type Deps = {
 	held: (model: Instance) -> boolean, -- the rig is drawn held this frame (the ribbon's ages hold)
 	-- The rig's Choreo animator (its `mixer` plays the clip that lights the trail), nil for none.
 	animator: (model: Instance) -> any,
+	-- The drawn pose's render step at a frame's start (FrameOrder at fx.luau renderOrder.drawnPose,
+	-- D-479); returns its leave, or nil where there is no render step (Lune): the ribbon then reads
+	-- the pose in the pose readers' step.
+	onDrawn: (fn: StepFn) -> (() -> ())?,
 }
 
 export type Overrides = {
@@ -131,6 +139,25 @@ export type Overrides = {
 	clear: ((trail: Trail) -> ())?,
 	held: ((model: Instance) -> boolean)?,
 	animator: ((model: Instance) -> any)?,
+	onDrawn: ((fn: StepFn) -> (() -> ())?)?,
+}
+
+-- What a rig's chain and clips were at a frame's start (D-479): the pose that frame draws (its
+-- rigs' step of the frame before wrote it, D-342) and the clip state of that step. Reused.
+type Drawn = {
+	at: number, -- the frame start (drawnFrame) that read it; 0 for none
+	chain: BladeContact.Chain?, -- the chain it was read on
+	pose: BladeContact.Pose, -- the chain's Transforms then (its root is read where the frame draws it)
+	light: any, -- the handle whose clip lit a stroke in that step (lighting), nil for none
+	mixer: any, -- its mixer
+	opened: number?, -- the clip time the window opened at
+	from: number, -- the handle's clock over that step
+	to: number,
+	lightWeight: number, -- its shown weight then
+	source: any, -- the stroke's clip then (Entry.source)
+	sourceTime: number, -- its clock then
+	sourceDone: boolean,
+	sourceWeight: number,
 }
 
 type Entry = {
@@ -158,6 +185,8 @@ type Entry = {
 	tipHead: number, -- index of the newest sample in `tips`
 	tipCount: number, -- samples recorded so far (at most SWING_SAMPLES)
 	sampledAt: number, -- Engine.now() of the newest sample
+	mount: Joints.Joint?, -- the joint that places the blade (WeaponBuilder's Weapon motor); nil: none
+	mountPart0: BasePart?, -- its Part0 at the newest sample (the hand, or the back mount)
 	lastSwing: Vector3?, -- the last good direction sampled while a trail kind was on
 	lastSwingAt: number, -- Engine.now() of that sample
 	strikeAt: number?, -- Engine.now() when the strike began (an Art or Basic kind turned on)
@@ -195,6 +224,10 @@ type Entry = {
 	ribbonClock: number, -- seconds the ribbon has aged (stands still in hit-stop)
 	ribbonAt: number, -- Engine.now() the clock last moved at
 	style: TrailRibbon.Style, -- reused frame to frame
+	drawn: Drawn, -- the chain and its clips at this frame's start (D-479)
+	-- Counts the activation light's changes made at once (D-479): one asked for the frame that
+	-- draws a step's pose carries the count it saw and is dropped once another change came first.
+	lightSerial: number,
 }
 
 local KIND_PRIORITY: { Kind } = { "Art", "Smear", "Basic" }
@@ -213,6 +246,12 @@ end
 -- after every step that poses or moves a body, before the draw. A no-op leave under Lune.
 local function poseReaders(fn: StepFn): () -> ()
 	return FrameOrder.join(FrameOrder.POSE_READERS, Fx.renderOrder.poseReaders, fn) or function() end
+end
+
+-- The drawn pose's render step (FrameOrder.DRAWN_POSE at fx.luau renderOrder.drawnPose, D-479):
+-- a frame's start, before any rig steps. Nil under Lune (no render step).
+local function drawnPoseStep(fn: StepFn): (() -> ())?
+	return FrameOrder.join(FrameOrder.DRAWN_POSE, Fx.renderOrder.drawnPose, fn)
 end
 
 -- Choreo, found on first use (it never requires this module; nil where it cannot load).
@@ -259,6 +298,7 @@ local function defaults(overrides: Overrides?): Deps
 		clear = engineClear,
 		held = choreoHeld,
 		animator = choreoAnimator,
+		onDrawn = drawnPoseStep,
 	}
 	if overrides ~= nil then
 		deps.now = overrides.now or deps.now
@@ -267,6 +307,7 @@ local function defaults(overrides: Overrides?): Deps
 		deps.clear = overrides.clear or deps.clear
 		deps.held = overrides.held or deps.held
 		deps.animator = overrides.animator or deps.animator
+		deps.onDrawn = overrides.onDrawn or deps.onDrawn
 	end
 	return deps
 end
@@ -276,6 +317,10 @@ local entries: { [Instance]: Entry } = {}
 local started = false
 local stopLoop: (() -> ())? = nil
 local stopRender: (() -> ())? = nil
+local stopDrawn: (() -> ())? = nil
+-- Frame starts the drawn pose's step has run (D-479); never reset, so a reading from before a
+-- bind never passes for this frame's.
+local drawnFrame = 0
 local sinceRank = 0
 -- When the render step last ran (deps.now); nil before the first one (and under Lune).
 local renderedAt: number? = nil
@@ -400,6 +445,8 @@ local function acquireRibbon(entry: Entry): TrailRibbon.Ribbon
 		-- The host names the rig it draws now, so a per-frame log can tell whose ribbon is lit
 		-- (D-362): every host sits in the one folder under the same name.
 		taken.host:SetAttribute(Fx.trail.ribbon.ownerAttribute, entry.model:GetFullName())
+		-- And whether its window is lit, so the log times the close's fade from it (D-498).
+		taken.host:SetAttribute(Fx.trail.ribbon.litAttribute, entry.lit)
 		entry.ribbon = taken
 		ribbon = taken
 	end
@@ -414,6 +461,7 @@ local function releaseRibbon(entry: Entry)
 	entry.ribbon = nil
 	TrailRibbon.clear(ribbon)
 	ribbon.host:SetAttribute(Fx.trail.ribbon.ownerAttribute, nil)
+	ribbon.host:SetAttribute(Fx.trail.ribbon.litAttribute, nil)
 	table.insert(ribbonPool, ribbon)
 end
 
@@ -522,6 +570,11 @@ local function applyAppearance(entry: Entry)
 			-- frame it drew, so the gap before the next window shows nothing of it (D-360).
 			TrailRibbon.close(ribbon, entry.ribbonClock)
 		end
+	end
+	local drawing = entry.ribbon
+	if drawing ~= nil and entry.lit ~= lit then
+		-- The window's open or close, on the host a log reads (D-498).
+		drawing.host:SetAttribute(Fx.trail.ribbon.litAttribute, lit)
 	end
 	entry.lit = lit
 	-- The ribbon's look: the same swing color (saturated; a Basic swing's white blend after), the
@@ -730,6 +783,8 @@ function Trails.attach(model: Instance): boolean
 		tipHead = 0,
 		tipCount = 0,
 		sampledAt = 0,
+		mount = nil,
+		mountPart0 = nil,
 		lastSwing = nil,
 		lastSwingAt = 0,
 		strikeAt = nil,
@@ -774,6 +829,22 @@ function Trails.attach(model: Instance): boolean
 			closeSeconds = Fx.trail.ribbon.closeSeconds,
 			viewer = nil,
 		},
+		drawn = {
+			at = 0,
+			chain = nil,
+			pose = { root = CFrame.identity, transforms = {} },
+			light = nil,
+			mixer = nil,
+			opened = nil,
+			from = 0,
+			to = 0,
+			lightWeight = 1,
+			source = nil,
+			sourceTime = 0,
+			sourceDone = false,
+			sourceWeight = 1,
+		},
+		lightSerial = 0,
 	}
 	entry.light.Color = color
 	entries[model] = entry
@@ -828,12 +899,22 @@ end
 --- The activation light on the blade (range 8, brightness 2) in the trail color and the blade's
 --- glow (F13), plus the three-frame SystemWhite flash on the weapon's own Highlight when it turns
 --- on (the weapon part alone, never the body: issue 5). `fade` (a cancelled Art) fades the light out over
---- fx.activationLight.cancelFadeSeconds instead of putting it out at once (issue 13).
-function Trails.activationLight(model: Instance, on: boolean, token: string?, fade: boolean?)
+--- fx.activationLight.cancelFadeSeconds instead of putting it out at once (issue 13). `serial`: a
+--- change asked for the frame that draws a step's pose passes the count (Trails.lightSerial) it saw
+--- when asked, and is dropped when a change made at once came between (D-479); with none, the
+--- change is made at once and counted.
+function Trails.activationLight(model: Instance, on: boolean, token: string?, fade: boolean?, serial: number?)
 	if entries[model] == nil and not Trails.attach(model) then
 		return
 	end
 	local entry = entries[model] :: Entry
+	if serial ~= nil then
+		if serial ~= entry.lightSerial then
+			return
+		end
+	else
+		entry.lightSerial += 1
+	end
 	if token ~= nil and Palette.tokens[token] ~= nil then
 		entry.light.Color = Palette.color3(token :: any)
 	else
@@ -853,6 +934,13 @@ function Trails.activationLight(model: Instance, on: boolean, token: string?, fa
 	else
 		hideGlow(entry)
 	end
+end
+
+--- How many activation light changes were made at once on a rig (0 for a rig not tracked): what a
+--- change asked for a later frame passes to activationLight (D-479).
+function Trails.lightSerial(model: Instance): number
+	local entry = entries[model]
+	return if entry ~= nil then entry.lightSerial else 0
 end
 
 --- True while a rig's activation light is on (fading counts).
@@ -965,11 +1053,11 @@ end
 -- The clip events that light a trail (Replication.routeClipEvent and ClipLab route them so).
 local LIGHTS: { [string]: boolean } = { TrailOn = true, HitWindowOpen = true, SmearOn = true }
 
--- The clip that lit a stroke on this frame: of the rig's playing clips, the handle whose clock
--- crossed a lighting event in the step this frame shows (Mixer handle.lastTime to its time), its
--- mixer, and the event's clip time (the earliest crossed). Nil when no clip lit it in that step (a
--- flash, a rig no animator plays, a trail that lit while out of the budget).
-local function lighting(entry: Entry): (any, any, number?)
+-- Of the rig's playing clips now, the handle whose clock crossed a lighting event in its last step
+-- (Mixer handle.lastTime to its time), its mixer, and the event's clip time (the earliest crossed).
+-- Nil when no clip lit it in that step (a flash, a rig no animator plays, a trail that lit while out
+-- of the budget).
+local function liveLighting(entry: Entry): (any, any, number?)
 	local animator = deps.animator(entry.model)
 	local mixer = if typeof(animator) == "table" then animator.mixer else nil
 	if typeof(mixer) ~= "table" or typeof(mixer.handles) ~= "function" then
@@ -992,6 +1080,44 @@ local function lighting(entry: Entry): (any, any, number?)
 	return found, if found ~= nil then mixer else nil, opened
 end
 
+-- The rig's reading at this frame's start (D-479), nil when the drawn pose's step did not read it
+-- this frame (none is bound, the rig was not wanted then, its chain changed since).
+local function freshDrawn(entry: Entry): Drawn?
+	local drawn = entry.drawn
+	if drawnFrame > 0 and drawn.at == drawnFrame and drawn.chain ~= nil and drawn.chain == entry.chain then
+		return drawn
+	end
+	return nil
+end
+
+-- The clip that lit a stroke on this frame: the handle whose clock crossed a lighting event in the
+-- step this frame shows (read at the frame's start where the drawn pose's step runs, D-479, else
+-- now), its mixer, the event's clip time and the handle's clock over that step.
+local function lighting(entry: Entry): (any, any, number?, number, number)
+	local drawn = freshDrawn(entry)
+	if drawn ~= nil then
+		return drawn.light, drawn.mixer, drawn.opened, drawn.from, drawn.to
+	end
+	local handle, mixer, opened = liveLighting(entry)
+	if handle == nil then
+		return nil, nil, nil, 0, 0
+	end
+	return handle, mixer, opened, handle.lastTime, handle.time
+end
+
+-- A stroke clip's clock and whether it is done, as the step this frame shows left them.
+local function clockOf(entry: Entry, source: any): (number, boolean)
+	local drawn = freshDrawn(entry)
+	if drawn ~= nil then
+		if source == drawn.light then
+			return drawn.to, false
+		elseif source == drawn.source then
+			return drawn.sourceTime, drawn.sourceDone
+		end
+	end
+	return source.time, source.done == true
+end
+
 -- What `pose` shows on top of the clip sampled at `offsets`, per link (Transform = clip * this):
 -- a blend with another clip, a procedural layer. Nil for a link the clip has no key for.
 local function residualsOf(entry: Entry, pose: BladeContact.Pose, offsets: ClipSampler.Offsets, into: { CFrame? })
@@ -1005,14 +1131,27 @@ local function residualsOf(entry: Entry, pose: BladeContact.Pose, offsets: ClipS
 	end
 end
 
--- The clip's share of the limbs (Mixer.preview with no time to move: its eased envelope times its
--- weight, as the step that showed this frame left it), 0..1.
-local function shownWeight(entry: Entry): number
-	local mixer, source = entry.sourceMixer, entry.source
+-- A handle's share of the limbs (Mixer.preview with no time to move: its eased envelope times its
+-- weight, as its last step left it), 0..1.
+local function weightOf(mixer: any, handle: any): number
 	if typeof(mixer) ~= "table" or typeof(mixer.preview) ~= "function" then
 		return 1
 	end
-	return math.clamp(mixer:preview(source, 0), 0, 1)
+	return math.clamp(mixer:preview(handle, 0), 0, 1)
+end
+
+-- The stroke clip's share of the limbs as the step that showed this frame left it, 0..1.
+local function shownWeight(entry: Entry): number
+	local source = entry.source
+	local drawn = freshDrawn(entry)
+	if drawn ~= nil then
+		if source == drawn.light then
+			return drawn.lightWeight
+		elseif source == drawn.source then
+			return drawn.sourceWeight
+		end
+	end
+	return weightOf(entry.sourceMixer, source)
 end
 
 -- Follows the stroke's clip across this frame: a new stroke looks for the clip that lit it (and
@@ -1022,11 +1161,11 @@ end
 local function followSource(entry: Entry, starting: boolean): number?
 	local opened: number? = nil
 	if starting then
-		local handle, mixer, at = lighting(entry)
+		local handle, mixer, at, lastTime = lighting(entry)
 		entry.source = handle
 		entry.sourceMixer = mixer
 		if handle ~= nil then
-			entry.sourceTime = handle.lastTime
+			entry.sourceTime = lastTime
 			entry.sourceOffsets = nil
 			opened = at
 		end
@@ -1035,8 +1174,9 @@ local function followSource(entry: Entry, starting: boolean): number?
 	if source == nil then
 		return nil
 	end
-	local from, to = entry.sourceTime, source.time
-	if source.done or to < from then
+	local from = entry.sourceTime
+	local to, done = clockOf(entry, source)
+	if done or to < from then
 		entry.source = nil
 		return nil
 	end
@@ -1134,8 +1274,8 @@ end
 -- False (nothing stood in) with no such clip, or for a step longer than a jump (a stall's wake:
 -- nothing across the dark is drawn).
 local function standIn(entry: Entry): boolean
-	local handle = lighting(entry)
-	if handle == nil or handle.time - handle.lastTime > ChoreoData.stall.jumpSeconds then
+	local handle, _, _, from, to = lighting(entry)
+	if handle == nil or to - from > ChoreoData.stall.jumpSeconds then
 		return false
 	end
 	local pose, lastPose = entry.pose, entry.lastPose
@@ -1247,7 +1387,16 @@ local function stepRibbons(at: number, viewer: Vector3?)
 			end
 			local hadPose = entry.hasPose and at - entry.poseAt <= jump
 			entry.pose, entry.lastPose = entry.lastPose, entry.pose
-			BladeContact.read(chain, entry.pose)
+			local drawn = freshDrawn(entry)
+			if drawn ~= nil then
+				-- The pose this frame draws: its Transforms as the frame began (the rigs' step of the
+				-- frame before wrote them, D-342) on the root where it stands now (a root moved in
+				-- this frame's render steps shows on this frame), D-479.
+				BladeContact.copy(drawn.pose, entry.pose)
+				entry.pose.root = chain.root.CFrame
+			else
+				BladeContact.read(chain, entry.pose)
+			end
 			entry.hasPose = true
 			entry.poseAt = at
 			entry.guardAt, entry.tipAt = BladeContact.blade(chain, entry.pose)
@@ -1269,6 +1418,48 @@ local function stepRibbons(at: number, viewer: Vector3?)
 	end
 end
 
+-- The drawn pose's step, at a frame's start before any rig steps (fx.luau renderOrder.drawnPose,
+-- D-479): a frame draws the pose its rigs' step of the frame before wrote (D-342), so the ribbon of
+-- each rig it may draw (lit, or idle within accents.swing.sampleDistance) reads its chain's
+-- Transforms here, with the clip that lit a stroke in that step and the stroke clip's clock and
+-- weight then; the pose readers' step lays the ribbon from them on the root as it stands there. Read
+-- after the rigs' step, the ribbon led the blade it draws beside by a frame and lit on the frame
+-- before the window's first drawn pose.
+local function readDrawn()
+	drawnFrame += 1
+	local viewer = Engine.viewerPosition()
+	local range = Accents.swing.sampleDistance
+	for _, entry in entries do
+		local weapon = entry.weapon
+		local wanted = weapon.Parent ~= nil
+			and (entry.lit or (viewer ~= nil and (weapon.Position - (viewer :: Vector3)).Magnitude <= range))
+		local chain = if wanted then chainOf(entry, false) else nil
+		if chain == nil then
+			continue
+		end
+		local drawn = entry.drawn
+		BladeContact.read(chain, drawn.pose)
+		drawn.at = drawnFrame
+		drawn.chain = chain
+		-- Only a lit rig starts a stroke, so only its step's lighting is looked for.
+		local handle, mixer, opened = nil, nil, nil
+		if entry.lit then
+			handle, mixer, opened = liveLighting(entry)
+		end
+		drawn.light, drawn.mixer, drawn.opened = handle, mixer, opened
+		drawn.from = if handle ~= nil then handle.lastTime else 0
+		drawn.to = if handle ~= nil then handle.time else 0
+		drawn.lightWeight = if handle ~= nil then weightOf(mixer, handle) else 1
+		local source = entry.source
+		drawn.source = source
+		if source ~= nil then
+			drawn.sourceTime = source.time
+			drawn.sourceDone = source.done == true
+			drawn.sourceWeight = weightOf(entry.sourceMixer, source)
+		end
+	end
+end
+
 --- Records each tracked blade tip's world position in its ring (the pose readers' render step
 --- runs it, so the tip is where this frame draws it; specs call it), and remembers the direction
 --- of a rig that is swinging (a trail kind on). Only a rig whose answer can matter is read: one
@@ -1276,6 +1467,32 @@ end
 --- the world is never read. A rig not read this frame starts its ring over, and so does one read
 --- more than choreo.luau stall.jumpSeconds after its last sample (a render stall): no chord ever
 --- spans the frames it missed.
+-- The part the blade rides on now: its joint's (WeaponBuilder's Weapon motor, Part1 the blade)
+-- Part0, the hand or the back mount WeaponMount moved it to; nil for a blade no such joint holds.
+-- The joint is looked up again only while none is known or once it left the blade (an equip, a
+-- respawn), never by a scan of the weapon's children.
+local function mountPart(entry: Entry): BasePart?
+	local joint = entry.mount
+	local weapon = entry.weapon
+	if joint == nil or joint.Parent ~= weapon then
+		joint = nil
+		local found = weapon:FindFirstChild(WeaponModels.motorName)
+		local asJoint = if found ~= nil then Joints.asJoint(found) else nil
+		if asJoint ~= nil then
+			local _, part1 = Joints.parts(asJoint)
+			if part1 == weapon then
+				joint = asJoint
+			end
+		end
+		entry.mount = joint
+	end
+	if joint == nil then
+		return nil
+	end
+	local part0 = Joints.parts(joint)
+	return part0
+end
+
 function Trails.sample()
 	local at = Engine.now()
 	local viewer = Engine.viewerPosition()
@@ -1289,6 +1506,16 @@ function Trails.sample()
 			continue
 		end
 		local position = entry.tip.WorldPosition
+		local part0 = mountPart(entry)
+		if part0 ~= entry.mountPart0 then
+			-- The sword changed hands since the last sample (WeaponMount, the back mount and the
+			-- hand): the ring starts over, and a strike measures its snap from this sample, its first
+			-- in the hand. Kept, the back mount's sample turned an opener's snap 53 to 71 degrees off
+			-- its slash (D-473).
+			entry.mountPart0 = part0
+			entry.tipCount = 0
+			entry.snapFrom = nil
+		end
 		if entry.tipCount > 0 and at - entry.sampledAt > ChoreoData.stall.jumpSeconds then
 			-- Nothing rendered for longer than a jump: the ring starts over, a strike from before
 			-- the gap loses its snap, and one begun since measures from this sample.
@@ -1422,11 +1649,16 @@ local function connectLoops()
 		rendered()
 		Trails.sample()
 	end)
+	-- The drawn pose at each frame's start (D-479); none bound under Lune.
+	stopDrawn = deps.onDrawn(readDrawn)
 end
 
 local function disconnectLoops()
-	local stopWatch, stopStep = stopLoop, stopRender
-	stopLoop, stopRender = nil, nil
+	local stopWatch, stopStep, stopStart = stopLoop, stopRender, stopDrawn
+	stopLoop, stopRender, stopDrawn = nil, nil, nil
+	if stopStart ~= nil then
+		stopStart()
+	end
 	if stopWatch ~= nil then
 		stopWatch()
 	end

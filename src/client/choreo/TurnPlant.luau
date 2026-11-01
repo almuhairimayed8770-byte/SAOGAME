@@ -7,7 +7,10 @@
 	the root's axis (a 180 degree lock turn moved the feet 1.28 and 2.09 studs, a planted foot 0.31
 	a frame). So while the body stands its hips keep the yaw they stood at: the Root joint takes
 	back what the root turned (the lag), and the Waist turns the upper body on toward the root's
-	facing by up to choreo.luau locomotion.turnPlant.twistDegrees (the head and torso lead).
+	facing by up to choreo.luau locomotion.turnPlant.twistDegrees (the head and torso lead),
+	counting the twist the pose already has: the drawn stance's chest is 12 degrees round and a
+	turn clip looks into the turn with the neck, so the chest of a drawn turn to the right led
+	the hips by 57.5 and every head by 55 (D-507).
 
 	The hips come round only between a turn clip's first two Footsteps. The first is the pivot
 	foot's: the clip has set it with the inner corner of its sole on the root's axis. The other foot
@@ -124,16 +127,33 @@ function TurnPlant.step(
 	plant.lag = lag
 end
 
+-- D-507: `twist` cut so that `own + twist` stays within twistDegrees, or within `own` when the
+-- pose already turns further on its own (never turned back).
+local function within(twist: number, own: number): number
+	local limit = math.max(Data.twistDegrees, math.abs(own))
+	return math.clamp(own + twist, -limit, limit) - own
+end
+
 --- The channel's offsets for the plant's lag (the Root takes it back, the Waist turns the upper
---- body on by up to twistDegrees of it), or nil when there is none.
-function TurnPlant.offsets(plant: Plant): ClipSampler.Offsets?
+--- body on by up to twistDegrees of it), or nil when there is none. `stanceWaist` and `stanceNeck`:
+--- the yaw the pose under the channel already gives the Waist and the Neck (the drawn stance's
+--- chest is -12 round; a turn clip looks into the turn by about 10), so the chest and the head
+--- lead the hips by at most twistDegrees in all (D-507).
+function TurnPlant.offsets(plant: Plant, stanceWaist: number?, stanceNeck: number?): ClipSampler.Offsets?
 	local lag = plant.lag
 	if lag == 0 then
 		return nil
 	end
 	local offsets = plant.offsets
 	offsets.Root.rot[2] = lag
-	offsets.Waist.rot[2] = -math.clamp(lag, -Data.twistDegrees, Data.twistDegrees)
+	local twist = -math.clamp(lag, -Data.twistDegrees, Data.twistDegrees)
+	if stanceWaist ~= nil then
+		twist = within(twist, stanceWaist)
+		if stanceNeck ~= nil then
+			twist = within(twist, stanceWaist + stanceNeck)
+		end
+	end
+	offsets.Waist.rot[2] = twist
 	return offsets
 end
 

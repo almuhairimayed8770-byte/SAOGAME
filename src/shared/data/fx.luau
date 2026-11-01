@@ -119,6 +119,11 @@ local Fx = {
 			-- from the pool, cleared when it goes back), so a per-frame log tells the player's own
 			-- ribbon from an enemy's (D-362).
 			ownerAttribute = "TrailOwner",
+			-- And whether the rig's hit window is lit in this attribute (true from the window's open,
+			-- false from its close while the arc fades out, cleared with the owner), so a per-frame
+			-- log times "gone closeSeconds after the window closes" from the window's own close
+			-- frame; the close is a clip event no remote carries (D-498).
+			litAttribute = "TrailLit",
 			-- Built once: a layer's transparency snaps to this many steps.
 			transparencySteps = 20,
 			-- Each layer is a chain of camera-facing Beams through one point of the blade
@@ -205,6 +210,11 @@ local Fx = {
 		-- Lower ranks win the budget; Boss / Lock / Party are always on regardless of distance.
 		importanceRank = { Boss = 0, Lock = 1, Party = 2, Normal = 3 },
 		alwaysOn = { Boss = true, Lock = true, Party = true },
+		-- A rig showing a hit's flash or a telegraph's tint ranks here, at any distance (D-476):
+		-- after every always-on rank and before a resting Normal outline, so a wide kill's flashes
+		-- take the farthest resting outlines' slots for their frames and never light a Highlight
+		-- past budgets.highlights. Among the flashes the nearer wins.
+		signalRank = 2.5,
 		flashFillTransparency = 0.1, -- fill while a flash is on
 		flashFrames = Combat.highlightFlashFrames,
 		depthMode = "Occluded",
@@ -521,6 +531,11 @@ local Fx = {
 	-- (choreo.luau and camera.luau renderOrder), so they read the pose, the root and the view
 	-- this frame draws, in the same order on every machine. The steps stay bound (FrameOrder).
 	renderOrder = {
+		-- The drawn pose (SkyspireDrawnPose, D-479): at a frame's start (1), after FrameClock's
+		-- (First: the cues due on the frame run first) and before any rig steps (choreo.luau
+		-- renderOrder.rigs). A frame draws the pose its rigs' step of the frame before wrote
+		-- (impact.poseLagFrames), so Trails reads the Transforms its ribbon draws beside here.
+		drawnPose = { base = "First", offset = 1 },
 		-- FrameClock's mark that this frame's rigs have stepped (200, just after choreo.luau
 		-- renderOrder.rigs and before renderOrder.character): a hit's cue asked after it waits for the
 		-- next frame, which draws the pose the step wrote (D-342, impact.poseLagFrames).

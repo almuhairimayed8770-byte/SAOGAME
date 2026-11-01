@@ -159,6 +159,20 @@ local AI = {
 		},
 	},
 
+	-- The Humanoid states no enemy body ever enters (D-494). The brain owns the body: it walks it
+	-- with MoveTo, turns it with its yaw align, holds it with an anchor and plays every fall it has
+	-- (Stagger, Break, the death freeze; section 10: "Death is a 0.5 s freeze in the last pose (no
+	-- ragdoll)") as a Choreo clip, so an engine fall only takes the body away from it. Studio
+	-- (48a846f): a body anchored on its first physics step (a staged or held-at-spawn enemy, D-436)
+	-- went FallingDown 0.015 s later and stayed down about 3 s past its release, its root sunk into
+	-- the field and MoveTo doing nothing, so the staged boar's first charge jammed. EnemyService turns
+	-- these off on the frame the model is made (Engine.keepUpright: SetStateEnabled, before its first
+	-- physics step) and stands up a body found in one on every release (Engine.standUp: GettingUp).
+	-- Names of Enum.HumanoidStateType (the ai validator checks them).
+	upright = {
+		offStates = { "FallingDown", "Ragdoll" },
+	},
+
 	interrupt = {
 		resumeDelay = 0.3, -- a beat after a stagger or break before the next decision
 		-- Fallback hold durations when the StateChanged signal carries none (section 6 numbers).

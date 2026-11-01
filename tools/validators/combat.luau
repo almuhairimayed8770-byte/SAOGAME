@@ -31,6 +31,12 @@
 	follows the root over one anti-cheat sample (the speed over the sample, or one frame if that is
 	longer, plus the full credit) stays under teleportFlagDistance.
 
+	The server's action speed (D-469): actionSpeed.min <= 1 <= actionSpeed.max, both inside
+	choreo.luau minSpeed..maxSpeed (the speeds a client's Mixer plays), and sweepMaxRootSpeed times
+	the min stays over the sprint cap by sweepRootSpeedMargin (the sweep's root bound runs per second
+	of clip, so a slowed run must still follow a sprinting body). guardBreakHitStop (D-471) names a
+	hitStopFrames tier that holds longer than Normal.
+
 	The aim table (D-112): every number is sound, and aim.snapDegrees plus
 	aim.replicationMarginDegrees stays within deg(acos(1 - facingTolerance)), the farthest a request's
 	facing may be from the root the server has seen. A swing turns the body by up to the snap the
@@ -428,6 +434,76 @@ return function(ctx: Context): { string }
 				)
 			)
 		end
+	end
+
+	-- The server's action speed (D-469): its bounds hold 1 (a run as authored), sit inside the speeds
+	-- a client's Mixer plays (choreo.luau minSpeed..maxSpeed, so the clip plays at the speed sent),
+	-- and its slowest still follows a sprinting body: the sweep reads its root bound
+	-- (sweepMaxRootSpeed) per second of clip, so at the lowest speed a real second allows that
+	-- many times the bound, and it must stay over the sprint cap by sweepRootSpeedMargin.
+	local actionSpeed = combat.actionSpeed
+	if typeof(actionSpeed) ~= "table" then
+		problem(("actionSpeed must be a table { min, max } (got %s)"):format(typeof(actionSpeed)))
+	elseif
+		not isNumber(actionSpeed.min)
+		or not isNumber(actionSpeed.max)
+		or actionSpeed.min <= 0
+		or actionSpeed.min > 1
+		or actionSpeed.max < 1
+	then
+		problem(
+			("actionSpeed must be positive numbers with min <= 1 <= max (got min %s, max %s)"):format(
+				tostring(actionSpeed.min),
+				tostring(actionSpeed.max)
+			)
+		)
+	else
+		local choreo = ctx.load("src/shared/data/choreo")
+		if
+			isNumber(choreo.minSpeed)
+			and isNumber(choreo.maxSpeed)
+			and (actionSpeed.min < choreo.minSpeed or actionSpeed.max > choreo.maxSpeed)
+		then
+			problem(
+				("actionSpeed %s..%s must sit inside choreo.luau minSpeed..maxSpeed (%s..%s): a client would play the clip at another speed than the server sweeps it"):format(
+					tostring(actionSpeed.min),
+					tostring(actionSpeed.max),
+					tostring(choreo.minSpeed),
+					tostring(choreo.maxSpeed)
+				)
+			)
+		end
+		if
+			isNumber(combat.sweepMaxRootSpeed)
+			and isNumber(combat.sweepRootSpeedMargin)
+			and isNumber(combat.maxSpeedStudsPerSecond)
+			and combat.sweepMaxRootSpeed * actionSpeed.min
+				< combat.maxSpeedStudsPerSecond * combat.sweepRootSpeedMargin
+		then
+			problem(
+				("actionSpeed.min %s lets a slowed run follow its root at %.2f studs a second, under the sprint cap (%s) x sweepRootSpeedMargin (%s): a sprinting body would break the sweep's chain"):format(
+					tostring(actionSpeed.min),
+					combat.sweepMaxRootSpeed * actionSpeed.min,
+					tostring(combat.maxSpeedStudsPerSecond),
+					tostring(combat.sweepRootSpeedMargin)
+				)
+			)
+		end
+	end
+	-- The guard break's hit-stop (D-471): a tier of hitStopFrames that holds longer than Normal.
+	local frames = combat.hitStopFrames
+	local breakTier = combat.guardBreakHitStop
+	local breakFrames = if typeof(frames) == "table" and typeof(breakTier) == "string" then frames[breakTier] else nil
+	if not isNumber(breakFrames) then
+		problem(("guardBreakHitStop must name a hitStopFrames tier (got %s)"):format(tostring(breakTier)))
+	elseif isNumber(frames.Normal) and breakFrames <= frames.Normal then
+		problem(
+			("guardBreakHitStop %s holds %s frames, not over Normal's %s: the guard giving way would read as a plain hit"):format(
+				tostring(breakTier),
+				tostring(breakFrames),
+				tostring(frames.Normal)
+			)
+		)
 	end
 
 	local rateOk = positive("hitSampleHz")

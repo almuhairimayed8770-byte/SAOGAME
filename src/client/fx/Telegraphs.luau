@@ -133,6 +133,9 @@ local function acquire(kind: PieceKind): BasePart
 	return part :: BasePart
 end
 
+-- The slot release of a telegraph that reserved none (a whole-rig tint, D-476).
+local function noRelease() end
+
 local function release(part: BasePart)
 	part.Transparency = 1
 	local decal = part:FindFirstChild("Decal")
@@ -326,9 +329,10 @@ function Telegraphs.show(
 		fill.Enabled = true
 		highlight = fill
 	end
-	-- The weapon's fill is a Highlight of its own; a whole-rig tint can light an outline the
-	-- budget had off. Either way it holds a slot while it shows.
-	local releaseSlot = OutlineManager.reserve()
+	-- The weapon's fill is a Highlight of its own and holds a slot while it shows. A whole-rig tint
+	-- lights the rig's own outline, which ranks inside the budget as a signal (D-476): reserving
+	-- a slot for it too would hold two for one Highlight.
+	local releaseSlot = if highlight ~= nil then OutlineManager.reserve() else noRelease
 
 	local pieces: { BasePart } = {}
 	if Quality.params().groundDecals then

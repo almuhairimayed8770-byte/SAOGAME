@@ -74,12 +74,13 @@ local Playground = {
 	-- the root of every living fighter, players included: a boar reaches 5.6 studs from its root
 	-- (snout), so two boars this far apart clear each other at any facing. It tries `tries` spots in
 	-- the scatter disc, then widens the disc by widenStuds, up to `widenings` times; with no clear
-	-- spot left it takes the roomiest spot it tried.
+	-- spot left it takes the roomiest spot it tried. Eight widenings (a 54-stud disc) clear three
+	-- packs of 6 dropped at one point (item 352(a), D-499); four left members 9-10 studs apart.
 	spawnSpacing = {
 		minStuds = 12,
 		tries = 12,
 		widenStuds = 6,
-		widenings = 4,
+		widenings = 8,
 	} :: SpawnSpacing,
 	playerSpawn = { position = { 0, 0, 0 }, facing = 0 },
 

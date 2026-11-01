@@ -120,8 +120,10 @@
 	  positive and at most chargeTimeoutSeconds (a late part lands while a charge still waits);
 	  hooks.maxNameLength is whole, 1 to 100 (the engine's name cap); the parts' colour is a palette
 	  token and their material a real Enum.Material; hooks.maxPackSize ("pack", item 315) is whole,
-	  from 2 to the members the widest spawn scatter (playground spawnScatterRadius widened by
-	  spawnSpacing) holds spawnSpacing.minStuds apart;
+	  from 2 to the members three packs dropped at one point may hold (item 352(a), D-499): the
+	  widest spawn scatter (playground spawnScatterRadius widened by spawnSpacing) holds
+	  spawnSpacing.minStuds circles, and three full packs fill at most a quarter of them, the share
+	  a random draw clears;
 	- the Studio frame cap (303): frameCap.attribute is a plain name no other dev attribute uses;
 	  frameCap.least and most are whole frames a second, 1 <= least < most <= 240, with the 30 the
 	  Studio item asks for inside; frameCap.priority runs after every renderOrder row of choreo,
@@ -183,6 +185,10 @@ local MAX_DEV_PARTS = 256
 local ENGINE_MAX_PART_STUDS = 2048
 -- The engine's cap on an Instance.Name.
 local MAX_INSTANCE_NAME = 100
+-- Item 352(a) (D-499): the packs the item drops at one point, and the share of the widest
+-- scatter's room a random draw clears (one member in this many circles).
+local PACK_CROWD = 3
+local PACK_DRAW_SHARE = 4
 -- The render-frame tick (D-336): a small square, its two colors as bright as each other.
 local MAX_TICK_PIXELS = 32
 local MAX_TICK_LUMINANCE_STEP = 0.1
@@ -343,15 +349,18 @@ local function checkHooks(ctx: Context, dev: any, problem: (message: string) -> 
 		problem(("hooks.partMaterial '%s' is not an Enum.Material"):format(tostring(hooks.partMaterial)))
 	end
 	-- Item 315: as many pack members as the widest scatter disc holds clear of each other (its area
-	-- over each member's minStuds circle), and at least a pair.
+	-- over each member's minStuds circle), and at least a pair. Item 352(a) (D-499): the item runs
+	-- the pack line more than once at one point, and a random draw (spawnSpacing.tries a disc)
+	-- clears about a quarter of that room, so three full packs fit in a quarter of it.
 	local spacing = playground.spawnSpacing
 	local widest = playground.spawnScatterRadius + spacing.widenStuds * spacing.widenings
 	local room = math.floor((widest / (spacing.minStuds / 2)) ^ 2)
-	if not isWhole(hooks.maxPackSize) or hooks.maxPackSize < 2 or hooks.maxPackSize > room then
+	local most = math.floor(room / (PACK_CROWD * PACK_DRAW_SHARE))
+	if not isWhole(hooks.maxPackSize) or hooks.maxPackSize < 2 or hooks.maxPackSize > most then
 		problem(
-			("hooks.maxPackSize (%s) must be a whole number from 2 to %d: the members the widest spawn scatter holds clear of each other"):format(
+			("hooks.maxPackSize (%s) must be a whole number from 2 to %d: three packs at one point fill at most a quarter of the members the widest spawn scatter holds clear of each other"):format(
 				tostring(hooks.maxPackSize),
-				room
+				most
 			)
 		)
 	end
@@ -427,6 +436,189 @@ local function checkFrameCap(ctx: Context, dev: any, problem: (message: string) 
 					other
 				)
 			)
+		end
+	end
+end
+
+-- SheathCover.spec.luau's cases (D-504): each cover starts before the Draw's WeaponDraw, so it
+-- hides the grab; the guard is let go after every cover started and before the case ends.
+local function checkSheathCover(ctx: Context, dev: any, problem: (message: string) -> ())
+	local cover = dev.groundClearance and dev.groundClearance.sheathCover
+	if typeof(cover) ~= "table" then
+		problem("groundClearance.sheathCover must be a table (SheathCover.spec.luau's cases)")
+		return
+	end
+	local draw = ctx.load("src/shared/clips/player/OneHandedSword/Draw")
+	local grab: number? = nil
+	for _, event in draw.events do
+		if event.kind == "WeaponDraw" then
+			grab = event.time
+		end
+	end
+	for _, key in { "settle", "seconds", "releaseAt" } do
+		if not isNumber(cover[key]) or cover[key] <= 0 then
+			problem(("groundClearance.sheathCover.%s must be a number above 0"):format(key))
+		end
+	end
+	if not isWhole(cover.stepHz) or cover.stepHz < 60 then
+		problem("groundClearance.sheathCover.stepHz must be a whole number of steps a second, at least 60")
+	end
+	if typeof(cover.clips) ~= "table" or #cover.clips == 0 then
+		problem("groundClearance.sheathCover.clips must name at least one cover clip")
+	else
+		for index, name in cover.clips do
+			if not isName(name) then
+				problem(("groundClearance.sheathCover.clips[%d] must be a clip name"):format(index))
+			end
+		end
+	end
+	if typeof(cover.speeds) ~= "table" or #cover.speeds == 0 then
+		problem("groundClearance.sheathCover.speeds must list at least one speed")
+	else
+		for index, speed in cover.speeds do
+			if not isNumber(speed) or speed < 0 then
+				problem(
+					("groundClearance.sheathCover.speeds[%d] must be a number of studs a second, 0 or more"):format(
+						index
+					)
+				)
+			end
+		end
+	end
+	if typeof(cover.coverAt) ~= "table" or #cover.coverAt == 0 then
+		problem("groundClearance.sheathCover.coverAt must list at least one time")
+	else
+		for index, at in cover.coverAt do
+			if not isNumber(at) or at < 0 or (grab ~= nil and at >= grab) then
+				problem(
+					("groundClearance.sheathCover.coverAt[%d] (%s) must be at least 0 and before the Draw's WeaponDraw (%s s): a later cover does not hide the grab"):format(
+						index,
+						tostring(at),
+						tostring(grab)
+					)
+				)
+			elseif isNumber(cover.releaseAt) and at >= cover.releaseAt then
+				problem(("groundClearance.sheathCover.coverAt[%d] must come before releaseAt"):format(index))
+			end
+		end
+	end
+	if isNumber(cover.releaseAt) and isNumber(cover.seconds) and cover.releaseAt >= cover.seconds then
+		problem("groundClearance.sheathCover.releaseAt must come before the case ends (seconds)")
+	end
+end
+
+-- StandHeight.spec.luau's cases (D-506): every HipHeight error is one the body can take up.
+local function checkStandHeight(ctx: Context, dev: any, problem: (message: string) -> ())
+	local stand = dev.groundClearance and dev.groundClearance.standHeight
+	if typeof(stand) ~= "table" then
+		problem("groundClearance.standHeight must be a table (StandHeight.spec.luau's cases)")
+		return
+	end
+	local choreo = ctx.load("src/shared/data/choreo")
+	local most = choreo.locomotion.footIK.maxAdjust
+	if typeof(stand.hipErrors) ~= "table" or #stand.hipErrors == 0 then
+		problem("groundClearance.standHeight.hipErrors must list at least one error")
+	else
+		for index, err in stand.hipErrors do
+			if not isNumber(err) or math.abs(err) > most then
+				problem(
+					("groundClearance.standHeight.hipErrors[%d] (%s) must be a number within choreo.luau footIK.maxAdjust (%s)"):format(
+						index,
+						tostring(err),
+						tostring(most)
+					)
+				)
+			end
+		end
+	end
+	if typeof(stand.speeds) ~= "table" or #stand.speeds == 0 then
+		problem("groundClearance.standHeight.speeds must list at least one speed")
+	else
+		for index, speed in stand.speeds do
+			if not isNumber(speed) or speed < 0 then
+				problem(
+					("groundClearance.standHeight.speeds[%d] must be a number of studs a second, 0 or more"):format(
+						index
+					)
+				)
+			end
+		end
+	end
+	if not isWhole(stand.stepHz) or stand.stepHz < 30 then
+		problem("groundClearance.standHeight.stepHz must be a whole number of steps a second, at least 30")
+	end
+	for _, key in { "settle", "seconds" } do
+		if not isNumber(stand[key]) or stand[key] <= 0 then
+			problem(("groundClearance.standHeight.%s must be a number above 0"):format(key))
+		end
+	end
+	local landing = stand.landing
+	if typeof(landing) ~= "table" then
+		problem("groundClearance.standHeight.landing must be a table")
+	else
+		for _, key in { "fallSeconds", "fallSpeed", "fallHeight", "after" } do
+			if not isNumber(landing[key]) or landing[key] <= 0 then
+				problem(("groundClearance.standHeight.landing.%s must be a number above 0"):format(key))
+			end
+		end
+		if typeof(landing.stepHz) ~= "table" or #landing.stepHz == 0 then
+			problem("groundClearance.standHeight.landing.stepHz must list at least one rate")
+		else
+			for index, hz in landing.stepHz do
+				if not isWhole(hz) or hz < 30 then
+					problem(
+						("groundClearance.standHeight.landing.stepHz[%d] must be a whole number, at least 30"):format(
+							index
+						)
+					)
+				end
+			end
+		end
+	end
+end
+
+-- LockTurnShown.spec.luau's bars (D-505, D-507): a planted foot's bars inside ClipAudit's own
+-- (review.audit), the turns real lock turns, and a lead slack under a pop.
+local function checkLockTurn(dev: any, problem: (message: string) -> ())
+	local bar = dev.groundClearance and dev.groundClearance.lockTurn
+	if typeof(bar) ~= "table" then
+		problem("groundClearance.lockTurn must be a table (LockTurnShown.spec.luau's bars)")
+		return
+	end
+	local audit = dev.review and dev.review.audit
+	if
+		not isNumber(bar.slideStuds)
+		or bar.slideStuds <= 0
+		or (audit ~= nil and bar.slideStuds > audit.footSlideStuds)
+	then
+		problem("groundClearance.lockTurn.slideStuds must be above 0 and at most review.audit.footSlideStuds")
+	end
+	if
+		not isNumber(bar.driftStuds)
+		or bar.driftStuds <= 0
+		or (audit ~= nil and bar.driftStuds > audit.footDriftStuds)
+	then
+		problem("groundClearance.lockTurn.driftStuds must be above 0 and at most review.audit.footDriftStuds")
+	end
+	if not isNumber(bar.leadSlack) or bar.leadSlack < 0 or (audit ~= nil and bar.leadSlack >= audit.popDegrees) then
+		problem("groundClearance.lockTurn.leadSlack must be 0 or more and under review.audit.popDegrees")
+	end
+	if typeof(bar.degrees) ~= "table" or #bar.degrees == 0 then
+		problem("groundClearance.lockTurn.degrees must list at least one turn")
+	else
+		for index, degrees in bar.degrees do
+			if not isNumber(degrees) or degrees <= 0 or degrees > 180 then
+				problem(("groundClearance.lockTurn.degrees[%d] must be above 0 and at most 180"):format(index))
+			end
+		end
+	end
+	if typeof(bar.stepHz) ~= "table" or #bar.stepHz == 0 then
+		problem("groundClearance.lockTurn.stepHz must list at least one rate")
+	else
+		for index, hz in bar.stepHz do
+			if not isWhole(hz) or hz < 30 then
+				problem(("groundClearance.lockTurn.stepHz[%d] must be a whole number, at least 30"):format(index))
+			end
 		end
 	end
 end
@@ -2143,5 +2335,8 @@ return function(ctx: Context): { string }
 
 	checkHooks(ctx, dev, problem)
 	checkFrameCap(ctx, dev, problem)
+	checkSheathCover(ctx, dev, problem)
+	checkStandHeight(ctx, dev, problem)
+	checkLockTurn(dev, problem)
 	return problems
 end

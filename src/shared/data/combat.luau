@@ -58,6 +58,19 @@ local Combat = {
 	basicChainLength = 3,
 	basicChainWindow = 0.6, -- seconds after the previous swing STARTED in which the next basic continues the chain
 	basicHitDuration = 0.35,
+	-- The speed a server run plays its clip at (D-469; 1 is the clip as authored). The run's whole
+	-- timeline (hit windows, the end pose, the lock up to post-motion) runs on its clip clock at this
+	-- speed, and ActionStarted carries it when it is not 1, so every other client plays the clip at
+	-- the speed the server sweeps it. Post-motion is a freeze in seconds and never scales. Phase 0
+	-- has no source of speed: every player request runs at 1, and a code caller
+	-- (CombatService.beginArt) may pass one, held to these bounds. They are the slowest and fastest
+	-- single sources the spec names: Freeze's -40% (status.Freeze.speedMultiplier) and Overwhelm's
+	-- +40% attack speed (section 7); AGI's +15% (section 13, tiers.agiArtSpeedMax) with the Herald's
+	-- Rally +10% (section 7) stacks to 1.265, under the top. A client plays a speed outside them at 1.
+	actionSpeed = {
+		min = 0.6,
+		max = 1.4,
+	},
 
 	-- Guard Gauge and Break
 	guardRegenPerSecond = 0.1, -- fraction of max per second while not hit by Arts
@@ -66,7 +79,9 @@ local Combat = {
 	breakDamageMultiplier = 2.0,
 	breakPostMotion = 0, -- Arts landed on a Broken enemy have zero post-motion
 
-	-- Switch (Phase 1 uses these; the window is drawn in Phase 0 for review)
+	-- Switch (section 6). The window opens on an enemy when a player's Art connects or a parry
+	-- lands; another player's Art landing on that enemy inside it is a Switch (D-470), which the
+	-- server judges and sends as HitConfirmed.isSwitch. The bonuses below are Phase 1's.
 	switchWindow = 0.8,
 	switchDamageBonus = 0.25,
 	switchGaugeBonus = 0.5,
@@ -82,6 +97,9 @@ local Combat = {
 	shieldReduction = 0.85,
 	guardGaugeDrainFraction = 1.0, -- fraction of incoming gauge damage applied to the guarding player
 	guardBreakStagger = 1.2,
+	-- The hit-stop tier of the enemy blow that breaks a player's guard (D-471): the guard giving
+	-- way holds as a final hit does (6 frames, its shake and its tick), not as a normal one.
+	guardBreakHitStop = "Final",
 	parryWindow = 0.15,
 	parryRearmTime = 0.25, -- seconds the guard must stay down before a new raise can parry (no tap spam)
 	parryStagger = 1.0,

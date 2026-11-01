@@ -2755,3 +2755,251 @@ describe("CombatService swing sequence numbers (item 4)", function()
 		expect(hit.swing).toBeNil()
 	end)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- What the server tells every client about a run and a hit (FC: speed, Switch, guard break)
+-- ------------------------------------------------------------------------------------------
+
+describe("CombatService action speed (D-469)", function()
+	local HORIZONTAL_WINDOW = ClipSampler.hitWindows(Horizontal)[1]
+	local POST_MOTION_AT = 0.6 -- Horizontal's PostMotionStart
+
+	it("a run at 1.15 says so on ActionStarted and sweeps, freezes and locks on that clock", function()
+		fresh()
+		local playerId = spawnPlayer()
+		local boarId = spawnBoar()
+		local startedAt = clock.t
+		expect(CombatService.beginArt(playerId, "OneHandedSword.Horizontal", nil, 1.15)).toBe(true)
+		local action = lastOf("ActionStarted")
+		expect(action.speed).toBe(1.15)
+		expect(action.serverTime).toBe(startedAt)
+		local record = EntityService.get(playerId)
+		expect(record.lockUntil).toBeCloseTo(startedAt + POST_MOTION_AT / 1.15 + HORIZONTAL.postMotion, 1e-9)
+		-- The window opens 1.15 x sooner in real time: nothing just before it, one hit just after.
+		local opensAt = HORIZONTAL_WINDOW.open / 1.15
+		advance(opensAt - 0.02)
+		expect(#sentOf("HitConfirmed")).toBe(0)
+		advance(0.04)
+		expect(#sentOf("HitConfirmed")).toBe(1)
+		expect(lastOf("HitConfirmed").targetId).toBe(boarId)
+		-- At 1 the same hit is still 0.4 x 0.15 / 1.15 = 0.05 s away: the sweep runs on the run's clock.
+		expect(clock.t - startedAt).toBeLessThan(HORIZONTAL_WINDOW.open - 0.02)
+		-- The end pose at 0.6 / 1.15 s, then post-motion for its whole (unscaled) length.
+		advance(POST_MOTION_AT / 1.15 - (clock.t - startedAt) - 0.01)
+		expect(record.state).toBe("Art")
+		advance(0.02)
+		expect(record.state).toBe("PostMotion")
+		expect(lastOf("StateChanged").duration).toBe(HORIZONTAL.postMotion)
+	end)
+
+	it("a player's request and a run at 1 send no speed; a code caller's is held to combat.actionSpeed", function()
+		fresh()
+		local playerId, player = spawnPlayer()
+		handlers.ArtRequest(player, artPayload("OneHandedSword.Horizontal"))
+		expect(lastOf("ActionStarted").speed).toBeNil()
+		local function speedOf(requested: any): number?
+			fresh()
+			local id = spawnPlayer()
+			expect(CombatService.beginArt(id, "OneHandedSword.Horizontal", nil, requested)).toBe(true)
+			return lastOf("ActionStarted").speed
+		end
+		expect(speedOf(nil)).toBeNil()
+		expect(speedOf(1)).toBeNil()
+		expect(speedOf(0 / 0)).toBeNil()
+		expect(speedOf(5)).toBe(Combat.actionSpeed.max)
+		expect(speedOf(0.05)).toBe(Combat.actionSpeed.min)
+		expect(speedOf(math.huge)).toBe(Combat.actionSpeed.max)
+		expect(CombatService.actionSpeedOf("fast")).toBe(1)
+		expect(playerId).toBeGreaterThan(0)
+	end)
+end)
+
+describe("CombatService Switch (D-470)", function()
+	local HORIZONTAL_WINDOW = ClipSampler.hitWindows(Horizontal)[1]
+
+	-- Two players side by side facing the boar 4 studs ahead.
+	local function pair()
+		fresh()
+		local aId, a = spawnPlayer(CFrame.new(0, 3, 0))
+		local bId, b = spawnPlayer(CFrame.new(0.5, 3, 0))
+		local boarId = spawnBoar()
+		return aId, a, bId, b, boarId
+	end
+
+	local function hitsOn(targetId)
+		local list = {}
+		for _, hit in sentOf("HitConfirmed") do
+			if hit.targetId == targetId then
+				table.insert(list, hit)
+			end
+		end
+		return list
+	end
+
+	it("a partner's Art landing inside the window is a Switch, names the opener, and opens its own", function()
+		local aId, a, bId, b, boarId = pair()
+		handlers.ArtRequest(a, artPayload("OneHandedSword.Horizontal"))
+		advance(HORIZONTAL_WINDOW.open + 0.05)
+		local opened = lastOf("SwitchWindow")
+		expect(opened.openerId).toBe(aId)
+		local first = hitsOn(boarId)
+		expect(#first).toBe(1)
+		expect(first[1].attackerId).toBe(aId)
+		expect(first[1].isSwitch).toBeNil()
+		expect(first[1].switchPartner).toBeNil()
+		-- B swings 0.1 s later: its cut lands 0.1 + open into A's 0.8 s window.
+		advance(0.1)
+		handlers.ArtRequest(b, artPayload("OneHandedSword.Horizontal"))
+		advance(HORIZONTAL_WINDOW.open + 0.05)
+		local hits = hitsOn(boarId)
+		expect(#hits).toBe(2)
+		expect(hits[2].attackerId).toBe(bId)
+		expect(hits[2].isSwitch).toBe(true)
+		expect(hits[2].switchPartner).toBe(aId)
+		-- The Switch spent A's window and B's Art opened its own, for A to Switch back into.
+		expect(lastOf("SwitchWindow").openerId).toBe(bId)
+		local windows = sentOf("SwitchWindow")
+		expect(#windows).toBe(2)
+	end)
+
+	it("no Switch outside the window, from the opener itself, or from a basic swing", function()
+		-- Outside: B's cut lands after the 0.8 s window closed.
+		local aId, a, _, b, boarId = pair()
+		handlers.ArtRequest(a, artPayload("OneHandedSword.Horizontal"))
+		advance(HORIZONTAL_WINDOW.open + 0.05)
+		advance(Combat.switchWindow)
+		handlers.ArtRequest(b, artPayload("OneHandedSword.Horizontal"))
+		advance(HORIZONTAL_WINDOW.open + 0.05)
+		local late = hitsOn(boarId)
+		expect(#late).toBe(2)
+		expect(late[2].isSwitch).toBeNil()
+		-- The opener's own next Art inside its own window is not a Switch.
+		advance(2)
+		local before = #hitsOn(boarId)
+		handlers.ArtRequest(a, artPayload("OneHandedSword.Horizontal"))
+		advance(HORIZONTAL_WINDOW.open + 0.05)
+		expect(lastOf("SwitchWindow").openerId).toBe(aId)
+		advance(HORIZONTAL.postMotion + 0.5)
+		handlers.ArtRequest(a, artPayload("OneHandedSword.Horizontal"))
+		advance(HORIZONTAL_WINDOW.open + 0.05)
+		local own = hitsOn(boarId)
+		expect(#own).toBe(before + 2)
+		expect(own[#own].attackerId).toBe(aId)
+		expect(own[#own].isSwitch).toBeNil()
+		-- A basic swing is no Art: inside A's window it is not a Switch.
+		local _, a2, _, b2, boar2 = pair()
+		handlers.ArtRequest(a2, artPayload("OneHandedSword.Horizontal"))
+		advance(HORIZONTAL_WINDOW.open + 0.05)
+		handlers.BasicAttackRequest(b2, basicPayload())
+		advance(Combat.basicHitDuration)
+		local basics = hitsOn(boar2)
+		expect(#basics).toBe(2)
+		expect(basics[2].artId).toBeNil()
+		expect(basics[2].isSwitch).toBeNil()
+	end)
+
+	it("a perfect parry opens the window: the partner's Art inside it is a Switch with the parrier", function()
+		fresh()
+		local KOBOLD_CFRAME = CFrame.lookAt(Vector3.new(0, 2.2, -4), Vector3.new(0, 2.2, 0))
+		local parrierId, parrier = spawnPlayer(CFrame.new(0, 3, 0))
+		-- The partner stands beside the kobold, out of its Overhead's cone, facing it.
+		local SIDE = { -1, 0, 0 }
+		local _, partner = spawnPlayer(CFrame.lookAt(Vector3.new(4, 3, -4), Vector3.new(0, 3, -4)))
+		local koboldId = spawnKobold(KOBOLD_CFRAME)
+		handlers.GuardRequest(parrier, { held = true, facing = FORWARD, clientTime = 1 })
+		clock.t += Combat.parryWindow / 2
+		local results = CombatService.enemyStrike(koboldId, OVERHEAD, Vector3.new(0, 2.2, -4), Vector3.new(0, 0, 1))
+		expect(#results).toBe(1)
+		expect(lastOf("HitConfirmed").parried).toBe(true)
+		expect(lastOf("SwitchWindow").openerId).toBe(parrierId)
+		handlers.ArtRequest(partner, artPayload("OneHandedSword.Horizontal", SIDE))
+		advance(HORIZONTAL_WINDOW.open + 0.05)
+		local hit = lastOf("HitConfirmed")
+		expect(hit.targetId).toBe(koboldId)
+		expect(hit.isSwitch).toBe(true)
+		expect(hit.switchPartner).toBe(parrierId)
+	end)
+
+	it("the window is the newest opener's; a Switch that kills is a Switch, and a corpse keeps none", function()
+		local aId, a, bId, b, boarId = pair()
+		expect(CombatService.switchWindowOf(boarId)).toBeNil()
+		handlers.ArtRequest(a, artPayload("OneHandedSword.Horizontal"))
+		advance(HORIZONTAL_WINDOW.open + 0.05)
+		local opener, closesAt = CombatService.switchWindowOf(boarId)
+		expect(opener).toBe(aId)
+		expect(closesAt).toBeCloseTo(lastOf("SwitchWindow").serverTime + Combat.switchWindow, 1e-9)
+		EntityService.get(boarId).hp = 1
+		advance(0.05)
+		handlers.ArtRequest(b, artPayload("OneHandedSword.Horizontal"))
+		advance(HORIZONTAL_WINDOW.open + 0.05)
+		local kill = lastOf("HitConfirmed")
+		expect(kill.attackerId).toBe(bId)
+		expect(kill.killed).toBe(true)
+		expect(kill.isSwitch).toBe(true)
+		expect(kill.switchPartner).toBe(aId)
+		-- No window opens on the corpse, and the one the Switch spent is gone.
+		expect(lastOf("SwitchWindow").openerId).toBe(aId)
+		expect(CombatService.switchWindowOf(boarId)).toBeNil()
+		-- reset forgets every window.
+		local _, a2, _, _, boar2 = pair()
+		handlers.ArtRequest(a2, artPayload("OneHandedSword.Horizontal"))
+		advance(HORIZONTAL_WINDOW.open + 0.05)
+		expect(CombatService.switchWindowOf(boar2)).never.toBeNil()
+		CombatService.reset()
+		expect(CombatService.switchWindowOf(boar2)).toBeNil()
+	end)
+end)
+
+describe("CombatService guard break hit-stop (D-471)", function()
+	local KOBOLD_CFRAME = CFrame.lookAt(Vector3.new(0, 2.2, -4), Vector3.new(0, 2.2, 0))
+
+	it("the blow that breaks a player's guard is confirmed at combat.guardBreakHitStop", function()
+		fresh()
+		local playerId, player = spawnPlayer()
+		local koboldId = spawnKobold(KOBOLD_CFRAME)
+		handlers.GuardRequest(player, { held = true, facing = FORWARD, clientTime = 1 })
+		clock.t += 1
+		local results = CombatService.enemyStrike(koboldId, OVERHEAD, Vector3.new(0, 2.2, -4), Vector3.new(0, 0, 1))
+		expect(results[1].broke).toBe(true)
+		expect(results[1].hitStop).toBe("Final")
+		local hit = lastOf("HitConfirmed")
+		expect(hit.broke).toBe(true)
+		expect(hit.hitStop).toBe(Combat.guardBreakHitStop)
+		expect(EntityService.get(playerId).state).toBe("GuardBroken")
+	end)
+
+	it("a guarded blow that empties the gauge breaks it too; a block, an open hit and a kill keep theirs", function()
+		fresh()
+		local playerId, player = spawnPlayer()
+		local boarId = spawnBoar(CFrame.lookAt(Vector3.new(0, 1.2, -6), Vector3.new(0, 1.2, 0)))
+		handlers.GuardRequest(player, { held = true, facing = FORWARD, clientTime = 1 })
+		clock.t += 1
+		local function rush()
+			return CombatService.enemyStrike(boarId, NORMAL_RUSH, Vector3.new(0, 1.2, -6), Vector3.new(0, 0, 1))[1]
+		end
+		local blocked = rush()
+		expect(blocked.guarded).toBe(true)
+		expect(blocked.broke).toBe(false)
+		expect(lastOf("HitConfirmed").hitStop).toBe("Normal")
+		EntityService.get(playerId).gauge = 1
+		local emptied = rush()
+		expect(emptied.broke).toBe(true)
+		expect(lastOf("HitConfirmed").hitStop).toBe("Final")
+		-- An open hit stays Normal; a guard break that kills is a Kill.
+		fresh()
+		local openId = spawnPlayer()
+		local kobold = spawnKobold(KOBOLD_CFRAME)
+		CombatService.enemyStrike(kobold, OVERHEAD, Vector3.new(0, 2.2, -4), Vector3.new(0, 0, 1))
+		expect(lastOf("HitConfirmed").hitStop).toBe("Normal")
+		expect(EntityService.get(openId).state).toBe("Stagger")
+		fresh()
+		local doomedId, doomed = spawnPlayer()
+		local axe = spawnKobold(KOBOLD_CFRAME)
+		handlers.GuardRequest(doomed, { held = true, facing = FORWARD, clientTime = 1 })
+		clock.t += 1
+		EntityService.get(doomedId).hp = 1
+		CombatService.enemyStrike(axe, OVERHEAD, Vector3.new(0, 2.2, -4), Vector3.new(0, 0, 1))
+		expect(lastOf("HitConfirmed").killed).toBe(true)
+		expect(lastOf("HitConfirmed").hitStop).toBe("Kill")
+	end)
+end)

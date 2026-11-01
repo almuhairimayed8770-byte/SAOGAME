@@ -44,6 +44,7 @@ Harness.stubService("RunService", {
 
 local Choreo = Harness.load("src/client/choreo/Choreo")
 local Combat = Harness.load("src/shared/data/combat")
+local CameraData = Harness.load("src/shared/data/camera")
 
 local PATH = "src/client/camera/CameraController"
 local F = 1 / 60
@@ -294,6 +295,42 @@ describe("a hit's freeze holds the shot's follow with the bodies (D-357, 300)", 
 			for f, moved in run.moves do
 				if moved > STILL then
 					error(("word at %d: frame %d from the cue moved the camera %.3f studs"):format(wordAt, f, moved))
+				end
+			end
+		end
+	end)
+
+	-- Item 334(b): a kill the contact did not prove (Basic3's Final on a kobold with HP to spare)
+	-- shakes from its cue; the word's still shot (D-323) dropped the shake's offset in one frame:
+	-- Studio logged 0.016 to 0.026 studs at the hand-over, here 0.020 (Normal) and 0.039 (Final,
+	-- word 9 frames on). The still shot stands where the shake left it (D-497): 0 move from the
+	-- hand-over through the still shot, and the held offset rings out once it lets go.
+	it("an unproven kill's shake hands over to the still shot with no move, and rings out after it", function()
+		for _, tier in { "Normal", "Final" } do
+			for _, wordAt in { 2, 4, 9 } do
+				local fixture = intoContact()
+				local controller = fixture.controller
+				local stillFrames = math.floor((0.5 + CameraData.lock.riseHoldSeconds) / F)
+				local run = play(fixture, tier, wordAt + stillFrames + 30, wordAt + 1, function(f: number)
+					if f == 1 then
+						controller.nudge(ROOT + Vector3.new(0, 0, -4), Combat.cameraNudgeStuds)
+						controller.shake(tier)
+					end
+					if f == wordAt then
+						controller.holdLock(0.5)
+					end
+				end)
+				for f = wordAt, wordAt + stillFrames - 1 do
+					if run.moves[f] > STILL then
+						error(
+							("%s, word at %d: frame %d of the still shot moved the camera %.4f studs"):format(
+								tier,
+								wordAt,
+								f,
+								run.moves[f]
+							)
+						)
+					end
 				end
 			end
 		end

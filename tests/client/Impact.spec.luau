@@ -1191,6 +1191,46 @@ describe("Impact.death", function()
 		Impact.death(world.target, HIT_POINT, false)
 		none(world, "sfx.contour")
 	end)
+
+	-- The blooms the director started, in order.
+	local function blooms(world: any): { string }
+		local names = {}
+		for _, args in callsTo(world, "sfx.contour") do
+			table.insert(names, args[1])
+		end
+		return names
+	end
+
+	it("deaths that land together bloom once: a longer bloom takes over, a shorter one adds nothing (D-478)", function()
+		local world = bind(newWorld())
+		-- One frame: a sweep's two kills (one rig already gone) and a player's death beside them.
+		Impact.death(world.target, HIT_POINT, false)
+		Impact.death(nil, HIT_POINT + Vector3.new(4, 0, 0), false)
+		Impact.death(nil, HIT_POINT, false, true)
+		expect(blooms(world)).toEqual({ "ShatterBloom" })
+		-- A boss falling in the same moment: its longer bloom takes over ...
+		world.clock += moments.sweep.mergeSeconds * 0.5
+		Impact.death(nil, HIT_POINT, true)
+		-- ... and a mob shattering after it never cuts the boss's tail short.
+		Impact.death(nil, HIT_POINT, false)
+		expect(blooms(world)).toEqual({ "ShatterBloom", "BossShatterBloom" })
+		-- Past the window a death is a moment of its own and blooms again.
+		world.clock += moments.sweep.mergeSeconds * 1.01
+		Impact.death(nil, HIT_POINT, false)
+		expect(blooms(world)).toEqual({ "ShatterBloom", "BossShatterBloom", "ShatterBloom" })
+		-- Binding again forgets the moment.
+		bind(world)
+		Impact.death(nil, HIT_POINT, false)
+		expect(#blooms(world)).toBe(4)
+	end)
+
+	it("a death past its range takes no part in the moment: the one in range still blooms (D-478)", function()
+		local world = bind(newWorld())
+		local far = HIT_POINT + Vector3.new(0, 0, moments.rangeOf("Death") * 2)
+		Impact.death(nil, far, false)
+		Impact.death(nil, HIT_POINT, false)
+		expect(blooms(world)).toEqual({ "ShatterBloom" })
+	end)
 end)
 
 describe("Impact swing plane", function()
@@ -1716,6 +1756,51 @@ describe("Impact marks the local player's own sounds (issue 9)", function()
 		Impact.guardRaise(world.target, false)
 		for index = mine + 1, #heard do
 			expect(heard[index]:sub(-4)).never.toBe(":own")
+		end
+	end)
+end)
+
+-- D-470: only the server judges a Switch, so the local contact never carries one. Before, the
+-- confirmation dropped the Switch layer whenever a contact had played: the land sound and both
+-- blades' white flash never showed for the fighter who made the Switch.
+describe("Impact.hit, a Switch the contact could not know (D-470)", function()
+	local function confirmAfterContact(world: any, confirm: any): string
+		local played = Impact.hit(hitInfo(world, {}))
+		flush(world)
+		table.clear(world.calls)
+		world.clock += 0.05
+		local name = Impact.hit(hitInfo(world, confirm), played)
+		flush(world)
+		return name
+	end
+
+	it("plays the Switch layer on the confirmation and nothing of the contact again", function()
+		local world = bind(newWorld())
+		confirmAfterContact(world, { isSwitch = true, partner = world.partner })
+		local flashes = callsTo(world, "trails.flashWhite")
+		expect(#flashes).toBe(2)
+		expect(flashes[1][1]).toBe(world.attacker)
+		expect(flashes[2][1]).toBe(world.partner)
+		expect(only(world, "sfx.play")[1]).toBe("ui.SwitchLand")
+		for _, fn in { "sfx.cue", "glint.play", "impactFrames.play", "outline.flash", "camera.punch" } do
+			none(world, fn)
+		end
+	end)
+
+	it("a stronger Switch adds its tier's upgrade and the Switch layer", function()
+		local world = bind(newWorld())
+		world.swing = Vector3.new(1, 0, 0)
+		confirmAfterContact(world, { tier = "Kill", killed = true, isSwitch = true, partner = world.partner })
+		expect(only(world, "sfx.cue")[1]).toBe("HitKill")
+		expect(only(world, "sfx.play")[1]).toBe("ui.SwitchLand")
+		expect(#callsTo(world, "trails.flashWhite")).toBe(2)
+	end)
+
+	it("a confirmation that is no Switch still adds nothing at a tier no stronger", function()
+		local world = bind(newWorld())
+		confirmAfterContact(world, { crit = true })
+		for _, fn in { "sfx.cue", "sfx.play", "trails.flashWhite", "glint.play", "outline.flash" } do
+			none(world, fn)
 		end
 	end)
 end)

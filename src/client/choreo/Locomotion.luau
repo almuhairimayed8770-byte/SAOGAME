@@ -25,8 +25,14 @@
 	that step every frame. Grounded and moving only; a teleport or shove past the bound is dropped.
 	The root's physics position never changes. One-shots (Jump, Fall, Land, TurnLeft, TurnRight, Skid) play
 	on the FullBody layer (a turn in place or a standing Land stops when the root starts to move;
-	a landing on the move plays Land with no weight, for its sounds); the lean into turns, the drawn sprint "weapon low and back" pose and the
-	raycast foot IK ride as procedural additive channels. The raycast is injected so the IK math
+	a landing on the move plays Land with no weight, for its sounds; a Skid called while a FullBody
+	clip that outranks it holds the body, a dodge or an attack, does not play: it would only be
+	heard, D-472); the lean into turns, the drawn sprint "weapon low and back" pose and the
+	raycast foot IK ride as procedural additive channels (D-506: the IK measures the ground
+	against the floor the Humanoid holds the root over, its own HipHeight, and a standHeight
+	channel raises or lowers the body over its root by the gap between that floor and where this
+	avatar's own legs reach in their bind pose, so the soles stand on the floor whatever the
+	avatar; State.yawAhead, D-505, is the lock's turn still to land). The raycast is injected so the IK math
 	stays pure and tested; the default uses workspace.
 
 	A body held off its stick (D-144: walking into an enemy or a wall, slid along its flank): once
@@ -81,6 +87,7 @@ local Rigs = require(Shared.data.rigs)
 local WeaponModels = require(Shared.data.weaponModels)
 local Types = require(Shared.types)
 local ClipSampler = require(Shared.choreo.ClipSampler)
+local Pose = require(Shared.choreo.Pose)
 local Easing = require(Shared.util.Easing)
 local ClipLibrary = require(script.Parent.ClipLibrary)
 local GaitHandOff = require(script.Parent.GaitHandOff)
@@ -140,6 +147,11 @@ export type State = {
 	-- The root's velocity, the reading `speed` came from (nil: Locomotion reads the root's own).
 	-- With the stick held, a velocity off the stick marks the body blocked (stride.blocked, D-144).
 	velocity: Vector3?,
+	-- D-505: degrees (+ = left) the root turns after this step and before the frame that shows
+	-- this step's pose (the lock's turn, which CharacterController writes on PreSimulation). The
+	-- facing is read as the root will stand then, so the turn plant takes back the yaw the frame
+	-- shows with this pose, not the one before it. Nil or 0: the root as it stands.
+	yawAhead: number?,
 }
 
 export type Raycast = (origin: Vector3, direction: Vector3) -> Vector3?
@@ -250,12 +262,14 @@ end
 -- while the body stands (update sets plantHolds) and no full-body clip but the turn or a standing
 -- Land has it; else its lag lets go over locomotion.turnPlant.plantSeconds.
 local PLANT_CHANNEL = "turnPlant"
+local STAND_CHANNEL = "standHeight" -- D-506
 local function stepTurnPlant(self: any, dt: number, handles: { any }?)
 	local root: BasePart? = self.character.PrimaryPart
 	if root == nil then
 		return
 	end
-	local yaw = math.deg(math.atan2(-root.CFrame.LookVector.X, -root.CFrame.LookVector.Z))
+	-- As the root will stand on the frame this step's pose shows (D-505, State.yawAhead).
+	local yaw = math.deg(math.atan2(-root.CFrame.LookVector.X, -root.CFrame.LookVector.Z)) + (self.yawAhead or 0)
 	local last = self.plantYaw
 	self.plantYaw = yaw
 	local turned = if last ~= nil then (yaw - last + 180) % 360 - 180 else 0
@@ -287,7 +301,31 @@ local function stepTurnPlant(self: any, dt: number, handles: { any }?)
 		end
 	end
 	TurnPlant.step(self.turnPlant, dt, turned, holds, clip, from, to)
-	self.animator:setProcedural(PLANT_CHANNEL, TurnPlant.offsets(self.turnPlant))
+	-- D-507: the Waist and Neck yaw the pose gave last step without this channel.
+	local stanceWaist: number?, stanceNeck: number? = nil, nil
+	local last = self.animator.mixer:lastOffsets()
+	local waist = if last ~= nil then last.Waist else nil
+	if waist ~= nil and waist.rot ~= nil then
+		stanceWaist = (waist.rot[2] or 0) - self.plantWaist
+	end
+	local neck = if last ~= nil then last.Neck else nil
+	if neck ~= nil and neck.rot ~= nil then
+		stanceNeck = neck.rot[2] or 0
+	end
+	-- The turn clip's own look at the clock it steps to: it can come in faster than last step's
+	-- pose shows, so the head is held to the larger of the two.
+	if clip ~= nil then
+		local clipNeck = ClipSampler.sample(clip, to).Neck
+		if clipNeck ~= nil and clipNeck.rot ~= nil then
+			local look = clipNeck.rot[2] or 0
+			if stanceNeck == nil or math.abs(look) > math.abs(stanceNeck :: number) then
+				stanceNeck = look
+			end
+		end
+	end
+	local offsets = TurnPlant.offsets(self.turnPlant, stanceWaist, stanceNeck)
+	self.plantWaist = if offsets ~= nil then offsets.Waist.rot[2] else 0
+	self.animator:setProcedural(PLANT_CHANNEL, offsets)
 end
 
 -- The turn in place for the stance the body stands in (D-416): over the drawn idle the drawn
@@ -768,6 +806,8 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		raycast = dependencies.raycast,
 		footIK = dependencies.footIK ~= false,
 		hipHeight = (Rigs[animator.rigId] or Rigs.PlayerR15).hipHeight,
+		standDepth = nil :: number?, -- D-506: the bind pose's soles below the root's center (standDepth)
+		standKey = nil :: Vector3?, -- the sizes standDepth was measured on
 		mount = nil :: any,
 		sheath = nil :: any,
 		mountGeneration = 0,
@@ -813,6 +853,8 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		-- body stands for it (set by update).
 		turnPlant = TurnPlant.new(),
 		plantYaw = nil :: number?,
+		yawAhead = 0, -- D-505: the last update's State.yawAhead
+		plantWaist = 0, -- D-507: the Waist yaw the turn plant added last step
 		plantHolds = false,
 		turnUnderWay = false, -- LocomotionState's last word on a standing turn (323(b))
 		destroyed = false,
@@ -885,6 +927,32 @@ local function playOneShot(self: any, name: string, weight: number?)
 	return self.animator:play(clipId(name), { weight = weight })
 end
 
+-- True while a FullBody clip that outranks the locomotion one-shot `name` holds the body (a
+-- dodge, an attack, a stagger): played now, the one-shot would show nothing under it, yet its
+-- clip sounds would play (D-472: a sprint cut by a dodge called a Skid whose landing sounded
+-- 0.16 s before the dodge's own).
+local function actionHoldsBody(self: any, name: string): boolean
+	local mixer = self.animator.mixer
+	if typeof(mixer) ~= "table" or typeof(mixer.handles) ~= "function" then
+		return false
+	end
+	local id = clipId(name)
+	local own = if ClipLibrary.has(id) then ClipLibrary.get(id).priority else nil
+	local floor = own or ChoreoData.priority.OneShot
+	for _, handle in mixer:handles() do
+		if
+			handle.layer == "FullBody"
+			and handle.priority > floor
+			and not handle.done
+			and not handle.stopping
+			and handle.weight > 0
+		then
+			return true
+		end
+	end
+	return false
+end
+
 -- Drops the jump's handoff to the fall (landed before the jump clip ended, jumped again, or gone).
 local function dropJumpHandoff(self: any)
 	if self.jumpHandoff ~= nil then
@@ -893,10 +961,79 @@ local function dropJumpHandoff(self: any)
 	end
 end
 
+-- D-506: how far below the root's center this body's soles hang in its bind pose (no clip), from
+-- its own parts and joints: the owner's avatar or any other, scaled or not. Measured again when the
+-- root's or a foot's size changes (the avatar's scale lands after the character spawns). A body
+-- with no feet falls back to the rig table's hipHeight under the root's bottom.
+local STAND_FEET = { "LeftFoot", "RightFoot" }
+local function standDepth(self: any, root: BasePart): number
+	local character: Model = self.character
+	local left = character:FindFirstChild("LeftFoot") :: BasePart?
+	local right = character:FindFirstChild("RightFoot") :: BasePart?
+	if left == nil or right == nil then
+		return self.hipHeight + root.Size.Y * 0.5
+	end
+	local key = Vector3.new(root.Size.Y, left.Size.Y + left.Size.X, right.Size.Y + right.Size.X)
+	local cached: number? = self.standDepth
+	if cached ~= nil and self.standKey == key then
+		return cached
+	end
+	local ok, solved = pcall(Pose.solve, character, CFrame.new(), {})
+	local lowest = math.huge
+	local found = 0
+	if ok then
+		for _, name in STAND_FEET do
+			local frame = (solved :: any)[name]
+			local part = character:FindFirstChild(name) :: BasePart?
+			if frame ~= nil and part ~= nil then
+				found += 1
+				local size = part.Size
+				for _, sx in { -0.5, 0.5 } do
+					for _, sz in { -0.5, 0.5 } do
+						lowest =
+							math.min(lowest, (frame * CFrame.new(sx * size.X, -0.5 * size.Y, sz * size.Z)).Position.Y)
+					end
+				end
+			end
+		end
+	end
+	if found < #STAND_FEET then
+		-- A body still being put together: measured again next step.
+		return self.hipHeight + root.Size.Y * 0.5
+	end
+	self.standDepth = -lowest
+	self.standKey = key
+	return -lowest
+end
+
+local function readHipHeight(humanoid: Humanoid): number
+	return humanoid.HipHeight
+end
+
+-- D-506: how far below the root's center the floor is: the engine holds the root's bottom the
+-- Humanoid's own HipHeight over it (not the rig table's), else the body stands on its soles.
+local function floorDepth(self: any, root: BasePart): number
+	local humanoid = self.humanoid :: Humanoid?
+	if humanoid == nil then
+		humanoid = self.character:FindFirstChildOfClass("Humanoid")
+		self.humanoid = humanoid
+	end
+	if humanoid ~= nil then
+		local ok, hipHeight = pcall(readHipHeight, humanoid)
+		if ok and typeof(hipHeight) == "number" and hipHeight > 0 then
+			return hipHeight + root.Size.Y * 0.5
+		end
+	end
+	return standDepth(self, root)
+end
+
 local function footDeltas(self: any, root: BasePart): (number?, number?)
 	local raycast: Raycast = self.raycast
 	local ik = Config.footIK
-	local expectedGround = root.Position.Y - self.hipHeight - root.Size.Y * 0.5
+	-- D-506: the IK measures the ground against the floor the Humanoid stands the root over. The
+	-- rig table's hipHeight (2.0) is not this avatar's: on the owner-sized body its flat field read
+	-- 0.54 high, and the IK lifted both standing feet 0.30 to 0.66 off it.
+	local expectedGround = root.Position.Y - floorDepth(self, root)
 	local rightVector = root.CFrame.RightVector
 	local function probe(side: number): number?
 		local base = root.Position + rightVector * (side * ik.footSpacing)
@@ -1074,12 +1211,13 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 			right = move:Dot(cframe.RightVector)
 			stickX, stickZ = move.X, move.Z
 		end
-		local yaw = yawOf(cframe)
+		local yaw = yawOf(cframe) + (state.yawAhead or 0)
 		if self.lastYaw ~= nil and dt > 0 and clock > 0 then
 			yawRate = wrapDegrees(yaw - self.lastYaw) / dt / clock
 		end
 		self.lastYaw = yaw
 	end
+	self.yawAhead = state.yawAhead or 0
 	if state.drawn ~= nil then
 		self.drawn = state.drawn
 	end
@@ -1181,6 +1319,12 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 		if math.abs(pending) > half or math.abs(state.turning) > half then
 			self.turnHandle = playOneShot(self, turnClipName(self, oneShot))
 		end
+	elseif oneShot == "Skid" then
+		-- A stop under an action (a sprint cut by a dodge or an attack) is the action's: the Skid
+		-- would only sound under it (D-472).
+		if not actionHoldsBody(self, oneShot) then
+			playOneShot(self, oneShot)
+		end
 	elseif oneShot ~= nil then
 		playOneShot(self, oneShot)
 	end
@@ -1211,6 +1355,19 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 	)
 
 	if self.footIK and root ~= nil then
+		-- D-506: the body stands on the floor the Humanoid holds the root over, at every speed: a
+		-- HipHeight short of this avatar's legs sank every sole into the field (walking too, where
+		-- the IK has faded); one past them floated it. Within footIK.maxAdjust.
+		local lift = math.clamp(
+			standDepth(self, root :: BasePart) - floorDepth(self, root :: BasePart),
+			-Config.footIK.maxAdjust,
+			Config.footIK.maxAdjust
+		)
+		if lift ~= 0 then
+			animator:setProcedural(STAND_CHANNEL, LocomotionState.standOffsets(lift))
+		else
+			animator:setProcedural(STAND_CHANNEL, nil)
+		end
 		local weight = LocomotionState.footIKWeight(blendSpeed, state.grounded) * ChoreoData.additiveWeights.footIK
 		if weight > 0 then
 			local leftDelta, rightDelta = footDeltas(self, root)
@@ -1256,7 +1413,7 @@ function Locomotion.destroy(self: any)
 	if self.fallHandle ~= nil then
 		self.animator:stop(self.fallHandle)
 	end
-	for _, name in { "lean", "drawnSprint", "footIK", PLANT_CHANNEL } do
+	for _, name in { "lean", "drawnSprint", "footIK", PLANT_CHANNEL, STAND_CHANNEL } do
 		self.animator:setProcedural(name, nil)
 	end
 	table.clear(self.handles)

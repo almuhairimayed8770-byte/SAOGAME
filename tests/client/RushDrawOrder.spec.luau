@@ -161,6 +161,7 @@ type Options = {
 	studioOrder: boolean?,
 	-- Where the replicated root stands at client time `t` (default: the server's body `lag` late).
 	rootAt: ((t: number) -> CFrame)?,
+	fps: number?, -- the loop's frame rate (default 60)
 }
 
 local WIND_UP_START = 10
@@ -223,7 +224,8 @@ end
 type Run = { frames: { Frame }, front: number, model: Model, root: BasePart, calls: { any }, casts: { Cast } }
 
 local function rush(options: Options): Run
-	clock = WIND_UP_START - 0.2 + (options.phase or 0) * FRAME
+	local frameLength = if options.fps ~= nil then 1 / options.fps else FRAME
+	clock = WIND_UP_START - 0.2 + (options.phase or 0) * frameLength
 	local model = RigBuilder.build("Boar")
 	local front = EnemyService.bodyExtents(model)
 	local root = model.PrimaryPart :: BasePart
@@ -358,7 +360,7 @@ local function rush(options: Options): Run
 		Replication.watch(record)
 	end
 	local animator = Choreo.get(model)
-	animator:step(FRAME)
+	animator:step(frameLength)
 
 	local messages: { { at: number, name: string, payload: any, sent: boolean? } } = {}
 	local telegraphAt = WIND_UP_START + (options.telegraphLatency or options.latency)
@@ -411,7 +413,7 @@ local function rush(options: Options): Run
 	frameNow = 0
 	for _ = 1, options.frames or 170 do
 		frameNow += 1
-		clock += FRAME
+		clock += frameLength
 		for _, message in messages do
 			if not message.sent and clock >= message.at - 1e-9 then
 				message.sent = true
@@ -434,14 +436,14 @@ local function rush(options: Options): Run
 		end
 		-- The frame's render steps: FrameClock's start, the rigs' (this animator), its posed mark.
 		if clockStart ~= nil then
-			clockStart(FRAME)
+			clockStart(frameLength)
 		end
-		animator:step(FRAME)
+		animator:step(frameLength)
 		if clockPosed ~= nil then
-			clockPosed(FRAME)
+			clockPosed(frameLength)
 		end
 		if clockEnd ~= nil then
-			clockEnd(FRAME)
+			clockEnd(frameLength)
 		end
 		if options.studioOrder then
 			place(bodyAt(clock - options.lag, options.stopAt))
@@ -657,5 +659,102 @@ describe("a drawn rush in Studio's frame order (offset on PreSimulation, root mo
 				end
 			end
 		)
+	end
+end)
+
+-- The first step the drawn rush takes: the drawn body's move on the first frame from the client's
+-- launch (the telegraph's predicted launch, else RushStarted heard `latency` late) that moves it;
+-- the largest step before it (the body on its root, which moves at most at the server's own speed);
+-- and the root's own move on that frame when it is the root's first from rest (what Studio's order
+-- adds then, D-438; 0 when the root stood still or was already moving).
+local function launchStep(run: Run, launchAt: number): (number, number, number)
+	local frames = run.frames
+	local before, launch, rootStart = 0, 0, 0
+	for index = 2, #frames do
+		local frame = frames[index]
+		local step = (frame.drawn - frames[index - 1].drawn).Magnitude
+		if frame.t < launchAt - 1e-9 then
+			before = math.max(before, step)
+		elseif step > 1e-6 then
+			launch = step
+			local rootMove = (frame.root - frames[index - 1].root).Magnitude
+			local moving = index > 2 and (frames[index - 1].root - frames[index - 2].root).Magnitude > 1e-6
+			rootStart = if moving then 0 else rootMove
+			break
+		end
+	end
+	return before, launch, rootStart
+end
+
+describe("a rush's first drawn step (D-480)", function()
+	-- The launch starts the drawn body where it was last drawn: never from where the root has moved
+	-- to since (a root with no lag, or already on its way when RushStarted is heard), which added the
+	-- root's own move of the frame to the run's first step (48a846f: 1.87 studs at 30 fps, 0.84 at
+	-- 60, 0.35 at 144 with the telegraph; 1.77, 0.89 and 0.37 with RushStarted alone).
+	for _, fps in { 30, 60, 144 } do
+		local steady = SPEED / fps
+		for _, lag in { 0, 0.05, 0.25 } do
+			for _, telegraph in { true, false } do
+				it(
+					("moves no more than a frame of the run's travel at %d fps, root %.2f s late, %s"):format(
+						fps,
+						lag,
+						if telegraph then "telegraphed" else "RushStarted alone"
+					),
+					function()
+						local latency = 0.05
+						local launchAt = if telegraph then 0 else latency
+						for _, phase in { 0, 0.3, 0.6, 0.9 } do
+							local run = rush({
+								latency = latency,
+								lag = lag,
+								telegraph = telegraph,
+								fps = fps,
+								phase = phase,
+								frames = math.ceil((0.4 + CHARGE.windUp) * fps),
+								frameClock = true,
+							})
+							local before, launch = launchStep(run, launchAt)
+							expect(before).toBeLessThanOrEqual(steady + 1e-3)
+							expect(launch).toBeLessThanOrEqual(steady + 1e-3)
+							expect(launch).toBeGreaterThan(0)
+						end
+					end
+				)
+			end
+		end
+	end
+
+	-- In Studio's order the launch adds nothing but the late root's own first move from rest on that
+	-- frame, which nothing the client holds before physics moves it foretells (it carries no velocity
+	-- yet, D-438; STUDIO_TASKS 347(c) measures it).
+	for _, fps in { 30, 60, 144 } do
+		local steady = SPEED / fps
+		for _, lag in { 0, 0.05, 0.25 } do
+			it(
+				("adds only the root's first move in Studio's order at %d fps, root %.2f s late"):format(fps, lag),
+				function()
+					for _, telegraph in { true, false } do
+						local latency = 0.05
+						for _, phase in { 0, 0.3, 0.6, 0.9 } do
+							local run = rush({
+								latency = latency,
+								lag = lag,
+								telegraph = telegraph,
+								fps = fps,
+								phase = phase,
+								frames = math.ceil((0.4 + CHARGE.windUp) * fps),
+								frameClock = true,
+								studioOrder = true,
+							})
+							local before, launch, rootStart = launchStep(run, if telegraph then 0 else latency)
+							expect(before).toBeLessThanOrEqual(steady + 1e-3)
+							expect(rootStart).toBeLessThanOrEqual(steady + 1e-3)
+							expect(launch).toBeLessThanOrEqual(steady + rootStart + 1e-3)
+						end
+					end
+				end
+			)
+		end
 	end
 end)

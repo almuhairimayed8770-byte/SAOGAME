@@ -221,6 +221,23 @@ function DevStageLogic.bodyInside(
 	return nil
 end
 
+--- Whether the flat point (x, z) stands within `near` studs (flat) of the footprint of a staged
+--- part named in `names` (the ledge or its ramp, by partBoxes): a read the staging settles before
+--- it builds there (item 359(b), D-503).
+function DevStageLogic.nearParts(ledge: any, x: number, z: number, near: number, names: { string }): boolean
+	for _, box in DevStageLogic.partBoxes(ledge) do
+		if table.find(names, box.name) == nil then
+			continue
+		end
+		local dx = math.max(box.min[1] - x, 0, x - box.max[1])
+		local dz = math.max(box.min[3] - z, 0, z - box.max[3])
+		if dx * dx + dz * dz <= near * near then
+			return true
+		end
+	end
+	return false
+end
+
 --- The stand ring of a shot (open: on the ledge's top) from capture.stage.
 function DevStageLogic.ring(open: boolean, stage: any): Ring
 	local x, y, z, facing = DevStageLogic.standSpot(open, stage.area, stage.ledge)

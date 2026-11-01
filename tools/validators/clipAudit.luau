@@ -16,6 +16,9 @@
 	- cancel.snapFrames a whole number in [2, 4] (a cancel's hand-over is a snap, section 10 beat 2);
 	- afterFreezeTipSpeed in (0, 20] studs a second (the tip's step on the first frame after a
 	  hit-stop, tests/choreo/PostFreezeStep.spec.luau; a tenth of a snap's peak at most);
+	- followThrough (tests/choreo/FollowThrough.spec.luau): exitFrames a whole number in [6, 12]
+	  (section 10 beat 5's overshoot and settle), touchStuds in (0, overlapStuds] (a blade left
+	  in the body past the exit may not sit deeper than a limb may in another);
 	- leadSeconds at least the longest clip blend in (what plays under a clip is settled when it
 	  starts), settleSeconds and loopOverSeconds above 0, maxTraceSeconds above the longest trace
 	  (lead, chain, the longest clip and a loop's overrun, the longest blend-out, the settle),
@@ -52,6 +55,8 @@ local VIEWS = { "Behind", "Front" }
 local MAX_AFTER_FREEZE_TIP_SPEED = 20
 -- Section 10 beat 2: a snap is 2 to 4 frames.
 local SNAP_FRAMES_LOW, SNAP_FRAMES_HIGH = 2, 4
+-- Section 10 beat 5: the overshoot and settle is 6 to 12 frames.
+local SETTLE_FRAMES_LOW, SETTLE_FRAMES_HIGH = 6, 12
 
 local function isNumber(value: any): boolean
 	return typeof(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
@@ -172,6 +177,27 @@ return function(ctx: Context): { string }
 				tostring(snapFrames)
 			)
 		)
+	end
+
+	-- The follow-through (D-484): the blade is out of the body within beat 5's frames, and what
+	-- touches it after is no deeper than the overlap bar.
+	local followThrough = audit.followThrough
+	if typeof(followThrough) ~= "table" then
+		problem("followThrough is missing")
+	else
+		local exitFrames = followThrough.exitFrames
+		if not (isWhole(exitFrames) and exitFrames >= SETTLE_FRAMES_LOW and exitFrames <= SETTLE_FRAMES_HIGH) then
+			problem(
+				("followThrough.exitFrames must be a whole number of frames in [%d, %d] (got %s)"):format(
+					SETTLE_FRAMES_LOW,
+					SETTLE_FRAMES_HIGH,
+					tostring(exitFrames)
+				)
+			)
+		end
+		if isNumber(audit.overlapStuds) then
+			inRange("followThrough.touchStuds", followThrough.touchStuds, 0, audit.overlapStuds, false, true)
+		end
 	end
 
 	-- The trace.

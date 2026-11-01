@@ -279,6 +279,10 @@ local Accents = {
 	speedLines = {
 		screenGuiName = "FxSpeedLines",
 		displayOrder = 5, -- under the HUD (ui.luau hud.displayOrder 10)
+		-- Full screen: the rays run from the screen's edges, past a phone's notch and home
+		-- indicator (ScreenInsets None, not clipped to the device's safe area; D-475).
+		screenInsets = "None",
+		clipToDeviceSafeArea = false,
 		token = "SystemWhite",
 		-- Transparency along each line, inner end first: the inner part fades to nothing.
 		gradient = { { 0, 1 }, { 0.4, 0.5 }, { 1, 0 } },

@@ -278,7 +278,11 @@ local Rigs: { [string]: Rig } = {
 	Kobold = {
 		id = "Kobold",
 		rootPart = "HumanoidRootPart",
-		hipHeight = 2.2,
+		-- The rest pose stands on the floor (D-483): the hips sit 1.2 under the root's centre and
+		-- the legs hang 2.2 under the hips, so the root's centre is 3.4 up (2.4 under its 2-stud
+		-- box). At 2.2 the rest pose, which the server's hit sweeps read, stood 0.2 into the field
+		-- and every clip raised the torso 0.2 more than its pose needed.
+		hipHeight = 2.4,
 		placeholder = true,
 		walkSpeed = 10,
 		weaponGrip = "RightArm",

@@ -88,7 +88,9 @@
 		                               slam and jam stops, the daze); waits up to
 		                               hooks.chargeTimeoutSeconds for the wind-up and the run, then
 		                               replies the launch and every stop told for it (reason,
-		                               distance down the path, seconds after the launch)
+		                               distance down the path, seconds after the launch); a
+		                               "hold" or "enemy" on that enemy ends the wait at once
+		                               (endedBy "hold" or "enemy", D-500), so the next charge goes
 		"part" { size, cframe | position, tilt?, name?, after? }
 		                               an anchored, solid part in the Workspace folder
 		                               hooks.folderName (a wall, a slope, a stair step): size {x, y,
@@ -206,6 +208,29 @@ local previous: Sink? = nil
 local warnedSink = false
 -- The waiting command ("basic", "art", "charge", "walk" with wait, or "place" on a wind-up), or nil.
 local busy: string? = nil
+-- Bumped each time a waiting command starts or is ended early: a wait ends once it changes, and
+-- only the wait that still holds it frees `busy` (D-500).
+local busyToken = 0
+-- The enemy a waiting "charge" is for, and by wait token the command that ended a wait early.
+local busyEnemy: number? = nil
+local endedBy: { [number]: string } = {}
+
+-- Item 348(a) (D-500): a "hold" or "enemy" on the enemy a charge waits for drops that charge (as
+-- a hold does), so the charge's wait ends there and then and the next charge can go at once.
+local function endChargeWait(ids: { number }, by: string)
+	if busy ~= "charge" or busyEnemy == nil then
+		return
+	end
+	for _, id in ids do
+		if id == busyEnemy then
+			endedBy[busyToken] = by
+			busyToken += 1
+			busy = nil
+			busyEnemy = nil
+			return
+		end
+	end
+end
 -- "part": parts asked for with `after` still to come, and the token "clearparts" bumps to drop them.
 local pendingParts = 0
 local partsToken = 0
@@ -519,6 +544,9 @@ local function holdCommand(args: { [string]: any }): Reply
 	if args.all == true then
 		EnemyService.setHoldNew(on)
 	end
+	if on then
+		endChargeWait(targets, "hold")
+	end
 	return {
 		ok = true,
 		on = on,
@@ -829,6 +857,7 @@ local function enemyCommand(args: { [string]: any }): Reply
 	if not EnemyService.place(id, CFrame.new(at) * CFrame.Angles(0, math.rad(facing), 0), hold) then
 		return fail(("entity %d is no living enemy"):format(id))
 	end
+	endChargeWait({ id }, "enemy")
 	return {
 		ok = true,
 		entityId = id,
@@ -913,6 +942,8 @@ local function chargeCommand(args: { [string]: any }): Reply
 	if not started then
 		return { ok = false, entityId = id, name = name, error = ("refused: %s"):format(tostring(reason)) }
 	end
+	local token = busyToken
+	busyEnemy = id
 	-- The wind-up and the run: over once the brain leaves them (Recover after a full run, Interrupted
 	-- for a slam's daze or a hit's stagger, Dead).
 	local deadline = startedAt + Hooks.chargeTimeoutSeconds
@@ -920,12 +951,21 @@ local function chargeCommand(args: { [string]: any }): Reply
 		local brain = EnemyService.brainOf(id)
 		return if brain ~= nil then brain:getPhase() else nil
 	end
+	local ended: string? = nil
 	while os.clock() < deadline do
 		local now = phase()
 		if now ~= "WindUp" and now ~= "Strike" then
 			break
 		end
 		task.wait()
+		if busyToken ~= token then
+			ended = endedBy[token]
+			endedBy[token] = nil
+			break
+		end
+	end
+	if busyToken == token then
+		busyEnemy = nil
 	end
 	local log = EnemyService.devRushOf(id)
 	local launched = if log ~= nil then log.launched else nil
@@ -949,7 +989,8 @@ local function chargeCommand(args: { [string]: any }): Reply
 		attackId = if log ~= nil then log.attackId else nil,
 		from = plainVector(from),
 		toward = plainVector(toward),
-		complete = phaseNow ~= "WindUp" and phaseNow ~= "Strike",
+		complete = ended == nil and phaseNow ~= "WindUp" and phaseNow ~= "Strike",
+		endedBy = ended,
 		phase = phaseNow,
 		at = if now ~= nil then plainVector(now) else nil,
 		launched = if launched ~= nil
@@ -1200,11 +1241,14 @@ local function invoke(command: unknown, rawArgs: unknown): Reply
 	if waits and busy ~= nil then
 		return fail(("busy: a %s is still waiting"):format(busy :: string))
 	end
+	local token = busyToken
 	if waits then
+		busyToken += 1
+		token = busyToken
 		busy = command :: string
 	end
 	local ok, reply = pcall(handler, args)
-	if waits then
+	if waits and busyToken == token then
 		busy = nil
 	end
 	if not ok then

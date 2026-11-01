@@ -310,6 +310,9 @@ describe("ImpactFrames overlay tree", function()
 			expect(gui.Parent).toBe(world.gui)
 			expect(gui.Name).toBe(impact.overlay.screenGuiName)
 			expect(gui.IgnoreGuiInset).toBe(true)
+			-- Edge to edge on a notched phone (D-475): before, CoreUISafeInsets and clipped.
+			expect(gui.ScreenInsets).toBe(Enum.ScreenInsets.None)
+			expect(gui.ClipToDeviceSafeArea).toBe(false)
 			expect(gui.ResetOnSpawn).toBe(false)
 			expect(gui.Enabled).toBe(false)
 			expect(gui.DisplayOrder).toBe(impact.overlay.displayOrder)
@@ -2215,5 +2218,130 @@ describe("ImpactFrames at the screen's own pace (D-351)", function()
 				end
 			end
 		end
+	end)
+end)
+
+describe("ImpactFrames prewarmed figures: the hit's frame clones nothing (D-477)", function()
+	-- A rig with `extra` more plain parts than rig()'s FIGURE, each smaller than the figure's own.
+	local function bigRig(name: string, origin: Vector3, extra: number): Model
+		local model = rig(name, origin)
+		for index = 1, extra do
+			local limb = part("Part", "Limb" .. index, model, origin + Vector3.new(0, index * 0.1, 0))
+			limb.Size = Vector3.new(0.5, 0.5, 0.5)
+		end
+		return model
+	end
+
+	-- Clones made by `fn` (ImpactFrames.clonesMade), and the figures it drew from the pool.
+	local function clonesDuring(fn: () -> ()): (number, number)
+		local made = ImpactFrames.clonesMade()
+		local pooled = ImpactFrames.pooledCount()
+		fn()
+		return ImpactFrames.clonesMade() - made, pooled - ImpactFrames.pooledCount()
+	end
+
+	-- Fires the warm Heartbeat (the step prewarm bound) once per frame until the queue is empty;
+	-- returns the clones each frame made.
+	local function warmUp(frames: number): { number }
+		local perFrame: { number } = {}
+		for _ = 1, frames do
+			local made = clonesDuring(function()
+				beat(F)
+			end)
+			table.insert(perFrame, made)
+		end
+		return perFrame
+	end
+
+	it("a Kill on a 48-part figure and a 4-part one takes all 52 from the pool: 0 clones on the hit, not 52", function()
+		withWorld(function()
+			local player = bigRig("Player", Vector3.new(0, 0, 0), impact.quality.High.maxPartsPerRig)
+			local boar = rig("Boar", Vector3.new(4, 0, 0))
+			ImpactFrames.prewarm(player)
+			ImpactFrames.prewarm(boar)
+			local perFrame = warmUp(12)
+			local total = 0
+			for _, made in perFrame do
+				expect(made <= impact.silhouette.prewarmPerFrame).toBe(true)
+				total += made
+			end
+			-- The whole of both figures, spread over ceil(52 / 6) = 9 Heartbeats.
+			expect(total).toBe(impact.quality.High.maxPartsPerRig + FIGURE)
+			expect(perFrame[9] > 0 and perFrame[10] == 0).toBe(true)
+			local made, taken = clonesDuring(function()
+				ImpactFrames.play("Kill", { player, boar })
+				advance(F)
+			end)
+			expect(made).toBe(0)
+			expect(taken).toBe(impact.quality.High.maxPartsPerRig + FIGURE)
+			expect(#ImpactFrames.clones()).toBe(impact.quality.High.maxPartsPerRig + FIGURE)
+		end)
+	end)
+
+	it("a rig never warmed still draws whole, cloned on its hit as before", function()
+		withWorld(function()
+			local cold = rig("Cold", Vector3.new(0, 0, 0))
+			local made = clonesDuring(function()
+				ImpactFrames.play("Kill", { cold })
+			end)
+			expect(made).toBe(FIGURE)
+			expect(#ImpactFrames.clones()).toBe(FIGURE)
+		end)
+	end)
+
+	it("keeps the rigs nearest the camera warm inside poolCap; a full pool lets the farthest go", function()
+		withWorld(function()
+			local cap = impact.silhouette.poolCap
+			-- Each rig's figure is 24 parts: four fit in a 96 pool, the fifth does not.
+			local perRig = cap // 4
+			local rigs: { Model } = {}
+			for index = 1, 5 do
+				-- The camera stands at (0, 5, 20): rig 1 nearest, rig 5 farthest.
+				local model = bigRig("Rig" .. index, Vector3.new(0, 0, 20 - index * 6), perRig - FIGURE)
+				table.insert(rigs, model)
+				ImpactFrames.prewarm(model)
+			end
+			warmUp(math.ceil(cap / impact.silhouette.prewarmPerFrame) + 2)
+			expect(ImpactFrames.pooledCount()).toBe(cap)
+			local made = clonesDuring(function()
+				ImpactFrames.play("Kill", { rigs[1], rigs[4] })
+			end)
+			expect(made).toBe(0)
+			ImpactFrames.cancel()
+			-- A new flash window: the next Kill draws its figures, not the dim.
+			FlashBudget.reset()
+			local farMade = clonesDuring(function()
+				ImpactFrames.play("Kill", { rigs[5] })
+			end)
+			expect(farMade).toBe(perRig)
+		end)
+	end)
+
+	it("Main hands every tracked rig to prewarm, and a rig that leaves tracking to forget", function()
+		local main = Harness.readFile("src/client/Main.client.luau")
+		expect(main:find('Siblings.call(ImpactFrames, "prewarm", record.model)', 1, true)).never.toBeNil()
+		expect(main:find('Siblings.call(ImpactFrames, "forget", record.model)', 1, true)).never.toBeNil()
+		expect(main:find("EntityTracker.added:Connect(warm)", 1, true)).never.toBeNil()
+		expect(main:find("for _, record in EntityTracker.all() do", 1, true)).never.toBeNil()
+	end)
+
+	it("a rig that left the world is dropped from warming, and forget stops it", function()
+		withWorld(function()
+			local gone = rig("Gone", Vector3.new(0, 0, 0))
+			local kept = rig("Kept", Vector3.new(3, 0, 0))
+			local dropped = rig("Dropped", Vector3.new(6, 0, 0))
+			ImpactFrames.prewarm(gone)
+			ImpactFrames.prewarm(kept)
+			ImpactFrames.prewarm(dropped)
+			ImpactFrames.forget(dropped)
+			gone.Parent = nil
+			gone:Destroy()
+			warmUp(4)
+			expect(ImpactFrames.pooledCount()).toBe(FIGURE)
+			local made = clonesDuring(function()
+				ImpactFrames.play("Kill", { kept })
+			end)
+			expect(made).toBe(0)
+		end)
 	end)
 end)

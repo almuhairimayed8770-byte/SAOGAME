@@ -74,12 +74,13 @@
 	`parry(position)`, `shatter(position, weight)` (the caller's weight, or the cue's own name,
 	picks sfx.shatterCues: Shatter for a mob, ShatterHeavy for a player or an Elite, BossShatter
 	for a boss; the old boolean still means boss or normal; the reverb bloom is the impact
-	director's; shatters of one cue inside fx.audio.dedupeSeconds and within sfx.mix's rolloff
-	distance of each other are one sound, so a sweep's kills crack once and a kill across the map
-	does not mute the one here), `footstep(model, surface?, weight?)` (surface from the Humanoid's
-	FloorMaterial when the clip event carries none), `loop(name, gain)` for the heartbeat and the
-	ambience beds (Looped over startAt .. stopAt; the caller's gain ramp is the fade, and stopping
-	resets Looped and the regions), `duck(db, seconds, spareOwn?)` for the system voice and the
+	director's; a shatter of one cue inside fx.audio.dedupeSeconds and within sfx.mix's rolloff
+	distance of any that played in that window is the same sound, so a sweep's kills crack once
+	and a kill across the map neither mutes the one here nor lets it play twice),
+	`footstep(model, surface?, weight?)` (surface from the Humanoid's FloorMaterial when the clip
+	event carries none), `loop(name, gain)` for the heartbeat and the ambience beds (Looped over
+	startAt .. stopAt; the caller's gain ramp is the fade, and stopping resets Looped and the
+	regions), `duck(db, seconds, spareOwn?)` for the system voice and the
 	death silence. A cue in sfx.mix.heartbeatDuck.cues played as the local player's own (`asOwn`:
 	a hit they deal or take, a block, a parry) drops the heartbeat by its db on the cue's call,
 	holds, and eases it back on the pool's step (F15); the director's loop calls keep the duck.
@@ -225,9 +226,9 @@ local fades: { Fade } = {}
 local emitterPool: { BasePart } = {}
 local emitterFolder: Instance? = nil
 local recent: { { name: string, position: Vector3?, time: number } } = {}
--- shatter cue name -> when and where it last started: shatters that crack together inside one
--- sound's reach are one sound.
-local lastShatters: { [string]: { at: number, position: Vector3? } } = {}
+-- shatter cue name -> when and where each of its plays inside fx.audio.dedupeSeconds started:
+-- shatters that crack together inside one sound's reach of any of them are one sound (D-478).
+local recentShatters: { [string]: { { at: number, position: Vector3? } } } = {}
 -- When the newest sfx.mix.heartbeatDuck started (an own hit's cue), nil when none holds.
 local heartbeatDuckAt: number? = nil
 -- Plays asked for, played, deduped, placeholders that never play, risers skipped unloaded, and
@@ -1137,7 +1138,7 @@ end
 function SfxPool.reset()
 	stopStepper()
 	table.clear(recent)
-	table.clear(lastShatters)
+	table.clear(recentShatters)
 	heartbeatDuckAt = nil
 	stats = freshStats()
 	for _, list in voices do
@@ -1478,16 +1479,28 @@ function SfxPool.shatter(position: Vector3?, weight: (ShatterWeight | string | b
 	-- One sweep's kills shatter in the same frame, often farther apart than the same-spot dedupe
 	-- reaches: inside fx.audio.dedupeSeconds a shatter cue plays once within one sound's reach
 	-- (sfx.mix.rolloffMaxDistance; a pack lies well inside it). One beyond it is another fight's.
+	-- Every play of the cue inside the window counts, not only the last: a kill across the map
+	-- in the same frame never lets a second kill here play the cue again (D-478).
 	local now = deps.now()
-	local last = lastShatters[cue]
-	if last ~= nil and now - last.at <= Fx.audio.dedupeSeconds then
+	local recentOfCue = recentShatters[cue]
+	if recentOfCue == nil then
+		recentOfCue = {}
+		recentShatters[cue] = recentOfCue
+	end
+	local plays = recentOfCue :: { { at: number, position: Vector3? } }
+	for index = #plays, 1, -1 do
+		if now - plays[index].at > Fx.audio.dedupeSeconds then
+			table.remove(plays, index)
+		end
+	end
+	for _, last in plays do
 		local from = last.position
 		if position == nil or from == nil or (position - (from :: Vector3)).Magnitude <= Sfx.mix.rolloffMaxDistance then
 			stats.deduped += 1
 			return
 		end
 	end
-	lastShatters[cue] = { at = now, position = position }
+	table.insert(plays, { at = now, position = position })
 	SfxPool.cue(cue, position)
 end
 

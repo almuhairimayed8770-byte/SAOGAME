@@ -275,3 +275,75 @@ describe("a swing's sequence number (item 4)", function()
 		expect(Remotes.HitConfirmed.schema(payload)).toBe(false)
 	end)
 end)
+
+describe("the server's words the client was missing (FC)", function()
+	local Combat = Harness.load("src/shared/data/combat")
+
+	-- D-469: the speed the server sweeps an action's clip at. Before, the schema took 0.1 to 4: a
+	-- speed no source in the game can reach (Freeze -40%, Overwhelm +40%).
+	it("ActionStarted may carry the server's clip speed, only inside combat.luau actionSpeed", function()
+		local payload: any =
+			{ entityId = 3, clipId = "player/OneHandedSword/Horizontal", serverTime = 10, facing = { 0, 0, -1 } }
+		expect(Remotes.ActionStarted.schema(payload)).toBe(true) -- speed 1 is sent as none
+		for _, bad in { 0.5, 1.5, 3, 0.1, 4, 0, -1, 0 / 0, math.huge, "1.2", true } do
+			payload.speed = bad
+			expect(Remotes.ActionStarted.schema(payload)).toBe(false)
+		end
+		for _, good in { Combat.actionSpeed.min, 0.8, 1, 1.15, Combat.actionSpeed.max } do
+			payload.speed = good
+			expect(Remotes.ActionStarted.schema(payload)).toBe(true)
+		end
+	end)
+
+	-- D-470: a Switch names the player whose window it landed in.
+	it("HitConfirmed may name the Switch's partner by entity id", function()
+		local payload: any = {
+			attackerId = 2,
+			targetId = 7,
+			damage = 37,
+			crit = false,
+			gaugeDamage = 12,
+			killed = false,
+			broke = false,
+			hitStop = "Normal",
+			position = { 1, 2, 3 },
+			parried = false,
+			guarded = false,
+			reflected = false,
+			artId = "OneHandedSword.Vertical",
+			hitIndex = 1,
+			isSwitch = true,
+		}
+		expect(Remotes.HitConfirmed.schema(payload)).toBe(true)
+		for _, good in { 1, 3, 1000 } do
+			payload.switchPartner = good
+			expect(Remotes.HitConfirmed.schema(payload)).toBe(true)
+		end
+		for _, bad in { 0, -2, 1.5, "1", 0 / 0, true } do
+			payload.switchPartner = bad
+			expect(Remotes.HitConfirmed.schema(payload)).toBe(false)
+		end
+	end)
+
+	-- D-471: the blow that breaks a guard comes at combat.luau guardBreakHitStop, a tier the
+	-- schema carries.
+	it("HitConfirmed carries the guard break's tier", function()
+		local payload: any = {
+			attackerId = 8,
+			targetId = 1,
+			damage = 0,
+			crit = false,
+			gaugeDamage = 30,
+			killed = false,
+			broke = true,
+			hitStop = Combat.guardBreakHitStop,
+			position = { 1, 2, 3 },
+			parried = false,
+			guarded = false,
+			reflected = false,
+			hitIndex = 1,
+		}
+		expect(Combat.guardBreakHitStop).toBe("Final")
+		expect(Remotes.HitConfirmed.schema(payload)).toBe(true)
+	end)
+end)

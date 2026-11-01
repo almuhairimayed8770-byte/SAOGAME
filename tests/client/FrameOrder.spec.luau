@@ -76,6 +76,14 @@ describe("The client's render order (D-211)", function()
 		end
 	end)
 
+	it("reads the drawn pose at a frame's start, after FrameClock's and before the rigs' (D-479)", function()
+		local row = orderRow(Fx, "drawnPose")
+		expect(row).never.toBeNil()
+		local at = priorityOf(row, -1)
+		expect(at).toBeGreaterThan(Enum.RenderPriority.First.Value)
+		expect(at).toBeLessThan(RIGS)
+	end)
+
 	it("keeps the rigs just before the camera's priority and the controller just after Character's", function()
 		-- D-201 and D-139: the rigs' step and the controller's own stay where they were.
 		expect(priorityOf(orderRow(ChoreoData, "rigs"), -1)).toBe(Enum.RenderPriority.Camera.Value - 1)

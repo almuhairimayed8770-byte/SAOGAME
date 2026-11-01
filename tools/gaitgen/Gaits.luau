@@ -272,14 +272,17 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 			liftPivot = "toe",
 			liftAngle = -45,
 			peel = { duration = 0.025, rise = 0.12, angle = -10 },
-			swingJoints = { -- hip X, knee X, ankle X through the swing (hip Y/Z and ankle Z blend lift to strike)
-				{ t = 0.2, hip = 15, knee = -115, ankle = 15 },
-				{ t = 0.3, hip = 55, knee = -120, ankle = 0 },
-				{ t = 0.325, hip = 66, knee = -112, ankle = -5 },
-				{ t = 0.35, hip = 74, knee = -100, ankle = -10 },
-				{ t = 0.375, hip = 78, knee = -82, ankle = -12 },
-				{ t = 0.4, hip = 76, knee = -62, ankle = -12 },
-				{ t = 0.5, hip = 55, knee = -22, ankle = -10 },
+			-- Hip X, knee X, ankle X through the swing (hip Y/Z and ankle Z blend lift to strike). `out`
+			-- turns the swinging hip out past the planted leg (D-481): both feet plant 0.1 inside the
+			-- hips, so with no turn the swinging shin passed 0.23 studs into the planted one.
+			swingJoints = {
+				{ t = 0.2, hip = 15, knee = -115, ankle = 15, out = 6 },
+				{ t = 0.3, hip = 55, knee = -120, ankle = 0, out = 10 },
+				{ t = 0.325, hip = 66, knee = -112, ankle = -5, out = 10 },
+				{ t = 0.35, hip = 74, knee = -100, ankle = -10, out = 9 },
+				{ t = 0.375, hip = 78, knee = -82, ankle = -12, out = 7 },
+				{ t = 0.4, hip = 76, knee = -62, ankle = -12, out = 5 },
+				{ t = 0.5, hip = 55, knee = -22, ankle = -10, out = 2 },
 			},
 		}
 		G.Run = {
@@ -317,6 +320,10 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 			end,
 			sheathed = true,
 			mirrored = false,
+			-- The swing's turn out is RunDrawn's (D-481). Here Sheathe starts over the run with the
+			-- guard held low at the right hip, where the right thigh turned out to: 10 degrees put the
+			-- guard 0.025 studs into it.
+			swingOut = 0,
 		}
 	end
 
@@ -858,6 +865,8 @@ function Gaits.build(rig: Rig.Rig): { [string]: Gait }
 				end,
 				sheathed = false,
 				mirrored = false,
+				-- The plans' whole swing turn out (D-481), whatever the sheathed gait turns.
+				swingOut = 1,
 			}
 		end
 		-- The walk's pelvis sits 0.02 lower so the legs reach (D-134).

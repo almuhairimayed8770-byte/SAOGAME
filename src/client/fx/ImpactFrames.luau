@@ -5,7 +5,8 @@
 	black, ink on white, ink brush strokes along the slash, the parry's inverted frame).
 
 	Built from engine pieces that need no shaders. One pooled ScreenGui under the local PlayerGui
-	(IgnoreGuiInset, ResetOnSpawn off, disabled while idle, impact.overlay.displayOrder above the
+	(IgnoreGuiInset, ScreenInsets None and not clipped to the device's safe area so it reaches past
+	a phone's notch, ResetOnSpawn off, disabled while idle, impact.overlay.displayOrder above the
 	HUD) holds, back to front:
 	  - Background: a full-screen Frame in the look's background token.
 	  - Figures: a full-screen ViewportFrame with its own Camera, copied from the CurrentCamera
@@ -81,6 +82,15 @@
 	one asked for while it fades is a new flash and is charged. With the setting on, at most
 	impact.reduced.maxPerWindow dims start in any flash window, so Reduce flashing really flashes
 	less than the budget allows.
+
+	Prewarming (D-477): a hit's frame clones nothing. Cloning a rig's parts on the hit (up to
+	impact.quality maxPartsPerRig, 48 at High) put that whole cost on the frame the hit lands. Every
+	tracked rig is handed to `prewarm` (Main wires EntityTracker's added and removed), and a Heartbeat
+	step clones the figures of the rigs nearest the camera into the pool ahead of their first hit, at
+	most impact.silhouette.prewarmPerFrame parts a frame, ranking again every prewarmInterval. The
+	nearest rigs whose figures fit in poolCap are kept warm: a full pool lets go of a colder clone
+	first. A rig no figure was warmed for (past the pool, or hit before its turn) still clones on
+	its hit, as before.
 
 	Engine-only pieces (the render step, PlayerGui, the camera, projection) sit behind `bind`, so
 	specs drive the clock and the render step by hand.
@@ -164,8 +174,18 @@ local strokes: { Frame } = {}
 local rigFolders: { Model } = {}
 
 local active: { CloneEntry } = {}
+local activeSources: { [BasePart]: boolean } = {} -- the sources of `active`
 local pooled: { [BasePart]: BasePart } = {}
 local pooledOrder: { BasePart } = {}
+local clonesMade = 0 -- every clone ever made (specs count a hit frame's)
+
+-- Prewarming (D-477): the rigs handed to `prewarm`, the sources the nearest of them draw (kept in
+-- the pool), the ones still to clone (nearest rig first) and the Heartbeat step that clones them.
+local warmRigs: { [Instance]: boolean } = {}
+local warmWanted: { [BasePart]: boolean } = {}
+local warmQueue: { BasePart } = {}
+local warmUnbind: (() -> ())? = nil
+local sinceWarmRank = math.huge
 
 local showing: Showing? = nil
 local reducedDims: { FlashBudget.Claim } = {} -- the dims Reduce flashing let start, newest last
@@ -355,6 +375,10 @@ local function build(parent: Instance): ScreenGui
 	local screen = Instance.new("ScreenGui")
 	screen.Name = overlay.screenGuiName
 	screen.IgnoreGuiInset = true
+	-- Edge to edge past a phone's notch (D-475); after IgnoreGuiInset, which the engine links to
+	-- ScreenInsets.
+	screen.ScreenInsets = (Enum.ScreenInsets :: any)[overlay.screenInsets]
+	screen.ClipToDeviceSafeArea = overlay.clipToDeviceSafeArea
 	screen.ResetOnSpawn = false
 	screen.Enabled = false
 	screen.DisplayOrder = overlay.displayOrder
@@ -549,6 +573,7 @@ local function cloneOf(source: BasePart): BasePart?
 	if copy == nil or not copy:IsA("BasePart") then
 		return nil
 	end
+	clonesMade += 1
 	local clone = copy :: BasePart
 	strip(clone)
 	return clone
@@ -617,6 +642,27 @@ local function buildSilhouettes(rigs: { Model }, firstIndex: number)
 			clone.CFrame = source.CFrame
 			clone.Parent = folder
 			table.insert(active, { source = source, clone = clone })
+			activeSources[source] = true
+		end
+	end
+end
+
+-- Destroys pooled clones past impact.silhouette.poolCap: the oldest one no warm rig draws first
+-- (D-477), else the oldest.
+local function trimPool()
+	while #pooledOrder > Impact.silhouette.poolCap do
+		local index = 1
+		for at, source in pooledOrder do
+			if not warmWanted[source] then
+				index = at
+				break
+			end
+		end
+		local oldest = table.remove(pooledOrder, index) :: BasePart
+		local clone: BasePart? = pooled[oldest]
+		pooled[oldest] = nil
+		if clone ~= nil then
+			clone:Destroy()
 		end
 	end
 end
@@ -640,6 +686,7 @@ local function releaseClones()
 		end
 	end
 	table.clear(active)
+	table.clear(activeSources)
 	for index = #pooledOrder, 1, -1 do
 		local source = pooledOrder[index]
 		if not alive(source) then
@@ -651,13 +698,80 @@ local function releaseClones()
 			end
 		end
 	end
-	while #pooledOrder > Impact.silhouette.poolCap do
-		local oldest = table.remove(pooledOrder, 1) :: BasePart
-		local clone: BasePart? = pooled[oldest]
-		pooled[oldest] = nil
-		if clone ~= nil then
-			clone:Destroy()
+	trimPool()
+end
+
+-- Which figures to keep warm (D-477): the registered rigs nearest the camera whose figures (at the
+-- tier's part cap) fit in the pool, nearest first; the parts of theirs not pooled yet are queued.
+local function rankWarm()
+	table.clear(warmWanted)
+	table.clear(warmQueue)
+	local row = qualityRow()
+	if not row.silhouettes then
+		return
+	end
+	local camera = sourceCamera()
+	local eye: Vector3? = if camera ~= nil then camera.CFrame.Position else nil
+	local ranked: { { model: Instance, distance: number } } = {}
+	for model in warmRigs do
+		if not alive(model) then
+			warmRigs[model] = nil
+			continue
 		end
+		local position = Engine.modelPosition(model)
+		local distance = if position ~= nil and eye ~= nil then (position - eye).Magnitude else math.huge
+		table.insert(ranked, { model = model, distance = distance })
+	end
+	table.sort(ranked, function(a, b)
+		return a.distance < b.distance
+	end)
+	local room = Impact.silhouette.poolCap
+	for _, item in ranked do
+		local parts = eligibleParts(item.model, row.maxPartsPerRig)
+		if #parts > room then
+			break
+		end
+		room -= #parts
+		for _, source in parts do
+			warmWanted[source] = true
+			local warmed: BasePart? = pooled[source]
+			if warmed == nil and not activeSources[source] then
+				table.insert(warmQueue, source)
+			end
+		end
+	end
+end
+
+-- One Heartbeat of prewarming: ranks again every prewarmInterval, then clones up to
+-- prewarmPerFrame queued parts into the pool. Leaves the Heartbeat once no rig is registered.
+local function warmStep(dt: number)
+	local config = Impact.silhouette
+	sinceWarmRank += dt
+	if sinceWarmRank >= config.prewarmInterval then
+		sinceWarmRank = 0
+		rankWarm()
+	end
+	local made = 0
+	while made < config.prewarmPerFrame and #warmQueue > 0 do
+		local source = table.remove(warmQueue, 1) :: BasePart
+		local warmed: BasePart? = pooled[source]
+		if warmed ~= nil or activeSources[source] or not alive(source) then
+			continue
+		end
+		local clone = cloneOf(source)
+		made += 1
+		if clone ~= nil then
+			pooled[source] = clone
+			table.insert(pooledOrder, source)
+		end
+	end
+	if made > 0 then
+		trimPool()
+	end
+	if next(warmRigs) == nil and #warmQueue == 0 and warmUnbind ~= nil then
+		local unbind = warmUnbind
+		warmUnbind = nil
+		unbind()
 	end
 end
 
@@ -1444,6 +1558,15 @@ function ImpactFrames.bind(deps: Deps?)
 		clone:Destroy()
 	end
 	table.clear(pooledOrder)
+	if warmUnbind ~= nil then
+		local unbind = warmUnbind
+		warmUnbind = nil
+		unbind()
+	end
+	table.clear(warmRigs)
+	table.clear(warmWanted)
+	table.clear(warmQueue)
+	sinceWarmRank = math.huge
 	destroyGui()
 	overrides = deps or {}
 end
@@ -1461,6 +1584,41 @@ function ImpactFrames.screenDirection(position: Vector3, direction: Vector3): Ve
 		return nil
 	end
 	return delta.Unit
+end
+
+--- Clones the rig's figure into the pool ahead of its first hit, a few parts a Heartbeat, while it
+--- is among the rigs nearest the camera whose figures fit in the pool (D-477): the hit's frame
+--- then takes it from the pool and clones nothing. Main hands every tracked rig here.
+function ImpactFrames.prewarm(model: Instance)
+	if typeof(model) ~= "Instance" then
+		return
+	end
+	warmRigs[model] = true
+	sinceWarmRank = math.huge
+	if warmUnbind == nil then
+		warmUnbind = onHeartbeat(warmStep)
+	end
+end
+
+--- Stops keeping the rig's figure warm (it left tracking); its pooled clones go as the pool needs
+--- room, or when the rig leaves the world.
+function ImpactFrames.forget(model: Instance)
+	if warmRigs[model] == nil then
+		return
+	end
+	warmRigs[model] = nil
+	sinceWarmRank = math.huge
+end
+
+--- Runs one prewarming Heartbeat of `dt` seconds (specs; the Heartbeat calls it).
+function ImpactFrames.warm(dt: number)
+	warmStep(dt)
+end
+
+--- Clones made since the module loaded: on a hit's frame, its figures not taken from the pool
+--- (specs).
+function ImpactFrames.clonesMade(): number
+	return clonesMade
 end
 
 --- The overlay ScreenGui, or nil before the first build (specs).

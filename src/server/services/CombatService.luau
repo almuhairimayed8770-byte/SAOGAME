@@ -32,7 +32,16 @@
 
 	Enemy strikes come from EnemyService (enemyStrike): each player in the attack's cone or line
 	is checked for dodge frames, a parry (guard raised inside parryWindow), a guard (cone and
-	reduction, GuardBreak telegraphs smash through), then damage.
+	reduction, GuardBreak telegraphs smash through), then damage. The blow that breaks a player's
+	guard holds for combat.guardBreakHitStop (D-471).
+
+	A run plays its clip at a speed (D-469, combat.actionSpeed; 1 for every player request): the
+	clip clock is (now - startedAt) x speed, so its windows, end pose and lock follow it, and
+	ActionStarted carries it when it is not 1. A player's Art that connects with an enemy opens a
+	Switch window on it (as a perfect parry does); another player's Art landing on that enemy inside
+	the window, on its swing's own clock, is a Switch (D-470): HitConfirmed.isSwitch with the
+	partner who opened it. Phase 1's bonuses (damage, gauge, the opener's cut post-motion, the
+	interrupt, Tempo) are not applied yet.
 
 	Timelines are stepped from one Heartbeat (`tick`), never from task.wait, so they are
 	deterministic and run under Lune with a fake clock, a fake spherecast and a fake overlap
@@ -138,6 +147,7 @@ type ArtRun = {
 	windows: { HitSweep.Window },
 	facing: Vector3, -- D-113: the validated flat unit facing; every sample's root takes its yaw
 	startedAt: number,
+	speed: number, -- D-469: the clip clock's rate (combat.actionSpeed); clip time = (now - startedAt) x speed
 	postMotionAt: number, -- clip time the body freezes in its end pose
 	multiplier: number,
 	gaugePerHit: number,
@@ -160,6 +170,13 @@ type ArtRun = {
 type Frame = {
 	subdivisions: number, -- arc sub-samples left of combat.sweepMaxSubdivisions
 	chain: Pose.Chain?, -- the fighter's joints, read once this frame (never kept to the next)
+}
+
+-- D-470: a Switch window open on an enemy: who opened it and when, on the server's clock.
+type SwitchWindow = {
+	openerId: number,
+	openedAt: number,
+	closesAt: number,
 }
 
 local STAGE_PLAYER = "player"
@@ -190,6 +207,7 @@ local heartbeatConnection: Connection? = nil
 local signalConnections: { Connection } = {}
 local started = false
 local enemyHitStop: EnemyHitStop? = nil
+local switchWindows: { [number]: SwitchWindow } = {} -- D-470: by enemy id
 
 -- ------------------------------------------------------------------------------------------
 -- Engine seam and helpers
@@ -343,6 +361,9 @@ local function hitPayload(applied: Types.AppliedHit, attackPause: number?, swing
 		-- Item 4: the sequence number the swing's request carried, so the swinger's client matches
 		-- this hit to the swing that made it.
 		swing = swing,
+		-- D-470: only on a Switch: true, and the partner whose window it landed in.
+		isSwitch = if applied.isSwitch == true then true else nil,
+		switchPartner = if applied.isSwitch == true then applied.switchPartnerId else nil,
 	}
 end
 
@@ -374,7 +395,10 @@ local function pauseEnemyAttack(target: Record, applied: Types.AppliedHit): numb
 	return if typeof(result) == "number" then result else nil
 end
 
+-- Opens a Switch window on `enemy` for `opener` (an Art that connected, or a perfect parry) and
+-- shows it to everyone. A newer window replaces an older one (D-470).
 local function showSwitchWindow(enemy: Record, opener: Record, now: number)
+	switchWindows[enemy.id] = { openerId = opener.id, openedAt = now, closesAt = now + Combat.switchWindow }
 	fireAll("SwitchWindow", {
 		entityId = enemy.id,
 		openerId = opener.id,
@@ -676,8 +700,33 @@ local function mayDamage(attacker: Record, target: Record?): boolean
 	return target ~= nil and target.state ~= "Dead" and target.id ~= attacker.id and target.kind ~= attacker.kind
 end
 
--- A blade touch becomes a hit: crit roll, attack value, applyHit, HitConfirmed to all.
-local function landHit(run: ArtRun, attacker: Record, hit: HitSweep.Hit, now: number)
+-- D-470: the partner whose Switch window this hit lands in, or nil. A player's Art landing on an
+-- enemy is a Switch when another player opened the window there (their Art connected, or they
+-- parried it) and the blade landed, on the swing's own clock (`landedAt`: the run's start, its
+-- request's stamp inside the lag allowance, plus the clip time its sweep reached), no earlier than
+-- the window opened and no later than it closes. Phase 0 has no parties: every other player is a
+-- partner, as nobody can hurt anyone on their own side (mayDamage).
+local function switchPartnerOf(run: ArtRun, attacker: Record, target: Record, landedAt: number): number?
+	if run.art == nil or attacker.kind ~= "Player" or target.kind ~= "Enemy" then
+		return nil
+	end
+	local window = switchWindows[target.id]
+	if window == nil or window.openerId == attacker.id then
+		return nil
+	end
+	if landedAt < window.openedAt or landedAt > window.closesAt then
+		return nil
+	end
+	local partner = EntityService.get(window.openerId)
+	if partner == nil or partner.kind ~= "Player" then
+		return nil
+	end
+	return partner.id
+end
+
+-- A blade touch becomes a hit: crit roll, attack value, applyHit, HitConfirmed to all. `landedAt`
+-- is the server time the swing's own clock reached the sample that touched (D-470).
+local function landHit(run: ArtRun, attacker: Record, hit: HitSweep.Hit, now: number, landedAt: number)
 	local target = EntityService.get(hit.targetId)
 	if target == nil or not mayDamage(attacker, target) then
 		return
@@ -687,6 +736,7 @@ local function landHit(run: ArtRun, attacker: Record, hit: HitSweep.Hit, now: nu
 	local raw = DamageMath.attackValue(attacker.attack, run.multiplier, attacker.stats.str, crit)
 	-- Section 6: 6 frames on the final hit. A basic chain's final hit is its third swing, not every swing.
 	local isLast = run.finalHit and run.windowIndex >= #run.windows
+	local partnerId = switchPartnerOf(run, attacker, target, landedAt)
 	local applied = EntityService.applyHit(target.id, {
 		attackerId = attacker.id,
 		rawDamage = raw,
@@ -704,8 +754,14 @@ local function landHit(run: ArtRun, attacker: Record, hit: HitSweep.Hit, now: nu
 		run.hitBreak = true
 	end
 	run.hitAny = true
+	if partnerId ~= nil then
+		-- The Switch spends the window it landed in (D-470).
+		applied.isSwitch = true
+		applied.switchPartnerId = partnerId
+		switchWindows[target.id] = nil
+	end
 	announceHit(applied, pauseEnemyAttack(target, applied), run.swing)
-	-- An Art that connects opens a Switch window on the enemy (Phase 1 logic, Phase 0 ring).
+	-- An Art that connects opens a Switch window on the enemy (its partner's to land in).
 	if run.art ~= nil and not run.switchShown and target.kind == "Enemy" and not applied.killed then
 		run.switchShown = true
 		showSwitchWindow(target, attacker, now)
@@ -867,8 +923,11 @@ local function sweep(
 		overlap = d.overlap,
 		continued = previous ~= nil,
 	})
+	-- The server time the swing's own clock reached this frame's last sample (D-470): `now` on a
+	-- live frame, earlier on a rewound swing's catch-up, never before its stamp.
+	local landedAt = run.startedAt + times[#times] / run.speed
 	for _, hit in hits do
-		landHit(run, record, hit, now)
+		landHit(run, record, hit, now, landedAt)
 		if EntityService.get(record.id) == nil or record.state ~= "Art" then
 			return -- the attacker fell or was knocked out of the Art by a reaction
 		end
@@ -951,7 +1010,7 @@ local function stepRun(session: Session, run: ArtRun, now: number)
 		cancelRun(session, record)
 		return
 	end
-	local clipTime = now - run.startedAt
+	local clipTime = (now - run.startedAt) * run.speed
 	-- The frame's arc sub-samples and joint read, shared by every window this frame sweeps (a
 	-- caught-up frame can close one window and open the next), so one fighter never adds more than
 	-- the cap per frame and reads its joints once.
@@ -1019,19 +1078,22 @@ local function beginRun(
 	now: number,
 	startAt: number, -- clip time zero: `now`, or a request's clamped client stamp (runStartOf)
 	finalHit: boolean,
-	swing: number? -- the request's sequence number (item 4), nil for code callers
+	swing: number?, -- the request's sequence number (item 4), nil for code callers
+	speed: number? -- D-469: the clip's speed (CombatService.actionSpeedOf); nil plays it at 1
 )
 	local session = sessionOf(record.id)
 	cancelRun(session, record)
 	session.generation += 1
+	local runSpeed = CombatService.actionSpeedOf(speed)
 	local windows = ClipSampler.hitWindows(clip)
 	local postMotionAt = postMotionStartOf(clip, if art ~= nil then art.total else clip.duration)
-	-- The whole timeline (windows, freeze, lock) runs on the clip clock from startAt.
+	-- The whole timeline (windows, freeze, lock) runs on the clip clock from startAt, at runSpeed
+	-- clip seconds a second. Post-motion is a freeze in real seconds and never scales.
 	local elapsed = now - startAt
 	if art ~= nil then
-		EntityService.setState(record.id, "Art", postMotionAt + art.postMotion - elapsed)
+		EntityService.setState(record.id, "Art", postMotionAt / runSpeed + art.postMotion - elapsed)
 	else
-		EntityService.setState(record.id, "Art", Combat.basicHitDuration - elapsed, nil, "Basic")
+		EntityService.setState(record.id, "Art", Combat.basicHitDuration / runSpeed - elapsed, nil, "Basic")
 	end
 	EntityService.markCombat(record.id)
 	session.run = {
@@ -1044,6 +1106,7 @@ local function beginRun(
 		windows = windows,
 		facing = unitOrNil(flat(facing)) or Vector3.zAxis * -1,
 		startedAt = startAt,
+		speed = runSpeed,
 		postMotionAt = postMotionAt,
 		multiplier = multiplier,
 		gaugePerHit = gaugePerHit,
@@ -1067,10 +1130,21 @@ local function beginRun(
 		serverTime = startAt, -- other clients start the clip at this clock position
 		facing = toVec3(facing),
 		artId = if art ~= nil then art.id else nil,
+		-- D-469: the speed the server sweeps the clip at, so other clients play it at the same.
+		speed = if runSpeed ~= 1 then runSpeed else nil,
 	})
 	if art ~= nil then
 		CombatService.ArtStarted:Fire(record, art)
 	end
+end
+
+--- D-469: the speed a run plays its clip at: `requested` held to combat.luau actionSpeed, or 1
+--- when it is not a number (nil, NaN, anything else).
+function CombatService.actionSpeedOf(requested: any): number
+	if typeof(requested) ~= "number" or requested ~= requested then
+		return 1
+	end
+	return math.clamp(requested, Combat.actionSpeed.min, Combat.actionSpeed.max)
 end
 
 local function facingOf(record: Record, requested: Vector3?): Vector3
@@ -1079,9 +1153,20 @@ local function facingOf(record: Record, requested: Vector3?): Vector3
 	return unit or (Vector3.zAxis * -1)
 end
 
---- Starts an Art for a fighter after validation (the ArtRequest handler, bosses with Arts, smoke
---- tests). Returns (ok, reason).
-function CombatService.beginArt(entityId: number, artId: string, facing: Vector3?): (boolean, string?)
+--- D-470: the Switch window open on enemy `enemyId`: its opener's id and the server time it closes,
+--- or nil when none is open (it closed, a Switch spent it, or the enemy died).
+function CombatService.switchWindowOf(enemyId: number): (number?, number?)
+	local window = switchWindows[enemyId]
+	if window == nil or dependencies().now() > window.closesAt then
+		return nil, nil
+	end
+	return window.openerId, window.closesAt
+end
+
+--- Starts an Art for a fighter after validation (bosses with Arts, smoke tests, dev tools). Returns
+--- (ok, reason). `speed` (D-469) plays its clip faster or slower, held to combat.luau actionSpeed;
+--- nil plays it as authored. Player requests never pass one: Phase 0 has no source of Art speed.
+function CombatService.beginArt(entityId: number, artId: string, facing: Vector3?, speed: number?): (boolean, string?)
 	local record = EntityService.get(entityId)
 	local art = Arts.byId(artId)
 	local now = dependencies().now()
@@ -1110,7 +1195,9 @@ function CombatService.beginArt(entityId: number, artId: string, facing: Vector3
 		look,
 		now,
 		now,
-		true
+		true,
+		nil,
+		speed
 	)
 	return true, nil
 end
@@ -1256,6 +1343,15 @@ end
 -- Enemy strikes
 -- ------------------------------------------------------------------------------------------
 
+-- D-471: combat.luau guardBreakHitStop as a tier (the validator holds it to a hitStopFrames key).
+local function guardBreakTier(): Types.HitStopTier
+	local tier = Combat.guardBreakHitStop
+	if tier == "Normal" or tier == "Kill" then
+		return tier
+	end
+	return "Final"
+end
+
 --- Resolves an enemy attack at strike time against every player in its cone or line: dodge frames,
 --- parry, guard, damage. Returns the hits it applied (parries included). Origin and facing may be
 --- Vector3 or {x, y, z}.
@@ -1360,6 +1456,11 @@ function CombatService.enemyStrike(
 			-- The blow lands: the body flinches from the side it came from, and any Art is lost.
 			CombatService.cancelAction(player.id)
 			EntityService.setState(player.id, "Stagger", Combat.staggerDuration, applied.staggerDirection)
+		end
+		if applied.broke and not applied.killed then
+			-- The blow that breaks the guard (a GuardBreak telegraph, or a guarded hit that emptied
+			-- the gauge) holds as a final hit does, on every screen (D-471).
+			applied.hitStop = guardBreakTier()
 		end
 		announceHit(applied)
 		table.insert(results, applied)
@@ -1531,6 +1632,9 @@ local function wireEntitySignals()
 	table.insert(
 		signalConnections,
 		EntityService.StateChanged:Connect(function(record, state)
+			if state == "Dead" then
+				switchWindows[record.id] = nil -- D-470: no Switch on a corpse
+			end
 			if state ~= "Art" and state ~= "PostMotion" then
 				local session = sessions[record.id]
 				if session ~= nil and session.run ~= nil then
@@ -1542,6 +1646,7 @@ local function wireEntitySignals()
 	table.insert(
 		signalConnections,
 		EntityService.Unregistered:Connect(function(record)
+			switchWindows[record.id] = nil
 			local session = sessions[record.id]
 			if session ~= nil then
 				cancelRun(session, record)
@@ -1589,6 +1694,7 @@ function CombatService.reset()
 	end
 	table.clear(signalConnections)
 	table.clear(sessions)
+	table.clear(switchWindows)
 	CombatService.traceSink = nil
 	enemyHitStop = nil
 	started = false

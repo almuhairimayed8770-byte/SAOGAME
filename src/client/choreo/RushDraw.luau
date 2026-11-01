@@ -35,7 +35,7 @@
 	            so it is on the line by the launch and the launch turns nothing. A crouch that will
 	            not launch (`release`) keeps its turn until the late root has come round to it, then
 	            is on its root, or slides back onto it after settleSeconds.
-	  Run       from the launch: it starts where the root is drawn and closes on the timeline, each
+	  Run       from the launch: it starts where the body was last drawn (D-480) and closes on the timeline, each
 	            frame moving the timeline's own travel give or take catchUpFraction of a frame's
 	            travel at the rush speed (none on the launch frame), never backward. An offset off
 	            the path closes at that pace too, and the facing turns onto the leg's at turnRate. It
@@ -156,6 +156,7 @@ export type State = {
 	handAt: number,
 	handSeconds: number,
 	drawn: CFrame?, -- the CFrame last drawn (Frozen keeps it)
+	shown: Vector3?, -- where the root stood on the last frame drawn before the rush (RushDraw.new)
 	released: boolean, -- an Armed crouch that will not launch (RushDraw.release)
 	restSpot: Vector3?, -- where the late root was last seen moving (flat), and when (D-256)
 	restFrom: number?,
@@ -311,8 +312,9 @@ local function runOver(state: State, now: number): boolean
 	return limit ~= nil and RushDraw.distanceAt(line, now - line.startedAt) >= limit
 end
 
---- A rush waiting for its launch on `line`.
-function RushDraw.new(line: Line): State
+--- A rush waiting for its launch on `line`. `shown`: where its root stood on the last frame drawn
+--- before it (the body on it), which a launch with no crouch drawn starts from (D-480).
+function RushDraw.new(line: Line, shown: Vector3?): State
 	local legs = RushWorld.line(line.origin, line.direction)
 	return {
 		line = line,
@@ -337,6 +339,7 @@ function RushDraw.new(line: Line): State
 		handAt = 0,
 		handSeconds = 0,
 		drawn = nil,
+		shown = shown,
 		released = false,
 		restSpot = nil,
 		restFrom = nil,
@@ -1041,15 +1044,18 @@ function RushDraw.step(
 		if now < line.startedAt or state.released then
 			return armed(state, now, dt, root)
 		end
-		-- The launch: the body starts where the root is drawn, so nothing jumps; turned as the
-		-- crouch drew it, else on the root's own look.
+		-- The launch: the body starts where it was last drawn (D-480): the crouch's spot, else its
+		-- root's place on the last frame drawn before the rush (RushDraw.new's `shown`), else the
+		-- root as it stands now. Never from where the root has moved to since: a root already on
+		-- its way (no lag) would add its own move of the frame to the run's first step. Turned as
+		-- the crouch drew it, else on the root's own look.
 		local legs = state.legs
 		local first = legs[1]
-		local along = if #legs == 1
-			then (flat(root.Position) - first.from):Dot(first.heading)
-			else RushWorld.project(legs, root.Position)
+		local crouch = state.drawn
+		local from = if crouch ~= nil then crouch.Position else state.shown or root.Position
+		local along = if #legs == 1 then (flat(from) - first.from):Dot(first.heading) else RushWorld.project(legs, from)
 		state.along = along
-		state.lateral = flat(root.Position) - RushWorld.pointAt(legs, along)
+		state.lateral = flat(from) - RushWorld.pointAt(legs, along)
 		if state.drawn == nil then
 			state.facing = unitFlat(root.LookVector, first.heading)
 		end

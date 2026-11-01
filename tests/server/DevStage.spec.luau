@@ -895,6 +895,36 @@ describe("DevStage: a shot stages itself (F12)", function()
 		end
 	end)
 
+	-- Item 359(b) (D-503): 40 studs back, where the ledge goes, the PC's P built the ledge round the
+	-- body (it ended on top, y 9.24). Studio replicates a client-owned character late: the server's
+	-- read still trailed the body short of the ledge's footprint, more than settleNearStuds from the
+	-- ring on its top, so it was taken at once and passed the check. A read near where a part goes is
+	-- settled first, as one near the ring is.
+	it("never builds round a body the server still reads short of the ledge (a late replica)", function()
+		local data = STAGE.ledge
+		local floor = data.position[2] - data.size[2] / 2
+		local _, _, ringZ = StageLogic.standSpot(true, STAGE.area, data)
+		local front = data.position[3] - data.size[3] / 2
+		-- Where the body rests: half a stud into where the ledge goes, farther than settleNearStuds
+		-- from the ring; the read starts a sprint's lag short of it, clear of the footprint.
+		local restZ = front + 0.5
+		local readZ = front - BODY_REACH - 3
+		expect(ringZ - restZ > STAGE.settleNearStuds).toBe(true)
+		local world = load({ studio = true, capture = true })
+		world.standAt(data.position[1], floor, readZ, 180)
+		local started = world.clock.now
+		world.onWait = function(now: number)
+			-- The replica catches up over a tenth of a second, then stands still.
+			local share = math.clamp((now - started) / 0.1, 0, 1)
+			world.standAt(data.position[1], floor, readZ + (restZ - readZ) * share, 180)
+		end
+		local reply = world.invoke("stage", "locomotion")
+		expect(world.ledge()).toBeNil()
+		expect(world.ramp()).toBeNil()
+		expect(reply.ok).toBe(false)
+		expect(reply.error:find(data.name, 1, true)).never.toBeNil()
+	end)
+
 	it("builds the ledge beside a body that stands clear of it by more than its reach", function()
 		local data = STAGE.ledge
 		local world = load({ studio = true, capture = true })

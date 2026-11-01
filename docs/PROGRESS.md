@@ -241,7 +241,7 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 | The 20-second fight: six beats on every attack, the parry sparks, the kill shatters | Needs the owner's recording (`fight-boar-kobold.mp4`) |
 | The server registered every hit | **Met** in the hit matrix (every window, both enemies, real fight distances, four frame phases; D-045) and in `combat.smoke` in Studio; the recording shows it again as a digit per hit. The first takes (2026-10-25) showed one point-blank Horizontal hit the server did not register; the matrix now also swings at four point-blank placements at 30, 60 and 144 fps (D-234) |
 | 60 fps in Studio | **Partly met**: 59.9 to 60.0 fps in Play with the window rendering on the owner's PC (2026-10-20, builds 927dbed and 6d6eb74, frame cap 60, p95 17.6 to 17.7 ms), standing and running with the enemies 66+ studs away; still to read during the recorded fight (**View > Stats**) |
-| All tests green | **Met** in Lune on the fourth-round build (2026-10-30: 3666 tests in 219 spec files, 39 validators, `tools/lint.sh --offline` ALL GREEN); CI runs on every push to `phase-0`; the six Studio smokes last passed on earlier builds and still have to run on this one |
+| All tests green | **Met** in Lune on the build with the section AF fixes (2026-11-01: 3830 tests in 231 spec files, 41 validators, `tools/lint.sh --offline` ALL GREEN); CI runs on every push to `phase-0`; the six Studio smokes last passed on earlier builds and still have to run on this one |
 
 | Line | State | Evidence / what is missing |
 | --- | --- | --- |
@@ -853,45 +853,90 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - Checks: the full suite passes 3666 specs in 219 files; 39 validators, 0 problems; the hit matrix passes; ANIMATION_REVIEW.md is current (66 clips).
 - Still open: the follow-through depth on 7 clips (up to 0.53 studs for up to 24 frames); Basic3's reach step (1.25 studs for 0.158); the activation light, chime, FOV kick, TrailOn and footsteps still one frame early; the rush's first drawn move (0.70 at 60 fps, 1.87 at 30); Studio's 240 Hz substep mispredict (about ±0.23); Basic2's mashed pull, enemy Break, Stagger and Walk strides, the RunDrawn leg crossing; the kobold's hipHeight; the owner's avatar feet; the trail lifetime against GAME_SPEC; every PC item in section AF.
 
+## Code leftovers after the fourth round (2026-11-01, D-469 to D-493)
+
+- Why: the fourth round's "Still open" list and its code owners' open issues left code that Lune can fix without the PC: no clip speed on the wire, no Switch from the server, a guard break confirmed at Normal, a Skid under a remote dodge, a sheath-drawn opener's ribbon streak, a stop carry that read its own Move, full-screen effects inside the safe area, flashes past the Highlight budget, clones on the hit frame, stacked shatters, clip cues one frame early, the rush's first drawn move, enemy Break, Stagger and Walk feet, the drawn run's legs crossing, the kobold's hipHeight, the follow-through depth, Basic3's reach step and Basic2's mashed pull. Five owners fixed them side by side; one merge joined them and re-measured each claim.
+- Fights: a run's clip speed (0.6 to 1.4) goes on ActionStarted and the server sweeps on it; a remote clip matches the server within 1e-6 at lag 0 and 0.05 s (30/60/144 Hz; speeds 0.6, 1.15, 1.4) (D-469). The server judges Switches and sends isSwitch and switchPartner, so the Switch moment plays in fights (D-470). A guard break is confirmed at Final: 3 → 6 frames, with the Final shake and tick (D-471).
+- Remote rigs and input: no Skid under a dodge (LandSoft 1 → 0) (D-472); a sheath-drawn opener caught up 85–250 ms slashes on its line (53–71° → 0.0°) (D-473); the stop carry reads the control module, so with controls off the body stands at frame 72 after 9.47 studs, where it walked 79.8 and never stood (D-474).
+- Screen and budgets: the impact overlay and speed lines go edge to edge and the HUD stays safe (D-475); enabled Highlights in a wide kill 41 → 31, re-measured at most 31 with 48 rigs, 18 staggered flashes and 4 tints, every flash shown (D-476); hit-frame clones 52 → 0 (D-477); simultaneous kills make one crack and one bloom (3 blooms → 1) (D-478).
+- Cue frames: every clip cue shows on the first frame that draws its pose, on local and remote rigs (1 frame early → 0 at 30/60/144). Re-measured on the merged tree at 30/60/144 Hz: 0 of 1140 events off on the re-keyed player clips (local and remote), 0 of 217 on the re-keyed enemy clips, and 0 of 1026 on remote Arts at speeds 0.6, 1.15 and 1.4, with late starts at lag 0.05 and 0.25 s on their frames. The ribbon head is within 0.001 studs of the drawn tip (was up to 8.99 ahead at 30) (D-479). A boar rush's first drawn step is no larger than the steady step, 0.933/0.467/0.194 at 30/60/144 (was up to 1.867), re-measured in all 54 cases of rate, lag, order and message arrival (D-480).
+- Clips: RunDrawn's legs pass (0.238 → 0.038 deep) (D-481); enemy Break and Stagger have 0 audit findings (were Pop 55–62°) and the walks hold their feet over a cycle (drift 5.13 → 0.070 boar, 2.86 → 0.043 kobold) (D-482); the kobold's rest pose stands on the floor (0.200 below → 0.000) under a new rigs validator (D-483); a follow-through rule and re-keys take the worst blade left in the kobold 6 frames past a hold from 0.48 to 0.08 studs and Horizontal's hand in the torso from 0.36 to 0.10 (D-484, D-486 to D-491); Basic3's reach step 1.25 → 1.00 (D-485); Basic2's mashed pull 70% → 47% of the snap and its Run@0.5 off-hand pop 20.24° → 19.6° (D-492).
+- Merge fixes: the kobold standing 0.2 higher (D-483) failed 3 FollowThrough specs on the merged tree, so Basic2's 0.067 wind-up key rolls the sword wrist 3.5° less (the leg at 4.8: 0.341 → 0.170 deep), the PENDING list is restated (Basic2 Approach 0.21 → 0.08, Rising Arc's Exit gone), and the held-at-key self-test plays Basic3; each fix was shown failing first (D-493). ANIMATION_REVIEW's Basic2 row was regenerated after the merge. Raising catchUpMaxJump so a fast remote clip can catch up at lag 0.25 was tried and dropped, because it loosens a bound and would start an Art inside its first window (0.333–0.35).
+- Mutations: 18 of the 25 rows were broken on purpose (all but D-481, D-484, D-486, D-487 and D-489 to D-491), and each break failed its specs except in three places no spec covers yet: the second light-serial check in Trails (Replication's check already stops the call), CharacterController's stance and dodge reads of MoveInput, and the HUD's insets in HudInstances.
+- Checks: ALL GREEN (full): 3792 specs passed in 226 spec files; 41 validators, 0 problems; the hit matrix passes; ANIMATION_REVIEW.md is current (66 clips).
+- Still open: a faster clip under 0.25 s lag runs up to 0.100 clip-s behind at 1.4 (catchUpMaxJump); the Weapon motor's Part0 change may show a frame before the hand's pose; Basic2's cock 0.153 into the kobold at 3.5 and 0.170 at 4.8, its mash speed 47% and run hidden 67%; Sheathed Run, Sprint and SprintDrawn legs still cross 0.20/0.25/0.32; the walks' Lab cut-in; the rule for distant Heartbeat-stepped rigs; the Phase 1 Switch payoff; every PC item in section AG (372 to 396).
+
+## Section AF fixes (2026-11-01, D-494 to D-507)
+
+- Why: the owner's PC ran section AF on 48a846f. Part 1 (items 329 to 352): 12 pass, 17 fail. Part 2 (353 to 371 and the rehearsal): every staged boar charge (shots 1, 6 and 11) ended "Jammed" 9 frames into the rush, because a Humanoid anchored on its first physics step goes FallingDown and MoveTo does nothing there for about 3 s; a free S("charge") on the same boar ran Done at 22. So 3 of the 11 rehearsals failed and nothing was recorded. The logs also showed AF's frame names one frame off: the logger reads isPaused at Input+1, before the local character step. Four owners fixed what the code controls, side by side from 48a846f, and one merge put their work on top of round F.
+- Boar jam (D-494, D-495): enemies keep out of FallingDown and Ragdoll from the frame they are made and stand up on release. Shot 6's first charge: Jammed 0.15 s after the launch with 0 studs → Done 22.000 and one hit at 1.10 s; a staged kobold's first overhead 3.55 → 0.75 s after go; shot 1 in the loopback probe: 9 hits, 5 parries and a jammed boar → 12 hits, 6 parries, the dodge at 9.3 s, the kill at 10.8 s, 0 hits taken. Up a 40° slope the drawn rush keeps the flat clock: a 3D step of 0.609 is by design, and item 349's 0.5 was below it.
+- Held frames, camera and ribbons (D-496 to D-498): the local root holds with its pose on held frames (Lune 0.200/0.100/0.042 → 0.000 at 30/60/144; PC 0.181 at 60), moving a step at a time and ending in the same place; a kill's still shot keeps the shake's last offset (hand-over 0.020–0.211 → 0.000; PC 0.016–0.026); ribbon hosts carry TrailLit, so Studio can time the close's fade (2/1/5 frames at 60/30/144).
+- Bodies and staging (D-499 to D-503): hands and arms are kept out of an enemy's body on every sample, with no clip keys changed (deepest at the walk-in rests 0.412 kobold and 0.635 boar → 0.007 and 0.009 at 30–240 Hz; PC 0.69–0.71); the stand-off no longer pushes the root into a wall flush behind (0.13–0.69 → −0.017; PC 0.48); packs dropped at one point stay ≥ 12 studs apart (closest 8.83 → 12.05); a hold or an enemy move ends a waiting charge, so "hold, then charge" runs; the ledge is never built round a body the server still reads late.
+- Sheath, lock turn and feet (D-504 to D-507): a sheathed guard under a cover no longer snaps the sword (7.41 → 0.290 per 240 Hz frame; PC 5.7–6.6); the lock turn lands on PreSimulation, so planted feet hold (slide 0.079–0.094 → ≤ 0.010 a frame, drift 0.102 → 0.015); the turn plant counts the pose's own twist (chest 57.5 → 45.4, head 55 → 45.1); the foot IK and a new standHeight channel stand the owner-sized body on the Humanoid's floor (sole +0.681 or −0.20 → within 0.004), and the landing pop drops from 34.8° to 12.0°.
+- Studio: section AH (items 397 to 419) moves the logger to Last+2 and names every frame as the logger logs it (the contact pose on F, heldShown from F+1). Its table answers 84 AF lines: 28 fixed, 25 corrected pass lines where the test asked for the wrong thing, 5 not bugs, 18 that need a Studio log before any fix, and 8 still open. Item 398 (the boar jam) runs first; item 419 is the rehearsal and the recording.
+- Merge fix: tests/choreo/FollowThrough.spec.luau's self-test "fails a hand pushed into the body after the cut" pushed the hand 2 studs nearer the kobold after the cut. With D-501 the keep-out holds hands and arms out too, so a 2-stud push is taken back whole (no Limb finding; 3 studs leaves 0.24). The self-test now pushes 4 studs (Limb 1.02) and also requires the excess to be over 0.5. No bound moved. Other changed expectations, each in its row: two CharacterController.spec numbers one 60 Hz step later (0.400 → 0.375, 0.315 → 0.3067; D-496) and validators.spec's maxPackSize needles (2 to 25 → 2 to 6; D-499).
+- Checks: ALL GREEN (full): 3830 specs passed in 231 spec files, 0 failed; 41 validators, 0 problems; the hit matrix passes; gaitgen matches 12 gait clips; ANIMATION_REVIEW.md is current (66 clips).
+- Still open: the rush root's prediction in Studio's frame order (a replicated velocity leading the drawn root would explain 347's snout past the face and its back-snaps; item 401(c) measures it) and the server body resting 0.05–0.28 short of a slam's told stop; the late root's first drawn move (≤ 0.98 at 60); the enemy blow's white a frame after the axe's strike pose (D-355); the torso twisting into a wall behind (0.44 and 0.63) and D-315's aside against 337's slide line; hands at a kobold placed 1.75 away (Sharp Nail Final 0.61, Basic2 0.39); the Humanoid's overshoot past the shell rest (3.14 against 3.27); a cover arriving after the Draw's grab pulls the held sword 0.7–1.66 per 240 Hz frame; attacks out of a sprint (arms 20.4–21.9°, no Sprint@ audit); Skid 22.4–24.0° a 60 Hz frame; the kobold's Idle 0.032 and Walk 0.053 below the field and its 0.055 start drop; C("face")'s one-frame lead; the lines not reproduced in Lune (361's shot 8, 365(b)'s guard, 366(a)'s 6.6-stud jump, 366(c)'s head, 335's sword and axe on frozen frames, 338(b) and (c), 350(b), 345(b)'s Draw jumps, 363(a)); every PC item in sections AG and AH.
+
 ## Next three tasks
 
-1. Run section AF of `docs/STUDIO_TASKS.md` (items 329 to 371) on the fourth-round build on the owner's PC, at the
-   frame rates and lags each item names, and report every pass line with its numbers; fix what fails the same way as
-   the earlier rounds. The owner's calls listed in section AF (the trail lifetime against section 10, the kill number,
-   the audio and video judgements, gamepad and touch) go to the owner.
-2. The owner records the ten gate shots in the Playground with the Capture panel (`docs/clips/phase-0/README.md`),
-   with **View > Stats** open during the fight for the fps reading, and hands the files over (here in the project or in
-   `docs/clips/phase-0/` on the PC). Each is then reviewed frame by frame at 0.25x, the hand columns of
-   `docs/ANIMATION_REVIEW.md` are filled, and anything that reads wrong is fixed with the PoseEditor and recorded again.
+1. Run sections AG (items 372 to 396) and AH (items 397 to 418) of `docs/STUDIO_TASKS.md` on the build with rounds F
+   and G on the owner's PC: item 398 (the boar jam) first, every item with item 397's logger at Last+2 and its frame
+   names, at the frame rates and lags each item names. Report every pass line with its numbers, and the logs AH asks
+   for before any fix (items 401(c), 408 and 414, and the log lines of 409, 412, 415 to 418). Fix what fails the same
+   way as the earlier rounds; the owner's calls (below, and in AG and AH) go to the owner.
+2. The rehearsal and the recording (item 419): once every AH re-test passes, rehearse the 11 shots in dev.luau order
+   with the frame-tick square on and log any take that fails its own pass lines; if all pass, record each with Game Bar
+   at 60 fps, High quality, with **View > Stats** open during the fight for the fps reading, and hand the files over
+   (here in the project or in `docs/clips/phase-0/` on the PC). Each is then reviewed frame by frame at 0.25x, the hand
+   columns of `docs/ANIMATION_REVIEW.md` are filled (with AG item 391(f)'s enemy cells), and anything that reads wrong
+   is fixed with the PoseEditor and recorded again.
 3. Fill the section 16 numbers in the performance table: client fps during the recorded fight, draw calls
    (MicroProfiler), client memory (**View > Stats > Memory**), the 8 players + 30 enemies case and a 2020 phone. Then
    merge `phase-0` into `main` and tag it once every gate line reads Met.
 
 ### Open items (after the leftover fixes, not in the three above)
 
-- **Code, other owners.** The server sends no `speed` on `ActionStarted` (every remote Art rises at speed 1) and no
-  `isSwitch` on hits (the Switch moment, digit and partner flash never fire live); it should confirm
-  `hitStop = "Final"` on a guard-breaking hit (the client lifts it today).
-- **From the merge check (each has a Studio check, items 91 to 96).** A remote sprint into a dodge plays Skid's
-  landing and the Dodge cue's (fix: skip Skid while a FullBody action holds the body). A remote opener from the sheath
-  at 85 ms or more of catch-up measures its slash from the back mount, about 80 degrees off (fix: reset the tip ring
-  when the weapon motor changes part). The stop carry treats `Humanoid.MoveDirection` as the stick and can keep
-  walking with no active controller (fix: read the control module's move vector). The impact overlay and speed lines
-  stop at the safe area on notched phones (fix: `ScreenInsets` None, `ClipToDeviceSafeArea` false). `OutlineManager.flash`
-  enables Highlights past the 31 budget on a wide kill. Impact frames clone up to 48 parts per rig on the hit frame
-  itself (fix: prewarm).
+- **Owner calls (rounds F and G).** Rush and camera: should a charging boar slow up a steep slope (D-495)? Is the
+  late root's one big first drawn step (≤ 0.98 at 60) acceptable until a lag-estimating predictor exists? Should an
+  enemy blow's white land with the axe's strike pose (a D-355 change)? Should the wall slam's "first frame largest"
+  mean the offset from rest or the frame-to-frame move? Bars: should the first step out of a freeze (0.25 a 60 Hz
+  frame) cover the body's keep-out step too? Should the Draw and sheathed-guard tip bars be speeds (84 studs/s)?
+  Should Rising Arc's head window end at the settle (0.517 s)? Should the head's 45° lead include the turn clip's
+  own look? Walls: keep D-315's aside at a wall (the line becomes "slide beyond the aside ≤ 0.2") or drop it when the
+  world is behind? Take the torso's twist into a wall out in the clips or in the plan? Should the Weapon motor's
+  Part0 swap wait for the grip's drawn frame? Clips: keep Break's get-up inside its 3.0 s, or a full 3 s kneel? Is the
+  boar's 0.30 s trot and the kobold's 0.50 s waddle the right read? Accept the kobold's hurtbox 0.2 higher? Basic2:
+  its mashed wind-up cannot meet speed ≤ 40% (judge after the hand-over, cock higher, or a softer hand-over?), and its
+  cock sits 0.153 and 0.170 inside the kobold (accept, or move the cock pose and the hit path)? Should ClipAudit judge
+  a carried loop only after the fallback idle fades? Systems: should AGI raise Art speed in Phase 0, and on what
+  curve? Should post-motion scale with clip speed (chosen no)? Should a newer Switch window replace an older one on
+  the same enemy? Only party members as Switch partners once parties exist? A catch-up rate for a late fast remote
+  clip? Fold simultaneous kills of different weights into the heaviest shatter cue? The HUD vignette edge to edge on
+  notched phones? The frame rule for distant Heartbeat-stepped rigs (AG item 387)?
+- **Proposed fixes waiting on a Studio log or an owner call.** The rush root: predict from the root's last move instead
+  of its replicated velocity (if item 401(c) shows the lead), and estimate a late root's lag from earlier rushes for
+  its first move. A slam's server body: land again for the remainder when it stops short of the told stop (if 401(b)
+  shows it). Enemy blows: judge them in the render step after the enemy rigs step, so the strike pose and the white
+  share a frame. The torso at a wall: soften the twist in Basic1 and Sharp Nail, or plan a forward room for the
+  colliding parts. A cover after the Draw's grab: a least blend-in for arm-keying covers over a live Draw or Sheathe,
+  bounded by drawTipSpeed. Attacks out of a sprint: Sprint@ plans in ClipAudit with the drawnSprint additive. A late
+  fast remote clip: a Mixer catch-up rate once an Art-speed source exists (raising catchUpMaxJump was tried and
+  dropped).
 - **Not built yet.** The FX have no time-scale hook, so Capture's slow motion slows only the animation (D-111).
   `Trails.reset()` has no caller until a place change or teleport flow exists.
-- **Checks.** The sfx coverage scan counts names inside comments. Not posed yet: a flinch over a FullBody one-shot,
+- **Checks.** Round F's mutations found three places no spec covers: CharacterController's stance and dodge reads of
+  `MoveInput`, the HUD's insets in `HudInstances`, and Trails' own light-serial check (Replication's check already
+  stops the call); seven rows were not mutated (D-481, D-484, D-486, D-487, D-489 to D-491). The dense enemy clips'
+  generators are scratch scripts outside the repository with no `--check`. The sfx coverage scan counts names inside comments. Not posed yet: a flinch over a FullBody one-shot,
   Draw with a flinch on top, the sheathed set with the sword still in the hand during `sheatheDelay`, the walk-run
   blends, gait weight pops.
-- **Clean-up.** `SfxPool.hit`, `parry` and `hitStopTick` and Replication's `SOUNDS.impact`, `block`, `parry` and
-  `switchLand` have no game caller: keep or delete. Two deaths in one frame start two ShatterBloom contours; the
-  no-rig shatter fallback skips `SfxPool.shatter`'s merge; the merge remembers only the last shatter of each cue.
+- **Clean-up.** `SfxPool.hit`, `parry` and `hitStopTick` have no game caller: keep or delete.
 - **From the aim fix (D-112 to D-116).** A swing sent during the lock's acquisition turn sweeps along the facing the
   server accepts, up to about 49 degrees short of the client's body, so it may miss until the turn has replicated
   (about latency + 0.11 s). Server lag past `combat.lagAllowance` can still get a mid-turn swing refused "Facing".
-  The lock turn runs on the render step (not while the display sleeps; DevAim "face" covers tests). Strafing at walk
+  The lock turn is worked out on the render step and written on PreSimulation (D-505), so it still stops while the
+  display sleeps; DevAim "face" covers tests and keeps a one-frame lead, because it writes the root on Heartbeat. Strafing at walk
   speed may slide the WalkLeft/WalkRight feet (item 103). CharacterController reaches TargetController through
   Siblings because `tests/net/TrailingSend.spec.luau` has no TargetController fake. `Assets.url` still returns the
   placeholder id (guarded by the content validator only). MusicDirector's Stop() rewinds a stem (item 104).

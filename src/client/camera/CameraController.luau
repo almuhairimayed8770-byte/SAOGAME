@@ -143,6 +143,11 @@ local choreoModule: any = nil
 -- the look input added up while it holds (D-324): the degrees moved, and the move to turn by when a
 -- deliberate look lets it go.
 local stillPivot: Vector3? = nil
+-- The shake's offset the still shot stands on (D-497): the one the frame before it drew, held in
+-- the world while it holds (nil when no still shot holds), and what is left of it once it lets go,
+-- ringing out at the shake's own decay (camera.luau shake.decay) rather than dropping in a frame.
+local stillShake: Vector3? = nil
+local shakeCarry = Vector3.zero
 local heldLookDegrees = 0
 local heldLookX, heldLookY = 0, 0
 -- A staged view (the capture's gate shots, F12; setStage): it rides over the free rig and the
@@ -201,6 +206,8 @@ local drawn = {
 	lookAt = Vector3.zero,
 	axes = CFrame.identity, -- the camera's CFrame before the step: the shake's axes
 	shakeTime = 0,
+	shakeVector = Vector3.zero, -- the shake's offset the frame drew (the still shot holds it, D-497)
+	shakeCarry = Vector3.zero, -- the let-go still shot's offset in it, ringing out (D-497)
 	blendFrom = nil :: CFrame?,
 	blendAlpha = 1,
 }
@@ -955,7 +962,26 @@ local function step(dt: number)
 		shakeTime += span
 	end
 	local axes = camera.CFrame
-	local shakeVector = shakeIn(axes, shakeEnergy, shakeTime)
+	local shakeVector: Vector3
+	if still then
+		-- The still shot stands where the shake left the frame before it (D-497): nothing moves.
+		if stillShake == nil then
+			stillShake = drawn.shakeVector
+		end
+		shakeVector = stillShake :: Vector3
+	else
+		local held = stillShake
+		if held ~= nil then
+			shakeCarry = held
+			stillShake = nil
+		elseif shakeCarry ~= Vector3.zero then
+			shakeCarry *= math.exp(-CameraData.shake.decay * span)
+			if shakeCarry.Magnitude < CameraData.shake.cutoff then
+				shakeCarry = Vector3.zero
+			end
+		end
+		shakeVector = shakeIn(axes, shakeEnergy, shakeTime) + shakeCarry
+	end
 
 	local followCFrame = CFrame.lookAt(position + shakeVector, lookAt + shakeVector)
 	local back = blendBack
@@ -987,6 +1013,8 @@ local function step(dt: number)
 	drawn.lookAt = lookAt
 	drawn.axes = axes
 	drawn.shakeTime = shakeTime
+	drawn.shakeVector = shakeVector
+	drawn.shakeCarry = if still then Vector3.zero else shakeCarry
 	drawn.blendFrom = blendFrom
 	drawn.blendAlpha = blendAlpha
 end
@@ -1047,7 +1075,8 @@ local function lateStep(_dt: number)
 		lookAt += shift
 		cameraSpot = position
 	end
-	local shakeVector = shakeIn(drawn.axes, shakeValue(drawn.at), drawn.shakeTime)
+	local shakeVector = shakeIn(drawn.axes, shakeValue(drawn.at), drawn.shakeTime) + drawn.shakeCarry
+	drawn.shakeVector = shakeVector
 	if shook then
 		-- A shake from rest is shown here at its start phase: the next step runs its clock on (312).
 		shakeFresh = false

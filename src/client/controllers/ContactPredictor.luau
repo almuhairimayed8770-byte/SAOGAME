@@ -970,7 +970,13 @@ type Strike = { key: number, start: number, ready: number, need: number?, aside:
 -- the body whose step back carries it into the torso, or along an arm whose end is a stud and more
 -- away). The key is posed when the swing first reaches that strike's anticipation, and again when
 -- the aside grows before the key. The reach is a ramp of its own and needs no head start, so a
--- frame reads it at its own clip time, not a sample ahead. Nil when the target has no blocker.
+-- frame reads it at its own clip time, not a sample ahead.
+--
+-- The hands (D-501): on every sample, as the colliding parts are, no hand or arm (keepOut.limbs)
+-- stands deeper than depthEpsilon in any of those body parts through all it sweeps from the
+-- sample before (a hand or arm that swings fast is cut into pieces, as a spin is): the reach is
+-- priced at the keys, where a blade deep at every step hid a hand under its price, and nothing
+-- held a hand out between keys. Nil when the target has no blocker.
 local function keepOutOf(
 	model: Model,
 	clip: Types.ClipDef,
@@ -1142,6 +1148,59 @@ local function keepOutOf(
 	for part, size in hurtSizes do
 		hurtRadii[part] = size.Magnitude * 0.5
 	end
+	-- The hands and arms on every sample (D-501): as the sample before stood, then as each piece of
+	-- the way between the two stands, as `chain` holds the colliding parts.
+	local limbBefore: { CFrame } = table.clone(reachFrames)
+	local limbChain: { { CFrame } } = { limbBefore }
+	local limbNow: { CFrame } = table.clone(reachFrames)
+	-- The least step back at or past `at` (with the body `shift` aside) that leaves every hand and
+	-- arm, through all it sweeps from the sample before, at most depthEpsilon deep in any of the
+	-- target's body parts: a follow-through or a snap between two strike keys carries a hand as
+	-- deep as a key does (item 331(a): 0.31-0.54 studs in a side-on boar's torso after Horizontal,
+	-- Rising Arc and Sharp Nail cuts) with no key there to step it, and a hold pose drawn in at the
+	-- shell's rest starts one inside (Rising Arc's right hand 0.21 studs in a side-on boar's torso),
+	-- which the first samples step out of at the speed cap. A pair whose bounding spheres stand
+	-- apart at `at` stands apart (the step is `at`).
+	local function limbOut(at: number, shift: Vector3): number
+		local need = at
+		local moved = away * at + shift
+		for index, piece in reach do
+			if index == bladeIndex then
+				continue
+			end
+			for part, hurtFrame in hurtFrames do
+				local reachOf = reachRadii[index] + hurtRadii[part]
+				local near = false
+				for each = 1, pieces + 1 do
+					if (limbChain[each][index].Position + moved - hurtFrame.Position).Magnitude <= reachOf then
+						near = true
+						break
+					end
+				end
+				if not near then
+					continue
+				end
+				local deep: number = KEEP_OUT.depthEpsilon
+				for each = 1, pieces do
+					need = math.max(
+						need,
+						stepOut(
+							limbChain[each][index],
+							limbChain[each + 1][index],
+							piece.size,
+							hurtFrame,
+							hurtSizes[part],
+							away,
+							at,
+							deep,
+							shift
+						)
+					)
+				end
+			end
+		end
+		return need
+	end
 	-- The pairs a strike's key could bring together (piece, part, flattened), its allowed depth each.
 	local nearPieces: { number } = {}
 	local nearParts: { number } = {}
@@ -1276,9 +1335,9 @@ local function keepOutOf(
 	end
 	-- The most any part turns between two poses (its axes' largest angle), in degrees: a part that
 	-- turns sweeps out past the hull of its two boxes, by a hair for a small turn.
-	local function turnOf(a: { CFrame }, b: { CFrame }): number
+	local function turnOf(a: { CFrame }, b: { CFrame }, n: number): number
 		local most = 1
-		for index in parts do
+		for index = 1, n do
 			local x, y = a[index], b[index]
 			most = math.min(
 				most,
@@ -1328,22 +1387,35 @@ local function keepOutOf(
 		for k = #back, math.min(last, count) do
 			if not done then
 				table.move(frames, 1, #parts, 1, before)
+				table.move(limbNow, 1, #reach, 1, limbBefore)
 				local time = math.min(from + k * step, clip.duration)
 				local previous = math.min(from + (k - 1) * step, clip.duration)
 				-- The sample whose sweep reaches the first key is the first held out.
 				allowed = if time >= firstKey - KEY_EPSILON then KEEP_OUT.depthEpsilon else startAllowed
-				pose(time, frames)
+				pose(time, frames, if #reach > 0 then limbNow else nil)
 				-- A fast turn (a spin) is cut into pieces no part turns more than maxTurnDegrees in.
-				pieces = math.clamp(math.ceil(turnOf(before, frames) / KEEP_OUT.maxTurnDegrees), 1, KEEP_OUT.maxPieces)
+				-- The hands and arms count too: a limb swung fast leaves the hull of its two poses.
+				local turn = turnOf(before, frames, #parts)
+				if #reach > 0 then
+					turn =
+						math.max(turn, turnOf(limbBefore, limbNow, if bladeIndex > 0 then bladeIndex - 1 else #reach))
+				end
+				pieces = math.clamp(math.ceil(turn / KEEP_OUT.maxTurnDegrees), 1, KEEP_OUT.maxPieces)
 				for piece = 1, pieces - 1 do
 					local into = chain[piece + 1]
 					if into == nil or into == frames then
 						into = table.create(#parts)
 						chain[piece + 1] = into
 					end
-					pose(previous + (time - previous) * piece / pieces, into)
+					local limbInto = limbChain[piece + 1]
+					if #reach > 0 and (limbInto == nil or limbInto == limbNow) then
+						limbInto = table.create(#reach)
+						limbChain[piece + 1] = limbInto
+					end
+					pose(previous + (time - previous) * piece / pieces, into, if #reach > 0 then limbInto else nil)
 				end
 				chain[pieces + 1] = frames
+				limbChain[pieces + 1] = limbNow
 				local b, a = currentBack, currentAside
 				-- Out of the body's face first, then the held ones, then the body's again for what an
 				-- aside step changed: a few rounds settle it.
@@ -1373,6 +1445,10 @@ local function keepOutOf(
 				if #strikes > 0 then
 					local span = previous - math.min(from + (k - 2) * step, clip.duration)
 					b = math.max(b, reachAt(previous, b, a, currentBack, span, math.max(a - currentAside, 0)))
+				end
+				-- And no hand or arm deeper in the body than it stood at the start, on any sample.
+				if #reach > 0 then
+					b = limbOut(b, if side ~= nil then side * a else Vector3.zero)
 				end
 				-- Back and aside are square to each other: together with the step, one distance.
 				local backMost = math.sqrt(math.max(budget * budget - currentAside * currentAside, 0)) - distance

@@ -24,6 +24,11 @@
 	Re-key (D-375): the old start pose behind the head turned the sword hand 79 degrees in a frame;
 	the raise beside the head fits the pop rule over its 9 frames. Both feet stay planted under the
 	crouch (the front foot slid and sank 0.29 into the field); a 0.15 s blend out.
+	Follow-through (D-489): the cut carries down and through instead of springing back up into the
+	body: the settle is a QuadOut with the torso more upright (waist X -31 to -22) and the arm swung
+	down to the side (shoulder X 46 to -1), then a SineInOut key at 0.63 carries it back past the
+	hip with the elbow folded (83), the blade up beside the body; the recovery keeps the elbow bent
+	(16 to 77 at 0.75). The blade stood 0.43 in the leg 6 frames past the hold, now 0.08.
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -167,25 +172,26 @@ local clip: Types.ClipDef = {
 				LeftShoulder = rot(-24, 0, -27),
 				Neck = rot(-4, -11, 0),
 				RightAnkle = rot(36.15, -1.75, -7.75),
-				RightElbow = rot(6, 0, 0),
+				RightElbow = rot(0, 0, 0),
 				RightHip = rot(15.65, 4.1, 5.15),
 				RightKnee = rot(-79.2, 0, 0),
-				RightShoulder = rot(43, 0, 3),
+				RightShoulder = rot(42.32, 7.91, -6.28),
 				Root = posRot(0, -0.41, -0.055, 0, 3.5, 0),
 				Waist = rot(-33.5, 11, 2),
 				Weapon = rot(-23, 0, 0),
+				RightWrist = rot(-2.09, -6.52, 8.18),
 			},
 		},
 		{
 			-- settle: the torso and the sword arm spring back 5-6 degrees, the point lifts off the ground
 			time = 0.55,
-			easing = "Spring",
+			easing = "QuadOut",
 			joints = {
 				Root = posRot(0, -0.4, -0.05, 0, 3, 0),
-				Waist = rot(-31, 10, 2),
+				Waist = rot(-22, 10, 2),
 				Neck = rot(-2, -10, 0),
-				RightShoulder = rot(46, 0, 4),
-				RightElbow = rot(6, 0, 0),
+				RightShoulder = rot(-0.7, 0.59, 15.96),
+				RightElbow = rot(0, 0, 0),
 				Weapon = rot(-27, 0, 0),
 				LeftShoulder = rot(-22, 0, -26),
 				LeftAnkle = rot(29.7, -5.5, 7.1),
@@ -194,6 +200,29 @@ local clip: Types.ClipDef = {
 				RightAnkle = rot(37.9, -1.7, -7.5),
 				RightHip = rot(14.1, 4, 5.3),
 				RightKnee = rot(-76.4, 0, 0),
+				RightWrist = rot(31.14, 3.71, -14.53),
+			},
+		},
+		{
+			time = 0.63,
+			easing = "SineInOut",
+			joints = {
+				LeftAnkle = rot(28.04, -5.12, 6.96),
+				LeftElbow = rot(41.21, 0, 0),
+				LeftHip = rot(42.4, -1.35, -8.13),
+				LeftKnee = rot(-70.24, 0, 0),
+				LeftShoulder = rot(-16.33, 0, -24.65),
+				LeftWrist = rot(0, 0, 1.21),
+				Neck = rot(-1.03, -7.34, 0),
+				RightAnkle = rot(37.28, -1.63, -7.26),
+				RightElbow = rot(82.67, 0, 0),
+				RightHip = rot(12.1, 3.83, 5.4),
+				RightKnee = rot(-71.67, 0, 0),
+				RightShoulder = rot(-43.85, -15.11, 26.52),
+				RightWrist = rot(-17.08, 4.01, -26.63),
+				Root = posRot(0, -0.366, -0.044, 0, 2.65, 0),
+				Waist = rot(-16, 7.34, 1.76),
+				Weapon = rot(-29.76, 0, 0),
 			},
 		},
 		{
@@ -203,7 +232,7 @@ local clip: Types.ClipDef = {
 				Waist = rot(-23, 2.3, 1.3),
 				Neck = rot(0.8, -2.3, 0),
 				Weapon = rot(-35, 0, 0),
-				RightWrist = rot(-13.9, 0, 0),
+				RightWrist = rot(-41.26, -20.27, 11.25),
 				LeftAnkle = rot(24.9, -4.4, 6.7),
 				LeftElbow = rot(43.5, 0, 0),
 				LeftHip = rot(38.6, -0.7, -8),
@@ -211,10 +240,10 @@ local clip: Types.ClipDef = {
 				LeftShoulder = rot(-5.6, 0, -22.1),
 				LeftWrist = rot(0, 0, 3.5),
 				RightAnkle = rot(36.1, -1.5, -6.8),
-				RightElbow = rot(16.2, 0, 0),
+				RightElbow = rot(77.2, 0, 0),
 				RightHip = rot(8.3, 3.5, 5.6),
 				RightKnee = rot(-62.7, 0, 0),
-				RightShoulder = rot(40.4, 0, 6.1),
+				RightShoulder = rot(-4.04, -4.49, 4.61),
 				Root = posRot(0, -0.302, -0.032, 0, 2, 0),
 			},
 		},

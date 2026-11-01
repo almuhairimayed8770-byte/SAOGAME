@@ -279,7 +279,8 @@ local Moments = {
 			audience = { Cue = "Range" } :: { [string]: Audience },
 		},
 		-- A player's guard breaks (StateChanged GuardBroken): the crack with the sub under it. The
-		-- Final hit-stop tick for the people in the hit is Replication's.
+		-- blow's hit-stop is the server's (combat.luau guardBreakHitStop, D-471); its tick for the
+		-- people in the hit is Replication's.
 		GuardBreak = {
 			cue = "GuardBreak",
 		},

@@ -10,9 +10,10 @@
 	The impact director (fx/Impact.luau) owns every hit, parry, block and guard sound and the reel
 	accents: each HitConfirmed becomes one Impact.hit(info); a guard break or raise, a remote dodge
 	(ActionStarted of a "/Dodge" clip), an Art activation (the clip's ActivationHold) and a shatter
-	call it too. Replication keeps the hit-stop tick (2D, for the people in the hit; a hit that
-	breaks a player's guard ticks Final; one per sweep, a stronger tier's taking over), the
-	digits, the reactions, the flinch, one camera nudge per sweep, the shake and the HP flash. The
+	call it too. Replication keeps the hit-stop tick (2D, for the people in the hit, at the
+	server's tier: a hit that breaks a player's guard comes as combat.luau guardBreakHitStop,
+	D-471; one per sweep, a stronger tier's taking over), the digits, the reactions, the flinch,
+	one camera nudge per sweep, the shake and the HP flash. The
 	blow that breaks a player's guard reaches the director as a guarded hit: StateChanged
 	GuardBroken already played the break's crack, and the blow is the block under it. A death
 	waits the kill's hit-stop (Moments.deathDuckDelay) before the silence, so the kill is heard;
@@ -165,7 +166,7 @@ export type Deps = {
 	digits: any,
 	hud: any,
 	systemLine: any,
-	sfx: any, -- SfxPool-like: play(name, position?), playLate(name, lateBy, position?), cue(name, position?, lateBy?), footstep(model, surface?), duck(db, seconds)
+	sfx: any, -- SfxPool-like: play(name, position?), playLate(name, lateBy, position?), cue(name, position?, lateBy?), shatter(position?, cue), footstep(model, surface?), duck(db, seconds)
 	-- Impact-like: hit(info, previous?) -> string, ownsHighlight(info) -> boolean, afterHidden(fn),
 	-- activation(model, clipId, token, isLocal, speed?, lateBy?), dodge(model, isLocal, lateBy?),
 	-- guardBreak(model, isLocal), guardRaise(model, isLocal), shatterCue(boss, heavy) -> string,
@@ -1268,7 +1269,9 @@ local function armRush(record: any, line: any, since: number, launched: boolean)
 	local root: BasePart? = if model ~= nil then (model :: Model).PrimaryPart else nil
 	local rush: Rush = {
 		record = record,
-		state = RushDraw.new(line),
+		-- Where the body stood on the last frame drawn (on its root): a launch with no crouch drawn
+		-- starts there (D-480).
+		state = RushDraw.new(line, if root ~= nil then (root :: BasePart).Position else nil),
 		animator = animator,
 		root = root,
 		unhook = nil,
@@ -1326,19 +1329,69 @@ local function attackFlinchMask(record: any): { [string]: number }?
 	return nil
 end
 
+-- Runs `fn` on the first rendered frame that draws the pose of the step asking now (deps.atStepPose,
+-- D-343, D-479): a clip event fires inside its rig's step, whose pose is drawn a frame later
+-- (impact.poseLagFrames), while a light, a Beam, a Highlight, a sound or the FOV shows on the frame
+-- it is set; asked from a message (outside the render steps), that is the frame that draws the
+-- next step's pose. Nothing runs for a rig let go before that frame (Replication.unwatch).
+local function onDrawn(record: any, fn: () -> ())
+	local gate = dependencies().atStepPose
+	if gate == nil then
+		fn()
+		return
+	end
+	local watching = watched[record.id]
+	gate(function()
+		if watching ~= nil and watched[record.id] ~= watching then
+			return
+		end
+		fn()
+	end)
+end
+
+-- How many activation light changes were made at once on a rig (Trails.lightSerial), read when a
+-- change is asked for the frame that draws its step (onDrawn): that change is dropped once a change
+-- made at once came between (a cancelled hold's fade, a cut Art's), D-479. Nil for a trails
+-- package that cannot say.
+local function lightSerial(model: Instance): number?
+	local trails = dependencies().trails
+	local read = if typeof(trails) == "table" then rawget(trails, "lightSerial") else nil
+	if typeof(read) ~= "function" then
+		return nil
+	end
+	return read(model)
+end
+
+-- True when a light change asked with `serial` was overtaken by one made at once since.
+local function lightOvertaken(model: Instance, serial: number?): boolean
+	return serial ~= nil and lightSerial(model) ~= serial
+end
+
 -- An Art's ActivationHold a late start jumped over while its first damage frame is still ahead:
 -- the activation light, the chime from where it would be by now, and the riser still ending on
--- that frame. A hold whose window the start jumped over too is over: nothing replays for it.
-local function replayHold(record: any, clip: any, clipId: string, holdTime: number, clipTime: number, speed: number)
+-- that frame. A hold whose window the start jumped over too is over: nothing replays for it, nor
+-- for one whose light a cancel or a cut put out since it was asked (`serial`, D-479).
+local function replayHold(
+	record: any,
+	clip: any,
+	clipId: string,
+	holdTime: number,
+	clipTime: number,
+	speed: number,
+	serial: number?
+)
 	for _, event in clip.events do
 		if event.kind == "HitWindowOpen" and event.time >= holdTime and event.time <= clipTime then
 			return
 		end
 	end
 	local d = dependencies()
+	if lightOvertaken(record.model, serial) then
+		return
+	end
 	local token = d.trailToken(record)
 	local late = (clipTime - holdTime) / speed
-	d.trails.activationLight(record.model, true, token)
+	d.trails.activationLight(record.model, true, token, nil, serial)
 	d.sfx.playLate("artChime." .. token, late, d.positionOf(record.model))
 	d.impact.activation(record.model, clipId, token, false, speed, late)
 end
@@ -1355,7 +1408,9 @@ end
 
 -- The clip sounds a late start jumped over (the network catch-up starts the clip `handle.time`
 -- in; the Mixer's first step fires the events from there on), each from where it would be by now,
--- and an Art's hold it jumped over (replayHold).
+-- and an Art's hold it jumped over (replayHold). They play on the first frame that draws the clip
+-- (onDrawn, D-479), from where the clip stands there (its step since has moved it on), and not at
+-- all for a clip taken away before it (F5).
 local function replaySkipped(record: any, handle: any, clipId: string)
 	if typeof(handle) ~= "table" or typeof(handle.time) ~= "number" or handle.time <= 0 then
 		return
@@ -1364,18 +1419,26 @@ local function replaySkipped(record: any, handle: any, clipId: string)
 	if typeof(clip) ~= "table" or typeof(clip.events) ~= "table" or clip.loop == true then
 		return
 	end
-	local d = dependencies()
 	local speed = if typeof(handle.speed) == "number" and handle.speed > 0 then handle.speed else 1
-	for _, event in clip.events do
-		if (event.kind == "Sfx" or event.kind == "Voice") and event.time < handle.time then
-			local data = event.data
-			if typeof(data) == "table" and typeof(data.name) == "string" then
-				d.sfx.playLate(data.name, (handle.time - event.time) / speed, d.positionOf(record.model))
-			end
-		elseif event.kind == "ActivationHold" and event.time < handle.time then
-			replayHold(record, clip, clipId, event.time, handle.time, speed)
+	local startTime = handle.time
+	local serial = lightSerial(record.model)
+	onDrawn(record, function()
+		if handle.stopping == true and handle.ended ~= true then
+			return
 		end
-	end
+		local d = dependencies()
+		local shown = if typeof(handle.time) == "number" then math.max(handle.time, startTime) else startTime
+		for _, event in clip.events do
+			if (event.kind == "Sfx" or event.kind == "Voice") and event.time < startTime then
+				local data = event.data
+				if typeof(data) == "table" and typeof(data.name) == "string" then
+					d.sfx.playLate(data.name, (shown - event.time) / speed, d.positionOf(record.model))
+				end
+			elseif event.kind == "ActivationHold" and event.time < startTime then
+				replayHold(record, clip, clipId, event.time, shown, speed, serial)
+			end
+		end
+	end)
 end
 
 local function reactionClip(record: any, name: string): string?
@@ -2014,6 +2077,17 @@ end
 
 local handlers: { [string]: (payload: any) -> () } = {}
 
+-- D-469: the speed the server sweeps a clip at (ActionStarted.speed), or nil, the clip at its own
+-- speed, when it is absent or anything but a number inside combat.luau actionSpeed: a speed the
+-- server would never send plays nothing on the rig (NaN froze it, a string threw in the Mixer).
+local function actionSpeedOf(value: any): number?
+	local bounds = Combat.actionSpeed
+	if typeof(value) ~= "number" or value ~= value or value < bounds.min or value > bounds.max then
+		return nil
+	end
+	return value
+end
+
 function handlers.ActionStarted(payload: any)
 	local d = dependencies()
 	if payload.entityId == d.localId() then
@@ -2030,7 +2104,8 @@ function handlers.ActionStarted(payload: any)
 		return
 	end
 	local animator = animatorOf(record)
-	local options: { [string]: any } = { serverTime = payload.serverTime, speed = payload.speed }
+	local speed = actionSpeedOf(payload.speed)
+	local options: { [string]: any } = { serverTime = payload.serverTime, speed = speed }
 	if record.kind == "Player" then
 		-- A remote fighter's action takes the body from the one it cuts as the local fighter's
 		-- does (D-408, D-409): the cut clip holds its pose while the new one comes in as a snap.
@@ -2048,7 +2123,7 @@ function handlers.ActionStarted(payload: any)
 		end
 	end
 	local handle = animator:play(payload.clipId, options)
-	clipSpeeds[record.id] = { clipId = payload.clipId, speed = payload.speed }
+	clipSpeeds[record.id] = { clipId = payload.clipId, speed = speed }
 	if record.kind == "Player" then
 		remoteActions[record.id] = handle
 	end
@@ -2436,8 +2511,19 @@ function handlers.HitConfirmed(payload: any)
 		end
 	end
 
-	local window = if payload.isSwitch then switchOpeners[payload.targetId] else nil
-	local opener = if window ~= nil then d.entities.get(window.openerId) else nil
+	-- D-470: the server judges a Switch (a player's Art inside another player's window on the
+	-- enemy) and names the partner who opened it; a word without the name takes the opener of the
+	-- window this client saw open there (an unreliable SwitchWindow can be lost).
+	local isSwitch = payload.isSwitch == true
+	local opener: any = nil
+	if isSwitch then
+		local named = if typeof(payload.switchPartner) == "number" then d.entities.get(payload.switchPartner) else nil
+		if named == nil then
+			local window = switchOpeners[payload.targetId]
+			named = if window ~= nil then d.entities.get(window.openerId) else nil
+		end
+		opener = if named ~= nil and named.kind == "Player" then named else nil
+	end
 	-- The blow that breaks a player's guard (an enemy's Break is its gauge, not a guard).
 	local breaksGuard = payload.broke == true and not payload.killed and target ~= nil and target.kind == "Player"
 	local info = {
@@ -2452,7 +2538,7 @@ function handlers.HitConfirmed(payload: any)
 		-- The guard break's crack already played (StateChanged GuardBroken): its blow is the block.
 		guarded = payload.guarded == true or breaksGuard,
 		crit = payload.crit == true,
-		isSwitch = payload.isSwitch == true,
+		isSwitch = isSwitch,
 		killed = payload.killed == true,
 		-- An Art's hit carries its artId; a player's hit without one is a basic swing; an enemy's
 		-- strike is neither.
@@ -2461,7 +2547,7 @@ function handlers.HitConfirmed(payload: any)
 		-- A stronger tier than the one shown, come after that freeze let go (D-348).
 		late = not alone and not heldOn,
 	}
-	if payload.isSwitch then
+	if isSwitch then
 		switchOpeners[payload.targetId] = nil
 	end
 
@@ -2493,7 +2579,7 @@ function handlers.HitConfirmed(payload: any)
 	local kind = "Normal"
 	if payload.targetId == localId then
 		kind = "Taken"
-	elseif payload.isSwitch then
+	elseif isSwitch then
 		kind = "Switch"
 	elseif payload.crit then
 		kind = "Crit"
@@ -2533,9 +2619,9 @@ function handlers.HitConfirmed(payload: any)
 			d.outline.flash(target.model, "SystemWhite", Combat.highlightFlashFrames)
 		end
 		if involved and (predicted == nil or whole or upgrade > 0) then
-			-- The hit that breaks a player's guard ticks Final (the server keeps its hit-stop tier). A
-			-- contact's upgrade shakes and ticks at the stronger tier; the contact gave the nudge.
-			local tick = if breaksGuard and tier == "Normal" then "Final" else tier
+			-- The tick is the server's tier (the blow that breaks a player's guard comes as
+			-- combat.guardBreakHitStop, D-471). A contact's upgrade shakes and ticks at the stronger
+			-- tier; the contact gave the nudge.
 			local sweepKey = if payload.attackerId ~= nil then payload.attackerId else NO_ATTACKER
 			if predicted == nil or whole then
 				-- A hit shown whole holds the shot's follow with the bodies (D-357).
@@ -2543,7 +2629,7 @@ function handlers.HitConfirmed(payload: any)
 					heldFrames(Combat.hitStopFrames[tier] or Combat.hitStopFrames.Normal) * ChoreoData.frameSeconds
 				)
 			end
-			feelHit(sweepKey, position, tier, tick, predicted == nil or whole)
+			feelHit(sweepKey, position, tier, tier, predicted == nil or whole)
 		end
 		if payload.targetId == localId and payload.damage > 0 then
 			d.hud.flashHp()
@@ -2564,6 +2650,10 @@ function handlers.HitConfirmed(payload: any)
 		elseif predicted ~= nil and upgrade > 0 then
 			d.impact.hit(info, predicted.moment)
 			played = true
+		elseif predicted ~= nil and isSwitch then
+			-- D-470: the Switch the contact could not know (only the server judges one): the word
+			-- adds its layer alone, the land sound and both blades' flash, and no picture to hold over.
+			d.impact.hit(info, predicted.moment)
 		end
 		-- A word that joined a freeze still on, or waiting for it, holds its bodies over the picture
 		-- its moment put up (D-350).
@@ -2684,7 +2774,12 @@ function handlers.EntityDied(payload: any)
 		end
 		playReaction(record, "DeathFreeze")
 		animator:setTimeScale(0)
-		d.trails.setActive(record.model, false, "Art")
+		-- On the frame that draws the step after the kill, after any trail a step before it lit for
+		-- that frame (D-479).
+		local model = record.model
+		onDrawn(record, function()
+			d.trails.setActive(model, false, "Art")
+		end)
 		-- The scream starts with the kill; the silence after the hit-stop chops its tail.
 		deathVocal(record, position)
 	end
@@ -2745,8 +2840,15 @@ function handlers.EntityDied(payload: any)
 			-- Shatter.play plays the shatter cue itself (SfxPool.shatter) at the rig.
 			d.shatter.play(record.model, payload.shatter, cue)
 		else
-			-- No rig left to shatter: the shatter cue still sounds where the server said it died.
-			d.sfx.cue(cue, position)
+			-- No rig left to shatter: the shatter cue still sounds where the server said it died,
+			-- through the same merge as a rig's (SfxPool.shatter), so it folds into a shatter of
+			-- that cue cracking in the same frame (D-478). A pool without it plays the cue.
+			local merge = method(d.sfx, "shatter")
+			if merge ~= nil then
+				merge(position, cue)
+			else
+				d.sfx.cue(cue, position)
+			end
 		end
 		d.impact.death(if record ~= nil then record.model else nil, position, boss, heavy)
 	end)
@@ -2977,8 +3079,11 @@ local function resolveTrailKind(record: any, clipId: string, event: any): string
 	return if string.find(clipId, "/Basic", 1, true) then "Basic" else "Art"
 end
 
--- A clip's one-shot on a rig (a clip sound or voice, an Art's activation, a footstep).
-local function routeOneShot(record: any, clipId: string, event: any)
+-- A clip's one-shot on a rig (a clip sound or voice, an Art's activation, a footstep), on the
+-- first frame that draws its step's pose (routeClipEvent asks it through onDrawn, D-479). An
+-- activation carries the light count it saw when its step fired (`serial`) and the clip's speed
+-- then (`speed`): a cancel or a cut that put the light out since means it never shows at all.
+local function routeOneShot(record: any, clipId: string, event: any, serial: number?, speed: number?)
 	local d = dependencies()
 	local model = record.model
 	local kind = event.kind
@@ -2989,16 +3094,17 @@ local function routeOneShot(record: any, clipId: string, event: any)
 			d.sfx.play(data.name, d.positionOf(model))
 		end
 	elseif kind == "ActivationHold" then
+		if lightOvertaken(model, serial) then
+			return
+		end
 		local token = d.trailToken(record)
 		local isLocal = record.id == d.localId()
-		d.trails.activationLight(model, true, token)
+		d.trails.activationLight(model, true, token, nil, serial)
 		d.sfx.play("artChime." .. token, d.positionOf(model))
 		if isLocal then
 			d.camera.fovKick()
 		end
 		-- The riser into the first damage frame (remote), the wind-up contour (local).
-		local entry = clipSpeeds[record.id]
-		local speed = if entry ~= nil and entry.clipId == clipId then entry.speed else nil
 		d.impact.activation(model, clipId, token, isLocal, speed)
 	elseif kind == "Footstep" then
 		-- SfxPool resolves the surface from the event or the Humanoid's floor, and the weight
@@ -3036,23 +3142,18 @@ end
 -- rest). A rig let go before that frame keeps the rest size Replication.unwatch gave it.
 local function smearOnPose(record: any, on: boolean, axis: string?)
 	local d = dependencies()
-	local gate = d.atStepPose
-	if gate == nil then
-		d.smear.apply(record.model, on, axis)
-		return
-	end
-	local watching = watched[record.id]
-	gate(function()
-		if watching ~= nil and watched[record.id] ~= watching then
-			return
-		end
+	onDrawn(record, function()
 		d.smear.apply(record.model, on, axis)
 	end)
 end
 
 --- Routes one clip event on a rig to the FX and audio packages (trails, smear, activation light,
 --- footsteps, clip sounds). `jumped`: a render stall's gap crossed it (D-132); only what it closes
---- runs, as for a clip taken away (F5).
+--- runs, as for a clip taken away (F5). An event fires inside its rig's step, whose pose is drawn a
+--- frame later (D-342), so what it shows (the trail, the light, the glow and flash, the chime, the
+--- kick, a sound, a footstep) comes on the first frame that draws that pose (onDrawn, D-479);
+--- what it decides (the trail kind, the clipEvent signal the controller's hold and the gait
+--- read) does at once.
 function Replication.routeClipEvent(record: any, clipId: string, event: any, jumped: boolean?)
 	local d = dependencies()
 	local model = record.model
@@ -3062,35 +3163,58 @@ function Replication.routeClipEvent(record: any, clipId: string, event: any, jum
 	if kind == "HitWindowOpen" or kind == "TrailOn" then
 		-- A jumped one still names the clip's trail kind for the events after it.
 		local trailKind = resolveTrailKind(record, clipId, event)
-		if starts then
-			d.trails.setActive(model, true, trailKind)
-		end
-		if kind == "HitWindowOpen" then
-			-- A clip taken away lets the light it lit fade, as a cancelled hold's does (F5).
-			d.trails.activationLight(model, false, d.trailToken(record), closing)
-		end
+		local opens = kind == "HitWindowOpen"
+		local serial = if opens then lightSerial(model) else nil
+		local token = if opens then d.trailToken(record) else nil
+		onDrawn(record, function()
+			if starts then
+				d.trails.setActive(model, true, trailKind)
+			end
+			if opens then
+				-- A clip taken away lets the light it lit fade, as a cancelled hold's does (F5).
+				d.trails.activationLight(model, false, token, closing, serial)
+			end
+		end)
 	elseif kind == "HitWindowClose" or kind == "TrailOff" then
-		d.trails.setActive(model, false, resolveTrailKind(record, clipId, event))
+		local trailKind = resolveTrailKind(record, clipId, event)
+		onDrawn(record, function()
+			d.trails.setActive(model, false, trailKind)
+		end)
 	elseif kind == "SmearOn" then
 		-- The smear frames run the trail at full width (section 10 beat 3) on top of any Art or
 		-- Basic kind; Trails keeps the trail lit while any kind is on.
 		if starts then
 			smearOnPose(record, true, if event.data ~= nil then event.data.axis else nil)
-			d.trails.setActive(model, true, "Smear")
+			onDrawn(record, function()
+				d.trails.setActive(model, true, "Smear")
+			end)
 		end
 	elseif kind == "SmearOff" then
 		smearOnPose(record, false, if event.data ~= nil then event.data.axis else nil)
-		d.trails.setActive(model, false, "Smear")
+		onDrawn(record, function()
+			d.trails.setActive(model, false, "Smear")
+		end)
 	elseif kind == "PostMotionStart" then
-		d.trails.activationLight(model, false, d.trailToken(record))
-		d.trails.setActive(model, false, resolveTrailKind(record, clipId, event))
+		local trailKind = resolveTrailKind(record, clipId, event)
+		local serial = lightSerial(model)
+		local token = d.trailToken(record)
+		onDrawn(record, function()
+			d.trails.activationLight(model, false, token, nil, serial)
+			d.trails.setActive(model, false, trailKind)
+		end)
 		trailKinds[record.id] = nil
 	elseif starts then
 		-- The one-shots. A clip sound or voice, an Art's activation (light, chime, kick, riser) or a
 		-- footstep that a render stall's gap jumped over is over: nothing replays. The local
 		-- fighter's are their own: inside a death's silence they play at full (issue 9).
-		asOwn(record.id == d.localId(), function()
-			routeOneShot(record, clipId, event)
+		local own = record.id == d.localId()
+		local serial = if kind == "ActivationHold" then lightSerial(model) else nil
+		local entry = clipSpeeds[record.id]
+		local speed = if entry ~= nil and entry.clipId == clipId then entry.speed else nil
+		onDrawn(record, function()
+			asOwn(own, function()
+				routeOneShot(record, clipId, event, serial, speed)
+			end)
 		end)
 	end
 	Replication.clipEvent:Fire(record, clipId, event, not starts)

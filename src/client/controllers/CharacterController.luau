@@ -54,12 +54,17 @@
 	its last move direction and slows down as the gait walks on, and stops where the walk's planted
 	foot is over its Idle spot (ActionLogic.stopCarryStep, Locomotion.stopGait), never faster than
 	it was moving, so the walk paced to it plants its feet instead of sliding over a body that
-	stopped dead. Any input ends it.
+	stopped dead. Any input ends it. The stick is the control module's (MoveInput: the keyboard, a
+	gamepad or a touch thumbstick, whichever is active), never Humanoid.MoveDirection, which is the
+	last Move and so the carry's own; with no active controller the stick is let go (D-474).
 
 	Lock-facing and aim (D-112): while TargetController holds a lock and the body is free (Idle,
 	Guard, the held Art stance; not while the stick sprints), AutoRotate is off and the root turns
-	toward the target at combat.luau aim.lockTurnRate on this render step, so the stick strafes and
-	backs off around it at walk speed. A basic swing or an Art release turns the rest of the way to
+	toward the target at combat.luau aim.lockTurnRate, so the stick strafes and backs off around it
+	at walk speed. The render step works the turn out and it lands on the root on PreSimulation,
+	with the pose that step wrote (D-505): a root's CFrame shows on the frame it is written, a pose
+	one frame after its step, so a turn written in the render step swung the planted feet round
+	with the root for a frame. Locomotion hears the turn still to land (State.yawAhead). A basic swing or an Art release turns the rest of the way to
 	the lock at once, by at most aim.snapDegrees (with no lock, to the best enemy in the soft assist's
 	cone), and only then reads the facing it sends: the server sweeps where that facing points
 	(D-113). The snap also keeps the facing inside what the server accepts from a root it saw up to
@@ -112,6 +117,7 @@ local ActionLogic = require(script.Parent.ActionLogic)
 local AimLogic = require(script.Parent.AimLogic)
 local ContactPredictor = require(script.Parent.ContactPredictor)
 local EntityTracker = require(script.Parent.EntityTracker)
+local MoveInput = require(script.Parent.MoveInput)
 local Replication = require(script.Parent.Replication)
 local WalkShell = require(script.Parent.WalkShell)
 local WeaponInfo = require(script.Parent.WeaponInfo)
@@ -204,6 +210,12 @@ local standOffSideShown = 0
 -- off the clip's own motion toward the target instead.
 local standOffLost = 0
 local STAND_OFF_EASING: string = Combat.contact.standOff.easing
+-- The root's move a step held back to the next one (D-496): the root is written in the render
+-- step and shows on its own frame, the pose a frame later (impact.poseLagFrames), so a step taken
+-- while the frame still draws a held pose (a hit-stop's last still frame) would move the root
+-- under a frozen body. Held back, the root moves with its pose; zero once the root and the pose
+-- are back in step.
+local rootHeldBack = Vector3.zero
 local lastPredictAt: number? = nil
 local lastParryAt: number? = nil
 local lastWalkSpeed: number? = nil
@@ -337,6 +349,17 @@ local function yawRoot(rootPart: BasePart, degrees: number)
 	end
 	local frame = rootPart.CFrame
 	rootPart.CFrame = CFrame.new(frame.Position) * CFrame.Angles(0, math.rad(degrees), 0) * frame.Rotation
+end
+
+-- D-505: the lock's turn this step, written to the root on PreSimulation (flushLockYaw).
+local pendingLockYaw = 0
+local function flushLockYaw()
+	local turn = pendingLockYaw
+	pendingLockYaw = 0
+	local rootPart = root
+	if turn ~= 0 and rootPart ~= nil then
+		yawRoot(rootPart, turn)
+	end
 end
 
 local function recordYaw(rootPart: BasePart, t: number)
@@ -478,8 +501,13 @@ end
 -- held off the clip's own motion toward the target instead (`carried`, this frame's root motion
 -- in the world), so with no room behind the lunge the keep-out was holding back never carries the
 -- body into the enemy (item 287: the engine then split the overlap between the blocker and the
--- wall, 0.16-0.51 studs a frame). A basic swing's plan is asked for here, on its first frame (the
--- clip has taken one step, and the root faces where the request turned it).
+-- wall, 0.16-0.51 studs a frame). The way this frame's motion came is free (the root stood there a
+-- moment ago), so the hold and then the frame's own share take it back first, and only what is
+-- left of the share is cast against the world, from where the root then stands: casting first let
+-- the step take the room the lunge had just opened and the hold take the same lunge again, past
+-- where the root stood (item 337, D-502: the root box 0.48 into a wall flush behind). A basic
+-- swing's plan is asked for here, on its first frame (the clip has taken one step, and the root
+-- faces where the request turned it).
 local function stepStandOff(rootPart: BasePart, carried: Vector3)
 	local current = predicted
 	if
@@ -509,21 +537,25 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3)
 	local shown = AimLogic.standOffAt(plan.distance, plan.from, plan.to, handle.time, STAND_OFF_EASING)
 		+ (if keep ~= nil then keep(handle.time) else 0)
 	local by = shown - standOffShown
-	if by ~= 0 then
-		local room = plan.room
-		local move = if by > 0 and room ~= nil then room(rootPart.CFrame, by) else by
-		rootPart.CFrame = rootPart.CFrame + plan.away * move
-		standOffShown = shown
-		if by > 0 and move < by then
-			standOffLost += by - move
-		end
-	end
-	-- Back along the way this frame's root motion came, so never into the world.
-	local toward = -carried:Dot(plan.away)
+	-- Back along the way this frame's root motion came, so never into the world: first what a wall
+	-- took off before, then this frame's share.
+	local toward = math.max(-carried:Dot(plan.away), 0)
 	if standOffLost > 0 and toward > 0 then
 		local held = math.min(toward, standOffLost)
 		rootPart.CFrame = rootPart.CFrame + plan.away * held
 		standOffLost -= held
+		toward -= held
+	end
+	if by ~= 0 then
+		local free = if by > 0 then math.min(by, toward) else by
+		local rest = by - free
+		local room = plan.room
+		local move = if rest > 0 and room ~= nil then room(rootPart.CFrame + plan.away * free, rest) else rest
+		rootPart.CFrame = rootPart.CFrame + plan.away * (free + move)
+		standOffShown = shown
+		if rest > 0 and move < rest then
+			standOffLost += rest - move
+		end
 	end
 	local side, keepSide = plan.side, plan.keepSide
 	if side ~= nil and keepSide ~= nil then
@@ -669,7 +701,7 @@ local function stance(): ActionLogic.Stance
 	local moving = false
 	local airborne = false
 	if humanoid ~= nil then
-		moving = humanoid.MoveDirection.Magnitude > 0
+		moving = MoveInput.world(humanoid).Magnitude > 0
 		airborne = humanoid.FloorMaterial == Enum.Material.Air
 	end
 	local afterParry = lastParryAt ~= nil and now() - (lastParryAt :: number) <= Combat.parryStagger
@@ -1015,8 +1047,11 @@ function CharacterController.dodge()
 	-- Relative to where the body aims: a snap's whip still showing turns it to the last request's facing.
 	local rotation = aimRotation(rootPart)
 	-- The stick, not the Humanoid: the two-step stop keeps moving the Humanoid along the last move
-	-- after the stick lets go, and a dodge with no input steps back.
-	local stick = if stopCarry.active then Vector3.zero else (humanoid :: Humanoid).MoveDirection
+	-- after the stick lets go, and a dodge with no input steps back. Under a live lock it is the
+	-- lock's frame the body walks (D-238), as the step turns it (D-474).
+	local stick = if stopCarry.active
+		then Vector3.zero
+		else CameraController.lockMove(MoveInput.world(humanoid :: Humanoid))
 	local moveLocal = rotation:VectorToObjectSpace(stick)
 	local direction = ActionLogic.dodgeDirection(moveLocal.X, moveLocal.Z, InputData.dodge.inputDeadzone)
 	local look = rotation.LookVector
@@ -1296,6 +1331,13 @@ local function step(dt: number)
 		runAfterContacts(dt)
 		return
 	end
+	-- The move held back last step (D-496) shows now, with the pose its step wrote: everything
+	-- this step reads and writes stands on the root the clip and the keep-out put it at.
+	local heldBack = rootHeldBack
+	if heldBack ~= Vector3.zero then
+		rootPart.CFrame = rootPart.CFrame + heldBack
+		rootHeldBack = Vector3.zero
+	end
 	local t = now()
 	if
 		actionEndsAt ~= nil
@@ -1311,7 +1353,10 @@ local function step(dt: number)
 	-- A held lock turns a free body to face it (D-112); a sprint (the sprint key with the stick
 	-- moving) hands the facing back to the stick unless aim.lockFaceWhileSprinting.
 	local lockAt = lockPosition()
-	local sprintingNow = sprinting and hum.MoveDirection.Magnitude > 0
+	-- The stick is the control module's (D-474): the Humanoid's MoveDirection is the last Move,
+	-- and this step Moves it too (the stop's carry, the lock's frame, the body shell).
+	local stickNow = MoveInput.world(hum)
+	local sprintingNow = sprinting and stickNow.Magnitude > 0
 	local faceLock = AimLogic.facesLock(state, lockAt ~= nil, sprintingNow, AIM)
 	-- Facing the lock, the stick strafes and backs off at walk speed (the walk set's feet, D-054).
 	local walkSpeed = AimLogic.moveSpeed(ActionLogic.speedFor(state, sprinting, speeds), faceLock, speeds.walk)
@@ -1322,11 +1367,18 @@ local function step(dt: number)
 		hum.AutoRotate = autoRotate
 		lastAutoRotate = autoRotate
 	end
+	-- D-505: the lock's turn lands on the root on PreSimulation, after this step, so the frame that
+	-- shows this step's pose shows the root turned with it: a root written here showed at once,
+	-- under the pose before it, and the planted feet swung round with the root for a frame
+	-- (0.08 to 0.09 studs a 60 Hz frame on a 720 degree a second turn). Locomotion reads the
+	-- facing ahead (State.yawAhead). A turn still pending from a frame that had no PreSimulation
+	-- lands first.
+	flushLockYaw()
 	if faceLock and lockAt ~= nil and snap == nil then
 		local delta = lockBearing(rootPart.CFrame, lockAt)
 		if delta ~= nil then
 			-- On the capture's clock (1 in play).
-			yawRoot(rootPart, AimLogic.turnStep(delta, AIM.lockTurnRate, dt * captureScale))
+			pendingLockYaw = AimLogic.turnStep(delta, AIM.lockTurnRate, dt * captureScale)
 		end
 	end
 
@@ -1343,7 +1395,7 @@ local function step(dt: number)
 	local grounded = hum.FloorMaterial ~= Enum.Material.Air
 	local fallHeight = ActionLogic.fallStep(fallTracker, grounded, rootPart.Position.Y, t)
 	local look = rootPart.CFrame.LookVector
-	local moveDir = hum.MoveDirection
+	local moveDir = stickNow
 	-- Under a live lock the stick walks the lock's frame, not the camera's (D-238): forward closes
 	-- on the target and sideways circles it wherever the two-shot stands. The Humanoid walks the
 	-- turned stick (this Move after the control script's), and so do the stop and Locomotion.
@@ -1423,6 +1475,7 @@ local function step(dt: number)
 			verticalVelocity = velocity.Y,
 			-- The reading `speed` came from: a velocity off the stick blocks the body (D-144).
 			velocity = velocity,
+			yawAhead = pendingLockYaw, -- D-505
 		})
 	end
 
@@ -1449,6 +1502,7 @@ local function step(dt: number)
 		heldYaw = nil
 	end
 	local carried = Vector3.zero
+	local movedFrom = rootPart.Position
 	if ActionLogic.rootMotionActive(state) then
 		local delta = animator:currentRootMotionDelta()
 		if typeof(delta) == "Vector3" and delta.Magnitude > 0 then
@@ -1460,11 +1514,20 @@ local function step(dt: number)
 	end
 	-- The Art stand-off over the anticipation (fix F1), on the clip's clock like the root motion.
 	stepStandOff(rootPart, carried)
+	local moved = rootPart.Position - movedFrom
 	-- The blade on the pose this frame shows: a touch plays its hit now (issue 4).
 	stepContacts()
 	runAfterContacts(dt)
 	wakeSleptDodge(t)
 	recordYaw(rootPart, t)
+	-- This frame still draws a held pose (the step that wrote it was frozen), or the root is
+	-- already a step behind since one did: this step's move shows next frame, with its pose
+	-- (D-496). A step that moves nothing ends the run, and the root leads its pose again.
+	local drawsHeld = typeof(animator.heldShown) == "function" and animator:heldShown() == true
+	if moved.Magnitude > 0 and (drawsHeld or heldBack ~= Vector3.zero) and root == rootPart then
+		rootPart.CFrame = rootPart.CFrame - moved
+		rootHeldBack = moved
+	end
 end
 
 -- ------------------------------------------------------------------ character lifecycle
@@ -1484,6 +1547,7 @@ local function clearCharacter()
 	rigJumped = false
 	heartbeatsSinceRigStep = 0
 	sleptDodge = nil
+	pendingLockYaw = 0
 	Siblings.call(Choreo, "setLocalModel", nil)
 	character, humanoid, root, animator, locomotion = nil, nil, nil, nil, nil
 	predicted = nil
@@ -1496,6 +1560,7 @@ local function clearCharacter()
 	snap = nil
 	standOff, standOffHandle, standOffShown, standOffSideShown, standOffAsked = nil, nil, 0, 0, nil
 	standOffLost = 0
+	rootHeldBack = Vector3.zero
 	assistTargetId = nil
 	lastPredictAt = nil
 	fallTracker = { airborneSince = nil, peakY = 0 }
@@ -1585,7 +1650,10 @@ function CharacterController.start()
 	-- timed when it happens, not taken for a turn made just before the next swing (D-112). The snap's
 	-- whip steps here too, so it ends on time while nothing renders. A second Heartbeat with no rig
 	-- step tells a dodge the display sleeps (D-141).
+	-- D-505: the lock's turn lands after the render step, with the pose it wrote (flushLockYaw).
+	RunService.PreSimulation:Connect(flushLockYaw)
 	RunService.Heartbeat:Connect(function()
+		flushLockYaw()
 		heartbeatsSinceRigStep += 1
 		local rootPart = root
 		if rootPart ~= nil then

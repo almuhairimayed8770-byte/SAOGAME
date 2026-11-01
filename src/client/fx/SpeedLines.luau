@@ -110,6 +110,10 @@ local function ensureGui(): ScreenGui
 		screen.Name = config.screenGuiName
 		screen.ResetOnSpawn = false
 		screen.IgnoreGuiInset = true
+		-- Edge to edge past a phone's notch (D-475); after IgnoreGuiInset, which the engine links
+		-- to ScreenInsets.
+		screen.ScreenInsets = (Enum.ScreenInsets :: any)[config.screenInsets]
+		screen.ClipToDeviceSafeArea = config.clipToDeviceSafeArea
 		screen.DisplayOrder = config.displayOrder
 		screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 		screen.Enabled = false

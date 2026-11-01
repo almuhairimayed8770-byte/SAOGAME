@@ -22,8 +22,10 @@
 		                    to it (past the lock's range and every aggro radius), so the walk is safe;
 		                 4. the open shot builds the ledge and its ramp (once): there is no jump
 		                    (D-024), so its fall and land come off an edge and the way up is the ramp.
-		                    Never around the player's body: while its box (the model's extents) reaches
-		                    into where one goes (DevStageLogic.bodyInside), nothing is built and the
+		                    Never around the player's body: while its box (the model's extents), read
+		                    once it has stood still when it is near where one goes (settledRoot, item
+		                    359(b)), reaches into where one goes (DevStageLogic.bodyInside), nothing is
+		                    built and the
 		                    reply is { ok = false, error = "stand clear of where <part> goes first",
 		                    walk = the stage area's ring and a route to it }; the next ask builds them;
 		                 5. the player's root, read once it has stood still (settledRoot, D-447:
@@ -310,11 +312,16 @@ end
 -- minChargeDistance from where the player rests and circled out before its only charge. A read
 -- farther than stage.settleNearStuds (flat) from the spot is taken as it is (the reply is a walk);
 -- nearer, it is read again every frame until it has moved no more than stage.settleStuds for
--- stage.settleSeconds, for up to stage.settleTimeoutSeconds.
-local function settledRoot(root: BasePart, ring: DevStageLogic.Ring): Vector3
+-- stage.settleSeconds, for up to stage.settleTimeoutSeconds. So is one that near a staged part
+-- still to be built (`unbuilt`): the trailing read passed the check short of the ledge's
+-- footprint, and the ledge went up round the body (item 359(b), D-503).
+local function settledRoot(root: BasePart, ring: DevStageLogic.Ring, unbuilt: { string }): Vector3
 	local at = root.Position
 	local dx, dz = at.X - ring.x, at.Z - ring.z
-	if dx * dx + dz * dz > Stage.settleNearStuds * Stage.settleNearStuds then
+	if
+		dx * dx + dz * dz > Stage.settleNearStuds * Stage.settleNearStuds
+		and not DevStageLogic.nearParts(Stage.ledge, at.X, at.Z, Stage.settleNearStuds, unbuilt)
+	then
 		return at
 	end
 	local deadline = os.clock() + Stage.settleTimeoutSeconds
@@ -370,7 +377,7 @@ local function stageShot(player: Player, shotId: unknown): Reply
 	if root == nil or humanoid == nil or model.Parent == nil then
 		return fail("the player has no character in the world (respawning?)")
 	end
-	local at = settledRoot(root, ring)
+	local at = settledRoot(root, ring, if open then stagedParts(false) else {})
 	if model.Parent == nil or model.PrimaryPart ~= root then
 		return fail("the player has no character in the world (respawning?)")
 	end

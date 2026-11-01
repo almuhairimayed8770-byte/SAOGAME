@@ -89,6 +89,12 @@ describe("impact data", function()
 		expect(impact.overlay.displayOrder).toBeGreaterThan(ui.systemLine.displayOrder)
 	end)
 
+	it("covers the whole screen past a phone's safe area, which the HUD keeps inside (D-475)", function()
+		expect(impact.overlay.screenInsets).toBe("None")
+		expect(impact.overlay.clipToDeviceSafeArea).toBe(false)
+		expect(ui.hud.screenInsets).toBe("CoreUISafeInsets")
+	end)
+
 	it("leaves the root, the sheath and FX parts out of the silhouettes, and draws the sword", function()
 		for _, name in { "HumanoidRootPart", "Sheath", "FX" } do
 			expect(impact.silhouette.excludeNames).toContain(name)
@@ -97,6 +103,13 @@ describe("impact data", function()
 		expect(table.find(impact.silhouette.excludeNames, "Weapon")).toBeNil()
 		expect(impact.silhouette.maxRigs).toBeGreaterThan(0)
 		expect(impact.silhouette.poolCap).toBeGreaterThanOrEqual(impact.quality.High.maxPartsPerRig)
+	end)
+
+	it("warms a figure ahead of its hit a few parts a frame (D-477)", function()
+		-- A High figure (48 parts) warms in 8 Heartbeats; the nearest rigs are re-ranked twice a second.
+		expect(impact.silhouette.prewarmPerFrame).toBe(6)
+		expect(math.ceil(impact.quality.High.maxPartsPerRig / impact.silhouette.prewarmPerFrame)).toBe(8)
+		expect(impact.silhouette.prewarmInterval).toBe(0.5)
 	end)
 
 	it("lays 3 to 5 tapered ink strokes", function()

@@ -72,6 +72,14 @@ describe("playground data", function()
 		)
 	end)
 
+	it("three full dev packs at one point fit a quarter of the widest disc's room (item 352(a), D-499)", function()
+		local Dev = Harness.load("src/shared/data/dev")
+		local spacing = Playground.spawnSpacing
+		local widest = Playground.spawnScatterRadius + spacing.widenings * spacing.widenStuds
+		local room = (widest / (spacing.minStuds / 2)) ^ 2
+		expect(4 * 3 * Dev.hooks.maxPackSize).toBeLessThanOrEqual(room)
+	end)
+
 	it("measures distance on the field plane", function()
 		expect(Playground.distanceFromCenter({ 3, 50, 4 })).toBeCloseTo(5)
 	end)

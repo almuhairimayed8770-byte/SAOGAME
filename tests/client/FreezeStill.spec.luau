@@ -526,12 +526,12 @@ describe("the cut meets the body at its surface and never sinks to its root (D-4
 	-- Measured at the kobold 3.5 ahead before the reach: the held key put Sharp Nail's right hand
 	-- 0.82 into the kobold's torso at its third thrust (the left 0.82 at its second) and the blade
 	-- 0.36 deep there; Rising Arc's blade 0.44, Vertical's 0.32 and the first basic's 0.43.
-	-- Not landed on the re-keyed swings (D-425), handed to the clips' owner with what they show at
-	-- the kobold 3.5 ahead: the third basic's first strike steps 1.25 back for a cost of 0.158 where
-	-- no step costs 0.004. Rising Arc's second strike held the blade 0.226 deep at its key 0.610
-	-- (0.226 allowed, over by under a thousandth); its elbow a degree more bent there holds it 0.209
-	-- (0.215 allowed) and it is judged again (D-415).
-	local NOT_LANDED: { [string]: boolean } = { Basic3 = true }
+	-- Not landed on the re-keyed swings (D-425) and judged again since: at the kobold 3.5 ahead the
+	-- third basic's first strike stepped 1.25 back for a cost of 0.158 where no step cost 0.004; its
+	-- head turned off the axe face through the cut (D-485) it steps 1.00 for 0.125 against 0.112.
+	-- Rising Arc's second strike held the blade 0.226 deep at its key 0.610 (0.226 allowed, over by
+	-- under a thousandth); its elbow a degree more bent there holds it 0.209 (0.215 allowed, D-415).
+	local NOT_LANDED: { [string]: boolean } = {}
 	for _, swing in SWINGS do
 		if NOT_LANDED[swing.name] then
 			continue

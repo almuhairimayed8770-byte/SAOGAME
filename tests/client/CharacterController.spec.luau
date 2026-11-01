@@ -28,6 +28,7 @@ local Rigs = Harness.load("src/shared/data/rigs")
 
 local CONTROLLER_PATH = "src/client/controllers/CharacterController"
 local CHOREO_PATH = "src/client/choreo/Choreo"
+local MOVE_INPUT_PATH = "src/client/controllers/MoveInput"
 local FRAME = 1 / 60
 
 -- A fresh copy of Choreo (its own registry and frame loops) whose RunService is `runService`.
@@ -46,6 +47,19 @@ local function freshChoreo(runService: any): any
 		end,
 	}
 	return luau.load(Harness.readFile(CHOREO_PATH .. ".luau"), { debugName = CHOREO_PATH, environment = env :: any })()
+end
+
+-- A fresh copy of MoveInput (its own bound control module), so two rigs never read one stick.
+local function freshMoveInput(): any
+	local env = Harness.environment()
+	env.script = Harness.node(MOVE_INPUT_PATH)
+	env.require = function(target: any): any
+		return Harness.loadModule(target)
+	end
+	return luau.load(
+		Harness.readFile(MOVE_INPUT_PATH .. ".luau"),
+		{ debugName = MOVE_INPUT_PATH, environment = env :: any }
+	)()
 end
 
 -- A PlayerR15 rig model: one Part per rig part, one Motor6D per joint (as tests/choreo/Choreo.spec).
@@ -79,8 +93,11 @@ end
 type Rig = {
 	controller: any,
 	sent: { { name: string, payload: any } },
-	-- One frame with the stick at a world direction (zero for none).
-	frame: (stick: Vector3) -> (),
+	-- One frame with the stick at a world direction (zero for none), `dt` long (default 1/60).
+	frame: (stick: Vector3, dt: number?) -> (),
+	-- The control module's active controller comes and goes (the controls disabled, a menu): with
+	-- none, the control script Moves nothing and its move vector is zero (D-474).
+	setControls: (active: boolean) -> (),
 	-- One frame with the display asleep: the clock moves and Heartbeat fires, no render step runs.
 	heartbeat: () -> (),
 	humanoid: any,
@@ -100,6 +117,8 @@ type Rig = {
 	setEnemies: (enemies: { { id: number, position: Vector3 } }) -> (),
 	-- The last input the controller handed Locomotion.update.
 	locomotionInput: () -> any,
+	-- The root's yaw (degrees, + = left) when the controller last called Locomotion.update.
+	locomotionYaw: () -> number?,
 	-- What the fake CameraController.lockMove does to the stick it is handed (D-238): nil hands
 	-- it back untouched (no live lock), as the real one does.
 	setLockMove: (turn: ((Vector3) -> Vector3)?) -> (),
@@ -218,6 +237,7 @@ local function load(options: Options?): Rig
 	local lockRecord: any = nil
 	local enemies: { { id: number, position: Vector3 } } = {}
 	local lastInput: any = nil
+	local lastInputYaw: number? = nil -- the root's yaw as Locomotion.update was called (D-505)
 	local lockTurn: ((Vector3) -> Vector3)? = nil
 	local lockMoves: { Vector3 } = {}
 	local model = {
@@ -240,6 +260,8 @@ local function load(options: Options?): Rig
 				end,
 				update = function(_self: any, _dt: number, input: any)
 					lastInput = input
+					local look = root.CFrame.LookVector
+					lastInputYaw = AimLogic.yawOf(look.X, look.Z)
 				end,
 				stopGait = if opts.stopGait ~= nil
 					then function(_self: any, into: any)
@@ -305,7 +327,25 @@ local function load(options: Options?): Rig
 	local rigStepCount: () -> number = function(): number
 		return 0
 	end
+	-- The control module (PlayerModule:GetControls()) the real MoveInput reads, with the camera at
+	-- rest (looking down -Z), so its camera-relative stick is the spec's world stick.
+	local controlsActive = true
+	local stickNow = Vector3.zero
+	local moveInput = freshMoveInput()
+	moveInput.bind({
+		controls = function(): any
+			return {
+				GetMoveVector = function(_self: any): Vector3
+					return if controlsActive then stickNow else Vector3.zero
+				end,
+			}
+		end,
+		camera = function(): CFrame?
+			return CFrame.identity
+		end,
+	})
 	local fakes: { [string]: any } = {
+		MoveInput = moveInput,
 		ContactPredictor = {
 			standOff = function(
 				model: any,
@@ -581,7 +621,12 @@ local function load(options: Options?): Rig
 	-- RenderStepped connection in the order the spec picked, the physics, then Heartbeat and the
 	-- timers due by now (task.delay resumes there).
 	local function render(stick: Vector3, dt: number)
-		humanoid:Move(stick)
+		if controlsActive then
+			stickNow = stick
+			humanoid:Move(stick)
+		else
+			stickNow = Vector3.zero
+		end
 		local runStep = step :: (dt: number) -> ()
 		if opts.renderOrder == "connections" then
 			renderStepped:Fire(dt)
@@ -626,6 +671,9 @@ local function load(options: Options?): Rig
 		locomotionInput = function(): any
 			return lastInput
 		end,
+		locomotionYaw = function(): number?
+			return lastInputYaw
+		end,
 		setLockMove = function(turn: ((Vector3) -> Vector3)?)
 			lockTurn = turn
 		end,
@@ -652,9 +700,13 @@ local function load(options: Options?): Rig
 			heartbeat:Fire(FRAME)
 			runTimers()
 		end,
-		frame = function(stick: Vector3)
-			clock += FRAME
-			render(stick, FRAME)
+		frame = function(stick: Vector3, dt: number?)
+			local length = dt or FRAME
+			clock += length
+			render(stick, length)
+		end,
+		setControls = function(active: boolean)
+			controlsActive = active
 		end,
 		now = function(): number
 			return clock
@@ -1446,11 +1498,14 @@ describe("CharacterController: the Art stand-off (fix F1)", function()
 			expect((rig.root.Position - at).Magnitude < 1e-9).toBe(true)
 		end
 		expect(frozen >= 5).toBe(true)
-		-- Then the body goes on with the clip.
+		-- Then the body goes on with the clip, with the pose each frame draws (D-496): out of a
+		-- freeze the root shows the clip time its pose shows, a step behind the clip's clock.
+		local drawnTime = handle.time
 		for _ = 1, 5 do
+			drawnTime = handle.time
 			frame()
 		end
-		expect(apart()).toBeCloseTo(keep(handle.time), 1e-4)
+		expect(apart()).toBeCloseTo(keep(drawnTime), 1e-4)
 		expect(apart() > keep(held) + 1e-3).toBe(true)
 	end)
 
@@ -1571,13 +1626,16 @@ describe("CharacterController: the Art stand-off (fix F1)", function()
 				expect((rig.root.Position - at).Magnitude < 1e-9).toBe(true)
 			end
 			expect(frozen >= 5).toBe(true)
-			-- Then on, aside no farther than the world leaves: what it took off is not made up.
+			-- Then on, aside no farther than the world leaves: what it took off is not made up. The
+			-- root shows the clip time its pose shows, a step behind the clock (D-496).
+			local drawnTime = handle.time
 			for _ = 1, 30 do
+				drawnTime = handle.time
 				frame()
 			end
 			expect(handle.time > 0.32 + 0.12 + 0.05).toBe(true)
 			expect(offset():Dot(side)).toBeCloseTo(0.12, 1e-4)
-			expect(offset():Dot(away)).toBeCloseTo(keep(handle.time), 1e-4)
+			expect(offset():Dot(away)).toBeCloseTo(keep(drawnTime), 1e-4)
 			expect(#asked >= 3).toBe(true)
 		end
 	)
@@ -1658,6 +1716,35 @@ describe("CharacterController aim: the body faces a held lock (D-112)", function
 		rig.frame(STILL)
 		rig.frame(STILL)
 		expect(writesOf(rig, "AutoRotate", after)).toEqual({ true })
+	end)
+
+	it("the lock's turn lands on the root after the render step, and Locomotion hears it ahead (D-505)", function()
+		-- The root's CFrame shows on the frame it is written, the pose one frame after the step that
+		-- wrote it (impact.poseLagFrames): a turn written in the render step showed under the pose
+		-- before it, and the planted feet swung round with the root for a frame. So the turn lands
+		-- on PreSimulation, and Locomotion reads the facing the root will have then.
+		local rig = load()
+		rig.frame(STILL)
+		rig.frame(STILL)
+		local boar = pointAt(rig, 90, 5)
+		rig.setLock(boar)
+		local turning = 0
+		for _ = 1, 12 do
+			local before = yawOf(rig)
+			rig.frame(STILL)
+			local after = yawOf(rig)
+			local step = wrapped(after - before)
+			-- During the render step the root still stood where the last frame left it.
+			expect(rig.locomotionYaw()).toBeCloseTo(before, 1e-3)
+			-- Locomotion heard the turn that landed after the step.
+			expect(rig.locomotionInput().yawAhead).toBeCloseTo(step, 1e-3)
+			if math.abs(step) > 1e-4 then
+				turning += 1
+			end
+		end
+		-- 90 degrees at 12 a frame: 8 frames, the last one short.
+		expect(turning).toBe(8)
+		expect(bearingOf(rig, boar)).toBeCloseTo(0, 1e-3)
 	end)
 
 	it("strafes around the lock at walk speed, still facing it", function()
@@ -3344,5 +3431,143 @@ describe("CharacterController: under a live lock the stick walks the lock's fram
 		expect(#writesOf(turned, "MoveDirection", turnedFrom)).toBe(2)
 		expect(#free.lockMoves > 0).toBe(true)
 		expect(free.humanoid.MoveDirection.Z).toBeCloseTo(FORWARD.Z, 1e-6)
+	end)
+end)
+
+describe("CharacterController: the stop reads the control module's stick (D-474)", function()
+	-- Walks FORWARD for 10 frames, lets go with the stick at zero for `zeroFrames` frames (the
+	-- control script still Moving), then the control module has no active controller (no Move, a
+	-- zero move vector) for 5 seconds. Returns the frames until the body stood, nil if it never did,
+	-- and the studs it went after the stick let go.
+	local function letGo(zeroFrames: number, controlsAfter: boolean): (number?, number)
+		local rig = load()
+		for _ = 1, 10 do
+			rig.frame(FORWARD)
+		end
+		local from = rig.root.Position
+		local stood: number? = nil
+		local frames = math.ceil(5 / FRAME)
+		for frame = 1, frames do
+			if frame > zeroFrames then
+				rig.setControls(controlsAfter)
+			end
+			rig.frame(Vector3.zero)
+			if stood == nil and rig.humanoid.MoveDirection.Magnitude == 0 then
+				stood = frame
+			end
+		end
+		return stood, (rig.root.Position - from).Magnitude
+	end
+
+	it("the carry ends and the body stands with no active controller, as with the stick let go", function()
+		local keyStood, keyWent = letGo(math.huge, true)
+		assert(keyStood ~= nil, "the stick let go never stood")
+		-- Before: with no controller from the carry's second frame (or from the release itself) the
+		-- carry read its own Move as the stick, ended, and the body walked on at 16 studs a second:
+		-- 79.7 studs in the 5 seconds and never stood. Now it stops where the stick let go stops.
+		for _, zeroFrames in { 0, 1, 2, 10 } do
+			local stood, went = letGo(zeroFrames, false)
+			expect(stood).toBe(keyStood)
+			expect(went).toBeCloseTo(keyWent, 1e-6)
+		end
+	end)
+
+	it("a gamepad's half tilt and a keyboard's diagonal walk and stop as a whole stick does", function()
+		-- The control module hands a gamepad's tilt under 1 and a keyboard diagonal over 1; the stop
+		-- reads each as its direction, as Humanoid.MoveDirection did.
+		local function stopFrom(stick: Vector3): (number?, Vector3)
+			local rig = load()
+			for _ = 1, 10 do
+				rig.frame(stick)
+			end
+			local from = rig.root.Position
+			local stood: number? = nil
+			for frame = 1, 120 do
+				rig.frame(Vector3.zero)
+				if stood == nil and rig.humanoid.MoveDirection.Magnitude == 0 then
+					stood = frame
+				end
+			end
+			return stood, rig.root.Position - from
+		end
+		local wholeStood, wholeWent = stopFrom(FORWARD)
+		local halfStood, halfWent = stopFrom(FORWARD * 0.5)
+		expect(halfStood).toBe(wholeStood)
+		expect((halfWent - wholeWent).Magnitude).toBeCloseTo(0, 1e-6)
+		local diagonal = Vector3.new(1, 0, -1)
+		local diagonalStood, diagonalWent = stopFrom(diagonal)
+		expect(diagonalStood).toBe(wholeStood)
+		expect(diagonalWent.Magnitude).toBeCloseTo(wholeWent.Magnitude, 1e-6)
+		expect(diagonalWent.Unit:Dot(diagonal.Unit)).toBeCloseTo(1, 1e-6)
+	end)
+end)
+
+-- Items 330(a), 331(a)(c) and 332(b): the root is written in the render step and shows on that
+-- frame, the pose a frame later (impact.poseLagFrames). So the first step after a freeze moved
+-- the root (the clip's root motion and the keep-out, D-314) on the freeze's last still frame:
+-- Studio logged Sharp Nail's root moving up to 0.181 studs on a held frame at 60 Hz (0.058 to
+-- 0.095 at 144). Held with the pose (D-496), the root stands still on every frame that draws a
+-- held pose and moves with the pose after it, a frame's share at a time: nothing is lost.
+describe("CharacterController: the root holds on a freeze's still frames (D-496)", function()
+	-- One Art released into a keep-out that steps back 6 studs a second from the release, frozen
+	-- `steps` steps a few frames in. Returns the most the root moved on a frame that drew a held
+	-- pose, the most on any other frame, how many frames drew a held pose, and the root's last
+	-- position.
+	local function run(fps: number, steps: number?): (number, number, number, Vector3)
+		local fromTime = math.huge
+		local plan = {
+			distance = 0,
+			away = Vector3.new(0, 0, 1),
+			to = 0,
+			keepUntil = 100,
+			keep = function(time: number): number
+				return math.clamp((time - fromTime) * 6, 0, 1.2)
+			end,
+		}
+		local rig = load({ choreo = true, impact = true, standOff = plan })
+		local dt = 1 / fps
+		for _ = 1, 40 do
+			rig.frame(STILL)
+		end
+		rig.setLock(Vector3.new(0, 0, -1.6))
+		rig.controller.beginArt(1)
+		for _ = 1, 12 do
+			rig.frame(STILL)
+		end
+		rig.controller.releaseArt(1, 12 * FRAME)
+		fromTime = rig.contacts.standOffs[1].from
+		local last = rig.root.Position
+		local heldMove, freeMove, held = 0, 0, 0
+		for frame = 1, math.ceil(1.5 * fps) do
+			if steps ~= nil and frame == math.ceil(0.12 * fps) then
+				rig.animator:holdSteps(steps)
+			end
+			rig.frame(STILL, dt)
+			local now = rig.root.Position
+			local moved = (now - last).Magnitude
+			last = now
+			if rig.animator:heldShown() then
+				held += 1
+				heldMove = math.max(heldMove, moved)
+			else
+				freeMove = math.max(freeMove, moved)
+			end
+		end
+		return heldMove, freeMove, held, last
+	end
+
+	it("no frame that draws a held pose moves the root, at 30, 60 and 144 Hz", function()
+		for _, fps in { 30, 60, 144 } do
+			local steps = math.max(1, math.round(Combat.hitStopFrames.Final * fps / 60))
+			local heldMove, freeMove, held, last = run(fps, steps)
+			local _, freeBare, _, lastBare = run(fps, nil)
+			expect(held).toBe(steps)
+			expect(heldMove).toBeLessThan(1e-6)
+			-- The keep-out's 6 studs a second shows, a frame's share at a time (no frame carries two).
+			expect(freeMove).toBeLessThan(freeBare + 1e-4)
+			expect(freeMove).toBeGreaterThan(5.5 / fps)
+			-- Nothing is lost: the body ends where the same swing without the freeze ends.
+			expect((last - lastBare).Magnitude).toBeLessThan(1e-3)
+		end
 	end)
 end)

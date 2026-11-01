@@ -43,59 +43,29 @@ local root = Harness.repoRoot()
 -- bound, a share or a cosine past an anticipation bound). Measured on the pass after cebade4; the
 -- player attacks' entries shrunk with the gait hand-off and the cancel hand-over (D-404, D-408), and
 -- the flinches' and DeathFreeze's Sink over the drawn idle went with its sole (D-417), and the
--- Kobold walk's Sink with its root at the idle's height (D-418; its Drift shrank with it). A
+-- Kobold walk's Sink with its root at the idle's height (D-418; its Drift shrank with it); the
+-- attacks' Overlap out of the drawn run went with its swing turning out past the planted leg
+-- (D-481); the boar's and the kobold's Break and Stagger went with their re-key on the rigid
+-- legs, and the walks' Slide and Drift shrank to the Lab's cut-in (D-482); Basic2's pop out of
+-- the run went and its mashed pull shrank with its new wind-up key (D-492). A
 -- clip fails a kind it does not list, a kind in a plan it does not list it for, a listed kind and
 -- plan past that excess, and a listed kind and plan it no longer has (take it off). The fix stage
 -- takes entries off; an entry never grows.
 local PENDING: { [string]: { [string]: { [string]: number } } } = {
-	["player/OneHandedSword/Basic1"] = {
-		Overlap = { ["Run@0.5"] = 0.03 },
-	},
 	["player/OneHandedSword/Basic2"] = {
-		Pop = { ["Run@0.5"] = 0.24 },
-		Overlap = { ["Run@0.5"] = 0.03 },
-		Anticipation = { ["Run@0.5"] = 0.17, ["Mash after Basic1"] = 0.31 },
+		Anticipation = { ["Run@0.5"] = 0.17, ["Mash after Basic1"] = 0.08 },
 	},
-	["player/OneHandedSword/Basic3"] = {
-		Overlap = { ["Run@0.5"] = 0.03 },
-	},
-	["player/OneHandedSword/Horizontal"] = {
-		Overlap = { ["Run@0.5"] = 0.03 },
-	},
-	["player/OneHandedSword/Vertical"] = {
-		Overlap = { ["Run@0.5"] = 0.03 },
-	},
-	["player/OneHandedSword/SharpNail"] = {
-		Overlap = { ["Run@0.5"] = 0.03 },
-	},
-	["player/OneHandedSword/RisingArc"] = {
-		Overlap = { ["Run@0.5"] = 0.04 },
-	},
+	-- The walks' feet hold the field through their whole cycle (D-482); what is left is the
+	-- Lab's cut-in: the root moves at walkSpeed from the first frame while the rig's fallback idle
+	-- fades out under the walk over choreo.luau fallbackBlend (0.15 s), so the planted foot is half
+	-- the idle's for the first frames (any stance through that fade drifts 0.33 or more).
 	["enemy/Boar/Walk"] = {
-		Slide = { ["Lab"] = 0.29 },
-		Drift = { ["Lab"] = 4.88 },
-	},
-	["enemy/Boar/Break"] = {
-		Pop = { ["Lab"] = 20.06, ["Stand@0"] = 34.22, ["Stand@6"] = 35.31 },
-		Slide = { ["Lab"] = 1.23, ["Stand@0"] = 0.22, ["Stand@6"] = 0.22 },
-		Drift = { ["Lab"] = 1.94, ["Stand@0"] = 1.94, ["Stand@6"] = 1.84 },
-		Sink = { ["Lab"] = 0.23, ["Stand@0"] = 0.23, ["Stand@6"] = 0.24 },
-	},
-	["enemy/Boar/Stagger"] = {
-		Pop = { ["Lab"] = 17.44, ["Stand@0"] = 38.22, ["Stand@6"] = 42.27 },
-		Slide = { ["Lab"] = 0.37, ["Stand@0"] = 0.37, ["Stand@6"] = 0.37 },
-		Drift = { ["Lab"] = 0.81, ["Stand@0"] = 0.81, ["Stand@6"] = 0.81 },
-		Sink = { ["Lab"] = 0.51, ["Stand@0"] = 0.51, ["Stand@6"] = 0.51 },
+		Slide = { ["Lab"] = 0.12 },
+		Drift = { ["Lab"] = 0.21 },
 	},
 	["enemy/Kobold/Walk"] = {
-		Slide = { ["Lab"] = 0.22 },
-		Drift = { ["Lab"] = 2.61 },
-	},
-	["enemy/Kobold/Break"] = {
-		Pop = { ["Lab"] = 21.24, ["Stand@0"] = 35.13, ["Stand@6"] = 35.27 },
-		Slide = { ["Lab"] = 0.39, ["Stand@0"] = 0.22, ["Stand@6"] = 0.22 },
-		Drift = { ["Lab"] = 1.48, ["Stand@0"] = 1.48, ["Stand@6"] = 1.4 },
-		Sink = { ["Lab"] = 1.11, ["Stand@0"] = 1.11, ["Stand@6"] = 1.11 },
+		Slide = { ["Lab"] = 0.02 },
+		Drift = { ["Lab"] = 0.38 },
 	},
 }
 
@@ -361,7 +331,8 @@ describe("ClipAudit: the rules catch what they are for", function()
 
 	it("a clip on the pending list still fails a pending fault that grew: the boar's walk slid further", function()
 		local id = "enemy/Boar/Walk"
-		local clip = oneFrameChangeAt(ClipLibrary.get(id), 0.3, function(joints: any)
+		-- 0.2 s is inside the trot's 0.3 s cycle, past the fallback idle's fade (D-482).
+		local clip = oneFrameChangeAt(ClipLibrary.get(id), 0.2, function(joints: any)
 			local rootKey = joints.Root or { pos = { 0, 0, 0 }, rot = { 0, 0, 0 } }
 			local pos = rootKey.pos or { 0, 0, 0 }
 			joints.Root = { pos = { pos[1] + 0.5, pos[2], pos[3] }, rot = rootKey.rot }

@@ -7,6 +7,7 @@
 	everything that reads a rig's pose on a frame is a bound step after the steps that pose it:
 
 	  First            FrameClock: the frame starts (counted, its due callbacks run)
+	  First + 1        SkyspireDrawnPose: Trails reads the pose this frame draws (D-479)
 	  Camera - 1       SkyspireRigs: Choreo steps every full-rate rig, publishes its drawn body
 	  Character + 1    the controller: the local rig (stepLocal), its root motion, the contact
 	  Character + 2    SkyspireCamera: frames the local root and the drawn bodies as this frame draws them
@@ -17,8 +18,8 @@
 	Distant and Far rigs step on Choreo's Heartbeat, after the draw, and are drawn as posed on the
 	next frame, so a reader here sees them as drawn too. Each priority is a data row, an
 	Enum.RenderPriority name and an offset from its value: choreo.luau renderOrder (rigs,
-	character), camera.luau renderOrder (main, late), fx.luau renderOrder (impactFrames,
-	poseReaders). Effects that read no pose (the glint, the slash line, the speed lines: driven by
+	character), camera.luau renderOrder (main, late), fx.luau renderOrder (drawnPose,
+	impactFrames, poseReaders). Effects that read no pose (the glint, the slash line, the speed lines: driven by
 	time and the camera's own projection) stay on RenderStepped.
 
 	`join(name, row, fn)` runs `fn` in the named step every frame until the `leave` it returns is
@@ -74,6 +75,11 @@ local steps: { [string]: Step } = {}
 --- The step every reader of a drawn pose joins (fx.luau renderOrder.poseReaders): Trails' blade
 --- samples.
 FrameOrder.POSE_READERS = "SkyspirePoseReaders"
+
+--- The step at a frame's start, before any rig steps (fx.luau renderOrder.drawnPose, D-479): a
+--- frame draws the pose its rigs' step of the frame before wrote (D-342), so a reader of what it
+--- draws (Trails' ribbon) reads the Transforms here.
+FrameOrder.DRAWN_POSE = "SkyspireDrawnPose"
 
 --- The render priority a row names: its Enum.RenderPriority value plus its offset.
 function FrameOrder.priority(row: Row): number

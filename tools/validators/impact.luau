@@ -28,7 +28,10 @@
 	  than the shortest hit-stop in combat.hitStopFrames, so a hit's cues, which wait that many
 	  frames after the contact's step, never come after the freeze's last frozen step; and FrameClock's mark
 	  (fx.luau renderOrder.posed) runs after the rigs' step (choreo.luau renderOrder.rigs) and
-	  before the character's (renderOrder.character), whose contact asks for the cues.
+	  before the character's (renderOrder.character), whose contact asks for the cues. The drawn
+	  pose's step (fx.luau renderOrder.drawnPose, D-479) runs after FrameClock's frame start
+	  (First), whose due cues come first, and before the rigs' step, so it reads the pose that
+	  frame draws.
 	- The pace keys (D-327, D-341, D-351, D-352): hold.paceFrames a whole number of at least
 	  MIN_PACE_FRAMES, hold.hitchFactor strictly between 2 and 3 (a two-refresh frame is the pace,
 	  a three-refresh one a hitch), 0 <= hold.tieFrames < 0.5, timing.paceSamples a whole number of
@@ -306,6 +309,15 @@ return function(ctx: Context): { string }
 		"overlay.displayOrder must sit above the HUD's (ui.hud.displayOrder)"
 	)
 	check(typeof(overlay.screenGuiName) == "string" and overlay.screenGuiName ~= "", "overlay.screenGuiName is missing")
+	-- A full-screen picture reaches every edge of a notched phone (D-475).
+	check(
+		overlay.screenInsets == "None",
+		"overlay.screenInsets must be None: the picture covers the whole screen, past the safe area"
+	)
+	check(
+		overlay.clipToDeviceSafeArea == false,
+		"overlay.clipToDeviceSafeArea must be false: the picture is not clipped to the device's safe area"
+	)
 	check(
 		typeof(overlay.renderStepName) == "string" and overlay.renderStepName ~= "",
 		"overlay.renderStepName is missing"
@@ -359,6 +371,16 @@ return function(ctx: Context): { string }
 	check(
 		isWhole(silhouette.poolCap) and silhouette.poolCap >= 0,
 		"silhouette.poolCap must be a whole number, 0 or more"
+	)
+	check(
+		isWhole(silhouette.prewarmPerFrame) and silhouette.prewarmPerFrame >= 1,
+		"silhouette.prewarmPerFrame must be a whole number of at least 1: a warming rig's figure is cloned a few parts a frame, never on its hit's frame (D-477)"
+	)
+	check(
+		typeof(silhouette.prewarmInterval) == "number"
+			and silhouette.prewarmInterval > 0
+			and silhouette.prewarmInterval < math.huge,
+		"silhouette.prewarmInterval must be a positive number of seconds (D-477)"
 	)
 	check(typeof(silhouette.excludeNames) == "table", "silhouette.excludeNames must be a list")
 	check(typeof(silhouette.skipWrapLayers) == "boolean", "silhouette.skipWrapLayers must be a boolean")
@@ -467,6 +489,12 @@ return function(ctx: Context): { string }
 	check(
 		posedAt ~= nil and rigsAt ~= nil and characterAt ~= nil and posedAt > rigsAt and posedAt < characterAt,
 		"fx.renderOrder.posed must run after choreo renderOrder.rigs and before renderOrder.character"
+	)
+	local drawnAt = priority(order.drawnPose)
+	local firstAt = priority({ base = "First", offset = 0 })
+	check(
+		drawnAt ~= nil and rigsAt ~= nil and firstAt ~= nil and drawnAt > firstAt and drawnAt < rigsAt,
+		"fx.renderOrder.drawnPose must run after FrameClock's frame start (First) and before choreo renderOrder.rigs"
 	)
 
 	-- Quality

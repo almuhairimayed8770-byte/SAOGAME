@@ -1190,6 +1190,33 @@ describe("EnemyService attack limit (FK2)", function()
 		expect(FREE[heldFrom :: string]).toBe(true)
 	end)
 
+	-- Item 361, shot 8 (parry-spark): Studio logged the kobold moving 0.08 to 0.16 studs a frame
+	-- after its recovery. The server's own path never moves it: the stagger ends into Chase, the
+	-- next tick holds it before the chase hands the mover a goal, even with the player stepped out
+	-- of reach (9 studs) while it was staggered. 0.000 studs from the stagger to the take's end.
+	it("a stagger's end never walks: the body stands still from the stagger to the take's end", function()
+		fresh()
+		local id, model = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		putPlayer(1, Vector3.new(0, 3, -6))
+		EnemyService.limitAttacks(id, 1)
+		expect(advanceUntil(function()
+			return phaseOf(id) == "WindUp"
+		end, 5)).toBe(true)
+		advance(0.3)
+		EntityService.setState(id, "Stagger", Combat.parryStagger)
+		putPlayer(1, Vector3.new(0, 3, -9))
+		local from = bodyOf(model).position
+		local moved = 0
+		local elapsed = 0
+		while elapsed < Combat.parryStagger + 3 do
+			advance(TICK)
+			elapsed += TICK
+			moved = math.max(moved, (bodyOf(model).position - from).Magnitude)
+		end
+		expect(EnemyService.isHeld(id)).toBe(true)
+		expect(moved).toBeLessThan(1e-3)
+	end)
+
 	it("two attacks left let two go; nil lifts the limit; the timing never changes before it is spent", function()
 		fresh()
 		local limited = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))

@@ -14,6 +14,14 @@
 	engine draws one Highlight per adornee, so a second Highlight on the same model (the old
 	TelegraphFill) could hide this one, and a boar never showed a hit's white (issue 3). A flash
 	over a tint wins for its frames, then the tint comes back.
+
+	The budget holds every Highlight this lights (D-476): a flash or a tint lit its Highlight
+	whether the ranking had it on or not, so a wide kill on the rigs past the nearest 31 drew one
+	Highlight more per flash (41 for 10). A rig showing one now ranks as a signal
+	(OutlineRanking, fx.luau outline.signalRank): after Boss, Lock and Party, before a resting
+	outline, at any distance. It takes the farthest resting outline's slot for its frames and gives
+	it back when it ends; the always-on keep theirs; among the flashes the nearer wins, and one with
+	no slot left does not show. A flash on a rig already lit re-ranks nothing.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -35,6 +43,7 @@ type Entry = {
 	ranked: boolean, -- inside the budget on the last rank
 	flashCancel: (() -> ())?,
 	flashing: boolean,
+	flashTook: boolean, -- the flash ranked a rig the budget had off: its end ranks again
 	tinted: boolean, -- a telegraph's fill (tintColor, tintTransparency) is on
 	tintColor: Color3,
 	tintTransparency: number,
@@ -67,8 +76,9 @@ local function inkFor(model: Instance): Color3
 	return Color3.new(rgb[1], rgb[2], rgb[3])
 end
 
+-- Lit only inside the budget: a flash or a tint ranks as a signal (D-476), never past it.
 local function applyEnabled(entry: Entry)
-	entry.highlight.Enabled = not entry.suspended and (entry.ranked or entry.flashing or entry.tinted)
+	entry.highlight.Enabled = not entry.suspended and entry.ranked
 end
 
 -- The fill when no flash is on: the telegraph's tint, else none.
@@ -91,7 +101,12 @@ function OutlineManager.rerank()
 		end
 		local position = Engine.modelPosition(model)
 		local distance = if position ~= nil then Engine.distanceTo(position) else math.huge
-		table.insert(candidates, { key = model, importance = entry.importance, distance = distance })
+		table.insert(candidates, {
+			key = model,
+			importance = entry.importance,
+			distance = distance,
+			signal = entry.flashing or entry.tinted,
+		})
 	end
 	local budget = math.max(0, math.min(Fx.outline.budget, Fx.budgets.highlights) - reserved)
 	local _, chosen = OutlineRanking.select(candidates, budget, params.outlineDistance)
@@ -127,6 +142,7 @@ function OutlineManager.register(model: Instance, importance: Importance?)
 		ranked = false,
 		flashCancel = nil,
 		flashing = false,
+		flashTook = false,
 		tinted = false,
 		tintColor = highlight.FillColor,
 		tintTransparency = Fx.outline.fillTransparency,
@@ -160,7 +176,8 @@ function OutlineManager.setImportance(model: Instance, importance: Importance)
 	OutlineManager.rerank()
 end
 
---- Fills the rig's Highlight with a token color for `frames` rendered frames, then restores it.
+--- Fills the rig's Highlight with a token color for `frames` rendered frames, then restores it. A
+--- rig the budget had off takes the farthest resting outline's slot for those frames (D-476).
 function OutlineManager.flash(model: Instance, token: string, frames: number)
 	if entries[model] == nil then
 		OutlineManager.register(model)
@@ -173,12 +190,22 @@ function OutlineManager.flash(model: Instance, token: string, frames: number)
 	entry.highlight.FillColor = Palette.color3(resolved :: any)
 	entry.highlight.FillTransparency = Fx.outline.flashFillTransparency
 	entry.flashing = true
-	applyEnabled(entry)
+	if entry.ranked then
+		applyEnabled(entry)
+	else
+		entry.flashTook = true
+		OutlineManager.rerank()
+	end
 	entry.flashCancel = FrameClock.after(frames, function()
 		entry.flashing = false
 		entry.flashCancel = nil
 		applyRestingFill(entry)
-		applyEnabled(entry)
+		if entry.flashTook then
+			entry.flashTook = false
+			OutlineManager.rerank()
+		else
+			applyEnabled(entry)
+		end
 	end)
 end
 
@@ -189,13 +216,19 @@ function OutlineManager.tint(model: Instance, color: Color3, fillTransparency: n
 		OutlineManager.register(model)
 	end
 	local entry = entries[model] :: Entry
+	local was = entry.tinted
 	entry.tinted = true
 	entry.tintColor = color
 	entry.tintTransparency = fillTransparency
 	if not entry.flashing then
 		applyRestingFill(entry)
 	end
-	applyEnabled(entry)
+	-- Ranks as a signal (D-476); a tint already on (each frame's fade) re-ranks nothing.
+	if was or entry.ranked then
+		applyEnabled(entry)
+	else
+		OutlineManager.rerank()
+	end
 end
 
 --- Takes a telegraph's tint off the rig's Highlight (a flash showing keeps its frames).
@@ -208,7 +241,8 @@ function OutlineManager.untint(model: Instance)
 	if not entry.flashing then
 		applyRestingFill(entry)
 	end
-	applyEnabled(entry)
+	-- Its slot as a signal goes back to the ranking (D-476).
+	OutlineManager.rerank()
 end
 
 --- Hides (true) or restores (false) a rig's outline without forgetting it (the shatter hides the rig).
@@ -269,6 +303,19 @@ function OutlineManager.start()
 			OutlineManager.rerank()
 		end
 	end)
+end
+
+--- Forgets every registered rig (its flash cancelled, its Highlight destroyed) and every reserved
+--- slot (specs: a budget count starts from nothing another spec left registered).
+function OutlineManager.reset()
+	for model, entry in entries do
+		if entry.flashCancel ~= nil then
+			entry.flashCancel()
+		end
+		entry.highlight:Destroy()
+		entries[model] = nil
+	end
+	reserved = 0
 end
 
 return OutlineManager

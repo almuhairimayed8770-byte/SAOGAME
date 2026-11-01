@@ -12,6 +12,14 @@
 	not its fastest. The front foot steps in on the snap and the rear foot is drawn up in the
 	recovery (QuadIn, then QuadOut through 0.365); the recovery ends a quarter of the way back to
 	the ready guard.
+	Mashed pull (D-492): a QuadIn key at 0.0208 leaves the ready guard toward the middle of the
+	wind-up, so a mashed start from the first basic's contact pose spreads its pull over the frames
+	(it peaked at 2.52 studs a frame, 70% of the snap; now 1.70, 47%), and the off hand is 70% of
+	the way to its cocked pose by 0.067 (its Run@0.5 hand-over turned 20.2 degrees a frame, 19.6).
+	The cock at 0.1 is unchanged, so the hit path and the window are too.
+	Middle wind-up key (D-493): the sword wrist rolls 3.5 degrees less by 0.067 (-9.1, was -12.6),
+	so with the kobold's rest pose on the field (D-483) the blade passes over its near leg at 4.8
+	(0.341 deep, now 0.170) and the hand turns at most 19.4 degrees a frame into the cock (20 max).
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -62,21 +70,43 @@ local clip: Types.ClipDef = {
 			root = { pos = { 0, 0, 0 } },
 		},
 		{
+			time = 0.0208,
+			easing = "QuadIn",
+			joints = {
+				LeftAnkle = rot(14.42, -0.11, 6.19),
+				LeftHip = rot(26.47, -1.22, -6.17),
+				LeftKnee = rot(-40.25, 0, 0),
+				LeftShoulder = rot(19.42, 0, -17.45),
+				LeftWrist = rot(0, 0, 7.77),
+				Neck = rot(5.78, 4.4, -0.22),
+				RightAnkle = rot(23.96, 0.98, -6.66),
+				RightElbow = rot(48.02, 0, 0),
+				RightHip = rot(-3.14, 0.97, 6.61),
+				RightKnee = rot(-34.62, 0, 0),
+				RightShoulder = rot(30.82, -5.25, 6.86),
+				RightWrist = rot(-28.1, -0.65, -4.54),
+				Root = posRot(-0.004, -0.121, -0.001, 0, 0.36, 0),
+				Waist = rot(-8, 1.66, 0.9),
+				Weapon = rot(-50.9, 0, -8.96),
+			},
+			root = { pos = { 0, 0, 0 } },
+		},
+		{
 			time = 0.0667,
 			easing = "QuadIn",
 			joints = {
 				LeftAnkle = rot(30.4, -4.8, 5.2),
 				LeftHip = rot(46.6, -2.3, -4),
 				LeftKnee = rot(-68.6, 0, 0),
-				LeftShoulder = rot(9.5, 0, -21.8),
-				LeftWrist = rot(0, 0, 3.8),
+				LeftShoulder = rot(7.5, 0, -22.7),
+				LeftWrist = rot(0, 0, 3),
 				Neck = rot(5.4, -9.1, -0.6),
 				RightAnkle = rot(16.2, -0.1, -8.1),
 				RightElbow = rot(50.6, 0, 0),
 				RightHip = rot(8.6, 2.5, 6.7),
 				RightKnee = rot(-55.2, 0, 0),
 				RightShoulder = rot(29.5, -1.8, 8.5),
-				RightWrist = rot(-33.6, -1.8, -12.6),
+				RightWrist = rot(-33.6, -1.8, -9.1),
 				Root = posRot(-0.037, -0.132, -0.012, 0, 3.7, 0),
 				Waist = rot(-8, 14, 2.5),
 				Weapon = rot(-52.5, 0, -14.9),

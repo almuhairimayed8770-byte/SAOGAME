@@ -183,3 +183,57 @@ describe("Shatter's white flash across a render stall", function()
 		end
 	end)
 end)
+
+-- Kills that land together (D-478): one sweep's kills, and another fight's across the map in the
+-- same frame. Each body flashes and breaks where it stood, on that frame; the shatter cue cracks
+-- once within one sound's reach of any of them.
+describe("Shatter: kills that land together (D-478)", function()
+	-- A one-part rig standing at `position`.
+	local function rigAt(position: Vector3): Model
+		local model = rig()
+		local torso = model.PrimaryPart :: BasePart
+		torso.CFrame = CFrame.new(position)
+		return model
+	end
+
+	it("crack once within a sound's reach of any of them; each body flashes where it stood", function()
+		local flashes: { Vector3 } = {}
+		Bursts.bind({
+			now = function(): number
+				return 0
+			end,
+			onHeartbeat = function(_fn: (number) -> ()): () -> ()
+				return function() end
+			end,
+			emit = function(emitter: any, _count: number)
+				table.insert(flashes, (emitter.Parent :: BasePart).CFrame.Position)
+			end,
+			clear = function(_emitter: any) end,
+		})
+		local ok, err = pcall(function()
+			recording(function(plays)
+				local here = Vector3.new(0, 3, 0)
+				local across = here + Vector3.new(sfx.mix.rolloffMaxDistance * 2, 0, 0)
+				local beside = here + Vector3.new(fx.audio.dedupeDistance * 2, 0, 0)
+				local spots = { here, across, beside }
+				local before = Shatter.liveCount()
+				for _, spot in spots do
+					Shatter.play(rigAt(spot), "Beast")
+				end
+				-- One Shatter here and one across the map; the second kill here adds none.
+				expect(#plays).toBe(2 * #sfx.cue(sfx.shatterCues.normal))
+				-- Every body still breaks and flashes at its own spot, this frame.
+				expect(Shatter.liveCount() - before).toBeGreaterThanOrEqual(3)
+				expect(#flashes).toBe(#spots)
+				for index, spot in spots do
+					expect((flashes[index] - spot).Magnitude).toBeLessThan(1e-3)
+				end
+			end)
+		end)
+		Bursts.reset()
+		Bursts.bind(nil)
+		if not ok then
+			error(err, 0)
+		end
+	end)
+end)

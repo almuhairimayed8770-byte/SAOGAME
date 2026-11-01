@@ -37,6 +37,11 @@
 	one sweep into one picture, charged once; a later hit of the sweep whose picture already ended
 	draws none again unless its hit-stop is stronger.
 
+	Deaths that land together are one bloom (D-478): inside moments.sweep.mergeSeconds of the
+	moment's first bloom, a death whose bloom rings no longer than the one already playing adds
+	nothing (one sweep's kills, a player's death beside them), and a longer one (a boss's) takes
+	over. A death past its range blooms nothing and takes no part in the moment.
+
 	Order on a hit: the cue first (its crack starts with the picture), then the impact frames;
 	the 3D accents (glint, crescent, slash line, the Highlight flash, the Switch trail flash) wait
 	while the impact frames hide the world for this viewer (ImpactFrames.hiddenSeconds: a
@@ -70,6 +75,7 @@ local Shared = ReplicatedStorage.Shared
 local Moments = require(Shared.data.moments)
 local Accents = require(Shared.data.accents)
 local Combat = require(Shared.data.combat)
+local Sfx = require(Shared.data.sfx)
 local Engine = require(script.Parent.Engine)
 local Siblings = require(script.Parent.Parent.controllers.Siblings)
 
@@ -143,6 +149,10 @@ type Sweep = { at: number, fired: { [string]: boolean }, strongest: { [string]: 
 local sweeps: { [any]: Sweep } = setmetatable({}, { __mode = "k" }) :: any
 local ownSweeps: { [any]: Sweep } = setmetatable({}, { __mode = "k" }) :: any
 local NO_ATTACKER = {} -- the sweep key of a hit whose attacker this client does not track
+-- The bloom of the deaths landing together (D-478): when the moment's first bloom started and how
+-- long the longest bloom it played rings, in seconds.
+type Bloom = { at: number, seconds: number }
+local bloom: Bloom? = nil
 
 -- ------------------------------------------------------------------ plumbing
 
@@ -582,12 +592,13 @@ local function playHit(info: HitInfo, before: Moments.Moment?): string
 	local position = info.position
 	local involved = info.involved
 	local switchName, switch = switchRow(name, row, info)
-	-- The upgrade a confirmation brings to a contact: only a stronger hit-stop adds anything (a
-	-- crit or a Switch the contact could not know keeps the contact's sound and accents): its cue,
-	-- picture, contour and punch, and the accents the contact's moment lacked. The target already
-	-- flashed white on contact, and the Switch layer is the contact's to have played.
+	-- The upgrade a confirmation brings to a contact: only a stronger hit-stop adds its cue,
+	-- picture, contour and punch, and the accents the contact's moment lacked (a crit the contact
+	-- could not know keeps the contact's sound and accents). The target already flashed white on
+	-- contact. The Switch layer is the server's word alone (a contact never claims one, D-470): it
+	-- plays on the confirmation unless the contact's own moment was the Switch.
 	local stronger = before == nil or rankOf(row) > rankOf(before)
-	if before ~= nil then
+	if before ~= nil and before == Moments.rows.Switch then
 		switchName, switch = nil, nil
 	end
 
@@ -713,8 +724,9 @@ end
 --- (Replication.contact, issue 4). The server's confirmation then plays only what its moment
 --- adds, and only when its hit-stop is stronger (a Kill the contact could not prove): its cue,
 --- impact frames, contour and punch, its own white flash after the frames (D-349), and a crescent
---- or slash line the contact's moment did not have. Never a second glint or the Switch layer; a
---- crit the contact could not know shows in its number only. With `info.late` (the word came
+--- or slash line the contact's moment did not have. Never a second glint; a crit the contact could
+--- not know shows in its number only. A Switch the contact could not know plays its layer (the
+--- land sound, both blades' white flash) on the confirmation, whatever its tier (D-470). With `info.late` (the word came
 --- after the contact's freeze let go, D-348) it draws no picture and no punch.
 function Impact.hit(info: HitInfo, previous: string?): string
 	local name = ""
@@ -862,14 +874,41 @@ function Impact.shatterCue(boss: boolean, heavy: boolean?): string
 	return if cue ~= nil then cue else Moments.byId("Death").shatterCue :: string
 end
 
---- A death, as its shatter starts: the bloom contour for everyone in range. The shatter's own cue
---- is Shatter.luau's (SfxPool.shatter, the cue from `shatterCue`), never played here.
+-- Seconds a contour rings: its last step's start plus that step's ramp (0 for a name sfx.luau lacks).
+local function contourSeconds(name: string): number
+	local ok, steps = pcall(Sfx.contour, name)
+	local seconds = 0
+	if ok then
+		for _, contourStep in steps do
+			seconds = math.max(seconds, contourStep.at + contourStep.ramp)
+		end
+	end
+	return seconds
+end
+
+--- A death, as its shatter starts: the bloom contour for everyone in range, once for deaths that
+--- land together (a longer bloom takes over, D-478). The shatter's own cue is Shatter.luau's
+--- (SfxPool.shatter, the cue from `shatterCue`), never played here.
 function Impact.death(_model: Model?, position: Vector3, boss: boolean, heavy: boolean?)
 	local name = Moments.deathFor(boss, heavy)
 	local row = Moments.byId(name)
-	if row.contour ~= nil and allowed(name, "Contour", false, position) then
-		call("sfx", "contour", row.contour)
+	local contour = row.contour
+	if contour == nil or not allowed(name, "Contour", false, position) then
+		return
 	end
+	local at = now()
+	local seconds = contourSeconds(contour)
+	local current = bloom
+	if current ~= nil and at - current.at <= Moments.sweep.mergeSeconds then
+		if seconds <= current.seconds then
+			return
+		end
+		-- A longer bloom takes the moment over; the moment still dates from its first.
+		current.seconds = seconds
+	else
+		bloom = { at = at, seconds = seconds }
+	end
+	call("sfx", "contour", contour)
 end
 
 -- ------------------------------------------------------------------ binding
@@ -880,6 +919,7 @@ function Impact.bind(newDeps: Deps)
 	table.clear(reported)
 	table.clear(sweeps)
 	table.clear(ownSweeps)
+	bloom = nil
 end
 
 -- The tangent projected through the current camera into a screen direction (x right, y down).

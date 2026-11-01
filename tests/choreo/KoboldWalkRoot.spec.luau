@@ -12,7 +12,8 @@
 	- ClipAudit finds no Sink for the walk in any plan.
 
 	The bounds are review.audit's own; none moves. The walk's stride against the rig's walkSpeed
-	(its Slide and Drift) is still pending in ClipAudit.spec.
+	(its Slide and Drift through a whole cycle) is EnemyWalkStride.spec's (D-482); ClipAudit.spec
+	keeps only the Lab's cut-in over the fading idle pending.
 ]]
 
 local Dev = Harness.load("src/shared/data/dev")

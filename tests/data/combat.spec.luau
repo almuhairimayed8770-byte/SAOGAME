@@ -131,6 +131,49 @@ describe("combat data: the server hit sweep", function()
 		expect(runValidator()).toEqual({})
 	end)
 
+	it("a server run's speed stays between Freeze's -40% and Overwhelm's +40% (D-469)", function()
+		expect(combat.actionSpeed.min).toBe(0.6)
+		expect(combat.actionSpeed.max).toBe(1.4)
+		expect(combat.actionSpeed.min).toBe(combat.status.Freeze.speedMultiplier)
+		-- AGI's +15% with the Herald's Rally +10% stacks under the top.
+		expect(1.15 * 1.1).toBeLessThan(combat.actionSpeed.max)
+	end)
+
+	it("the validator wants the action speed around 1, inside the Mixer's speeds, and a sprint followed", function()
+		for _, bad in
+			{
+				"fast",
+				{ min = 1.1, max = 1.4 },
+				{ min = 0.6, max = 0.9 },
+				{ min = 0, max = 1.4 },
+				{ min = 0 / 0, max = 1.4 },
+				{ min = 0.6 },
+			}
+		do
+			expect(mentions(runValidator({ actionSpeed = bad }), "actionSpeed")).toBe(true)
+		end
+		-- Past the Mixer's 4x a client would play the clip slower than the server sweeps it.
+		local tooFast = runValidator({ actionSpeed = { min = 0.6, max = 5 } })
+		expect(#tooFast).toBe(1)
+		expect(mentions(tooFast, "minSpeed..maxSpeed")).toBe(true)
+		-- 0.3 x 90 = 27 studs a second, under the sprint cap's 24 x 1.25 = 30.
+		local tooSlow = runValidator({ actionSpeed = { min = 0.3, max = 1.4 } })
+		expect(#tooSlow).toBe(1)
+		expect(mentions(tooSlow, "sprinting body")).toBe(true)
+		expect(runValidator({ actionSpeed = { min = 0.34, max = 4 } })).toEqual({})
+	end)
+
+	it("the guard break holds the Final tier, which the validator wants over Normal (D-471)", function()
+		expect(combat.guardBreakHitStop).toBe("Final")
+		expect(combat.hitStopFrames[combat.guardBreakHitStop]).toBe(6)
+		expect(mentions(runValidator({ guardBreakHitStop = "Huge" }), "guardBreakHitStop")).toBe(true)
+		expect(mentions(runValidator({ guardBreakHitStop = 6 }), "guardBreakHitStop")).toBe(true)
+		local plain = runValidator({ guardBreakHitStop = "Normal" })
+		expect(#plain).toBe(1)
+		expect(mentions(plain, "plain hit")).toBe(true)
+		expect(runValidator({ guardBreakHitStop = "Kill" })).toEqual({})
+	end)
+
 	it("the validator wants the step at most two radii and the cap a positive whole number", function()
 		local wide = runValidator({ sweepMaxTipStep = combat.hitSphereRadius * 2 + 0.01 })
 		expect(#wide).toBe(1)

@@ -16,7 +16,8 @@
 	the drawn one (choreo enemy.rush.turnRate), a daze no shorter than a parry's stagger, and a
 	climbable riser below every Charger rig's hip. A rush's dead stop leads by at most one AI tick,
 	and a walking body's snout slack in a wall stays below a rush's corner margin (D-278, D-279); a
-	blocked step tells running from blocked and is told before the jam lag (D-280).
+	blocked step tells running from blocked and is told before the jam lag (D-280). Every enemy
+	Humanoid keeps out of FallingDown and only ever out of fall states (upright.offStates, D-494).
 ]]
 
 type Context = {
@@ -608,6 +609,35 @@ local function validate(ctx: Context): { string }
 					problem(("rushWorld.probeStuds must reach below rig %s's hip"):format(def.skin))
 				end
 			end
+		end
+	end
+
+	-- D-494: the fall states every enemy Humanoid keeps out of are engine state names, and never a
+	-- state the body needs (standing, walking, the air, getting up, death).
+	local upright = AI.upright
+	if typeof(upright) ~= "table" or typeof(upright.offStates) ~= "table" or #upright.offStates == 0 then
+		problem("upright.offStates must be a non-empty list of Humanoid state names")
+	else
+		local fallStates =
+			{ FallingDown = true, Ragdoll = true, Physics = true, PlatformStanding = true, Seated = true }
+		local seen: { [string]: boolean } = {}
+		for _, name in upright.offStates do
+			if typeof(name) ~= "string" or not fallStates[name] then
+				problem(
+					("upright.offStates: %s is not a fall state an enemy may keep out of (%s)"):format(
+						tostring(name),
+						"FallingDown, Ragdoll, Physics, PlatformStanding, Seated"
+					)
+				)
+			elseif seen[name] then
+				problem(("upright.offStates names %s twice"):format(name))
+			end
+			if typeof(name) == "string" then
+				seen[name] = true
+			end
+		end
+		if not seen.FallingDown then
+			problem("upright.offStates must hold FallingDown (the staged charge's jam, D-494)")
 		end
 	end
 

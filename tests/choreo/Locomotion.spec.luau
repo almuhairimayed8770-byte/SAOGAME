@@ -1311,3 +1311,84 @@ describe("Locomotion's jump", function()
 		Choreo.release(model)
 	end)
 end)
+
+-- Item 91 (D-472): the local fighter's sprint cut by a dodge. CharacterController plays the dodge
+-- (handOver, as CharacterController.dodge does) and its Humanoid walks at 0 from then on, so the
+-- root's speed falls under the dodge a frame or more later. The Skid that fall calls would only be
+-- heard under the dodge: it does not play. A sprint let go with nothing on the body still skids.
+describe("Locomotion: a stop under an action", function()
+	local SKID = Config.clipPrefix .. Config.clips.Skid
+	local DODGE_FORWARD = Config.clipPrefix .. "DodgeForward"
+	local FORWARD = Vector3.new(0, 0, -1)
+
+	-- Sprints 1 s, then `before` (may play an action) and the root's speed falls to 0 `dropAfter`
+	-- frames later. Returns the Skid's clip sounds and whether a live Skid handle ever played.
+	local function sprintThenStop(before: ((any) -> ())?, dropAfter: number): (number, boolean)
+		local model = buildRig("PlayerR15")
+		local animator = Choreo.get(model)
+		local locomotion = Locomotion.new(animator, model, { footIK = false }) :: any
+		local sounds = 0
+		local connection = animator.events:Connect(function(clipId, event)
+			if clipId == SKID and event.kind == "Sfx" then
+				sounds += 1
+			end
+		end)
+		local function frame(speed: number)
+			locomotion:update(FRAME, {
+				moveDir = if speed > 0 then FORWARD else Vector3.zero,
+				speed = speed,
+				sprinting = speed > 0,
+				grounded = true,
+				turning = 0,
+			})
+			animator:step(FRAME)
+		end
+		for _ = 1, 60 do
+			frame(Config.sprintSpeed)
+		end
+		if before ~= nil then
+			before(animator)
+		end
+		for _ = 1, dropAfter do
+			frame(Config.sprintSpeed)
+		end
+		local played = false
+		for _ = 1, 45 do
+			frame(0)
+			played = played or handleOf(animator, SKID) ~= nil
+		end
+		connection:Disconnect()
+		locomotion:destroy()
+		Choreo.release(model)
+		return sounds, played
+	end
+
+	it("a sprint stopped with nothing on the body plays the Skid and its landing", function()
+		local sounds, played = sprintThenStop(nil, 0)
+		expect(played).toBe(true)
+		expect(sounds).toBe(1)
+	end)
+
+	it("a sprint cut by a dodge plays no Skid under it, the fall on the press frame or after", function()
+		for dropAfter = 0, 3 do
+			local sounds, played = sprintThenStop(function(animator)
+				animator:play(DODGE_FORWARD, { handOver = true })
+			end, dropAfter)
+			expect(played).toBe(false)
+			expect(sounds).toBe(0)
+		end
+	end)
+
+	it("an attack holds the body as a dodge does; a weightless Land (a landing on the move) does not", function()
+		local sounds, played = sprintThenStop(function(animator)
+			animator:play(Config.clipPrefix .. "Basic1", { handOver = true })
+		end, 1)
+		expect(played).toBe(false)
+		expect(sounds).toBe(0)
+		sounds, played = sprintThenStop(function(animator)
+			animator:play(Config.clipPrefix .. Config.clips.Land, { weight = 0 })
+		end, 0)
+		expect(played).toBe(true)
+		expect(sounds).toBe(1)
+	end)
+end)

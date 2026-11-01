@@ -260,6 +260,8 @@ describe("Hud SWITCH prompt (instances)", function()
 		expect(gui.IgnoreGuiInset).toBe(false)
 		expect(UI.hud.screenInsets).toBe("CoreUISafeInsets")
 		expect(gui.ScreenInsets).toBe(Enum.ScreenInsets.CoreUISafeInsets)
+		-- Only the full-screen effects reach past the safe area (D-475); the HUD stays clipped to it.
+		expect(gui.ClipToDeviceSafeArea).toBe(true)
 		local corner = gui:FindFirstChild("TopLeft")
 		expect(corner).never.toBeNil()
 		expect(corner.Position).toEqual(UDim2.fromOffset(UI.hud.margin, UI.hud.margin))

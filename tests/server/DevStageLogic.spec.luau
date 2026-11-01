@@ -182,6 +182,23 @@ describe("DevStageLogic body: never inside the ledge or its ramp", function()
 		expect(rampBox.max).toEqual({ LEDGE.position[1] + ramp[1] / 2, FLOOR + ramp[2], edge + ramp[3] })
 	end)
 
+	it("tells a read near where the ledge or its ramp goes, flat, for the parts asked about (item 359(b))", function()
+		local names = { LEDGE.name, LEDGE.ramp.name }
+		local front = LEDGE.position[3] - LEDGE.size[3] / 2
+		local x = LEDGE.position[1]
+		expect(Logic.nearParts(LEDGE, x, LEDGE.position[3], 1, names)).toBe(true)
+		expect(Logic.nearParts(LEDGE, x, front - 9.9, 10, names)).toBe(true)
+		expect(Logic.nearParts(LEDGE, x, front - 10.1, 10, names)).toBe(false)
+		-- A corner: the flat distance to it, not each axis's.
+		local minX = LEDGE.position[1] - LEDGE.size[1] / 2
+		expect(Logic.nearParts(LEDGE, minX - 7.1, front - 7.1, 10, names)).toBe(false)
+		expect(Logic.nearParts(LEDGE, minX - 7, front - 7, 10, names)).toBe(true)
+		-- Only the parts asked about (the ramp's footprint lies behind the ledge's).
+		local _, _, rampZ = Logic.rampFrame(LEDGE)
+		expect(Logic.nearParts(LEDGE, x, rampZ + 20, 10, { LEDGE.name })).toBe(false)
+		expect(Logic.nearParts(LEDGE, x, front - 1, 10, {})).toBe(false)
+	end)
+
 	it("finds a body standing on the field where the ledge or its ramp goes", function()
 		local x, z = LEDGE.position[1], LEDGE.position[3]
 		expect(Logic.bodyInside(LEDGE, x, FLOOR, z, REACH, HEIGHT, TOUCH)).toBe(LEDGE.name)

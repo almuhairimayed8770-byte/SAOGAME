@@ -62,15 +62,20 @@ local function setupOf(id: string): any
 	error("no hit matrix setup " .. id)
 end
 
--- An enemy's rig in its rest pose where the hit matrix stands it (its bearing, yaw and height).
-local function place(setup: any, distance: number): any
+-- An enemy's rig in its rest pose where the hit matrix stands it (its bearing, yaw and height),
+-- `below` studs lower when it stands on ground below the player's.
+local function place(setup: any, distance: number, below: number?): any
 	local def = Enemies.byId(setup.enemy)
 	local model = RigBuilder.build(def.skin)
 	local height =
 		PlaygroundLayout.rootHeight(Rigs[def.skin].hipHeight, model.PrimaryPart.Size.Y, World.spawn.groundEpsilon)
 	local bearing = math.rad(setup.bearing or 0)
 	local frame = avatar.base
-		* CFrame.new(math.sin(bearing) * distance, height - avatar.rootHeight, -math.cos(bearing) * distance)
+		* CFrame.new(
+			math.sin(bearing) * distance,
+			height - avatar.rootHeight - (below or 0),
+			-math.cos(bearing) * distance
+		)
 		* CFrame.Angles(0, math.pi - bearing + math.rad(setup.yaw), 0)
 	for name, solved in Pose.solve(model, frame, {}) do
 		local part = model:FindFirstChild(name)
@@ -117,9 +122,9 @@ local function gap(model: any, clip: any, root: CFrame, time: number, held: { st
 	return best
 end
 
-local function standOffFor(artId: string, setupId: string, distance: number): (any, any, any, number)
+local function standOffFor(artId: string, setupId: string, distance: number, below: number?): (any, any, any, number)
 	local clip = artClip(artId)
-	local model = place(setupOf(setupId), distance)
+	local model = place(setupOf(setupId), distance, below)
 	local from = holdTime(clip)
 	local plan = ContactPredictor.standOff(avatar.model, clip, from, avatar.base, model)
 	return plan, clip, model, from
@@ -510,7 +515,10 @@ end)
 
 describe("the Art stand-off steps back from the body, not from the weapon it holds (D-277)", function()
 	it("the Rising Arc's start pose that meets only the kobold's club takes no step", function()
-		local plan, clip, model, from = standOffFor("OneHandedSword.RisingArc", "Kobold", 3.5)
+		-- The kobold on ground 0.2 below the player's: its rest pose stands on its floor (D-483), so
+		-- on level ground its club hangs 0.27 above where the cut starts, clear of it; 0.2 lower it
+		-- holds the club where the cut starts, as it did when its feet stood 0.2 into the field.
+		local plan, clip, model, from = standOffFor("OneHandedSword.RisingArc", "Kobold", 3.5, 0.2)
 		expect(plan).toBeNil()
 		-- The start pose is in the club, and clear of the body.
 		local window = ClipSampler.hitWindows(clip)[1]

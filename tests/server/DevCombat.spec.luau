@@ -1097,6 +1097,38 @@ describe("DevCombat Studio test hooks (D-333)", function()
 		expect(busy.invoke("charge", { entityId = 11, toward = { 10, 0, -5 } }).ok).toBe(true)
 	end)
 
+	-- Item 348(a): "with a boar mid-wind-up run S('hold') then S('charge') at once" answered busy,
+	-- because the charge that put the boar in its wind-up still waited. A hold or an "enemy" on the
+	-- enemy a charge waits for ends that wait there and then (D-500); a hold on any other enemy
+	-- leaves it waiting, and the other waiting commands stay one at a time (D-467).
+	it("a hold or an enemy move on the charging boar ends its charge's wait, so the next charge goes", function()
+		for _, how in { "hold", "enemy" } do
+			local world = load({ studio = true, capture = true })
+			world.chargePlan.run = 2
+			local released: any, second: any, other: any, basic: any = nil, nil, nil, nil
+			world.clock.after(0.3, function()
+				other = world.invoke("hold", { ids = { 99 } })
+				basic = world.invoke("basic", nil)
+				released = if how == "hold"
+					then world.invoke("hold", { ids = { 11 } })
+					else world.invoke("enemy", { entityId = 11, position = { 0, 0, -5 }, hold = true })
+				second = world.invoke("charge", { entityId = 11, toward = { 10, 0, -5 } })
+			end)
+			local first = world.invoke("charge", { entityId = 11, toward = { 10, 0, -5 } })
+			expect(basic.ok).toBe(false)
+			expect(basic.error:find("busy", 1, true)).never.toBeNil()
+			expect(other.error).toBeNil()
+			expect(released.ok).toBe(true)
+			expect(second.error).toBeNil()
+			expect(second.ok).toBe(true)
+			expect(first.ok).toBe(true)
+			expect(first.complete).toBe(false)
+			expect(first.endedBy).toBe(how)
+			-- Once both replied the next one goes.
+			expect(world.invoke("charge", { entityId = 11, toward = { 10, 0, -5 } }).ok).toBe(true)
+		end
+	end)
+
 	it("refuses bad arguments and moves or makes nothing", function()
 		local far = PLACE.maxCoordinate + 1
 		local longName = string.rep("x", HOOKS.maxNameLength + 1)

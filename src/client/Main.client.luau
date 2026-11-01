@@ -118,6 +118,24 @@ if hasQuality and hasChoreo then
 	end)
 end
 
+-- Every tracked rig's impact-frame figure is cloned ahead of its first hit, a few parts a frame,
+-- so the hit's frame clones nothing (D-477).
+local ImpactFrames, hasImpactFrames = siblings["fx.ImpactFrames"], present["fx.ImpactFrames"]
+if hasImpactFrames then
+	startStep("ImpactFrames prewarm", function()
+		local function warm(record: any)
+			Siblings.call(ImpactFrames, "prewarm", record.model)
+		end
+		EntityTracker.added:Connect(warm)
+		EntityTracker.removed:Connect(function(record: any)
+			Siblings.call(ImpactFrames, "forget", record.model)
+		end)
+		for _, record in EntityTracker.all() do
+			warm(record)
+		end
+	end)
+end
+
 -- The telegraph intensity slider lives in the HUD; Telegraphs reads it every frame.
 local Telegraphs, hasTelegraphs = siblings["fx.Telegraphs"], present["fx.Telegraphs"]
 if hasHud and hasTelegraphs then

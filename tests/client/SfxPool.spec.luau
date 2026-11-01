@@ -1803,6 +1803,29 @@ describe("SfxPool.shatter", function()
 			end)
 		end)
 	end)
+
+	it("folds a shatter into any recent one of its cue in reach, not only the last (D-478)", function()
+		scenario(function(w)
+			local normal = sfx.shatterCues.normal
+			withReal(layerNames(normal), function()
+				-- One frame: a kill here, a party member's kill across the map, then a second kill
+				-- here (its rig already gone: the death names the cue itself).
+				local across = HIT + Vector3.new(sfx.mix.rolloffMaxDistance * 2, 0, 0)
+				local beside = HIT + Vector3.new(fx.audio.dedupeDistance * 2, 0, 0)
+				SfxPool.shatter(HIT, "normal")
+				SfxPool.shatter(across, "normal")
+				SfxPool.shatter(beside, normal)
+				-- And one more across the map folds into the first one there.
+				SfxPool.shatter(across + Vector3.new(fx.audio.dedupeDistance * 2, 0, 0), "normal")
+				w.run(sfx.limits.cueDelaySeconds + 1)
+				expect(#w.plays).toBe(2 * #sfx.cue(normal))
+				-- Past the window both are forgotten: the next one here is another death's.
+				SfxPool.shatter(beside, "normal")
+				w.run(2 * (sfx.limits.cueDelaySeconds + 1))
+				expect(#w.plays).toBe(3 * #sfx.cue(normal))
+			end)
+		end)
+	end)
 end)
 
 describe("SfxPool.playLate", function()

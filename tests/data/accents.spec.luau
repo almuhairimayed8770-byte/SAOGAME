@@ -260,6 +260,15 @@ describe("accents validator", function()
 			copy.speedLines.displayOrder = 50
 		end)
 		expect(mentions(over, "must sit under the HUD")).toBe(true)
+		-- Full screen past a phone's notch (D-475).
+		expect(accents.speedLines.screenInsets).toBe("None")
+		expect(accents.speedLines.clipToDeviceSafeArea).toBe(false)
+		local inset = broken(function(copy)
+			copy.speedLines.screenInsets = "DeviceSafeInsets"
+			copy.speedLines.clipToDeviceSafeArea = true
+		end)
+		expect(mentions(inset, "speedLines.screenInsets must be None")).toBe(true)
+		expect(mentions(inset, "speedLines.clipToDeviceSafeArea must be false")).toBe(true)
 		local crossing = broken(function(copy)
 			copy.speedLines.kinds.Dash.angleJitter = 0.6
 		end)

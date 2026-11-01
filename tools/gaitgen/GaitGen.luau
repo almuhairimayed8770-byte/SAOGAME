@@ -556,7 +556,9 @@ local function solveKeys(body: Body, gait: Gait): ({ Emit.ClipKey }, number, { s
 			local function mix(i: number): number
 				return offAngles[i] + (onAngles[i] - offAngles[i]) * frac
 			end
-			table.insert(anchors, { t = at, x = { e.hip, mix(2), mix(3), e.knee, e.ankle, mix(6) } })
+			-- `out` turns the hip away from the other leg: Z- for the left leg, Z+ for the right.
+			local out = (e.out or 0) * (gait.swingOut or 1) * (if side == "Left" then -1 else 1)
+			table.insert(anchors, { t = at, x = { e.hip, mix(2), mix(3) + out, e.knee, e.ankle, mix(6) } })
 		end
 		table.insert(anchors, { t = on, x = onAngles })
 		table.sort(anchors, function(a: Anchor, b: Anchor): boolean

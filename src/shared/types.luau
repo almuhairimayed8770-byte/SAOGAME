@@ -466,6 +466,10 @@ export type AppliedHit = HitResult & {
 	hpAfter: number,
 	gaugeAfter: number,
 	staggerDirection: ("Front" | "Back" | "Left" | "Right")?,
+	-- D-470: CombatService's word that this hit is a Switch (a player's Art landing inside another
+	-- player's window on the enemy), and that partner's entity id; nil on every other hit.
+	isSwitch: boolean?,
+	switchPartnerId: number?,
 }
 
 -- CombatService.enemyStrike's optional fifth argument: how a moving strike (a Charger's rush)

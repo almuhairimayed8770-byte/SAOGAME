@@ -371,6 +371,12 @@ return function(ctx: Context): { string }
 		"speedLines.clearFraction must keep at least the middle third clear"
 	)
 	check(isInteger(speed.displayOrder), "speedLines.displayOrder must be an integer")
+	-- Full screen: the rays reach every edge of a notched phone (D-475).
+	check(speed.screenInsets == "None", "speedLines.screenInsets must be None: the lines run from the screen's edges")
+	check(
+		speed.clipToDeviceSafeArea == false,
+		"speedLines.clipToDeviceSafeArea must be false: the lines are not clipped to the device's safe area"
+	)
 	check(
 		isNumber(speed.displayOrder) and speed.displayOrder < ui.hud.displayOrder,
 		"speedLines.displayOrder must sit under the HUD (%s)",

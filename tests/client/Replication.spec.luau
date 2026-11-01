@@ -2,6 +2,7 @@
 local Replication = Harness.load("src/client/controllers/Replication")
 local ChoreoData = Harness.load("src/shared/data/choreo")
 local Impact = Harness.load("src/client/fx/Impact")
+local SfxPool = Harness.load("src/client/audio/SfxPool")
 local combat = Harness.load("src/shared/data/combat")
 local fx = Harness.load("src/shared/data/fx")
 local sfx = Harness.load("src/shared/data/sfx")
@@ -293,14 +294,23 @@ local function setup(options)
 	}
 end
 
--- The shatter cues played straight through SfxPool so far (a death with no rig left).
+-- The shatter cues Replication played itself so far (a death with no rig left), each as
+-- { args = { cue, position } }: through SfxPool.shatter's merge (D-478), and any shatter cue played
+-- straight through sfx.cue, so a death that skips the merge still counts here.
 local function shatterCues(t)
 	local found = {}
-	for _, call in t.find("sfx", "cue") do
-		for _, cue in sfx.shatterCues do
-			if call.args[1] == cue then
-				table.insert(found, call)
-				break
+	for _, call in t.calls do
+		if call.module ~= "sfx" then
+			continue
+		end
+		if call.fn == "shatter" then
+			table.insert(found, { module = "sfx", fn = "shatter", args = { call.args[2], call.args[1] } })
+		elseif call.fn == "cue" then
+			for _, cue in sfx.shatterCues do
+				if call.args[1] == cue then
+					table.insert(found, call)
+					break
+				end
 			end
 		end
 	end
@@ -1475,7 +1485,7 @@ describe("Replication", function()
 	end)
 
 	it(
-		"EntityDied plays the shatter cue once: through the shatter with a rig, directly when the rig is gone",
+		"EntityDied plays the shatter cue once: through the shatter with a rig, through SfxPool.shatter when the rig is gone",
 		function()
 			local t = setup()
 			Replication.dispatch(
@@ -1553,7 +1563,7 @@ describe("Replication", function()
 		expect(releaseAt :: number).toBeLessThan(shatterAt :: number)
 		expect(#t.find("sfx", "duck")).toBe(2)
 
-		-- The second death has no rig: its own release comes before the cue it plays directly.
+		-- The second death has no rig: its own release comes before the cue it plays itself.
 		runUntil(start + lead + combat.deathFreeze + moments.sweep.mergeSeconds)
 		ducks = t.find("sfx", "duck")
 		expect(#ducks).toBe(3)
@@ -1563,12 +1573,111 @@ describe("Replication", function()
 		for index, call in t.calls do
 			if call.module == "sfx" and call.fn == "duck" then
 				lastRelease = index
-			elseif call.module == "sfx" and call.fn == "cue" then
+			elseif call.module == "sfx" and call.fn == "shatter" then
 				cueAt = index
 			end
 		end
 		expect(#shatterCues(t)).toBe(1)
 		expect(lastRelease).toBeLessThan(cueAt)
+	end)
+
+	it("EntityDied with no rig left shatters through SfxPool.shatter's merge, never past it (D-478)", function()
+		local t = setup()
+		Replication.dispatch("EntityDied", { entityId = 99, shatter = "Beast", position = { 1, 2, 3 }, name = "Gone" })
+		Replication.dispatch("EntityDied", { entityId = 98, shatter = "Boss", position = { 4, 5, 6 }, name = "Gone" })
+		runScheduled(t)
+		-- Nothing plays a shatter cue straight through the pool, past the merge.
+		for _, call in t.find("sfx", "cue") do
+			for _, cue in sfx.shatterCues do
+				expect(call.args[1]).never.toBe(cue)
+			end
+		end
+		-- Each goes through SfxPool.shatter where the server said it died, naming its cue.
+		local merged = t.find("sfx", "shatter")
+		expect(#merged).toBe(2)
+		expect(merged[1].args[1]).toBe(Vector3.new(1, 2, 3))
+		expect(merged[1].args[2]).toBe(sfx.shatterCues.normal)
+		expect(merged[2].args[1]).toBe(Vector3.new(4, 5, 6))
+		expect(merged[2].args[2]).toBe(sfx.shatterCues.boss)
+	end)
+
+	it("EntityDied: deaths in one frame are one shatter, one cue and one bloom, a rig gone or not (D-478)", function()
+		local t = setup()
+		-- The real pool (its plays recorded) and the real director (its blooms recorded); the
+		-- shatter's sound is Shatter.play's own line, SfxPool.shatter at the rig (Shatter.spec).
+		local played: { string } = {}
+		SfxPool.reset()
+		SfxPool.bind({
+			now = function(): number
+				return t.state.clock
+			end,
+			delay = function(_seconds: number, _fn: () -> ()) end,
+			onStep = function(_fn: (number) -> ()): () -> ()
+				return function() end
+			end,
+			play = function(sound: Sound): boolean
+				table.insert(played, sound.Name)
+				return true
+			end,
+			stop = function(_sound: Sound) end,
+			timeLength = function(_sound: Sound): number
+				return 30
+			end,
+			preload = function(_sounds: { Instance }) end,
+		})
+		local blooms: { string } = {}
+		Impact.bind({
+			sfx = {
+				contour = function(name: string)
+					table.insert(blooms, name)
+				end,
+			},
+			now = function(): number
+				return t.state.clock
+			end,
+			viewerPosition = function(): Vector3?
+				return Vector3.zero
+			end,
+		} :: any)
+		t.deps.sfx = SfxPool
+		t.deps.impact = Impact
+		t.deps.shatter = {
+			play = function(_model: Model, _kind: string, weight: string?)
+				SfxPool.shatter(Vector3.zero, weight)
+			end,
+		}
+		Replication.bind(t.deps)
+		local ok, err = pcall(function()
+			-- One sweep kills the boar and a mob whose rig is already gone, in the same frame.
+			Replication.dispatch(
+				"EntityDied",
+				{ entityId = 7, shatter = "Beast", position = { 1, 2, 3 }, name = "Frenzy Boar" }
+			)
+			Replication.dispatch(
+				"EntityDied",
+				{ entityId = 99, shatter = "Beast", position = { 4, 5, 6 }, name = "Gone" }
+			)
+			runScheduled(t)
+			local layers: { [string]: boolean } = {}
+			for _, layer in sfx.cue(sfx.shatterCues.normal) do
+				layers[layer.name] = true
+			end
+			local cracks = 0
+			for _, name in played do
+				if layers[name] then
+					cracks += 1
+				end
+			end
+			-- One Shatter cue's layers, not two; one bloom, not two.
+			expect(cracks).toBe(#sfx.cue(sfx.shatterCues.normal))
+			expect(blooms).toEqual({ "ShatterBloom" })
+		end)
+		SfxPool.reset()
+		SfxPool.bind(nil)
+		Impact.bind({})
+		if not ok then
+			error(err, 0)
+		end
 	end)
 
 	it("HitConfirmed: a basic swing is no Art's; its third swing keeps the Final hit-stop and tick", function()
@@ -1633,12 +1742,20 @@ describe("Replication", function()
 
 	it("HitConfirmed: the hit that breaks a player's guard ticks Final for the people in it", function()
 		local t = setup()
-		-- The boar breaks the local player's guard.
-		Replication.dispatch("HitConfirmed", hit({ attackerId = 7, targetId = 1, guarded = true, broke = true }))
+		-- The boar breaks the local player's guard: the server confirms it at combat.guardBreakHitStop
+		-- (D-471), and the tick is that tier.
+		local breakTier = combat.guardBreakHitStop
+		Replication.dispatch(
+			"HitConfirmed",
+			hit({ attackerId = 7, targetId = 1, guarded = true, broke = true, hitStop = breakTier })
+		)
 		expect(t.find("sfx", "play")[1].args[1]).toBe("hitStopTick.Final")
 		-- The local player breaks another player's guard (each blow its own swing, never one sweep).
 		t.state.clock += 1
-		Replication.dispatch("HitConfirmed", hit({ attackerId = 1, targetId = 2, guarded = true, broke = true }))
+		Replication.dispatch(
+			"HitConfirmed",
+			hit({ attackerId = 1, targetId = 2, guarded = true, broke = true, hitStop = breakTier })
+		)
 		expect(t.find("sfx", "play")[2].args[1]).toBe("hitStopTick.Final")
 		-- An enemy's Break is not a guard break; a kill keeps its own tick.
 		t.state.clock += 1
@@ -2454,8 +2571,10 @@ end)
 -- Replication reads the spec clock. A handler that throws inside a Signal only warns, so every
 -- test here checks `live.handlerErrors()` too. `liveOptions.isLocal` makes the rig the local
 -- player's own (no locomotion driver: the character controller owns that one).
-local function liveRemote(liveOptions: { isLocal: boolean? }?)
+-- `trails`: the real Trails module in place of the recorder (bound by the caller).
+local function liveRemote(liveOptions: { isLocal: boolean?, trails: any? }?)
 	local isLocal = liveOptions ~= nil and liveOptions.isLocal == true
+	local realTrails = if liveOptions ~= nil then liveOptions.trails else nil
 	local function frameSignal()
 		return {
 			Connect = function()
@@ -2567,7 +2686,7 @@ local function liveRemote(liveOptions: { isLocal: boolean? }?)
 		},
 		choreo = Choreo,
 		clipLibrary = ClipLibrary,
-		trails = recorder("trails", calls),
+		trails = if realTrails ~= nil then realTrails else recorder("trails", calls),
 		smear = recorder("smear", calls),
 		shatter = recorder("shatter", calls),
 		sparks = recorder("sparks", calls),
@@ -2929,4 +3048,482 @@ describe("Replication across a render stall", function()
 			end
 		end)
 	end
+end)
+
+describe("Replication: the server's words it was missing (FC)", function()
+	local FRAME = ChoreoData.frameSeconds
+	local CLIP = "player/OneHandedSword/Horizontal"
+
+	local function contact(overrides: { [string]: any }?): any
+		local entry: { [string]: any } = {
+			targetId = 7,
+			windowIndex = 1,
+			artId = "OneHandedSword.Horizontal",
+			tier = "Normal",
+			killed = false,
+			position = Vector3.new(1, 2, -3),
+		}
+		for key, value in overrides or {} do
+			entry[key] = if value == NONE then nil else value
+		end
+		return entry
+	end
+
+	local function ticks(t: any): { string }
+		local names = {}
+		for _, call in t.find("sfx", "play") do
+			if string.find(call.args[1], "hitStopTick", 1, true) then
+				table.insert(names, call.args[1])
+			end
+		end
+		return names
+	end
+
+	-- D-469: the server sends the speed its sweep runs the clip at; a remote rig plays the clip at
+	-- it and the activation riser is timed by it. Anything the server would never send (NaN, a
+	-- string, a speed outside combat.luau actionSpeed) plays the clip at its own speed. Before, the
+	-- payload's value went to the Mixer and the riser raw: NaN froze the clip's clock.
+	it("ActionStarted plays a remote rig at the server's speed only inside combat.luau actionSpeed", function()
+		local t = setup()
+		local serverTime = 5
+		local function start(speed: any): (any, any)
+			serverTime += 1
+			Replication.dispatch(
+				"ActionStarted",
+				{ entityId = 2, clipId = CLIP, serverTime = serverTime, facing = { 0, 0, -1 }, speed = speed }
+			)
+			local plays = t.find("animator:ally", "play")
+			Replication.routeClipEvent(t.records[2], CLIP, { time = 0.15, kind = "ActivationHold" })
+			local holds = t.find("impact", "activation")
+			return plays[#plays].args[2].speed, holds[#holds].args[5]
+		end
+		local played, riser = start(1.15)
+		expect(played).toBe(1.15)
+		expect(riser).toBe(1.15)
+		for _, bad in { 0 / 0, 0, -1, 0.5, 1.5, 9, math.huge, "fast", true } do
+			played, riser = start(bad)
+			expect(played).toBeNil()
+			expect(riser).toBeNil()
+		end
+		-- The bounds themselves are speeds the server sends.
+		for _, edge in { combat.actionSpeed.min, combat.actionSpeed.max } do
+			played, riser = start(edge)
+			expect(played).toBe(edge)
+			expect(riser).toBe(edge)
+		end
+		-- No speed is the clip's own.
+		played, riser = start(nil)
+		expect(played).toBeNil()
+		expect(riser).toBeNil()
+	end)
+
+	-- D-470: the server names the Switch's partner; the window this client saw open is the
+	-- fallback (SwitchWindow is unreliable and can be lost).
+	it("HitConfirmed: the server's switchPartner names the partner, with or without a window", function()
+		local t = setup()
+		local kai = Instance.new("Model")
+		t.records[3] =
+			{ id = 3, model = kai, kind = "Player", rig = "PlayerR15", weaponId = "TrialistSword", name = "Kai" }
+		local function word(overrides: { [string]: any })
+			t.state.clock += 1
+			Replication.dispatch("HitConfirmed", hit(overrides))
+			return lastInfo(t)
+		end
+		-- No SwitchWindow reached this client: the word alone names the partner.
+		local info = word({ isSwitch = true, switchPartner = 2 })
+		expect(info.isSwitch).toBe(true)
+		expect(info.partner).toBe(t.models.ally)
+		-- A name that is no player is no partner; with no window seen there is none.
+		expect(word({ isSwitch = true, switchPartner = 7 }).partner).toBeNil()
+		expect(word({ isSwitch = true, switchPartner = 99 }).partner).toBeNil()
+		expect(word({ isSwitch = true, switchPartner = "2" }).partner).toBeNil()
+		-- An unknown name falls back to the window this client saw open.
+		Replication.dispatch(
+			"SwitchWindow",
+			{ entityId = 7, openerId = 2, position = { 1, 1, 1 }, duration = 0.8, serverTime = 1 }
+		)
+		expect(word({ isSwitch = true, switchPartner = 99 }).partner).toBe(t.models.ally)
+		-- The server's name wins over the window's opener.
+		Replication.dispatch(
+			"SwitchWindow",
+			{ entityId = 7, openerId = 2, position = { 1, 1, 1 }, duration = 0.8, serverTime = 2 }
+		)
+		expect(word({ isSwitch = true, switchPartner = 3 }).partner).toBe(kai)
+		-- A hit that is not a Switch takes no partner, named or not.
+		local plain = word({ switchPartner = 2 })
+		expect(plain.isSwitch).toBe(false)
+		expect(plain.partner).toBeNil()
+		expect(t.find("digits", "show")[#t.find("digits", "show")].args[3]).toBe("Normal")
+	end)
+
+	-- D-470: only the server judges a Switch, so the local contact never plays its layer. Before,
+	-- a word after the contact added nothing at a tier no stronger: the land sound and the two
+	-- blades' flash never played for the fighter who made the Switch.
+	it("a Switch word after the local contact plays the Switch layer once and replays nothing", function()
+		local t = setup()
+		t.state.moment = "Hit"
+		expect(Replication.contact(contact())).toBe(true)
+		local before = #t.calls
+		t.state.clock += 6 * FRAME
+		Replication.dispatch("HitConfirmed", hit({ isSwitch = true, switchPartner = 2 }))
+		local hits = t.find("impact", "hit")
+		expect(#hits).toBe(2)
+		expect(hits[2].args[1].isSwitch).toBe(true)
+		expect(hits[2].args[1].partner).toBe(t.models.ally)
+		expect(hits[2].args[2]).toBe("Hit")
+		for index = before + 1, #t.calls do
+			local call = t.calls[index]
+			local name = call.module .. "." .. call.fn
+			for _, banned in
+				{
+					"animator:me.hitStop",
+					"animator:boar.hitStop",
+					"outline.flash",
+					"camera.nudge",
+					"camera.shake",
+					"sfx.play",
+				}
+			do
+				if name == banned then
+					error("the Switch word replayed " .. name)
+				end
+			end
+		end
+		expect(t.find("digits", "show")[1].args[3]).toBe("Switch")
+		-- A Switch at a stronger tier is the contact's upgrade: one more call, carrying the Switch.
+		local final = setup()
+		final.state.moment = "Hit"
+		Replication.contact(contact({ windowIndex = 3 }))
+		final.state.clock += 2 * FRAME
+		Replication.dispatch(
+			"HitConfirmed",
+			hit({ hitStop = "Final", isSwitch = true, switchPartner = 2, hitIndex = 3 })
+		)
+		local upgraded = final.find("impact", "hit")
+		expect(#upgraded).toBe(2)
+		expect(upgraded[2].args[1].isSwitch).toBe(true)
+		expect(upgraded[2].args[1].tier).toBe("Final")
+		expect(upgraded[2].args[2]).toBe("Hit")
+		-- A word that is not a Switch and no stronger still adds nothing.
+		local plain = setup()
+		plain.state.moment = "Hit"
+		Replication.contact(contact())
+		plain.state.clock += 6 * FRAME
+		Replication.dispatch("HitConfirmed", hit())
+		expect(#plain.find("impact", "hit")).toBe(1)
+	end)
+
+	-- D-471: the server confirms the blow that breaks a guard at combat.luau guardBreakHitStop and
+	-- the client draws that tier: both rigs hold it, the shot shakes it, the tick is it. Before, the
+	-- word came at Normal: 3 frames held and a Normal shake under a Final tick the client made up.
+	it("HitConfirmed: the guard break comes at the server's tier on both rigs, the shake and the tick", function()
+		local t = setup()
+		Replication.dispatch(
+			"HitConfirmed",
+			hit({ attackerId = 8, targetId = 1, broke = true, artId = NONE, hitStop = combat.guardBreakHitStop })
+		)
+		expect(t.find("animator:me", "hitStop")[1].args[1]).toBe(held("Final"))
+		expect(t.find("animator:axeman", "hitStop")[1].args[1]).toBe(held("Final"))
+		expect(t.find("camera", "shake")[1].args[1]).toBe("Final")
+		expect(ticks(t)).toEqual({ "hitStopTick.Final" })
+		local info = lastInfo(t)
+		expect(info.tier).toBe("Final")
+		expect(moments.selectFor(info)).toBe("Guarded")
+		-- The client makes up no tier: a guard break word at Normal is drawn at Normal throughout.
+		local normal = setup()
+		Replication.dispatch("HitConfirmed", hit({ attackerId = 8, targetId = 1, broke = true, artId = NONE }))
+		expect(normal.find("animator:me", "hitStop")[1].args[1]).toBe(held("Normal"))
+		expect(normal.find("camera", "shake")[1].args[1]).toBe("Normal")
+		expect(ticks(normal)).toEqual({ "hitStopTick.Normal" })
+	end)
+end)
+
+-- D-469 on a real rig (Choreo, Mixer, the clip): the server sweeps an Art's clip at its speed
+-- (CombatService: clip time = (now - startedAt) * speed), so a remote rig that plays the clip at
+-- the same speed shows the blade where the server swept it. Before, a speed that reached the rig
+-- went in raw: NaN made the clip's clock NaN for the rest of the swing.
+describe("Replication on a remote player's rig: the server's clip speed (D-469)", function()
+	local horizontal = ChoreoData.locomotion.clipPrefix .. "Horizontal"
+	local ClipLibraryForSpec = Harness.load("src/client/choreo/ClipLibrary")
+
+	local function handleOf(live: any): any
+		for _, handle in live.animator.mixer:handles() do
+			if handle.clipId == horizontal and not handle.stopping then
+				return handle
+			end
+		end
+		return nil
+	end
+
+	local function firstWindow(): number
+		local first = math.huge
+		for _, event in ClipLibraryForSpec.get(horizontal).events do
+			if event.kind == "HitWindowOpen" then
+				first = math.min(first, event.time)
+			end
+		end
+		return first
+	end
+
+	local function drawnRemote(): any
+		local live = liveRemote()
+		live.model:SetAttribute("Drawn", true)
+		for _ = 1, 90 do
+			live.step()
+		end
+		return live
+	end
+
+	it("the clip reaches its hit window on the server's hit time at the server's speed", function()
+		local window = firstWindow()
+		expect(window < math.huge).toBe(true)
+		for _, speed in { 1.15, combat.actionSpeed.min, combat.actionSpeed.max } do
+			local live = drawnRemote()
+			local startedAt = live.now() - 0.05
+			Replication.dispatch(
+				"ActionStarted",
+				{ entityId = 2, clipId = horizontal, serverTime = startedAt, facing = { 0, 0, -1 }, speed = speed }
+			)
+			-- The server's first hit of this swing: its window's clip time at the swing's speed.
+			local serverHit = startedAt + window / speed
+			while live.now() + 1e-9 < serverHit do
+				live.step()
+			end
+			local handle = handleOf(live)
+			expect(handle).toBeTruthy()
+			expect(handle.speed).toBe(speed)
+			-- The rig's clip is where the server's was, give or take the frame that crossed it.
+			expect(math.abs(handle.time - (live.now() - startedAt) * speed)).toBeLessThan(1e-6)
+			expect(handle.time >= window - 1e-6).toBe(true)
+			expect(handle.time < window + speed / 60 + 1e-6).toBe(true)
+			expect(live.handlerErrors()).toEqual({})
+			live.release()
+		end
+	end)
+
+	it("a speed the server never sends plays the clip at its own speed", function()
+		for _, bad in { 0 / 0, 9, 0.2 } do
+			local live = drawnRemote()
+			local startedAt = live.now()
+			Replication.dispatch(
+				"ActionStarted",
+				{ entityId = 2, clipId = horizontal, serverTime = startedAt, facing = { 0, 0, -1 }, speed = bad }
+			)
+			for _ = 1, 12 do
+				live.step()
+			end
+			local handle = handleOf(live)
+			expect(handle).toBeTruthy()
+			expect(handle.speed).toBe(1)
+			expect(math.abs(handle.time - (live.now() - startedAt))).toBeLessThan(1e-6)
+			expect(live.handlerErrors()).toEqual({})
+			live.release()
+		end
+	end)
+end)
+
+-- Item 91 (D-472): a sprint cut by a dodge. The replicated root speed falls from the sprint when
+-- the dodge starts (the dodging body's Humanoid walks at 0 while the clip carries it), a frame or a
+-- few either side of the dodge's ActionStarted. LocomotionState calls that drop a Skid; under the
+-- dodge (FullBody, priority 25) the Skid's picture never shows, so its landing (LandSoft at 0.09 s)
+-- must not sound either: the Dodge cue's landing at the step's end is the one thud.
+describe("Replication: a remote sprint into a dodge", function()
+	local LANDSOFT = "footsteps.LandSoft"
+	local skidId = ChoreoData.locomotion.clipPrefix .. ChoreoData.locomotion.clips.Skid
+	local dodgeId = ChoreoData.locomotion.clipPrefix .. "DodgeForward"
+	local sprint = ChoreoData.locomotion.sprintSpeed
+
+	-- Sprints 1 s, then the dodge's ActionStarted at frame 0 and the speed's fall at `dropAt`
+	-- frames from it (negative: the fall replicated first); the speed comes back after the dodge.
+	-- Returns the Skid's LandSoft plays and the steps a live Skid handle showed above zero weight.
+	local function run(dropAt: number): (number, number)
+		local live = liveRemote()
+		local humanoid = live.model:FindFirstChildOfClass("Humanoid") :: any
+		local root = live.model.PrimaryPart :: any
+		humanoid.MoveDirection = Vector3.new(0, 0, -1)
+		root.AssemblyLinearVelocity = Vector3.new(0, 0, -sprint)
+		for _ = 1, 60 do
+			live.step()
+		end
+		local dodgeSteps = math.ceil(combat.dodgeDuration * 60)
+		local skidShown = 0
+		for frame = math.min(0, dropAt), 40 do
+			if frame == 0 then
+				Replication.dispatch(
+					"ActionStarted",
+					{ entityId = 2, clipId = dodgeId, serverTime = live.now(), facing = { 0, 0, -1 } }
+				)
+			end
+			if frame == dropAt then
+				root.AssemblyLinearVelocity = Vector3.zero
+			elseif frame == dropAt + dodgeSteps then
+				root.AssemblyLinearVelocity = Vector3.new(0, 0, -sprint)
+			end
+			live.step()
+			for _, handle in live.animator.mixer:handles() do
+				if handle.clipId == skidId and not handle.stopping and handle.weight > 0 then
+					skidShown += 1
+				end
+			end
+		end
+		local lands = 0
+		for _, call in live.calls("sfx", "play") do
+			if call.args[1] == LANDSOFT then
+				lands += 1
+			end
+		end
+		expect(#live.calls("impact", "dodge")).toBe(1)
+		expect(live.handlerErrors()).toEqual({})
+		live.release()
+		return lands, skidShown
+	end
+
+	it("plays no Skid landing once the dodge holds the body (the fall on or after its start)", function()
+		for dropAt = 0, 4 do
+			local lands = run(dropAt)
+			expect(lands).toBe(0)
+		end
+	end)
+
+	it("a Skid the fall started first is cut by the dodge before its landing sounds", function()
+		-- The Skid's LandSoft is at 0.09 s: a dodge up to 5 frames behind cuts it first.
+		for dropAt = -5, -1 do
+			local lands = run(dropAt)
+			expect(lands).toBe(0)
+		end
+	end)
+end)
+
+describe("Replication: a remote opener drawn from the sheath (D-473)", function()
+	--[[
+		A remote fighter's first swing from the sheath, its ActionStarted caught up by `late`
+		seconds. The attack pulls the sword from the back mount to the hand before its first posed
+		frame; at 85 ms or more of catch-up Basic1's TrailOn (0.1 s) fires on that same frame, so
+		the strike's snap began from the ring's last sample, taken on the back mount. On the real
+		path: Replication routes the clip events to the real Trails, which samples the tip in its
+		render step after the rig's step. Lune derives no WorldPosition, so the spec puts TrailEnd
+		where the rig's joints pose it (BladeContact, the chain the ribbon reads) before each render
+		step, as the engine would.
+		The truth is the blade's own chord over the snap frames from the strike's first frame in the
+		hand.
+	]]
+	local BASIC1 = ChoreoData.locomotion.clipPrefix .. "Basic1"
+	local SNAP_FRAMES = Harness.load("src/shared/data/accents").swing.snapFrames
+
+	local function frameSignal(): any
+		return {
+			Connect = function()
+				return { Disconnect = function() end }
+			end,
+		}
+	end
+
+	-- Returns the degrees between Trails.swingDirection and the blade's own chord after the snap.
+	local function opener(drawn: boolean, late: number): number
+		Harness.stubService("RunService", {
+			RenderStepped = frameSignal(),
+			Heartbeat = frameSignal(),
+			PreSimulation = frameSignal(),
+			BindToRenderStep = function() end,
+			UnbindFromRenderStep = function() end,
+		})
+		local Trails = Harness.load("src/client/fx/Trails")
+		local Engine = Harness.load("src/client/fx/Engine")
+		local BladeContact = Harness.load("src/shared/choreo/BladeContact")
+		local live: any = nil
+		local renderFn: ((dt: number) -> ())? = nil
+		Engine.setViewer(function(): Vector3
+			return Vector3.new(0, 5, 10)
+		end)
+		Engine.setClock(function(): number
+			return if live ~= nil then live.now() else 0
+		end)
+		Trails.start()
+		Trails.bind({
+			now = function(): number
+				return if live ~= nil then live.now() else 0
+			end,
+			onRender = function(fn: (dt: number) -> ()): () -> ()
+				renderFn = fn
+				return function()
+					renderFn = nil
+				end
+			end,
+			onWatch = function(_fn: (dt: number) -> ()): () -> ()
+				return function() end
+			end,
+			clear = function(_trail: Trail) end,
+			held = function(_model: Instance): boolean
+				return false
+			end,
+			animator = function(target: Instance): any
+				return Harness.load("src/client/choreo/Choreo").find(target :: any)
+			end,
+		})
+		live = liveRemote({ trails = Trails })
+		local model = live.model
+		local tipAttachment = model:FindFirstChild("TrailEnd", true) :: Attachment
+		local weapon = tipAttachment.Parent :: BasePart
+		weapon.Position = Vector3.new(0, 3, 0)
+		-- The engine's WorldPosition: the tip where the rig's joints pose it this frame.
+		local function render(): Vector3
+			local chain = BladeContact.chain(model) :: any
+			local _, tip = BladeContact.blade(chain, BladeContact.read(chain))
+			tipAttachment.WorldPosition = tip
+			assert(renderFn ~= nil, "Trails connected no render step");
+			(renderFn :: (dt: number) -> ())(1 / 60)
+			return tip
+		end
+		if drawn then
+			model:SetAttribute("Drawn", true)
+		end
+		for _ = 1, 90 do
+			live.step()
+			render()
+		end
+		expect(live.inHand()).toBe(drawn)
+		Replication.dispatch(
+			"ActionStarted",
+			{ entityId = 2, clipId = BASIC1, serverTime = live.now() - late, facing = { 0, 0, -1 } }
+		)
+		-- The first frames in the hand: the strike (when its TrailOn is not caught up past) begins
+		-- on the first, and its snap spans SNAP_FRAMES; with no strike the ring answers.
+		local frames = SNAP_FRAMES + 1
+		local tips: { Vector3 } = {}
+		for frame = 1, frames do
+			live.step()
+			tips[frame] = render()
+		end
+		expect(live.inHand()).toBe(true)
+		local measured = Trails.swingDirection(model)
+		local truth = (tips[frames] - tips[1]).Unit
+		expect(live.handlerErrors()).toEqual({})
+		Trails.bind(nil)
+		Trails.reset()
+		Engine.setViewer(nil)
+		Engine.setClock(nil)
+		live.release()
+		assert(measured ~= nil, "no swing direction")
+		local cosine = math.clamp((measured :: Vector3):Dot(truth), -1, 1)
+		return math.deg(math.acos(cosine))
+	end
+
+	it("measures the slash in the hand, not from the back mount, at 85 to 250 ms of catch-up", function()
+		-- Before: 65.7, 70.5, 68.8, 67.5, 55.8 and 53.3 degrees off; now 0.
+		local worst = 0
+		for _, late in { 0.085, 0.1, 0.12, 0.15, 0.2, 0.25 } do
+			local off = opener(false, late)
+			worst = math.max(worst, off)
+		end
+		expect(worst < 10).toBe(true)
+	end)
+
+	it("a drawn opener at the same catch-up stays as it was (2.8 to 4.6 degrees)", function()
+		local worst = 0
+		for _, late in { 0.085, 0.1, 0.12, 0.15, 0.2, 0.25 } do
+			local off = opener(true, late)
+			worst = math.max(worst, off)
+		end
+		expect(worst < 10).toBe(true)
+	end)
 end)

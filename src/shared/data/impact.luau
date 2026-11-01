@@ -178,6 +178,11 @@ local Impact = {
 	overlay = {
 		screenGuiName = "SkyspireImpact",
 		displayOrder = 30,
+		-- A full-screen picture: edge to edge on a notched phone too, past the safe area the HUD
+		-- keeps inside (ScreenGui.ScreenInsets None, nothing clipped to the device's safe area;
+		-- D-475). Set after IgnoreGuiInset, which the engine links to ScreenInsets.
+		screenInsets = "None",
+		clipToDeviceSafeArea = false,
 		renderStepName = "SkyspireImpactFrames", -- bound after the camera's step
 		zIndex = { background = 1, figures = 2, strokes = 3 },
 		-- No number of its own for how long a picture waits for its first drawn frame (D-122):
@@ -213,6 +218,12 @@ local Impact = {
 		skipWrapLayers = true,
 		maxRigs = 4, -- rigs drawn per play (rigs of hits that join a showing sequence count too)
 		poolCap = 96, -- idle clones kept for the next play; the oldest past this are destroyed
+		-- Prewarming (D-477): the figures of the rigs nearest the camera are cloned into the pool
+		-- ahead of their first hit, at most prewarmPerFrame parts a Heartbeat (a 48-part figure in
+		-- 8 frames), so the hit's frame clones nothing. Which rigs are warm is ranked again every
+		-- prewarmInterval seconds: the nearest whose figures fit in poolCap.
+		prewarmPerFrame = 6,
+		prewarmInterval = 0.5,
 	},
 
 	-- The Ink look's brush strokes: OutlineInk Frames with round ends (UICorner) and a

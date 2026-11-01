@@ -14,6 +14,14 @@
 	extreme. The committed step lands on the snap and the rear foot is drawn up in the recovery
 	(QuadIn, then QuadOut through 0.365); the recovery ends a quarter of the way back to the ready
 	guard.
+	Head off the axe face (D-485): the neck leans the head back and rolls it out through the cut
+	(Neck X -2 to 8, Z -3 to -13), so the keep-out steps 1.00 back at the kobold 3.5 off, not 1.25.
+	Follow-through (D-486): the roll out of the legs starts in the window's last frames (Weapon Z
+	-15 to -5 at 0.23, the blade at most 0.64 off its old path inside the window, at 0.229; no
+	hit-matrix cell turns hit or miss), a key at the window's close keeps that line, then the blade
+	rolls on through the settle (Weapon Z to 25, the waist turning on to 46) and a SineInOut key at
+	0.32 lifts it before the recovery; the blade stood 0.44 in the right leg 6 frames past the hold,
+	now -0.10 (clear).
 	Rotations: X+ leans the torso back / swings a hanging limb forward, Y+ turns left, Z+ rolls left.
 ]]
 
@@ -117,7 +125,7 @@ local clip: Types.ClipDef = {
 			joints = {
 				Root = posRot(-0.08, -0.26, -0.1, 0, 8, 3),
 				Waist = rot(-12, 35, 10),
-				Neck = rot(-2, -23, -3),
+				Neck = rot(8, -23, -13),
 				RightShoulder = rot(16.9, -3.2, -0.4),
 				RightElbow = rot(0, 0, 0),
 				RightWrist = rot(-7.4, -4.8, -33.9),
@@ -151,7 +159,7 @@ local clip: Types.ClipDef = {
 				LeftHip = rot(37.6, -0.4, -5.35),
 				LeftKnee = rot(-62.35, 0, 0),
 				LeftShoulder = rot(-23.1, 0, -27.7),
-				Neck = rot(-1.25, -23.75, -2.7),
+				Neck = rot(8.75, -23.75, -12.7),
 				RightAnkle = rot(7.3, -2.5, -7.7),
 				RightElbow = rot(0, 0, 0),
 				RightHip = rot(-40.75, -1.8, 1.45),
@@ -159,9 +167,28 @@ local clip: Types.ClipDef = {
 				RightWrist = rot(-3.3, -6.1, -31.05),
 				Root = posRot(-0.077, -0.26, -0.1, 0, 7.7, 2.85),
 				Waist = rot(-12.6, 36.5, 9.25),
-				Weapon = rot(-19.7, 0, -15.4),
+				Weapon = rot(-19.7, 0, -5.4),
 			},
 			root = { pos = { 0, 0, -0.55 } },
+		},
+		{
+			time = 0.24,
+			easing = "QuadOut",
+			joints = {
+				LeftAnkle = rot(27.39, -13.38, 2.14),
+				LeftHip = rot(35.74, -0.4, -5.62),
+				LeftKnee = rot(-62.62, 0, 0),
+				LeftShoulder = rot(-22.12, 0, -27.37),
+				Neck = rot(9.57, -24.57, -12.37),
+				RightAnkle = rot(4.9, -1.84, -7.7),
+				RightHip = rot(-41.57, -1.91, 1.61),
+				RightShoulder = rot(14.81, -5.4, 1.27),
+				RightWrist = rot(1.18, -7.52, -27.93),
+				Root = posRot(-0.074, -0.26, -0.1, 0, 7.37, 2.69),
+				Waist = rot(-13.26, 38.14, 8.43),
+				Weapon = rot(-19.37, 0, -5.67),
+			},
+			root = { pos = { 0, 0, -0.605 } },
 		},
 		{
 			-- settle
@@ -169,11 +196,11 @@ local clip: Types.ClipDef = {
 			easing = "Spring",
 			joints = {
 				Root = posRot(-0.074, -0.26, -0.1, 0, 7.4, 2.7),
-				Waist = rot(-13.2, 38, 8.5),
-				Neck = rot(-0.5, -24.5, -2.4),
+				Waist = rot(-13.2, 46, 8.5),
+				Neck = rot(9.5, -24.5, -12.4),
 				RightShoulder = rot(14.9, -5.3, 1.2),
 				RightElbow = rot(0, 0, 0),
-				Weapon = rot(-19.4, 0, -14.8),
+				Weapon = rot(-19.4, 0, 25.2),
 				LeftShoulder = rot(-22.2, 0, -27.4),
 				LeftAnkle = rot(27.2, -13.4, 2.1),
 				LeftHip = rot(35.9, -0.4, -5.6),
@@ -185,8 +212,31 @@ local clip: Types.ClipDef = {
 			root = { pos = { 0, 0, -0.6 } },
 		},
 		{
+			time = 0.32,
+			easing = "SineInOut",
+			joints = {
+				LeftAnkle = rot(25.15, -11.9, 2.55),
+				LeftElbow = rot(43.25, 0, 0),
+				LeftHip = rot(33.75, -0.1, -5.4),
+				LeftKnee = rot(-58.4, 0, 0),
+				LeftShoulder = rot(-12.45, 0, -24.85),
+				LeftWrist = rot(0, 0, 0.6),
+				Neck = rot(6.1, -17.25, -6.8),
+				RightAnkle = rot(17.35, -2, -7.9),
+				RightElbow = rot(22.05, 0, 0),
+				RightHip = rot(-24.2, -0.15, 3.3),
+				RightKnee = rot(-25.55, 0, 0),
+				RightShoulder = rot(19.2, -3.05, 0.3),
+				RightWrist = rot(-1.4, -6.5, -19.55),
+				Root = posRot(-0.059, -0.232, -0.082, 0, 5.95, 2.05),
+				Waist = rot(-12.65, 31.75, 6.55),
+				Weapon = rot(11.85, 0, 24.15),
+			},
+			root = { pos = { 0, 0, -0.6 } },
+		},
+		{
 			time = 0.365,
-			easing = "QuadIn",
+			easing = "QuadOut",
 			joints = {
 				LeftAnkle = rot(23.1, -10.4, 3),
 				LeftElbow = rot(44.5, 0, 0),
@@ -196,14 +246,14 @@ local clip: Types.ClipDef = {
 				LeftWrist = rot(0, 0, 1.2),
 				Neck = rot(2.7, -10, -1.2),
 				RightAnkle = rot(29.6, -2.1, -8.1),
-				RightElbow = rot(14.1, 0, 0),
+				RightElbow = rot(44.1, 0, 0),
 				RightHip = rot(-6.9, 1.6, 5),
 				RightKnee = rot(-51.1, 0, 0),
 				RightShoulder = rot(23.5, -0.8, -0.6),
 				RightWrist = rot(-3.6, -5.6, -10.9),
 				Root = posRot(-0.045, -0.205, -0.065, 0, 4.5, 1.4),
 				Waist = rot(-12.1, 17.5, 4.6),
-				Weapon = rot(-36.9, 0, -8.9),
+				Weapon = rot(43.1, 0, -36.9),
 			},
 			root = { pos = { 0, 0, -0.6 } },
 		},
@@ -217,7 +267,7 @@ local clip: Types.ClipDef = {
 				Neck = rot(6, 4.5, 0),
 				RightShoulder = rot(32.1, 3.8, -2.5),
 				RightElbow = rot(28.2, 0, 0),
-				Weapon = rot(-54.5, 0, -3),
+				Weapon = rot(-54.5, 0, -28),
 				LeftShoulder = rot(16.8, 0, -17.2),
 				LeftElbow = rot(47, 0, 0),
 				LeftKnee = rot(-44.3, 0, 0),

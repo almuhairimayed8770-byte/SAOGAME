@@ -389,7 +389,12 @@ local function guardPolicy(link: Link): (any) -> any
 		},
 	}
 	local services: { [string]: any } = {
-		RunService = { BindToRenderStep = function() end, Heartbeat = Signal.new() },
+		RunService = {
+			BindToRenderStep = function() end,
+			Heartbeat = Signal.new(),
+			-- The lock turn lands on PreSimulation (D-505).
+			PreSimulation = Signal.new(),
+		},
 		Players = {
 			LocalPlayer = { CharacterAdded = Signal.new(), CharacterRemoving = Signal.new(), Character = model },
 		},

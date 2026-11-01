@@ -138,6 +138,17 @@ export type Engine = {
 	-- and no player walking into it shoves it; freed, the server simulates it again (network owner
 	-- nil) and it stands where it is. Nil: never anchored.
 	anchor: ((model: Model, anchored: boolean) -> ())?,
+	-- Keeps the body's Humanoid out of the engine's fall states (ai.upright.offStates, D-494:
+	-- Humanoid:SetStateEnabled false), so nothing but the brain moves or lays down the body. Asked on
+	-- the frame the model is made, before its first physics step: Studio puts a Humanoid whose root is
+	-- anchored on that step (a staged or held-at-spawn enemy, D-436) in FallingDown 0.015 s later,
+	-- where MoveTo does nothing for about 3 s after its release, and turning it off a frame later
+	-- leaves it down. Nil: never asked (the engine decides).
+	keepUpright: ((model: Model) -> ())?,
+	-- Stands up a body the engine has in a fall state (Humanoid:ChangeState GettingUp; Running again
+	-- within 0.033 s in Studio), asked as its root is freed (anchor false). A standing body is left
+	-- alone. Nil: never asked.
+	standUp: ((model: Model) -> ())?,
 }
 
 -- The world cast worldAhead makes: a box of `size` at `start` moved by `vector`, colliding as
@@ -1488,9 +1499,16 @@ local function anchorBody(entry: Entry, anchored: boolean)
 		return
 	end
 	entry.anchored = anchored
-	local anchor = dependencies().engine.anchor
+	local engine = dependencies().engine
+	local anchor = engine.anchor
 	if anchor ~= nil then
 		anchor(entry.model, anchored)
+	end
+	-- Freed, it stands up if the engine laid it down meanwhile (D-494): a body still in a fall would
+	-- not walk, so a rush let go with it would jam where it crouched.
+	local standUp = engine.standUp
+	if not anchored and standUp ~= nil then
+		standUp(entry.model)
 	end
 end
 
@@ -1578,6 +1596,12 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 	-- engine refuses for a part that is not under Workspace yet.
 	model.Parent = d.folder
 	d.engine.place(model, cframe)
+	-- Out of the engine's falls from this frame, before its first physics step (D-494): a hold
+	-- below anchors it on that step, which would put it in FallingDown for good.
+	local keepUpright = d.engine.keepUpright
+	if keepUpright ~= nil then
+		keepUpright(model)
+	end
 
 	local id = d.entities.registerEnemy(model, def, { name = opts.name, level = opts.level })
 	local entry: Entry = {
@@ -2494,6 +2518,28 @@ local function defaultEngine(groups: any?): Engine
 			if humanoid ~= nil then
 				humanoid.WalkSpeed = pace.Magnitude
 				humanoid:MoveTo(Vector3.new(position.X, at.Y, position.Z))
+			end
+		end,
+		keepUpright = function(model)
+			local humanoid = humanoidOf(model)
+			if humanoid == nil then
+				return
+			end
+			for _, name in AI.upright.offStates do
+				humanoid:SetStateEnabled((Enum.HumanoidStateType :: any)[name], false)
+			end
+		end,
+		standUp = function(model)
+			local humanoid = humanoidOf(model)
+			if humanoid == nil then
+				return
+			end
+			local state = humanoid:GetState()
+			for _, name in AI.upright.offStates do
+				if state == (Enum.HumanoidStateType :: any)[name] then
+					humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+					return
+				end
 			end
 		end,
 		anchor = function(model, anchored)

@@ -518,6 +518,41 @@ describe("DevCombat's pack hook spawns a pack the way the world does (item 315, 
 		end
 	end)
 
+	-- Item 352(a): the PC ran the pack line at one point more than once (3, then 6) and a member
+	-- spawned 10.29 studs from another, with "took the roomiest" six times in the Output. Packs at
+	-- one crowded point still clear each other: the disc widens far enough (D-499).
+	it("packs run again and again at one point still spawn every member clear of every fighter", function()
+		fresh()
+		spawnPlayer(Vector3.new(0, 3, 25))
+		local before = #Harness.warnings()
+		local spots: { Vector3 } = {}
+		for _, count in { 3, 6, 6 } do
+			local reply = invokeDev("pack", { enemy = "KoboldAxeman", position = { 0, 0, -20 }, count = count })
+			expect(reply.error).toBeNil()
+			expect(reply.ok).toBe(true)
+			for _, id in reply.ids do
+				local position = ((EnemyService.modelOf(id) :: Model).PrimaryPart :: BasePart).CFrame.Position
+				table.insert(spots, Vector3.new(position.X, 0, position.Z))
+			end
+		end
+		expect(#spots).toBe(15)
+		local closest = math.huge
+		for i = 1, #spots do
+			for j = i + 1, #spots do
+				closest = math.min(closest, (spots[i] - spots[j]).Magnitude)
+			end
+		end
+		print(("[352a] closest pack pair %.2f studs"):format(closest))
+		expect(closest >= Playground.spawnSpacing.minStuds - 1e-3).toBe(true)
+		local roomiest = 0
+		for index, line in Harness.warnings() do
+			if index > before and string.find(line, "took the roomiest", 1, true) then
+				roomiest += 1
+			end
+		end
+		expect(roomiest).toBe(0)
+	end)
+
 	it("refuses more than dev.hooks.maxPackSize members, an unknown enemy and a point off the map", function()
 		fresh()
 		spawnPlayer(Vector3.new(0, 3, 200))

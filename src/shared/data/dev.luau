@@ -383,6 +383,19 @@ local Dev = {
 			-- times the frame (0.25 a 60 Hz frame; Horizontal's QuadIn settle shows 0.11). A Spring
 			-- settle out of the hold threw most of the settle into that frame (Rising Arc 1.48 studs).
 			afterFreezeTipSpeed = 15,
+			-- Section 10 beat 5, the follow-through (D-484): a cut goes through the target and out
+			-- past it. At the kobold where a fight with it stands (the reach's placements), within
+			-- exitFrames 60 Hz frames after a strike's authored hold the blade is no deeper in the
+			-- body than its own snap and hold took it (it carries on through, it does not sink in),
+			-- and from then until the next strike's snap (or the settle after the blend-out) it is
+			-- at most touchStuds in. Before the first snap, and outside the cuts, no hand or arm is
+			-- more than touchStuds deeper than it started. 6 frames is beat 5's shortest settle; 0.1
+			-- is the overlap and weapon bars above (a blade that brushes the body reads as touching
+			-- it, one held inside it reads as stuck).
+			followThrough = {
+				exitFrames = 6,
+				touchStuds = 0.1,
+			},
 			-- A cancel (D-408, choreo.luau handOver): the action that cuts a live one takes the body
 			-- within snapFrames 60 Hz frames (section 10 beat 2: a snap is 2 to 4 frames). Those frames
 			-- are the cut's snap (no pop judged); no part turns back inside them by more than
@@ -858,6 +871,48 @@ local Dev = {
 			speeds = { 0, 8, 16, 24 },
 			stepHz = { 60, 240 },
 			hitch = { seconds = 0.1, hz = 60, steps = 3 },
+		},
+		-- A guard raised sheathed under a cover (SheathCover.spec.luau, D-504): `settle` seconds
+		-- sheathed, the guard pressed with the Drawn target, each of `clips` (a FullBody clip that
+		-- keys the right arm) played `coverAt` seconds after the press, at each of `speeds`, stepped
+		-- at `stepHz` (the 240 Hz review) for `seconds`; the guard let go at `releaseAt`, or held.
+		-- Every cover starts before the Draw's WeaponDraw (0.22 s) so it hides the grab.
+		sheathCover = {
+			settle = 0.5,
+			seconds = 2.2,
+			stepHz = 240,
+			clips = { "Land", "Skid", "TurnLeft" },
+			coverAt = { 0, 0.15 },
+			speeds = { 0, 8 },
+			releaseAt = 0.5,
+		},
+		-- The lock turn as the frame shows it (LockTurnShown.spec.luau, D-505): the turn written
+		-- after the step, posed with that step's offsets, at each of `degrees` each way and each of
+		-- `stepHz`. Over any 60 Hz frame a planted foot moves at most `slideStuds`, and over one
+		-- plant at most `driftStuds` (STUDIO_TASKS 363(b): 0.02 a frame, 0.05 over the turn).
+		lockTurn = {
+			degrees = { 90, 135, 180 },
+			stepHz = { 60, 240 },
+			slideStuds = 0.02,
+			driftStuds = 0.05,
+			-- The chest and head lead the hips by at most turnPlant.twistDegrees, within this many
+			-- degrees (the clip's own neck and the lean's roll move the head a little).
+			leadSlack = 1,
+		},
+		-- The soles on the floor the Humanoid holds the root over (StandHeight.spec.luau, D-506):
+		-- the hit matrix's player with its Humanoid's HipHeight short of its legs' hang by each of
+		-- `hipErrors` studs (negative: past it; the root stands that much lower or higher), drawn,
+		-- at each of `speeds` (standing, the walk), stepped at `stepHz`, read for `seconds` after
+		-- `settle`. Every error stays within choreo.luau footIK.maxAdjust, the most the body moves.
+		standHeight = {
+			hipErrors = { -0.2, 0, 0.2 },
+			speeds = { 0, 8 },
+			stepHz = 60,
+			settle = 1,
+			seconds = 3,
+			-- A standing body falls for `fallSeconds` at `fallSpeed` (studs a second, from
+			-- `fallHeight` studs: a Land) and lands, read for `after` seconds, at each of `stepHz`.
+			landing = { fallSeconds = 0.5, fallSpeed = 25, fallHeight = 8, after = 0.8, stepHz = { 60, 144 } },
 		},
 		-- From a WeaponDraw until the blade is clear of the scabbard, and back from a WeaponSheathe
 		-- to where it first meets it, every long edge of the blade that is partly inside the

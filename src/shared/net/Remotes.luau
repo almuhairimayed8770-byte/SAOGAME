@@ -130,7 +130,10 @@ local Remotes: { [string]: RemoteDef } = {
 			reflected = Check.boolean,
 			artId = Check.optional(artId),
 			hitIndex = Check.integer(0),
+			-- D-470: present (true) only on a Switch: a player's Art landing inside another player's
+			-- window on the enemy; switchPartner names the player who opened that window.
 			isSwitch = Check.optional(Check.boolean),
+			switchPartner = Check.optional(entityId),
 			staggerDirection = Check.optional(Check.literal("Front", "Back", "Left", "Right")),
 			-- D-168: present when the target is an enemy whose attack was unresolved (its wind-up, or its
 			-- strike before it resolved): the seconds this hit pushed that attack's timeline back (0 once
@@ -193,7 +196,9 @@ local Remotes: { [string]: RemoteDef } = {
 			serverTime = Check.number(0),
 			facing = unitVec,
 			artId = Check.optional(artId),
-			speed = Check.optional(Check.number(0.1, 4)),
+			-- D-469: the speed the server sweeps the clip at, present when it is not 1 (combat.luau
+			-- actionSpeed bounds it); clients play the clip at it and a speed outside it at 1.
+			speed = Check.optional(Check.number(Combat.actionSpeed.min, Combat.actionSpeed.max)),
 		}),
 	},
 	Telegraph = {

@@ -290,3 +290,132 @@ describe("dev.luau place (D-143)", function()
 		expect(limit > 0 and limit < math.huge).toBe(true)
 	end)
 end)
+
+describe("dev.luau review.audit.followThrough (D-484)", function()
+	local Audit = Dev.review.audit
+
+	it("gives the blade beat 5's shortest settle to leave the body, in whole 60 Hz frames", function()
+		local followThrough = Audit.followThrough
+		expect(typeof(followThrough)).toBe("table")
+		expect(followThrough.exitFrames % 1).toBe(0)
+		-- GAME_SPEC section 10 beat 5: the overshoot and settle is 6 to 12 frames.
+		expect(followThrough.exitFrames >= 6 and followThrough.exitFrames <= 12).toBe(true)
+	end)
+
+	it("lets the blade touch the body after the exit no deeper than a limb may sink into another", function()
+		local touch = Audit.followThrough.touchStuds
+		expect(touch > 0).toBe(true)
+		expect(touch <= Audit.overlapStuds).toBe(true)
+	end)
+end)
+
+describe("dev.luau groundClearance.sheathCover (D-504)", function()
+	it("passes as written", function()
+		expect(hasProblem(runValidator(nil), "sheathCover")).toBe(false)
+	end)
+
+	it("catches a cover that starts after the Draw's grab", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathCover.coverAt = { 0, 0.3 }
+			end),
+			"sheathCover.coverAt[2]"
+		)).toBe(true)
+	end)
+
+	it("catches a release before a cover and a release after the end", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathCover.releaseAt = 0.1
+			end),
+			"must come before releaseAt"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathCover.releaseAt = 5
+			end),
+			"releaseAt must come before"
+		)).toBe(true)
+	end)
+
+	it("catches an empty clip list and a step rate under 60", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathCover.clips = {}
+			end),
+			"sheathCover.clips"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathCover.stepHz = 30
+			end),
+			"sheathCover.stepHz"
+		)).toBe(true)
+	end)
+end)
+
+describe("dev.luau groundClearance.standHeight (D-506)", function()
+	it("passes as written", function()
+		expect(hasProblem(runValidator(nil), "standHeight")).toBe(false)
+	end)
+
+	it("catches a HipHeight error past footIK.maxAdjust", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.standHeight.hipErrors = { 0, 1.5 }
+			end),
+			"standHeight.hipErrors[2]"
+		)).toBe(true)
+	end)
+
+	it("catches no speeds and a negative speed", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.standHeight.speeds = {}
+			end),
+			"standHeight.speeds"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.standHeight.speeds = { -1 }
+			end),
+			"standHeight.speeds[1]"
+		)).toBe(true)
+	end)
+end)
+
+describe("dev.luau groundClearance.lockTurn (D-505, D-507)", function()
+	it("passes as written", function()
+		expect(hasProblem(runValidator(nil), "lockTurn")).toBe(false)
+	end)
+
+	it("catches bars looser than ClipAudit's own", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.lockTurn.slideStuds = dev.review.audit.footSlideStuds * 2
+			end),
+			"lockTurn.slideStuds"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.lockTurn.driftStuds = 0
+			end),
+			"lockTurn.driftStuds"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.lockTurn.leadSlack = dev.review.audit.popDegrees
+			end),
+			"lockTurn.leadSlack"
+		)).toBe(true)
+	end)
+
+	it("catches a turn past 180 degrees", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.lockTurn.degrees = { 90, 270 }
+			end),
+			"lockTurn.degrees[2]"
+		)).toBe(true)
+	end)
+end)

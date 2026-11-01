@@ -749,6 +749,12 @@ function LocomotionState.footIK(leftDelta: number?, rightDelta: number?, weight:
 	return offsets
 end
 
+--- D-506: the body raised by `lift` studs over its root (lowered when negative), so its bind-pose
+--- soles stand on the floor the Humanoid holds the root over.
+function LocomotionState.standOffsets(lift: number): ClipSampler.Offsets
+	return { Root = { pos = { 0, lift, 0 }, rot = { 0, 0, 0 } } }
+end
+
 --- Weight of the foot IK for a speed: full when standing, gone at footIK.fadeSpeed.
 function LocomotionState.footIKWeight(speed: number, grounded: boolean): number
 	if not grounded then

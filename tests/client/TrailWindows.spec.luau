@@ -46,6 +46,7 @@ local CameraMath = Harness.load("src/client/camera/CameraMath")
 local Dev = Harness.load("src/shared/data/dev")
 local Trails = Harness.load("src/client/fx/Trails")
 local Engine = Harness.load("src/client/fx/Engine")
+local Fx = Harness.load("src/shared/data/fx")
 
 local clock = 0
 Choreo.configure({
@@ -94,6 +95,7 @@ type End = {
 
 type Frame = {
 	lit: boolean, -- the trail is on (Trails.isEnabled)
+	hostLit: any, -- the ribbon host's fx.trail.ribbon.litAttribute (nil with no ribbon)
 	beams: number, -- Beams showing on any layer
 	smear: boolean, -- inside SmearOn..SmearOff
 	tallest: number, -- the Body layer's tallest Beam end on the screen, px at 1080p
@@ -290,9 +292,11 @@ local function play(name: string, options: Options): { Frame }
 			end
 			assert(renderFn ~= nil, "Trails connected no render step");
 			(renderFn :: (dt: number) -> ())(dt)
-			local record: Frame = { lit = Trails.isEnabled(model), beams = 0, smear = smear, tallest = 0, ends = {} }
+			local record: Frame =
+				{ lit = Trails.isEnabled(model), hostLit = nil, beams = 0, smear = smear, tallest = 0, ends = {} }
 			local ribbon = Trails.ribbonOf(model)
 			if ribbon ~= nil then
+				record.hostLit = ribbon.host:GetAttribute(Fx.trail.ribbon.litAttribute)
 				local facing = if camera ~= nil then facings(ribbon, (camera :: CFrame).Position) else {}
 				for layer, beams in ribbon.beams do
 					record.beams += #beams
@@ -385,6 +389,56 @@ describe("each hit window draws its own arc, gone before the next lights (shots 
 			)
 		end
 	end
+
+	-- Item 341(a): the window's close is a clip event no remote carries, so the PC could not time
+	-- "gone 2 frames after its window closes". The ribbon's host says so itself (D-498): its
+	-- fx.trail.ribbon.litAttribute is true on every frame the window is lit and false from the
+	-- close, and the arc then shows on floor(closeSeconds x fps) frames (D-360: 2 at 60, 1 at 30,
+	-- 5 at 144) and is gone on the next.
+	it("the ribbon's host says when its window is lit, and the arc goes closeSeconds after it", function()
+		local closeSeconds = Fx.trail.ribbon.closeSeconds
+		for _, name in { "SharpNail", "RisingArc", "Horizontal" } do
+			for _, fps in RATES do
+				local frames = play(name, { fps = fps, freezes = true })
+				local windows = windowsOf(frames)
+				expect(#windows).toBeGreaterThan(0)
+				for index, frame in frames do
+					if frame.beams > 0 and frame.hostLit ~= frame.lit then
+						error(
+							("%s at %d fps: f%d draws the ribbon lit=%s, its host says %s"):format(
+								name,
+								fps,
+								index,
+								tostring(frame.lit),
+								tostring(frame.hostLit)
+							)
+						)
+					end
+				end
+				local fade = math.floor(closeSeconds * fps + 1e-6)
+				for number, window in windows do
+					local shown = 0
+					local index = window.last + 1
+					while index <= #frames and not frames[index].lit and frames[index].beams > 0 do
+						expect(frames[index].hostLit).toBe(false)
+						shown += 1
+						index += 1
+					end
+					if shown ~= fade then
+						error(
+							("%s at %d fps: window %d's arc shows on %d frames after the close (%d asked)"):format(
+								name,
+								fps,
+								number,
+								shown,
+								fade
+							)
+						)
+					end
+				end
+			end
+		end
+	end)
 
 	it("Sharp Nail draws three arcs and Rising Arc two, each with a clear frame before the next", function()
 		for _, case in { { "SharpNail", 3 }, { "RisingArc", 2 } } do

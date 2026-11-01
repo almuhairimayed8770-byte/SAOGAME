@@ -15,6 +15,8 @@
 	  0 < minShare <= 1 (the share of full width a cut seen edge-on keeps);
 	- ownerAttribute is a non-empty string: the attribute on a ribbon's host that names the rig it
 	  draws now (D-362), so a per-frame log tells the player's ribbon from an enemy's.
+	- litAttribute is a non-empty string other than ownerAttribute: the attribute on a ribbon's host
+	  that says whether the rig's hit window is lit (D-498), so a log times the close's fade.
 
 	tests/client/TrailWindows.spec.luau plays the clips through the real Trails module and measures
 	both on screen.
@@ -142,6 +144,14 @@ return function(ctx: any): { string }
 		problem(
 			"ribbon.ownerAttribute must be a non-empty string (the host attribute that names the rig a ribbon draws); got %s",
 			tostring(owner)
+		)
+	end
+
+	local litName = ribbon.litAttribute
+	if typeof(litName) ~= "string" or litName == "" or litName == owner then
+		problem(
+			"ribbon.litAttribute must be a non-empty string other than ownerAttribute (the host attribute that says the rig's window is lit); got %s",
+			tostring(litName)
 		)
 	end
 
