@@ -6,7 +6,8 @@
 	walls as planes the root's box is pushed out of and the server's Blockcast sees, Model:PivotTo),
 	plus `land`: a body carried onto a point by its own velocity over a given time and stopped dead
 	there, the way a server-owned body moves without a CFrame write (which every client would show as
-	a teleport of its replicated root).
+	a teleport of its replicated root). The last cases (AI 423(c), 422(d)) swap in the Humanoid the
+	PC's server log shows (`humanoid`, "studio") and Studio's 60 and 144 Hz server frames, jittered.
 ]]
 Harness.stubService("CollectionService", {
 	AddTag = function(_self, instance, tag)
@@ -61,6 +62,33 @@ local PHYSICS_STEP = 1 / 240
 local FLOOR_GAP = 1e-9
 local ACCELERATION = 560
 
+-- The Humanoid the fake engine plays and the server's frames (AI 423(c), 422(d)). "ideal" is this
+-- file's own: it walks onto its MoveTo goal and stops on it, and a landing ends exactly on its point.
+-- "studio" is the one the PC's server log on 4b18b5c shows (item 420 column 4; Studio, 60 fps):
+--   - it settles its walk once a frame, at the frame's start: it walks the whole frame at WalkSpeed
+--     toward its MoveTo goal, past the goal when that is nearer than a frame's walk (the slam ran
+--     0.467 a row through a goal 0.341 away: 5.828 → 6.295 against the told 6.169);
+--   - it holds a goal nearer than `arriveFrames` frames of its walk as reached and brakes, also at
+--     rest (the open run braked 0.772 short of the line end, 28 → 4.93 → 0.10 studs/s, rested at
+--     21.467 and stayed there with MoveTo re-sent; the slam ran on 0.808 short: 1.65–1.73 frames);
+--     `brake` per 1/240 s step brakes 28 studs/s to rest in 0.239, as the PC's rows did;
+--   - a velocity written on its root (engine.land, engine.halt) carries the body through the frame it
+--     is written on (the slam's land at 0.341 short ran the frame at 28.00);
+--   - it reaches its walk speed at `acceleration` (1320: the PC's rows sit 0.239 behind a body at
+--     full speed from the launch row, 3.028 at +0.116 s, 21.228 at +0.766 s).
+-- What lies behind the arrival rule is not visible from the log; `arriveFrames` 0 is a Humanoid that
+-- never brakes short (it only ever runs on past its goal). `fps` and `jitter` set the server frames:
+-- each lasts 1/fps × (1 + u), u uniform in [-jitter, jitter].
+local humanoid = {
+	mode = "ideal",
+	arriveFrames = 1.7,
+	brake = 0.672,
+	acceleration = 1320,
+	fps = 60,
+	jitter = 0,
+	random = Random.new(11),
+}
+
 type Plane = { point: Vector3, out: Vector3 }
 
 type Body = {
@@ -71,6 +99,9 @@ type Body = {
 	offsets: { [BasePart]: CFrame },
 	physT: number,
 	landing: { to: Vector3, untilT: number }?,
+	-- A velocity written on the root since the last frame's physics (land, halt): the studio
+	-- Humanoid keeps it through the next frame.
+	written: boolean?,
 }
 
 local clock = { t = 1000 }
@@ -79,6 +110,8 @@ local sent: { { time: number, remote: string, payload: any } } = {}
 local antiCheatCalls: { string } = {}
 local bodies: { [Model]: Body } = {}
 local walls: { Plane } = {}
+-- Walls the studio Humanoid's body meets and the server's cast never sees (an obstacle it misses).
+local hiddenWalls: { Plane } = {}
 local delayed: { { at: number, fn: () -> () } } = {}
 local devWorkspace: any = nil
 local invokeDev: (command: string, args: any) -> any = nil :: any
@@ -226,12 +259,23 @@ local engine = {
 		end
 		body.velocity = Vector3.zero
 		body.goal = body.position
+		body.written = true
 		placeParts(model, body)
 	end,
 	-- Carries the body onto `position` (its height kept) by its velocity over `seconds`, then stops it
-	-- dead there: no CFrame write.
+	-- dead there: no CFrame write. The studio Humanoid gets what the real engine.land does: the flat
+	-- velocity that covers the way in `seconds`, that pace as its WalkSpeed, and MoveTo(position).
 	land = function(model: Model, position: Vector3, seconds: number)
 		local body = bodies[model]
+		if humanoid.mode == "studio" then
+			local offset = Vector3.new(position.X - body.position.X, 0, position.Z - body.position.Z)
+			local pace = if seconds > 0 then offset / seconds else Vector3.zero
+			body.velocity = pace
+			body.walkSpeed = pace.Magnitude
+			body.goal = Vector3.new(position.X, body.position.Y, position.Z)
+			body.written = true
+			return
+		end
 		body.landing = {
 			to = Vector3.new(position.X, body.position.Y, position.Z),
 			untilT = body.physT + math.max(seconds, PHYSICS_STEP),
@@ -282,8 +326,67 @@ local function syncWalls()
 	end
 end
 
+-- The root's box at `nextPosition` pushed out of every wall (its velocity into a wall dropped).
+local function outOfWalls(model: Model, body: Body, nextPosition: Vector3): Vector3
+	local root = model.PrimaryPart :: BasePart
+	local frame = CFrame.lookAt(nextPosition, nextPosition + yawOf(model))
+	local at = nextPosition
+	local all = table.clone(walls)
+	table.move(hiddenWalls, 1, #hiddenWalls, #all + 1, all)
+	for _, wall in all do
+		local depth = support(frame, root.Size / 2, wall.out) - (at - wall.point):Dot(wall.out)
+		if depth > 0 then
+			at += wall.out * depth
+			local into = body.velocity:Dot(wall.out)
+			if into < 0 then
+				body.velocity -= wall.out * into
+			end
+		end
+	end
+	return at
+end
+
+-- One frame of the studio Humanoid (see `humanoid`): its walk settled at the frame's start, then
+-- 240 Hz steps up to `untilT`.
+local function studioFrame(model: Model, body: Body, untilT: number)
+	local seconds = untilT - body.physT
+	local desired: Vector3? = nil
+	local goal = body.goal
+	if goal ~= nil then
+		local delta = Vector3.new(goal.X - body.position.X, 0, goal.Z - body.position.Z)
+		local reached = humanoid.arriveFrames * body.walkSpeed * math.max(seconds, 0)
+		if delta.Magnitude > math.max(reached, 1e-3) then
+			desired = delta.Unit * body.walkSpeed
+		end
+	end
+	local kept = body.written == true
+	body.written = false
+	while body.physT + PHYSICS_STEP <= untilT + FLOOR_GAP do
+		body.physT += PHYSICS_STEP
+		if desired ~= nil then
+			local change = desired - body.velocity
+			local most = humanoid.acceleration * PHYSICS_STEP
+			if change.Magnitude > most then
+				change = change.Unit * most
+			end
+			body.velocity += change
+		elseif not kept then
+			body.velocity *= humanoid.brake
+			if body.velocity.Magnitude < 0.01 then
+				body.velocity = Vector3.zero
+			end
+		end
+		body.position = outOfWalls(model, body, body.position + body.velocity * PHYSICS_STEP)
+	end
+	placeParts(model, body)
+end
+
 local function physics(untilT: number)
 	for model, body in bodies do
+		if humanoid.mode == "studio" then
+			studioFrame(model, body, untilT)
+			continue
+		end
 		local root = model.PrimaryPart :: BasePart
 		while body.physT + PHYSICS_STEP <= untilT + FLOOR_GAP do
 			local landing = body.landing
@@ -334,10 +437,17 @@ local function physics(untilT: number)
 	end
 end
 
--- One 60 Hz server frame: the parts due land, then physics, the AI, the entities, the combat tick.
+-- One server frame (60 Hz unless `humanoid` says otherwise): the parts due land, then physics, the
+-- AI, the entities, the combat tick. Returns the frame's seconds.
 local FRAME = 1 / 60
-local function serverFrame()
-	clock.t += FRAME
+-- Called at the end of every server frame while set (a case's per-frame log).
+local frameHook: (() -> ())? = nil
+local function serverFrame(): number
+	local dt = FRAME
+	if humanoid.fps ~= 60 or humanoid.jitter > 0 then
+		dt = (1 + humanoid.jitter * (2 * humanoid.random:NextNumber() - 1)) / humanoid.fps
+	end
+	clock.t += dt
 	local due = {}
 	for index = #delayed, 1, -1 do
 		if delayed[index].at <= clock.t + FLOOR_GAP then
@@ -349,13 +459,19 @@ local function serverFrame()
 	end
 	syncWalls()
 	physics(clock.t)
-	EnemyService.step(FRAME)
-	EntityService.tick(FRAME)
+	EnemyService.step(dt)
+	EntityService.tick(dt)
 	CombatService.tick()
+	local hook = frameHook
+	if hook ~= nil then
+		hook()
+	end
+	return dt
 end
 
 local function frames(seconds: number)
-	for _ = 1, math.round(seconds / FRAME) do
+	local stop = clock.t + seconds - FRAME / 2
+	while clock.t < stop do
 		serverFrame()
 	end
 end
@@ -414,8 +530,7 @@ local function loadDevCombat()
 	env.print = function() end
 	env.task = {
 		wait = function(_seconds: number?): number
-			serverFrame()
-			return FRAME
+			return serverFrame()
 		end,
 		delay = function(seconds: number, fn: () -> ())
 			table.insert(delayed, { at = clock.t + seconds, fn = fn })
@@ -443,6 +558,7 @@ local function fresh()
 	delayed = {}
 	antiCheatCalls = {}
 	wallFrom = Vector3.zero
+	table.clear(hiddenWalls)
 	local now = function()
 		return clock.t
 	end
@@ -536,6 +652,13 @@ engine.halt = function(model: Model, position: Vector3?)
 		table.insert(writes, { model = model, time = clock.t, kind = "halt" })
 	end
 	engineHalt(model, position)
+end
+-- Every land the server asks of the engine, with its time and seconds (D-525).
+local lands: { { model: Model, time: number, seconds: number } } = {}
+local engineLand = engine.land
+engine.land = function(model: Model, position: Vector3, seconds: number)
+	table.insert(lands, { model = model, time = clock.t, seconds = seconds })
+	engineLand(model, position, seconds)
 end
 local enginePivot = engine.pivot
 engine.pivot = function(model: Model, cframe: CFrame)
@@ -724,5 +847,249 @@ describe("Boar hooks: rests, holds and walls after the 1cf87aa PC run", function
 			expect(anchoredOf[model]).toBe(true)
 			expect(antiCheatCalls).toEqual({})
 		end
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- AI 423(c) and 422(d): where the server body rests against the stop it was told
+-- ------------------------------------------------------------------------------------------
+
+type HumanoidSettings = {
+	mode: string?,
+	fps: number?,
+	jitter: number?,
+	seed: number?,
+	arriveFrames: number?,
+}
+
+type Rest = {
+	told: number, -- the told stop: RushEnded Wall's distance, or the line end (speed × duration)
+	finalTold: number?, -- the distance the stop that ended the rush told (a slam's Interrupted)
+	rest: number, -- the root's distance down the line 1 s after the stop that ended the rush
+	farthest: number, -- the farthest the root got down the line, launch to then
+	backStep: number, -- the largest step the root took back up the line between two frames
+	doneAt: number?, -- seconds from the launch to the run's Done, if it ran its time
+	duration: number, -- the run's time (RushStarted)
+	writes: number, -- CFrame writes on the body from the charge on
+	rows: { { t: number, along: number, speed: number, walkSpeed: number } },
+}
+
+local PROBE = false
+
+-- A held boar at the origin charges -Z (a wall's face 12 studs ahead of its root when `wallZ` is
+-- given; the open field otherwise), with the fake engine's Humanoid and frames as `settings` asks.
+-- The server root is logged every frame from the launch to 1 s after the stop that ends the rush
+-- (item 420 column 4).
+local function restRun(wallZ: number?, settings: HumanoidSettings, hiddenAt: number?): Rest
+	humanoid.mode = settings.mode or "studio"
+	humanoid.fps = settings.fps or 60
+	humanoid.jitter = settings.jitter or 0
+	humanoid.random = Random.new(settings.seed or 11)
+	humanoid.arriveFrames = settings.arriveFrames or 1.7
+	local id, model = boarAtOrigin(wallZ)
+	if hiddenAt ~= nil then
+		table.insert(hiddenWalls, { point = Vector3.new(0, 0, -(hiddenAt + 2.5)), out = Vector3.zAxis })
+	end
+	local from = clock.t
+	local body = bodies[model]
+	local launch: number? = nil
+	local origin, direction = Vector3.zero, -Vector3.zAxis
+	local result: Rest = {
+		told = 0,
+		finalTold = nil,
+		rest = 0,
+		farthest = -math.huge,
+		backStep = 0,
+		doneAt = nil,
+		duration = 0,
+		writes = 0,
+		rows = {},
+	}
+	local endedAt: number? = nil
+	local finished = false
+	local last: number? = nil
+	frameHook = function()
+		if finished then
+			return
+		end
+		local started = sentOf("RushStarted", id)
+		if launch == nil and #started > 0 then
+			local payload = started[1].payload
+			launch = payload.serverTime
+			origin = Vector3.new(payload.origin[1], 0, payload.origin[3])
+			direction = Vector3.new(payload.direction[1], 0, payload.direction[3]).Unit
+			result.told = payload.speed * payload.duration
+			result.duration = payload.duration
+		end
+		local launchedAt = launch
+		if launchedAt == nil then
+			return
+		end
+		local along = (flat(body.position) - origin):Dot(direction)
+		table.insert(result.rows, {
+			t = clock.t - launchedAt,
+			along = along,
+			speed = flat(body.velocity).Magnitude,
+			walkSpeed = body.walkSpeed,
+		})
+		result.farthest = math.max(result.farthest, along)
+		if last ~= nil then
+			result.backStep = math.max(result.backStep, last - along)
+		end
+		last = along
+		local log = EnemyService.devRushOf(id)
+		if endedAt == nil and log ~= nil then
+			for _, stop in log.stops do
+				if stop.reason == "Wall" then
+					result.told = stop.distance
+				elseif stop.reason == "Done" then
+					result.doneAt = stop.at - launchedAt
+					endedAt = clock.t
+				else
+					result.finalTold = stop.distance
+					endedAt = clock.t
+				end
+			end
+		end
+		local ended = endedAt
+		if ended ~= nil and clock.t - ended >= 1 - FLOOR_GAP then
+			result.rest = along
+			finished = true
+		end
+	end
+	expect(invokeDev("charge", { entityId = id, toward = { 0, 0, -20 } }).ok).toBe(true)
+	local guard = 0
+	while not finished and guard < 2000 do
+		guard += 1
+		serverFrame()
+	end
+	frameHook = nil
+	assert(finished, "the rush never ended")
+	result.writes = writesOn(model, from)
+	humanoid.mode = "ideal"
+	humanoid.fps = 60
+	humanoid.jitter = 0
+	humanoid.arriveFrames = 1.7
+	if PROBE then
+		print(
+			("told %.3f rest %.3f (%+.3f) farthest %+.3f backStep %.3f final %s done %s"):format(
+				result.told,
+				result.rest,
+				result.rest - result.told,
+				result.farthest - result.told,
+				result.backStep,
+				tostring(result.finalTold),
+				tostring(result.doneAt)
+			)
+		)
+		for _, row in result.rows do
+			if (row.t < 0.3 and result.told < 10) or (row.t > 0.7 and row.t < 0.9) then
+				print(("  +%.3f along %.3f speed %.2f walk %.2f"):format(row.t, row.along, row.speed, row.walkSpeed))
+			end
+		end
+	end
+	return result
+end
+
+describe("A rush's server body rests on its told stop (AI 423(c), 422(d), D-525)", function()
+	it("a slam and an open run rest on their stops at 60 Hz, where the PC's log on 4b18b5c rested off them", function()
+		-- The PC's server log (Studio, 60 fps, lag 0; this file's studio Humanoid plays it: rows 3.027,
+		-- 5.822 → 6.294 and 21.227 → 21.417 → 21.456 against its 3.028, 5.828 → 6.295 and 21.228 →
+		-- 21.454 → 21.466). The slam was landed 0.341 short of its told 6.169 on a landing timed to end
+		-- inside the frame, ran the whole frame at 28 and was halted a frame later: 0.126 past (Lune
+		-- 0.125 on 4b18b5c). The open run's Humanoid braked 0.772 short of the line end on its own, and
+		-- a body 0.534 short is no landing for a frame's lead, so it stood there: 0.533 short (Lune
+		-- 0.534).
+		for _, kind in { "slam", "open" } do
+			local wall = if kind == "slam" then WALL_Z else nil
+			local run = restRun(wall, {})
+			expect(math.abs(run.rest - run.told)).toBeLessThanOrEqual(0.05)
+			expect(run.farthest - run.told).toBeLessThanOrEqual(0.05)
+			expect(run.backStep).toBeLessThanOrEqual(1e-6)
+			expect(run.writes).toBe(0)
+			if wall ~= nil then
+				-- The stop that ends the slam (its daze) tells the rest too.
+				expect(math.abs((run.finalTold :: number) - run.told)).toBeLessThanOrEqual(0.05)
+			end
+		end
+	end)
+
+	it("rests within 0.05 of its stop at 60 and 144 Hz server frames, jittered, never past it nor back", function()
+		local worst = { rest = 0, past = -math.huge, back = 0 }
+		for _, fps in { 60, 144 } do
+			for _, jitter in { 0, 0.25 } do
+				for seed = 1, if jitter > 0 then 3 else 1 do
+					for _, kind in { "slam", "open" } do
+						local wall = if kind == "slam" then WALL_Z else nil
+						local run = restRun(wall, { fps = fps, jitter = jitter, seed = seed })
+						worst.rest = math.max(worst.rest, math.abs(run.rest - run.told))
+						worst.past = math.max(worst.past, run.farthest - run.told)
+						worst.back = math.max(worst.back, run.backStep)
+						expect(run.writes).toBe(0)
+					end
+				end
+			end
+		end
+		print(
+			("[423(c)] studio Humanoid, 60/144 Hz, jitter 0/0.25: rest off its stop %.3f, farthest past %+.3f, back %.4f"):format(
+				worst.rest,
+				worst.past,
+				worst.back
+			)
+		)
+		expect(worst.rest).toBeLessThanOrEqual(0.05)
+		expect(worst.past).toBeLessThanOrEqual(0.05)
+		expect(worst.back).toBeLessThanOrEqual(1e-6)
+	end)
+
+	it("rests on its stop whether the Humanoid never brakes short or brakes as far as its lead", function()
+		-- What makes Studio's Humanoid brake short is not in the log (0.772 braked, 0.808 ran on, at
+		-- 60 fps): a Humanoid that only ever runs on past its goal, and one that holds a goal 1.95
+		-- frames out reached (0.91 at 60 Hz, inside the 0.933 lead), both land on the stop. On
+		-- 4b18b5c the first ran 0.579 past the slam's stop at 60 Hz and walked 0.552 back: once
+		-- halted there, MoveTo was sent to the stop again and it ran a whole frame through it.
+		local worst = { rest = 0, past = -math.huge, back = 0 }
+		for _, arrive in { 0, 1.95 } do
+			for _, fps in { 60, 144 } do
+				for _, kind in { "slam", "open" } do
+					local wall = if kind == "slam" then WALL_Z else nil
+					local run = restRun(wall, { fps = fps, arriveFrames = arrive, jitter = 0.1, seed = 5 })
+					worst.rest = math.max(worst.rest, math.abs(run.rest - run.told))
+					worst.past = math.max(worst.past, run.farthest - run.told)
+					worst.back = math.max(worst.back, run.backStep)
+				end
+			end
+		end
+		print(
+			("[423(c)] Humanoids braking at 0 and 1.95 frames: rest off its stop %.3f, farthest past %+.3f, back %.4f"):format(
+				worst.rest,
+				worst.past,
+				worst.back
+			)
+		)
+		expect(worst.rest).toBeLessThanOrEqual(0.05)
+		expect(worst.past).toBeLessThanOrEqual(0.05)
+		expect(worst.back).toBeLessThanOrEqual(1e-6)
+	end)
+
+	it("keeps the run's end on its time, and a landing the world holds short ends in landMaxSeconds", function()
+		-- Done still comes when the run's time is over (the clients' timeline): 22 / 28 = 0.786 s
+		-- after the body started, on the first frame after it. A body something unseen holds short of
+		-- its line end (here 21.6) is landed for at most landMaxSeconds and then stopped dead there.
+		local open = restRun(nil, {})
+		local duration = open.duration
+		expect(open.doneAt).toBeGreaterThanOrEqual(duration)
+		expect(open.doneAt).toBeLessThanOrEqual(duration + 2 / 60 + 1e-6)
+		table.clear(lands)
+		local held = restRun(nil, {}, 21.6)
+		expect(held.doneAt).toBeGreaterThanOrEqual(duration)
+		expect(held.doneAt).toBeLessThanOrEqual(duration + 2 / 60 + 1e-6)
+		expect(math.abs(held.rest - 21.6)).toBeLessThanOrEqual(0.01)
+		expect(#lands >= 2).toBe(true)
+		local first, last = lands[1].time, lands[#lands].time
+		expect(last - first).toBeLessThanOrEqual(AI.movement.landMaxSeconds + 1e-6)
+		-- Stopped dead after it: still on the next rows.
+		local row = held.rows[#held.rows]
+		expect(row.speed).toBe(0)
 	end)
 end)

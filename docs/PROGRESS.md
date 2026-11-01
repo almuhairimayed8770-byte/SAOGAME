@@ -892,26 +892,62 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - Checks: ALL GREEN (full): 3879 specs passed in 233 spec files, 0 failed; 41 validators, 0 problems; the hit matrix passes; gaitgen matches 12 gait clips; ANIMATION_REVIEW.md is current (66 clips).
 - Still open: the server body's rest against the told stop (0.126 past after a slam at 60 fps, about 0.58 short of an open run's line end; land again for what is left, once item 420's server log shows which); 399(a)'s white one row after the closest snout, and the 1.903 and 7.77 jumps (not reproduced); D-514 assumes the frame is drawn after PostSimulation (item 420 shows it); the same tick boundary in Recover (the boar's 1.2 s) and the interrupt resume; a client stand-up if an enemy's first client row reads FallingDown; lag 0.1 s adding 8–10 rows over lag 0; the logs AI asks for (404(b)'s 0.29 and 0.37 at 144 Hz, 405(c)'s 0.455 and 1.72 camera jumps, 408(b)'s 0.066 s guard, the 9.2-stud and 4.4 rows at 144 Hz, 409(b)'s missing number, the engine steps of 409(c) and 410); the PC's cause for the sheathed sword (415); the owner's avatar may reach farther than Lune's at 4.2 (the fallback is 4.85); the clips' own lean past the drawn idle at a flush wall (Basic1 0.21 to Rising Arc 0.52); the sheathed player Idle 0.061–0.068 below the floor and the kobold Idle's 0.032 sink; Sprint@ arms at 21.2°; Basic3's recovery start (59 → 229 studs/s in one 240 Hz sample at 0.325, under the rule; a SineInOut there put the blade 0.18 into the kobold's head); FollowThrough reads 60 Hz rows only (Basic1's old lift passed 0.47 deep between rows); the capture's walk-in still Moves in world space without MoveInput.script; a spawn made inside EnemyService.step would lose its lift before physics (no such path found); TrailRibbon's "holds its ages on the frames the rig's animator draws held" fails when the client/Trail filter group runs alone, though it passes alone and in the full suite (order-dependent); every PC item in section AI and the AG items not run.
 
+## Section AI fixes, first part (2026-11-01, D-523 to D-526)
+
+- Why: the owner's PC ran section AI on 4b18b5c, items 420 to 429 (with 432(c)) first, then 430 to 437. Shot 1 passed at lags 0, 0.05 and 0.1 s (421). What failed in 420 to 429: the client copy of every staged enemy read GetStateEnabled(FallingDown) true on rows 0–9 of all 6 takes and FallingDown on every held row (520 at lag 0, 531 at 0.1 s, and 1–2 more after the release at 0.1 s), while the server read Running on all 1063–1086 rows (425(a), (b)); the server boar ran on at 28 studs/s through a slam's told stop and rested 0.126 past it (6.295 against 6.169), WalkSpeed 28 throughout (423(c)), and rested 0.533 short of an open run's line end (21.467 against 22), which the client showed as a 0.58 slide back over about 30 rows (422(d)); the boar's Torso stepped 0.74–0.85 on 2–5 rows a rush (422(a)); and the snout was drawn 0.05–0.37 past the wall face on 3–7 rows a take at lags 0 to 0.1 s, and 1.607 once at 0.25 s (423(b)). In 435(h) a kobold's client copy read FallingDown on 331 of 440 Idle rows. Owners took them side by side from 4b18b5c; this first part merges the enemy and server-rest fixes.
+- Enemies upright on each client (D-523, D-524, amending D-508): D-508 asked once, on first sight, and never read the answer, so a copy whose turn-off did not take, or whose Humanoid or EntityKind came later, was never asked again. Now the client reads the copy first and the states back, asks again before every physics step (PreSimulation) and on an EntityKind change until they read off (at most 240 tries), and stands a copy already down up to Running. Lune through the real tracker and Replication, 196 held rows: every late arrival order 196 → 0 FallingDown rows; an EntityKind a frame late 196 → 1 (row 0, then stood up); an engine that drops the first turn-off (the PC's pattern) 196 → 0; pack kobolds held later 196 → 0 in all 6 late orders (0 in one batch); players never asked. Enemy models carry client-only UprightClient, UprightClientWhy and UprightClientTries, which item 442 reads to name the PC's cause (not proven).
+- The server boar's rest (D-525, D-526): the landing onto a slam's contact or a run's line end is landed again every server frame for what is left (paced over at least 2 frames, stopped within 0.02, never past, at most 0.25 s), and the mover issues no MoveTo to a goal it has landed on. Lune, with a studio Humanoid fitted to the PC's rows: a slam +0.125 → −0.013 and an open run −0.534 → −0.017 at 60 fps; worst across 60 and 144 Hz with frame jitter 0.534 off and 0.351 past → 0.020 off, never past, no back step; the client's slide back after an open run about 0.58 → under 0.02. Done stays on the run's timer and the root reaches the line end 0.083 s after it (≤ 0.25 s), inside Recover; RushEnded "Interrupted" tells the stop (6.169), not the overshoot (6.295). Three new ai.movement values with validator rules: landFrames 2, landSlackStuds 0.02, landMaxSeconds 0.25.
+- The render check (measured on the PC at 4b18b5c, 60 fps, rows at Last+2): a joint Transform written on PostSimulation never shows on screen (the boar's Root lifted 3 studs: not visible; the avatar's RightShoulder +80°: not visible); written in the render step at Camera−1 it shows, steadily; written on PreSimulation it shows on the boar, while on the avatar's arm the game's own PreSimulation write replaces it. On every test the screen matched BasePart.CFrame, and BasePart.CFrame at Last+2 equals the previous row's joint-chain read (300 of 301 rows). So the screen shows the pose as physics solved it, and D-514's PostSimulation redraw has no visible effect: 422(a), 423(b) and 424 stay open, keep their AI lines and are being re-worked.
+- Studio: section AJ, first part (items 439 to 443). Item 439 replaces item 420 column 4's marks (land, the landing rows, landingUntil as a bound, landed); 440 is the slam's server rest (423(c)); 441 the open run's rest and the client's slide back (423(c)'s open run, 422(d)); 442 enemies upright on the client, with the new attributes (425(a), (b), (h)); 443 the kobolds' client copies (435(h)). Section AI marks each line they replace "Superseded by item …". The fails in 430 to 437 are being fixed separately; a second part of section AJ follows with their re-tests.
+- Merge: the two patches went on 4b18b5c 3-way with no conflicts. Both changed ai.luau, the ai validator, data/ai.spec and validators.spec; every block of both is intact, and their specs pass together (ai.spec 13, validators.spec 220, EnemyUprightClient 15, BoarHooks 10). The merge changed no spec, bound or data value. Changed expectations, each in its row: validators.spec's D-494 fixture carries upright.client (D-523); BoarHooks' frames() are time-based, with no number changed (D-525); everywhere else cases were only added.
+- Checks: ALL GREEN (full): 3898 specs passed in 233 spec files, 0 failed; 41 validators, 0 problems; the hit matrix passes; gaitgen matches 12 gait clips; ANIMATION_REVIEW.md is current (66 clips).
+- Still open: the PC's cause for 425 (a dropped first turn-off, the connection order, or watch never running; item 442(c) names it); the studio Humanoid's arrival braking is a fit to the PC's 60 fps rows (at 144 Hz it predicted −0.219 on 4b18b5c where round G measured 0.015–0.03 past), so items 440 and 441 decide; a hitch longer than twice the last frame can carry a landing past its stop; D-514's redraw does not show, so 422(a), 423(b) and 424 are being re-worked; the fails in 430 to 437; and every line of section AJ.
+
 ## Next three tasks
 
-1. Run section AI (items 420 to 437) of `docs/STUDIO_TASKS.md` on the build with the section AH fixes on the owner's
-   PC: item 420's logger columns and its 30 cap check first, then item 421 (shot 1), every item with item 397's frame
-   names, at the frame rates and lags each item names. Report every pass line with its numbers, and the logs AI asks for
-   before any fix (items 422(d), 423(c) and (d), 425(h), 426(b) and (c), 427(e), 429(a) and (d), 430, 431 and 433).
-   Then run the AG items not run on 0582a04 (listed after AI's table; the ones marked for the owner need the owner's
-   eyes, ears, gamepad or phone). Fix what fails the same way as the earlier rounds; the owner's calls (below, and in
-   AI) go to the owner.
-2. The rehearsal and the recording (item 438): once every AI re-test passes, rehearse the 11 shots in dev.luau order
-   with the frame-tick square on and log any take that fails its own pass lines; if all pass, record each with Game Bar
-   at 60 fps, High quality, with **View > Stats** open during the fight for the fps reading, and hand the files over
-   (here in the project or in `docs/clips/phase-0/` on the PC). Each is then reviewed frame by frame at 0.25x, the hand
-   columns of `docs/ANIMATION_REVIEW.md` are filled (with AG item 391(f)'s enemy cells), and anything that reads wrong
-   is fixed with the PoseEditor and recorded again.
-3. Fill the section 16 numbers in the performance table: client fps during the recorded fight, draw calls
-   (MicroProfiler), client memory (**View > Stats > Memory**), the 8 players + 30 enemies case and a 2020 phone. Then
-   merge `phase-0` into `main` and tag it once every gate line reads Met.
+1. Run section AJ (items 439 to 443) of `docs/STUDIO_TASKS.md` on the owner's PC on the build with these fixes:
+   item 442 (enemies upright, reading UprightClient, UprightClientWhy and UprightClientTries) and item 439's server
+   log first, then 440, 441 and 443, every item with item 397's frame names, at the frame rates and lags each names.
+   Report every pass line with its numbers and the reports AJ asks for (440(h), 441(e), 442(c) and (d), 443(b)).
+   Section AI's lines not superseded stand as written.
+2. Fix the remaining section AI fails, 430 to 437 (in progress), and re-work 422(a), 423(b) and 424 after the render
+   check (in progress); their re-tests follow as the second part of section AJ. The owner's calls (below, and in AI)
+   go to the owner.
+3. The rehearsal and the recording (item 438), once every line passes: rehearse the 11 shots in dev.luau order with the
+   frame-tick square on and log any take that fails its own pass lines; if all pass, record each with Game Bar at 60
+   fps, High quality, with **View > Stats** open during the fight for the fps reading, and hand the files over (here in
+   the project or in `docs/clips/phase-0/` on the PC). Each is then reviewed frame by frame at 0.25x, the hand columns
+   of `docs/ANIMATION_REVIEW.md` are filled (with AG item 391(f)'s enemy cells), and anything that reads wrong is fixed
+   with the PoseEditor and recorded again. The section 16 numbers and the merge into `main` follow (Open items).
 
-### Open items (after the section AH fixes, not in the three above)
+### Open items (after the section AI fixes, first part, not in the three above)
+
+- **Owner calls from the section AI fixes, first part (the default is chosen; say if not).**
+  - A client copy of an enemy found already fallen stands up to Running (chosen), not GettingUp: Running is the
+    server's state on every held row, and GettingUp would add a get-up beat the server never plays (D-524).
+  - After a slam or a run's end the server root eases into its stop over about 0.1 s, WalkSpeed halving each frame
+    (kept), not stopping at full pace on the exact stop: a full-pace stop is what ran 0.126 past or braked 0.533 short
+    in Studio, and the ease ends inside the daze or Recover (D-525).
+  - After an open run the root reaches the line end up to 0.25 s after Done (Lune 0.083 s) while Recover plays (kept):
+    Done, RushEnded and the hit sweep keep their clocks, so nothing the client or the hit timeline expects moves (D-525).
+- **From the section AI fixes, first part.** The PC's cause for 425 is not proven (a dropped first turn-off, the
+  connection order, or watch never running); item 442(c)'s attributes settle it. If UprightClient stays "Waiting" with
+  "NotTaken" up to 240 tries, a client SetStateEnabled is not kept from this LocalScript at all, and the earlier probe's
+  success needs explaining. If it reads "Off" but GetStateEnabled flips true later, the fix is a per-step check per enemy
+  (about 3 engine calls an enemy a frame), not added. The server's Engine.standUp still names GettingUp in code, not in
+  data (it could join ai.upright beside client.standUpState). The 1–2 FallingDown rows after a release at 0.1 s are
+  assumed to be the engine's (the anchored copy runs its own state machine until physics takes it); item 442(d) logs
+  them. The studio Humanoid's arrival braking in Lune is a fit to the PC's 60 fps rows (at 144 Hz it predicted −0.219 on
+  4b18b5c where round G measured 0.015–0.03 past); items 440 and 441 decide. A hitch longer than landFrames times the
+  last frame can carry a landing past its stop by up to speed × (hitch − 2 × the last dt); it stops on the next frame
+  and is never walked back. A Humanoid that brakes a written velocity at once would land more slowly, still within
+  0.25 s. A stall between 0.934 studs out and the stop is still caught only by the stuck clock.
+- **The render check.** D-514's PostSimulation redraw has no visible effect: the screen shows the pose as physics
+  solved it (BasePart.CFrame), a joint written on PostSimulation never shows, and one written in the render step at
+  Camera−1 does (the boar's on PreSimulation too). Items 422(a), 423(b) and 424 stay open and are being re-worked.
+- **After the recording.** Fill the section 16 numbers in the performance table: client fps during the recorded fight,
+  draw calls (MicroProfiler), client memory (**View > Stats > Memory**), the 8 players + 30 enemies case and a 2020
+  phone. Then merge `phase-0` into `main` and tag it once every gate line reads Met.
 
 - **Owner calls (rounds F and G, and the section AH fixes).** Rush and camera: should a charging boar slow up a steep
   slope (D-495)? Should the crouch (Armed) smooth over a root that jumps instead of standing exactly on it (D-255;
@@ -946,12 +982,8 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   Switch partners once parties exist? A catch-up rate for a late fast remote clip? Fold simultaneous kills of different
   weights into the heaviest shatter cue? The HUD vignette edge to edge on notched phones? The frame rule for distant
   Heartbeat-stepped rigs (AG item 387)?
-- **Proposed fixes waiting on a Studio log or an owner call.** A rush's server body: on landed, land again for what
-  is left while more than flatEpsilon remains (bounded), and end an overshooting landing a physics substep early, once
-  item 420's server log at land, landingUntil and landed shows which (0.126 past a slam at 60 fps, about 0.58 short of
-  an open run's line end). If item 420 shows the frame drawn before PostSimulation, D-514's redraw changes nothing and
-  the rush needs a predictor from the root's last move instead. A client stand-up (ChangeState GettingUp) when an enemy
-  model is first seen, if item 425(h) shows FallingDown on its first row. Brain.ticksWaited for Recover and the
+- **Proposed fixes waiting on a Studio log or an owner call.** (The server body's landing and the client stand-up
+  are done: D-525 and D-524. D-514's redraw is measured to show nothing: above.) Brain.ticksWaited for Recover and the
   interrupt resume (owner call). If item 430 still reads a hand over 0.05 with the owner's avatar, stage the gate kobold
   farther (the drawn shell clears the idling axe square on at 4.85). The torso at a wall: keep UpperTorso and Head within
   the drawn idle's back line in the clips (a forward room in the plan cannot clear it at the walk-in rest, which leaves

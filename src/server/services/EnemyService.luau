@@ -135,8 +135,9 @@ export type Engine = {
 	-- Carries the body onto `position` (its height kept) by its own velocity over `seconds`, the way
 	-- it was going (D-431): a strike's own movement about to reach its exact stop gets there by its
 	-- own motion, never by a CFrame write, which every client shows as a teleport of the replicated
-	-- root (a 5-6 stud jump past its interpolation). The service stops it dead (halt) once the time
-	-- is over. Nil: `halt` onto the position stands in.
+	-- root (a 5-6 stud jump past its interpolation). The service lands it again on every frame for
+	-- what is left and stops it dead (halt) once it stands on the position (D-525). Nil: `halt` onto
+	-- the position stands in.
 	land: ((model: Model, position: Vector3, seconds: number) -> ())?,
 	-- Anchors (true) or frees (false) the body's root (D-436): a held enemy stands where it was held
 	-- and no player walking into it shoves it; freed, the server simulates it again (network owner
@@ -217,8 +218,12 @@ type Mover = {
 	-- The exact goal the body was stopped dead on (Engine.halt, arrive); nil until it is reached.
 	halted: Vector3?,
 	-- A landing in flight (Engine.land, arrive): the server time it is over, when the body is stopped
-	-- dead where it got to (D-431). Nil: none.
+	-- dead where it got to (D-431, D-525: it ends sooner once the body stands on its stop). Nil: none.
 	landingUntil: number?,
+	-- The flat way to the stop when the landing began (a body past its stop that way is stopped dead
+	-- where it is, never walked back), and the server time it was last landed (D-525).
+	landWay: Vector3?,
+	landAt: number,
 	-- A plain stop asked for while an exact run was still under way (D-432): it applies once the body
 	-- is on its stop.
 	stopAfter: boolean,
@@ -402,6 +407,8 @@ local function newMover(model: Model, speed: number, body: RushWorld.Body?): Mov
 		body = body,
 		exact = false,
 		halted = nil,
+		landWay = nil,
+		landAt = -math.huge,
 		stopAfter = false,
 		cutStop = nil,
 		nearPoints = {},
@@ -458,6 +465,7 @@ local function moverStop(mover: Mover, dead: boolean?)
 	end
 	mover.stopAfter = false
 	mover.landingUntil = nil
+	mover.landWay = nil
 	mover.cutStop = nil
 	mover.nearAt = -math.huge -- the next movement looks round afresh (a hold, a place)
 	mover.goal = nil
@@ -799,6 +807,12 @@ local function moverUpdate(mover: Mover, now: number)
 			moverStop(mover, true)
 			return
 		end
+		local halted = mover.halted
+		if mover.exact and halted ~= nil and Brain.horizontalDistance(halted, goal) < AI.flatEpsilon then
+			-- Landing on its exact stop, or stopped dead there (arrive, landStep): no MoveTo of its own
+			-- carries it on (D-525, D-526). Studio's Humanoid runs a whole frame through a goal that near.
+			return
+		end
 		issue(mover, goal, now)
 		return
 	end
@@ -863,15 +877,55 @@ local function stopOf(mover: Mover): Vector3?
 	return nil
 end
 
--- A strike's own movement to where it stops (`exact`: a slam's stop, a finished rush's line end) that
--- would reach it before the next server frame (at its speed over this frame's seconds, at most
--- movement.haltLeadSeconds) lands on it (Engine.land, D-431): the body runs the rest of the way at its
--- own pace and is stopped dead there once that time is over (landed), so it rests on the stop the rush
--- told every client (D-208), never a skid past it, and gets there by its own motion: a CFrame write is
--- a teleport of the root on every client. An engine with no land is stopped dead on it (Engine.halt).
--- A walk a wall cut short lands on its cut the same way (D-435), with an engine that lands a body (a
--- halt onto it would be a CFrame write): it stands with its snout at the face, not a skid past it.
--- Once per stop.
+-- One server frame of a landing (arrive, landed; D-525). The body within landSlackStuds of its stop,
+-- past it the way it was going when the landing began (it is never walked back), or still short once
+-- the landing's time is over, is stopped dead where it is (Engine.halt) and the landing ends;
+-- otherwise it is landed again for what is left, at the pace that covers it over landFrames of this
+-- frame's seconds and never faster than its own speed. Studio's Humanoid runs a whole frame at its
+-- pace, through its goal (the PC's slam: 0.126 past its stop on a landing timed to end inside the
+-- frame), and brakes on its own short of a goal it holds reached (the PC's open run: 0.533 short), so
+-- the landing is judged on where the body stands each frame, not on a time worked out once.
+local function landStep(mover: Mover, stop: Vector3?, dt: number, now: number)
+	local engine = dependencies().engine
+	local movement = AI.movement
+	local land = engine.land
+	local untilAt = mover.landingUntil
+	if stop ~= nil and land ~= nil and untilAt ~= nil and now < untilAt and mover.speed > 0 then
+		local position = engine.position(mover.model)
+		local offset = Vector3.new(stop.X - position.X, 0, stop.Z - position.Z)
+		local left = offset.Magnitude
+		local way = mover.landWay
+		if left > movement.landSlackStuds and (way == nil or offset:Dot(way) > 0) then
+			land(mover.model, stop, math.max(left / mover.speed, movement.landFrames * math.max(dt, 0)))
+			mover.walkSpeed = nil -- the landing sets its own pace; the next movement sets its own again
+			mover.landAt = now
+			return
+		end
+	end
+	mover.landingUntil = nil
+	mover.landWay = nil
+	local halt = engine.halt
+	if halt ~= nil then
+		halt(mover.model, nil)
+	else
+		engine.stop(mover.model)
+	end
+	if mover.stopAfter then
+		moverStop(mover)
+	end
+end
+
+-- A strike's own movement to where it stops (`exact`: a slam's stop, a finished rush's line end)
+-- within its speed times movement.haltLeadSeconds of it lands on it (Engine.land, D-431, D-525):
+-- the body is carried the rest of the way by its own velocity, landed again on every server frame
+-- for what is left (landStep, landed) and stopped dead once it stands on the stop, so it rests on the
+-- stop the rush told every client (D-208), never a skid past it, and gets there by its own motion:
+-- a CFrame write is a teleport of the root on every client. A body standing short of its stop (the
+-- engine's walk braked on its own) lands from there too. An engine with no land is stopped dead on it
+-- (Engine.halt) once it would reach it before the next server frame (at its speed over this frame's
+-- seconds, at most haltLeadSeconds). A walk a wall cut short lands on its cut the same way (D-435),
+-- with an engine that lands a body (a halt onto it would be a CFrame write): it stands with its snout
+-- at the face, not a skid past it. Once per stop.
 local function arrive(mover: Mover, dt: number, now: number)
 	local goal = stopOf(mover)
 	if not mover.moving or goal == nil then
@@ -887,17 +941,20 @@ local function arrive(mover: Mover, dt: number, now: number)
 	if halted ~= nil and Brain.horizontalDistance(halted, goal) < AI.flatEpsilon then
 		return
 	end
-	local lead = mover.speed * math.clamp(dt, 0, AI.movement.haltLeadSeconds)
-	local left = Brain.horizontalDistance(engine.position(mover.model), goal)
-	if left > lead + AI.flatEpsilon then
+	local leadSeconds = AI.movement.haltLeadSeconds
+	if land == nil then
+		leadSeconds = math.clamp(dt, 0, leadSeconds)
+	end
+	local position = engine.position(mover.model)
+	local left = Brain.horizontalDistance(position, goal)
+	if left > mover.speed * leadSeconds + AI.flatEpsilon then
 		return
 	end
 	mover.halted = goal
 	if land ~= nil then
-		local seconds = if mover.speed > 0 then left / mover.speed else 0
-		land(mover.model, goal, seconds)
-		mover.landingUntil = now + seconds
-		mover.walkSpeed = nil -- the landing sets its own pace; the next movement sets its own again
+		mover.landingUntil = now + AI.movement.landMaxSeconds
+		mover.landWay = Brain.horizontal(goal - position)
+		landStep(mover, goal, dt, now)
 	elseif halt ~= nil then
 		halt(mover.model, goal)
 		if mover.stopAfter then
@@ -906,28 +963,20 @@ local function arrive(mover: Mover, dt: number, now: number)
 	end
 end
 
--- A landing whose time is over (arrive) stops the body dead where it got to (Engine.halt), unless a
--- new movement took over meanwhile (it carries the body on from there).
-local function landed(mover: Mover, now: number)
-	local untilAt = mover.landingUntil
-	if untilAt == nil or now < untilAt then
-		return
+-- A landing in flight (arrive) goes on for another frame (landStep): landed again for what is left,
+-- or stopped dead where the body got to once it stands on its stop, passed it, or its time is over;
+-- unless a new movement took over meanwhile (it carries the body on from there).
+local function landed(mover: Mover, now: number, dt: number)
+	if mover.landingUntil == nil or mover.landAt >= now then
+		return -- no landing, or one landed in this pass already
 	end
-	mover.landingUntil = nil
 	local goal, halted = stopOf(mover) or mover.goal, mover.halted
 	if goal ~= nil and (halted == nil or Brain.horizontalDistance(halted, goal) >= AI.flatEpsilon) then
+		mover.landingUntil = nil
+		mover.landWay = nil
 		return
 	end
-	local engine = dependencies().engine
-	local halt = engine.halt
-	if halt ~= nil then
-		halt(mover.model, nil)
-	else
-		engine.stop(mover.model)
-	end
-	if mover.stopAfter then
-		moverStop(mover)
-	end
+	landStep(mover, halted, dt, now)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -2123,7 +2172,7 @@ local function frameAll(dt: number)
 	end
 	table.clear(frameList)
 	for _, entry in entries do
-		landed(entry.mover, now) -- asleep or held too: a landing still ends stopped dead
+		landed(entry.mover, now, dt) -- asleep or held too: a landing still ends stopped dead
 	end
 end
 

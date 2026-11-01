@@ -137,6 +137,18 @@ local AI = {
 		-- never a skid past it. The next frame is taken to come at most this many seconds later, so
 		-- the stop never moves a body more than its speed times this.
 		haltLeadSeconds = 1 / 30,
+		-- The landing onto that stop (Engine.land, D-525). A body within its speed times
+		-- haltLeadSeconds of its stop is carried onto it by its own velocity and landed again on every
+		-- server frame for what is left, until it stands within landSlackStuds of it: then it is
+		-- stopped dead. Each frame's pace covers what is left over at least landFrames of the last
+		-- frame's seconds, so a frame up to landFrames times as long as the last never carries the
+		-- body past its stop (Studio's Humanoid runs a whole frame at its pace, through its goal: the
+		-- PC's slam rested 0.126 past its stop at 60 fps), and a body the Humanoid braked short of it
+		-- is still carried there (the PC's open run rested 0.533 short of its line end). A landing
+		-- still short after landMaxSeconds is stopped dead where it got to.
+		landFrames = 2,
+		landSlackStuds = 0.02,
+		landMaxSeconds = 0.25,
 		-- A walk stops with the body's snout on a wall, never in it, and a turn never swings it in
 		-- (EnemyService): a turn that sets any part of the body more than this far inside a wall is
 		-- not taken (turning away from a wall it faces head on swings a corner of the snout a hair
@@ -171,6 +183,34 @@ local AI = {
 	-- Names of Enum.HumanoidStateType (the ai validator checks them).
 	upright = {
 		offStates = { "FallingDown", "Ragdoll" },
+		-- Each client's own copy of an enemy Humanoid (D-508, D-523): the server's SetStateEnabled
+		-- does not replicate, so Replication turns the same states off on the copy, reading it first
+		-- and the states back after (the PC's working probe read first). A copy whose states still
+		-- read on, or whose Humanoid or EntityKind "Enemy" has not come yet, is tried again on every
+		-- PreSimulation, before this client's physics steps it, up to maxTries; a copy already in a
+		-- fall state goes to standUpState (Studio: an anchored copy left in FallingDown goes straight
+		-- back to it unless the state is off first, so the stand-up only follows the turn-off).
+		client = {
+			standUpState = "Running", -- the server's state on every held row the PC logged
+			maxTries = 240, -- 4 s of 60 Hz PreSimulation steps, then only an EntityKind change retries
+			-- A log aid on the enemy Model, client only (client attributes do not replicate), in the
+			-- shape of WeaponMount and WeaponMountWhy (D-519): nothing in the game reads them.
+			attributes = {
+				state = "UprightClient", -- one of `states` below
+				why = "UprightClientWhy", -- one of `whys` below while it waits; nil once off
+				tries = "UprightClientTries", -- how many times this client asked (1: at first sight)
+			},
+			states = {
+				off = "Off", -- the fall states read off on this copy; it was not in one
+				stoodUp = "StoodUp", -- off, and the copy was in a fall state, so it was stood up
+				waiting = "Waiting", -- not yet: the why says what is missing
+			},
+			whys = {
+				noHumanoid = "NoHumanoid", -- the model has no Humanoid on this client yet
+				notEnemy = "NotEnemy", -- the model's EntityKind attribute does not read "Enemy" yet
+				notTaken = "NotTaken", -- SetStateEnabled false was asked, but a state still reads on
+			},
+		},
 	},
 
 	interrupt = {

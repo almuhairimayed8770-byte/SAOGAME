@@ -2647,6 +2647,36 @@ describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", fun
 		expect(withMovement("snoutSlackStuds", 0)).toEqual({})
 	end)
 
+	it("a rush's landing paces over a frame at least, ends within a hair and lasts long enough (D-525)", function()
+		local function withMovement(field: string, value: any): { string }
+			return runAi(function(copy)
+				copy.movement = table.clone(copy.movement)
+				copy.movement[field] = value
+			end)
+		end
+		expect(hasProblem(withMovement("landFrames", nil), "movement.landFrames must be a number")).toBe(true)
+		expect(hasProblem(withMovement("landFrames", 0), "movement.landFrames must be positive")).toBe(true)
+		expect(hasProblem(withMovement("landFrames", 0.5), "movement.landFrames 0.5 must be at least 1")).toBe(true)
+		expect(hasProblem(withMovement("landSlackStuds", 0), "movement.landSlackStuds must be positive")).toBe(true)
+		expect(
+			hasProblem(
+				withMovement("landSlackStuds", 0.15),
+				"movement.landSlackStuds 0.15 must be below rushWorld.clipMarginStuds (0.15)"
+			)
+		).toBe(true)
+		expect(hasProblem(withMovement("landMaxSeconds", nil), "movement.landMaxSeconds must be a number")).toBe(true)
+		-- The fastest Charger rush (36 studs/s) from its 1.2-stud lead halves to 0.02 in 6 frames of
+		-- 1/30 s: 0.2 s.
+		expect(
+			hasProblem(
+				withMovement("landMaxSeconds", 0.15),
+				"movement.landMaxSeconds 0.15 must land the fastest rush (36 studs/s) from its lead within it (0.200 s)"
+			)
+		).toBe(true)
+		expect(withMovement("landMaxSeconds", 0.2)).toEqual({})
+		expect(withMovement("landFrames", 1)).toEqual({})
+	end)
+
 	it("a blocked step is told sooner than the jam lag, by fractions that tell running from blocked (D-280)", function()
 		local function withCharger(field: string, value: any): { string }
 			return runAi(function(copy)
@@ -2679,7 +2709,7 @@ describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", fun
 	it("enemies keep out of FallingDown, and only ever out of fall states (D-494)", function()
 		local function withOff(states: any): { string }
 			return runAi(function(copy)
-				copy.upright = { offStates = states }
+				copy.upright = { offStates = states, client = copy.upright.client }
 			end)
 		end
 		expect(withOff({ "FallingDown" })).toEqual({})
@@ -2694,6 +2724,75 @@ describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", fun
 		expect(hasProblem(withOff({ "FallingDown", "FallingDown" }), "upright.offStates names FallingDown twice")).toBe(
 			true
 		)
+	end)
+
+	it("the client's copy stands up into a walking state and logs under its own names (D-523)", function()
+		local function withClient(change: (client: any) -> ()): { string }
+			return runAi(function(copy)
+				local upright = table.clone(copy.upright)
+				local client = table.clone(upright.client)
+				client.attributes = table.clone(client.attributes)
+				client.states = table.clone(client.states)
+				client.whys = table.clone(client.whys)
+				change(client)
+				upright.client = client
+				copy.upright = upright
+			end)
+		end
+		expect(withClient(function() end)).toEqual({})
+		expect(hasProblem(
+			runAi(function(copy)
+				copy.upright = { offStates = copy.upright.offStates }
+			end),
+			"upright.client must be a table"
+		)).toBe(true)
+		expect(hasProblem(
+			withClient(function(client)
+				client.standUpState = "FallingDown"
+			end),
+			"upright.client.standUpState FallingDown must be Running or GettingUp"
+		)).toBe(true)
+		expect(withClient(function(client)
+			client.standUpState = "GettingUp"
+		end)).toEqual({})
+		for _, tries in { 0, 1.5, "240" } do
+			expect(hasProblem(
+				withClient(function(client)
+					client.maxTries = tries
+				end),
+				"upright.client.maxTries must be a whole number of at least 1"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			withClient(function(client)
+				client.attributes.why = "State"
+			end),
+			"upright.client.attributes.why 'State' is an attribute the server publishes"
+		)).toBe(true)
+		expect(hasProblem(
+			withClient(function(client)
+				client.attributes.tries = client.attributes.state
+			end),
+			"upright.client.attributes.tries 'UprightClient' is also attributes.state"
+		)).toBe(true)
+		expect(hasProblem(
+			withClient(function(client)
+				client.attributes.state = ""
+			end),
+			"upright.client.attributes.state must be a non-empty attribute name"
+		)).toBe(true)
+		expect(hasProblem(
+			withClient(function(client)
+				client.whys.notTaken = "Off"
+			end),
+			"upright.client.whys.notTaken 'Off' is also upright.client.states.off"
+		)).toBe(true)
+		expect(hasProblem(
+			withClient(function(client)
+				client.states.waiting = nil
+			end),
+			"upright.client.states.waiting must be a non-empty string"
+		)).toBe(true)
 	end)
 
 	it("a Charger needs a positive jamLagStuds", function()

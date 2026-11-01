@@ -119,6 +119,14 @@ describe("ai data", function()
 		end
 	end)
 
+	it("a client's copy stands up to the state the server holds it in (D-523)", function()
+		-- The PC's server log: Running on every held row; the client copy stands up to the same.
+		expect(AI.upright.client.standUpState).toBe("Running")
+		expect(table.find(AI.upright.offStates, AI.upright.client.standUpState)).toBeNil()
+		-- Retries span seconds of PreSimulation steps, so a Humanoid replicated late is still met.
+		expect(AI.upright.client.maxTries / 60).toBeGreaterThan(1)
+	end)
+
 	it("interrupt fallbacks are the section 6 durations", function()
 		expect(AI.interrupt.durations.Stagger).toBe(Combat.staggerDuration)
 		expect(AI.interrupt.durations.Break).toBe(Combat.breakDuration)
@@ -140,5 +148,25 @@ describe("ai data", function()
 		end
 		expect(AI.maxTicksPerFrame).toBeGreaterThanOrEqual(1)
 		expect(AI.sleepCheckInterval).toBeGreaterThan(AI.tickSeconds())
+	end)
+
+	it("a rush's landing rests within the 0.05 of AI 423(c) and is over before its recovery (D-525)", function()
+		local movement = AI.movement
+		expect(movement.landFrames).toBeGreaterThanOrEqual(1)
+		-- A frame up to twice the last one never carries a landing past its stop (Studio's server
+		-- frames jitter; the PC's slam ran a whole frame past).
+		expect(movement.landFrames).toBeGreaterThanOrEqual(2)
+		expect(movement.landSlackStuds).toBeGreaterThan(0)
+		expect(movement.landSlackStuds).toBeLessThan(0.05)
+		expect(movement.landMaxSeconds).toBeGreaterThan(movement.haltLeadSeconds)
+		for _, def in Enemies.list() do
+			if def.archetype == "Charger" then
+				for _, attack in def.attacks do
+					if attack.groundShape == "Line" then
+						expect(movement.landMaxSeconds).toBeLessThan(attack.recovery)
+					end
+				end
+			end
+		end
 	end)
 end)

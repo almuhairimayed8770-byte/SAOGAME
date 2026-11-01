@@ -231,11 +231,19 @@ export type Deps = {
 		exclude: Instance
 	) -> (number?, Vector3?))?,
 	-- Keeps an enemy body's Humanoid on this client out of the engine's fall states (ai.upright
-	-- .offStates, D-508: Humanoid:SetStateEnabled false, Replication.keepUpright), asked once as the
-	-- rig is first watched, the frame this client first meets the model. The server's own call
-	-- (D-494) does not replicate: Studio's client copy of a held, anchored enemy read FallingDown
-	-- from its spawn to its release. Never asked for a player's character. Without it: never asked.
-	keepUpright: ((model: Model) -> ())?,
+	-- .offStates, D-508: Humanoid:SetStateEnabled false; start() hands Replication.uprightModel).
+	-- The server's own call (D-494) does not replicate: Studio's client copy of a held, anchored
+	-- enemy read FallingDown from its spawn to its release. Asked as the rig is first watched, the
+	-- frame this client first meets the model, and again (D-523) when its EntityKind attribute
+	-- changes and on every beforePhysics step until it answers ai.upright.client.states.off or
+	-- stoodUp (or a nil state: a player's character, never touched), up to maxTries. It answers the
+	-- state and the why that Replication writes on the model for the logger. Never asked for a
+	-- model whose EntityKind reads "Player" or for the local record. Without it: never asked.
+	keepUpright: ((model: Model) -> (string?, string?))?,
+	-- Calls `fn` every frame before physics steps the bodies (start(): RunService.PreSimulation):
+	-- an enemy copy still waiting to be kept upright is asked again there, before this client's
+	-- physics first steps it (D-523). Without it: asked only on watch and on an EntityKind change.
+	beforePhysics: ((fn: () -> ()) -> ())?,
 }
 
 -- Sound names (family.Name in sfx.luau) the reactions play; Replication.spec checks each resolves.
@@ -290,6 +298,11 @@ local stateClips: { [number]: any } = {} -- entity id -> handle of the reaction 
 -- parry's Parry): it coexists with the Guard loop, never replacing it (D-419).
 local guardReactions: { [number]: any } = {}
 local watched: { [number]: { Disconnect: (self: any) -> () }? } = {}
+-- entity id -> the watched record whose enemy copy is not upright on this client yet (D-523),
+-- and how often this client has asked for it.
+local uprightWaiting: { [number]: any } = {}
+local uprightTries: { [number]: number } = {}
+local kindConnection: { Disconnect: (self: any) -> () }? = nil -- entities.changed (EntityKind)
 local drivers: { [number]: any } = {} -- entity id -> locomotion driver on a rig this client does not own
 -- entity id -> the trail kind the playing clip's TrailOn named; HitWindowOpen / Close, TrailOff and
 -- PostMotionStart carry no kind, so they reuse it while the same clip is playing.
@@ -3356,11 +3369,103 @@ function Replication.keepUpright(humanoid: any)
 	end
 end
 
--- An enemy's body as the server published it (EntityKind "Enemy", never the tracker's default for a
--- missing attribute) and not the local player's own.
-local function enemyBody(record: any): boolean
+local UPRIGHT = AI.upright.client
+
+--- Keeps this client's copy of an enemy Humanoid upright (D-508, D-523) and says how it went
+--- (ai.upright.client.states, and whys while it waits). It reads the copy's state first, as the
+--- PC's working probe did, turns each ai.upright.offStates entry off where it still reads on, and
+--- reads them back: one still on is NotTaken (asked again next step). A copy found in a fall state
+--- then goes to standUpState; an anchored copy only stays there once the fall states are off.
+function Replication.standUpright(humanoid: any): (string, string?)
+	local state = humanoid:GetState()
+	for _, name in AI.upright.offStates do
+		local stateType = (Enum.HumanoidStateType :: any)[name]
+		if humanoid:GetStateEnabled(stateType) then
+			humanoid:SetStateEnabled(stateType, false)
+		end
+	end
+	for _, name in AI.upright.offStates do
+		if humanoid:GetStateEnabled((Enum.HumanoidStateType :: any)[name]) then
+			return UPRIGHT.states.waiting, UPRIGHT.whys.notTaken
+		end
+	end
+	for _, name in AI.upright.offStates do
+		if state == (Enum.HumanoidStateType :: any)[name] then
+			humanoid:ChangeState((Enum.HumanoidStateType :: any)[UPRIGHT.standUpState])
+			return UPRIGHT.states.stoodUp, nil
+		end
+	end
+	return UPRIGHT.states.off, nil
+end
+
+--- start()'s keepUpright seam for one model (D-523): nothing for a player's character (`isPlayer`,
+--- Players:GetPlayerFromCharacter), Waiting NoHumanoid while `humanoidOf` (FindFirstChildOfClass)
+--- finds none, else standUpright on it.
+function Replication.uprightModel(
+	model: Model,
+	isPlayer: (model: Model) -> boolean,
+	humanoidOf: (model: Model) -> any
+): (string?, string?)
+	if isPlayer(model) then
+		return nil, nil
+	end
+	local humanoid = humanoidOf(model)
+	if humanoid == nil then
+		return UPRIGHT.states.waiting, UPRIGHT.whys.noHumanoid
+	end
+	return Replication.standUpright(humanoid)
+end
+
+-- The log aid (D-523): this client's upright state of the model, why it waits and how often it
+-- asked, on the Model, client only; written only when a value changes. Nil clears each.
+local function publishUpright(model: Instance, state: string?, why: string?, tries: number?)
+	local names = UPRIGHT.attributes
+	if model:GetAttribute(names.state) ~= state then
+		model:SetAttribute(names.state, state)
+	end
+	if model:GetAttribute(names.why) ~= why then
+		model:SetAttribute(names.why, why)
+	end
+	if model:GetAttribute(names.tries) ~= tries then
+		model:SetAttribute(names.tries, tries)
+	end
+end
+
+-- Asks once to keep a watched model's copy upright (D-508, D-523). True when nothing is left to
+-- ask: it is off or stood up, the model is a player's or the local record, or there is no seam.
+-- An enemy only by the model's own EntityKind (never the tracker's default for a missing one):
+-- until it reads "Enemy" the model waits NotEnemy; "Player" (or another kind) is never asked.
+local function tryUpright(record: any): boolean
+	local keepUpright = dependencies().keepUpright
 	local model = record.model
-	return typeof(model) == "Instance" and model:GetAttribute("EntityKind") == "Enemy" and not isLocalRecord(record)
+	if keepUpright == nil or typeof(model) ~= "Instance" or isLocalRecord(record) then
+		return true
+	end
+	local tries = (uprightTries[record.id] or 0) + 1
+	uprightTries[record.id] = tries
+	local kind = model:GetAttribute("EntityKind")
+	local state: string?, why: string? = nil, nil
+	if kind == "Enemy" then
+		state, why = keepUpright(model)
+	elseif kind == nil then
+		state, why = UPRIGHT.states.waiting, UPRIGHT.whys.notEnemy
+	end
+	publishUpright(model, state, why, if state ~= nil then tries else nil)
+	return state ~= UPRIGHT.states.waiting
+end
+
+-- Every beforePhysics step: each enemy copy still waiting is asked again before this client's
+-- physics steps it, until it is upright or has been asked maxTries times (then only an EntityKind
+-- change asks again).
+local function retryUpright()
+	for id, record in uprightWaiting do
+		if (uprightTries[id] or 0) >= UPRIGHT.maxTries then
+			continue
+		end
+		if tryUpright(record) then
+			uprightWaiting[id] = nil
+		end
+	end
 end
 
 --- Starts watching a tracked rig: the enemy body's fall states off (D-508), outline, trail
@@ -3371,10 +3476,10 @@ function Replication.watch(record: any)
 		return
 	end
 	-- First, on the frame this client meets the model: its copy of the Humanoid steps on this
-	-- client's physics from then on.
-	local keepUpright = d.keepUpright
-	if keepUpright ~= nil and enemyBody(record) then
-		keepUpright(record.model)
+	-- client's physics from then on. A copy not upright yet (no Humanoid, no EntityKind, a state
+	-- that did not take) is asked again before every physics step until it is (D-523).
+	if not tryUpright(record) then
+		uprightWaiting[record.id] = record
 	end
 	d.outline.register(record.model)
 	d.trails.attach(record.model)
@@ -3400,6 +3505,8 @@ function Replication.unwatch(record: any)
 	end
 	destroyDriver(record.id)
 	endRush(record.id)
+	uprightWaiting[record.id] = nil
+	uprightTries[record.id] = nil
 	attacks[record.id] = nil
 	launches[record.id] = nil
 	stateClips[record.id] = nil
@@ -3423,6 +3530,8 @@ function Replication.bind(newDeps: Deps)
 	table.clear(stateClips)
 	table.clear(guardReactions)
 	table.clear(watched)
+	table.clear(uprightWaiting)
+	table.clear(uprightTries)
 	table.clear(drivers)
 	table.clear(trailKinds)
 	table.clear(switchOpeners)
@@ -3466,6 +3575,10 @@ function Replication.bind(newDeps: Deps)
 	if typeof(newDeps.afterPhysics) == "function" then
 		(newDeps.afterPhysics :: any)(Replication.redrawRushes)
 	end
+	if typeof(newDeps.beforePhysics) == "function" then
+		-- An enemy copy not upright yet, asked again before this client's physics steps it (D-523).
+		(newDeps.beforePhysics :: any)(retryUpright)
+	end
 	if playTicking then
 		local onHeartbeat = newDeps.onHeartbeat :: any
 		onHeartbeat(function(dt: number?)
@@ -3499,6 +3612,18 @@ function Replication.bind(newDeps: Deps)
 	if typeof(entities.added) == "table" then
 		entities.added:Connect(Replication.watch)
 		entities.removed:Connect(Replication.unwatch)
+	end
+	if kindConnection ~= nil then
+		kindConnection:Disconnect()
+		kindConnection = nil
+	end
+	if typeof(entities.changed) == "table" then
+		-- An EntityKind that comes after the model (D-523): its copy is asked again at once.
+		kindConnection = entities.changed:Connect(function(record: any, attribute: string)
+			if attribute == "EntityKind" and uprightWaiting[record.id] == record and tryUpright(record) then
+				uprightWaiting[record.id] = nil
+			end
+		end)
 	end
 	if typeof(entities.localChanged) == "table" then
 		-- The local record can be watched before the tracker resolves its id; a driver attached
@@ -3706,15 +3831,18 @@ function Replication.start()
 		-- Loaded by name: CharacterController requires this module.
 		localDefence = defenceOf(controller),
 		keyAhead = keyAheadOf(controller),
-		-- An enemy's fall states off on this client's copy too (D-508); never a player's character.
-		keepUpright = function(model: Model)
-			if Players:GetPlayerFromCharacter(model) ~= nil then
-				return
-			end
-			local humanoid = model:FindFirstChildOfClass("Humanoid")
-			if humanoid ~= nil then
-				Replication.keepUpright(humanoid)
-			end
+		-- An enemy's fall states off on this client's copy too (D-508, D-523); never a player's
+		-- character.
+		keepUpright = function(model: Model): (string?, string?)
+			return Replication.uprightModel(model, function(character: Model): boolean
+				return Players:GetPlayerFromCharacter(character) ~= nil
+			end, function(body: Model): any
+				return body:FindFirstChildOfClass("Humanoid")
+			end)
+		end,
+		-- A copy not upright yet, asked again before this client's physics steps it (D-523).
+		beforePhysics = function(fn)
+			(game:GetService("RunService") :: any).PreSimulation:Connect(fn)
 		end,
 	})
 	Replication.subscribe()
