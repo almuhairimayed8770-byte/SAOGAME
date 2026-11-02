@@ -20,7 +20,9 @@
 	cancel hand-over (choreo.luau handOver, D-408) whose first cancel.snapFrames frames are the
 	cut's snap. A clip
 	whose body the server carries (the boar's rush, an enemy's walk) is traced with its root carried
-	along its facing at the game's speed. Every non-looping clip ends the way the game ends it: the
+	along its facing at the game's speed; an enemy's walk sets off from standing as the game sets it
+	off (movement.startPace eased up at paceChangeRate, the walk paced to it; D-624). Every
+	non-looping clip ends the way the game ends it: the
 	Mixer stops it with its blendOut and the rig settles into what plays under it.
 
 	The measures (ClipAudit.measure), per 60 Hz frame:
@@ -145,7 +147,22 @@ export type Stop = { at: number, clipId: string, blendOut: number }
 --- inside [from, to] (the server moves the body; the clip carries no root). A rush (`length` and
 --- `strike` set) is carried on the timeline its body is drawn on (RushWorld.distanceAt: the rush
 --- speed to the strike beat, then the skid over the rest of the run), from `from` (the launch).
-export type Travel = { from: number, to: number, speed: number, length: number?, strike: number? }
+--- A walk from standing (`setOff` set, D-624) is carried as the game carries it instead: its
+--- pace sets off at `setOff.pace` and eases up to `speed` at `setOff.rate` studs/s each second of
+--- the clip's play (EnemyService, D-618), and the clip is paced to it no slower than
+--- `setOff.floor` of its own rate (Locomotion's RigDriver).
+export type Travel = {
+	from: number,
+	to: number,
+	speed: number,
+	length: number?,
+	strike: number?,
+	setOff: SetOff?,
+}
+
+--- A walk from standing: its first pace, how fast the pace rises (studs/s a second), the
+--- slowest rate its clip plays at.
+export type SetOff = { pace: number, rate: number, floor: number }
 
 --- How a clip is played for the audit: what plays under it and around it.
 export type Plan = {
@@ -496,8 +513,24 @@ function ClipAudit.travelled(travel: Travel, clipTime: number): number
 	return travel.speed * (math.clamp(clipTime, travel.from, travel.to) - travel.from)
 end
 
+--- Studs a walk from standing (`travel.setOff`) has carried the root `seconds` after its clip's
+--- first step: setOff.pace eased up to travel.speed at setOff.rate, then travel.speed.
+function ClipAudit.setOffDistance(travel: Travel, seconds: number): number
+	local setOff = travel.setOff
+	assert(setOff ~= nil, "a walk from standing needs its setOff")
+	local t = math.max(seconds, 0)
+	local first = math.min(setOff.pace, travel.speed)
+	local rise = if setOff.rate > 0 then (travel.speed - first) / setOff.rate else 0
+	if t <= rise then
+		return first * t + 0.5 * setOff.rate * t * t
+	end
+	return first * rise + 0.5 * setOff.rate * rise * rise + travel.speed * (t - rise)
+end
+
 --- Where the server carries the body while `clip` plays (nil when the clip stands in place): an
---- enemy's walk at its rig's walkSpeed (the walk is paced to it, Locomotion's RigDriver), a
+--- enemy's walk from standing at its rig's walkSpeed, eased up from movement.startPace at
+--- movement.paceChangeRate (EnemyService, D-618; the walk is paced to it, Locomotion's RigDriver,
+--- no slower than locomotion.stride.rateFloor; D-624), a
 --- Charger's rush from its wind-up (the launch) on the timeline RushDraw draws its body on
 --- (RushWorld.distanceAt: AI.rushSpeed to the strike beat, then the skid over the line's reach and
 --- the overshoot).
@@ -508,7 +541,16 @@ function ClipAudit.travelOf(clip: Types.ClipDef): Travel?
 	end
 	if config.walk == clip.id then
 		local rig = RigTable[clip.rig]
-		return { from = 0, to = math.huge, speed = rig.walkSpeed }
+		return {
+			from = 0,
+			to = math.huge,
+			speed = rig.walkSpeed,
+			setOff = {
+				pace = AI.movement.startPace,
+				rate = AI.movement.paceChangeRate,
+				floor = ChoreoData.locomotion.stride.rateFloor,
+			},
+		}
 	end
 	local rush = if config.rush ~= nil then config.rush[clip.id] else nil
 	if rush ~= nil then
@@ -708,6 +750,8 @@ function ClipAudit.trace(body: Body, plan: Plan, hz: number): { Frame }
 	local time = 0
 	local goneAt: number? = nil
 	local travel = plan.travel
+	local setOff = if travel ~= nil then travel.setOff else nil
+	local setOffClock = 0 -- seconds the measured clip has played, for a walk from standing
 	local lastClipTime: number? = nil
 	-- The strike keys a hit-stop plan freezes on, in clip time, and the next one due.
 	local strikeKeys: { number } = {}
@@ -783,9 +827,26 @@ function ClipAudit.trace(body: Body, plan: Plan, hz: number): { Frame }
 				table.remove(retargets, index)
 			end
 		end
-		local result = mixer:step(if #frames == 0 then 0 else dt)
+		local stepDt = if #frames == 0 then 0 else dt
+		-- A walk from standing (D-624): this step's pace, and the clip paced to it as RigDriver
+		-- paces the walk (speed over walkSpeed, no slower than the floor).
+		local setOffCarried = 0
+		local setOffHandle = measured
+		if travel ~= nil and setOff ~= nil and setOffHandle ~= nil and not setOffHandle.done then
+			local seconds = stepDt * scale
+			setOffCarried = ClipAudit.setOffDistance(travel, setOffClock + seconds)
+				- ClipAudit.setOffDistance(travel, setOffClock)
+			if seconds > 0 then
+				mixer:setSpeed(setOffHandle, math.max(setOffCarried / (travel.speed * seconds), setOff.floor))
+			end
+			setOffClock += seconds
+		end
+		local result = mixer:step(stepDt)
 		local delta = result.rootDelta
 		root = root * CFrame.new(delta[1], delta[2], delta[3])
+		if setOffCarried > 0 then
+			root = root * CFrame.new(0, 0, -setOffCarried)
+		end
 		local current = measured
 		local clipTime: number? = nil
 		local blendingIn = false
@@ -801,7 +862,7 @@ function ClipAudit.trace(body: Body, plan: Plan, hz: number): { Frame }
 					moved += (measuredClip :: Types.ClipDef).duration -- a loop wrapped
 				end
 				played += math.max(0, moved)
-				if travel ~= nil and moved > 0 then
+				if travel ~= nil and setOff == nil and moved > 0 then
 					local before = ClipAudit.travelled(travel, lastClipTime :: number)
 					local carried = ClipAudit.travelled(travel, lastClipTime :: number + moved) - before
 					if carried > 0 then

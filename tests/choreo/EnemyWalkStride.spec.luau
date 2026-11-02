@@ -73,3 +73,51 @@ describe("EnemyWalkStride: an enemy's walk keeps its planted feet on the field (
 		end
 	end
 end)
+
+-- The boar's walk is one key a 60 fps frame split into four on the straight line between its two
+-- keys (D-576), so a planted hoof moves near evenly inside a frame and a 144 Hz row never catches
+-- it stopping and going. The first frame's first quarter had kept the single ease's pace (the
+-- planted hips 1.11 degrees against the stance's 1.9), and the hooves dragged on by it at every
+-- front-left and back-right touchdown: 0.042 a 144 Hz row walking straight, 0.049 wheeling at 90
+-- degrees with the turn plant (D-620; now 0.021 and 0.029).
+describe("EnemyWalkStride: the boar's walk quarters every frame on its straight line (D-576, D-620)", function()
+	it("every key between two 60 fps keys stands on the line between them", function()
+		local clip = ClipLibrary.get(Choreo.rigs.Boar.walk)
+		local frame = 1 / 60
+		local framed: { number } = {}
+		for index, key in clip.keys do
+			local whole = key.time / frame
+			if math.abs(whole - math.floor(whole + 0.5)) < 0.01 then
+				table.insert(framed, index)
+			end
+		end
+		expect(#framed >= 2).toBe(true)
+		local worst, worstAt = 0, ""
+		for step = 1, #framed - 1 do
+			local from, to = clip.keys[framed[step]], clip.keys[framed[step + 1]]
+			local count = framed[step + 1] - framed[step]
+			for between = framed[step] + 1, framed[step + 1] - 1 do
+				local key = clip.keys[between]
+				local share = (between - framed[step]) / count
+				for joint, value in key.joints do
+					local a, b = from.joints[joint], to.joints[joint]
+					for _, field in { "pos", "rot" } do
+						local here = (value :: any)[field] or { 0, 0, 0 }
+						local first = (a :: any)[field] or { 0, 0, 0 }
+						local last = (b :: any)[field] or { 0, 0, 0 }
+						for axis = 1, 3 do
+							local line = first[axis] + (last[axis] - first[axis]) * share
+							local off = math.abs(here[axis] - line)
+							if off > worst then
+								worst, worstAt = off, ("%s %s[%d] at %.4f s"):format(joint, field, axis, key.time)
+							end
+						end
+					end
+				end
+			end
+		end
+		print(("enemy/Boar/Walk: farthest quarter key off its frame's line %.4f (%s)"):format(worst, worstAt))
+		-- The keys are written to the hundredth of a degree and the thousandth of a stud.
+		expect(worst <= 0.006).toBe(true)
+	end)
+end)

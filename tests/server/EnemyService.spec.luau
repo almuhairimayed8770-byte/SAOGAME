@@ -759,10 +759,15 @@ describe("EnemyService mover", function()
 		advance(TICK)
 		expect(#pathCalls).toBe(1)
 		expect(near(pathCalls[1].to, Vector3.new(0, 3, 0))).toBe(true)
-		-- No path: it walks straight at home and asks again after pathFailRetry.
+		-- No path: it walks straight at home and asks again after pathFailRetry. It sets off from
+		-- standing (its chase had not walked), so its pace eases up from startPace at paceChangeRate
+		-- (D-618) and is the return's own by the time it asks again.
 		expect(near(body.moveTos[#body.moveTos].position, Vector3.new(0, 3, 0))).toBe(true)
-		expect(body.walkSpeed).toBeCloseTo(BOAR.moveSpeed * AI.leash.returnSpeedMultiplier, 1e-9)
+		local returnPace = BOAR.moveSpeed * AI.leash.returnSpeedMultiplier
+		expect(body.walkSpeed > AI.movement.startPace).toBe(true)
+		expect(body.walkSpeed < returnPace).toBe(true)
 		advance(AI.movement.pathFailRetry - TICK * 2)
+		expect(body.walkSpeed).toBeCloseTo(returnPace, 1e-9)
 		expect(#pathCalls).toBe(1)
 		pathResult = routeThrough({ Vector3.new(0, 3, -60), Vector3.new(0, 3, -30) }, false)
 		advance(TICK * 4)
@@ -1665,7 +1670,9 @@ describe("EnemyService mover: a late path skips the waypoints the body already p
 				end
 			end
 			expect(worst).toBeLessThan(1)
-			expect(body.position.Z).toBeLessThan(start.Z - 14 * (4 - TICK * 2)) -- it walked on all the while
+			-- It walked on all the while, from standing: its pace eased up from startPace (D-618).
+			local easing = (14 - AI.movement.startPace) ^ 2 / (2 * AI.movement.paceChangeRate)
+			expect(body.position.Z).toBeLessThan(start.Z - (14 * (4 - TICK * 2) - easing))
 		end
 	end)
 
@@ -1738,7 +1745,10 @@ describe("EnemyService mover: a late path skips the waypoints the body already p
 			end
 		end
 		expect(first).never.toBeNil()
-		expect(first.from.Z).toBeLessThan(start.Z - 5) -- it had walked on 7 studs meanwhile
+		-- It had walked on meanwhile: 7 studs at its pace, less what easing up from standing took
+		-- (D-618; 3.3 studs from a startPace of 0).
+		local easing = (14 - AI.movement.startPace) ^ 2 / (2 * AI.movement.paceChangeRate)
+		expect(first.from.Z).toBeLessThan(start.Z - (14 * 0.5 - easing - 1))
 		expect(near(first.position, turn)).toBe(true)
 
 		-- A walking body whose route steps sideways to a corridor before it runs on: the body is past
@@ -1770,8 +1780,89 @@ describe("EnemyService mover: a late path skips the waypoints the body already p
 			end
 		end
 		expect(first).never.toBeNil()
-		expect(first.from.Z).toBeLessThan(start.Z - 5)
+		expect(first.from.Z).toBeLessThan(start.Z - (14 * 0.5 - easing - 1))
 		expect(near(first.position, side)).toBe(true)
+	end)
+end)
+
+-- An enemy sets off on its feet (D-618): a walk from standing takes movement.startPace on its
+-- first frame and eases up to its own pace at paceChangeRate, the way D-574 eases the boar out of
+-- its wheel. On 4c725c9 the Humanoid took the full pace on the first frame (the kobold's root
+-- 0.167 a 60 Hz row against a 0.125 s Idle-Walk crossfade: its planted feet rode the root).
+describe("EnemyService mover: a walk from standing eases up from startPace (D-618)", function()
+	local KOBOLD = Enemies.byId("KoboldAxeman")
+
+	-- The WalkSpeed each AI tick from the first the mover set (its frame pass eased it by then).
+	local function paces(start: (id: number) -> ()): { number }
+		fresh()
+		local id, model = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		local body = bodyOf(model)
+		start(id)
+		local list: { number } = {}
+		for _ = 1, math.ceil(2 / TICK) do
+			advance(TICK)
+			if body.walkSpeed ~= nil and (#list > 0 or body.goal ~= nil) then
+				table.insert(list, body.walkSpeed)
+			end
+		end
+		return list
+	end
+
+	local function expectEased(list: { number }, pace: number)
+		local step = AI.movement.paceChangeRate * TICK
+		expect(#list > 0).toBe(true)
+		-- The first frame pass after the walk was asked for: startPace, eased one frame.
+		expect(list[1] <= AI.movement.startPace + step + 1e-9).toBe(true)
+		for index = 2, #list do
+			expect(list[index] - list[index - 1] <= step + 1e-9).toBe(true)
+		end
+		expect(list[#list]).toBeCloseTo(pace, 1e-9)
+	end
+
+	it("the chase sets off at startPace and rises at paceChangeRate to its pace", function()
+		local list = paces(function()
+			putPlayer(1, Vector3.new(0, 3, -20))
+		end)
+		print(("chase from standing: first WalkSpeed %.2f, %d ticks to %.2f"):format(list[1], #list, list[#list]))
+		expectEased(list, KOBOLD.moveSpeed * AI.archetypes.Brute.chaseSpeedMultiplier)
+	end)
+
+	it("the dev walk (EnemyService.walk, DevCombat S walk) sets off the same way", function()
+		local list = paces(function(id: number)
+			local ok = EnemyService.walk(id, Vector3.new(0, 3, -30), { arriveStuds = 1, seconds = 5 })
+			expect(ok).toBe(true)
+		end)
+		print(("dev walk from standing: first WalkSpeed %.2f, %d ticks to %.2f"):format(list[1], #list, list[#list]))
+		expectEased(list, KOBOLD.moveSpeed)
+	end)
+
+	it("a walk under way keeps its pace: a new goal, and a stop with a new walk in the same pass", function()
+		fresh()
+		local id, model = spawnAt("KoboldAxeman", Vector3.new(0, 3, 0))
+		local body = bodyOf(model)
+		local brain = EnemyService.brainOf(id)
+		putPlayer(1, Vector3.new(0, 3, 120))
+		advance(0.5)
+		local pace = KOBOLD.moveSpeed
+		for _ = 1, math.ceil(1 / TICK) do
+			brain:moveToward(Vector3.new(0, 3, -60), pace)
+			advance(TICK)
+		end
+		expect(body.walkSpeed).toBeCloseTo(pace, 1e-9)
+		brain:moveToward(Vector3.new(20, 3, -60), pace)
+		advance(TICK)
+		expect(body.walkSpeed).toBeCloseTo(pace, 1e-9)
+		-- Stopped and sent on before the frame pass: the Humanoid never braked, so no fresh start.
+		brain:halt()
+		brain:moveToward(Vector3.new(20, 3, -80), pace)
+		advance(TICK)
+		expect(body.walkSpeed).toBeCloseTo(pace, 1e-9)
+		-- Stopped through a frame pass: the next walk is a start from standing.
+		brain:halt()
+		advance(TICK)
+		brain:moveToward(Vector3.new(20, 3, -80), pace)
+		advance(TICK)
+		expect(body.walkSpeed <= AI.movement.startPace + AI.movement.paceChangeRate * TICK + 1e-9).toBe(true)
 	end)
 end)
 

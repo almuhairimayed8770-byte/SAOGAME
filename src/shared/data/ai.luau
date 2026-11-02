@@ -49,10 +49,19 @@ export type ChargerTuning = ArchetypeTuning & {
 	blockedSeconds: number, -- blocked this long (over two passes at least): jammed (D-280)
 }
 
+-- The Brute's stop at a fighter whose back is to the world (D-627): the room it leaves between
+-- the world behind the fighter and its own blocker face, so the fighter's swing fits.
+export type BackRoomTuning = {
+	leanStuds: number, -- the room front to back a fighter's swing needs between the two faces
+	brakeSeconds: number, -- a body told to stop runs on its pace times this before it stands
+	maxStopDistance: number, -- however close the world, the stop grows no farther than this
+}
+
 export type BruteTuning = ArchetypeTuning & {
 	stopDistance: number, -- stops walking this far from the target
 	wheelAngle: number, -- degrees off the target beyond which the chase walks along the facing
 	wheelSpeedMultiplier: number, -- the chase speed while wheeling round to the target
+	backRoom: BackRoomTuning, -- the stop grows when the world stands close behind the target
 }
 
 -- How a rush meets the world (D-205 to D-210): the same rules on the server, which moves the body and
@@ -146,6 +155,16 @@ local AI = {
 		-- row; 7 to 14 over 0.23 s now, 0.091 at most). A walk from standing, a strike's own movement
 		-- and a landing still set theirs at once. At most stride.contact / (1/60)^2 (the validator).
 		paceChangeRate = 30,
+		-- A walk from standing (the chase, a return, a spacing step, the dev walk; D-618) sets off at
+		-- this WalkSpeed and eases up to its pace at paceChangeRate, rising only over frames the body
+		-- walks: an enemy sets off on its feet. The Humanoid took its full pace on its first frame
+		-- while the client's Idle-to-Walk crossfade takes 1 / locomotion.weightBlendRate (0.125 s), so
+		-- the idle's planted feet rode the root for 0.125 s (the kobold 0.108-0.176 a 60 Hz row on
+		-- rows 1-8, the boar 0.16-0.22; now at most 0.054 and 0.050). Every walk from standing arrives
+		-- (pace - startPace)^2 / (2 paceChangeRate) studs later (the kobold 1.67 studs, 0.17 s). Its
+		-- first frame's step (startPace + paceChangeRate / 60) over a 60 Hz frame stays within
+		-- choreo stride.contact (the validator).
+		startPace = 0,
 		-- A strike's own movement (the rush) that would reach its goal before the next server frame
 		-- stops dead on it (EnemyService, Engine.halt): the body rests where the rush said it stops,
 		-- never a skid past it. The next frame is taken to come at most this many seconds later, so
@@ -535,6 +554,32 @@ local AI = {
 			-- of the rig's walkSpeed; tools/validators/ai.luau checks both).
 			wheelAngle = 20,
 			wheelSpeedMultiplier = 0.5,
+			-- A fighter backed to the world (D-627, the owner's call: the monster looms close, but the
+			-- hero always has room to swing and nobody is shoved by physics). The stop grows when the
+			-- world stands close behind the target along the line from the Brute (the target's root box
+			-- cast on past it against the world alone): far enough that, wherever the walk's last tick
+			-- and the brake leave the body, at least leanStuds stand between that world and the Brute's
+			-- own blocker face (the one across its facing line, square to the target it turns to face).
+			-- From stopDistance 3.5 a kobold stood 3.0-3.5 root to root, 2.2-2.7 from a wall behind a
+			-- fighter whose root rests 0.45 off it, where the swings lean 2.0-2.8 deep and the engine
+			-- shoved the leaning body out (F1e openIssue 1).
+			backRoom = {
+				-- The deepest column front to back of any player Art or basic, posed on the player rig
+				-- with its root held (a stand-off step back stays, D-534: the deepest the body leans in
+				-- front so far plus how far it leans behind now), and the stand-off's wallGapStuds (0.05)
+				-- off each face. Vertical 2.845, Sharp Nail 2.757, Rising Arc 2.546, Horizontal 2.357,
+				-- the basics 2.017-2.281 (tests/data/ai.spec.luau measures them from the clips).
+				leanStuds = 2.95,
+				-- A Humanoid told to stop runs on about its pace times this: 0.085 at the kobold's 10
+				-- studs/s on BoarHooks.spec's studio Humanoid (braking 0.672 a 1/240 s step). The walk's
+				-- last tick, its pace over one AI tick, is added on top.
+				brakeSeconds = 0.01,
+				-- At most this far root to root, inside every Brute attack's engage range (reach x
+				-- engageFraction: the Overhead's 4.8) so it still swings, and its blow (reach 6) still
+				-- lands, and inside the hit matrix's kobold real fight (5.25), so every player Art and
+				-- basic still reaches it (tools/validators/ai.luau checks both).
+				maxStopDistance = 4.6,
+			},
 		} :: BruteTuning,
 		-- The other seven archetypes land in Phase 1; until then they borrow the Brute's numbers.
 		Default = {

@@ -137,6 +137,13 @@ export type Context = {
 	-- How far the root's own box reaches ahead of its centre along `direction`: a root stopped by a
 	-- face that worldAhead found stands this far short of it (D-202). Nil: 0.
 	rootReach: ((direction: Vector3) -> number)?,
+	-- How far past the centre of a target's root the world stands, along `direction` (flat: the line
+	-- from this body to the target, on past it), within `distance` studs: the target's root box cast
+	-- against the world alone (D-627). Nil: nothing within it, or no world.
+	worldBehind: ((targetId: number, direction: Vector3, distance: number) -> number?)?,
+	-- How far ahead of the root's centre, along its facing, the body's own blocker face reaches across
+	-- its facing line: what a player's body stands against (D-198). Nil: 0.
+	faceReach: (() -> number)?,
 	-- A rush launched / stopped (D-169): EnemyService switches collision groups and tells the clients.
 	rushStarted: ((rush: Rush) -> ())?,
 	-- `contact`: the slam that stopped it ("Wall": where the body meets the face, D-208).
@@ -538,6 +545,30 @@ function Brain.rootReach(self: Brain, direction: Vector3): number
 		return 0
 	end
 	return math.max(0, reach(direction))
+end
+
+--- How far past the target's root centre the world stands behind it, along the line from this body
+--- to the target, within `distance` studs; nil when nothing does or the context knows no world.
+function Brain.worldBehind(self: Brain, target: Target, distance: number): number?
+	local cast = self.context.worldBehind
+	if cast == nil or not (distance > 0) then
+		return nil
+	end
+	local behind = cast(target.id, target.direction, distance)
+	if behind == nil or not (behind >= 0) then
+		return nil
+	end
+	return behind
+end
+
+--- How far ahead of the root's centre along the facing the body's own blocker face reaches (0 when
+--- the context knows none): where a player's body that backs off from it stands.
+function Brain.faceReach(self: Brain): number
+	local reach = self.context.faceReach
+	if reach == nil then
+		return 0
+	end
+	return math.max(0, reach())
 end
 
 --- Resolves one stretch of the attack's line, `from` to `to` studs along it from `origin` (the

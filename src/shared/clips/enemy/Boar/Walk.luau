@@ -14,10 +14,12 @@
 	planted sole moves near evenly between the 60 fps keys and a 144 Hz row no longer catches it
 	stopping and going inside one ease (the boar wheeling at 90 deg with the gait on the replicated
 	velocity: 0.073 a 144 Hz row and 19 rows past 0.042 on one key a frame, 0.058 and 2 rows on
-	four). The first frame's first quarter keeps the single ease's own pace (its key stands where
-	that ease stood at 1/240 s), so the cut-in over the fading idle ClipAudit's Lab plays reads as
-	before (Drift 0.46, PENDING). Rig: Boar. Hip X+ swings a leg forward; a hip's pos Y draws the
-	leg up into the body.
+	four). The first frame is split on its straight line too (D-620): its first quarter had kept
+	the single ease's own pace (1.11 degrees against the stance's 1.9) for ClipAudit's Lab cut-in,
+	and the planted hooves dragged on by that quarter at every touchdown of front-left and
+	back-right: 0.042 a 144 Hz row walking straight (now 0.021) and 0.049 wheeling at 90 deg with
+	the turn plant (now 0.029); the Lab's cut-in under the fading idle stays PENDING (ClipAudit.spec).
+	Rig: Boar. Hip X+ swings a leg forward; a hip's pos Y draws the leg up into the body.
 ]]
 
 local Types = require(script.Parent.Parent.Parent.Parent.types)
@@ -61,48 +63,48 @@ local clip: Types.ClipDef = {
 			time = 0.0042,
 			easing = "SineInOut",
 			joints = {
-				Root = posRot(0, -0.064, 0, 0, 0, 0),
-				Neck = rot(-4.72, 2.48, 0),
+				Root = posRot(0, -0.056, 0, 0, 0, 0),
+				Neck = rot(-4.86, 2.46, 0),
 				Jaw = rot(0, 0, 0),
 				TuskLeft = rot(0, 0, 0),
 				TuskRight = rot(0, 0, 0),
-				FrontLeftHip = rot(32.06, 0, 0),
-				FrontRightHip = posRot(0, 0.003, 0, -33.62, 0, 0),
-				BackLeftHip = posRot(0, 0.003, 0, -33.62, 0, 0),
-				BackRightHip = rot(32.06, 0, 0),
-				TailJoint = rot(-6, 11.89, 0),
+				FrontLeftHip = rot(31.28, 0, 0),
+				FrontRightHip = posRot(0, 0.006, 0, -33.94, 0, 0),
+				BackLeftHip = posRot(0, 0.006, 0, -33.94, 0, 0),
+				BackRightHip = rot(31.28, 0, 0),
+				TailJoint = rot(-6, 11.82, 0),
 			},
 		},
 		{
 			time = 0.0083,
 			easing = "SineInOut",
 			joints = {
-				Root = posRot(0, -0.044, 0, 0, 0, 0),
-				Neck = rot(-5.12, 2.44, 0),
+				Root = posRot(0, -0.039, 0, 0, 0, 0),
+				Neck = rot(-5.21, 2.42, 0),
 				Jaw = rot(0, 0, 0),
 				TuskLeft = rot(0, 0, 0),
 				TuskRight = rot(0, 0, 0),
-				FrontLeftHip = rot(29.9, 0, 0),
-				FrontRightHip = posRot(0, 0.01, 0, -34.5, 0, 0),
-				BackLeftHip = posRot(0, 0.01, 0, -34.5, 0, 0),
-				BackRightHip = rot(29.9, 0, 0),
-				TailJoint = rot(-6, 11.69, 0),
+				FrontLeftHip = rot(29.38, 0, 0),
+				FrontRightHip = posRot(0, 0.011, 0, -34.71, 0, 0),
+				BackLeftHip = posRot(0, 0.011, 0, -34.71, 0, 0),
+				BackRightHip = rot(29.38, 0, 0),
+				TailJoint = rot(-6, 11.64, 0),
 			},
 		},
 		{
 			time = 0.0125,
 			easing = "SineInOut",
 			joints = {
-				Root = posRot(0, -0.024, 0, 0, 0, 0),
-				Neck = rot(-5.52, 2.39, 0),
+				Root = posRot(0, -0.022, 0, 0, 0, 0),
+				Neck = rot(-5.57, 2.39, 0),
 				Jaw = rot(0, 0, 0),
 				TuskLeft = rot(0, 0, 0),
 				TuskRight = rot(0, 0, 0),
-				FrontLeftHip = rot(27.75, 0, 0),
-				FrontRightHip = posRot(0, 0.016, 0, -35.37, 0, 0),
-				BackLeftHip = posRot(0, 0.016, 0, -35.37, 0, 0),
-				BackRightHip = rot(27.75, 0, 0),
-				TailJoint = rot(-6, 11.48, 0),
+				FrontLeftHip = rot(27.48, 0, 0),
+				FrontRightHip = posRot(0, 0.017, 0, -35.48, 0, 0),
+				BackLeftHip = posRot(0, 0.017, 0, -35.48, 0, 0),
+				BackRightHip = rot(27.48, 0, 0),
+				TailJoint = rot(-6, 11.46, 0),
 			},
 		},
 		{

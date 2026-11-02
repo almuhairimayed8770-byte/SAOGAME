@@ -6,13 +6,17 @@
 	wheelAngle) it wheels instead: it walks along its facing at wheelSpeedMultiplier of its pace while
 	it turns, so it turns round on its feet. Walked straight at a target behind it, the body went
 	sideways and back under a walk whose feet step along the facing, and they slid (the kobold from
-	behind, 0.161 / 0.280 a 60 Hz row at 135 / 180 degrees, D-598). When the target is inside
-	reach * engageFraction and roughly ahead, it begins the attack: the 1.0 s overhead wind-up with
-	the yellow (GuardBreak) edge from the attack def. During the wind-up it keeps facing the target,
-	but only at the Brute's slow wind-up turn rate, so a late sidestep or a dodge leaves the cone.
-	The strike commits (turn rate 0): the 60-degree cone resolves `attack.strike` seconds after the
-	wind-up ends, from where the body stands and faces at that moment. Then the 1.4 s recovery with
-	the axe stuck low.
+	behind, 0.161 / 0.280 a 60 Hz row at 135 / 180 degrees, D-598). With the world close behind the
+	target along the line from the body (a fighter backed to a wall or a pillar), the stop grows so
+	the fighter's swing has its room between that world and the body's own blocker face
+	(stopDistanceFor, D-627): from stopDistance alone a kobold stood 2.2-2.7 from a wall behind a
+	fighter, where the swings lean 2.0-2.8 deep, and the engine shoved the body out. When the
+	target is inside reach * engageFraction and roughly ahead, it begins the attack: the 1.0 s
+	overhead wind-up with the yellow (GuardBreak) edge from the attack def. During the wind-up it
+	keeps facing the target, but only at the Brute's slow wind-up turn rate, so a late sidestep or a
+	dodge leaves the cone. The strike commits (turn rate 0): the 60-degree cone resolves
+	`attack.strike` seconds after the wind-up ends, from where the body stands and faces at that
+	moment. Then the 1.4 s recovery with the axe stuck low.
 
 	A parry (CombatService staggers the enemy: EntityService.StateChanged "Stagger") reaches the
 	brain as interrupt(), which cancels the attack before the strike.
@@ -27,18 +31,49 @@ local Brain = require(script.Parent.Brain)
 
 local tuning: AI.BruteTuning = AI.archetypes.Brute
 
-local Brute: Brain.Archetype = {
+-- The archetype, plus where its chase stops (the specs and the bench read it, D-627).
+type BruteModule = Brain.Archetype & {
+	stopDistanceFor: (brain: Brain.Brain, target: Brain.Target) -> number,
+}
+
+local Brute: BruteModule = {
 	name = "Brute",
 } :: any
 
 --- Nothing to remember between chases.
 function Brute.onChaseStart(_brain: Brain.Brain) end
 
---- Turns toward the target and walks up to stopDistance: along its facing, slowed, while it wheels
---- round from more than wheelAngle off (D-598), then straight at the target.
+--- Where the chase stops (D-627): stopDistance, grown when the world stands close behind the
+--- target along the line from the body, so that wherever the walk's last tick and the brake leave
+--- the body, at least backRoom.leanStuds stand between that world and the body's own blocker face
+--- (faceReach: the face across its facing line, square to the target it turns to face), and never
+--- past backRoom.maxStopDistance. The world is looked for only as far behind as a face could still
+--- call for more than stopDistance.
+function Brute.stopDistanceFor(brain: Brain.Brain, target: Brain.Target): number
+	local base = tuning.stopDistance
+	local room = tuning.backRoom
+	local pace = brain:speed()
+	-- The tick that stops the walk finds the body up to a tick's walk inside the stop, and the brake
+	-- carries it on a little past where it was told.
+	local slack = pace * AI.tickSeconds() + pace * room.brakeSeconds
+	-- The stop that leaves leanStuds with the world at the target's own centre.
+	local needed = room.leanStuds + brain:faceReach() + slack
+	local look = needed - base
+	if look <= 0 then
+		return base
+	end
+	local behind = brain:worldBehind(target, look)
+	if behind == nil then
+		return base
+	end
+	return math.clamp(needed - behind, base, math.max(base, room.maxStopDistance))
+end
+
+--- Turns toward the target and walks up to its stop (stopDistanceFor): along its facing, slowed,
+--- while it wheels round from more than wheelAngle off (D-598), then straight at the target.
 function Brute.chase(brain: Brain.Brain, dt: number, target: Brain.Target): Types.EnemyAttackDef?
 	brain:turnToward(target.direction, tuning.turnRate, dt)
-	if target.distance > tuning.stopDistance then
+	if target.distance > Brute.stopDistanceFor(brain, target) then
 		if brain:angleTo(target.direction) > tuning.wheelAngle then
 			brain:moveForward(brain:speed() * tuning.wheelSpeedMultiplier)
 		else

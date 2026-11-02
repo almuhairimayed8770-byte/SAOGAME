@@ -518,12 +518,80 @@ local Choreo = {
 			-- A walk that joins its idle at any point of its cycle pulled the planted foot from the
 			-- idle's spot toward the walk's over the crossfade (up to 1.25 studs on the kobold's
 			-- 2.5-stud step), 0.2 to 0.36 a 60 Hz row on rows 1 to 8, in the field to 0.087. The
-			-- kobold steps off at its left foot's mid-stance (0.125 s of 0.5): the planted sole under
-			-- the hip, 0.13 behind the idle's left foot, and the right sole lifted. A rig with none
-			-- joins at any point (the boar: its 144 Hz walk rows depend on the phase, see D-599).
+			-- kobold steps off just before its left foot's mid-stance (0.115 s of 0.5, D-625): the
+			-- planted sole 0.26 from the idle's left foot and the lifted right sole 0.31 ahead of the
+			-- idle's right. At mid-stance (0.25) the right sole stood 0.49 ahead, and the crossfade's
+			-- first 144 Hz rows dragged the idle's right foot, still on the field, toward it: 0.045 and
+			-- 0.050 a 144 Hz row set off at 0 and 180 degrees, now 0.032 and 0.037 (at 60 Hz the start
+			-- rows read 0.032 to 0.066, were 0.033 to 0.054; the bar is 0.1). The boar steps off
+			-- at its front-left hoof's mid-stance too (0.075 s of its 0.3 s trot, D-621): its start
+			-- rows (0 to 0.15 s after the root moves) read 0.056 a 60 Hz row at 90 degrees and 0.035
+			-- at 144, against 0.17 / 0.07 joining at 0 and up to 0.33 / 0.15 elsewhere in its cycle,
+			-- and its window holds 0.020-0.038 a 144 Hz row at every phase. A rig with none joins at
+			-- any point.
 			startPhase = {
-				Kobold = 0.25,
+				Kobold = 0.23,
+				Boar = 0.25,
 			} :: { [string]: number },
+			-- A rig's walking-turn plant (D-619, WalkTurnPlant; tools/validators/choreo.luau): while
+			-- its walk shows, each of `feet` (parts hung from their own hip joints) takes back `share`
+			-- of the sweep its root's turn gives it while it is down, set out into the turn for its
+			-- next stance while it is up, the hip rolling the leg at most maxRollDegrees sideways and
+			-- sliding it at most maxShiftStuds along the body. A boar wheeling at the Charger's 110
+			-- degrees a second on its walk slid its planted hooves 0.064 a 60 Hz row and 0.041 at
+			-- 144; held, 0.025 and 0.019. 10 degrees takes the 1.8-stud leg 0.31 sideways, as far as a
+			-- whole stance's turn sets a back hoof out at the trot's pace; 0.3 studs along keeps the
+			-- leg inside its 0.8-stud hip.
+			turnPlant = {
+				Boar = {
+					feet = { "FrontLeftLeg", "FrontRightLeg", "BackLeftLeg", "BackRightLeg" },
+					share = 1,
+					maxRollDegrees = 10,
+					maxShiftStuds = 0.3,
+				},
+			} :: {
+				[string]: {
+					feet: { string },
+					share: number,
+					maxRollDegrees: number,
+					maxShiftStuds: number,
+				},
+			},
+			-- A rig's stop plant (D-623, WalkStopPlant; tools/validators/choreo.luau): when its root
+			-- stands under its walk, the walk's clock stops and each group of `groups` (feet hung from
+			-- their own hips) holds where it stood, then steps over stepSeconds to where the idle
+			-- stands it, its sole liftStuds clear of its straight path at the step's middle: every
+			-- group but the lowest first (the swinging foot lands), the lowest last. A group already
+			-- within settleStuds of the idle's spots glides there instead. The walk's share falls
+			-- evenly to 0 over the steps. The kobold slid 0.12 / 0.24 a 60 Hz row at its stop at 0 /
+			-- 90 degrees (0.100 / 0.105 at 144) and the boar 0.379 (0.166) as it stopped at 60 degrees
+			-- before its Charge, with hooves to -0.036.
+			stopPlant = {
+				Kobold = {
+					groups = { { "LeftLeg" }, { "RightLeg" } },
+					stepSeconds = 0.15,
+					liftStuds = 0.15,
+					settleStuds = 0.1,
+				},
+				Boar = {
+					groups = { { "FrontLeftLeg", "BackRightLeg" }, { "FrontRightLeg", "BackLeftLeg" } },
+					stepSeconds = 0.15,
+					liftStuds = 0.12,
+					settleStuds = 0.1,
+				},
+			} :: {
+				[string]: {
+					groups: { { string } },
+					stepSeconds: number,
+					liftStuds: number,
+					settleStuds: number,
+				},
+			},
+			-- A root that moved less than this share of its walk's own pace over a row has braked (the
+			-- server's Humanoid stops it within two frames): the stop plant takes the legs from the
+			-- next row. A walking root a 144 Hz client draws steps at least 0.6 of its pace a row
+			-- (511(g) on c78acd1: 0.030 to 0.066 a row at 7 studs/s).
+			stopBrakeShare = 0.5,
 		},
 		-- The attack clip ActionStarted plays keeps that beat up to its first HitWindowOpen (D-172):
 		-- the rig's hit-stop is the only freeze, and what it held beyond the server's pause (or

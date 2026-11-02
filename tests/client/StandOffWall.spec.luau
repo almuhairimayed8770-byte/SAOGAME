@@ -1333,6 +1333,8 @@ type Conditions = {
 	contact: number?,
 	headDepth: number?,
 	headCollides: boolean?,
+	-- The Art swung 3 times after Basic1 (a name in its clip id; Sharp Nail when nil), D-627.
+	art: string?,
 }
 
 -- One take as the PC ran it: placed at z `start` facing the kobold (locked), still 0.3 s, S held
@@ -1408,12 +1410,13 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		end
 		return plan
 	end
-	local pushed, walked = Vector3.zero, Vector3.zero
+	-- `byKobold`: the share of the push out of the kobold's blockers alone (D-627).
+	local pushed, walked, byKobold = Vector3.zero, Vector3.zero, Vector3.zero
 	local function physics(dt: number)
 		local count = math.max(1, math.floor(dt * SUBSTEP_HZ + 0.5))
 		local h = dt / count
 		local transforms = rig.animator.pose
-		pushed, walked = Vector3.zero, Vector3.zero
+		pushed, walked, byKobold = Vector3.zero, Vector3.zero, Vector3.zero
 		for _ = 1, count do
 			local velocity = rig.humanoid.MoveDirection * rig.humanoid.WalkSpeed
 			local walk = Vector3.new(velocity.X, 0, velocity.Z) * h
@@ -1421,17 +1424,22 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 			walked += walk
 			for _ = 1, PUSH_PASSES do
 				local solved = b.solve(rig.root.CFrame, transforms)
-				local push = Vector3.zero
+				local push, fromKobold = Vector3.zero, Vector3.zero
 				for _, name in colliding do
 					for _, obstacle in obstacles do
 						local apart, along = separation(solved[name], sizes[name], obstacle.CFrame, obstacle.Size)
 						if apart < -contact then
-							push += Vector3.new(along.X, 0, along.Z) * (-apart - contact)
+							local out = Vector3.new(along.X, 0, along.Z) * (-apart - contact)
+							push += out
+							if obstacle ~= block then
+								fromKobold += out
+							end
 						end
 					end
 				end
 				rig.root.CFrame = rig.root.CFrame + push * PUSH_SHARE
 				pushed += push * PUSH_SHARE
+				byKobold += fromKobold * PUSH_SHARE
 			end
 		end
 	end
@@ -1450,12 +1458,13 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 	rig.animator:play("player/OneHandedSword/IdleDrawn", {})
 	local basicId = "player/OneHandedSword/Basic1"
 	local slot, artId = 1, ""
+	local artName = pc.art or "SharpNail"
 	for index, art in rig.controller.slots() do
-		if art.clip:find("SharpNail") then
+		if art.clip:find(artName) then
 			slot, artId = index, art.clip
 		end
 	end
-	assert(artId ~= "", "no Sharp Nail in the slots")
+	assert(artId ~= "", "no " .. artName .. " in the slots")
 	local clips = {
 		[basicId] = Harness.load("src/shared/clips/" .. basicId),
 		[artId] = Harness.load("src/shared/clips/" .. artId),
@@ -1544,6 +1553,7 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 			first = first,
 			code = after - pushed - walked,
 			after = after,
+			kobold = Vector3.new(byKobold.X, 0, byKobold.Z).Magnitude,
 			drawn = drawn,
 			carried = carried,
 			swing = swing,
@@ -1608,6 +1618,13 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		blend = 0, -- (e) the same on rows that draw it fading in or out
 		blendRows = 0,
 		firstLag = 0, -- (f) First-to-First rows over (d)'s long-row bar
+		-- The engine's shove over the chain (D-627): the most it moved the root on one row (out of
+		-- the world and the blockers, flat) and the path it moved it in all.
+		push = 0,
+		pushPath = 0,
+		-- Of it, the share out of the kobold's blockers: the most on one row and the path in all.
+		koboldPush = 0,
+		koboldPath = 0,
 	}
 	local rootSize: Vector3 = avatar.model.PrimaryPart.Size
 	local function depth(frame: CFrame, size: Vector3): number
@@ -1646,6 +1663,11 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 			result.codeShare += code:Dot(toward)
 			result.engineShare += engine:Dot(toward)
 		end
+		local shove = Vector3.new(engine.X, 0, engine.Z).Magnitude
+		result.push = math.max(result.push, shove)
+		result.pushPath += shove
+		result.koboldPush = math.max(result.koboldPush, r.kobold)
+		result.koboldPath += r.kobold
 		-- The code's own step, its turn left out (the stand-off moves the root; the facing is apart),
 		-- and the clip's root motion alone, each against the screen at First.
 		local fromFirst = b.solve(r.first, r.drawn)
@@ -2030,4 +2052,107 @@ describe("the stand-off at the kobold's own stand under the PC's conditions (ite
 		end
 		b.kobold:Destroy()
 	end)
+end)
+
+describe("the stand-off at a Brute's stop by a fighter backed to the world (D-627)", function()
+	it(
+		"leaves Sharp Nail and Vertical their lean, the kobold's blockers never pushing the body, at 60 and 144",
+		function()
+			-- A Brute stops far enough off a fighter backed to a wall or a pillar to leave its lean
+			-- (ai.luau backRoom.leanStuds) between the world and its Blocker: server/BruteBackRoom
+			-- measures the gap through EnemyService, data/ai pins leanStuds to the deepest Art's lean
+			-- column. Here the PC's take swings Basic1 and three of the Art at that gap, and the engine
+			-- never pushes the body out of the kobold's blockers (the share `koboldPush` reads). At the
+			-- old stop (stopDistance less the last tick's walk, and efa907c's stop square on a wall,
+			-- 3.367) the same take is squeezed between the two: the kobold shoves it.
+			local AI = Harness.load("src/shared/data/ai")
+			local Enemies = Harness.load("src/shared/data/enemies")
+			local b = bench()
+			-- The blockers' face on the line (x within the root box's half width of the kobold's).
+			local rootSize = (b.avatar.model.PrimaryPart :: BasePart).Size
+			local blockerFace = math.huge
+			for _, blocker in b.blockers do
+				local half = blocker.Size / 2
+				local frame = blocker.CFrame
+				local reachZ = half.X * math.abs(frame.RightVector.Z)
+					+ half.Y * math.abs(frame.UpVector.Z)
+					+ half.Z * math.abs(frame.LookVector.Z)
+				local reachX = half.X * math.abs(frame.RightVector.X)
+					+ half.Y * math.abs(frame.UpVector.X)
+					+ half.Z * math.abs(frame.LookVector.X)
+				if math.abs(frame.Position.X - KOBOLD_AT.X) < reachX + rootSize.X / 2 then
+					blockerFace = math.min(blockerFace, frame.Position.Z - reachZ)
+				end
+			end
+			local function conditions(fps: number, art: string): Conditions
+				return {
+					hits = true,
+					jitter = if fps == 144 then 0.45 else nil,
+					contact = 0.04,
+					headDepth = 1.27,
+					headCollides = false,
+					art = art,
+				}
+			end
+			local function line(label: string, art: string, shape: string, fps: number, gap: number, result: any)
+				print(
+					("[G6b] %s %s %s %d, gap %.3f: pre %.3f | root %.3f UT %.3f LT %.3f Head %.3f | First-to-First over the long-row bar %d | push %.3f (path %.3f), of it the kobold's %.3f (path %.3f)"):format(
+						label,
+						art,
+						shape,
+						fps,
+						gap,
+						result.pre,
+						result.root,
+						result.torso.UpperTorso,
+						result.torso.LowerTorso,
+						result.torso.Head,
+						result.firstLag,
+						result.push,
+						result.pushPath,
+						result.koboldPush,
+						result.koboldPath
+					)
+				)
+			end
+			local lean: number = AI.archetypes.Brute.backRoom.leanStuds
+			for _, art in { "SharpNail", "Vertical" } do
+				for _, shape in { "wall", "pillar" } do
+					for _, fps in { 60, 144 } do
+						local face = blockerFace - lean
+						local result = take(b, shape, face, fps, face + 0.9, conditions(fps, art))
+						line("the new stop", art, shape, fps, lean, result)
+						-- The engine's own contact before the chain, no colliding part deeper through it.
+						expect(result.pre <= 0.07).toBe(true)
+						expect(result.root <= 0.07).toBe(true)
+						expect(result.torso.UpperTorso <= 0.07).toBe(true)
+						expect(result.torso.LowerTorso <= 0.07).toBe(true)
+						expect(result.firstLag).toBe(0)
+						-- The swing fits between the two faces: the kobold's blockers never push the body.
+						expect(result.koboldPath <= 1e-6).toBe(true)
+					end
+				end
+			end
+			-- The old stop, root to root, as gaps: less the Blocker's front, plus the root resting the
+			-- engine's 0.05 in the wall (its half depth off the face).
+			local brute = AI.archetypes.Brute
+			local pace = Enemies.byId("KoboldAxeman").moveSpeed * brute.chaseSpeedMultiplier
+			local front = KOBOLD_AT.Z - blockerFace
+			local behind = rootSize.Z / 2 - 0.05
+			for _, old in
+				{
+					{ art = "SharpNail", stop = brute.stopDistance - pace * AI.tickSeconds() },
+					{ art = "Vertical", stop = 3.367 },
+				}
+			do
+				local gap = old.stop - front + behind
+				local face = blockerFace - gap
+				local result = take(b, "wall", face, 60, face + 0.9, conditions(60, old.art))
+				line("the old stop", old.art, "wall", 60, gap, result)
+				expect(gap < lean).toBe(true)
+				expect(result.koboldPush > 0.05).toBe(true)
+			end
+			b.kobold:Destroy()
+		end
+	)
 end)

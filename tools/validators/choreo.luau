@@ -48,7 +48,21 @@
 
 	And an enemy rig's gait paced by its root's own travel (D-575): enemy.gait.travelSeconds is a
 	positive number of seconds, at most 1 / locomotion.weightBlendRate; each enemy.gait.startPhase
-	(D-599) names a rig with a walk clip and is a phase from 0 up to 1.
+	(D-599) names a rig with a walk clip and is a phase from 0 up to 1. Each enemy.gait.turnPlant
+	(D-619) names a rig with a walk clip; its feet are distinct parts of that rig, each hung from
+	its own joint; its share is above 0 and at most 1; its maxRollDegrees above 0 and at most 20 (the
+	roll's lift is drawn for a small roll); its maxShiftStuds above 0 and at most the narrowest
+	foot's half depth (the leg slides along the body inside its own hip). Each enemy.gait.stopPlant
+	(D-623) names a rig with a walk clip; its groups are two or more non-empty lists of distinct
+	parts of that rig, each hung from its own joint and named once (the body always stands on a
+	group while another steps); its stepSeconds is at least 1 / locomotion.weightBlendRate (a step
+	no quicker than the gait's own crossfade) and its groups' steps together take at most the walk
+	clip's duration (a stop steps no slower than its walk); its liftStuds is above
+	locomotion.stride.contact (the step clears the contact band: a foot that rose less would read as
+	sliding) and at most half the shortest foot part's height (a step, not a hop); its settleStuds
+	is 0 or more, and a glide over that far within stepSeconds (SineInOut, its fastest pi / 2 times
+	the mean) slides a foot at most stride.contact a 60 Hz frame. enemy.gait.stopBrakeShare is above
+	0 and below 1 (a root that moved its whole pace on a row walks on).
 ]]
 
 local TIERS = { "High", "Medium", "Low" }
@@ -665,6 +679,207 @@ return function(ctx: any): { string }
 			)
 		end
 	end
+
+	-- An enemy rig's walking-turn plant (D-619): each names a rig with a walk; its feet are that
+	-- rig's parts hung from their own joints; a share of the sweep up to all of it; a small roll and a
+	-- slide inside the hip.
+	local plants = if typeof(gait) == "table" then gait.turnPlant else nil
+	check(typeof(plants) == "table", "enemy.gait.turnPlant must be a table of rig ids to plants")
+	if typeof(plants) == "table" then
+		local Rigs = ctx.load("src/shared/data/rigs")
+		for rigId, plant in plants do
+			local where = ("enemy.gait.turnPlant.%s"):format(tostring(rigId))
+			local rigClips = if typeof(choreo.rigs) == "table" then choreo.rigs[rigId] else nil
+			local rig = Rigs[rigId]
+			check(
+				typeof(rigClips) == "table" and typeof(rigClips.walk) == "string" and typeof(rig) == "table",
+				("%s names no rig with a walk clip (choreo rigs)"):format(where)
+			)
+			if typeof(plant) ~= "table" then
+				check(false, ("%s must be a table (feet, share, maxRollDegrees, maxShiftStuds)"):format(where))
+				continue
+			end
+			local hung: { [string]: boolean } = {}
+			if typeof(rig) == "table" and typeof(rig.joints) == "table" then
+				for _, joint in rig.joints do
+					hung[joint.part1] = true
+				end
+			end
+			local narrowest = math.huge
+			check(
+				typeof(plant.feet) == "table" and #plant.feet > 0,
+				("%s.feet must list the rig's foot parts"):format(where)
+			)
+			if typeof(plant.feet) == "table" then
+				local seen: { [string]: boolean } = {}
+				for _, foot in plant.feet do
+					local part = if typeof(rig) == "table" and typeof(rig.parts) == "table"
+						then rig.parts[foot]
+						else nil
+					check(
+						typeof(foot) == "string" and part ~= nil and hung[foot] == true and not seen[foot],
+						("%s.feet: %s must be a part of the rig hung from its own joint, named once"):format(
+							where,
+							tostring(foot)
+						)
+					)
+					if typeof(foot) == "string" then
+						seen[foot] = true
+					end
+					if part ~= nil and typeof(part.size) == "table" and typeof(part.size[3]) == "number" then
+						narrowest = math.min(narrowest, part.size[3] / 2)
+					end
+				end
+			end
+			local share = plant.share
+			check(
+				typeof(share) == "number" and share > 0 and share <= 1,
+				("%s.share %s must be above 0 and at most 1"):format(where, tostring(share))
+			)
+			local roll = plant.maxRollDegrees
+			check(
+				typeof(roll) == "number" and roll > 0 and roll <= 20,
+				("%s.maxRollDegrees %s must be above 0 and at most 20"):format(where, tostring(roll))
+			)
+			local shift = plant.maxShiftStuds
+			check(
+				typeof(shift) == "number" and shift > 0 and shift <= narrowest,
+				("%s.maxShiftStuds %s must be above 0 and at most the narrowest foot's half depth (%s)"):format(
+					where,
+					tostring(shift),
+					tostring(narrowest)
+				)
+			)
+		end
+	end
+
+	-- An enemy rig's stop plant (D-623): each names a rig with a walk; two or more groups of that
+	-- rig's feet hung from their own joints, each foot named once; steps no quicker than the gait's
+	-- crossfade and no slower together than the walk's cycle; a lift that clears the contact band
+	-- and is no hop; a glide no faster than stride.contact a 60 Hz frame.
+	local stops = if typeof(gait) == "table" then gait.stopPlant else nil
+	check(typeof(stops) == "table", "enemy.gait.stopPlant must be a table of rig ids to stop plants")
+	if typeof(stops) == "table" then
+		local Rigs = ctx.load("src/shared/data/rigs")
+		local locomotion = if typeof(choreo.locomotion) == "table" then choreo.locomotion else {}
+		local stride = if typeof(locomotion.stride) == "table" then locomotion.stride else {}
+		local contact = stride.contact
+		for rigId, stop in stops do
+			local where = ("enemy.gait.stopPlant.%s"):format(tostring(rigId))
+			local rigClips = if typeof(choreo.rigs) == "table" then choreo.rigs[rigId] else nil
+			local rig = Rigs[rigId]
+			local walkId = if typeof(rigClips) == "table" then rigClips.walk else nil
+			check(
+				typeof(walkId) == "string" and typeof(rig) == "table",
+				("%s names no rig with a walk clip (choreo rigs)"):format(where)
+			)
+			if typeof(stop) ~= "table" then
+				check(false, ("%s must be a table (groups, stepSeconds, liftStuds, settleStuds)"):format(where))
+				continue
+			end
+			local hung: { [string]: boolean } = {}
+			if typeof(rig) == "table" and typeof(rig.joints) == "table" then
+				for _, joint in rig.joints do
+					hung[joint.part1] = true
+				end
+			end
+			local shortest = math.huge
+			local groups = stop.groups
+			check(
+				typeof(groups) == "table" and #groups >= 2,
+				("%s.groups must list two or more groups of the rig's foot parts"):format(where)
+			)
+			local seen: { [string]: boolean } = {}
+			if typeof(groups) == "table" then
+				for index, group in groups do
+					check(
+						typeof(group) == "table" and #group > 0,
+						("%s.groups[%s] must list one or more foot parts"):format(where, tostring(index))
+					)
+					if typeof(group) ~= "table" then
+						continue
+					end
+					for _, foot in group do
+						local part = if typeof(rig) == "table" and typeof(rig.parts) == "table"
+							then rig.parts[foot]
+							else nil
+						check(
+							typeof(foot) == "string" and part ~= nil and hung[foot] == true and not seen[foot],
+							("%s.groups: %s must be a part of the rig hung from its own joint, named once"):format(
+								where,
+								tostring(foot)
+							)
+						)
+						if typeof(foot) == "string" then
+							seen[foot] = true
+						end
+						if part ~= nil and typeof(part.size) == "table" and typeof(part.size[2]) == "number" then
+							shortest = math.min(shortest, part.size[2])
+						end
+					end
+				end
+			end
+			local step = stop.stepSeconds
+			local blendRate = locomotion.weightBlendRate
+			check(
+				positive(step) and positive(blendRate) and step >= 1 / blendRate - 1e-9,
+				("%s.stepSeconds %s must be at least 1 / locomotion.weightBlendRate (%s s): a step no quicker than the gait's crossfade"):format(
+					where,
+					tostring(step),
+					if positive(blendRate) then ("%.3f"):format(1 / blendRate) else "?"
+				)
+			)
+			if positive(step) and typeof(groups) == "table" and typeof(walkId) == "string" then
+				local ok, walk = pcall(ctx.load, "src/shared/clips/" .. walkId)
+				local cycle = if ok and typeof(walk) == "table" then walk.duration else nil
+				check(
+					positive(cycle) and #groups * step <= cycle + 1e-9,
+					("%s: its %d steps of %s s must take at most the walk's cycle (%s s): a stop steps no slower than its walk"):format(
+						where,
+						#groups,
+						tostring(step),
+						tostring(cycle)
+					)
+				)
+			end
+			local lift = stop.liftStuds
+			check(
+				typeof(lift) == "number"
+					and positive(contact)
+					and lift > contact
+					and shortest < math.huge
+					and lift <= shortest / 2,
+				("%s.liftStuds %s must be above locomotion.stride.contact (%s) and at most half the shortest foot's height (%s)"):format(
+					where,
+					tostring(lift),
+					tostring(contact),
+					if shortest < math.huge then tostring(shortest / 2) else "?"
+				)
+			)
+			local settleStuds = stop.settleStuds
+			check(
+				typeof(settleStuds) == "number" and settleStuds >= 0,
+				("%s.settleStuds %s must be 0 or more"):format(where, tostring(settleStuds))
+			)
+			if typeof(settleStuds) == "number" and settleStuds >= 0 and positive(step) and positive(contact) then
+				local fastest = settleStuds * math.pi / (2 * step) / 60
+				check(
+					fastest <= contact + 1e-9,
+					("%s.settleStuds %s glides a foot %.3f a 60 Hz frame over stepSeconds (max stride.contact %s)"):format(
+						where,
+						tostring(settleStuds),
+						fastest,
+						tostring(contact)
+					)
+				)
+			end
+		end
+	end
+	local brake = if typeof(gait) == "table" then gait.stopBrakeShare else nil
+	check(
+		typeof(brake) == "number" and brake > 0 and brake < 1,
+		("enemy.gait.stopBrakeShare %s must be above 0 and below 1"):format(tostring(brake))
+	)
 
 	local settle = if typeof(camera.stall) == "table" then camera.stall.settleSeconds else nil
 	if positive(settle) then

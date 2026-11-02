@@ -763,7 +763,8 @@ local Dev = {
 				yaw = 0,
 				-- The head reaches 0.75 in front of the root and meets the player's (0.53) at 1.28;
 				-- the body is at reach from 5.25. 3.5 is where the Brute stops walking in (ai.luau
-				-- stopDistance) and 4.8 where it starts its overhead (reach 6 x engageFraction 0.8).
+				-- stopDistance; with the fighter backed to the world up to backRoom.maxStopDistance
+				-- 4.6, D-627) and 4.8 where it starts its overhead (reach 6 x engageFraction 0.8).
 				realFight = { min = 1.3, max = 5.25 },
 				distances = { 1.3, 2.3, 3.5, 4.8, 5.25, 6.5 },
 			},
@@ -1029,6 +1030,13 @@ local Dev = {
 			-- stride.contact of the field on both rows moves at most `rowStuds` (513(a)'s bar).
 			idleStarts = { 3, 10 },
 			rowStuds = 0.01,
+			-- The sheathed turns again from each of `sheathedIdleStarts` seconds into the sheathed
+			-- idle (D-626: its weight shift onto the left leg, 4.5 to 8.2 s; it slid both feet
+			-- 0.15 to 0.17 off where the turn clips stand them), at each of `sheathedStepHz`: each
+			-- row's least-moving corner within stride.contact of the field on both rows moves at
+			-- most rowStuds in a 60 Hz row's time.
+			sheathedIdleStarts = { 5, 6.5 },
+			sheathedStepHz = { 60, 144 },
 		},
 		-- The soles on the floor the Humanoid holds the root over (StandHeight.spec.luau, D-506):
 		-- the hit matrix's player with its Humanoid's HipHeight short of its legs' hang by each of

@@ -654,4 +654,31 @@ describe("dev.luau groundClearance.lockTurn (D-505, D-507)", function()
 			"lockTurn.idleStarts"
 		)).toBe(true)
 	end)
+
+	it("catches a sheathed idle start outside the sheathed idle and a rate under 30 (D-626)", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.lockTurn.sheathedIdleStarts = { 6.5, -1 }
+			end),
+			"lockTurn.sheathedIdleStarts[2]"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.lockTurn.sheathedIdleStarts = {}
+			end),
+			"lockTurn.sheathedIdleStarts"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.lockTurn.sheathedStepHz = { 60, 20 }
+			end),
+			"lockTurn.sheathedStepHz[2]"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.lockTurn.stepHz = { 60, 14.5 }
+			end),
+			"lockTurn.stepHz[2]"
+		)).toBe(true)
+	end)
 end)

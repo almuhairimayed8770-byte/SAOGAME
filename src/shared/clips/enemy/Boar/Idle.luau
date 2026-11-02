@@ -1,9 +1,14 @@
 --!strict
 --[[
 	enemy/Boar/Idle: the Frenzy Boar at rest, a 4 s loop with breathing baked in (the chest
-	rises on the Root joint, the head bobs), two tail swishes, a snort with the jaw at 2.2 s and
-	a weight shift at 2 s. Rig: Boar (rigs.luau). Head forward of the Neck joint: Neck X- lowers
-	the head. Legs hang from the hips: Hip X+ swings a leg forward. Tail: X- lifts it.
+	rises on its legs, the head bobs), two tail swishes, a snort with the jaw at 2.2 s and a weight
+	shift at 2 s. Rig: Boar (rigs.luau). Head forward of the Neck joint: Neck X- lowers the head.
+	Legs hang from the hips: Hip X+ swings a leg forward. Tail: X- lifts it.
+	The breath (1.0 s and 3.2 s) lifts the body 0.05 and 0.04 on the Root joint and tips it 1 degree
+	nose up, and every hip takes that back: the leg drawn down out of the body and turned back by
+	what the body rose and tipped at its hip (the front hips 0.074 and 0.064, the back 0.025 and
+	0.015, slid 0.018 along), so the hooves stand where they stood (D-622). Riding the Root alone,
+	the breath lifted the front hooves 0.068 off the field at 1.0 s and 0.058 at 3.2 s.
 	The weight shift (2.0-2.6 s) slides the body 0.08 onto its left legs and rolls it 1 degree,
 	the hips rolled back the same so the stiff legs hang straight, the body lifted 0.015 so the
 	low side's hooves stay on the field, and the front right leg drawn back: every hoof's lowest
@@ -49,12 +54,16 @@ local clip: Types.ClipDef = {
 			},
 		},
 		{
-			-- breath in, tail swish
+			-- breath in, tail swish: the chest rises on its legs
 			time = 1,
 			easing = "SineInOut",
 			joints = {
 				Root = posRot(0, 0.05, 0, 1, 0, 0),
 				Neck = rot(-2, 3, 0),
+				FrontLeftHip = posRot(0, -0.0743, 0.0185, 1, 0, 0),
+				FrontRightHip = posRot(0, -0.0743, 0.0185, -3, 0, 0),
+				BackLeftHip = posRot(0, -0.0254, 0.0181, -3, 0, 0),
+				BackRightHip = posRot(0, -0.0254, 0.0181, 1, 0, 0),
 				TailJoint = rot(0, 18, 0),
 			},
 		},
@@ -94,10 +103,10 @@ local clip: Types.ClipDef = {
 			easing = "SineInOut",
 			joints = {
 				Root = posRot(0, 0.04, 0, 1, 0, 0),
-				FrontLeftHip = rot(2, 0, 0),
-				FrontRightHip = rot(-2, 0, 0),
-				BackLeftHip = rot(-2, 0, 0),
-				BackRightHip = rot(2, 0, 0),
+				FrontLeftHip = posRot(0, -0.0643, 0.0184, 1, 0, 0),
+				FrontRightHip = posRot(0, -0.0643, 0.0184, -3, 0, 0),
+				BackLeftHip = posRot(0, -0.0154, 0.0179, -3, 0, 0),
+				BackRightHip = posRot(0, -0.0154, 0.0179, 1, 0, 0),
 				TailJoint = rot(2, 10, 0),
 			},
 		},

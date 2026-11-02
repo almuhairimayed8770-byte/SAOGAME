@@ -86,6 +86,13 @@ local Stride = ChoreoData.locomotion.stride
 local CONTACT = Stride.contact
 local SLIDE = Dev.review.audit.footSlideStuds
 local FROM, TO = 0.15, 0.5
+-- The stop (D-623): from the brake row (the first row, once the root has walked, whose flat step
+-- is under BRAKE of the row before's) for STOP_SECONDS.
+local BRAKE = 0.5
+local STOP_SECONDS = 0.5
+-- What the server sends while a take runs (EnemyService's fireAll): a take that draws actions
+-- plays an ActionStarted's clip on the client copy as Replication does.
+local onFire: ((string, any) -> ())? = nil
 
 -- BoarHooks.spec's "studio" Humanoid (the PC's server log on 4b18b5c).
 local humanoid = { arriveFrames = 1.7, brake = 0.672, acceleration = 1320 }
@@ -266,7 +273,11 @@ local function fresh()
 		entities = EntityService,
 		combat = CombatService,
 		rigBuilder = RigBuilder,
-		fireAll = function() end,
+		fireAll = function(name: string, payload: any)
+			if onFire ~= nil then
+				onFire(name, payload)
+			end
+		end,
 		engine = engine,
 		players = function()
 			local list = {}
@@ -356,10 +367,25 @@ type Take = {
 	wheelWalk: number?, -- the least walk weight the driver gives while the body wheels at half speed
 	paces: { number }, -- the server body's WalkSpeed after each server frame from the release on
 	crab: number, -- the most the server body walked off its facing (degrees), over the whole take
-	startSlide: number, -- the worst one-row slide of a grounded foot from row 1 up to the window
+	startSlide: number, -- the worst one-row slide of a grounded foot from the release up to the window (but row 0)
 	startSlideAt: number,
-	startLowest: number, -- the lowest foot corner from row 1 up to the window
+	startLowest: number, -- the lowest foot corner from the release up to the window (but row 0)
 	standLowest: number, -- the lowest foot corner on the row the root first moves (the idle's stand)
+	-- The stop (D-623), when the take runs on to it: the brake row (seconds after the root first
+	-- moved), the worst one-row slide of a grounded foot and the lowest corner from it for
+	-- STOP_SECONDS, and on the stop's last row the walk's weight, whether the stop plant's channel is
+	-- still on the rig and the highest foot's lowest corner (every foot down: at most contact).
+	stopAt: number?,
+	stopSlide: number,
+	stopSlideAt: number,
+	stopLowest: number,
+	stopWalk: number?,
+	stopChannel: boolean?,
+	stopHighest: number?,
+	-- Clips the take's ActionStarted played on the client, and whether the stop plant's channel was
+	-- on the rig on a row a full-body clip showed.
+	played: { string },
+	channelUnderFullBody: boolean,
 }
 
 -- How the client sees the server's root. `hz`: client rows a second. `interpolated`: the root is
@@ -408,7 +434,9 @@ local function sampled(history: { any }, at: number): (CFrame, Vector3)
 	return a.cframe:Lerp(b.cframe, f), a.velocity:Lerp(b.velocity, f)
 end
 
-local function take(rig: string, off: number, view: View?): Take
+-- `seconds`: how long the take runs from the release (1.5 when nil). `actions`: ActionStarted's
+-- clips play on the client copy once the drawn root has reached the server time they were sent at.
+local function take(rig: string, off: number, view: View?, seconds: number?, actions: boolean?): Take
 	local seen = view or SERVER
 	fresh()
 	spawnPlayer(Vector3.new(0, 3, 25))
@@ -470,17 +498,52 @@ local function take(rig: string, off: number, view: View?): Take
 		startSlideAt = 0,
 		startLowest = math.huge,
 		standLowest = math.huge,
+		stopAt = nil,
+		stopSlide = 0,
+		stopSlideAt = 0,
+		stopLowest = math.huge,
+		stopWalk = nil,
+		stopChannel = nil,
+		stopHighest = nil,
+		played = {},
+		channelUnderFullBody = false,
 	}
+	local sent: { any } = {}
+	onFire = function(name: string, payload: any)
+		if actions == true and name == "ActionStarted" then
+			table.insert(sent, payload)
+		end
+	end
+	local mixer = animator.mixer :: any
+	local lastAt: Vector3? = nil
+	local lastStep: number? = nil
+	local walked = false
+	local brakeRow: number? = nil
 	local walkSpeed = Rigs[rig].walkSpeed
 	local dt = 1 / seen.hz
 	local clientT = clock.t
 	local history = { { t = clock.t, cframe = serverRoot.CFrame, velocity = Vector3.zero } }
-	for row = 1, math.ceil(1.5 * seen.hz) do
+	for row = 1, math.ceil((seconds or 1.5) * seen.hz) do
 		-- The client's step (Camera - 1, on the root as the last frame left it), then the server
 		-- frames due by the row's end, then the root this client draws the row on.
 		clientNow += dt
 		clientT += dt
+		local drawnT = if seen.interpolated then clientT - FRAME else clock.t
+		while #sent > 0 and sent[1].serverTime <= drawnT + GAP do
+			local payload = table.remove(sent, 1)
+			animator:play(payload.clipId, {})
+			table.insert(result.played, payload.clipId)
+		end
 		animator:step(dt)
+		local fullBody = false
+		for _, handle in mixer:handles() do
+			if handle.layer == "FullBody" and not handle.done and handle.weight > 0 then
+				fullBody = true
+			end
+		end
+		if fullBody and mixer._procedural.walkStopPlant ~= nil then
+			result.channelUnderFullBody = true
+		end
 		while clock.t + FRAME <= clientT + GAP do
 			serverFrame()
 			table.insert(history, { t = clock.t, cframe = serverRoot.CFrame, velocity = bodies[server].velocity })
@@ -511,17 +574,43 @@ local function take(rig: string, off: number, view: View?): Take
 			started = row
 		end
 		local rowT = if started ~= nil then (row - (started :: number)) * dt else -1
+		-- The brake row: the root's flat step falls under BRAKE of the row before's, once it walked
+		-- (stepped at least the walk's rateFloor pace a row).
+		local here = clientRoot.CFrame.Position
+		local step = if lastAt ~= nil
+			then Vector3.new(here.X - (lastAt :: Vector3).X, 0, here.Z - (lastAt :: Vector3).Z).Magnitude
+			else nil
+		if step ~= nil then
+			if step > Stride.rateFloor * walkSpeed * dt then
+				walked = true
+			end
+			if brakeRow == nil and walked and lastStep ~= nil and step < BRAKE * (lastStep :: number) then
+				brakeRow = row
+				result.stopAt = rowT
+			end
+		end
+		lastAt, lastStep = here, step
+		local stopRows = math.floor(STOP_SECONDS * seen.hz + 0.5)
+		local inStop = brakeRow ~= nil and row - (brakeRow :: number) <= stopRows
+		local stopEnd = brakeRow ~= nil and row - (brakeRow :: number) == stopRows
+		local highest = -math.huge
 		local inWindow = rowT > FROM + 1e-9 and rowT <= TO + 1e-9
 		-- Row 0 is drawn on the step before the root moved (the gait cannot know yet); the start's
-		-- rows are 1 up to the window.
-		local inStart = rowT > GAP and rowT <= FROM + 1e-9
+		-- rows are the release's up to the window but row 0 (the PC's row 0 is not Lune's first move,
+		-- see the start's describe below).
+		local inStart = (started == nil or rowT > GAP) and rowT <= FROM + 1e-9
 		local standing = started ~= nil and math.abs(rowT) < GAP
 		local points: { [string]: { Vector3 } } = {}
 		for _, foot in feet do
 			points[foot] = {}
+			local footLowest = math.huge
 			for index, corner in local_[foot] do
 				local point = solved[foot] * corner
 				points[foot][index] = point
+				footLowest = math.min(footLowest, point.Y)
+				if inStop then
+					result.stopLowest = math.min(result.stopLowest, point.Y)
+				end
 				if inWindow then
 					result.lowest = math.min(result.lowest, point.Y)
 				end
@@ -532,8 +621,9 @@ local function take(rig: string, off: number, view: View?): Take
 					result.standLowest = math.min(result.standLowest, point.Y)
 				end
 			end
+			highest = math.max(highest, footLowest)
 			local before = if previous ~= nil then previous[foot] else nil
-			if (inWindow or inStart) and before ~= nil then
+			if (inWindow or inStart or inStop) and before ~= nil then
 				local least = math.huge
 				for index, point in points[foot] do
 					local was = before[index]
@@ -547,9 +637,18 @@ local function take(rig: string, off: number, view: View?): Take
 				if least < math.huge and inStart and least > result.startSlide then
 					result.startSlide, result.startSlideAt = least, rowT
 				end
+				if least < math.huge and inStop and least > result.stopSlide then
+					result.stopSlide, result.stopSlideAt = least, rowT
+				end
 			end
 		end
 		previous = points
+		if stopEnd then
+			local handle = walkHandle()
+			result.stopWalk = if handle ~= nil then handle.weight else 0
+			result.stopChannel = mixer._procedural.walkStopPlant ~= nil
+			result.stopHighest = highest
+		end
 
 		-- Wheeling: the body at about half its walk speed, settled into it.
 		local handle = walkHandle()
@@ -558,6 +657,7 @@ local function take(rig: string, off: number, view: View?): Take
 			result.wheelWalk = math.min(result.wheelWalk or math.huge, handle.targetWeight)
 		end
 	end
+	onFire = nil
 	driver:destroy()
 	Choreo.release(client)
 	return result
@@ -658,7 +758,8 @@ describe("EnemyWalkStart: the boar's chase eases out of its wheel (D-574)", func
 		local boar = Harness.load("src/shared/data/enemies").byId("FrenzyBoar")
 		local full = boar.moveSpeed * AI.archetypes.Charger.chaseSpeedMultiplier
 		local wheel = full * AI.archetypes.Charger.wheelSpeedMultiplier
-		-- It sets off wheeling at half speed (a start from standing takes its pace at once).
+		-- It sets off wheeling at half speed (from standing its pace eases up to the wheel's from
+		-- movement.startPace first, D-618).
 		local start: number? = nil
 		for index, pace in result.paces do
 			if math.abs(pace - wheel) < 1e-9 then
@@ -710,32 +811,37 @@ describe("EnemyWalkStart: the kobold wheels round on its feet (D-598)", function
 	end
 end)
 
--- The start's own rows, from row 1 up to the window (AO 511: 0.2-0.32 a row, the boar's hooves
--- -0.069 and -0.074 in the field). Row 0 is drawn before the root moved. Two things slid them on
+-- The start's own rows, from the release up to the window (AO 511: 0.2-0.32 a row, the boar's
+-- hooves -0.069 and -0.074 in the field). The PC read the kobold at 0, 60 and 90 at 0.160 / 0.221 /
+-- 0.101 a 60 Hz row in its window on 81b8fef, feet to -0.083, where Lune read 0.001 / 0.001 /
+-- 0.059: Lune gives the PC's numbers with the PC's row 0 4 to 6 rows (0.07-0.1 s) before Lune's
+-- first move (0.148-0.246 at 60 and 0.048-0.056 at 144 on 81b8fef), which puts the start's rows in
+-- the PC's window; what moves the PC's root that early is Studio's to log (item 511(h)). So the
+-- start is judged from the release on, whatever row the PC calls row 0, through the alert turn and
+-- the boar's wheel in place before it walks. Row 0 is drawn before the root moved. Two things slid them on
 -- 81b8fef. The walk joined at the idle's phase of its cycle, which for the kobold was mid-swing:
 -- the crossfade pulled its feet up to 1.25 studs, 0.2-0.36 a 60 Hz row on rows 1-8 and 0.068 into
--- the field; the walk now joins at enemy.gait.startPhase, the kobold's left mid-stance (D-599).
+-- the field; the walk now joins at enemy.gait.startPhase, by the kobold's left mid-stance (D-599).
 -- The boar's idle weight shift stood a hoof 0.067 into the field under the walk's first key (now
--- re-keyed, D-601). What is left is the server's pace: the Humanoid takes its full WalkSpeed on
--- the first frame (the root 0.167 a 60 Hz row for the kobold), while the Idle-Walk crossfade takes
--- locomotion.weightBlendRate (0.125 s), and the idle's feet ride the root until the walk has the
--- weight. The bar is the window's (footSlideStuds a 60 Hz frame); no foot lower than the idle stood
--- on row 0 or stride.contact, whichever is deeper. START_PENDING: how far the worst slide is past
--- that bar, by view, rig and off angle (rounded up to the hundredth); START_LOW: how far the lowest
--- corner is past its bar. Neither grows.
+-- re-keyed, D-601). The server's pace was the last: the Humanoid took its full WalkSpeed on the
+-- first frame (the root 0.167 a 60 Hz row for the kobold) while the Idle-Walk crossfade takes
+-- locomotion.weightBlendRate (0.125 s), and the idle's feet rode the root until the walk had the
+-- weight. A walk from standing now eases up from movement.startPace (D-618), and the boar steps
+-- off at its own start phase (D-621). The kobold's at 0 and 180 on a 144 Hz client read 0.045 and
+-- 0.050 (START_PENDING 0.01 each): the crossfade's first rows dragged the idle's right foot, still on
+-- the field, toward the walk's lifted right sole 0.49 ahead; it steps off a little earlier in its
+-- cycle now (D-625), the sole 0.31 ahead, and every start is within the bar (0.032 and 0.037).
+-- The bar is the window's (footSlideStuds a 60 Hz frame); no
+-- foot lower than the idle stood on row 0 or stride.contact, whichever is deeper. START_PENDING: how
+-- far the worst slide is past that bar, by view, rig and off angle (rounded up to the hundredth);
+-- START_LOW: how far the lowest corner is past its bar. Neither grows.
 local START_PENDING: { [string]: { [string]: { [number]: number } } } = {
-	["60"] = {
-		Boar = { [90] = 0.13, [135] = 0.13, [180] = 0.07 },
-		Kobold = { [0] = 0.08, [60] = 0.01, [90] = 0.01, [135] = 0.01 },
-	},
-	["144"] = {
-		Boar = { [90] = 0.10, [135] = 0.10, [180] = 0.07 },
-		Kobold = { [0] = 0.07, [60] = 0.03, [90] = 0.03, [135] = 0.03, [180] = 0.04 },
-	},
+	["60"] = { Boar = {}, Kobold = {} },
+	["144"] = { Boar = {}, Kobold = {} },
 }
 local START_LOW: { [string]: { [string]: { [number]: number } } } = {
-	["60"] = { Boar = { [90] = 0.01, [135] = 0.01, [180] = 0.01 }, Kobold = {} },
-	["144"] = { Boar = { [90] = 0.02, [135] = 0.02, [180] = 0.02 }, Kobold = {} },
+	["60"] = { Boar = {}, Kobold = {} },
+	["144"] = { Boar = {}, Kobold = {} },
 }
 
 local function startCheck(rig: string, off: number, result: Take, hz: number)
@@ -743,7 +849,7 @@ local function startCheck(rig: string, off: number, result: Take, hz: number)
 	local pending = START_PENDING[key][rig][off]
 	local lowPending = START_LOW[key][rig][off]
 	print(
-		("%s off %d @%d Hz from row 1: slide %.4f at %.3f s, lowest %.4f (stood %.4f)"):format(
+		("%s off %d @%d Hz from the release: slide %.4f at %.3f s, lowest %.4f (stood %.4f)"):format(
 			rig,
 			off,
 			hz,
@@ -765,7 +871,7 @@ local function startCheck(rig: string, off: number, result: Take, hz: number)
 	end
 	if pending ~= nil and result.startSlide <= bound then
 		error(
-			("slides %.3f from row 1, within the bound %.3f: take it off START_PENDING"):format(
+			("slides %.3f from the release, within the bound %.3f: take it off START_PENDING"):format(
 				result.startSlide,
 				bound
 			)
@@ -774,18 +880,18 @@ local function startCheck(rig: string, off: number, result: Take, hz: number)
 	local floor = math.min(result.standLowest, -CONTACT)
 	if result.startLowest < floor - (lowPending or 0) - 1e-6 then
 		error(
-			("a foot corner %.3f under the field from row 1 (max %.3f)"):format(
+			("a foot corner %.3f under the field from the release (max %.3f)"):format(
 				-result.startLowest,
 				-(floor - (lowPending or 0))
 			)
 		)
 	end
 	if lowPending ~= nil and result.startLowest >= floor - 1e-6 then
-		error(("lowest %.3f from row 1, within %.3f: take it off START_LOW"):format(result.startLowest, floor))
+		error(("lowest %.3f from the release, within %.3f: take it off START_LOW"):format(result.startLowest, floor))
 	end
 end
 
-describe("EnemyWalkStart: the start's first rows, from row 1 (AO 511; D-599, D-601)", function()
+describe("EnemyWalkStart: the start's first rows, from the release (AO 511; D-599, D-601, D-618)", function()
 	for _, case in { { rig = "Boar", offs = { 90, 135, 180 } }, { rig = "Kobold", offs = { 0, 60, 90, 135, 180 } } } do
 		for _, off in case.offs do
 			it(("%s set off %d deg, 60 Hz"):format(case.rig, off), function()
@@ -795,5 +901,285 @@ describe("EnemyWalkStart: the start's first rows, from row 1 (AO 511; D-599, D-6
 				startCheck(case.rig, off, take(case.rig, off, PC144), 144)
 			end)
 		end
+	end
+end)
+
+-- An enemy's stop (D-623, AO 511(k)). The server's Humanoid brakes the root within two frames
+-- while the client's walk ran on at its slowest rate and crossfaded into the idle over
+-- locomotion.weightBlendRate with the root standing: each planted foot swung about its hip from the
+-- walk's stance to the idle's and the swinging foot was drawn onto the field on the way. On
+-- 0ba630b, from the brake row for STOP_SECONDS: the kobold at 0 and 90 degrees 0.120 and 0.244 a
+-- 60 Hz row (0.100 and 0.105 at 144), feet to -0.015 and -0.041; the boar at 60 degrees (its stop
+-- before the Charge) 0.379 (0.166), hooves to -0.036 (-0.037). RigDriver's stop plant holds each
+-- foot where it stood and steps them onto the idle's spots, the swinging foot first. Bars: the
+-- start's (footSlideStuds a 60 Hz row, the window's; no corner under the idle's stand or
+-- stride.contact, whichever is deeper), and once the stop is over the walk shows none, the plant's
+-- channel is gone and every foot is down. STOP_PENDING: how far the worst slide is past the bar
+-- (rounded up to the hundredth), by view, rig and off angle. Only the brake row is past it: the
+-- row the server's brake lands on is drawn before the client can see the brake, so its walk ran a
+-- whole row's pace over a root that moved only part of it (the kobold at 90: 0.1006 at 60 and
+-- 0.0459 at 144; the boar at 60: 0.0423 at 144). An entry never grows.
+local STOP_PENDING: { [string]: { [string]: { [number]: number } } } = {
+	["60"] = { Boar = {}, Kobold = { [90] = 0.01 } },
+	["144"] = { Boar = { [60] = 0.01 }, Kobold = { [90] = 0.01 } },
+}
+
+describe("EnemyWalkStart: an enemy's stop keeps its feet planted (AO 511(k); D-623)", function()
+	for _, case in
+		{
+			{ rig = "Kobold", off = 0, seconds = 2.2 },
+			{ rig = "Kobold", off = 90, seconds = 2.2 },
+			{ rig = "Boar", off = 60, seconds = 1.2 },
+		}
+	do
+		for _, view in { SERVER, PC144 } do
+			local label = if view.interpolated then "on a 144 Hz client over the interpolated root" else "60 Hz"
+			it(("%s stopping after it set off %d deg, %s"):format(case.rig, case.off, label), function()
+				local result = take(case.rig, case.off, view, case.seconds)
+				local key = tostring(view.hz)
+				local pending = STOP_PENDING[key][case.rig][case.off]
+				print(
+					("%s off %d @%d Hz, the stop at %s s: slide %.4f at %.3f s, lowest %.4f (stood %.4f); after it walk %s, channel %s, highest foot %s"):format(
+						case.rig,
+						case.off,
+						view.hz,
+						if result.stopAt ~= nil then ("%.3f"):format(result.stopAt :: number) else "-",
+						result.stopSlide,
+						result.stopSlideAt,
+						result.stopLowest,
+						result.standLowest,
+						tostring(result.stopWalk),
+						tostring(result.stopChannel),
+						if result.stopHighest ~= nil then ("%.4f"):format(result.stopHighest :: number) else "-"
+					)
+				)
+				assert(result.stopAt ~= nil and result.stopWalk ~= nil, "the take ended before its stop did")
+				local bound = SLIDE * 60 / view.hz
+				local bar = bound + (pending or 0)
+				if result.stopSlide > bar then
+					error(
+						("a planted foot slides %.3f in a row at %.3f s as it stops (max %.3f)"):format(
+							result.stopSlide,
+							result.stopSlideAt,
+							bar
+						)
+					)
+				end
+				if pending ~= nil and result.stopSlide <= bound then
+					error(
+						("slides %.3f as it stops, within the bound %.3f: take it off STOP_PENDING"):format(
+							result.stopSlide,
+							bound
+						)
+					)
+				end
+				local floor = math.min(result.standLowest, -CONTACT)
+				if result.stopLowest < floor - 1e-6 then
+					error(
+						("a foot corner %.3f under the field as it stops (max %.3f)"):format(-result.stopLowest, -floor)
+					)
+				end
+				-- The swinging foot landed and the idle has the rig.
+				expect(result.stopWalk).toBe(0)
+				expect(result.stopChannel).toBe(false)
+				expect((result.stopHighest :: number) <= CONTACT).toBe(true)
+			end)
+		end
+	end
+
+	it("the boar's Charge out of its stop is the Charge's: no stop plant under a full-body clip", function()
+		-- Its ActionStarted played on the client as Replication plays it: the crouch comes on the
+		-- brake row (the server stops the body as the wind-up starts), so the stop plant never
+		-- holds a leg under it (nor under a Stagger's clip: any full-body clip lets it go).
+		for _, view in { SERVER, PC144 } do
+			local result = take("Boar", 60, view, 1.2, true)
+			expect(table.find(result.played, "enemy/Boar/Charge") ~= nil).toBe(true)
+			expect(result.channelUnderFullBody).toBe(false)
+		end
+	end)
+end)
+
+-- A stop the root walks off from mid-step (D-623): the client copy alone, its root carried at
+-- the kobold's walkSpeed along its facing for a second, standing for 0.1 s (a foot in its step),
+-- then walking on. The stop plant takes the legs on the row after the root stood and lets them go
+-- over locomotion.weightBlendRate once it walks on, so a foot caught mid-step comes back to the walk
+-- without a pop: no leg's hip turns more than popDegrees a 60 Hz frame (as many a row at 144 as
+-- its share of the frame), the plant's channel is gone and the walk shows whole.
+local function walkOffMidStop(hz: number): { engaged: boolean, goneAfter: number?, walk: number, worstTurn: number }
+	local client = RigBuilder.build("Kobold")
+	local root = client.PrimaryPart :: BasePart
+	local humanoid = client:FindFirstChildOfClass("Humanoid") :: Humanoid
+	humanoid.FloorMaterial = Enum.Material.Plastic
+	humanoid.MoveDirection = Vector3.zero
+	local at = Vector3.new(0, Rigs.Kobold.hipHeight + root.Size.Y / 2, 0)
+	root.CFrame = CFrame.new(at)
+	root.Position = at
+	root.AssemblyLinearVelocity = Vector3.zero
+	local animator = Choreo.get(client)
+	local driver = Locomotion.attach(animator, client, { phase = 0 })
+	local mixer = animator.mixer :: any
+	local hips: { string } = {}
+	for _, joint in Rigs.Kobold.joints do
+		if table.find(FEET.Kobold, joint.part1) ~= nil then
+			table.insert(hips, joint.name)
+		end
+	end
+	local speed = Rigs.Kobold.walkSpeed
+	local dt = 1 / hz
+	local standFrom, standTo = hz, hz + math.floor(0.1 * hz + 0.5)
+	local result = { engaged = false, goneAfter = nil :: number?, walk = 0, worstTurn = 0 }
+	local last: { [string]: { number } } = {}
+	for row = 1, standTo + 2 * hz do
+		clientNow += dt
+		animator:step(dt)
+		local shown = mixer:lastOffsets()
+		for _, name in hips do
+			local offset = shown[name]
+			local rot = if offset ~= nil then offset.rot else { 0, 0, 0 }
+			local before = last[name]
+			if before ~= nil and row > 1 then
+				for axis = 1, 3 do
+					result.worstTurn = math.max(result.worstTurn, math.abs(rot[axis] - before[axis]))
+				end
+			end
+			last[name] = { rot[1], rot[2], rot[3] }
+		end
+		local channel = mixer._procedural.walkStopPlant ~= nil
+		if row > standFrom and row <= standTo and channel then
+			result.engaged = true
+		end
+		if row > standTo and not channel and result.goneAfter == nil then
+			result.goneAfter = (row - standTo) * dt
+		end
+		local moving = row < standFrom or row >= standTo
+		if moving then
+			at += Vector3.new(0, 0, -speed * dt)
+		end
+		local cframe = CFrame.new(at)
+		root.CFrame = cframe
+		root.Position = at
+		root.AssemblyLinearVelocity = if moving then cframe.LookVector * speed else Vector3.zero
+		humanoid.MoveDirection = if moving then cframe.LookVector else Vector3.zero
+	end
+	for _, handle in mixer:handles() do
+		if handle.clipId == ChoreoData.rigs.Kobold.walk and not handle.stopping and not handle.fallback then
+			result.walk = handle.weight
+		end
+	end
+	driver:destroy()
+	Choreo.release(client)
+	return result
+end
+
+describe("EnemyWalkStart: a stop the root walks off from mid-step (D-623)", function()
+	for _, hz in { 60, 144 } do
+		it(("at %d Hz the stop's legs go back to the walk without a pop"):format(hz), function()
+			local result = walkOffMidStop(hz)
+			print(
+				("Kobold walks off mid-stop @%d Hz: engaged %s, channel gone %s s after, walk %.2f, worst hip turn %.2f deg a row"):format(
+					hz,
+					tostring(result.engaged),
+					tostring(result.goneAfter),
+					result.walk,
+					result.worstTurn
+				)
+			)
+			expect(result.engaged).toBe(true)
+			expect(result.goneAfter ~= nil).toBe(true)
+			expect((result.goneAfter :: number) <= 1 / ChoreoData.locomotion.weightBlendRate + 3 / hz + GAP).toBe(true)
+			expect(result.walk).toBe(1)
+			expect(result.worstTurn <= Dev.review.audit.popDegrees * 60 / hz).toBe(true)
+		end)
+	end
+end)
+
+-- A boar wheeling on its walk (D-619): the server turns its root about its own axis at the
+-- Charger's turnRate (110 degrees a second) while it walks, and the walk's planted hooves, 1.0 to
+-- 2.3 studs off that axis, swung round it with the root: 0.056 a 144 Hz row and 0.070 a 60 Hz row
+-- on 4c725c9 at its full walk speed. RigDriver's walking-turn plant (WalkTurnPlant) takes the turn
+-- back at each planted hoof's hip. Drawn here on the client alone: the root carried at the rig's
+-- walkSpeed along its facing and turned at the turn rate each row, Locomotion's own tracker pacing
+-- the gait, the walk's planted hooves read after its first second (the gait settled).
+local function wheelSlide(hz: number, plant: boolean): number
+	local plants = ChoreoData.enemy.gait.turnPlant
+	local config = plants.Boar
+	if not plant then
+		plants.Boar = nil
+	end
+	local client = RigBuilder.build("Boar")
+	local root = client.PrimaryPart :: BasePart
+	local humanoid = client:FindFirstChildOfClass("Humanoid") :: Humanoid
+	humanoid.FloorMaterial = Enum.Material.Plastic
+	humanoid.MoveDirection = Vector3.zero
+	local at = Vector3.new(0, Rigs.Boar.hipHeight + root.Size.Y / 2, 0)
+	root.CFrame = CFrame.new(at)
+	root.Position = at
+	root.AssemblyLinearVelocity = Vector3.zero
+	local animator = Choreo.get(client)
+	local driver = Locomotion.attach(animator, client, { phase = 0 })
+	plants.Boar = config
+	local spin = math.rad(AI.archetypes.Charger.turnRate)
+	local speed = Rigs.Boar.walkSpeed
+	local dt = 1 / hz
+	local local_: { [string]: { Vector3 } } = {}
+	for _, foot in FEET.Boar do
+		local_[foot] = corners((client:FindFirstChild(foot) :: BasePart).Size)
+	end
+	local yaw = 0
+	local previous: { [string]: { Vector3 } }? = nil
+	local worst = 0
+	for row = 1, 2 * hz do
+		clientNow += dt
+		animator:step(dt)
+		yaw += spin * dt
+		at += CFrame.Angles(0, yaw, 0).LookVector * speed * dt
+		local cframe = CFrame.new(at) * CFrame.Angles(0, yaw, 0)
+		root.CFrame = cframe
+		root.Position = at
+		root.AssemblyLinearVelocity = cframe.LookVector * speed
+		humanoid.MoveDirection = cframe.LookVector
+		local solved = solve(client, cframe)
+		local points: { [string]: { Vector3 } } = {}
+		for _, foot in FEET.Boar do
+			points[foot] = {}
+			for index, corner in local_[foot] do
+				points[foot][index] = solved[foot] * corner
+			end
+			local before = if previous ~= nil then previous[foot] else nil
+			if before ~= nil and row > hz then
+				local least = math.huge
+				for index, point in points[foot] do
+					local was = before[index]
+					if point.Y <= CONTACT and was.Y <= CONTACT then
+						least = math.min(least, Vector3.new(point.X - was.X, 0, point.Z - was.Z).Magnitude)
+					end
+				end
+				if least < math.huge then
+					worst = math.max(worst, least)
+				end
+			end
+		end
+		previous = points
+	end
+	driver:destroy()
+	Choreo.release(client)
+	return worst
+end
+
+describe("EnemyWalkStart: a wheeling boar's planted hooves hold the field (D-619)", function()
+	for _, hz in { 60, 144 } do
+		it(("at %d Hz the turn plant takes back over half the wheel's slide, within the bar"):format(hz), function()
+			local planted = wheelSlide(hz, true)
+			local free = wheelSlide(hz, false)
+			print(
+				("Boar wheeling at %d Hz: planted hooves slide %.4f a row (%.4f without the plant)"):format(
+					hz,
+					planted,
+					free
+				)
+			)
+			expect(planted <= SLIDE * 60 / hz).toBe(true)
+			expect(planted <= free / 2).toBe(true)
+		end)
 	end
 end)

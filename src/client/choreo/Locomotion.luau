@@ -106,6 +106,8 @@ local GaitHandOff = require(script.Parent.GaitHandOff)
 local LocomotionState = require(script.Parent.LocomotionState)
 local SheathState = require(script.Parent.SheathState)
 local TurnPlant = require(script.Parent.TurnPlant)
+local WalkTurnPlant = require(script.Parent.WalkTurnPlant)
+local WalkStopPlant = require(script.Parent.WalkStopPlant)
 local WeaponMount = require(script.Parent.WeaponMount)
 
 local Config = ChoreoData.locomotion
@@ -1738,7 +1740,19 @@ end
 -- (speed / walkSpeed) slid a boar wheeling at half speed 0.2 a frame on hooves 0.09 deep.
 -- A rig with a start phase (choreo enemy.gait.startPhase, D-599) holds its walk there while the
 -- walk shows no weight, so every walk from standing steps off from the same pose.
+-- A rig with a walking-turn plant (choreo enemy.gait.turnPlant, D-619, WalkTurnPlant) takes back
+-- at each planted foot's hip a share of the sweep the root's turn gives it while the walk shows,
+-- and lets every leg go while a full-body clip has the body or the walk shows none.
+-- A rig with a stop plant (choreo enemy.gait.stopPlant, D-623, WalkStopPlant) stops its walk's
+-- clock when its root brakes under the walk, holds each foot where it stood and steps them into
+-- the idle's stand one group at a time while the walk's share falls to 0; a full-body clip or the
+-- root setting off again ends it.
 RigDriver.__index = RigDriver
+
+-- RigDriver's walking-turn plant channel (D-619) and stop plant channel (D-623).
+local WALK_PLANT_CHANNEL = "walkTurnPlant"
+local STOP_PLANT_CHANNEL = "walkStopPlant"
+local TRAVEL_TIME_SLACK = 1e-9 -- unit: seconds, float noise in a sum of frame times
 
 local function newRigDriver(
 	animator: any,
@@ -1746,9 +1760,18 @@ local function newRigDriver(
 	walkId: string,
 	walkSpeed: number,
 	phase: number,
-	startPhase: number?
+	startPhase: number?,
+	character: Model?,
+	plantConfig: WalkTurnPlant.Config?,
+	stopConfig: WalkStopPlant.Config?
 ): any
 	local walkDuration = ClipLibrary.get(walkId).duration
+	local plan = if character ~= nil and plantConfig ~= nil
+		then WalkTurnPlant.plan(character, ClipLibrary.get(walkId), plantConfig)
+		else nil
+	local stopPlan = if character ~= nil and stopConfig ~= nil
+		then WalkStopPlant.plan(character, ClipLibrary.get(walkId).rig, stopConfig)
+		else nil
 	local self = setmetatable({
 		animator = animator,
 		handles = {} :: { [string]: any },
@@ -1756,6 +1779,25 @@ local function newRigDriver(
 		walkDuration = walkDuration,
 		-- Where the walk steps off from standing (choreo enemy.gait.startPhase, D-599), or nil.
 		walkStartAt = if startPhase ~= nil then startPhase * walkDuration else nil,
+		-- The walking-turn plant (D-619), the root it last read and that step's turn, or nil.
+		character = character,
+		walkPlant = if plan ~= nil then WalkTurnPlant.new(plan) else nil,
+		plantYaw = nil :: CFrame?,
+		plantAt = nil :: Vector3?,
+		plantClock = 0,
+		plantHeading = 0,
+		plantTimes = {} :: { number },
+		plantHeadings = {} :: { number },
+		-- The stop plant (D-623), the root it last read and its flat move then, whether the walk
+		-- has shown whole since it last stood (a stop under it is planted), whether the root walked
+		-- off from the stop and what is left of its legs then, and whether a stop drew its last step.
+		walkStop = if stopPlan ~= nil then WalkStopPlant.new(stopPlan) else nil,
+		stopAt = nil :: Vector3?,
+		stopMoved = 0,
+		walked = false,
+		stopFade = 1,
+		stopLetGo = false,
+		stopEnds = false,
 		unhook = nil :: (() -> ())?,
 		destroyed = false,
 	}, RigDriver)
@@ -1773,7 +1815,248 @@ function Locomotion.idlePhase(entityId: number): number
 	return (entityId * ChoreoData.enemyIdlePhaseStep) % 1
 end
 
-function RigDriver.update(self: any, _dt: number, state: State): LocomotionState.Output
+-- The walking-turn plant's step (D-619): the turn the root will make over the row this step's pose
+-- is drawn on, each planted foot's hip taking back its share, while the walk shows and no
+-- full-body clip has the body. The turn is read as the root's turning speed over the gait's own
+-- travel window (enemy.gait.travelSeconds) times this step's dt: the root a client draws turns
+-- unevenly row to row (511(g): -0.15 to -1.28 degrees a 144 Hz row on a steady wheel), and a
+-- take-back of the last row's own turn would put that row-to-row difference on the planted sole.
+local function stepWalkPlant(self: any, dt: number)
+	local plant = self.walkPlant
+	local root: BasePart? = if self.character ~= nil then self.character.PrimaryPart else nil
+	if plant == nil or root == nil then
+		return
+	end
+	local gait = ChoreoData.enemy.gait
+	local rotation = root.CFrame.Rotation
+	local at = root.CFrame.Position
+	local last: CFrame? = self.plantYaw
+	local lastAt: Vector3? = self.plantAt
+	self.plantYaw = rotation
+	self.plantAt = at
+	local times: { number } = self.plantTimes
+	local headings: { number } = self.plantHeadings
+	if
+		last == nil
+		or lastAt == nil
+		or Vector3.new(at.X - lastAt.X, 0, at.Z - lastAt.Z).Magnitude > ChoreoData.enemy.rush.teleportStuds
+	then
+		-- A placement: the turn starts afresh from here.
+		table.clear(times)
+		table.clear(headings)
+	else
+		local look = (last:Inverse() * rotation).LookVector
+		self.plantHeading += math.atan2(-look.X, -look.Z)
+	end
+	if dt > 0 or #times == 0 then
+		self.plantClock += math.max(dt, 0)
+		table.insert(times, self.plantClock)
+		table.insert(headings, self.plantHeading)
+	else
+		headings[#headings] = self.plantHeading
+	end
+	local from = self.plantClock - gait.travelSeconds + TRAVEL_TIME_SLACK
+	while #times > 2 and times[2] <= from do
+		table.remove(times, 1)
+		table.remove(headings, 1)
+	end
+	local span = self.plantClock - times[1]
+	local ahead = if span > 0 then (self.plantHeading - headings[1]) / span * dt else 0
+	local walkHandle = self.handles.Walk
+	local mixer = self.animator.mixer
+	local weight = if walkHandle ~= nil and not walkHandle.done then walkHandle.targetWeight or walkHandle.weight else 0
+	if weight > 0 then
+		for _, handle in mixer:handles() do
+			if handle.layer == "FullBody" and not handle.done and handle.weight > 0 then
+				weight = 0
+				break
+			end
+		end
+	end
+	if weight <= 0 then
+		WalkTurnPlant.reset(plant)
+		self.animator:setProcedural(WALK_PLANT_CHANNEL, nil)
+		return
+	end
+	local rate = walkHandle.speed or 1
+	local time = walkHandle.time
+	if mixer:pauseRemaining() <= ChoreoData.pauseEpsilon then
+		time += dt * mixer:timeScale() * rate
+	end
+	local offsets = WalkTurnPlant.step(plant, dt, ahead, time, rate)
+	self.animator:setProcedural(WALK_PLANT_CHANNEL, offsets, weight)
+end
+
+-- True while a full-body clip shows on `mixer`: it has the body, and the plants let it go.
+local function fullBodyShows(mixer: any): boolean
+	for _, handle in mixer:handles() do
+		if handle.layer == "FullBody" and not handle.done and handle.weight > 0 then
+			return true
+		end
+	end
+	return false
+end
+
+-- A loop handle's clock once the next step of `dt` has run (the mixer's own advance, wrapped).
+local function timeAfter(mixer: any, handle: any, dt: number): number
+	local time = handle.time
+	if mixer:pauseRemaining() <= ChoreoData.pauseEpsilon and not handle.held then
+		time += dt * mixer:timeScale() * (handle.speed or 1)
+	end
+	local duration = handle.clip.duration
+	return if duration > 0 then time % duration else time
+end
+
+-- The base layer's pose on a stop's step: the walk and the idle by their shown weights, as the
+-- mixer mixes one priority group (normalised by their sum; a joint one clip leaves out counts as
+-- rest there).
+local function stopBase(
+	walkPose: ClipSampler.Offsets,
+	walk: number,
+	idlePose: ClipSampler.Offsets,
+	idle: number
+): ClipSampler.Offsets
+	local base: ClipSampler.Offsets = {}
+	local total = walk + idle
+	if total <= 0 then
+		return base
+	end
+	for _, entry in { { walkPose, walk / total }, { idlePose, idle / total } } do
+		local pose: ClipSampler.Offsets, weight: number = entry[1] :: any, entry[2] :: any
+		for name, offset in pose do
+			local into = base[name]
+			if into == nil then
+				into = { pos = { 0, 0, 0 }, rot = { 0, 0, 0 } }
+				base[name] = into
+			end
+			for axis = 1, 3 do
+				into.pos[axis] += offset.pos[axis] * weight
+				into.rot[axis] += offset.rot[axis] * weight
+			end
+		end
+	end
+	return base
+end
+
+-- Ends a stop: the walk's clock runs again and the stop's channel goes.
+local function endWalkStop(self: any)
+	WalkStopPlant.cancel(self.walkStop)
+	self.animator.mixer:hold(self.handles.Walk, false)
+	self.animator:setProcedural(STOP_PLANT_CHANNEL, nil)
+	self.stopFade = 1
+	self.stopLetGo = false
+end
+
+-- The stop plant's step (D-623). The root a step reads is where it was drawn on the last row: a
+-- root that moved under stopBrakeShare of the walk's own pace there has braked, and from this row
+-- the walk's clock stands and the legs are the stop plant's ("drive": RigDriver.update leaves the
+-- gait alone). A full-body clip ends it at once (it has the body). The root moving off again (more
+-- than twice its last row's move and more than locomotion.idleSpeedThreshold) hands the rig back to
+-- the gait ("letGo"): the stop's legs fade out over the gait's weightBlendRate, so a foot caught
+-- mid-step never jumps back onto the walk.
+local function stepWalkStop(self: any, dt: number): string?
+	local stop = self.walkStop
+	local root: BasePart? = if self.character ~= nil then self.character.PrimaryPart else nil
+	if stop == nil or root == nil then
+		return nil
+	end
+	local at = root.CFrame.Position
+	local last: Vector3? = self.stopAt
+	local lastMoved: number = self.stopMoved
+	local moved = if last ~= nil then Vector3.new(at.X - last.X, 0, at.Z - last.Z).Magnitude else 0
+	self.stopAt = at
+	self.stopMoved = moved
+	local walkHandle = self.handles.Walk
+	local idleHandle = self.handles.Idle
+	local mixer = self.animator.mixer
+	local full = fullBodyShows(mixer)
+	if stop.active then
+		if full or self.stopFade <= 0 then
+			endWalkStop(self)
+			return nil
+		end
+		if self.stopLetGo then
+			return "letGo"
+		end
+		if moved > math.max(2 * lastMoved, Config.idleSpeedThreshold * dt) then
+			mixer:hold(walkHandle, false)
+			self.stopLetGo = true
+			return "letGo"
+		end
+	else
+		if walkHandle.weight >= 1 - 1e-6 then
+			self.walked = true
+		elseif walkHandle.weight <= 0 then
+			self.walked = false
+		end
+		local pace = (walkHandle.speed or 0) * self.walkSpeed * dt
+		if not self.walked or full or last == nil or moved >= ChoreoData.enemy.gait.stopBrakeShare * pace then
+			return nil
+		end
+		-- The root braked: hold each foot where the last row drew it, the walk's clock where it is.
+		WalkStopPlant.begin(
+			stop,
+			mixer:lastOffsets(),
+			ClipSampler.sample(idleHandle.clip, timeAfter(mixer, idleHandle, dt))
+		)
+		mixer:hold(walkHandle, true)
+		self.walked = false
+		if self.walkPlant ~= nil then
+			-- What the turning plant held is in the pose the stop holds.
+			WalkTurnPlant.reset(self.walkPlant)
+			self.animator:setProcedural(WALK_PLANT_CHANNEL, nil)
+		end
+	end
+	-- The stop keeps the rig's clock: a hit-stop holds it, a time scale paces it.
+	local clockDt = if mixer:pauseRemaining() <= ChoreoData.pauseEpsilon then dt * mixer:timeScale() else 0
+	local walk = WalkStopPlant.walkWeight(stop, clockDt)
+	self.animator:setWeight(walkHandle, walk, true)
+	self.animator:setWeight(idleHandle, 1 - walk, true)
+	local idlePose = ClipSampler.sample(idleHandle.clip, timeAfter(mixer, idleHandle, dt))
+	local base = stopBase(ClipSampler.sample(walkHandle.clip, walkHandle.time), walk, idlePose, 1 - walk)
+	self.animator:setProcedural(STOP_PLANT_CHANNEL, WalkStopPlant.step(stop, clockDt, base, idlePose), 1)
+	if WalkStopPlant.done(stop) then
+		-- Its last foot is down on the idle's spot and the walk shows none: the idle has the rig.
+		WalkStopPlant.cancel(stop)
+		self.stopEnds = true
+	end
+	return "drive"
+end
+
+-- A stop the root walked off from, over the gait's own step: its legs as the stop has them, laid
+-- over the base the gait set up for this step by what is left of the let-go.
+local function letGoWalkStop(self: any, dt: number)
+	local stop = self.walkStop
+	local mixer = self.animator.mixer
+	local walkHandle = self.handles.Walk
+	local idleHandle = self.handles.Idle
+	local idlePose = ClipSampler.sample(idleHandle.clip, timeAfter(mixer, idleHandle, dt))
+	local walkPose = ClipSampler.sample(walkHandle.clip, timeAfter(mixer, walkHandle, dt))
+	local base = stopBase(walkPose, mixer:preview(walkHandle, dt), idlePose, mixer:preview(idleHandle, dt))
+	local clockDt = if mixer:pauseRemaining() <= ChoreoData.pauseEpsilon then dt * mixer:timeScale() else 0
+	self.stopFade = math.max(0, self.stopFade - clockDt * ChoreoData.locomotion.weightBlendRate)
+	self.animator:setProcedural(STOP_PLANT_CHANNEL, WalkStopPlant.step(stop, clockDt, base, idlePose), self.stopFade)
+end
+
+function RigDriver.update(self: any, dt: number, state: State): LocomotionState.Output
+	if self.stopEnds then
+		-- The stop's last step drew every leg on the idle: its channel goes.
+		self.stopEnds = false
+		endWalkStop(self)
+	end
+	local stopping = stepWalkStop(self, dt)
+	if stopping == "drive" then
+		local shown = self.handles.Walk.weight
+		return {
+			weights = { Idle = 1 - shown, Walk = shown },
+			oneShot = nil,
+			oneShotWeight = 1,
+			lean = 0,
+			drawnSprint = 0,
+			phase = "Idle",
+			airborne = not state.grounded,
+		}
+	end
 	local speed = math.max(0, state.speed)
 	local walk = 0
 	if speed > Config.idleSpeedThreshold then
@@ -1790,6 +2073,10 @@ function RigDriver.update(self: any, _dt: number, state: State): LocomotionState
 	self.animator:setWeight(self.handles.Idle, 1 - walk)
 	if walk > 0 then
 		self.animator:setSpeed(self.handles.Walk, math.max(speed / self.walkSpeed, Stride.rateFloor))
+	end
+	stepWalkPlant(self, dt)
+	if stopping == "letGo" then
+		letGoWalkStop(self, dt)
 	end
 	return {
 		weights = { Idle = 1 - walk, Walk = walk },
@@ -1826,6 +2113,12 @@ function RigDriver.destroy(self: any)
 		self.animator:stop(handle)
 	end
 	table.clear(self.handles)
+	if self.walkPlant ~= nil then
+		self.animator:setProcedural(WALK_PLANT_CHANNEL, nil)
+	end
+	if self.walkStop ~= nil then
+		self.animator:setProcedural(STOP_PLANT_CHANNEL, nil)
+	end
 end
 
 --- Drives a rig the local controller does not own from the animator's own step. The state comes
@@ -1862,7 +2155,10 @@ function Locomotion.attach(animator: any, character: Model, deps: Dependencies?)
 			rigClips.walk,
 			(rig and rig.walkSpeed) or Config.walkSpeed,
 			dependencies.phase or 0,
-			ChoreoData.enemy.gait.startPhase[rigId]
+			ChoreoData.enemy.gait.startPhase[rigId],
+			character,
+			ChoreoData.enemy.gait.turnPlant[rigId],
+			ChoreoData.enemy.gait.stopPlant[rigId]
 		)
 		if tracker == nil then
 			tracker = Locomotion.travelTracker(character, Locomotion.humanoidTracker(character))
@@ -1913,8 +2209,6 @@ function Locomotion.drawnTracker(animator: any, character: Model): (dt: number, 
 		return followed
 	end
 end
-
-local TRAVEL_TIME_SLACK = 1e-9 -- unit: seconds, float noise in a sum of frame times
 
 --- An enemy rig's gait paced by its root's own travel (D-575): `source`'s state with its flat
 --- speed, velocity and move direction those of the root's flat travel over the last

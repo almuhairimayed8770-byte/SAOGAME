@@ -328,15 +328,28 @@ describe("Locomotion.attach", function()
 	end)
 
 	it("starts an enemy rig's idle and walk loops at the phase it is given", function()
-		local model = buildRig("Kobold")
-		local animator = Choreo.get(model)
-		local driver = Locomotion.attach(animator, model, { tracker = trackerOf(still()), phase = 0.25 })
-		local idle = handleOf(animator, ChoreoData.rigs.Kobold.idle)
-		local walk = handleOf(animator, ChoreoData.rigs.Kobold.walk)
-		expect(idle.time).toBeCloseTo(0.25 * idle.clip.duration, 1e-9)
-		expect(walk.time).toBeCloseTo(0.25 * walk.clip.duration, 1e-9)
-		driver:destroy()
-		Choreo.release(model)
+		-- A rig with a walk start phase (enemy.gait.startPhase, D-599) holds its walk there while
+		-- the walk shows none (the kobold's is 0.23, D-625); a rig with none starts its walk at the
+		-- phase it is given too.
+		local phases = ChoreoData.enemy.gait.startPhase
+		local keep = phases.Kobold
+		local ran = 0
+		for _, case in { { startPhase = keep }, { startPhase = nil } } :: { { startPhase: number? } } do
+			local startPhase = case.startPhase
+			ran += 1
+			phases.Kobold = startPhase
+			local model = buildRig("Kobold")
+			local animator = Choreo.get(model)
+			local driver = Locomotion.attach(animator, model, { tracker = trackerOf(still()), phase = 0.25 })
+			local idle = handleOf(animator, ChoreoData.rigs.Kobold.idle)
+			local walk = handleOf(animator, ChoreoData.rigs.Kobold.walk)
+			expect(idle.time).toBeCloseTo(0.25 * idle.clip.duration, 1e-9)
+			expect(walk.time).toBeCloseTo((startPhase or 0.25) * walk.clip.duration, 1e-9)
+			driver:destroy()
+			Choreo.release(model)
+		end
+		phases.Kobold = keep
+		expect(ran).toBe(2)
 	end)
 
 	it("gives one id the same idle phase every time and spreads ids in a row round the loop", function()

@@ -20,9 +20,14 @@
 	lasts long enough to land the fastest Charger rush from its lead (D-525), and its MoveTo aims
 	past its stop by more than the Humanoid's MoveTo tolerance plus that lead (D-548); a walk's
 	change of pace eases by a positive rate whose 60 Hz frame's change times the frame stays within
-	choreo stride.contact (D-574); the Brute wheels round from under 180 degrees off at no more than
+	choreo stride.contact (D-574), and a walk from standing sets off at a startPace of 0 or more whose
+	first 60 Hz frame stays within it too (D-618); the Brute wheels round from under 180 degrees off at no more than
 	its pace, comes out of the wheel within footSlideStuds a 60 Hz frame and keeps its walk alone
-	while it wheels (D-598); a
+	while it wheels (D-598); its stop at a fighter backed to the world (backRoom, D-627) leaves a
+	positive lean, brakes over a positive fraction of a tick and grows no farther than a cap that is
+	at least stopDistance, inside every Brute attack's engage range (reach x engageFraction, so it
+	still swings and its blow lands) and inside every Brute hit matrix setup's real fight (so every
+	player Art and basic still reaches it); a
 	blocked step tells running from blocked and is told before the jam lag (D-280). Every enemy
 	Humanoid keeps out of FallingDown and only ever out of fall states (upright.offStates, D-494);
 	each client's copy stands up to Running or GettingUp, retries a whole number of steps and logs
@@ -301,6 +306,76 @@ local function validate(ctx: Context): { string }
 		if typeof(wheelShare) == "number" and wheelShare > 1 then
 			problem("archetypes.Brute.wheelSpeedMultiplier must be at most 1")
 		end
+		-- The stop at a fighter backed to the world (D-627).
+		local room = brute.backRoom
+		if typeof(room) ~= "table" then
+			problem("archetypes.Brute.backRoom must be a table of leanStuds, brakeSeconds and maxStopDistance")
+		else
+			positiveNumber(room.leanStuds, "archetypes.Brute.backRoom.leanStuds")
+			positiveNumber(room.brakeSeconds, "archetypes.Brute.backRoom.brakeSeconds", true)
+			positiveNumber(room.maxStopDistance, "archetypes.Brute.backRoom.maxStopDistance")
+			if typeof(room.brakeSeconds) == "number" and room.brakeSeconds >= AI.tickSeconds() then
+				problem(
+					("archetypes.Brute.backRoom.brakeSeconds (%s) must be under one AI tick (%.3f s): a stop brakes within a tick"):format(
+						tostring(room.brakeSeconds),
+						AI.tickSeconds()
+					)
+				)
+			end
+			local cap = room.maxStopDistance
+			if typeof(cap) == "number" and typeof(brute.stopDistance) == "number" and cap < brute.stopDistance then
+				problem(
+					("archetypes.Brute.backRoom.maxStopDistance (%s) must be at least stopDistance (%s)"):format(
+						tostring(cap),
+						tostring(brute.stopDistance)
+					)
+				)
+			end
+			if typeof(cap) == "number" and typeof(brute.engageFraction) == "number" then
+				for _, def in Enemies.list() do
+					if def.archetype ~= "Brute" then
+						continue
+					end
+					for _, attack in def.attacks do
+						local engage = attack.reach * brute.engageFraction
+						if cap > engage + 1e-9 then
+							problem(
+								("%s: archetypes.Brute.backRoom.maxStopDistance %s is past %s's engage range %.2f (reach %s x engageFraction %s): from its farthest stop it would never swing"):format(
+									def.id,
+									tostring(cap),
+									attack.id,
+									engage,
+									tostring(attack.reach),
+									tostring(brute.engageFraction)
+								)
+							)
+						end
+					end
+				end
+				local matrix = ctx.load("src/shared/data/dev").hitMatrix
+				local setups = if typeof(matrix) == "table" then matrix.setups else nil
+				if typeof(setups) == "table" then
+					for _, setup in setups do
+						local def = Enemies.byId(setup.enemy)
+						if
+							def ~= nil
+							and def.archetype == "Brute"
+							and not setup.pointBlank
+							and typeof(setup.realFight) == "table"
+							and cap > setup.realFight.max + 1e-9
+						then
+							problem(
+								("archetypes.Brute.backRoom.maxStopDistance %s is past hit matrix setup %s's real fight (max %s): a player's swing would not reach it there"):format(
+									tostring(cap),
+									tostring(setup.id),
+									tostring(setup.realFight.max)
+								)
+							)
+						end
+					end
+				end
+			end
+		end
 		local Rigs = ctx.load("src/shared/data/rigs")
 		local Dev = ctx.load("src/shared/data/dev")
 		local choreo = ctx.load("src/shared/data/choreo")
@@ -490,6 +565,27 @@ local function validate(ctx: Context): { string }
 						tostring(pace),
 						tostring(contact),
 						contact / (frame * frame)
+					)
+				)
+			end
+		end
+		-- A walk from standing sets off at startPace and eases up (D-618): its first 60 Hz frame's
+		-- pace (startPace + paceChangeRate / 60) over the frame, the slide it gives a gait still on
+		-- the idle, stays within stride.contact.
+		local start = AI.movement.startPace
+		if typeof(start) ~= "number" or start ~= start then
+			problem("movement.startPace must be a number")
+		elseif start < 0 then
+			problem("movement.startPace must be 0 or more")
+		elseif typeof(pace) == "number" and pace > 0 and typeof(contact) == "number" then
+			local frame = 1 / 60
+			if not ((start + pace * frame) * frame <= contact + 1e-12) then
+				problem(
+					("movement.startPace %s must set a walk off within stride.contact a 60 Hz frame (%s studs: at most %.2f studs/s with paceChangeRate %s)"):format(
+						tostring(start),
+						tostring(contact),
+						contact / frame - pace * frame,
+						tostring(pace)
 					)
 				)
 			end

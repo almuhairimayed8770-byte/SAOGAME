@@ -58,16 +58,20 @@ local PENDING: { [string]: { [string]: { [string]: number } } } = {
 		Anticipation = { ["Run@0.5"] = 0.17, ["Mash after Basic1"] = 0.08 },
 	},
 	-- The walks' feet hold the field through their whole cycle (D-482); what is left is the
-	-- Lab's cut-in: the root moves at walkSpeed from the first frame while the rig's fallback idle
-	-- fades out under the walk over choreo.luau fallbackBlend (0.15 s), so the planted foot is half
-	-- the idle's for the first frames (any stance through that fade drifts 0.33 or more).
+	-- Lab's cut-in: the rig's fallback idle fades out under the walk over choreo.luau fallbackBlend
+	-- (0.15 s), so the planted foot is part the idle's for the first frames. The Lab sets the walk
+	-- off as the game does (D-624): the root eases up from movement.startPace at paceChangeRate
+	-- (D-618) with the walk paced to it (RigDriver), where it moved at walkSpeed from the first
+	-- frame before. The boar's swinging pair, on the field under the fading idle (D-622), no
+	-- longer rides the root's first frames (its Slide went: 0.148 past the bound before), and its
+	-- cut-in drifts 0.038 past it (0.204). The kobold's stance foot drifts 0.320 past it through
+	-- the fade (0.358) and slides 0.002 (0.012).
 	["enemy/Boar/Walk"] = {
-		Slide = { ["Lab"] = 0.12 },
-		Drift = { ["Lab"] = 0.21 },
+		Drift = { ["Lab"] = 0.04 },
 	},
 	["enemy/Kobold/Walk"] = {
-		Slide = { ["Lab"] = 0.02 },
-		Drift = { ["Lab"] = 0.38 },
+		Slide = { ["Lab"] = 0.01 },
+		Drift = { ["Lab"] = 0.33 },
 	},
 }
 
@@ -242,6 +246,84 @@ describe("ClipAudit: every audited clip", function()
 			end
 			if #lines > 0 then
 				error("the tip outruns the snap:\n" .. table.concat(lines, "\n"))
+			end
+		end)
+	end
+end)
+
+-- The Lab plan sets an enemy's walk off as the game does (D-624): EnemyService sets a walk from
+-- standing off at movement.startPace and eases it up at movement.paceChangeRate (D-618), and
+-- RigDriver paces the walk to the root's speed, no slower than locomotion.stride.rateFloor. The
+-- Lab carried the root at walkSpeed from the walk's second frame, which the game no longer does.
+describe("ClipAudit: an enemy walk's Lab plan sets off as the game does (D-624)", function()
+	local AI = Harness.load("src/shared/data/ai")
+	local Choreo = Harness.load("src/shared/data/choreo")
+	local Rigs = Harness.load("src/shared/data/rigs")
+
+	-- Studs the root has gone `t` seconds after the walk's first step.
+	local function setOff(walkSpeed: number, t: number): number
+		local first, rate = AI.movement.startPace, AI.movement.paceChangeRate
+		local rise = (walkSpeed - first) / rate
+		if t <= rise then
+			return first * t + rate * t * t / 2
+		end
+		return first * rise + rate * rise * rise / 2 + walkSpeed * (t - rise)
+	end
+
+	for rig, config in Audit.rigs do
+		local walkId: string? = (config :: any).walk
+		if walkId == nil then
+			continue
+		end
+		local id = walkId :: string
+		it(("%s: the root eases up from startPace and the walk is paced to it"):format(id), function()
+			local clip = ClipLibrary.get(id)
+			local lab = ClipAudit.plans(clip, ClipLibrary.get)[1]
+			expect(lab.label).toBe("Lab")
+			local walkSpeed = Rigs[rig].walkSpeed
+			local floor = Choreo.locomotion.stride.rateFloor
+			local hz = 60
+			local dt = 1 / hz
+			local frames = ClipAudit.trace(bodyOf(rig), lab, hz)
+			local first: number? = nil
+			for index, frame in frames do
+				if frame.clipTime ~= nil then
+					first = index
+					break
+				end
+			end
+			assert(first ~= nil and first > 1, "the walk never played")
+			local lines = {}
+			local lastClip = 0
+			for index = first :: number, #frames do
+				local frame = frames[index]
+				if frame.clipTime == nil then
+					break
+				end
+				local k = index - (first :: number)
+				local step = (frame.root.Position - frames[index - 1].root.Position).Magnitude
+				local want = setOff(walkSpeed, (k + 1) * dt) - setOff(walkSpeed, k * dt)
+				local advanced = (frame.clipTime :: number) - lastClip
+				if advanced < -1e-9 then
+					advanced += clip.duration -- the loop wrapped
+				end
+				lastClip = frame.clipTime :: number
+				local paced = math.max(want / (walkSpeed * dt), floor) * dt
+				if math.abs(step - want) > 1e-6 or math.abs(advanced - paced) > 1e-6 then
+					table.insert(
+						lines,
+						("  row %d: root %.4f (want %.4f), clip %.4f s (want %.4f)"):format(
+							k,
+							step,
+							want,
+							advanced,
+							paced
+						)
+					)
+				end
+			end
+			if #lines > 0 then
+				error(("%s's Lab start is not the game's:\n%s"):format(id, table.concat(lines, "\n")))
 			end
 		end)
 	end

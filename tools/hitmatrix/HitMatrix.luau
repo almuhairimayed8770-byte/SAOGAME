@@ -513,6 +513,52 @@ function HitMatrix.standing(Harness: any): (Avatar, any)
 	return buildAvatar(ctx), fieldPart(ctx)
 end
 
+export type LeanColumn = { id: string, clipId: string, depth: number, at: number }
+
+--- How deep front to back each of the matrix's attacks (the loadout's Arts, then the basic chain)
+--- leans the parts the engine collides (combat.luau contact.standOff.keepOut.parts) on the matrix's
+--- body, posed every `sampleSeconds` (1/120 when nil) with its root held, as the stand-off holds a
+--- swing's own motion against a target it touches (D-502): at each pose, the deepest it has leant
+--- in front so far plus how far it leans behind now, since a stand-off step back stays (D-534). The
+--- room a fighter backed to the world needs between that world and a foe's blocker face, before the
+--- stand-off's own gaps (D-627); `at` is the clip time of the deepest pose.
+function HitMatrix.leanColumns(Harness: any, sampleSeconds: number?): { LeanColumn }
+	local ctx = load(Harness)
+	local avatar = buildAvatar(ctx)
+	local step = sampleSeconds or 1 / 120
+	local parts = ctx.Combat.contact.standOff.keepOut.parts
+	local facing = CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, 1))
+	local columns: { LeanColumn } = {}
+	for _, attack in HitMatrix.attacks(ctx) do
+		local clip = attack.clip
+		local deepest, deepestAt, frontSoFar = -math.huge, 0, -math.huge
+		local time = 0
+		while true do
+			local solved = ctx.Pose.solve(avatar.model, facing, ctx.ClipSampler.sample(clip, time))
+			local front, back = -math.huge, -math.huge
+			for _, name in parts do
+				local part = avatar.model:FindFirstChild(name)
+				local frame = solved[name]
+				if part ~= nil and frame ~= nil then
+					local reach = boundsHalf(frame, part.Size).Z
+					front = math.max(front, frame.Position.Z + reach)
+					back = math.max(back, reach - frame.Position.Z)
+				end
+			end
+			frontSoFar = math.max(frontSoFar, front)
+			if frontSoFar + back > deepest then
+				deepest, deepestAt = frontSoFar + back, time
+			end
+			if time >= clip.duration then
+				break
+			end
+			time = math.min(time + step, clip.duration)
+		end
+		table.insert(columns, { id = attack.id, clipId = attack.clipId, depth = deepest, at = deepestAt })
+	end
+	return columns
+end
+
 -- ------------------------------------------------------------------------------------------
 -- The engine queries
 -- ------------------------------------------------------------------------------------------

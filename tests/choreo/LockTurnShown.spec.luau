@@ -29,6 +29,16 @@
 	(the owner's PC 0.011 to 0.047 on four of six turns). Each 60 Hz row's least-moving corner
 	within the contact band of the field on both rows (513(a)'s read) moves at most
 	lockTurn.rowStuds.
+
+	D-626: the sheathed turns from lockTurn.sheathedIdleStarts seconds into the sheathed idle
+	(its weight shift onto the left leg, 4.5 to 8.2 s), at each of lockTurn.sheathedStepHz, the row
+	read summed over the rows of a 60 Hz row's time. The weight shift carried both feet 0.15 to 0.17
+	off where the cycle starts them, which is where the turn clips stand them: a turn's 0.08 s
+	blend in brought them back in five rows and its 0.15 s blend out took them away again (0.045 a
+	60 Hz row, 15 of 48 idle phases over 0.01). Its legs are now solved at the shift's key, as the
+	drawn idle's were (D-417), and the idle's own soles hold within stride.contact of their start.
+	As every case above, the body stays sheathed: a lock-on's own draw (the stance changing under
+	the turn) is not in this read.
 ]]
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
@@ -76,6 +86,8 @@ local ClipAudit = Harness.load("src/client/dev/ClipAudit")
 local FIELD_TOP = ClipAudit.topOf(field.CFrame, field.Size)
 local ChoreoData = Harness.load("src/shared/data/choreo")
 local Dev = Harness.load("src/shared/data/dev")
+local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
+local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
 local CONTACT = ChoreoData.locomotion.stride.contact
 local Bar = Dev.groundClearance.lockTurn
 local chain = Pose.chain(avatar.model)
@@ -132,6 +144,11 @@ type Track = {
 	driftAt: number,
 	worstRow: number, -- AR 513(a): the most the least-moving corner within the band moved in a row
 	rowAt: number,
+	-- D-626: the same read summed over the rows of a 60 Hz row's time (as many rows as cover
+	-- 1/60 s; one at 60 Hz, three at 144), a row with no corner in the band counting none.
+	worstRow60: number,
+	row60At: number,
+	recent: { number },
 	last: { Vector3 }?,
 	down: { Vector3 }?,
 	grounded: { boolean }?,
@@ -153,11 +170,22 @@ local function run(
 	local yaw, left = 0, degrees
 	local tracks: { [string]: Track } = {}
 	for _, name in FOOT do
-		tracks[name] = { worstSlide = 0, slideAt = 0, worstDrift = 0, driftAt = 0, worstRow = 0, rowAt = 0 }
+		tracks[name] = {
+			worstSlide = 0,
+			slideAt = 0,
+			worstDrift = 0,
+			driftAt = 0,
+			worstRow = 0,
+			rowAt = 0,
+			worstRow60 = 0,
+			row60At = 0,
+			recent = {},
+		}
 	end
 	leads.UpperTorso, leads.Head = 0, 0
 	local frames = math.floor((from + 1.1) * hz)
 	local per60 = hz / 60
+	local rows60 = math.max(1, math.ceil(per60 - 1e-9))
 	local slideAcc: { [string]: { number } } = { LeftFoot = {}, RightFoot = {} }
 	for frame = 1, frames do
 		local t = frame * dt
@@ -219,6 +247,19 @@ local function run(
 				if least < math.huge and least > track.worstRow then
 					track.worstRow = least
 					track.rowAt = t - from
+				end
+				local recent = track.recent
+				table.insert(recent, if least < math.huge then least else 0)
+				if #recent > rows60 then
+					table.remove(recent, 1)
+				end
+				local sum = 0
+				for _, moved in recent do
+					sum += moved
+				end
+				if sum > track.worstRow60 then
+					track.worstRow60 = sum
+					track.row60At = t - from
 				end
 			end
 			if last ~= nil and wasDown ~= nil then
@@ -410,6 +451,133 @@ describe("the lock turn from the drawn idle's weight shift (AR 513, D-615)", fun
 						worst.row,
 						worst.slide,
 						worst.drift
+					)
+				)
+				expect(table.concat(problems, "\n")).toBe("")
+			end
+		)
+	end
+end)
+
+describe("the lock turn from the sheathed idle's weight shift (D-626)", function()
+	it("the sheathed idle keeps both feet where its cycle starts them through its weight shift", function()
+		local clip = ClipLibrary.get(ChoreoData.locomotion.clipPrefix .. ChoreoData.locomotion.clips.Idle)
+		local function corners(time: number): { [string]: { Vector3 } }
+			local solved = Pose.solve(avatar.model, avatar.base, ClipSampler.sample(clip, time), chain)
+			local out = {}
+			for _, name in FOOT do
+				out[name] = bottom(solved[name], (avatar.model:FindFirstChild(name) :: any).Size)
+			end
+			return out
+		end
+		local start = corners(0)
+		-- Each foot's farthest corner from its start, across and up or down, and when.
+		local worst: { [string]: { moved: number, movedAt: number, rose: number, roseAt: number } } = {}
+		for _, name in FOOT do
+			worst[name] = { moved = 0, movedAt = 0, rose = 0, roseAt = 0 }
+		end
+		for index = 1, 240 do
+			local time = clip.duration * index / 240
+			for name, now in corners(time) do
+				local most = worst[name]
+				for i = 1, 4 do
+					local from = start[name][i]
+					local moved = (flat(now[i]) - flat(from)).Magnitude
+					local rose = math.abs(now[i].Y - from.Y)
+					if moved > most.moved then
+						most.moved, most.movedAt = moved, time
+					end
+					if rose > most.rose then
+						most.rose, most.roseAt = rose, time
+					end
+				end
+			end
+		end
+		local problems = {}
+		for _, name in FOOT do
+			local most = worst[name]
+			if most.moved > CONTACT or most.rose > CONTACT then
+				table.insert(
+					problems,
+					("%s: a sole corner moves %.3f across its start (at %.2f s) and %.3f up or down (at %.2f s), max %.2f"):format(
+						name,
+						most.moved,
+						most.movedAt,
+						most.rose,
+						most.roseAt,
+						CONTACT
+					)
+				)
+			end
+		end
+		print(
+			("LockTurnShown sheathed idle: a sole corner moved %.4f / %.4f, rose or sank %.4f / %.4f (left / right)"):format(
+				worst.LeftFoot.moved,
+				worst.RightFoot.moved,
+				worst.LeftFoot.rose,
+				worst.RightFoot.rose
+			)
+		)
+		expect(table.concat(problems, "\n")).toBe("")
+	end)
+
+	for _, side in { -1, 1 } do
+		it(
+			("the lock turns the sheathed body to the %s from the idle's weight shift: its feet hold"):format(
+				if side < 0 then "right" else "left"
+			),
+			function()
+				local problems = {}
+				local worst: { [number]: number } = {}
+				for _, start in Bar.sheathedIdleStarts do
+					for _, degrees in Bar.degrees do
+						for _, hz in Bar.sheathedStepHz do
+							local tracks = run(degrees, side, hz, Combat.aim.lockTurnRate, false, start)
+							for _, name in FOOT do
+								local track = tracks[name]
+								-- The moves over a 60 Hz row's time.
+								local row = track.worstRow60
+								worst[hz] = math.max(worst[hz] or 0, row)
+								if row > Bar.rowStuds + 1e-6 then
+									table.insert(
+										problems,
+										("%d deg %d Hz from %.1f s into the sheathed idle: %s moves %.4f in a 60 Hz row's time on the field at +%.3f s (max %.3f)"):format(
+											degrees,
+											hz,
+											start,
+											name,
+											row,
+											track.row60At,
+											Bar.rowStuds
+										)
+									)
+								end
+								if track.worstDrift > Bar.driftStuds + 1e-6 then
+									table.insert(
+										problems,
+										("%d deg %d Hz from %.1f s into the sheathed idle: %s drifts %.3f over one plant at +%.3f s (max %.2f)"):format(
+											degrees,
+											hz,
+											start,
+											name,
+											track.worstDrift,
+											track.driftAt,
+											Bar.driftStuds
+										)
+									)
+								end
+							end
+						end
+					end
+				end
+				local parts = {}
+				for _, hz in Bar.sheathedStepHz do
+					table.insert(parts, ("%d Hz %.4f"):format(hz, worst[hz] or 0))
+				end
+				print(
+					("LockTurnShown sheathed idle phases side %d: worst row in a 60 Hz row's time %s"):format(
+						side,
+						table.concat(parts, ", ")
 					)
 				)
 				expect(table.concat(problems, "\n")).toBe("")

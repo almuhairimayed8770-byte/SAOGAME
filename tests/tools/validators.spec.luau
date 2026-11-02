@@ -6613,6 +6613,434 @@ describe("ai validator: the Brute wheels round on its walk (D-598)", function()
 	end)
 end)
 
+-- ------------------------------------------------------------------------------------------
+-- The Brute's stop at a fighter backed to the world (D-627)
+-- ------------------------------------------------------------------------------------------
+
+describe("ai validator: the Brute's stop at a fighter backed to the world (D-627)", function()
+	local function withRoom(room: any, engageFraction: number?, kobold: number?): { string }
+		local real = Harness.load("src/shared/data/ai")
+		local copy = table.clone(real)
+		copy.archetypes = table.clone(real.archetypes)
+		copy.archetypes.Brute = table.clone(real.archetypes.Brute)
+		copy.archetypes.Brute.backRoom = room
+		if engageFraction ~= nil then
+			copy.archetypes.Brute.engageFraction = engageFraction
+		end
+		local dev = Harness.load("src/shared/data/dev")
+		if kobold ~= nil then
+			dev = table.clone(dev)
+			dev.hitMatrix = table.clone(dev.hitMatrix)
+			dev.hitMatrix.setups = table.clone(dev.hitMatrix.setups)
+			for index, setup in dev.hitMatrix.setups do
+				if setup.id == "Kobold" then
+					local changed = table.clone(setup)
+					changed.realFight = { min = setup.realFight.min, max = kobold }
+					dev.hitMatrix.setups[index] = changed
+				end
+			end
+		end
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/ai" then
+				return copy
+			elseif path == "src/shared/data/dev" then
+				return dev
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/ai")(context)
+	end
+	local real = Harness.load("src/shared/data/ai").archetypes.Brute.backRoom
+	local function room(changes: { [string]: any }): any
+		local copy = table.clone(real)
+		for key, value in changes do
+			copy[key] = value
+		end
+		return copy
+	end
+
+	it("passes the real tables", function()
+		expect(withRoom(real)).toEqual({})
+	end)
+
+	it("wants the table, a positive lean and cap, and a brake under one AI tick", function()
+		expect(hasProblem(withRoom(nil), "archetypes.Brute.backRoom must be a table")).toBe(true)
+		expect(hasProblem(withRoom(room({ leanStuds = 0 })), "archetypes.Brute.backRoom.leanStuds must be positive")).toBe(
+			true
+		)
+		expect(withRoom(room({ brakeSeconds = 0 }))).toEqual({})
+		expect(
+			hasProblem(
+				withRoom(room({ brakeSeconds = -0.01 })),
+				"archetypes.Brute.backRoom.brakeSeconds must be zero or positive"
+			)
+		).toBe(true)
+		expect(
+			hasProblem(
+				withRoom(room({ brakeSeconds = 0.05 })),
+				"archetypes.Brute.backRoom.brakeSeconds (0.05) must be under one AI tick"
+			)
+		).toBe(true)
+		expect(
+			hasProblem(
+				withRoom(room({ maxStopDistance = "far" })),
+				"archetypes.Brute.backRoom.maxStopDistance must be a number"
+			)
+		).toBe(true)
+		expect(
+			hasProblem(
+				withRoom(room({ maxStopDistance = 3 })),
+				"archetypes.Brute.backRoom.maxStopDistance (3) must be at least stopDistance (3.5)"
+			)
+		).toBe(true)
+	end)
+
+	it("keeps the farthest stop inside every Brute attack's engage range, so it still swings", function()
+		-- The kobold's Overhead engages at reach 6 x 0.8 = 4.8.
+		expect(withRoom(room({ maxStopDistance = 4.8 }), nil, 5.25)).toEqual({})
+		local problems = withRoom(room({ maxStopDistance = 4.85 }), nil, 5.25)
+		expect(
+			hasProblem(
+				problems,
+				"KoboldAxeman: archetypes.Brute.backRoom.maxStopDistance 4.85 is past Overhead's engage range 4.80"
+			)
+		).toBe(true)
+		expect(hasProblem(withRoom(real, 0.7), "is past Overhead's engage range 4.20")).toBe(true)
+	end)
+
+	it("keeps the farthest stop inside the hit matrix's real fight, so every player swing reaches it", function()
+		expect(withRoom(real, nil, 4.6)).toEqual({})
+		expect(
+			hasProblem(
+				withRoom(real, nil, 4.5),
+				"archetypes.Brute.backRoom.maxStopDistance 4.6 is past hit matrix setup Kobold's real fight (max 4.5)"
+			)
+		).toBe(true)
+	end)
+end)
+
+describe("ai validator: a walk from standing sets off within the contact band (D-618)", function()
+	local function withStart(value: any, rate: number?): { string }
+		local real = Harness.load("src/shared/data/ai")
+		local copy = table.clone(real)
+		copy.movement = table.clone(real.movement)
+		copy.movement.startPace = value
+		if rate ~= nil then
+			copy.movement.paceChangeRate = rate
+		end
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/ai" then
+				return copy
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/ai")(context)
+	end
+
+	it("passes the real tables", function()
+		expect(withStart(Harness.load("src/shared/data/ai").movement.startPace)).toEqual({})
+	end)
+
+	it("wants a number, 0 or more", function()
+		expect(hasProblem(withStart(nil), "movement.startPace must be a number")).toBe(true)
+		expect(hasProblem(withStart(0 / 0), "movement.startPace must be a number")).toBe(true)
+		expect(hasProblem(withStart("0"), "movement.startPace must be a number")).toBe(true)
+		expect(hasProblem(withStart(-1), "movement.startPace must be 0 or more")).toBe(true)
+	end)
+
+	it("sets a walk off within stride.contact over its first 60 Hz frame", function()
+		-- 0.02 studs a 60 Hz frame is 1.2 studs/s, less paceChangeRate 30 over the frame (0.5).
+		expect(withStart(0.7)).toEqual({})
+		expect(hasProblem(withStart(0.71), "movement.startPace 0.71 must set a walk off within stride.contact")).toBe(
+			true
+		)
+		expect(hasProblem(withStart(0, 72.5), "movement.startPace 0 must set a walk off")).toBe(true)
+	end)
+end)
+
+describe("choreo validator: an enemy walk's turn plant (D-619)", function()
+	local function withPlants(value: any): { string }
+		local real = Harness.load("src/shared/data/choreo")
+		local copy = table.clone(real)
+		copy.enemy = table.clone(real.enemy)
+		copy.enemy.gait = table.clone(real.enemy.gait)
+		copy.enemy.gait.turnPlant = value
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/choreo" then
+				return copy
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/choreo")(context)
+	end
+	local function boar(change: (any) -> ()): any
+		local plant = table.clone(Harness.load("src/shared/data/choreo").enemy.gait.turnPlant.Boar)
+		plant.feet = table.clone(plant.feet)
+		change(plant)
+		return { Boar = plant }
+	end
+
+	it("passes the real tables", function()
+		expect(withPlants(Harness.load("src/shared/data/choreo").enemy.gait.turnPlant)).toEqual({})
+		expect(withPlants({})).toEqual({})
+	end)
+
+	it("wants a table of plants for rigs that walk", function()
+		expect(hasProblem(withPlants(nil), "enemy.gait.turnPlant must be a table")).toBe(true)
+		expect(hasProblem(withPlants({ Boar = 1 }), "enemy.gait.turnPlant.Boar must be a table")).toBe(true)
+		local plant = Harness.load("src/shared/data/choreo").enemy.gait.turnPlant.Boar
+		expect(hasProblem(withPlants({ PlayerR15 = plant }), "enemy.gait.turnPlant.PlayerR15 names no rig with a walk")).toBe(
+			true
+		)
+		expect(hasProblem(withPlants({ Wolf = plant }), "enemy.gait.turnPlant.Wolf names no rig with a walk")).toBe(
+			true
+		)
+	end)
+
+	it("wants the rig's own feet, each hung from a joint, named once", function()
+		expect(hasProblem(
+			withPlants(boar(function(p)
+				p.feet = {}
+			end)),
+			"enemy.gait.turnPlant.Boar.feet must list"
+		)).toBe(true)
+		expect(hasProblem(
+			withPlants(boar(function(p)
+				p.feet[1] = "Hoof"
+			end)),
+			"enemy.gait.turnPlant.Boar.feet: Hoof must be a part of the rig"
+		)).toBe(true)
+		expect(hasProblem(
+			withPlants(boar(function(p)
+				p.feet[1] = "HumanoidRootPart"
+			end)),
+			"enemy.gait.turnPlant.Boar.feet: HumanoidRootPart must be a part of the rig hung from its own joint"
+		)).toBe(true)
+		expect(
+			hasProblem(
+				withPlants(boar(function(p)
+					p.feet[2] = p.feet[1]
+				end)),
+				"enemy.gait.turnPlant.Boar.feet: FrontLeftLeg must be a part of the rig hung from its own joint, named once"
+			)
+		).toBe(true)
+	end)
+
+	it("wants a share up to 1, a small roll and a slide inside the hip", function()
+		for _, bad in { 0, 1.01, -0.5, 0 / 0, "1" :: any } do
+			expect(hasProblem(
+				withPlants(boar(function(p)
+					p.share = bad
+				end)),
+				"enemy.gait.turnPlant.Boar.share"
+			)).toBe(true)
+		end
+		for _, bad in { 0, 20.5, -5, 0 / 0 } do
+			expect(hasProblem(
+				withPlants(boar(function(p)
+					p.maxRollDegrees = bad
+				end)),
+				"enemy.gait.turnPlant.Boar.maxRollDegrees"
+			)).toBe(true)
+		end
+		-- The boar's soles are 0.8 deep: a slide of 0.4 keeps the leg in its hip, 0.41 does not.
+		expect(withPlants(boar(function(p)
+			p.maxShiftStuds = 0.4
+		end))).toEqual({})
+		for _, bad in { 0, 0.41, -0.1, 0 / 0 } do
+			expect(hasProblem(
+				withPlants(boar(function(p)
+					p.maxShiftStuds = bad
+				end)),
+				"enemy.gait.turnPlant.Boar.maxShiftStuds"
+			)).toBe(true)
+		end
+	end)
+end)
+
+describe("choreo validator: an enemy walk's stop plant (D-623)", function()
+	local function withStops(value: any, brake: any?): { string }
+		local real = Harness.load("src/shared/data/choreo")
+		local copy = table.clone(real)
+		copy.enemy = table.clone(real.enemy)
+		copy.enemy.gait = table.clone(real.enemy.gait)
+		copy.enemy.gait.stopPlant = value
+		if brake ~= nil then
+			copy.enemy.gait.stopBrakeShare = if brake == "none" then nil else brake
+		end
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/choreo" then
+				return copy
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/choreo")(context)
+	end
+	local function real(): any
+		return Harness.load("src/shared/data/choreo").enemy.gait.stopPlant
+	end
+	local function stopOf(rig: string, change: (any) -> ()): any
+		local stop = table.clone(real()[rig])
+		stop.groups = table.clone(stop.groups)
+		for index, group in stop.groups do
+			stop.groups[index] = table.clone(group)
+		end
+		change(stop)
+		return { [rig] = stop }
+	end
+	local function boar(change: (any) -> ()): any
+		return stopOf("Boar", change)
+	end
+
+	it("passes the real tables", function()
+		expect(withStops(real())).toEqual({})
+		expect(withStops({})).toEqual({})
+	end)
+
+	it("wants a table of stop plants for rigs that walk", function()
+		expect(hasProblem(withStops(nil), "enemy.gait.stopPlant must be a table")).toBe(true)
+		expect(hasProblem(withStops({ Boar = 1 }), "enemy.gait.stopPlant.Boar must be a table")).toBe(true)
+		expect(
+			hasProblem(
+				withStops({ PlayerR15 = real().Boar }),
+				"enemy.gait.stopPlant.PlayerR15 names no rig with a walk"
+			)
+		).toBe(true)
+		expect(hasProblem(withStops({ Wolf = real().Boar }), "enemy.gait.stopPlant.Wolf names no rig with a walk")).toBe(
+			true
+		)
+	end)
+
+	it("wants two or more groups of the rig's own feet, each hung from a joint, named once", function()
+		expect(hasProblem(
+			withStops(boar(function(s)
+				s.groups = { { "FrontLeftLeg", "BackRightLeg", "FrontRightLeg", "BackLeftLeg" } }
+			end)),
+			"enemy.gait.stopPlant.Boar.groups must list two or more groups"
+		)).toBe(true)
+		expect(hasProblem(
+			withStops(boar(function(s)
+				s.groups[2] = {}
+			end)),
+			"enemy.gait.stopPlant.Boar.groups[2] must list one or more foot parts"
+		)).toBe(true)
+		expect(hasProblem(
+			withStops(boar(function(s)
+				s.groups[1][1] = "Hoof"
+			end)),
+			"enemy.gait.stopPlant.Boar.groups: Hoof must be a part of the rig"
+		)).toBe(true)
+		expect(
+			hasProblem(
+				withStops(boar(function(s)
+					s.groups[1][1] = "HumanoidRootPart"
+				end)),
+				"enemy.gait.stopPlant.Boar.groups: HumanoidRootPart must be a part of the rig hung from its own joint"
+			)
+		).toBe(true)
+		expect(
+			hasProblem(
+				withStops(boar(function(s)
+					s.groups[2][1] = s.groups[1][1]
+				end)),
+				"enemy.gait.stopPlant.Boar.groups: FrontLeftLeg must be a part of the rig hung from its own joint, named once"
+			)
+		).toBe(true)
+	end)
+
+	it("steps no quicker than the gait's crossfade and no slower, together, than the walk", function()
+		-- 1 / weightBlendRate is 0.125 s; the boar's trot is 0.3 s and the kobold's walk 0.5 s. (A
+		-- quicker step glides a settled foot quicker too: settleStuds 0.09 keeps that glide within.)
+		expect(withStops(boar(function(s)
+			s.stepSeconds = 0.125
+			s.settleStuds = 0.09
+		end))).toEqual({})
+		expect(hasProblem(
+			withStops(boar(function(s)
+				s.stepSeconds = 0.12
+			end)),
+			"enemy.gait.stopPlant.Boar.stepSeconds 0.12 must be at least 1 / locomotion.weightBlendRate"
+		)).toBe(true)
+		expect(hasProblem(
+			withStops(boar(function(s)
+				s.stepSeconds = 0.16
+			end)),
+			"enemy.gait.stopPlant.Boar: its 2 steps of 0.16 s must take at most the walk's cycle"
+		)).toBe(true)
+		expect(withStops(stopOf("Kobold", function(s)
+			s.stepSeconds = 0.25
+		end))).toEqual({})
+		expect(hasProblem(
+			withStops(stopOf("Kobold", function(s)
+				s.stepSeconds = 0.26
+			end)),
+			"enemy.gait.stopPlant.Kobold: its 2 steps of 0.26 s must take at most the walk's cycle"
+		)).toBe(true)
+		for _, bad in { 0, -0.15, 0 / 0, "0.15" :: any } do
+			expect(hasProblem(
+				withStops(boar(function(s)
+					s.stepSeconds = bad
+				end)),
+				"enemy.gait.stopPlant.Boar.stepSeconds"
+			)).toBe(true)
+		end
+	end)
+
+	it("lifts a stepping foot clear of the contact band, and no hop", function()
+		-- stride.contact is 0.02; the boar's legs are 1.8 tall.
+		expect(withStops(boar(function(s)
+			s.liftStuds = 0.9
+		end))).toEqual({})
+		expect(withStops(boar(function(s)
+			s.liftStuds = 0.021
+		end))).toEqual({})
+		for _, bad in { 0.02, 0.91, 0, -0.1, 0 / 0, "0.12" :: any } do
+			expect(hasProblem(
+				withStops(boar(function(s)
+					s.liftStuds = bad
+				end)),
+				"enemy.gait.stopPlant.Boar.liftStuds"
+			)).toBe(true)
+		end
+	end)
+
+	it("glides a settled foot at most stride.contact a 60 Hz frame", function()
+		-- Over a 0.15 s SineInOut step the fastest 60 Hz frame is settle x pi / 0.3 / 60: 0.114 is
+		-- 0.0199 a frame, 0.12 is 0.021.
+		expect(withStops(boar(function(s)
+			s.settleStuds = 0.114
+		end))).toEqual({})
+		expect(withStops(boar(function(s)
+			s.settleStuds = 0
+		end))).toEqual({})
+		expect(hasProblem(
+			withStops(boar(function(s)
+				s.settleStuds = 0.12
+			end)),
+			"enemy.gait.stopPlant.Boar.settleStuds 0.12 glides a foot 0.021 a 60 Hz frame"
+		)).toBe(true)
+		for _, bad in { -0.1, 0 / 0, "0.1" :: any } do
+			expect(hasProblem(
+				withStops(boar(function(s)
+					s.settleStuds = bad
+				end)),
+				"enemy.gait.stopPlant.Boar.settleStuds"
+			)).toBe(true)
+		end
+	end)
+
+	it("wants a brake share above 0 and below 1", function()
+		expect(withStops(real(), 0.5)).toEqual({})
+		for _, bad in { 0, 1, -0.5, 0 / 0, "0.5", "none" } :: { any } do
+			expect(hasProblem(withStops(real(), bad), "enemy.gait.stopBrakeShare")).toBe(true)
+		end
+	end)
+end)
+
 describe("choreo validator: an enemy walk's start phase (D-599)", function()
 	local function withStarts(value: any): { string }
 		local real = Harness.load("src/shared/data/choreo")

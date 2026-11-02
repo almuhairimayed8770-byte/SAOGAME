@@ -1105,17 +1105,27 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - New specs: RushWorld (+1), HudInstances (SWITCH's adornee), StandOffHold and StandOff (the hold's step), EnemyUprightClient (the turn-on's fall, a held copy, a copy that stays down), SwordToHand (both placement models), FrameClock, WeaponMount and CharacterController (new cases), StandOffWall (+1, the PC's conditions), BoarHooks (+1, the halt row), EnemyWalkStart (the start rows) and BoarIdleHooves, RushDraw and RushDrawOrder (the late root), HandsOut (the held stance), DodgeRun, DodgeTurn, SkidRate and SheathStop, LockTurnShown and Mixer (the root's yaw), and validator cases for every new data key. Changed expectations, none loosened: StandOff's Art step now starts at stepStart's time; EnemyUprightClient's turn-on case rides the fall out (D-589); EnemyWalkStart's Kobold PENDING is empty (D-598); RigBuilder's boar Blocker narrows to X −1.4007..1.300 (D-601); CharacterController's world casts go 1 → 2 (the stance plan); SheathSkid runs 64 cases a clip, was 32.
 - Studio: section AS (items 516 to 531), run after section AR. Sections AQ and AR mark each line they replace "Superseded by item …".
 
+## Enemy walk start, turn and stop, boar breath, sheathed lock-turn and Brute room fixes (2026-11-02, D-618 to D-629)
+
+- Enemies set off on their feet (D-618): a walk from standing eases up from 0 at paceChangeRate (30 studs/s each second), the dev walk included, and the boar now steps off from a set point of its walk as the kobold does (D-621, 0.25; the kobold's moves to 0.23, D-625). The start's worst planted slide from the release goes from 0.057–0.224 a 60 Hz row to 0.032–0.079, and from 0.064–0.136 at 144 to 0.027–0.037. The cost is a later arrival, 1.67 studs (0.17 s) for the kobold and 3.27 (0.23 s) for the boar, so the fight kobold's first wind-up comes at 0.90 s instead of 0.75 s. AR 511's kobold window on the PC (0.160 / 0.221 / 0.101 at 0° / 60° / 90° on c78acd1) was this start seen from an early row 0, so the start is now judged from the release; and 511(b)'s bar used a dt the ease never used (the PC's rises are exactly 30 × each Heartbeat's own dt).
+- A wheeling boar's planted hooves hold the field (D-619, a walking-turn plant in RigDriver, with D-620's re-keyed first walk frame): at 90° 0.091 → 0.053 a 60 Hz row and 0.041 → 0.029 at 144 (0.056 → 0.040 with the PC's uneven yaw cycle). The boar's idle breath is a chest rise (D-622): its hooves stay within 0.018 of the field over the loop, where the front hooves lifted 0.068.
+- An enemy's stop plants its feet (D-623): at the brake the walk's clock stops, each leg holds, and the legs step lifted onto the idle's spots, the swinging foot first. After the brake row the worst slide is 0.010–0.014 a 60 Hz row and 0.006–0.028 at 144 (with D-618 alone 0.120–0.379 and 0.100–0.166), feet at −0.009 / −0.013 (were down to −0.041). Only the brake row is left (0.098–0.101 at 60, up to 0.046 at 144), drawn before the client sees the brake; the owner's call keeps it. ClipAudit's Lab now sets an enemy walk off as the game does (D-624), so the boar walk's Slide pending goes (the breath had grown it to 0.15), its Drift pending goes 0.21 → 0.04, and the kobold walk's shrink (0.02 → 0.01, 0.38 → 0.33).
+- A sheathed lock turn's pivot foot holds from any point of the sheathed idle (D-626): the sheathed Idle's 5.2 s key re-solves both legs for its weight shift, so the feet stay where the turn clips stand them. Over 48 idle phases, 0.0451 / 0.0413 a 60 Hz row on 15 phases → 0.0048 / 0.0052 on 0, and at 144 over a 60 Hz row's time 0.0554 / 0.0499 → ≤ 0.0091; with the PC's row dt, 0.0475 / 0.0445 on 16–18 phases → 0.011–0.024 on 1–5, all at the second plant's touchdown. The idle's own glide in the shift goes from 0.167 / 0.145 to 0.005, and drawn turns are unchanged (D-615).
+- A Brute stops farther off a fighter backed to a wall or a pillar (D-627 to D-629): its stop grows by what the world behind the fighter takes from the swing's room, read from the clips (the deepest lean, Vertical's 2.845, plus 0.05 off each face: 2.95). The kobold stood 3.06–3.41 root to root on 97cea9d (2.52–2.74 from the world to its Blocker) and now stands 3.93–4.30 (3.42–3.66); in the open field it stops at 3.43, and its blows still land 3 of 3. In the bench the kobold's push on the leaning body is 0.000 at a gap of 2.95 on all 8 takes, where the old stop pushed up to 0.360 a row. The numbers live in ai.luau Brute.backRoom (leanStuds 2.95, brakeSeconds 0.01, maxStopDistance 4.6, inside the Overhead's 4.8 engage range and the matrix's 5.25 real fight).
+- New specs: BruteBackRoom (new); EnemyWalkStart (the wheeling boar, the stop, a stop walked off mid-step, the Charge out of a stop, the start from the release); EnemyWalkStride (the first frame's quarter keys); BoarIdleHooves (the breath); ClipAudit (the Lab's set-off); EnemyService (the start's ease); LockTurnShown (the sheathed idle's weight shift); StandOffWall (the back room, the kobold's push); ai and dev data specs; and validator cases for every new data key. Changed expectations: EnemyService.spec's three distance bounds take the start's ease off (3.27 studs, D-618), the path checks unchanged; EnemyWalkStart's START_PENDING and START_LOW are empty, and its new STOP_PENDING holds 0.01 on three brake rows (D-623); ClipAudit's PENDING only shrinks (D-624); Locomotion.spec's enemy walk starts at the rig's own start phase (0.115 s for the kobold), with a second case pinning a rig with none.
+- Studio: section AT (items 532 to 537), run after section AS. Sections AR and AS mark each line it replaces "Superseded by item …".
+
 ## Next three tasks
 
-1. Run section AS (items 516 to 531) of `docs/STUDIO_TASKS.md` on the owner's PC with the build that has these fixes,
-   every item with item 397's frame names, at the frame rates and lags each names, judged on the BasePart read. Report
-   every pass line with its numbers. Earlier sections' lines not superseded stand as written.
-2. Fix what section AS finds. Queued for the next round: the owner's Head kept out of a wall the fighter backs onto,
-   and a Brute's stop distance that grows when the fighter's back is to the world (item 519); a sheathed lock turn's
-   pivot foot on item 529's 0.01 bar; 448's take-up, once item 530 has read the PC's step clocks; the keep-out's
-   sideways step-aside inside an Art's hold; and the enemy walk's second part (an enemy's stop on its feet, the boar's
-   turning hooves and its breath), with AR 510 and 511's re-test. Their re-tests follow as later Studio sections. The
-   owner's calls (below, and in AI) go to the owner.
+1. Run section AT (items 532 to 537) of `docs/STUDIO_TASKS.md` on the owner's PC with the build that has these fixes,
+   every item with item 397's frame names, at the frame rates each names, judged on the BasePart read. Report every
+   pass line with its numbers. Earlier sections' lines not superseded stand as written.
+2. Fix what sections AS and AT find. Queued for the next round: the boar's hooves kept planted under the Charge's
+   crouch; the Head kept out of a wall the fighter backs onto, and no sideways step-aside inside an Art's hold; a
+   sheathed lock-on's stance step and the turn plant's come-round before the second plant; a watcher's late Art and
+   basic keeping their ribbon; the stand-off fixes for section AS's results; and 448's take-up, once item 530 has read
+   the PC's step clocks. Their re-tests follow as later Studio sections. The owner's calls (below, and in AI) go to the
+   owner.
 3. The rehearsal and the recording (item 438), once every line passes: rehearse the 11 shots in dev.luau order with the
    frame-tick square on and log any take that fails its own pass lines; if all pass, record each with Game Bar at 60
    fps, High quality, with **View > Stats** open during the fight for the fps reading, and hand the files over (here in
@@ -1123,8 +1133,55 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
    of `docs/ANIMATION_REVIEW.md` are filled (with AG item 391(f)'s enemy cells), and anything that reads wrong is fixed
    with the PoseEditor and recorded again. The section 16 numbers and the merge into `main` follow (Open items).
 
-### Open items (after the Art tell and stance, sword grab, enemy walk start, rush hand-back, lock-turn and dodge fixes, not in the three above)
+### Open items (after the enemy walk start, turn and stop, boar breath, sheathed lock-turn and Brute room fixes, not in the three above)
 
+- **Owner calls from the enemy walk start, turn and stop, boar breath, sheathed lock-turn and Brute room fixes (the
+  default is chosen; say if not).**
+  - The boar's breath (D-622) grew enemy/Boar/Walk's ClipAudit Lab Slide pending from 0.12 to 0.15. A pending entry may
+    not grow, so ClipAudit's Lab cut-in now eases an enemy walk from startPace as the game does (D-624), and the entry
+    is gone. The default is that a pending entry never grows; say if not.
+  - An enemy's stop plants its feet (D-623): at the brake the walk's clock stops and each leg steps lifted onto the
+    idle's spot. The default is planted stops for every enemy rig with a stopPlant entry (the kobold and the boar); say
+    if not.
+  - The boar's Charge out of a walk: its crouch comes on the brake row and blends in over the walking legs, 0.485 a 60
+    Hz row and 0.425 at 144 with hooves at −0.060 on the 60° take. The default is that the hooves stay planted under
+    the crouch's blend-in and a hoof that must move steps there lifted, a dig-in, queued for the next round; say if
+    not.
+  - The stop's brake row stays as one row at the bar: it is drawn before the client sees the brake, and
+    EnemyWalkStart's STOP_PENDING holds 0.01 for it on three takes, at most 0.004 over (0.1006, 0.0459 and 0.0423).
+    Easing the server's stop instead would stop enemies 1.67–3.3 studs early and move attack spacing, so the server's
+    stop is not eased. Item 532(l) reads the row on the PC. The default keeps the row; say if not.
+  - A lock-on from the sheathed body draws at once, so the stance changes under the turn: the fade rows slid
+    0.033–0.105 a 60 Hz row and a standing lock-on 0.075–0.079. The default is cross-stance turn clips and a standing
+    stance step, so the feet move only while lifted, queued for the next round; say if not.
+  - The turn plant's come-round ends about 0.03 s of clip time before the second plant lands: with the PC's row dt,
+    Lune's drawn −179 goes from 0.0128 to 0.0049 and the sheathed turns from 0.0239 to 0.0083, on 0 of 48 idle phases.
+    The default is the earlier come-round, queued for the next round; say if not.
+  - A Brute's stop grows only for the world on the line between it and its target (D-627). A wall beside that line does
+    not squeeze the fighter between the Brute and the world, and a corner counts where the line meets a wall, so
+    neither grows the stop further. The default is the line alone; say if not. A rail or a ledge outside the root box's
+    height band is not seen by the cast and stays open; item 535(e) reports any the PC meets.
+- **From the enemy walk start, turn and stop fixes.** Every walk from standing now arrives later, by (pace −
+  startPace)² / 60 studs: 1.67 (0.17 s) for the kobold at 10 and 3.27 (0.23 s) for the boar at 14; the fight kobold's
+  first wind-up moved from 0.75 to 0.90 s. The root's uneven yaw at 144 Hz (the PC's 5-row cycle on c78acd1) is the
+  engine's replication and interpolation in Lune's model, since the server turns evenly at 1.833° a 60 Hz Heartbeat;
+  item 532(g) confirms it, and the PC's 0.116 at 60 against Lune's 0.091 is not explained. What moves the PC's root 4–6
+  rows before its walk is not known (532(h)); the start is judged from the release now, so its lines do not depend on
+  it. The boar at 180° on a 144 Hz client with the PC's uneven yaw reads 0.043, a report line (532(d)). From the
+  release the boar turns in place under its idle for 0.367 s before its walk, and its back right hoof is swept 0.057 a
+  60 Hz row (0.035 at 144), within the bars: an idle turn plant like the player's TurnPlant (D-416) would hold it, and
+  the stop plant's stepping would carry over, but it is not built. The kobold walk's Lab drift (0.57 over one plant,
+  pending 0.33) is the Lab's fallback idle fading under the walk over 0.15 s, not the game's.
+- **From the sheathed idle and Brute room fixes.** The sheathed Idle's neutral soles still sit 0.020–0.068 below the
+  field (Idle's feet below the field, under Clip re-keys); the turn clips stand the feet at the same places, so the
+  turn read is unaffected. A longer-legged avatar (legs × 1.1 in Lune) reads 0.0111 on ±135 and 0.0153 on ±179
+  sheathed, the same from every idle phase: the come-round pivots off the grounded corner, as drawn, and the 5.2 s leg
+  angles are solved for the R15 rig (about 0.015 off over the shift on such an avatar, estimated). Item 534 times the
+  turns by the Idle handle's clock, assumed to be the time since spawn modulo 12 s (every player Base handle plays from
+  Locomotion's creation and loops). The Brute's faceFront is measured along its facing, so a Brute well off square
+  shows a tilted Blocker face, about 0.18 closer at one edge of the fighter's root at 10°; the spec's gap is the least
+  over 21 rays across the root, so the tilt at Lune's stops is counted. Only the Brute has the back room; the Phase 1
+  archetypes need it if they walk a fighter to a wall.
 - **Owner calls from the Art tell and stance, sword grab, enemy walk start, rush hand-back, lock-turn and dodge fixes
   (the default is chosen; say if not).**
   - A clip event whose summed clock lands a hair short of its time fires a row late: the ActivationHold light on 3 of
@@ -1152,12 +1209,12 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
     stands about 0.16–0.21 off a wall behind) or a colliding Head.
   - A Brute that walks a fighter back to a wall stops 3.0–3.5 root to root, which leaves 2.2–2.7 studs to its Blocker
     against Sharp Nail's lean of 2.71, and the engine pushes the leaning body out (in Lune 0.42–0.51 at the tightest).
-    The default is a stop distance that grows when the fighter's back is to the world, queued for the next round; the
-    engine's push (today) and a lean-off pose are the other ways. This replaces the earlier wall-pin call's default.
-  - G2c's three calls are decided with the defaults closest to the anime feel and built in the enemy walk start's
-    second part, whose re-test comes as a later section: an enemy's chase pace eases up from standing (every enemy sets off on its feet and
-    winds up about 0.15 s later); an enemy walking-turn plant takes the boar's planted hooves round its turn at 144
-    fps; and a breathing boar keeps its hooves within stride.contact (0.02) of the field.
+    The default, a stop distance that grows when the fighter's back is to the world, is built (D-627: 3.93–4.30 root to
+    root and 3.42–3.66 to the Blocker in Lune; item 535). This replaces the earlier wall-pin call's default.
+  - The enemy walk start's three calls are decided with the defaults closest to the anime feel and built (D-618, D-619,
+    D-622; items 532 and 533): an enemy's chase pace eases up from standing (every enemy sets off on its feet and winds
+    up about 0.15 s later); an enemy walking-turn plant takes the boar's planted hooves round its turn at 144 fps; and
+    a breathing boar keeps its hooves within stride.contact (0.02) of the field.
   - The Skid fires on a fall of more than 360 studs/s each second, the old 60 Hz rule, now the same at every rate
     (D-612); a stop with no Skid holds a live Draw or Sheathe while the gait falls faster than 1 step a second (D-611,
     stopBrakeRate 1; 2 leaves 84.0 on a run eased over 0.5 s); and every completed dodge hands the legs back at the
@@ -1171,7 +1228,8 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
     and 477(b).
   - A sheathed lock turn's pivot foot gets the same 0.01 a row from any point of the sheathed idle: from its
     weight-shift phase (4.25–7.75 s) the blend into TurnLeft or TurnRight still slides 0.0475 / 0.0445 on 16–18 of 48
-    phases. It is a blend fix in the turn clips' entry, queued for the next round.
+    phases. It was the sheathed idle's weight shift, now re-keyed so the feet stay where the turn clips stand them
+    (D-626: 0.0048 / 0.0052 a 60 Hz row on 0 of 48; item 534).
 - **From the Art tell, watcher and SWITCH fixes.** Steps that even the release's timing leaves over 12 studs/s keep it
   (maxStuds 1.5: 15.6–17.6 studs/s, above). A body that starts inside the target's blocker still steps out during the
   hold at up to 12 × dt (D-314), since waiting would leave a hand or the torso in the body through the tell. The reach
@@ -1254,8 +1312,9 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
     ever be seen in game. The default keeps the flinch.
   - The boar walk's first frame keeps its single ease up to its first sub-key (D-576), so its straight-line 144 Hz
     lift-off row reads 0.041 once a cycle. A full split reads 0.020 there but needs ClipAudit.spec's Boar Walk Lab
-    drift PENDING raised from 0.21 to 0.23 (the Lab cut-in drift 0.459 → 0.472), a loosening. The default keeps the
-    sub-key.
+    drift PENDING raised from 0.21 to 0.23 (the Lab cut-in drift 0.459 → 0.472), a loosening. D-620 has since put the
+    first frame's quarter keys on their line (0.042 → 0.021 a 144 Hz row walking straight), and with D-624's Lab
+    set-off the Drift pending fell to 0.04, so nothing was loosened.
   - Item 511's planted foot is a corner within stride.contact (0.02) of the field on both rows, not under 0.05 (D-578);
     the default adopts it.
   - 448 and 477(b): on the screen order, Stride.spec's engine-steps block fails its frameBar (0.04, the worst frame) on
@@ -1263,7 +1322,7 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
     perfect take-up passes (0.024–0.037), though the predictor improves the p90 the PC reads. The ways are (a) to keep
     the block in the chain order as the model's own check and add a screen-order spec judged on the walk's step p90,
     (b) to re-base the block and judge it on a p90, or (c) to wait for item 514(b) first. Item 514 read the PC's
-    clocks; the newer take-up call above (item 532 first) replaces this one.
+    clocks; the newer take-up call above (item 530 first) replaces this one.
   - Through a dodge pressed mid-Draw or mid-Sheathe the right arm stays where the clip had it (the hand at the hilt)
     and the clip finishes after (D-580), so the dodge's own arm pose does not show on that arm. The other way is a
     longer arm blend for that case (about 0.35 s for ≤ 20° a row); the default keeps the arm with the clip.
@@ -1291,18 +1350,17 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   0.06–0.10 short (0.011–0.018 at 60 and 144), perhaps the server's landing on a 30 Hz Heartbeat; item 506(d) asks for
   that gap per take. SWITCH is now put on its rig's root part every frame through DrawnBody.adorn (D-583), and
   RushWorld's probe box is data (D-582).
-- **From the enemy walk start fixes.** The boar at 90° at 144 reads 0.041 of 0.042 in Lune, and 0.045–0.048 with a 1 ms
-  jitter on the drawn root, so the PC may read it a hair over. Its floor is the planted hooves sweeping round the
-  110°/s turn (0.027 a 144 Hz row, 0.064 at 60), which a walking turn plant for enemy rigs, or the walking body drawn
-  on a smoothed root as a rush is, would take out. The kobold at 135° and 180° now wheels on its feet (D-598: 0.052 /
-  0.051 at 60, 0.024 / 0.022 at 144). Before 0.15 s, outside item 511's window, the Idle-to-Walk crossfade slides a
-  planted foot 0.2–0.32 a row on rows 1–8, and the boar's hooves read down to −0.069 / −0.074 there. enemy/Boar/Idle's
-  front left hoof is re-keyed out of the field (D-601). The fitted velocity under-read gives the PC's kobold at 0° and
-  60° at 144 about 40% low (0.059 against 0.098 / 0.094).
+- **From the enemy walk start fixes.** The boar at 90° at 144 read 0.041 of 0.042 in Lune, its floor the planted hooves
+  sweeping round the 110°/s turn (0.027 a 144 Hz row, 0.064 at 60); the walking-turn plant takes it to 0.029, 0.040
+  with the PC's uneven yaw (D-619). The kobold at 135° and 180° now wheels on its feet (D-598: 0.052 / 0.051 at 60,
+  0.024 / 0.022 at 144). The start's rows before the window now read 0.032–0.079 a 60 Hz row and 0.027–0.037 at 144,
+  the boar's hooves at −0.0134 or higher (D-618, D-621, D-625; item 532(j)). enemy/Boar/Idle's front left hoof is
+  re-keyed out of the field (D-601). The fitted velocity under-read gives the PC's kobold at 0° and 60° at 144 about
+  40% low (0.059 against 0.098 / 0.094).
 - **From the sheath-arm, lock-turn and dodge fixes.** 476(a)'s pivot slide was the drawn idle's weight shift left on
-  the turning root, fixed by D-615 (item 531). 448's take-up waits on item 532's step clocks (the newer owner call
+  the turning root, fixed by D-615 (item 529). 448's take-up waits on item 530's step clocks (the newer owner call
   above). The dodge's legs into and out of the run are fixed by D-609 and D-610. A sprint stopped without a Skid under
-  a mid-swing Sheathe is fixed by D-611 (item 530(e)).
+  a mid-swing Sheathe is fixed by D-611 (item 528(e)).
 - **Owner calls from the watcher hit-stop and wall stand-off fixes (the default is chosen; say if not).**
   - At lag 0.1 a watcher's copy of a swing starts about 0.134 s in and fades in from idle over 0.08 s, so the
     activation's 0.1 s still hold shows for only 0 / 2 / 5 rows at 30 / 60 / 144 fps (item 492(b)). A faster blend into
@@ -1313,7 +1371,7 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   - When an enemy pins a fighter to a wall closer than the fighter's drawn stance fits (under about 1.6 studs between
     the wall and the enemy's body), the engine pushes the body out sideways today. The other ways are an AI rule that
     keeps a pinning enemy at its stop distance from a fighter backed to the world, or a lean-off pose. A Brute's stop
-    now reaches a milder squeeze in play, and the newer call above replaces this default.
+    now grows at a fighter backed to the world (D-627), which replaces this default.
   - Item 497(e) read θP 0.0–1.29° on every take, the back mount's rest turn for one row; D-590 fixed it, and item
     520(e) re-tests it.
 - **From the watcher hit-stop, upright and stand-off fixes.** A held word waits at most 0.25 s for the watcher's copy
@@ -1371,7 +1429,7 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   interpolation (item 473 (g) reports it).
 - **From the client upright and measure fixes.** An EntityId that arrived after the Humanoid would miss the arrival
   catch and fall once into the rescue (the PC data show EntityId arriving with the tag). The client's fall-state list
-  is wider than the server's (it adds Physics and PlatformStanding). 448's take-up fix waits on item 532 (the newer
+  is wider than the server's (it adds Physics and PlatformStanding). 448's take-up fix waits on item 530 (the newer
   owner call above); on item 282's irregular 2–6 pattern no take-up can hold 0.04 a frame at run speed.
 - **From the landing and ribbon fixes.** The landing's Humanoid model is fitted to the PC's P2 rows, not engine
   internals, so items 479 and 480 are the real test; the pace drops below WalkSpeed 2 on the last rows, where P2 only

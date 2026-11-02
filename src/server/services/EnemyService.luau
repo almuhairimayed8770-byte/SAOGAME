@@ -123,6 +123,11 @@ export type Engine = {
 		offset: Vector3?,
 		walk: Vector3?
 	) -> (number?, boolean?, Vector3?))?,
+	-- D-627: how far past the centre of a player's root the world stands along `direction` (flat),
+	-- within `distance` studs: the root's own box cast in the rushing group (the world alone, never a
+	-- character, an enemy or a blocker) from where its leading face stands at the root's centre
+	-- (EnemyService.worldBehind). Nil when nothing is in the way. Nil: no world.
+	worldBehind: ((root: BasePart, direction: Vector3, distance: number) -> number?)?,
 	-- Stops the body dead (no skid): its flat velocity is zeroed and it holds where it stands, or on
 	-- `position` when given (a goal it would pass before the next frame). Nil: `stop` stands in.
 	halt: ((model: Model, position: Vector3?) -> ())?,
@@ -241,6 +246,13 @@ type Mover = {
 	nearPoints: { Vector3 },
 	nearInto: { Vector3 },
 	nearAt: number,
+	-- A walk from standing (D-618): the server time the mover last stopped a moving body (a walk
+	-- asked for in that same pass carries on at its pace, the body never stood), whether the walk's
+	-- WalkSpeed is still easing up from movement.startPace, and where the root stood at the last frame
+	-- pass of that ease (it rises only while the body walks).
+	stoppedAt: number,
+	starting: boolean,
+	startFrom: Vector3?,
 }
 
 export type Entry = {
@@ -262,6 +274,9 @@ export type Entry = {
 	home: Vector3,
 	front: number, -- studs the body reaches ahead of its root (the snout), measured at spawn
 	back: number, -- studs it reaches behind its root
+	-- Studs its blocker face across its facing line reaches ahead of its root (faceFrontOf, spawn):
+	-- where a player's body stands against it (D-627).
+	faceFront: number,
 	body: RushWorld.Body?, -- its corners at rest and its root's size: what a wall stops (D-205)
 	footprint: Spacing.Footprint, -- the ground it takes up, measured at spawn: the room others keep (D-259)
 	-- The mover's goal is a step out of another body (D-259), not the brain's: the next tick steps
@@ -421,6 +436,9 @@ local function newMover(model: Model, speed: number, body: RushWorld.Body?): Mov
 		nearPoints = {},
 		nearInto = {},
 		nearAt = -math.huge,
+		stoppedAt = -math.huge,
+		starting = false,
+		startFrom = nil,
 	}
 end
 
@@ -454,6 +472,8 @@ local function moverRequest(mover: Mover, goal: Vector3, speed: number, direct: 
 		-- A different kind of movement is a new movement: its own clock, and no path from the old one.
 		mover.direct = isDirect
 		mover.paced = false
+		mover.starting = false
+		mover.startFrom = nil
 		restartClock(mover)
 		dropPath(mover)
 	end
@@ -488,8 +508,11 @@ local function moverStop(mover: Mover, dead: boolean?)
 	mover.exact = false
 	mover.halted = nil
 	mover.paced = false
+	mover.starting = false
+	mover.startFrom = nil
 	if mover.moving then
 		mover.moving = false
+		mover.stoppedAt = dependencies().serverTime()
 		mover.issuedGoal = nil
 		-- A path still computing is for a goal that no longer exists; its result is dropped.
 		dropPath(mover)
@@ -809,13 +832,23 @@ local function moverUpdate(mover: Mover, now: number)
 		-- so its clock starts now (D-183).
 		restartClock(mover)
 	end
-	-- A walk under way that changes its pace eases toward it on the frame pass (easePace); any other
-	-- movement takes its pace at once.
+	-- A walk under way that changes its pace eases toward it on the frame pass (easePace), and so
+	-- does a walk from standing, from movement.startPace (D-618): one asked for after the body
+	-- stood at least a frame pass (a stop and a new walk in the same pass is a walk under way, which
+	-- the Humanoid never braked). Any other movement takes its pace at once.
 	local eases = mover.paced and mover.moving and not mover.direct
+	local startPace = movement.startPace
+	local fromStanding = not mover.moving and not mover.direct and mover.stoppedAt < now and startPace < mover.speed
 	mover.moving = true
-	if mover.walkSpeed ~= mover.speed and not eases then
+	if fromStanding then
+		engine.setWalkSpeed(mover.model, startPace)
+		mover.walkSpeed = startPace
+		mover.starting = true
+		mover.startFrom = nil
+	elseif mover.walkSpeed ~= mover.speed and not eases then
 		engine.setWalkSpeed(mover.model, mover.speed)
 		mover.walkSpeed = mover.speed
+		mover.starting = false
 	end
 	mover.paced = not mover.direct
 	if mover.direct then
@@ -1013,17 +1046,34 @@ end
 -- One server frame of a walk under way easing its WalkSpeed toward the pace it asked for (D-574):
 -- at most movement.paceChangeRate times the frame's seconds closer. A whole step at once runs the
 -- body a frame at the new pace while every client's gait, a frame behind its root, plays the old
--- one, so the planted feet slide.
+-- one, so the planted feet slide. A walk from standing eases up from movement.startPace the same
+-- way (D-618), and while it does, its pace rises only over a frame the body walked: a body that
+-- cannot walk yet (a Humanoid still down in a fall, a wall it is stuck on) sets off from the start's
+-- pace once it can, so its first steps are eased too.
 local function easePace(mover: Mover, dt: number)
 	local current = mover.walkSpeed
 	if not mover.paced or not mover.moving or mover.direct or current == mover.speed then
+		mover.starting = false
+		mover.startFrom = nil
 		return
 	end
 	local engine = dependencies().engine
+	if mover.starting and current ~= nil then
+		local at = engine.position(mover.model)
+		local from = mover.startFrom
+		mover.startFrom = at
+		if from ~= nil and current > 0 and Brain.horizontalDistance(at, from) < AI.flatEpsilon then
+			return -- it stood through the frame at the pace in hand: the start waits for it
+		end
+	end
 	local most = AI.movement.paceChangeRate * math.max(dt, 0)
 	local pace = if current == nil then mover.speed else current + math.clamp(mover.speed - current, -most, most)
 	engine.setWalkSpeed(mover.model, pace)
 	mover.walkSpeed = pace
+	if pace == mover.speed then
+		mover.starting = false
+		mover.startFrom = nil
+	end
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -1258,6 +1308,19 @@ local function facesOf(model: Model): { Spacing.Face }
 		})
 	end
 	return faces
+end
+
+-- How far ahead of the root (its look, -Z in its space) the blocker faces that stand across its
+-- facing line reach: the face a player's body stands against when the body faces it (D-627; the
+-- kobold's Blocker, 1.235, not the face over the axe at its right). 0 with none.
+local function faceFrontOf(faces: { Spacing.Face }): number
+	local front = 0
+	for _, face in faces do
+		if math.abs(face.centre.X) <= face.half.X then
+			front = math.max(front, face.half.Z - face.centre.Z)
+		end
+	end
+	return front
 end
 
 -- Whether two upright boxes overlap (separating axes: the vertical, then each box's two horizontal
@@ -1502,6 +1565,20 @@ local function makeContext(entry: Entry): Brain.Context
 		rootReach = function(direction)
 			return EnemyService.rootReach(model, direction)
 		end,
+		worldBehind = function(targetId, direction, distance)
+			local cast = d.engine.worldBehind
+			if cast == nil or typeof(d.entities.rootOf) ~= "function" then
+				return nil
+			end
+			local root = d.entities.rootOf(targetId)
+			if root == nil then
+				return nil
+			end
+			return cast(root, direction, distance)
+		end,
+		faceReach = function()
+			return entry.faceFront
+		end,
 		rushStarted = function(rush)
 			rushStarted(entry, rush)
 		end,
@@ -1705,7 +1782,8 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 	end
 	-- The room it keeps from other enemies (D-259): every blocker face it was just given counts
 	-- (D-332): since D-281 a face meets every other enemy's faces.
-	local footprint = Spacing.footprintOf(if body ~= nil then body.profile else {}, facesOf(model))
+	local faces = facesOf(model)
+	local footprint = Spacing.footprintOf(if body ~= nil then body.profile else {}, faces)
 	setGroup(model, AI.collision.enemies)
 	-- Parent first: the engine's place() claims server network ownership of the root, which the
 	-- engine refuses for a part that is not under Workspace yet.
@@ -1735,6 +1813,7 @@ function EnemyService.spawn(defId: string, cframe: CFrame, options: SpawnOptions
 		home = d.engine.position(model),
 		front = front,
 		back = back,
+		faceFront = faceFrontOf(faces),
 		body = body,
 		footprint = footprint,
 		stepping = false,
@@ -2533,6 +2612,32 @@ function EnemyService.rootReach(model: Model, direction: Vector3): number
 		+ math.abs(frame.LookVector:Dot(flat)) * half.Z
 end
 
+--- How far past the centre of a player's `root` the world stands along `direction` (flattened),
+--- within `distance` studs, or nil when nothing does (D-627: a Brute's stop at a fighter backed to
+--- the world). The root's own box is cast in the rushing group (the world alone: never a character,
+--- an enemy or a blocker) from where its leading face stands at the root's centre, so a root the
+--- engine rests a hair inside a wall still finds it (a cast never sees what its box starts in), and
+--- never its own character. Ground it would climb (a slope, D-204) is no wall. `cast` stands in for
+--- workspace:Blockcast.
+function EnemyService.worldBehind(root: BasePart, direction: Vector3, distance: number, cast: WorldCast?): number?
+	local flat = Brain.horizontal(direction)
+	if flat == nil or not (distance > 0) then
+		return nil
+	end
+	local engineCast: WorldCast = cast or defaultWorldCast
+	local frame = root.CFrame
+	local reach = boxReach(frame, root.Size, flat)
+	local ok, travelled, normal =
+		pcall(engineCast, frame - flat * reach, root.Size, flat * distance, AI.collision.rushing, root.Parent or root)
+	if not ok or typeof(travelled) ~= "number" then
+		return nil
+	end
+	if typeof(normal) == "Vector3" and RushWorld.isGround(normal) then
+		return nil
+	end
+	return math.max(0, travelled)
+end
+
 -- `groups` is world.CollisionGroups (nil while it has not landed: no groups, as before D-167).
 local function defaultEngine(groups: any?): Engine
 	local PathfindingService = game:GetService("PathfindingService")
@@ -2614,6 +2719,9 @@ local function defaultEngine(groups: any?): Engine
 			else nil,
 		worldAhead = function(model, direction, distance, offset, walk)
 			return EnemyService.worldAhead(model, direction, distance, nil, offset, walk)
+		end,
+		worldBehind = function(root, direction, distance)
+			return EnemyService.worldBehind(root, direction, distance)
 		end,
 		halt = function(model, position)
 			local humanoid = humanoidOf(model)

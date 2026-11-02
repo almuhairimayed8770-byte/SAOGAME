@@ -986,8 +986,11 @@ end
 
 -- LockTurnShown.spec.luau's bars (D-505, D-507): a planted foot's bars inside ClipAudit's own
 -- (review.audit), the turns real lock turns, and a lead slack under a pop. AR 513 (D-615): a
--- row's bar inside the frame's, and the idle starts inside one cycle of the drawn idle.
+-- row's bar inside the frame's, and the idle starts inside one cycle of the drawn idle. D-626:
+-- the sheathed idle starts inside one cycle of the sheathed idle, and every rate a whole number
+-- of at least 30.
 local IDLE_DRAWN_CLIP = "player/OneHandedSword/IdleDrawn"
+local IDLE_CLIP = "player/OneHandedSword/Idle"
 local function checkLockTurn(ctx: Context, dev: any, problem: (message: string) -> ())
 	local bar = dev.groundClearance and dev.groundClearance.lockTurn
 	if typeof(bar) ~= "table" then
@@ -1047,12 +1050,39 @@ local function checkLockTurn(ctx: Context, dev: any, problem: (message: string) 
 			end
 		end
 	end
-	if typeof(bar.stepHz) ~= "table" or #bar.stepHz == 0 then
-		problem("groundClearance.lockTurn.stepHz must list at least one rate")
+	-- D-626: the sheathed turns from the sheathed idle's weight shift.
+	local loadedSheathed, sheathedIdle = pcall(ctx.load, CLIPS .. IDLE_CLIP)
+	local sheathedCycle = if loadedSheathed
+			and typeof(sheathedIdle) == "table"
+			and isNumber(sheathedIdle.duration)
+		then sheathedIdle.duration
+		else nil
+	if sheathedCycle == nil then
+		problem("groundClearance.lockTurn.sheathedIdleStarts needs the clip " .. IDLE_CLIP)
+	elseif typeof(bar.sheathedIdleStarts) ~= "table" or #bar.sheathedIdleStarts == 0 then
+		problem("groundClearance.lockTurn.sheathedIdleStarts must list at least one start")
 	else
-		for index, hz in bar.stepHz do
-			if not isWhole(hz) or hz < 30 then
-				problem(("groundClearance.lockTurn.stepHz[%d] must be a whole number, at least 30"):format(index))
+		for index, start in bar.sheathedIdleStarts do
+			if not isNumber(start) or start < 0 or start > sheathedCycle then
+				problem(
+					("groundClearance.lockTurn.sheathedIdleStarts[%d] must be 0 to %s seconds (one cycle of %s)"):format(
+						index,
+						tostring(sheathedCycle),
+						IDLE_CLIP
+					)
+				)
+			end
+		end
+	end
+	for _, key in { "stepHz", "sheathedStepHz" } do
+		local rates = bar[key]
+		if typeof(rates) ~= "table" or #rates == 0 then
+			problem(("groundClearance.lockTurn.%s must list at least one rate"):format(key))
+		else
+			for index, hz in rates do
+				if not isWhole(hz) or hz < 30 then
+					problem(("groundClearance.lockTurn.%s[%d] must be a whole number, at least 30"):format(key, index))
+				end
 			end
 		end
 	end

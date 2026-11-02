@@ -6,6 +6,10 @@
 	takes weight: under the Charge's crouch when the boar charges from that pose (ClipAudit's Stand@6
 	plan) and in ClipLab's blend out of the Stagger into the idle at its 2 s mark.
 
+	Its breath kept them on the field too (D-622): riding the Root joint alone it lifted the body
+	0.05 with every leg, the front hooves 0.068 off the field at 1.0 s and 0.058 at 3.2 s; the hips
+	take the rise back now, so the chest rises on its legs.
+
 	Played through the real ClipAudit plans on the real rig at 60 and 144 Hz. A hoof reads its lowest
 	corner over the field; it is on the field while that is within stride.contact.
 ]]
@@ -87,6 +91,32 @@ describe("BoarIdleHooves: the boar's idle keeps its hooves out of the field (D-6
 			end)
 			if lo < -CONTACT then
 				error(("%s %s: %.4f at %.3f s, below -%.2f"):format(label, foot, lo, at, CONTACT))
+			end
+		end)
+
+		it(("every hoof stays on the field through the breath and the whole loop (%s)"):format(label), function()
+			local high, highFoot, highAt = -math.huge, "", 0
+			for _, row in trace(IDLE, "Lab", hz) do
+				if row.clipTime == nil then
+					continue
+				end
+				for foot, low in row.low do
+					if low > high then
+						high, highFoot, highAt = low, foot, row.t
+					end
+				end
+			end
+			print(("%s: highest hoof %s %.4f at %.3f s"):format(label, highFoot, high, highAt))
+			if high > CONTACT then
+				error(
+					("%s %s: %.4f at %.3f s, off the field by more than %.2f"):format(
+						label,
+						highFoot,
+						high,
+						highAt,
+						CONTACT
+					)
+				)
 			end
 		end)
 
