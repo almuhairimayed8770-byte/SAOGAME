@@ -136,9 +136,12 @@ export type Engine = {
 	-- it was going (D-431): a strike's own movement about to reach its exact stop gets there by its
 	-- own motion, never by a CFrame write, which every client shows as a teleport of the replicated
 	-- root (a 5-6 stud jump past its interpolation). The service lands it again on every frame for
-	-- what is left and stops it dead (halt) once it stands on the position (D-525). Nil: `halt` onto
-	-- the position stands in.
-	land: ((model: Model, position: Vector3, seconds: number) -> ())?,
+	-- what is left and stops it dead (halt) once it stands on the position (D-525). The Humanoid's
+	-- own walk is aimed `past` studs beyond the position, the way it goes (D-548): Studio's MoveTo
+	-- never starts a standing body toward a goal within about 0.93 stud of it, and stops a walk about
+	-- that short of its goal, so a walk aimed at the position itself stands short of it. Nil: `halt`
+	-- onto the position stands in.
+	land: ((model: Model, position: Vector3, seconds: number, past: number?) -> ())?,
 	-- Anchors (true) or frees (false) the body's root (D-436): a held enemy stands where it was held
 	-- and no player walking into it shoves it; freed, the server simulates it again (network owner
 	-- nil) and it stands where it is. Nil: never anchored.
@@ -884,7 +887,11 @@ end
 -- frame's seconds and never faster than its own speed. Studio's Humanoid runs a whole frame at its
 -- pace, through its goal (the PC's slam: 0.126 past its stop on a landing timed to end inside the
 -- frame), and brakes on its own short of a goal it holds reached (the PC's open run: 0.533 short), so
--- the landing is judged on where the body stands each frame, not on a time worked out once.
+-- the landing is judged on where the body stands each frame, not on a time worked out once. Its
+-- MoveTo aims movement.landAimStuds past the stop (D-548): one aimed at the stop lies inside the
+-- Humanoid's arrival tolerance, so after a frame it only drifted on the velocity written on it (the
+-- PC's 9063a60 landings ran out of landMaxSeconds 0.06 to 0.14 short at 60 fps). Each land and halt
+-- replaces the Humanoid's MoveTo goal, so the next movement issues its own afresh.
 local function landStep(mover: Mover, stop: Vector3?, dt: number, now: number)
 	local engine = dependencies().engine
 	local movement = AI.movement
@@ -896,14 +903,21 @@ local function landStep(mover: Mover, stop: Vector3?, dt: number, now: number)
 		local left = offset.Magnitude
 		local way = mover.landWay
 		if left > movement.landSlackStuds and (way == nil or offset:Dot(way) > 0) then
-			land(mover.model, stop, math.max(left / mover.speed, movement.landFrames * math.max(dt, 0)))
+			land(
+				mover.model,
+				stop,
+				math.max(left / mover.speed, movement.landFrames * math.max(dt, 0)),
+				movement.landAimStuds
+			)
 			mover.walkSpeed = nil -- the landing sets its own pace; the next movement sets its own again
+			mover.issuedGoal = nil
 			mover.landAt = now
 			return
 		end
 	end
 	mover.landingUntil = nil
 	mover.landWay = nil
+	mover.issuedGoal = nil
 	local halt = engine.halt
 	if halt ~= nil then
 		halt(mover.model, nil)
@@ -2587,13 +2601,14 @@ local function defaultEngine(groups: any?): Engine
 		pivot = function(model, cframe)
 			model:PivotTo(cframe)
 		end,
-		land = function(model, position, seconds)
+		land = function(model, position, seconds, past)
 			local root = model.PrimaryPart
 			if root == nil then
 				return
 			end
 			-- The rest of the way at the pace that covers it in `seconds`, the Humanoid walking it there:
-			-- the body is never moved by a CFrame write (D-431).
+			-- the body is never moved by a CFrame write (D-431). Its MoveTo aims `past` studs beyond the
+			-- position, outside the tolerance it holds a MoveTo goal reached in (D-548).
 			local at = root.Position
 			local offset = Vector3.new(position.X - at.X, 0, position.Z - at.Z)
 			local pace = if seconds > 0 then offset / seconds else Vector3.zero
@@ -2601,8 +2616,10 @@ local function defaultEngine(groups: any?): Engine
 			root.AssemblyLinearVelocity = Vector3.new(pace.X, velocity.Y, pace.Z)
 			local humanoid = humanoidOf(model)
 			if humanoid ~= nil then
+				local way = if offset.Magnitude > 1e-6 then offset.Unit else Vector3.zero
+				local aim = position + way * (past or 0)
 				humanoid.WalkSpeed = pace.Magnitude
-				humanoid:MoveTo(Vector3.new(position.X, at.Y, position.Z))
+				humanoid:MoveTo(Vector3.new(aim.X, at.Y, aim.Z))
 			end
 		end,
 		keepUpright = function(model)

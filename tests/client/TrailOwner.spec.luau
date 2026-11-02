@@ -16,6 +16,23 @@
 	(the rig model's full name), set when a rig takes the ribbon from the pool, so a logger counts
 	the player's own.
 ]]
+-- The engine Choreo loads on: Trails finds the rig's animator through Choreo on first
+-- use and keeps what it found for the run, so a Choreo that could not load here (no Heartbeat)
+-- would stay missing for the specs after this one in the same run (TrailRibbon's D-353 hold).
+local function frameSignal(): any
+	return {
+		Connect = function()
+			return { Disconnect = function() end }
+		end,
+	}
+end
+Harness.stubService("RunService", {
+	RenderStepped = frameSignal(),
+	Heartbeat = frameSignal(),
+	PreSimulation = frameSignal(),
+	BindToRenderStep = function() end,
+	UnbindFromRenderStep = function() end,
+})
 local Trails = Harness.load("src/client/fx/Trails")
 local Engine = Harness.load("src/client/fx/Engine")
 local fx = Harness.load("src/shared/data/fx")

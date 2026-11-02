@@ -17,11 +17,14 @@
 	climbable riser below every Charger rig's hip. A rush's dead stop leads by at most one AI tick,
 	and a walking body's snout slack in a wall stays below a rush's corner margin (D-278, D-279); a
 	rush's landing paces over at least one frame, ends within less than that margin of its stop and
-	lasts long enough to land the fastest Charger rush from its lead (D-525); a
+	lasts long enough to land the fastest Charger rush from its lead (D-525), and its MoveTo aims
+	past its stop by more than the Humanoid's MoveTo tolerance plus that lead (D-548); a
 	blocked step tells running from blocked and is told before the jam lag (D-280). Every enemy
 	Humanoid keeps out of FallingDown and only ever out of fall states (upright.offStates, D-494);
 	each client's copy stands up to Running or GettingUp, retries a whole number of steps and logs
-	under three distinct names the server never publishes (upright.client, D-523).
+	under three distinct names the server never publishes (upright.client, D-523), turns off at
+	least the server's fall states, says whether it is asked at its Humanoid's arrival, and stands
+	a fallen copy up by one of its two named rescues (D-543, D-544).
 ]]
 
 type Context = {
@@ -378,6 +381,31 @@ local function validate(ctx: Context): { string }
 				)
 			end
 		end
+		-- The landing's MoveTo (D-548) aims past its stop by more than the Humanoid's MoveTo
+		-- tolerance plus the fastest rush's lead, so no frame of the landing finds its goal inside
+		-- the tolerance however far from the stop it began.
+		local tolerance = AI.movement.moveToToleranceStuds
+		local aim = AI.movement.landAimStuds
+		positiveNumber(tolerance, "movement.moveToToleranceStuds")
+		positiveNumber(aim, "movement.landAimStuds")
+		if
+			typeof(tolerance) == "number"
+			and tolerance > 0
+			and typeof(aim) == "number"
+			and aim > 0
+			and typeof(lead) == "number"
+			and lead > 0
+		then
+			local need = tolerance + fastest * lead
+			if aim <= need then
+				problem(
+					("movement.landAimStuds %s must be past moveToToleranceStuds plus the fastest rush's lead (%.3f)"):format(
+						tostring(aim),
+						need
+					)
+				)
+			end
+		end
 	end
 
 	if typeof(AI.attack) == "table" and typeof(AI.attack.weights) == "table" then
@@ -676,11 +704,10 @@ local function validate(ctx: Context): { string }
 	-- D-494: the fall states every enemy Humanoid keeps out of are engine state names, and never a
 	-- state the body needs (standing, walking, the air, getting up, death).
 	local upright = AI.upright
+	local fallStates = { FallingDown = true, Ragdoll = true, Physics = true, PlatformStanding = true, Seated = true }
 	if typeof(upright) ~= "table" or typeof(upright.offStates) ~= "table" or #upright.offStates == 0 then
 		problem("upright.offStates must be a non-empty list of Humanoid state names")
 	else
-		local fallStates =
-			{ FallingDown = true, Ragdoll = true, Physics = true, PlatformStanding = true, Seated = true }
 		local seen: { [string]: boolean } = {}
 		for _, name in upright.offStates do
 			if typeof(name) ~= "string" or not fallStates[name] then
@@ -720,6 +747,48 @@ local function validate(ctx: Context): { string }
 		local tries = client.maxTries
 		if typeof(tries) ~= "number" or tries < 1 or tries % 1 ~= 0 then
 			problem("upright.client.maxTries must be a whole number of at least 1")
+		end
+		-- D-543: the copy's own list holds every state the server turns off, and only fall states.
+		local clientStates = client.offStates
+		if typeof(clientStates) ~= "table" or #clientStates == 0 then
+			problem("upright.client.offStates must be a non-empty list of Humanoid state names")
+		else
+			local seen: { [string]: boolean } = {}
+			for _, name in clientStates do
+				if typeof(name) ~= "string" or not fallStates[name] then
+					problem(
+						("upright.client.offStates: %s is not a fall state an enemy may keep out of"):format(
+							tostring(name)
+						)
+					)
+				elseif seen[name] then
+					problem(("upright.client.offStates names %s twice"):format(name))
+				else
+					seen[name] = true
+				end
+			end
+			for _, name in if typeof(upright.offStates) == "table" then upright.offStates else {} do
+				if typeof(name) == "string" and not seen[name] then
+					problem(("upright.client.offStates must hold %s (upright.offStates, the server's)"):format(name))
+				end
+			end
+			if typeof(stand) == "string" and seen[stand] then
+				problem(("upright.client.standUpState %s is one of upright.client.offStates"):format(stand))
+			end
+		end
+		if typeof(client.catchOnArrival) ~= "boolean" then
+			problem("upright.client.catchOnArrival must be true or false")
+		end
+		-- D-544: the code knows the two rescues by these names.
+		local rescues = client.rescues
+		if
+			typeof(rescues) ~= "table"
+			or rescues.stateMachine ~= "StateMachine"
+			or rescues.changeState ~= "ChangeState"
+		then
+			problem('upright.client.rescues must name stateMachine "StateMachine" and changeState "ChangeState"')
+		elseif client.rescue ~= rescues.stateMachine and client.rescue ~= rescues.changeState then
+			problem(("upright.client.rescue %s must be one of upright.client.rescues"):format(tostring(client.rescue)))
 		end
 		local published = {
 			EntityId = true,

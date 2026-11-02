@@ -35,10 +35,12 @@
 	stroke ends on the frame that shows the clip at its strike snap's landing (the stroke's end
 	pose, ClipSampler.strikeLandingAt): the hold and the settle after it draw no new segment, with
 	or without a hit's freeze (D-539). A clip the network catch-up started late (`lateStroke`,
-	D-538) has no frame of its own before its first step: a stroke its first step lights starts on
-	its own blade at the clock it came in at (the window Replication lit for it, or one that step
-	opens), never from the pose before the jump, and draws only what is still ahead of its end
-	pose; a window whose snap landed before the start draws nothing. The
+	D-538) has no frame of its own before its first step: a stroke its first step lights (the window
+	Replication lit for it, or one that step opens) is back-filled on the clip's own blade from its
+	window's open up to the clock that step reached, each sample aged as if drawn at its own clip
+	time, never from the pose before the jump (D-550); it draws that blade at full weight until
+	the clip has faded in, waits while a freeze holds the clip where it came in, and draws nothing
+	at or past its end pose, so a window whose snap landed before the start stays dark. The
 	ribbon's ages stand still while the rig is drawn held (Choreo heldShown, D-353: the frames the
 	screen shows its blade frozen, a frame behind the hold's flag). The chain is read again when the
 	Weapon's joint changes (WeaponMount moves the sword between the hand and the back), and that
@@ -167,6 +169,7 @@ type Drawn = {
 	sourceDone: boolean,
 	sourceWeight: number,
 	late: boolean, -- `light` is a late start's clip on its first step (lateFirst, D-538)
+	pending: boolean, -- a late start's clip whose first step left it where it came in (latePending)
 }
 
 type Entry = {
@@ -226,11 +229,15 @@ type Entry = {
 	-- last step is its first, the frame before shows another clip's pose.
 	late: any,
 	lateFrom: number,
+	-- The stroke draws its clip's own blade at full weight (a late start's, back-filled from its
+	-- window's open, D-550), until the clip has faded in over both frames.
+	lateFull: boolean,
 	source: any, -- the Mixer handle whose clip lit the stroke (its sub-steps sample it); nil: none
 	sourceMixer: any, -- the mixer that plays it
 	sourceTime: number, -- its clock at `pose`
 	fromTime: number, -- its clock at `lastPose`
 	sourceWeight: number, -- its share of the limbs this frame (0..1)
+	lastWeight: number, -- and at `lastPose`
 	sourceOffsets: ClipSampler.Offsets?, -- its clip sampled at sourceTime
 	lastOffsets: ClipSampler.Offsets?, -- its clip at the clock `lastPose` showed
 	linkNames: { string }, -- each chain link's joint name (the clip's keys), read with the chain
@@ -828,11 +835,13 @@ function Trails.attach(model: Instance): boolean
 		cutEnd = nil,
 		late = nil,
 		lateFrom = 0,
+		lateFull = false,
 		source = nil,
 		sourceMixer = nil,
 		sourceTime = 0,
 		fromTime = 0,
 		sourceWeight = 1,
+		lastWeight = 1,
 		sourceOffsets = nil,
 		lastOffsets = nil,
 		linkNames = {},
@@ -865,6 +874,7 @@ function Trails.attach(model: Instance): boolean
 			sourceDone = false,
 			sourceWeight = 1,
 			late = false,
+			pending = false,
 		},
 		lightSerial = 0,
 	}
@@ -931,10 +941,11 @@ end
 --- A clip that came in late (D-538): the network catch-up started the Mixer `handle` past its
 --- start, so the frames before the one that draws its first step showed another clip's pose. A
 --- stroke its first step lights (a window the start jumped into, which Replication lights, or an
---- open that first step crosses) starts on the clip's own blade at the clock it came in at, the
---- frame before standing in by the frame's own pose (as on a rig's first read, D-336), never
---- joined to the blade before the jump; its strike's snap measures from its first sample. Call it
---- when the clip starts, before the frame that draws its first step.
+--- open that first step crosses) waits for that step (a freeze can hold it), then is back-filled
+--- from its window's open on the clip's own blade at full weight, each sample aged by its own
+--- clip time (D-550), the frame before standing in by the frame's own pose (as on a rig's first
+--- read, D-336), never joined to the blade before the jump; nothing at or past its end pose. Call
+--- it when the clip starts, before the frame that draws its first step.
 function Trails.lateStroke(model: Instance, handle: any)
 	if typeof(handle) ~= "table" or typeof(handle.lastTime) ~= "number" then
 		return
@@ -1120,10 +1131,10 @@ local function lateFirst(entry: Entry, handle: any): boolean
 	return late ~= nil and handle == late and late.done ~= true and late.lastTime == entry.lateFrom
 end
 
--- True when a clip's own events have its trail lit at clip time `time`: its last open (TrailOn,
--- HitWindowOpen) at or before `time` has no close (HitWindowClose, TrailOff, PostMotionStart) after
--- it up to `time`.
-local function litAt(clip: any, time: number): boolean
+-- The clip time a clip's own events opened the trail lit at clip time `time`: its last open
+-- (TrailOn, HitWindowOpen) at or before `time`, when no close (HitWindowClose, TrailOff,
+-- PostMotionStart) came after it up to `time`; nil while the trail is out there.
+local function windowOpenAt(clip: any, time: number): number?
 	local openAt, closeAt = -math.huge, -math.huge
 	for _, event in clip.events do
 		if event.time <= time then
@@ -1134,7 +1145,14 @@ local function litAt(clip: any, time: number): boolean
 			end
 		end
 	end
-	return openAt > closeAt
+	return if openAt > closeAt then openAt else nil
+end
+
+-- True when a late start's clip is still where it came in after its first step (a freeze held
+-- that step: the frame shows the pose from before the jump), so a stroke it lit waits for it.
+local function pendingOf(entry: Entry): boolean
+	local late = entry.late
+	return late ~= nil and lateFirst(entry, late) and late.time <= late.lastTime
 end
 
 -- Of the rig's playing clips now, the handle whose clock crossed a lighting event in its last step
@@ -1167,7 +1185,7 @@ local function liveLighting(entry: Entry): (any, any, number?)
 		if not lateFirst(entry, late) then
 			-- Past its first step: the frame before shows its own pose now.
 			entry.late = nil
-		elseif late.time > late.lastTime and litAt(late.clip, late.lastTime) then
+		elseif late.time > late.lastTime and windowOpenAt(late.clip, late.lastTime) ~= nil then
 			for _, handle in mixer:handles() do
 				if handle == late then
 					found, opened = late, late.lastTime
@@ -1203,6 +1221,15 @@ local function lighting(entry: Entry): (any, any, number?, number, number, boole
 		return nil, nil, nil, 0, 0, false
 	end
 	return handle, mixer, opened, handle.lastTime, handle.time, lateFirst(entry, handle)
+end
+
+-- A late start's clip the step this frame shows left where it came in (pendingOf, D-550).
+local function latePending(entry: Entry): boolean
+	local drawn = freshDrawn(entry)
+	if drawn ~= nil then
+		return drawn.pending
+	end
+	return pendingOf(entry)
 end
 
 -- A stroke clip's clock and whether it is done, as the step this frame shows left them.
@@ -1286,7 +1313,9 @@ local function followSource(entry: Entry, starting: boolean): number?
 	entry.sourceOffsets = after
 	entry.fromTime = from
 	entry.sourceTime = to
-	entry.sourceWeight = shownWeight(entry)
+	local weight = shownWeight(entry)
+	entry.lastWeight = if starting then weight else entry.sourceWeight
+	entry.sourceWeight = weight
 	residualsOf(entry, entry.lastPose, before, entry.residuals)
 	residualsOf(entry, entry.pose, after, entry.nextResiduals)
 	if opened == nil then
@@ -1324,6 +1353,27 @@ local function bladeAt(entry: Entry, chain: BladeContact.Chain, alpha: number): 
 			transforms[index] = if weight >= 1 then clipped else linear:Lerp(clipped, weight)
 		else
 			transforms[index] = linear
+		end
+	end
+	return BladeContact.blade(chain, between)
+end
+
+-- The stroke clip's own blade at clip time `time`, at its full weight (D-550): each link the clip
+-- keys posed as the clip has it then, the others (and the root) as the frames show them `alpha` of
+-- the way from the frame before's pose to this one.
+local function clipBladeAt(entry: Entry, chain: BladeContact.Chain, time: number, alpha: number): (Vector3, Vector3)
+	local sampled = ClipSampler.sample(entry.source.clip, time)
+	local pose, lastPose, between = entry.pose, entry.lastPose, entry.between
+	between.root = lastPose.root:Lerp(pose.root, alpha)
+	local transforms = between.transforms
+	for index in chain.links do
+		local offset = sampled[entry.linkNames[index]]
+		if offset ~= nil then
+			transforms[index] = ClipSampler.toCFrame(offset)
+		else
+			local after = pose.transforms[index] or CFrame.identity
+			local before = lastPose.transforms[index] or after
+			transforms[index] = before:Lerp(after, alpha)
 		end
 	end
 	return BladeContact.blade(chain, between)
@@ -1387,6 +1437,107 @@ local function standIn(entry: Entry): boolean
 	return true
 end
 
+-- Pushes the stroke clip's own blade from clip time `from` to `to` (D-550) in pieces of a 60 fps
+-- frame (choreo.luau frameSeconds), each sub-stepped as a frame is (trail.ribbon.maxStep, at most
+-- maxSubsteps), so a stretch longer than this frame's step draws as finely as the frames it spans
+-- would have. `born(time)` is a sample's ribbon-clock time, `alphaOf(time)` its share of the way from
+-- the frame before's pose to this one. False when the cut turned back (the stroke is over).
+local function pushClipSpan(
+	entry: Entry,
+	chain: BladeContact.Chain,
+	ribbon: TrailRibbon.Ribbon,
+	from: number,
+	to: number,
+	born: (time: number) -> number,
+	alphaOf: (time: number) -> number
+): boolean
+	local config = Fx.trail.ribbon
+	local pieces = math.max(1, math.ceil((to - from) / ChoreoData.frameSeconds - 1e-6))
+	local guardBefore, tipBefore = clipBladeAt(entry, chain, from, alphaOf(from))
+	for piece = 1, pieces do
+		local pieceFrom = from + (to - from) * (piece - 1) / pieces
+		local pieceTo = from + (to - from) * piece / pieces
+		local guardEnd, tipEnd = clipBladeAt(entry, chain, pieceTo, alphaOf(pieceTo))
+		local steps = BladeContact.steps(guardBefore, tipBefore, guardEnd, tipEnd, config.maxStep, config.maxSubsteps)
+		for step = 1, steps do
+			local time = pieceFrom + (pieceTo - pieceFrom) * step / steps
+			local stepGuard, stepTip = guardEnd, tipEnd
+			if step < steps then
+				stepGuard, stepTip = clipBladeAt(entry, chain, time, alphaOf(time))
+			end
+			if turnsBack(entry, stepTip) then
+				entry.cutDone = true
+				return false
+			end
+			if TrailRibbon.push(ribbon, stepGuard, stepTip, born(time), true) then
+				advanceCut(entry, stepTip)
+			end
+		end
+		guardBefore, tipBefore = guardEnd, tipEnd
+	end
+	return true
+end
+
+-- The first frame that draws a late start's clip (D-550): the catch-up jumped the clip past its
+-- window's open, and the frames before showed another clip's pose, so the stroke is drawn here from
+-- the open up to the clip time this frame shows, on the clip's own blade at its full weight (the
+-- clip is still fading in over the rig's pose: the blade the frame shows is not the stroke's), each
+-- sample born as if drawn at its own clip time, so the ribbon looks as the on-time stroke's would
+-- at this clip time. `start` is the share of the frame where the step crossed the event that lit
+-- it, the open when the window opened in that step. A stroke whose strike already landed draws
+-- nothing (D-539).
+local function backfill(entry: Entry, chain: BladeContact.Chain, ribbon: TrailRibbon.Ribbon, start: number)
+	local source = entry.source
+	local clip = source.clip
+	local fromTime, toTime = entry.fromTime, entry.sourceTime
+	-- The window's own open: before the clip's start when the catch-up jumped into it (a SmearOn
+	-- that step crossed is no open), else where the step crossed it.
+	local openTime = windowOpenAt(clip, fromTime) or (fromTime + (toTime - fromTime) * start)
+	local cutEnd = ClipSampler.strikeLandingAt(clip, openTime)
+	entry.stroke = true
+	entry.cutEnd = cutEnd
+	entry.lateFull = true
+	local fromGuard, fromTip = clipBladeAt(entry, chain, openTime, 1)
+	beginCut(entry, fromTip, true)
+	if cutEnd ~= nil and fromTime >= cutEnd - 1e-6 then
+		-- It came in at or past its strike's landing (to the clock's rounding): what is left is the
+		-- settle (D-539).
+		entry.cutDone = true
+		return
+	end
+	local speed = if typeof(source.speed) == "number" and source.speed > 0 then source.speed else 1
+	local clock = entry.ribbonClock
+	local function born(time: number): number
+		return clock - (toTime - time) / speed
+	end
+	local function current(_time: number): number
+		return 1
+	end
+	TrailRibbon.push(ribbon, fromGuard, fromTip, born(openTime), false)
+	if pushClipSpan(entry, chain, ribbon, openTime, toTime, born, current) and cutEnd ~= nil and toTime >= cutEnd then
+		entry.cutDone = true
+	end
+end
+
+-- A back-filled stroke's move since the last frame while its clip still fades in (D-550): the
+-- clip's own blade at its full weight between the two frames' clocks, as the back-fill drew it, so
+-- the ribbon goes on from where it stood, never joined to the blade the frame shows.
+local function pushFull(entry: Entry, chain: BladeContact.Chain, ribbon: TrailRibbon.Ribbon, clockBefore: number)
+	local clock = entry.ribbonClock
+	local fromTime, toTime = entry.fromTime, entry.sourceTime
+	local span = toTime - fromTime
+	local function alphaOf(time: number): number
+		return if span > 0 then (time - fromTime) / span else 1
+	end
+	local function born(time: number): number
+		return clockBefore + (clock - clockBefore) * alphaOf(time)
+	end
+	local cutEnd = entry.cutEnd
+	if pushClipSpan(entry, chain, ribbon, fromTime, toTime, born, alphaOf) and cutEnd ~= nil and toTime >= cutEnd then
+		entry.cutDone = true
+	end
+end
+
 -- Adds the blade's move since the last frame to the ribbon: sub-steps from the frame before's pose
 -- to this one (each end moving at most trail.ribbon.maxStep), born along the ribbon clock between
 -- the two frames, posed from the stroke's clip where it is known (bladeAt). A stroke that starts
@@ -1402,6 +1553,19 @@ local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boole
 	local guard, tip = entry.guardAt, entry.tipAt
 	local clock = entry.ribbonClock
 	local standing = false
+	local cameLate = false
+	if not entry.stroke then
+		if latePending(entry) then
+			-- A late start's clip lit before its first step moved it (a freeze held that step): the
+			-- frame shows the pose from before the jump, so its stroke waits for the clip (D-550).
+			return
+		end
+		-- The clip that lights this stroke came in late on the step this frame shows (the network
+		-- catch-up jumped it in): the frame before shows the pose from before the jump, not this
+		-- clip's (D-538).
+		local _, _, _, _, _, late = lighting(entry)
+		cameLate = late
+	end
 	if not hadPose then
 		standing = not entry.stroke and standIn(entry)
 		if not standing then
@@ -1409,17 +1573,13 @@ local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boole
 			entry.stroke = true
 			entry.source = nil
 			entry.cutEnd = nil
+			entry.lateFull = false
 			beginCut(entry, tip, false)
 			return
 		end
-	elseif not entry.stroke then
-		-- The clip that lights this stroke came in late on the step this frame shows (the network
-		-- catch-up jumped it in): the frame before shows the pose from before the jump, not this
-		-- clip's, so this frame's pose stands in for it, as on a rig's first read (D-538).
-		local _, _, _, _, _, cameLate = lighting(entry)
-		if cameLate then
-			standing = standIn(entry)
-		end
+	elseif cameLate then
+		-- This frame's pose stands in for the frame before, as on a rig's first read (D-538).
+		standing = standIn(entry)
 	end
 	if entry.stroke and entry.cutDone then
 		-- The cut turned back: the rest of the window (the settle) draws nothing (D-335).
@@ -1427,6 +1587,23 @@ local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boole
 	end
 	local starting = not entry.stroke
 	local opened = followSource(entry, starting)
+	if starting and cameLate and entry.source ~= nil then
+		-- The stroke from its window's open, back-filled on its clip's own blade (D-550).
+		backfill(entry, chain, ribbon, opened or 0)
+		return
+	end
+	if entry.lateFull then
+		if entry.source == nil then
+			-- The clip that drew the back-filled stroke is gone: the stroke is over.
+			entry.cutDone = true
+			return
+		elseif entry.lastWeight < 1 or entry.sourceWeight < 1 then
+			pushFull(entry, chain, ribbon, clockBefore)
+			return
+		end
+		-- The clip has faded in over both frames: its blade is the one the frame shows.
+		entry.lateFull = false
+	end
 	if standing then
 		-- The frame before wears what this one shows on top of the clip (standIn).
 		local residuals = entry.residuals
@@ -1445,6 +1622,7 @@ local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boole
 	end
 	if starting then
 		entry.stroke = true
+		entry.lateFull = false
 		local source = entry.source
 		local openedAt = if source ~= nil and opened ~= nil
 			then entry.fromTime + (entry.sourceTime - entry.fromTime) * start
@@ -1582,6 +1760,7 @@ local function readDrawn()
 		drawn.to = if handle ~= nil then handle.time else 0
 		drawn.lightWeight = if handle ~= nil then weightOf(mixer, handle) else 1
 		drawn.late = handle ~= nil and lateFirst(entry, handle)
+		drawn.pending = pendingOf(entry)
 		local source = entry.source
 		drawn.source = source
 		if source ~= nil then

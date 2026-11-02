@@ -1,16 +1,18 @@
 --!strict
 --[[
 	enemy/Kobold/Walk: a 0.5 s waddle on the kobold's rigid legs (D-482), paced to rigs.luau Kobold
-	walkSpeed 10 (RigDriver plays it at speed / walkSpeed). Hunched 10 degrees, the axe swinging with
-	the right arm, the free arm counter-swinging. Each planted leg rolls over its sole, heel edge then
-	toe edge, under a hip that moves forward at the walk's speed, so the edge on the field holds its
-	place (32.4 degrees forward to 32.4 back, 2.50 studs a step). The body turns over the planted hip,
-	up to 6 degrees, so the other hip rises and the swinging sole, its hip drawn 0.1 up at mid-swing,
-	clears the field by 0.054 or more. The body rides the stiff legs' arc, 0.102 below to 0.046 above
-	standing straight, its root at the idle's height on average (D-418). Footsteps on the plants.
-	Generated: one key a 60 fps frame (the stance angle solved from the distance walked, the root
-	placed so the planted hip holds its place). Rig: Kobold. Hip X+ swings a leg forward; Root X-
-	hunches forward, Root Z+ lifts the right side.
+	walkSpeed 10 (RigDriver plays it at speed / walkSpeed). Hunched 10 degrees, the axe swinging
+	with the right arm, its head tipped up over the field at the bottom of the swing (0.18-0.40,
+	D-542: the lowest corner 0.01 over it, where it went 0.34 under), the free arm
+	counter-swinging. Each planted leg rolls over its sole, heel edge then toe edge, under a hip
+	that moves forward at the walk's speed, so the edge on the field holds its place (32.4 degrees
+	forward to 32.4 back, 2.50 studs a step). The body turns over the planted hip, up to 6 degrees,
+	so the other hip rises and the swinging sole, its hip drawn 0.1 up at mid-swing, clears the
+	field by 0.054 or more. The body rides the stiff legs' arc, 0.102 below to 0.046 above standing
+	straight, its root at the idle's height on average (D-418). Footsteps on the plants. Generated:
+	one key a 60 fps frame (the stance angle solved from the distance walked, the root placed so the
+	planted hip holds its place). Rig: Kobold. Hip X+ swings a leg forward; Root X- hunches forward,
+	Root Z+ lifts the right side.
 ]]
 
 local Types = require(script.Parent.Parent.Parent.Parent.types)
@@ -187,7 +189,7 @@ local clip: Types.ClipDef = {
 				RightHip = posRot(0, 0.055, 0, 37.2, -2.7, -3.55),
 				LeftShoulder = rot(11.22, 0, -10),
 				RightShoulder = rot(-2.98, 0, 12),
-				Weapon = rot(-28.05, 0, 0),
+				Weapon = rot(-27.5, 0, 0),
 			},
 		},
 		{
@@ -200,7 +202,7 @@ local clip: Types.ClipDef = {
 				RightHip = posRot(0, 0.035, 0, 42.18, -2.37, -2.61),
 				LeftShoulder = rot(14.43, 0, -10),
 				RightShoulder = rot(-5.54, 0, 12),
-				Weapon = rot(-27.5, 0, 0),
+				Weapon = rot(-25.87, 0, 0),
 			},
 		},
 		{
@@ -213,7 +215,7 @@ local clip: Types.ClipDef = {
 				RightHip = posRot(0, 0.017, 0, 45.04, -1.73, -1.72),
 				LeftShoulder = rot(17.67, 0, -10),
 				RightShoulder = rot(-8.13, 0, 12),
-				Weapon = rot(-26.94, 0, 0),
+				Weapon = rot(-23.03, 0, 0),
 			},
 		},
 		{
@@ -226,7 +228,7 @@ local clip: Types.ClipDef = {
 				RightHip = posRot(0, 0.004, 0, 45.28, -0.89, -0.88),
 				LeftShoulder = rot(20.96, 0, -10),
 				RightShoulder = rot(-10.77, 0, 12),
-				Weapon = rot(-26.37, 0, 0),
+				Weapon = rot(-19.75, 0, 0),
 			},
 		},
 		{
@@ -240,7 +242,7 @@ local clip: Types.ClipDef = {
 				RightHip = rot(42.43, 0, 0),
 				LeftShoulder = rot(24.32, 0, -10),
 				RightShoulder = rot(-13.46, 0, 12),
-				Weapon = rot(-25.78, 0, 0),
+				Weapon = rot(-14.75, 0, 0),
 			},
 		},
 		{
@@ -253,7 +255,7 @@ local clip: Types.ClipDef = {
 				RightHip = rot(37.94, 0.77, 0.98),
 				LeftShoulder = rot(26.46, 0, -10),
 				RightShoulder = rot(-15.17, 0, 12),
-				Weapon = rot(-25.41, 0, 0),
+				Weapon = rot(-14.32, 0, 0),
 			},
 		},
 		{
@@ -266,7 +268,7 @@ local clip: Types.ClipDef = {
 				RightHip = rot(33.53, 1.35, 2.03),
 				LeftShoulder = rot(26.3, 0, -10),
 				RightShoulder = rot(-15.04, 0, 12),
-				Weapon = rot(-25.44, 0, 0),
+				Weapon = rot(-14.75, 0, 0),
 			},
 		},
 		{
@@ -279,7 +281,7 @@ local clip: Types.ClipDef = {
 				RightHip = rot(29.19, 1.72, 3.08),
 				LeftShoulder = rot(24.18, 0, -10),
 				RightShoulder = rot(-13.34, 0, 12),
-				Weapon = rot(-25.81, 0, 0),
+				Weapon = rot(-15.92, 0, 0),
 			},
 		},
 		{
@@ -292,7 +294,7 @@ local clip: Types.ClipDef = {
 				RightHip = rot(24.9, 1.88, 4.04),
 				LeftShoulder = rot(20.46, 0, -10),
 				RightShoulder = rot(-10.37, 0, 12),
-				Weapon = rot(-26.45, 0, 0),
+				Weapon = rot(-17.79, 0, 0),
 			},
 		},
 		{
@@ -305,7 +307,7 @@ local clip: Types.ClipDef = {
 				RightHip = rot(20.63, 1.84, 4.86),
 				LeftShoulder = rot(15.5, 0, -10),
 				RightShoulder = rot(-6.4, 0, 12),
-				Weapon = rot(-27.31, 0, 0),
+				Weapon = rot(-20.34, 0, 0),
 			},
 		},
 		{
@@ -318,7 +320,7 @@ local clip: Types.ClipDef = {
 				RightHip = rot(16.37, 1.61, 5.47),
 				LeftShoulder = rot(9.66, 0, -10),
 				RightShoulder = rot(-1.73, 0, 12),
-				Weapon = rot(-28.33, 0, 0),
+				Weapon = rot(-23.52, 0, 0),
 			},
 		},
 		{
@@ -331,7 +333,7 @@ local clip: Types.ClipDef = {
 				RightHip = rot(12.1, 1.26, 5.83),
 				LeftShoulder = rot(3.28, 0, -10),
 				RightShoulder = rot(3.38, 0, 12),
-				Weapon = rot(-29.43, 0, 0),
+				Weapon = rot(-26.54, 0, 0),
 			},
 		},
 		{
@@ -344,7 +346,7 @@ local clip: Types.ClipDef = {
 				RightHip = rot(7.8, 0.81, 5.91),
 				LeftShoulder = rot(-3.28, 0, -10),
 				RightShoulder = rot(8.62, 0, 12),
-				Weapon = rot(-30.57, 0, 0),
+				Weapon = rot(-29.28, 0, 0),
 			},
 		},
 		{
@@ -357,7 +359,7 @@ local clip: Types.ClipDef = {
 				RightHip = rot(3.53, 0.35, 5.7),
 				LeftShoulder = rot(-9.66, 0, -10),
 				RightShoulder = rot(13.73, 0, 12),
-				Weapon = rot(-31.67, 0, 0),
+				Weapon = rot(-31.13, 0, 0),
 			},
 		},
 		{

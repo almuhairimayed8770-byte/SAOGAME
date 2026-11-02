@@ -6,8 +6,10 @@
 	walls as planes the root's box is pushed out of and the server's Blockcast sees, Model:PivotTo),
 	plus `land`: a body carried onto a point by its own velocity over a given time and stopped dead
 	there, the way a server-owned body moves without a CFrame write (which every client would show as
-	a teleport of its replicated root). The last cases (AI 423(c), 422(d)) swap in the Humanoid the
-	PC's server log shows (`humanoid`, "studio") and Studio's 60 and 144 Hz server frames, jittered.
+	a teleport of its replicated root). The last cases (AI 423(c), 422(d), 440, 441) swap in the
+	Humanoid the PC's server logs show (`humanoid`: "studio", fitted to the 4b18b5c log, and
+	"tolerant", fitted to the PC's P2 probe of a real server Humanoid on 4e60f11) and Studio's 60 and
+	144 Hz server frames, jittered.
 ]]
 Harness.stubService("CollectionService", {
 	AddTag = function(_self, instance, tag)
@@ -77,19 +79,47 @@ local ACCELERATION = 560
 --   - it reaches its walk speed at `acceleration` (1320: the PC's rows sit 0.239 behind a body at
 --     full speed from the launch row, 3.028 at +0.116 s, 21.228 at +0.766 s).
 -- What lies behind the arrival rule is not visible from the log; `arriveFrames` 0 is a Humanoid that
--- never brakes short (it only ever runs on past its goal). `fps` and `jitter` set the server frames:
--- each lasts 1/fps × (1 + u), u uniform in [-jitter, jitter].
+-- never brakes short (it only ever runs on past its goal).
+-- "tolerant" is the one the PC's P2 probe measured (a real server FrenzyBoar on open floor, AI held
+-- off, 4e60f11; rc/g4/PC-P2-humanoid-near-goal.md), which also plays the 4b18b5c rows above and the
+-- 9063a60 landing's rows (AJ 440, 441):
+--   - each 1/240 s step its velocity closes `gain` of the way to its target, by at most `cap` × step
+--     (the ramp from rest: 0.240, 0.455, 0.466 at WalkSpeed 28, 0.179, 0.232 at 14, 0.114, 0.133 at
+--     8; the partial rows after its walk stops: 0.226 + 0.012 at 28, 0.054 at 14, 0.020 at 8, 0.005
+--     at 2; the open run's 28 → 4.93 → 0.10); a velocity written on its root is where it starts from;
+--   - it settles its walk at the frame's start: WalkSpeed toward its MoveTo goal, the way fixed for
+--     the frame, or nothing (target 0);
+--   - a MoveTo given to it while it stands (or has arrived) never starts it toward a goal within
+--     `startStuds` (no move at all for 30 rows at any WalkSpeed), and a walk it starts so stops
+--     once one more frame and its brake would bring it within `startStuds` of the goal (0.933 to
+--     1.4 short);
+--   - a MoveTo given to it while it walks (a re-issue, the slam's stop, a landing) keeps it walking:
+--     it walks that frame and arrives at a frame's end within `runFrames` frames of its walk (the
+--     4b18b5c rows: 0.772 braked, 0.808 ran on; the slam's land 0.341 short ran the frame through
+--     its goal, 0.126 past).
+-- So a landing paced onto a goal inside `startStuds` (D-525) walks one frame and then only drifts on
+-- the velocity written on it each frame, braked within the frame: the PC's 9063a60 landings rested
+-- 0.06 to 0.14 short at 60 fps once landMaxSeconds ran out, and passed at 144 fps.
+-- `fps` and `jitter` set the server frames: each lasts 1/fps × (1 + u), u uniform in [-jitter, jitter].
 local humanoid = {
 	mode = "ideal",
 	arriveFrames = 1.7,
 	brake = 0.672,
 	acceleration = 1320,
+	gain = 0.623,
+	cap = 1384,
+	startStuds = 0.9335,
+	runFrames = 1.7,
 	fps = 60,
 	jitter = 0,
 	random = Random.new(11),
 }
 
 type Plane = { point: Vector3, out: Vector3 }
+
+local function flat(vector: Vector3): Vector3
+	return Vector3.new(vector.X, 0, vector.Z)
+end
 
 type Body = {
 	position: Vector3,
@@ -102,6 +132,11 @@ type Body = {
 	-- A velocity written on the root since the last frame's physics (land, halt): the studio
 	-- Humanoid keeps it through the next frame.
 	written: boolean?,
+	-- The tolerant Humanoid: a MoveTo given since its last frame, whether it walks toward its goal,
+	-- and how that walk arrives ("start": begun standing, "run": given while walking).
+	called: boolean?,
+	walking: boolean?,
+	band: string?,
 }
 
 local clock = { t = 1000 }
@@ -247,10 +282,12 @@ local engine = {
 	end,
 	moveTo = function(model: Model, position: Vector3)
 		bodies[model].goal = position
+		bodies[model].called = true
 	end,
 	stop = function(model: Model)
 		local body = bodies[model]
 		body.goal = body.position
+		body.called = true
 	end,
 	halt = function(model: Model, position: Vector3?)
 		local body = bodies[model]
@@ -260,20 +297,25 @@ local engine = {
 		body.velocity = Vector3.zero
 		body.goal = body.position
 		body.written = true
+		body.called = true
 		placeParts(model, body)
 	end,
 	-- Carries the body onto `position` (its height kept) by its velocity over `seconds`, then stops it
-	-- dead there: no CFrame write. The studio Humanoid gets what the real engine.land does: the flat
-	-- velocity that covers the way in `seconds`, that pace as its WalkSpeed, and MoveTo(position).
-	land = function(model: Model, position: Vector3, seconds: number)
+	-- dead there: no CFrame write. The studio and tolerant Humanoids get what the real engine.land
+	-- does: the flat velocity that covers the way in `seconds`, that pace as its WalkSpeed, and
+	-- MoveTo `past` studs beyond `position` the way it goes.
+	land = function(model: Model, position: Vector3, seconds: number, past: number?)
 		local body = bodies[model]
-		if humanoid.mode == "studio" then
+		if humanoid.mode == "studio" or humanoid.mode == "tolerant" then
 			local offset = Vector3.new(position.X - body.position.X, 0, position.Z - body.position.Z)
 			local pace = if seconds > 0 then offset / seconds else Vector3.zero
+			local way = if offset.Magnitude > 1e-9 then offset.Unit else Vector3.zero
+			local aim = position + way * (past or 0)
 			body.velocity = pace
 			body.walkSpeed = pace.Magnitude
-			body.goal = Vector3.new(position.X, body.position.Y, position.Z)
+			body.goal = Vector3.new(aim.X, body.position.Y, aim.Z)
 			body.written = true
+			body.called = true
 			return
 		end
 		body.landing = {
@@ -381,10 +423,78 @@ local function studioFrame(model: Model, body: Body, untilT: number)
 	placeParts(model, body)
 end
 
+-- The studs the tolerant Humanoid runs on from `speed` once its target is nothing.
+local function tolerantBrake(speed: number): number
+	local v, run = speed, 0
+	for _ = 1, 240 do
+		v -= math.min(humanoid.cap * PHYSICS_STEP, humanoid.gain * v)
+		if v < 1e-4 then
+			break
+		end
+		run += v * PHYSICS_STEP
+	end
+	return run
+end
+
+-- One frame of the tolerant Humanoid (see `humanoid`): its walk settled at the frame's start, then
+-- 240 Hz steps up to `untilT`, then a walk given on the way arrives.
+local function tolerantFrame(model: Model, body: Body, untilT: number)
+	local seconds = math.max(untilT - body.physT, 0)
+	local function left(): Vector3
+		local goal = body.goal
+		if goal == nil then
+			return Vector3.zero
+		end
+		return Vector3.new(goal.X - body.position.X, 0, goal.Z - body.position.Z)
+	end
+	if body.called then
+		body.called = false
+		if body.walking then
+			body.band = "run"
+		else
+			body.walking = left().Magnitude > humanoid.startStuds
+			body.band = "start"
+		end
+	end
+	local speed = flat(body.velocity).Magnitude
+	if
+		body.walking
+		and body.band == "start"
+		and left().Magnitude - speed * seconds - tolerantBrake(speed) <= humanoid.startStuds
+	then
+		body.walking = false
+	end
+	local target = Vector3.zero
+	local walkSpeed = body.walkSpeed
+	local way = left()
+	if body.walking and way.Magnitude > 1e-3 then
+		target = way.Unit * walkSpeed
+	end
+	body.written = false
+	while body.physT + PHYSICS_STEP <= untilT + FLOOR_GAP do
+		body.physT += PHYSICS_STEP
+		local change = (target - flat(body.velocity)) * humanoid.gain
+		local most = humanoid.cap * PHYSICS_STEP
+		if change.Magnitude > most then
+			change = change.Unit * most
+		end
+		body.velocity = flat(body.velocity) + change
+		body.position = outOfWalls(model, body, body.position + body.velocity * PHYSICS_STEP)
+	end
+	if body.walking and body.band == "run" and left().Magnitude <= humanoid.runFrames * walkSpeed * seconds then
+		body.walking = false
+	end
+	placeParts(model, body)
+end
+
 local function physics(untilT: number)
 	for model, body in bodies do
 		if humanoid.mode == "studio" then
 			studioFrame(model, body, untilT)
+			continue
+		end
+		if humanoid.mode == "tolerant" then
+			tolerantFrame(model, body, untilT)
 			continue
 		end
 		local root = model.PrimaryPart :: BasePart
@@ -636,10 +746,6 @@ local function spawnPlayer(position: Vector3): (Model, number)
 	return model, EntityService.registerPlayer(player :: any, model, Playground.loadout)
 end
 
-local function flat(vector: Vector3): Vector3
-	return Vector3.new(vector.X, 0, vector.Z)
-end
-
 -- ------------------------------------------------------------------------------------------
 -- What the cases measure
 -- ------------------------------------------------------------------------------------------
@@ -654,11 +760,11 @@ engine.halt = function(model: Model, position: Vector3?)
 	engineHalt(model, position)
 end
 -- Every land the server asks of the engine, with its time and seconds (D-525).
-local lands: { { model: Model, time: number, seconds: number } } = {}
+local lands: { { model: Model, time: number, seconds: number, past: number? } } = {}
 local engineLand = engine.land
-engine.land = function(model: Model, position: Vector3, seconds: number)
-	table.insert(lands, { model = model, time = clock.t, seconds = seconds })
-	engineLand(model, position, seconds)
+engine.land = function(model: Model, position: Vector3, seconds: number, past: number?)
+	table.insert(lands, { model = model, time = clock.t, seconds = seconds, past = past })
+	engineLand(model, position, seconds, past)
 end
 local enginePivot = engine.pivot
 engine.pivot = function(model: Model, cframe: CFrame)
@@ -872,6 +978,7 @@ type Rest = {
 	duration: number, -- the run's time (RushStarted)
 	writes: number, -- CFrame writes on the body from the charge on
 	rows: { { t: number, along: number, speed: number, walkSpeed: number } },
+	launch: number, -- the server time of the launch (RushStarted's serverTime)
 }
 
 local PROBE = false
@@ -904,6 +1011,7 @@ local function restRun(wallZ: number?, settings: HumanoidSettings, hiddenAt: num
 		duration = 0,
 		writes = 0,
 		rows = {},
+		launch = 0,
 	}
 	local endedAt: number? = nil
 	local finished = false
@@ -920,6 +1028,7 @@ local function restRun(wallZ: number?, settings: HumanoidSettings, hiddenAt: num
 			direction = Vector3.new(payload.direction[1], 0, payload.direction[3]).Unit
 			result.told = payload.speed * payload.duration
 			result.duration = payload.duration
+			result.launch = payload.serverTime
 		end
 		local launchedAt = launch
 		if launchedAt == nil then
@@ -1091,5 +1200,355 @@ describe("A rush's server body rests on its told stop (AI 423(c), 422(d), D-525)
 		-- Stopped dead after it: still on the next rows.
 		local row = held.rows[#held.rows]
 		expect(row.speed).toBe(0)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- AI 440 and 441: the landing against Studio's MoveTo tolerance (the PC's P2 probe, D-548)
+-- ------------------------------------------------------------------------------------------
+
+-- The land and landed rows of a run (item 439): the first land, and the first row after it whose
+-- flat velocity reads 0, in seconds from the launch; nil when there was none.
+local function landRows(run: Rest, model: Model?): (number?, number?)
+	local landAt: number? = nil
+	for _, entry in lands do
+		if (model == nil or entry.model == model) and entry.time >= run.launch then
+			landAt = entry.time - run.launch
+			break
+		end
+	end
+	if landAt == nil then
+		return nil, nil
+	end
+	for _, row in run.rows do
+		if row.t > (landAt :: number) + 1e-9 and row.speed < 1e-6 then
+			return landAt, row.t
+		end
+	end
+	return landAt, nil
+end
+
+-- The PC's P2 probe on the fake engine's tolerant Humanoid: a body standing still is given
+-- WalkSpeed `walkSpeed` and MoveTo `ahead` studs down -Z on a Heartbeat, then `rows` frames at
+-- `fps` are stepped (physics only: no AI moves it). `stopAfter`: MoveTo where it stands (the
+-- Humanoid's own stop, as Move(Vector3.zero) is) after that many rows. Returns each row's step and
+-- what is left to the goal at the end.
+local function probeWalk(
+	model: Model,
+	walkSpeed: number,
+	ahead: number,
+	fps: number,
+	rows: number,
+	stopAfter: number?
+): ({ number }, number)
+	local body = bodies[model]
+	local start = Vector3.new(0, body.position.Y, 0)
+	body.position = start
+	body.velocity = Vector3.zero
+	body.goal = start
+	body.walking = false
+	body.called = false
+	body.physT = clock.t
+	engine.setWalkSpeed(model, walkSpeed)
+	local goal = start - Vector3.zAxis * ahead
+	engine.moveTo(model, goal)
+	local steps = {}
+	local last = start
+	for row = 1, rows do
+		clock.t += 1 / fps
+		physics(clock.t)
+		table.insert(steps, (flat(body.position) - flat(last)).Magnitude)
+		last = body.position
+		if stopAfter ~= nil and row == stopAfter then
+			engine.stop(model)
+		end
+	end
+	return steps, (flat(goal) - flat(body.position)).Magnitude
+end
+
+describe("A rush's landing against Studio's MoveTo tolerance (AI 440, 441, D-548)", function()
+	it("the fake engine's tolerant Humanoid plays the PC's P2 probe rows (4e60f11)", function()
+		humanoid.mode = "tolerant"
+		local _, model = boarAtOrigin(nil)
+		-- §1: a goal within the tolerance never starts it, at any WalkSpeed (30 rows, no move).
+		for _, case in { { 28, 1 }, { 28, 1.5 }, { 28, 2 }, { 14, 3 }, { 8, 5 }, { 4, 10 }, { 2, 10 } } do
+			local steps = probeWalk(model, case[1], case[2] * case[1] / 60, 60, 30)
+			for _, step in steps do
+				expect(step).toBeLessThanOrEqual(1e-9)
+			end
+		end
+		-- §1: a longer goal is walked to about 0.93 short (more at 28): the PC's steps and what is left.
+		-- The probe's goals (k frames of walk) put the last frame of W 28 k 10, W 14 k 10 and W 8 k 10
+		-- exactly on a predicted rest of 14/15 = 0.9333 stud, where the PC braked the first and walked
+		-- the other two one frame more: this Humanoid brakes all three there, so those two stop a
+		-- frame's walk short of the PC's (`tie`).
+		for _, case in
+			{
+				{ walk = 28, k = 3, steps = { 0.240, 0.153, 0.005 }, left = 1.001 },
+				{ walk = 28, k = 10, steps = { 0.240, 0.455, 0.466, 0.467 }, left = 1.400 },
+				{ walk = 14, k = 5, steps = { 0.179, 0.051 }, left = 0.935 },
+				{ walk = 14, k = 10, steps = { 0.179, 0.232, 0.233 }, left = 0.933, tie = true },
+				{ walk = 8, k = 10, steps = { 0.114, 0.133 }, left = 0.933, tie = true },
+			}
+		do
+			local steps, left = probeWalk(model, case.walk, case.k * case.walk / 60, 60, 30)
+			if PROBE then
+				local text = {}
+				for index = 1, 10 do
+					table.insert(text, ("%.3f"):format(steps[index]))
+				end
+				print(("P2 W %d k %d: %s left %.3f"):format(case.walk, case.k, table.concat(text, " "), left))
+			end
+			for index, step in case.steps do
+				expect(math.abs(steps[index] - step)).toBeLessThanOrEqual(0.003)
+			end
+			local over = if case.tie then case.walk / 60 else 0
+			expect(left - case.left).toBeGreaterThanOrEqual(-0.003)
+			expect(left - case.left).toBeLessThanOrEqual(over + 0.003)
+		end
+		-- At 144 fps: W 8 k 10 still stops about 0.933 short; W 8 k 5 and W 2 k 10 never start.
+		local _, left144 = probeWalk(model, 8, 10 * 8 / 60, 144, 60)
+		expect(left144 - 0.933).toBeGreaterThanOrEqual(-0.003)
+		expect(left144 - 0.933).toBeLessThanOrEqual(8 / 144 + 0.003)
+		for _, case in { { 8, 5 }, { 2, 10 } } do
+			local steps = probeWalk(model, case[1], case[2] * case[1] / 60, 144, 60)
+			for _, step in steps do
+				expect(step).toBeLessThanOrEqual(1e-9)
+			end
+		end
+		-- §2: walked 10 rows toward a far goal and then stopped where it stands (as Move(Vector3.zero)
+		-- stops it): one partial row (0.226 then 0.012 at 28; 0.054 at 14; 0.020 at 8; 0.005 at 2).
+		for _, case in { { 28, 0.226, 0.012 }, { 14, 0.054, 0 }, { 8, 0.020, 0 }, { 2, 0.005, 0 } } do
+			local steps = probeWalk(model, case[1], 100, 60, 14, 10)
+			expect(math.abs(steps[10] - case[1] / 60)).toBeLessThanOrEqual(0.001)
+			expect(math.abs(steps[11] - case[2])).toBeLessThanOrEqual(0.002)
+			expect(math.abs(steps[12] - case[3])).toBeLessThanOrEqual(0.002)
+			expect(steps[14]).toBeLessThanOrEqual(1e-3)
+		end
+		-- §3: a goal 5 studs past a mark 3 studs ahead is walked at full pace through the mark: it is
+		-- crossed on row 7 at 28, 14 at 14, 23 at 8 and 91 at 2 (the PC's W 4 started 11 rows late in
+		-- §2 and §3 both; this Humanoid does not play that).
+		for _, case in { { 28, 7 }, { 14, 14 }, { 8, 23 }, { 2, 91 } } do
+			local steps = probeWalk(model, case[1], 8, 60, 100)
+			local along, crossed = 0, nil
+			for row, step in steps do
+				along += step
+				if crossed == nil and along >= 3 then
+					crossed = row
+				end
+			end
+			expect(crossed).toBe(case[2])
+		end
+		humanoid.mode = "ideal"
+	end)
+
+	it("aimed at its stop (9063a60), stalls at 60 Hz as the PC's rows did and passes at 144", function()
+		-- The PC on 9063a60 at 60 fps: the slam's landing WalkSpeed went 28, 25.22, 8.21, 8.26, 7.63
+		-- and then slowly down to about 2.3; landed came 0.267 to 0.285 s after land, when
+		-- landMaxSeconds ran out; the slam rested 0.060 to 0.090 short and the open run 0.114 to 0.144.
+		-- At 144 fps both rested 0.017 to 0.020 short. movement.landAimStuds 0 aims the landing's
+		-- MoveTo at its stop, as 9063a60's did: within the Humanoid's tolerance, so after its first
+		-- frame the body only drifts on the velocity written on it, braked within the frame. (The PC's
+		-- second row, 8.21 where this Humanoid reads 12.11, stepped 0.567 at 25.22 studs a second: a
+		-- longer frame than 1/60 s; with frames jittered by a quarter, seed 5 reads 25.39, 7.56, 6.64,
+		-- 8.58, 7.80 ... 2.43 and rests 0.086 short.) The open run's own Humanoid braked short of the
+		-- line end before Done, as on 4b18b5c, so its landing starts 0.533 short (the PC's 0.533).
+		local saved = AI.movement.landAimStuds
+		AI.movement.landAimStuds = 0
+		local runs = {}
+		for _, fps in { 60, 144 } do
+			for _, jitter in { 0, 0.25 } do
+				for seed = 1, if jitter > 0 then 3 else 1 do
+					for _, kind in { "slam", "open" } do
+						table.clear(lands)
+						local run = restRun(
+							if kind == "slam" then WALL_Z else nil,
+							{ mode = "tolerant", fps = fps, jitter = jitter, seed = seed }
+						)
+						local landAt, landedAt = landRows(run)
+						local paces = {}
+						local landLeft: number? = nil
+						for _, row in run.rows do
+							if landAt ~= nil and landLeft == nil and row.t >= landAt - 1e-9 then
+								landLeft = run.told - row.along
+							end
+							if
+								landAt ~= nil
+								and row.t >= landAt - 1e-9
+								and (landedAt == nil or row.t < landedAt - 1e-9)
+							then
+								table.insert(paces, row.walkSpeed)
+							end
+						end
+						table.insert(runs, {
+							name = ("%s %d Hz jitter %.2f seed %d"):format(kind, fps, jitter, seed),
+							kind = kind,
+							fps = fps,
+							jitter = jitter,
+							rest = run.rest - run.told,
+							landing = if landAt ~= nil and landedAt ~= nil then landedAt - landAt else nil,
+							paces = paces,
+							landLeft = landLeft,
+						})
+					end
+				end
+			end
+		end
+		AI.movement.landAimStuds = saved
+		for _, run in runs do
+			if PROBE then
+				local text = {}
+				for _, pace in run.paces do
+					table.insert(text, ("%.2f"):format(pace))
+				end
+				print(
+					("%s: rest %+.3f, land to landed %s, WalkSpeed %s"):format(
+						run.name,
+						run.rest,
+						tostring(run.landing),
+						table.concat(text, ", ")
+					)
+				)
+			end
+			expect(run.landing ~= nil).toBe(true)
+			if run.fps == 60 then
+				-- Short of its stop by more than 440(e)'s and 441(b)'s 0.05 when landMaxSeconds runs out.
+				expect(run.rest).toBeLessThan(-0.05)
+				expect(run.rest).toBeGreaterThan(-0.2)
+				expect(run.landing :: number).toBeGreaterThanOrEqual(AI.movement.landMaxSeconds)
+				if run.jitter == 0 then
+					-- One paced row (the slam's) and then no row ever halves: each is at least 0.85 of the
+					-- last (the PC's 8.21, 8.26, 7.63), and the last is still above 2 (the PC's about 2.3).
+					local from = if run.kind == "slam" then 3 else 2
+					if run.kind == "open" then
+						expect(math.abs((run.landLeft :: number) - 0.533)).toBeLessThanOrEqual(0.01)
+					end
+					if run.kind == "slam" then
+						expect(run.paces[1]).toBeGreaterThan(20)
+						expect(run.paces[2]).toBeLessThanOrEqual(run.paces[1] * 0.55)
+					end
+					for index = from, #run.paces do
+						expect(run.paces[index]).toBeGreaterThanOrEqual(run.paces[index - 1] * 0.85)
+					end
+					expect(run.paces[#run.paces]).toBeGreaterThan(2)
+				end
+			else
+				-- A pass at 144: within 0.025 short (the PC's 0.017 to 0.020), landed before the bound.
+				expect(run.rest).toBeLessThanOrEqual(0)
+				expect(run.rest).toBeGreaterThanOrEqual(-0.025)
+				expect(run.landing :: number).toBeLessThan(AI.movement.landMaxSeconds)
+			end
+		end
+	end)
+
+	it("rests within 0.05 of its stop at 60 and 144 Hz, jittered, landed before landMaxSeconds is out", function()
+		-- On 9063a60 the PC's server rows at 60 fps: the landing's WalkSpeed went 28, 25.22, 8.21,
+		-- 8.26, 7.63 and then slowly down to about 2.3; landed came 0.267 to 0.285 s after land, when
+		-- landMaxSeconds ran out, and the slam rested 0.060 to 0.090 short, the open run 0.114 to
+		-- 0.144; at 144 fps both rested 0.017 to 0.020 short and passed. The pace left/(2 dt) aims the
+		-- Humanoid's MoveTo at the stop, within its tolerance, so after its first frame it only drifts
+		-- on the velocity written on it, braked within the frame: 7% of what is left a frame at 60
+		-- fps, 13% at 144 with 2.4 times the frames.
+		local worst = { rest = 0, past = -math.huge, back = 0, landing = 0 }
+		for _, fps in { 60, 144 } do
+			for _, jitter in { 0, 0.25 } do
+				for seed = 1, if jitter > 0 then 3 else 1 do
+					for _, kind in { "slam", "open" } do
+						local wall = if kind == "slam" then WALL_Z else nil
+						table.clear(lands)
+						local run = restRun(wall, { mode = "tolerant", fps = fps, jitter = jitter, seed = seed })
+						local landAt, landedAt = landRows(run)
+						if PROBE then
+							print(
+								("%s %d Hz jitter %.2f seed %d: rest %+.3f, land %s landed %s"):format(
+									kind,
+									fps,
+									jitter,
+									seed,
+									run.rest - run.told,
+									tostring(landAt),
+									tostring(landedAt)
+								)
+							)
+						end
+						worst.rest = math.max(worst.rest, math.abs(run.rest - run.told))
+						worst.past = math.max(worst.past, run.farthest - run.told)
+						worst.back = math.max(worst.back, run.backStep)
+						expect(landAt ~= nil and landedAt ~= nil).toBe(true)
+						worst.landing = math.max(worst.landing, (landedAt :: number) - (landAt :: number))
+						expect(run.writes).toBe(0)
+						expect(antiCheatCalls).toEqual({})
+					end
+				end
+			end
+		end
+		print(
+			("[440/441] tolerant Humanoid, 60/144 Hz, jitter 0/0.25: rest off its stop %.3f, farthest past %+.3f, back %.4f, land to landed %.3f s"):format(
+				worst.rest,
+				worst.past,
+				worst.back,
+				worst.landing
+			)
+		)
+		expect(worst.rest).toBeLessThanOrEqual(0.05)
+		expect(worst.past).toBeLessThanOrEqual(0.05)
+		expect(worst.back).toBeLessThanOrEqual(1e-3)
+		-- Landed because it stands on its stop, not because landMaxSeconds ran out.
+		expect(worst.landing).toBeLessThan(AI.movement.landMaxSeconds - 1e-6)
+	end)
+
+	it("at 60 Hz the landing's WalkSpeed halves each row and it lands in under 0.15 s", function()
+		-- Item 439 line 2: from land on, WalkSpeed reads about what is left / (2 × the row's dt) and
+		-- shrinks each row. The 9063a60 PC rows held at about 8 for rows on end (8.21, 8.26, 7.63).
+		for _, kind in { "slam", "open" } do
+			local wall = if kind == "slam" then WALL_Z else nil
+			table.clear(lands)
+			local run = restRun(wall, { mode = "tolerant" })
+			local landAt, landedAt = landRows(run)
+			expect(landAt ~= nil and landedAt ~= nil).toBe(true)
+			local paces = {}
+			for _, row in run.rows do
+				if row.t >= (landAt :: number) - 1e-9 and row.t < (landedAt :: number) - 1e-9 then
+					table.insert(paces, row.walkSpeed)
+				end
+			end
+			if PROBE then
+				local text = {}
+				for _, pace in paces do
+					table.insert(text, ("%.2f"):format(pace))
+				end
+				print(
+					("%s: land +%.3f landed +%.3f WalkSpeed %s"):format(
+						kind,
+						landAt :: number,
+						landedAt :: number,
+						table.concat(text, ", ")
+					)
+				)
+			end
+			expect(#paces >= 2).toBe(true)
+			for index = 2, #paces do
+				expect(paces[index]).toBeLessThanOrEqual(paces[index - 1] * 0.6)
+			end
+			expect((landedAt :: number) - (landAt :: number)).toBeLessThan(0.15)
+		end
+	end)
+
+	it("a landing the world holds short still ends in landMaxSeconds, stopped dead, its run's end on time", function()
+		-- Done still comes when the run's time is over; a body something unseen holds 0.4 short of its
+		-- line end pushes on it for at most landMaxSeconds and is then stopped dead where it stands,
+		-- and stays there: the MoveTo past the stop is replaced by the halt's own.
+		table.clear(lands)
+		local held = restRun(nil, { mode = "tolerant" }, 21.6)
+		local duration = held.duration
+		expect(held.doneAt).toBeGreaterThanOrEqual(duration)
+		expect(held.doneAt).toBeLessThanOrEqual(duration + 2 / 60 + 1e-6)
+		expect(math.abs(held.rest - 21.6)).toBeLessThanOrEqual(0.01)
+		expect(#lands >= 2).toBe(true)
+		local first, last = lands[1].time, lands[#lands].time
+		expect(last - first).toBeLessThanOrEqual(AI.movement.landMaxSeconds + 1e-6)
+		local row = held.rows[#held.rows]
+		expect(row.speed).toBe(0)
+		expect(held.farthest - 21.6).toBeLessThanOrEqual(0.01)
 	end)
 end)

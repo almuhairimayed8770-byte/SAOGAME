@@ -149,6 +149,18 @@ local AI = {
 		landFrames = 2,
 		landSlackStuds = 0.02,
 		landMaxSeconds = 0.25,
+		-- Studio's Humanoid holds a MoveTo goal within about this of it reached (the PC's P2 probe, a
+		-- server FrenzyBoar on 4e60f11: a standing body never starts toward a goal within 0.933 at
+		-- any WalkSpeed, and a walk stops 0.933 to 1.4 short of its goal, the 1.4 at WalkSpeed 28).
+		-- An engine fact, kept here so the landing's aim can be checked against it.
+		moveToToleranceStuds = 1.4,
+		-- A landing's MoveTo aims this far past its stop, the way it goes (D-548), so the Humanoid
+		-- walks at the landing's pace all the way and the service stops it on the stop: aimed at the
+		-- stop, a goal within the tolerance, it walked a frame and then only drifted on the velocity
+		-- written on it (the PC's 9063a60 landings: 0.06 to 0.14 short at 60 fps once landMaxSeconds
+		-- ran out). The PC walked a goal 5 studs past a mark through the mark at full pace at every
+		-- WalkSpeed from 2 to 28.
+		landAimStuds = 4,
 		-- A walk stops with the body's snout on a wall, never in it, and a turn never swings it in
 		-- (EnemyService): a turn that sets any part of the body more than this far inside a wall is
 		-- not taken (turning away from a wall it faces head on swings a corner of the snout a hair
@@ -183,14 +195,31 @@ local AI = {
 	-- Names of Enum.HumanoidStateType (the ai validator checks them).
 	upright = {
 		offStates = { "FallingDown", "Ragdoll" },
-		-- Each client's own copy of an enemy Humanoid (D-508, D-523): the server's SetStateEnabled
-		-- does not replicate, so Replication turns the same states off on the copy, reading it first
-		-- and the states back after (the PC's working probe read first). A copy whose states still
-		-- read on, or whose Humanoid or EntityKind "Enemy" has not come yet, is tried again on every
-		-- PreSimulation, before this client's physics steps it, up to maxTries; a copy already in a
-		-- fall state goes to standUpState (Studio: an anchored copy left in FallingDown goes straight
-		-- back to it unless the state is off first, so the stand-up only follows the turn-off).
+		-- Each client's own copy of an enemy Humanoid (D-508, D-523, D-543, D-544): the server's
+		-- SetStateEnabled does not replicate, so Replication turns the states off on the copy, reading
+		-- it first and the states back after. Studio (9063a60, probe P1 on 4e60f11): the tag comes
+		-- before the Humanoid, and a Humanoid that comes after it has had a physics step by the next
+		-- PreSimulation, so an anchored copy is FallingDown there already; neither turning the state
+		-- off nor a ChangeState (Running, GettingUp) takes it out while the root stays anchored (P1
+		-- L4: 473 of 473 rows). So the states go off inside the Humanoid's own arrival handler (P1 L2:
+		-- Running on 2260 and 2080 of as many rows, the state machine left on), and a copy found in a
+		-- fall state anyway has its state machine turned off before the stand-up (P1 L3: Running at
+		-- once and on 862 of 862 anchored rows). A copy whose Humanoid or EntityKind "Enemy" has not
+		-- come yet, or whose states still read on, is tried again on every PreSimulation up to
+		-- maxTries.
 		client = {
+			-- The states this client turns off on its copy: the server's offStates and the two more the
+			-- PC's working lever turned off (P1 L2); every name in offStates above is here too.
+			offStates = { "FallingDown", "Ragdoll", "Physics", "PlatformStanding" },
+			-- Ask at once inside the handler of the Humanoid's arrival on the model (start(): the
+			-- model's ChildAdded), before this client's first physics step on it (D-543, P1 L2).
+			-- false: ask only on watch, on an EntityKind change and on PreSimulation (9063a60, P1 L0).
+			catchOnArrival = true,
+			-- How a copy found in a fall state is stood up (D-544): `rescues.stateMachine` sets its
+			-- Humanoid.EvaluateStateMachine false, then ChangeState(standUpState) (P1 L3), and leaves it
+			-- off; `rescues.changeState` is the ChangeState alone (9063a60, P1 L4: no take while held).
+			rescue = "StateMachine",
+			rescues = { stateMachine = "StateMachine", changeState = "ChangeState" },
 			standUpState = "Running", -- the server's state on every held row the PC logged
 			maxTries = 240, -- 4 s of 60 Hz PreSimulation steps, then only an EntityKind change retries
 			-- A log aid on the enemy Model, client only (client attributes do not replicate), in the

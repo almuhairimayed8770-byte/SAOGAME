@@ -1496,6 +1496,11 @@ end
 -- An enemy rig's locomotion: its data Idle and Walk crossfaded by speed, the walk paced to the
 -- rig's walkSpeed. Reactions and attacks ride above on FullBody / Additive as on every rig. Both
 -- loops start `phase` of the way round (D-123), so a herd never breathes or roars in step.
+-- The crossfade is the player's own gait rule (LocomotionState.gaitWeights with no Run, D-541):
+-- the walk shows alone from stride.rateFloor of the rig's walkSpeed up, paced to the body's speed,
+-- and only below that slows to rateFloor and hands weight to Idle. A joint-angle blend of the
+-- walk and the idle shortens the planted leg's sweep but not the body's travel, so the old share
+-- (speed / walkSpeed) slid a boar wheeling at half speed 0.2 a frame on hooves 0.09 deep.
 RigDriver.__index = RigDriver
 
 local function newRigDriver(animator: any, idleId: string, walkId: string, walkSpeed: number, phase: number): any
@@ -1503,6 +1508,7 @@ local function newRigDriver(animator: any, idleId: string, walkId: string, walkS
 		animator = animator,
 		handles = {} :: { [string]: any },
 		walkSpeed = math.max(walkSpeed, Config.idleSpeedThreshold),
+		walkDuration = ClipLibrary.get(walkId).duration,
 		unhook = nil :: (() -> ())?,
 		destroyed = false,
 	}, RigDriver)
@@ -1522,11 +1528,14 @@ end
 
 function RigDriver.update(self: any, _dt: number, state: State): LocomotionState.Output
 	local speed = math.max(0, state.speed)
-	local walk = if speed > Config.idleSpeedThreshold then math.clamp(speed / self.walkSpeed, 0, 1) else 0
+	local walk = 0
+	if speed > Config.idleSpeedThreshold then
+		walk = LocomotionState.gaitWeights(speed, self.walkSpeed, self.walkDuration)
+	end
 	self.animator:setWeight(self.handles.Walk, walk)
 	self.animator:setWeight(self.handles.Idle, 1 - walk)
 	if walk > 0 then
-		self.animator:setSpeed(self.handles.Walk, speed / self.walkSpeed)
+		self.animator:setSpeed(self.handles.Walk, math.max(speed / self.walkSpeed, Stride.rateFloor))
 	end
 	return {
 		weights = { Idle = 1 - walk, Walk = walk },

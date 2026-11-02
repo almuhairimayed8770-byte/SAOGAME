@@ -2760,6 +2760,34 @@ describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", fun
 		expect(withMovement("landFrames", 1)).toEqual({})
 	end)
 
+	it("a rush's landing aims its MoveTo past the Humanoid's tolerance and its lead (D-548)", function()
+		local function withMovement(field: string, value: any): { string }
+			return runAi(function(copy)
+				copy.movement = table.clone(copy.movement)
+				copy.movement[field] = value
+			end)
+		end
+		expect(hasProblem(withMovement("landAimStuds", nil), "movement.landAimStuds must be a number")).toBe(true)
+		expect(hasProblem(withMovement("landAimStuds", 0), "movement.landAimStuds must be positive")).toBe(true)
+		expect(hasProblem(withMovement("moveToToleranceStuds", nil), "movement.moveToToleranceStuds must be a number")).toBe(
+			true
+		)
+		-- The 1.4-stud tolerance plus the fastest Charger rush's lead (36 studs/s for 1/30 s): 2.6.
+		expect(
+			hasProblem(
+				withMovement("landAimStuds", 2.5),
+				"movement.landAimStuds 2.5 must be past moveToToleranceStuds plus the fastest rush's lead (2.600)"
+			)
+		).toBe(true)
+		expect(
+			hasProblem(
+				withMovement("moveToToleranceStuds", 3),
+				"movement.landAimStuds 4 must be past moveToToleranceStuds plus the fastest rush's lead (4.200)"
+			)
+		).toBe(true)
+		expect(withMovement("landAimStuds", 2.7)).toEqual({})
+	end)
+
 	it("a blocked step is told sooner than the jam lag, by fractions that tell running from blocked (D-280)", function()
 		local function withCharger(field: string, value: any): { string }
 			return runAi(function(copy)
@@ -2877,6 +2905,73 @@ describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", fun
 			"upright.client.states.waiting must be a non-empty string"
 		)).toBe(true)
 	end)
+
+	it(
+		"the client's copy turns off at least the server's states and stands up by a named rescue (D-543, D-544)",
+		function()
+			local function withClient(change: (client: any) -> ()): { string }
+				return runAi(function(copy)
+					local upright = table.clone(copy.upright)
+					local client = table.clone(upright.client)
+					client.offStates = table.clone(client.offStates)
+					client.rescues = table.clone(client.rescues)
+					change(client)
+					upright.client = client
+					copy.upright = upright
+				end)
+			end
+			expect(withClient(function() end)).toEqual({})
+			expect(withClient(function(client)
+				client.offStates = { "FallingDown", "Ragdoll" }
+			end)).toEqual({})
+			expect(withClient(function(client)
+				client.catchOnArrival = false
+				client.rescue = client.rescues.changeState
+			end)).toEqual({})
+			expect(hasProblem(
+				withClient(function(client)
+					client.offStates = {}
+				end),
+				"upright.client.offStates must be a non-empty list of Humanoid state names"
+			)).toBe(true)
+			expect(hasProblem(
+				withClient(function(client)
+					client.offStates = { "FallingDown" }
+				end),
+				"upright.client.offStates must hold Ragdoll (upright.offStates, the server's)"
+			)).toBe(true)
+			expect(hasProblem(
+				withClient(function(client)
+					table.insert(client.offStates, "Running")
+				end),
+				"upright.client.offStates: Running is not a fall state"
+			)).toBe(true)
+			expect(hasProblem(
+				withClient(function(client)
+					table.insert(client.offStates, "Physics")
+				end),
+				"upright.client.offStates names Physics twice"
+			)).toBe(true)
+			expect(hasProblem(
+				withClient(function(client)
+					client.catchOnArrival = "yes"
+				end),
+				"upright.client.catchOnArrival must be true or false"
+			)).toBe(true)
+			expect(hasProblem(
+				withClient(function(client)
+					client.rescue = "Anchor"
+				end),
+				"upright.client.rescue Anchor must be one of upright.client.rescues"
+			)).toBe(true)
+			expect(hasProblem(
+				withClient(function(client)
+					client.rescues.stateMachine = "Off"
+				end),
+				"upright.client.rescues must name stateMachine"
+			)).toBe(true)
+		end
+	)
 
 	it("a Charger needs a positive jamLagStuds", function()
 		expect(hasProblem(

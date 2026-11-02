@@ -1,30 +1,38 @@
 --!strict
 --[[
-	A held enemy stands upright on this client too (D-508, D-523, the client side of D-494). The
-	server turns its enemy Humanoids' fall states off (ai.upright.offStates) on the frame each model
-	is made, but Humanoid:SetStateEnabled does not replicate. The real EntityTracker meets the models
-	the way Studio hands them over (the SkyspireEntity tag's InstanceAdded, the attributes the server
-	published, each attribute change on its own signal), the real Replication watches them and asks
-	its real seam (Replication.uprightModel, which start() hands it), and the rigs are RigBuilder's
-	own. The fake engine is this client's copy of each Humanoid, doing what the owner's PC measured
-	in Studio (item 398(a) on 0582a04, item 425 and the upright probe on 4b18b5c, staged shots 1, 6
-	and 11):
+	A held enemy stands upright on this client too (D-508, D-523, D-543, D-544, the client side
+	of D-494). The server turns its enemy Humanoids' fall states off (ai.upright.offStates) on the
+	frame each model is made, but Humanoid:SetStateEnabled does not replicate. The real
+	EntityTracker meets the models the way Studio hands them over (the SkyspireEntity tag's
+	InstanceAdded, the attributes the server published, each attribute change on its own signal),
+	the real Replication watches them and asks its real seam (Replication.uprightModel, which start()
+	hands it), and the rigs are RigBuilder's own. The fake engine is this client's copy of each
+	Humanoid, doing what the owner's PC measured in Studio (item 398(a) on 0582a04, item 425 and the
+	upright probe on 4b18b5c, items 442 and 443 on 9063a60, probe P1 on 4e60f11):
 
 	- the server's SetStateEnabled does not reach the copy: GetStateEnabled(FallingDown) reads true;
-	- a copy whose root comes anchored (a staged enemy is held from its spawn, D-436) reads Running
-	  when the client first sees it and FallingDown from its first physics step on, every held row,
-	  unless FallingDown is off; a ChangeState(Running) alone goes straight back to FallingDown;
-	- the client's own SetStateEnabled(FallingDown, false) holds, at first sight or deferred (the
-	  probe: 0 FallingDown rows), with ChangeState(Running) for a copy already down;
-	- from the row its root is let go it reads the server's state (Running);
-	- its root stays at its standing height throughout (nothing visible was measured).
+	- the tag comes before the Humanoid (442; P1: the tag's handler never finds one), and a copy
+	  reads None in the handler of its own arrival (P1);
+	- a copy whose root is anchored goes FallingDown on its physics step while FallingDown is on;
+	  one that comes after the tag has had that step by the next PreSimulation (442: StoodUp, tries
+	  2, FallingDown, GetStateEnabled false, on every held row; P1 L0);
+	- once FallingDown with its root anchored it stays there: neither turning the state off nor a
+	  ChangeState (Running, GettingUp, the same frame or the next) takes it out (P1 L4, 473 of 473);
+	- the client's own SetStateEnabled false made in the Humanoid's arrival handler holds, and the
+	  copy reads Running on every row, held at spawn or later (P1 L2, 2260 and 2080 rows);
+	- with Humanoid.EvaluateStateMachine false the state machine no longer moves the copy, and a
+	  ChangeState takes at once, held or not (P1 L3: Running on 862 of 862 anchored rows);
+	- with the state machine on, from the row its root is let go it reads the server's state
+	  (Running), FallingDown or not before;
+	- its root stays at its standing height throughout (nothing visible was measured: P1 Torso y
+	  3.40-3.46, lowest leg corner -0.032 to 0.000 with and without FallingDown).
 
-	One frame here: what replication brings (each arrival with its handlers, in order), then the
-	beforePhysics step (PreSimulation), then this client's physics on every copy, then the logged
-	row. Assumed, not measured: replication's handlers run before the frame's PreSimulation, and
-	PreSimulation before the physics step (Studio's frame order). Also assumed for one case only:
-	an engine that loses the first SetStateEnabled made on a copy (the cause of the PC's true reads
-	on 4b18b5c is not proven; the client's log aid, UprightClient, names it on the next run).
+	One frame here: the beforePhysics step (PreSimulation), then what replication brings (each
+	arrival with its handlers, in order; a Humanoid's parenting fires the model's arrival seam,
+	start()'s ChildAdded), then this client's physics on every copy, then the logged row. Where in
+	Studio's frame the copy first falls is not measured; that it has fallen by the next
+	PreSimulation and not inside its own arrival handler is (442, P1). Also assumed for one case
+	only: an engine that loses the first SetStateEnabled made on a copy (never seen since 4b18b5c).
 ]]
 
 local EntityTracker = Harness.load("src/client/controllers/EntityTracker")
@@ -34,6 +42,7 @@ local AI = Harness.load("src/shared/data/ai")
 
 local UPRIGHT = AI.upright.client
 local NAMES = UPRIGHT.attributes
+local FALLS = UPRIGHT.offStates
 
 -- The PC's longest held stretch in a take (rows from the spawn to the release, 398(a)).
 local HELD_ROWS = 196
@@ -58,6 +67,9 @@ local function fakeSignal(): any
 				handler(...)
 			end
 		end,
+		count = function(): number
+			return #handlers
+		end,
 	}
 end
 
@@ -73,11 +85,14 @@ end
 type Copy = {
 	state: string,
 	enabled: { [string]: boolean },
+	evaluates: boolean, -- Humanoid.EvaluateStateMachine
+	root: BasePart,
 	stepped: boolean,
 	sets: number,
 	loseFirstSet: boolean, -- the one assumed engine (see the header)
 	asked: number, -- how often the seam reached it
 	askedSteps: number?, -- the physics steps it had had when it was first asked
+	askedState: string?, -- what GetState read when it was first asked
 	fallingRows: number,
 	enabledOnFirstRow: boolean?, -- GetStateEnabled(FallingDown) on the first logged row
 	stateOnFirstRow: string?,
@@ -87,29 +102,39 @@ type World = {
 	copies: { [Instance]: Copy },
 	tag: (model: Model) -> (), -- the replication batch that brings a tagged model to this client
 	attribute: (model: Model, name: string, value: any) -> (), -- an attribute change replicated
-	frame: (arrivals: { () -> () }?) -> (), -- one frame: arrivals, PreSimulation, physics, the row
+	frame: (arrivals: { () -> () }?) -> (), -- one frame: PreSimulation, arrivals, physics, the row
+	parent: (humanoid: Instance?, model: Model) -> (), -- a Humanoid replicated into its model
+	catches: (model: Model) -> number, -- arrival handlers connected on the model
 	localModel: Model,
 	players: { [Instance]: boolean }, -- Players:GetPlayerFromCharacter
 }
 
-local function newCopy(loseFirstSet: boolean): Copy
+local function newCopy(loseFirstSet: boolean, root: BasePart): Copy
+	local enabled: { [string]: boolean } = {}
+	for _, name in FALLS do
+		enabled[name] = true
+	end
 	return {
-		state = "Running",
-		enabled = { FallingDown = true, Ragdoll = true },
+		state = "None",
+		enabled = enabled,
+		evaluates = true,
+		root = root,
 		stepped = false,
 		sets = 0,
 		loseFirstSet = loseFirstSet,
 		asked = 0,
 		askedSteps = nil,
+		askedState = nil,
 		fallingRows = 0,
 		enabledOnFirstRow = nil,
 		stateOnFirstRow = nil,
 	}
 end
 
--- What the seam's FindFirstChildOfClass hands Replication: the copy behind the engine's methods.
+-- What the seam's FindFirstChildOfClass hands Replication: the copy behind the engine's methods
+-- and its EvaluateStateMachine property.
 local function engineHumanoid(copy: Copy): any
-	return {
+	local methods = {
 		GetState = function(_self: any): any
 			return (Enum.HumanoidStateType :: any)[copy.state]
 		end,
@@ -124,11 +149,28 @@ local function engineHumanoid(copy: Copy): any
 			copy.enabled[stateType.Name] = on
 		end,
 		ChangeState = function(_self: any, stateType: any)
-			if copy.enabled[stateType.Name] ~= false then
-				copy.state = stateType.Name
+			if copy.enabled[stateType.Name] == false then
+				return
 			end
+			-- P1 L4: an anchored copy already down stays down while its state machine runs.
+			if copy.evaluates and copy.root.Anchored and copy.state == "FallingDown" then
+				return
+			end
+			copy.state = stateType.Name
 		end,
 	}
+	return setmetatable({}, {
+		__index = function(_, key: string): any
+			if key == "EvaluateStateMachine" then
+				return copy.evaluates
+			end
+			return methods[key]
+		end,
+		__newindex = function(_, key: string, value: any)
+			assert(key == "EvaluateStateMachine", "the fake Humanoid has no property " .. key)
+			copy.evaluates = value == true
+		end,
+	})
 end
 
 local function rootOf(model: Model): BasePart
@@ -191,14 +233,23 @@ local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolea
 	players[localModel] = true
 	local added = fakeSignal()
 	local attributeHandlers: { [Instance]: { [string]: any } } = {}
+	local arrivals: { [Instance]: any } = {}
 	local beforePhysics: { () -> () } = {}
 	local function copyOf(humanoid: Instance): Copy
 		local copy = copies[humanoid]
 		if copy == nil then
-			copy = newCopy(loseFirstSet == true)
+			copy = newCopy(loseFirstSet == true, rootOf(humanoid.Parent :: Model))
 			copies[humanoid] = copy
 		end
 		return copy
+	end
+	local function arrivalOf(model: Instance): any
+		local signal = arrivals[model]
+		if signal == nil then
+			signal = fakeSignal()
+			arrivals[model] = signal
+		end
+		return signal
 	end
 	EntityTracker.bind({
 		tagged = function()
@@ -272,6 +323,10 @@ local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolea
 		beforePhysics = function(fn: () -> ())
 			table.insert(beforePhysics, fn)
 		end,
+		-- start()'s seam: the model's ChildAdded, for a Humanoid child, handled at once.
+		humanoidAdded = function(model: Model, fn: () -> ()): any
+			return arrivalOf(model):Connect(fn)
+		end,
 	}
 	if withSeam then
 		-- Replication.start's seam on this client's copy: the real Replication.uprightModel, with
@@ -288,6 +343,7 @@ local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolea
 				copy.asked += 1
 				if copy.askedSteps == nil then
 					copy.askedSteps = if copy.stepped then 1 else 0
+					copy.askedState = copy.state
 				end
 				return engineHumanoid(copy)
 			end)
@@ -301,15 +357,15 @@ local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolea
 				continue
 			end
 			local copy = copyOf(humanoid)
-			local root = rootOf(record.model)
 			copy.stepped = true
-			if root.Anchored then
-				-- An anchored copy goes FallingDown on its physics step while the state is on, and
-				-- back to it after a ChangeState (the probe's deferred Running and GettingUp takes).
-				if copy.enabled.FallingDown then
-					copy.state = "FallingDown"
+			-- P1 L1, L3: with its state machine off, physics leaves the copy's state where it is.
+			if copy.evaluates and copy.root.Anchored then
+				-- An anchored copy falls on its step while FallingDown is on, and stays down: the
+				-- state machine never takes it out while the root stays anchored (P1 L4).
+				if copy.state ~= "FallingDown" then
+					copy.state = if copy.enabled.FallingDown then "FallingDown" else "Running"
 				end
-			else
+			elseif copy.evaluates then
 				copy.state = "Running" -- the server's state, once the root is let go
 			end
 			if copy.enabledOnFirstRow == nil then
@@ -336,14 +392,22 @@ local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolea
 				signal:Fire()
 			end
 		end,
-		frame = function(arrivals: { () -> () }?)
-			for _, arrive in arrivals or {} do
-				arrive()
-			end
+		frame = function(arriving: { () -> () }?)
 			for _, fn in beforePhysics do
 				fn()
 			end
+			for _, arrive in arriving or {} do
+				arrive()
+			end
 			stepCopies()
+		end,
+		parent = function(humanoid: Instance?, model: Model)
+			(humanoid :: Instance).Parent = model
+			arrivalOf(model):Fire()
+		end,
+		catches = function(model: Model): number
+			local signal = arrivals[model]
+			return if signal ~= nil then signal.count() else 0
 		end,
 	}
 end
@@ -386,16 +450,57 @@ local function copyOf(w: World, model: Model): Copy
 	return w.copies[model:FindFirstChildOfClass("Humanoid") :: Instance]
 end
 
+-- Upright to the end: Running through the release, the client's fall states read off, the log aid
+-- done. A copy caught in time keeps its state machine (P1 L2) and never reads FallingDown; one
+-- stood up (StoodUp) read it on the one row before and has its state machine off (P1 L3).
 local function expectUpright(w: World, model: Model, state: string, tries: number)
 	local copy = copyOf(w, model)
 	expect(copy.fallingRows).toBe(if state == UPRIGHT.states.stoodUp then 1 else 0)
 	expect(copy.state).toBe("Running")
-	for _, name in AI.upright.offStates do
+	expect(copy.evaluates).toBe(state ~= UPRIGHT.states.stoodUp)
+	for _, name in FALLS do
 		expect(copy.enabled[name]).toBe(false)
 	end
 	expect(model:GetAttribute(NAMES.state)).toBe(state)
 	expect(model:GetAttribute(NAMES.why)).toBeNil()
 	expect(model:GetAttribute(NAMES.tries)).toBe(tries)
+end
+
+-- Runs `body` with ai.upright.client's switches set as given, then puts them back.
+local function withSwitches(switches: { [string]: any }, body: () -> ())
+	local before: { [string]: any } = {}
+	for key, value in switches do
+		before[key] = (UPRIGHT :: any)[key];
+		(UPRIGHT :: any)[key] = value
+	end
+	local ok, problem = pcall(body)
+	for key, value in before do
+		(UPRIGHT :: any)[key] = value
+	end
+	if not ok then
+		error(problem, 0)
+	end
+end
+
+-- A staged shot's boar and a kobold held at spawn whose Humanoids come after their tags in the
+-- same frame (442's staged enemies; 443's #38; P1 #8, #10, #12).
+local function lateHumanoids(): (World, { Model })
+	local w = world(true, {})
+	local boar, boarHumanoid = enemy(7, "Boar", "FrenzyBoar", true, true, true)
+	local kobold, koboldHumanoid = enemy(38, "Kobold", "KoboldAxeman", true, true, true)
+	holdAndRelease(w, { boar, kobold }, {
+		function()
+			w.tag(boar)
+			w.tag(kobold)
+			expect(boar:GetAttribute(NAMES.state)).toBe(UPRIGHT.states.waiting)
+			expect(boar:GetAttribute(NAMES.why)).toBe(UPRIGHT.whys.noHumanoid)
+		end,
+		function()
+			w.parent(boarHumanoid, boar)
+			w.parent(koboldHumanoid, kobold)
+		end,
+	})
+	return w, { boar, kobold }
 end
 
 describe("A held enemy stands upright on this client (D-508)", function()
@@ -450,6 +555,121 @@ describe("A held enemy stands upright on this client (D-508)", function()
 	end)
 end)
 
+describe("A Humanoid that comes after its tag is caught as it arrives (D-543)", function()
+	it("turns the states off inside the Humanoid's arrival: Running on every held row, Off, tries 2", function()
+		-- 9063a60 and 4e60f11 (442, 443 #38, P1 L0): StoodUp, tries 2, FallingDown on every held
+		-- row with GetStateEnabled(FallingDown) false; P1 L2 at the arrival: Running every row, Off / 2
+		local w, models = lateHumanoids()
+		for _, model in models do
+			local copy = copyOf(w, model)
+			expect(copy.askedSteps).toBe(0)
+			expect(copy.askedState).toBe("None")
+			expect(copy.enabledOnFirstRow).toBe(false)
+			expect(copy.stateOnFirstRow).toBe("Running")
+			expectUpright(w, model, UPRIGHT.states.off, 2)
+		end
+	end)
+
+	it("lets the arrival handler go once the copy is upright, and when the rig leaves", function()
+		local w, models = lateHumanoids()
+		for _, model in models do
+			expect(w.catches(model)).toBe(0)
+		end
+		local kobold, humanoid = enemy(39, "Kobold", "KoboldAxeman", true, true, true)
+		w.frame({
+			function()
+				w.tag(kobold)
+			end,
+		})
+		expect(w.catches(kobold)).toBe(if UPRIGHT.catchOnArrival then 1 else 0)
+		Replication.unwatch(EntityTracker.fromModel(kobold))
+		expect(w.catches(kobold)).toBe(0)
+		w.frame({
+			function()
+				w.parent(humanoid, kobold)
+			end,
+		})
+		expect(copyOf(w, kobold).asked).toBe(0)
+	end)
+
+	it("a player's character whose Humanoid and EntityKind come late is never touched", function()
+		local w = world(true, {})
+		local remote = player(2, "Partner", false)
+		w.players[remote] = true
+		local humanoid = remote:FindFirstChildOfClass("Humanoid") :: Instance
+		humanoid.Parent = nil
+		holdAndRelease(w, {}, {
+			function()
+				w.tag(remote)
+			end,
+			function()
+				w.parent(humanoid, remote)
+			end,
+		}, {
+			function()
+				w.attribute(remote, "EntityKind", "Player")
+			end,
+		})
+		local copy = copyOf(w, remote)
+		expect(copy.asked).toBe(0)
+		expect(copy.sets).toBe(0)
+		expect(copy.evaluates).toBe(true)
+		expect(remote:GetAttribute(NAMES.state)).toBeNil()
+		expect(w.catches(remote)).toBe(0)
+	end)
+
+	it("with the arrival catch and the stand-up switched back, the copy reads the PC's 9063a60 rows", function()
+		-- The fake against the PC (442, P1 L0): StoodUp, tries 2, FallingDown on every held row
+		-- with GetStateEnabled(FallingDown) false, Running from the release row
+		withSwitches({ catchOnArrival = false, rescue = UPRIGHT.rescues.changeState }, function()
+			local w, models = lateHumanoids()
+			for _, model in models do
+				local copy = copyOf(w, model)
+				expect(copy.askedState).toBe("FallingDown")
+				expect(copy.fallingRows).toBe(HELD_ROWS)
+				expect(copy.enabled.FallingDown).toBe(false)
+				expect(copy.state).toBe("Running")
+				expect(model:GetAttribute(NAMES.state)).toBe(UPRIGHT.states.stoodUp)
+				expect(model:GetAttribute(NAMES.tries)).toBe(2)
+			end
+		end)
+	end)
+end)
+
+describe("A copy found already down is stood up with its state machine off (D-544)", function()
+	it("without the catch, a held copy already down reads Running from the next row, still held", function()
+		-- P1 L3 (#14): EvaluateStateMachine false then ChangeState(Running): Running at once and on
+		-- 862 of 862 anchored rows; 4e60f11 (L4): FallingDown on every held row
+		withSwitches({ catchOnArrival = false }, function()
+			local w, models = lateHumanoids()
+			for _, model in models do
+				expect(copyOf(w, model).askedState).toBe("FallingDown")
+				expectUpright(w, model, UPRIGHT.states.stoodUp, 2)
+			end
+		end)
+	end)
+
+	it("the ChangeState stand-up alone leaves a held copy down until its release (P1 L4)", function()
+		withSwitches({ catchOnArrival = false, rescue = UPRIGHT.rescues.changeState }, function()
+			local w = world(true, {})
+			local boar = enemy(7, "Boar", "FrenzyBoar", true, false)
+			holdAndRelease(w, { boar }, {
+				function()
+					w.tag(boar)
+				end,
+			}, {
+				function()
+					w.attribute(boar, "EntityKind", "Enemy")
+				end,
+			})
+			local copy = copyOf(w, boar)
+			expect(copy.fallingRows).toBe(HELD_ROWS)
+			expect(copy.evaluates).toBe(true)
+			expect(boar:GetAttribute(NAMES.state)).toBe(UPRIGHT.states.stoodUp)
+		end)
+	end)
+end)
+
 describe("Every arrival order keeps the copy upright from its first physics step (D-523)", function()
 	it("writes the log aid: Off on the first try when the batch brings everything", function()
 		local w, models = take(true)
@@ -478,7 +698,7 @@ describe("Every arrival order keeps the copy upright from its first physics step
 	end)
 
 	it("an EntityKind a frame late: the copy already down is stood up, one FallingDown row", function()
-		-- 4b18b5c: FallingDown 196 of 196 held rows
+		-- 4b18b5c: FallingDown 196 of 196 held rows; 4e60f11 (stand-up by ChangeState, P1 L4): 196
 		local w = world(true, {})
 		local boar = enemy(7, "Boar", "FrenzyBoar", true, false)
 		holdAndRelease(w, { boar }, {
@@ -515,26 +735,8 @@ describe("Every arrival order keeps the copy upright from its first physics step
 		expectUpright(w, kobold, UPRIGHT.states.off, 2)
 	end)
 
-	it("a Humanoid parented after the tag, in the same frame: off at PreSimulation, before physics", function()
-		-- 4b18b5c: asked once with no Humanoid and never again, FallingDown 196 of 196 held rows
-		local w = world(true, {})
-		local boar, humanoid = enemy(7, "Boar", "FrenzyBoar", true, true, true)
-		holdAndRelease(w, { boar }, {
-			function()
-				w.tag(boar)
-				expect(boar:GetAttribute(NAMES.state)).toBe(UPRIGHT.states.waiting)
-				expect(boar:GetAttribute(NAMES.why)).toBe(UPRIGHT.whys.noHumanoid)
-			end,
-			function()
-				(humanoid :: Instance).Parent = boar
-			end,
-		})
-		expect(copyOf(w, boar).askedSteps).toBe(0)
-		expect(copyOf(w, boar).enabledOnFirstRow).toBe(false)
-		expectUpright(w, boar, UPRIGHT.states.off, 2)
-	end)
-
-	it("a Humanoid a frame late: met at that frame's PreSimulation, before its first physics step", function()
+	it("a Humanoid a frame late: caught as it arrives, before its first physics step", function()
+		-- 4e60f11: met at the next PreSimulation already down, FallingDown on every held row
 		local w = world(true, {})
 		local boar, humanoid = enemy(7, "Boar", "FrenzyBoar", true, true, true)
 		holdAndRelease(w, { boar }, {
@@ -543,28 +745,34 @@ describe("Every arrival order keeps the copy upright from its first physics step
 			end,
 		}, {
 			function()
-				(humanoid :: Instance).Parent = boar
+				w.parent(humanoid, boar)
 			end,
 		})
 		expect(copyOf(w, boar).askedSteps).toBe(0)
+		expect(copyOf(w, boar).askedState).toBe("None")
+		-- the tag's try, the PreSimulation's before the Humanoid came, then its arrival's
 		expectUpright(w, boar, UPRIGHT.states.off, 3)
 	end)
 
-	it("a turn-off the engine drops is read back and asked again before the first step", function()
-		-- The assumed engine (header) on 4b18b5c: GetStateEnabled true on the first row, FallingDown
-		-- 196 of 196 held rows, as the PC measured
+	it("a turn-off the engine drops is read back, and the copy it let fall is stood up", function()
+		-- The assumed engine (header). 4b18b5c: GetStateEnabled true on the first row, FallingDown
+		-- 196 of 196 held rows; 4e60f11 (stand-up by ChangeState, P1 L4): 196
 		local w, models = take(true, true)
-		for index = 1, 3 do
-			expect(copyOf(w, models[index]).enabledOnFirstRow).toBe(false)
-			expectUpright(w, models[index], UPRIGHT.states.off, 2)
+		-- the shot's boar and kobold: asked as tagged, fallen on that frame's physics step
+		for index = 1, 2 do
+			expect(copyOf(w, models[index]).enabledOnFirstRow).toBe(true)
+			expectUpright(w, models[index], UPRIGHT.states.stoodUp, 2)
 		end
+		-- the field kobold, met before the first frame: asked again at its PreSimulation, in time
+		expect(copyOf(w, models[3]).enabledOnFirstRow).toBe(false)
+		expectUpright(w, models[3], UPRIGHT.states.off, 2)
 	end)
 
 	it("a pack-spawned kobold, standing at spawn and held later, is kept upright in every arrival order", function()
 		-- PC 435(h) on 4b18b5c: a kobold's client Humanoid read FallingDown on 331 of 440 Idle rows.
 		-- Each order brings an unanchored kobold; 60 rows later a hold anchors it (S("hold")) for
 		-- HELD_ROWS rows, then lets it go. 4b18b5c: no FallingDown row only for the whole batch; every
-		-- other order HELD_ROWS rows from the hold on, never asked.
+		-- other order HELD_ROWS rows from the hold on, never asked. P1 L0 and L2 (#9, #13): Running.
 		local function tag(w: World, model: Model): () -> ()
 			return function()
 				w.tag(model)
@@ -575,9 +783,9 @@ describe("Every arrival order keeps the copy upright from its first physics step
 				w.attribute(model, name, value)
 			end
 		end
-		local function parent(humanoid: Instance?, model: Model): () -> ()
+		local function parent(w: World, humanoid: Instance?, model: Model): () -> ()
 			return function()
-				(humanoid :: Instance).Parent = model
+				w.parent(humanoid, model)
 			end
 		end
 		local orders: { any } = {
@@ -602,7 +810,7 @@ describe("Every arrival order keeps the copy upright from its first physics step
 							then tag(w, kobold)
 							elseif step == "id" then set(w, kobold, "EntityId", 23)
 							elseif step == "kind" then set(w, kobold, "EntityKind", "Enemy")
-							else parent(humanoid, kobold)
+							else parent(w, humanoid, kobold)
 					)
 				end
 				return list
@@ -676,16 +884,21 @@ describe("Every arrival order keeps the copy upright from its first physics step
 
 	it("standUpright reads the copy first, turns the states off, reads them back, then stands it up", function()
 		local calls: { string } = {}
-		local copy = newCopy(false)
+		local copy = newCopy(false, Instance.new("Part"))
 		copy.state = "FallingDown"
+		copy.root.Anchored = true
 		local engine = engineHumanoid(copy)
 		local spy: any = setmetatable({}, {
 			__index = function(_, method: string)
-				return function(self: any, ...: any)
+				return function(_self: any, ...: any)
 					local args = { ... }
 					table.insert(calls, method .. (if args[1] ~= nil then " " .. args[1].Name else ""))
-					return engine[method](self, ...)
+					return engine[method](engine, ...)
 				end
+			end,
+			__newindex = function(_, property: string, value: any)
+				table.insert(calls, property .. " " .. tostring(value))
+				engine[property] = value
 			end,
 		})
 		local state, why = Replication.standUpright(spy)
@@ -694,9 +907,14 @@ describe("Every arrival order keeps the copy upright from its first physics step
 		expect(calls[1]).toBe("GetState")
 		expect(calls[#calls]).toBe("ChangeState " .. UPRIGHT.standUpState)
 		expect(copy.state).toBe(UPRIGHT.standUpState)
+		expect(copy.evaluates).toBe(false)
+		-- P1 L3's order: the state machine off before the ChangeState, on a copy still held
 		expect(table.concat(calls, ",")).toBe(
 			"GetState,GetStateEnabled FallingDown,SetStateEnabled FallingDown,GetStateEnabled Ragdoll,"
-				.. "SetStateEnabled Ragdoll,GetStateEnabled FallingDown,GetStateEnabled Ragdoll,ChangeState Running"
+				.. "SetStateEnabled Ragdoll,GetStateEnabled Physics,SetStateEnabled Physics,"
+				.. "GetStateEnabled PlatformStanding,SetStateEnabled PlatformStanding,GetStateEnabled FallingDown,"
+				.. "GetStateEnabled Ragdoll,GetStateEnabled Physics,GetStateEnabled PlatformStanding,"
+				.. "EvaluateStateMachine false,ChangeState Running"
 		)
 	end)
 end)

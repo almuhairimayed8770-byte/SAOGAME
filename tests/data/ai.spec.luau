@@ -127,6 +127,24 @@ describe("ai data", function()
 		expect(AI.upright.client.maxTries / 60).toBeGreaterThan(1)
 	end)
 
+	it(
+		"a client's copy is caught as its Humanoid arrives and a fallen one stands up with its state machine off (D-543, D-544)",
+		function()
+			local client = AI.upright.client
+			-- P1 L2 on 4e60f11: the four states off inside the arrival handler, Running on every row
+			expect(client.catchOnArrival).toBe(true)
+			for _, name in { "FallingDown", "Ragdoll", "Physics", "PlatformStanding" } do
+				expect(table.find(client.offStates, name)).toBeTruthy()
+			end
+			for _, name in AI.upright.offStates do
+				expect(table.find(client.offStates, name)).toBeTruthy()
+			end
+			expect(table.find(client.offStates, client.standUpState)).toBeNil()
+			-- P1 L3: EvaluateStateMachine false, then ChangeState: the only stand-up that took while held
+			expect(client.rescue).toBe(client.rescues.stateMachine)
+		end
+	)
+
 	it("interrupt fallbacks are the section 6 durations", function()
 		expect(AI.interrupt.durations.Stagger).toBe(Combat.staggerDuration)
 		expect(AI.interrupt.durations.Break).toBe(Combat.breakDuration)
@@ -168,5 +186,28 @@ describe("ai data", function()
 				end
 			end
 		end
+	end)
+
+	it("a rush's landing aims past the stop by more than Studio's MoveTo tolerance (AI 440, 441, D-548)", function()
+		local movement = AI.movement
+		-- The PC's P2 probe: a goal within 0.933 never starts a standing Humanoid; walks stop 0.933 to
+		-- 1.4 short of their goal.
+		expect(movement.moveToToleranceStuds).toBeGreaterThanOrEqual(1.4)
+		-- Past that and the most a landing begins short of its stop (the rush speed times
+		-- haltLeadSeconds), and no farther than the PC walked a goal past a mark at full pace (5).
+		local fastest = 0
+		for _, def in Enemies.list() do
+			if def.archetype == "Charger" then
+				for _, attack in def.attacks do
+					if attack.arc == 0 or attack.groundShape == "Line" then
+						fastest = math.max(fastest, AI.rushSpeed(attack))
+					end
+				end
+			end
+		end
+		expect(movement.landAimStuds).toBeGreaterThan(
+			movement.moveToToleranceStuds + fastest * movement.haltLeadSeconds
+		)
+		expect(movement.landAimStuds).toBeLessThanOrEqual(5)
 	end)
 end)

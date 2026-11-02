@@ -9,7 +9,10 @@
 	             and 20 down on the right, and the right leg swings back under it and comes down on
 	             its toe (0.40, the thud at 0.42); the axe arm goes limp and the axe drops to the dirt,
 	             the head hangs
-	  0.40-2.30  down: a bounce, then panting (the chest heaves over the left hip, the free arm sways)
+	  0.40-2.30  down: a bounce, then panting (the chest heaves over the left hip, the free arm sways);
+	             the axe stays gripped with its head planted on the dirt until 2.37, never under it
+	             (D-542: each key's Weapon X solved so the axe block's lowest corner sits 0.01 over
+	             the field)
 	  2.30-2.92  gets up: the right side comes up off the toe, the body rises past its stance, the
 	             right leg swings under it and comes straight down where it stood; the axe comes up
 	The left foot never leaves the field: the body turns about the left hip and the left leg keeps
@@ -363,7 +366,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.02, 14.2, 22.3),
 				LeftHip = rot(26.55, 9.24, 13.82),
 				RightHip = rot(-11.31, -4.08, 23.6),
-				Weapon = rot(-98.88, 0, 0),
+				Weapon = rot(-30.12, 0, 0),
 			},
 		},
 		{
@@ -376,7 +379,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.66, 14.11, 22.35),
 				LeftHip = rot(26.07, 9.09, 13.89),
 				RightHip = posRot(0, 0, 0.004, -11.78, -4.25, 23.56),
-				Weapon = rot(-99.64, 0, 0),
+				Weapon = rot(-30.38, 0, 0),
 			},
 		},
 		{
@@ -389,7 +392,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.34, 14.03, 22.41),
 				LeftHip = rot(25.71, 8.97, 13.95),
 				RightHip = posRot(0, 0, 0.006, -12.12, -4.37, 23.54),
-				Weapon = rot(-99.95, 0, 0),
+				Weapon = rot(-30.52, 0, 0),
 			},
 		},
 		{
@@ -402,7 +405,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.22, 14, 22.43),
 				LeftHip = rot(25.58, 8.93, 13.97),
 				RightHip = posRot(0, 0, 0.007, -12.25, -4.42, 23.53),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.56, 0, 0),
 			},
 		},
 		{
@@ -415,7 +418,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.35, 14.03, 22.4),
 				LeftHip = rot(25.71, 8.97, 13.95),
 				RightHip = posRot(0, 0, 0.006, -12.12, -4.37, 23.54),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.53, 0, 0),
 			},
 		},
 		{
@@ -428,7 +431,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.72, 14.12, 22.31),
 				LeftHip = rot(26.07, 9.09, 13.89),
 				RightHip = posRot(0, 0, 0.004, -11.78, -4.25, 23.56),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.45, 0, 0),
 			},
 		},
 		{
@@ -441,7 +444,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.22, 14.24, 22.19),
 				LeftHip = rot(26.55, 9.24, 13.82),
 				RightHip = rot(-11.31, -4.08, 23.6),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -454,7 +457,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.22, 14.24, 22.19),
 				LeftHip = rot(26.55, 9.24, 13.82),
 				RightHip = rot(-11.31, -4.08, 23.6),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -467,7 +470,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.22, 14.24, 22.19),
 				LeftHip = rot(26.55, 9.24, 13.82),
 				RightHip = rot(-11.31, -4.08, 23.6),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -480,7 +483,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.22, 14.24, 22.19),
 				LeftHip = rot(26.55, 9.24, 13.82),
 				RightHip = rot(-11.31, -4.08, 23.6),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -493,7 +496,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.21, 14.24, 22.19),
 				LeftHip = rot(26.54, 9.24, 13.82),
 				RightHip = rot(-11.32, -4.08, 23.6),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -506,7 +509,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.18, 14.23, 22.2),
 				LeftHip = rot(26.51, 9.23, 13.82),
 				RightHip = rot(-11.34, -4.09, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -519,7 +522,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.13, 14.22, 22.21),
 				LeftHip = rot(26.47, 9.21, 13.83),
 				RightHip = posRot(0, 0, 0.001, -11.39, -4.11, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.35, 0, 0),
 			},
 		},
 		{
@@ -532,7 +535,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.07, 14.21, 22.23),
 				LeftHip = rot(26.41, 9.19, 13.84),
 				RightHip = posRot(0, 0, 0.001, -11.45, -4.13, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.37, 0, 0),
 			},
 		},
 		{
@@ -545,7 +548,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.99, 14.19, 22.24),
 				LeftHip = rot(26.33, 9.17, 13.85),
 				RightHip = posRot(0, 0, 0.002, -11.52, -4.16, 23.58),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.39, 0, 0),
 			},
 		},
 		{
@@ -558,7 +561,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.9, 14.16, 22.27),
 				LeftHip = rot(26.24, 9.14, 13.87),
 				RightHip = posRot(0, 0, 0.002, -11.61, -4.19, 23.57),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.42, 0, 0),
 			},
 		},
 		{
@@ -571,7 +574,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.79, 14.14, 22.29),
 				LeftHip = rot(26.13, 9.11, 13.88),
 				RightHip = posRot(0, 0, 0.003, -11.71, -4.23, 23.57),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.44, 0, 0),
 			},
 		},
 		{
@@ -584,7 +587,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.67, 14.11, 22.32),
 				LeftHip = rot(26.02, 9.07, 13.9),
 				RightHip = posRot(0, 0, 0.004, -11.83, -4.27, 23.56),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.47, 0, 0),
 			},
 		},
 		{
@@ -597,7 +600,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.54, 14.08, 22.36),
 				LeftHip = rot(25.89, 9.03, 13.92),
 				RightHip = posRot(0, 0, 0.005, -11.95, -4.31, 23.55),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.5, 0, 0),
 			},
 		},
 		{
@@ -610,7 +613,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.4, 14.04, 22.39),
 				LeftHip = rot(25.76, 8.99, 13.94),
 				RightHip = posRot(0, 0, 0.006, -12.08, -4.35, 23.54),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.53, 0, 0),
 			},
 		},
 		{
@@ -623,7 +626,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.26, 14.01, 22.42),
 				LeftHip = rot(25.63, 8.95, 13.96),
 				RightHip = posRot(0, 0, 0.007, -12.21, -4.4, 23.53),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.55, 0, 0),
 			},
 		},
 		{
@@ -636,7 +639,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.12, 13.97, 22.46),
 				LeftHip = rot(25.49, 8.9, 13.98),
 				RightHip = posRot(0, 0, 0.008, -12.35, -4.45, 23.52),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.58, 0, 0),
 			},
 		},
 		{
@@ -649,7 +652,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.98, 13.93, 22.49),
 				LeftHip = rot(25.35, 8.86, 14),
 				RightHip = posRot(0, 0, 0.009, -12.48, -4.5, 23.51),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.61, 0, 0),
 			},
 		},
 		{
@@ -662,7 +665,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.84, 13.9, 22.53),
 				LeftHip = rot(25.21, 8.81, 14.02),
 				RightHip = posRot(0, 0, 0.01, -12.62, -4.54, 23.5),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.66, 0, 0),
 			},
 		},
 		{
@@ -675,7 +678,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.7, 13.87, 22.56),
 				LeftHip = rot(25.08, 8.77, 14.05),
 				RightHip = posRot(0, 0, 0.011, -12.74, -4.59, 23.49),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.68, 0, 0),
 			},
 		},
 		{
@@ -688,7 +691,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.57, 13.83, 22.59),
 				LeftHip = rot(24.96, 8.73, 14.06),
 				RightHip = posRot(0, 0, 0.012, -12.87, -4.63, 23.48),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.71, 0, 0),
 			},
 		},
 		{
@@ -701,7 +704,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.45, 13.8, 22.62),
 				LeftHip = rot(24.84, 8.69, 14.08),
 				RightHip = posRot(0, 0, 0.013, -12.98, -4.67, 23.47),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.74, 0, 0),
 			},
 		},
 		{
@@ -714,7 +717,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.34, 13.78, 22.64),
 				LeftHip = rot(24.74, 8.66, 14.1),
 				RightHip = posRot(0, 0, 0.013, -13.08, -4.71, 23.46),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.76, 0, 0),
 			},
 		},
 		{
@@ -727,7 +730,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.25, 13.75, 22.67),
 				LeftHip = rot(24.65, 8.63, 14.11),
 				RightHip = posRot(0, 0, 0.014, -13.17, -4.74, 23.45),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.77, 0, 0),
 			},
 		},
 		{
@@ -740,7 +743,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.17, 13.73, 22.68),
 				LeftHip = rot(24.57, 8.61, 14.12),
 				RightHip = posRot(0, 0, 0.015, -13.25, -4.77, 23.45),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.79, 0, 0),
 			},
 		},
 		{
@@ -753,7 +756,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.11, 13.71, 22.7),
 				LeftHip = rot(24.51, 8.59, 14.13),
 				RightHip = posRot(0, 0, 0.015, -13.31, -4.79, 23.44),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.8, 0, 0),
 			},
 		},
 		{
@@ -766,7 +769,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.06, 13.7, 22.71),
 				LeftHip = rot(24.47, 8.57, 14.14),
 				RightHip = posRot(0, 0, 0.015, -13.35, -4.8, 23.44),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.81, 0, 0),
 			},
 		},
 		{
@@ -779,7 +782,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.03, 13.7, 22.72),
 				LeftHip = rot(24.44, 8.56, 14.14),
 				RightHip = posRot(0, 0, 0.016, -13.38, -4.81, 23.44),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.82, 0, 0),
 			},
 		},
 		{
@@ -792,7 +795,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.02, 13.69, 22.72),
 				LeftHip = rot(24.43, 8.56, 14.14),
 				RightHip = posRot(0, 0, 0.016, -13.39, -4.82, 23.43),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.82, 0, 0),
 			},
 		},
 		{
@@ -805,7 +808,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.03, 13.7, 22.72),
 				LeftHip = rot(24.44, 8.56, 14.14),
 				RightHip = posRot(0, 0, 0.016, -13.38, -4.81, 23.44),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.82, 0, 0),
 			},
 		},
 		{
@@ -818,7 +821,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.06, 13.7, 22.71),
 				LeftHip = rot(24.47, 8.57, 14.14),
 				RightHip = posRot(0, 0, 0.015, -13.35, -4.8, 23.44),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.81, 0, 0),
 			},
 		},
 		{
@@ -831,7 +834,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.11, 13.71, 22.7),
 				LeftHip = rot(24.51, 8.59, 14.13),
 				RightHip = posRot(0, 0, 0.015, -13.31, -4.79, 23.44),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.8, 0, 0),
 			},
 		},
 		{
@@ -844,7 +847,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.17, 13.73, 22.68),
 				LeftHip = rot(24.57, 8.61, 14.12),
 				RightHip = posRot(0, 0, 0.015, -13.25, -4.77, 23.45),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.79, 0, 0),
 			},
 		},
 		{
@@ -857,7 +860,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.25, 13.75, 22.67),
 				LeftHip = rot(24.65, 8.63, 14.11),
 				RightHip = posRot(0, 0, 0.014, -13.17, -4.74, 23.45),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.77, 0, 0),
 			},
 		},
 		{
@@ -870,7 +873,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.34, 13.78, 22.64),
 				LeftHip = rot(24.74, 8.66, 14.1),
 				RightHip = posRot(0, 0, 0.013, -13.08, -4.71, 23.46),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.76, 0, 0),
 			},
 		},
 		{
@@ -883,7 +886,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.45, 13.8, 22.62),
 				LeftHip = rot(24.84, 8.69, 14.08),
 				RightHip = posRot(0, 0, 0.013, -12.98, -4.67, 23.47),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.74, 0, 0),
 			},
 		},
 		{
@@ -896,7 +899,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.57, 13.83, 22.59),
 				LeftHip = rot(24.96, 8.73, 14.06),
 				RightHip = posRot(0, 0, 0.012, -12.87, -4.63, 23.48),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.71, 0, 0),
 			},
 		},
 		{
@@ -909,7 +912,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.7, 13.87, 22.56),
 				LeftHip = rot(25.08, 8.77, 14.05),
 				RightHip = posRot(0, 0, 0.011, -12.74, -4.59, 23.49),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.68, 0, 0),
 			},
 		},
 		{
@@ -922,7 +925,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.84, 13.9, 22.53),
 				LeftHip = rot(25.21, 8.81, 14.02),
 				RightHip = posRot(0, 0, 0.01, -12.62, -4.54, 23.5),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.66, 0, 0),
 			},
 		},
 		{
@@ -935,7 +938,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.98, 13.93, 22.49),
 				LeftHip = rot(25.35, 8.86, 14),
 				RightHip = posRot(0, 0, 0.009, -12.48, -4.5, 23.51),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.61, 0, 0),
 			},
 		},
 		{
@@ -948,7 +951,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.12, 13.97, 22.46),
 				LeftHip = rot(25.49, 8.9, 13.98),
 				RightHip = posRot(0, 0, 0.008, -12.35, -4.45, 23.52),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.58, 0, 0),
 			},
 		},
 		{
@@ -961,7 +964,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.26, 14.01, 22.42),
 				LeftHip = rot(25.63, 8.95, 13.96),
 				RightHip = posRot(0, 0, 0.007, -12.21, -4.4, 23.53),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.55, 0, 0),
 			},
 		},
 		{
@@ -974,7 +977,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.4, 14.04, 22.39),
 				LeftHip = rot(25.76, 8.99, 13.94),
 				RightHip = posRot(0, 0, 0.006, -12.08, -4.35, 23.54),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.53, 0, 0),
 			},
 		},
 		{
@@ -987,7 +990,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.54, 14.08, 22.36),
 				LeftHip = rot(25.89, 9.03, 13.92),
 				RightHip = posRot(0, 0, 0.005, -11.95, -4.31, 23.55),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.5, 0, 0),
 			},
 		},
 		{
@@ -1000,7 +1003,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.67, 14.11, 22.32),
 				LeftHip = rot(26.02, 9.07, 13.9),
 				RightHip = posRot(0, 0, 0.004, -11.83, -4.27, 23.56),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.47, 0, 0),
 			},
 		},
 		{
@@ -1013,7 +1016,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.79, 14.14, 22.29),
 				LeftHip = rot(26.13, 9.11, 13.88),
 				RightHip = posRot(0, 0, 0.003, -11.71, -4.23, 23.57),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.44, 0, 0),
 			},
 		},
 		{
@@ -1026,7 +1029,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.9, 14.16, 22.27),
 				LeftHip = rot(26.24, 9.14, 13.87),
 				RightHip = posRot(0, 0, 0.002, -11.61, -4.19, 23.57),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.42, 0, 0),
 			},
 		},
 		{
@@ -1039,7 +1042,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.99, 14.19, 22.24),
 				LeftHip = rot(26.33, 9.17, 13.85),
 				RightHip = posRot(0, 0, 0.002, -11.52, -4.16, 23.58),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.39, 0, 0),
 			},
 		},
 		{
@@ -1052,7 +1055,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.07, 14.21, 22.23),
 				LeftHip = rot(26.41, 9.19, 13.84),
 				RightHip = posRot(0, 0, 0.001, -11.45, -4.13, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.37, 0, 0),
 			},
 		},
 		{
@@ -1065,7 +1068,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.13, 14.22, 22.21),
 				LeftHip = rot(26.47, 9.21, 13.83),
 				RightHip = posRot(0, 0, 0.001, -11.39, -4.11, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.35, 0, 0),
 			},
 		},
 		{
@@ -1078,7 +1081,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.18, 14.23, 22.2),
 				LeftHip = rot(26.51, 9.23, 13.82),
 				RightHip = rot(-11.34, -4.09, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -1091,7 +1094,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.21, 14.24, 22.19),
 				LeftHip = rot(26.54, 9.24, 13.82),
 				RightHip = rot(-11.32, -4.08, 23.6),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -1104,7 +1107,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.22, 14.24, 22.19),
 				LeftHip = rot(26.55, 9.24, 13.82),
 				RightHip = rot(-11.31, -4.08, 23.6),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -1117,7 +1120,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.21, 14.24, 22.19),
 				LeftHip = rot(26.54, 9.24, 13.82),
 				RightHip = rot(-11.32, -4.08, 23.6),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -1130,7 +1133,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.18, 14.23, 22.2),
 				LeftHip = rot(26.51, 9.23, 13.82),
 				RightHip = rot(-11.34, -4.09, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -1143,7 +1146,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.13, 14.22, 22.21),
 				LeftHip = rot(26.47, 9.21, 13.83),
 				RightHip = posRot(0, 0, 0.001, -11.39, -4.11, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.35, 0, 0),
 			},
 		},
 		{
@@ -1156,7 +1159,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.07, 14.21, 22.23),
 				LeftHip = rot(26.41, 9.19, 13.84),
 				RightHip = posRot(0, 0, 0.001, -11.45, -4.13, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.37, 0, 0),
 			},
 		},
 		{
@@ -1169,7 +1172,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.99, 14.19, 22.24),
 				LeftHip = rot(26.33, 9.17, 13.85),
 				RightHip = posRot(0, 0, 0.002, -11.52, -4.16, 23.58),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.39, 0, 0),
 			},
 		},
 		{
@@ -1182,7 +1185,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.9, 14.16, 22.27),
 				LeftHip = rot(26.24, 9.14, 13.87),
 				RightHip = posRot(0, 0, 0.002, -11.61, -4.19, 23.57),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.42, 0, 0),
 			},
 		},
 		{
@@ -1195,7 +1198,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.79, 14.14, 22.29),
 				LeftHip = rot(26.13, 9.11, 13.88),
 				RightHip = posRot(0, 0, 0.003, -11.71, -4.23, 23.57),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.44, 0, 0),
 			},
 		},
 		{
@@ -1208,7 +1211,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.67, 14.11, 22.32),
 				LeftHip = rot(26.02, 9.07, 13.9),
 				RightHip = posRot(0, 0, 0.004, -11.83, -4.27, 23.56),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.47, 0, 0),
 			},
 		},
 		{
@@ -1221,7 +1224,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.54, 14.08, 22.36),
 				LeftHip = rot(25.89, 9.03, 13.92),
 				RightHip = posRot(0, 0, 0.005, -11.95, -4.31, 23.55),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.5, 0, 0),
 			},
 		},
 		{
@@ -1234,7 +1237,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.4, 14.04, 22.39),
 				LeftHip = rot(25.76, 8.99, 13.94),
 				RightHip = posRot(0, 0, 0.006, -12.08, -4.35, 23.54),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.53, 0, 0),
 			},
 		},
 		{
@@ -1247,7 +1250,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.26, 14.01, 22.42),
 				LeftHip = rot(25.63, 8.95, 13.96),
 				RightHip = posRot(0, 0, 0.007, -12.21, -4.4, 23.53),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.55, 0, 0),
 			},
 		},
 		{
@@ -1260,7 +1263,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.12, 13.97, 22.46),
 				LeftHip = rot(25.49, 8.9, 13.98),
 				RightHip = posRot(0, 0, 0.008, -12.35, -4.45, 23.52),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.58, 0, 0),
 			},
 		},
 		{
@@ -1273,7 +1276,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.98, 13.93, 22.49),
 				LeftHip = rot(25.35, 8.86, 14),
 				RightHip = posRot(0, 0, 0.009, -12.48, -4.5, 23.51),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.61, 0, 0),
 			},
 		},
 		{
@@ -1286,7 +1289,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.84, 13.9, 22.53),
 				LeftHip = rot(25.21, 8.81, 14.02),
 				RightHip = posRot(0, 0, 0.01, -12.62, -4.54, 23.5),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.66, 0, 0),
 			},
 		},
 		{
@@ -1299,7 +1302,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.7, 13.87, 22.56),
 				LeftHip = rot(25.08, 8.77, 14.05),
 				RightHip = posRot(0, 0, 0.011, -12.74, -4.59, 23.49),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.68, 0, 0),
 			},
 		},
 		{
@@ -1312,7 +1315,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.57, 13.83, 22.59),
 				LeftHip = rot(24.96, 8.73, 14.06),
 				RightHip = posRot(0, 0, 0.012, -12.87, -4.63, 23.48),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.71, 0, 0),
 			},
 		},
 		{
@@ -1325,7 +1328,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.45, 13.8, 22.62),
 				LeftHip = rot(24.84, 8.69, 14.08),
 				RightHip = posRot(0, 0, 0.013, -12.98, -4.67, 23.47),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.74, 0, 0),
 			},
 		},
 		{
@@ -1338,7 +1341,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.34, 13.78, 22.64),
 				LeftHip = rot(24.74, 8.66, 14.1),
 				RightHip = posRot(0, 0, 0.013, -13.08, -4.71, 23.46),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.76, 0, 0),
 			},
 		},
 		{
@@ -1351,7 +1354,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.25, 13.75, 22.67),
 				LeftHip = rot(24.65, 8.63, 14.11),
 				RightHip = posRot(0, 0, 0.014, -13.17, -4.74, 23.45),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.77, 0, 0),
 			},
 		},
 		{
@@ -1364,7 +1367,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.17, 13.73, 22.68),
 				LeftHip = rot(24.57, 8.61, 14.12),
 				RightHip = posRot(0, 0, 0.015, -13.25, -4.77, 23.45),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.79, 0, 0),
 			},
 		},
 		{
@@ -1377,7 +1380,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.11, 13.71, 22.7),
 				LeftHip = rot(24.51, 8.59, 14.13),
 				RightHip = posRot(0, 0, 0.015, -13.31, -4.79, 23.44),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.8, 0, 0),
 			},
 		},
 		{
@@ -1390,7 +1393,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.06, 13.7, 22.71),
 				LeftHip = rot(24.47, 8.57, 14.14),
 				RightHip = posRot(0, 0, 0.015, -13.35, -4.8, 23.44),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.81, 0, 0),
 			},
 		},
 		{
@@ -1403,7 +1406,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.03, 13.7, 22.72),
 				LeftHip = rot(24.44, 8.56, 14.14),
 				RightHip = posRot(0, 0, 0.016, -13.38, -4.81, 23.44),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.82, 0, 0),
 			},
 		},
 		{
@@ -1416,7 +1419,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.02, 13.69, 22.72),
 				LeftHip = rot(24.43, 8.56, 14.14),
 				RightHip = posRot(0, 0, 0.016, -13.39, -4.82, 23.43),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.82, 0, 0),
 			},
 		},
 		{
@@ -1429,7 +1432,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.03, 13.7, 22.72),
 				LeftHip = rot(24.44, 8.56, 14.14),
 				RightHip = posRot(0, 0, 0.016, -13.38, -4.81, 23.44),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.82, 0, 0),
 			},
 		},
 		{
@@ -1442,7 +1445,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.06, 13.7, 22.71),
 				LeftHip = rot(24.47, 8.57, 14.14),
 				RightHip = posRot(0, 0, 0.015, -13.35, -4.8, 23.44),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.81, 0, 0),
 			},
 		},
 		{
@@ -1455,7 +1458,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.11, 13.71, 22.7),
 				LeftHip = rot(24.51, 8.59, 14.13),
 				RightHip = posRot(0, 0, 0.015, -13.31, -4.79, 23.44),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.8, 0, 0),
 			},
 		},
 		{
@@ -1468,7 +1471,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.17, 13.73, 22.68),
 				LeftHip = rot(24.57, 8.61, 14.12),
 				RightHip = posRot(0, 0, 0.015, -13.25, -4.77, 23.45),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.79, 0, 0),
 			},
 		},
 		{
@@ -1481,7 +1484,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.25, 13.75, 22.67),
 				LeftHip = rot(24.65, 8.63, 14.11),
 				RightHip = posRot(0, 0, 0.014, -13.17, -4.74, 23.45),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.77, 0, 0),
 			},
 		},
 		{
@@ -1494,7 +1497,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.34, 13.78, 22.64),
 				LeftHip = rot(24.74, 8.66, 14.1),
 				RightHip = posRot(0, 0, 0.013, -13.08, -4.71, 23.46),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.76, 0, 0),
 			},
 		},
 		{
@@ -1507,7 +1510,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.45, 13.8, 22.62),
 				LeftHip = rot(24.84, 8.69, 14.08),
 				RightHip = posRot(0, 0, 0.013, -12.98, -4.67, 23.47),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.74, 0, 0),
 			},
 		},
 		{
@@ -1520,7 +1523,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.57, 13.83, 22.59),
 				LeftHip = rot(24.96, 8.73, 14.06),
 				RightHip = posRot(0, 0, 0.012, -12.87, -4.63, 23.48),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.71, 0, 0),
 			},
 		},
 		{
@@ -1533,7 +1536,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.7, 13.87, 22.56),
 				LeftHip = rot(25.08, 8.77, 14.05),
 				RightHip = posRot(0, 0, 0.011, -12.74, -4.59, 23.49),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.68, 0, 0),
 			},
 		},
 		{
@@ -1546,7 +1549,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.84, 13.9, 22.53),
 				LeftHip = rot(25.21, 8.81, 14.02),
 				RightHip = posRot(0, 0, 0.01, -12.62, -4.54, 23.5),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.66, 0, 0),
 			},
 		},
 		{
@@ -1559,7 +1562,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(42.98, 13.93, 22.49),
 				LeftHip = rot(25.35, 8.86, 14),
 				RightHip = posRot(0, 0, 0.009, -12.48, -4.5, 23.51),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.61, 0, 0),
 			},
 		},
 		{
@@ -1572,7 +1575,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.12, 13.97, 22.46),
 				LeftHip = rot(25.49, 8.9, 13.98),
 				RightHip = posRot(0, 0, 0.008, -12.35, -4.45, 23.52),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.58, 0, 0),
 			},
 		},
 		{
@@ -1585,7 +1588,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.26, 14.01, 22.42),
 				LeftHip = rot(25.63, 8.95, 13.96),
 				RightHip = posRot(0, 0, 0.007, -12.21, -4.4, 23.53),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.55, 0, 0),
 			},
 		},
 		{
@@ -1598,7 +1601,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.4, 14.04, 22.39),
 				LeftHip = rot(25.76, 8.99, 13.94),
 				RightHip = posRot(0, 0, 0.006, -12.08, -4.35, 23.54),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.53, 0, 0),
 			},
 		},
 		{
@@ -1611,7 +1614,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.54, 14.08, 22.36),
 				LeftHip = rot(25.89, 9.03, 13.92),
 				RightHip = posRot(0, 0, 0.005, -11.95, -4.31, 23.55),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.5, 0, 0),
 			},
 		},
 		{
@@ -1624,7 +1627,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.67, 14.11, 22.32),
 				LeftHip = rot(26.02, 9.07, 13.9),
 				RightHip = posRot(0, 0, 0.004, -11.83, -4.27, 23.56),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.47, 0, 0),
 			},
 		},
 		{
@@ -1637,7 +1640,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.79, 14.14, 22.29),
 				LeftHip = rot(26.13, 9.11, 13.88),
 				RightHip = posRot(0, 0, 0.003, -11.71, -4.23, 23.57),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.44, 0, 0),
 			},
 		},
 		{
@@ -1650,7 +1653,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.9, 14.16, 22.27),
 				LeftHip = rot(26.24, 9.14, 13.87),
 				RightHip = posRot(0, 0, 0.002, -11.61, -4.19, 23.57),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.42, 0, 0),
 			},
 		},
 		{
@@ -1663,7 +1666,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(43.99, 14.19, 22.24),
 				LeftHip = rot(26.33, 9.17, 13.85),
 				RightHip = posRot(0, 0, 0.002, -11.52, -4.16, 23.58),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.39, 0, 0),
 			},
 		},
 		{
@@ -1676,7 +1679,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.07, 14.21, 22.23),
 				LeftHip = rot(26.41, 9.19, 13.84),
 				RightHip = posRot(0, 0, 0.001, -11.45, -4.13, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.37, 0, 0),
 			},
 		},
 		{
@@ -1689,7 +1692,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.13, 14.22, 22.21),
 				LeftHip = rot(26.47, 9.21, 13.83),
 				RightHip = posRot(0, 0, 0.001, -11.39, -4.11, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.35, 0, 0),
 			},
 		},
 		{
@@ -1702,7 +1705,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.18, 14.23, 22.2),
 				LeftHip = rot(26.51, 9.23, 13.82),
 				RightHip = rot(-11.34, -4.09, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -1715,7 +1718,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.21, 14.24, 22.19),
 				LeftHip = rot(26.54, 9.24, 13.82),
 				RightHip = rot(-11.32, -4.08, 23.6),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -1728,7 +1731,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.22, 14.24, 22.19),
 				LeftHip = rot(26.55, 9.24, 13.82),
 				RightHip = rot(-11.31, -4.08, 23.6),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -1741,7 +1744,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.21, 14.24, 22.19),
 				LeftHip = rot(26.54, 9.24, 13.82),
 				RightHip = rot(-11.31, -4.08, 23.6),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -1754,7 +1757,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.19, 14.24, 22.2),
 				LeftHip = rot(26.52, 9.23, 13.82),
 				RightHip = rot(-11.33, -4.09, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -1767,7 +1770,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.16, 14.23, 22.2),
 				LeftHip = rot(26.49, 9.22, 13.82),
 				RightHip = rot(-11.36, -4.1, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -1780,7 +1783,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.14, 14.22, 22.21),
 				LeftHip = rot(26.47, 9.21, 13.83),
 				RightHip = posRot(0, 0, 0.001, -11.38, -4.11, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.36, 0, 0),
 			},
 		},
 		{
@@ -1793,7 +1796,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.12, 14.22, 22.21),
 				LeftHip = rot(26.45, 9.21, 13.83),
 				RightHip = posRot(0, 0, 0.001, -11.4, -4.12, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.37, 0, 0),
 			},
 		},
 		{
@@ -1806,7 +1809,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.11, 14.22, 22.22),
 				LeftHip = rot(26.45, 9.21, 13.83),
 				RightHip = posRot(0, 0, 0.001, -11.41, -4.12, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.37, 0, 0),
 			},
 		},
 		{
@@ -1819,7 +1822,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.12, 14.22, 22.21),
 				LeftHip = rot(26.46, 9.21, 13.83),
 				RightHip = posRot(0, 0, 0.001, -11.4, -4.11, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.37, 0, 0),
 			},
 		},
 		{
@@ -1832,7 +1835,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.16, 14.23, 22.2),
 				LeftHip = rot(26.49, 9.22, 13.83),
 				RightHip = rot(-11.36, -4.1, 23.59),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -1846,7 +1849,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.22, 14.24, 22.19),
 				LeftHip = rot(26.55, 9.24, 13.82),
 				RightHip = rot(-11.31, -4.08, 23.6),
-				Weapon = rot(-100, 0, 0),
+				Weapon = rot(-30.34, 0, 0),
 			},
 		},
 		{
@@ -1859,7 +1862,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.22, 14.22, 22.17),
 				LeftHip = rot(26.55, 9.23, 13.79),
 				RightHip = rot(-11.31, -4.08, 23.56),
-				Weapon = rot(-99.95, 0, 0),
+				Weapon = rot(-30.35, 0, 0),
 			},
 		},
 		{
@@ -1872,7 +1875,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.2, 14.06, 22.05),
 				LeftHip = rot(26.58, 9.13, 13.6),
 				RightHip = rot(-11.32, -4.03, 23.36),
-				Weapon = rot(-99.64, 0, 0),
+				Weapon = rot(-30.45, 0, 0),
 			},
 		},
 		{
@@ -1885,7 +1888,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.16, 13.68, 21.75),
 				LeftHip = rot(26.65, 8.91, 13.14),
 				RightHip = rot(-11.36, -3.94, 22.86),
-				Weapon = rot(-98.88, 0, 0),
+				Weapon = rot(-30.73, 0, 0),
 			},
 		},
 		{
@@ -1898,7 +1901,7 @@ local clip: Types.ClipDef = {
 				RightShoulder = rot(44.07, 13.03, 21.24),
 				LeftHip = rot(26.77, 8.52, 12.36),
 				RightHip = rot(-11.42, -3.76, 22.01),
-				Weapon = rot(-97.52, 0, 0),
+				Weapon = rot(-31.16, 0, 0),
 			},
 		},
 		{

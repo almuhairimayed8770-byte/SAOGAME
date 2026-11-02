@@ -934,11 +934,13 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - Passed: the drawn idle's feet (447), the landing at walk speed 24 (449), the drawn sprint into an attack (450; arms 18–21°), the drawn guard raise (451), and 15 of 17 dodges (452).
 - Failed: the sheathed guard's and the Draw's tip speed at 240 fps (444(a), 445(a)): every row over 84 studs/s is a 2.4–3.9 ms frame right after a 4.5–6.2 ms one, a frame with no physics in between reads 0, and over the pair the tip reads 49–86.5. The lock turn's pivot foot moves 0.012–0.094 (446(a), ≤ 0.01 asked). The locked drawn walk's feet are planted 34% of rows at 60 fps (27% at 144) with a p90 step of 0.065 on the screen against 0.019 on the joint chain (448). Two dodges turn the legs 21.6° and 20.2° on the press row (452(a)), and parts still move until 0.30–0.32 s. Being fixed.
 
-## Section AL on the PC (2026-11-02, f446653, in progress)
+## Section AL on the PC (2026-11-02, f446653)
 
 - 453(a) passed: the client's joint and anchor writes hold for the whole detached stretch and never reach the server, so D-531 stands.
-- 453(b) failed on 4 of 4 charges: on the row the Torso goes back on its joint it shows 0.63–0.64 off its joint, about 0.19 low and 0.6 ahead along the run, and lands back the next row. Being fixed. The client also detached the Torso for 7–8 rows while Idle right after a placement, before the charge (being checked with the fix).
+- 453(b) and 456 failed: on the row the Torso goes back on its joint it shows 0.63–0.64 off its joint, about 0.15–0.19 low and 0.6 ahead along the run, and lands back the next row, on every take at 60 and 144 fps; both rows step 0.60–0.70 against 0.48–0.56 at 60 fps and 0.65–0.67 against 0.22–0.28 at 144 (30 fps passes, 0.75–0.81 under 0.98, and so does one uphill take). The PC's probes found the hand-over has to happen at PreSimulation. Being fixed.
 - 453(c): the Head and Snout follow the drawn Torso on the same row.
+- Passed: the snout stays 0.061–0.073 short of the wall face on every detached row (454(a), 12 of 12), the steps off the launch rows (455(a), 0.48–0.58 at 60 fps, 0.29–0.32 at 144), the launch rows against the drawn root (455(b)), the wall runs' run, skid, slam and crouch rows (455(c)), the uphill run's stop at 22.00 (458(b), 3 of 3), a second charge apart from its re-attach rows (458(a)), the first launch row on 14 of 18 charges (458(c)), and the back charge (458(d), as 424(b)). The nameplate is adorned to the drawn Torso on every detached row (457(a)); after the re-attach it is adorned to the model, which the logger read as no Adornee.
+- Failed: the Charge clip's snap row and the two rows after it step 0.79–0.86, 0.60–0.67 and 0.53–0.57 at 60 fps against 0.51–0.53 (454(b), the uphill run in 458(b), and the row after 458(c)'s first); after the stop the body steps back 0.072–0.080 and then 0.040–0.046 at 60 fps on 5 of 6 takes, 0.022–0.038 at 144 (454(b)); shot 6's run rows lead the drawn root by 0.12–0.18 at the turn into the skid on 5 of 6 takes (455(c)); the nameplate misses the drawn body by 0.46–0.52 on stagger rows at 60 fps, and by 0.45 for the rest of a run after a late RushStarted moves the drawn body 0.45 back at lag 0.25 (457(b)); on the uphill run the Torso moves 0.08–0.20 on the slope over 5–9 rows after the stop (458(b)); and after a placement the client detached the Torso for 18–19 Idle rows on 3 takes. No SWITCH prompt showed in solo play, so 457(c) was not read. Being fixed.
 
 ## Section AI fixes, fourth part (2026-11-02, D-534 to D-537)
 
@@ -957,19 +959,35 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - 376(b), the sword in the idle hand for one frame when it leaves the back, is real on screen; the fix (WeaponMount's swap on the step that writes the grab pose) is chosen and comes with the next guard and Draw round.
 - Studio: section AN (items 465 to 469), run after section AM. Section AG marks each line they replace "Superseded by item …".
 
+## Section AM on the PC (2026-11-02, 006f057)
+
+- Passed: every hit's number shows, counted both ways, at 30, 60 and 144 fps and at lag 0.05 (459); the code's step back or aside stays under 12·dt at 30 and 60 (460(a)) and the engine adds nothing on Art rows (460(c)); Basic3's step back matches the in-game plan at 0.10 (463(a), 3 of 3) and its net move by 0.15 (463(b)); the sheathed plan is no longer zero (463(c)); the head stays 2.84–2.96 from the axe tip (463(f)).
+- Failed: Basic3's right arm and hand go 0.14–0.20 into the kobold's Torso at the walk-in rests at 30, 60 and 144, Horizontal's 0.053 at 144 and Rising Arc's 0.090 at 30 (461(a), (c)), with the joint chain reading the same, so the plan lets them in; placed at 2.0, the idle left hand is 0.30–0.45 inside the kobold's arm (461(e)). Basic1's blade is 0.43–0.57 deep at its key and still 0.19–0.40 in at clip 0.283 and at the clip's end (464): the plan keeps only 0.30–0.45 back where Lune kept 1.05, and the PC found it follows the kobold's idling axe. At a wall or pillar flush behind, the root box ends 0.24–0.50 inside the wall, the torso and head about 0.5 inside, and the body slides 3.4–5.9 studs along it over a take (462). One 144 fps row of Sharp Nail steps back 0.082 against 0.078 (460(a)). Being fixed.
+
+## Enemy clip, upright, landing, ribbon and measure fixes (2026-11-02, D-540 to D-550)
+
+- AG 392(b): an enemy's walk now crossfades by the player's gait rule (D-541). A boar wheeling at half speed walks on its hooves: lowest corner −0.092 → −0.002, slide 0.198 → 0.087–0.113 a frame. The kobold is unchanged.
+- AG 391(e): the Kobold Break's axe rests on the dirt instead of 1.75 under the floor and turns at most 2.6° a frame instead of flipping 67° (D-542). The Kobold Walk's axe no longer dips 0.34 under every step.
+- AG 391(c): the pass line is corrected. The boar rears its front hooves about 1.0 high, as the clip authors it, not 0.12 (D-540).
+- New specs: EnemyWalkStart (8 cases, 4 pending on their slide) and EnemyWeaponGround (11 cases; 3 clips pending, each over its bar by 0.29 studs or 1.9–2.6°).
+- Client upright, third pass (D-543, D-544): on 9063a60 every enemy copy that came while the client was in read FallingDown on every held row (442; 443 #38 on 456 of 456), because the Humanoid comes after the tag and an anchored copy that has fallen cannot be pulled out. The client now turns the fall states off inside the Humanoid's own arrival handler (the PC's P1 probe: Running on 2260 and 2080 of as many rows; Lune 196 → 0), and a copy still found down stands up with its state machine off (P1: 862 of 862; Lune 196 → 1). Item 474 confirms it from the game's own LocalScript.
+- Section AK's fails, re-read (D-545 to D-547, no code): the tip speeds of 444 and 445 were measured over the wrong frame time (the pose's own speed is 64.7–75.5 and 65.1–71.7, under 84); 446's chain read is built into the read (Lune 0.0785 = the PC's 0.076–0.078) and its screen slide is not reproduced, so item 476 splits physics yaw from the drawing; 448's 144 fps slide is real and reproduced (Lune 0.0503, the PC 0.0514), from D-334's take-up running a frame late on the screen; 452's two fails are the run's own stride on the press row.
+- The boar's landing at 60 fps (D-548, AI 440 and 441): the landing's MoveTo aimed at its stop, inside Studio's MoveTo arrival tolerance of about 0.93 (the PC's P2 probe), so the body stalled after one frame and rested 0.06–0.14 short. It now aims 4 studs past the stop and the service halts within 0.02: Lune slam −0.120 → −0.013, open run −0.131 → −0.017, landing 0.267 → 0.100 / 0.083 s; 144 stays within 0.02. 441(d)'s slide back is read on the drawn root (0.016); the Torso's other 0.2 is the Charge clip's own Recovery (D-549).
+- A late remote basic now draws its whole slash (D-550): 5.36–5.40 studs at every catch-up from 0.10 to 0.149, against 0.06–3.6 under D-538, from the clip's own blade, and nothing on a frozen frame.
+- Studio: section AO (items 470 to 481), run after section AN. Section AG marks each line they replace "Superseded by item …".
+
 ## Next three tasks
 
-1. Run the rest of section AL (items 454 to 458, in progress on the PC) and then sections AM (items 459 to 464) and AN
-   (items 465 to 469) of `docs/STUDIO_TASKS.md` on the owner's PC on the build with these fixes, every item with item 397's frame names, at
-   the frame rates and lags each names, judged on the BasePart read. Report every pass line with its numbers. Section
-   AI's and AJ's lines not superseded stand as written.
-2. Fix section AJ's fails (the client's enemy copies falling, 442 and 443; the server landing short at 60 fps and the
-   client's slide back, 440(e), 441(b) and (d)), section AK's (the tip on short frames, 444 and 445; the pivot foot,
-   446; the locked walk's planted feet, 448; the dodge's legs on the press row, 452), section AL's (the Torso's pop
-   when it goes back on its joint, 453(b)), and the AG fails the PC found on 4b18b5c (391(c), the boar Stagger's rear; 392(b), the boar's walk start; 376(a),
-   383 and 384 are fixed and re-tested in section AN);
-   all in progress, with the PC's engine probes. Their re-tests follow as later Studio sections. The owner's calls
-   (below, and in AI) go to the owner.
+1. Run section AN (items 465 to 469) of `docs/STUDIO_TASKS.md`, in progress on the owner's PC on 006f057, and then
+   section AO (items 470 to 481) on the build with these fixes, every item with item 397's frame names, at the frame
+   rates and lags each names, judged on the BasePart read. Report every pass line with its numbers. Earlier sections'
+   lines not superseded stand as written.
+2. Fix what is still open: section AL's boar rush lines (the pop when the Torso goes back on its joint, 453(b) and 456;
+   the launch, back-step, skid-turn, nameplate and slope rows of 454 to 458; the detached Idle rows after a placement),
+   section AM's (the hands and blade inside the kobold, 461 and 464; the body in the wall behind, 462; one 144 fps
+   step, 460(a)), 376(b), the sword in the idle hand for one frame (item 466 measures it until then), and whatever
+   sections AN and AO find; all in progress. 448's planted feet wait on item 477 and the owner's call below. Their
+   re-tests follow as later Studio sections. The owner's calls (below, and in AI) go to the owner.
 3. The rehearsal and the recording (item 438), once every line passes: rehearse the 11 shots in dev.luau order with the
    frame-tick square on and log any take that fails its own pass lines; if all pass, record each with Game Bar at 60
    fps, High quality, with **View > Stats** open during the fight for the fps reading, and hand the files over (here in
@@ -977,8 +995,47 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
    of `docs/ANIMATION_REVIEW.md` are filled (with AG item 391(f)'s enemy cells), and anything that reads wrong is fixed
    with the PoseEditor and recorded again. The section 16 numbers and the merge into `main` follow (Open items).
 
-### Open items (after the section AI fixes, fourth part, not in the three above)
+### Open items (after the enemy clip, upright, landing, ribbon and measure fixes, not in the three above)
 
+- **Owner calls from the enemy clip fixes (the default is chosen; say if not).**
+  - The boar's parry stagger keeps its rear-up, front hooves about 1.0 high, up in 0.1 s and down by 0.4 s (D-540); it
+    reads from the gameplay camera and the spec only says a parry staggers for 1.0 s. A low recoil (6–8° of pitch,
+    hooves about 0.3 high) would re-key its first 0.4 s with the same landing and footstep.
+  - The Kobold Overhead's axe bites 0.95 into the ground from 1.37 to 2.17 s, as the clip authors it; kept.
+  - A client copy rescued from a fall keeps its state machine off for the rest of its life (D-544); turning it back
+    on at release waits on item 474(e)'s FloorMaterial reading. If 474(a) still fails, more Studio rounds follow
+    rather than accepting the client's state as cosmetic (the P1 probe saw no drawn difference either way).
+  - The boar rocks back 0.2 after every run, as its Charge clip's Recovery steps the forelegs back under it (kept; 480(d)
+    reads the drawn root). Re-keying the Recovery so the body settles without moving back is the other way.
+  - The landing keeps its ease over the last ~0.1 s at 60 fps (WalkSpeed halving each frame), as D-525 asked.
+  - A late remote ribbon is aged by its own clip time, as an on-time one is, so at 30 fps with a catch-up of 0.12 or
+    more the whole slash shows for only 2–4 frames; aging it from its first drawn frame instead would keep it 0.13 s.
+    The ribbon's head leads the shown sword by 1–4 studs on the first frames because the shown clip is still fading
+    in; starting a late clip's blend-in part done would fix that at the cost of a one-frame pose pop on every late
+    remote clip (not done).
+  - The locked walk's planted foot on screen (448, D-334): the default is to re-base the gait's travel take-up to the
+    screen order (build the pose for this frame's physics travel) and Stride spec's engine-steps block with it, once
+    item 477 has read the physics step pattern; Workspace.PhysicsSteppingMethod stays at the place default unless 477(c)
+    shows Fixed makes the steps regular, and then it comes back to the owner (it costs physics time on every assembly).
+- **From the enemy clip fixes.** A boar setting off from behind still slides 0.100 (135°) and 0.113 (180°) a frame: a
+  rigid walk turned about its root at 110°/s cannot plant hooves 1.4 behind it; proposed, a steering layer in RigDriver
+  that turns each hip by the yaw rate, as the player's turn plant does (or a slower wheel turn while it walks). The
+  kobold crab-walks from behind (0.166 / 0.285 a frame), chasing straight at its target while it turns; proposed, walk
+  along its facing while more than wheelAngle off, as the Charger does. The kobold's flinches put the axe 0.389 under
+  and both flinches and its Stagger turn the axe about 22° in one frame (pending in EnemyWeaponGround); the audit has no
+  Stagger-out-of-the-Overhead plan. Lune does not model the 144 Hz client's root interpolation (item 473 (g) reports it).
+- **From the client upright and measure fixes.** An EntityId that arrived after the Humanoid would miss the arrival
+  catch and fall once into the rescue (the PC data show EntityId arriving with the tag). The client's fall-state list is
+  wider than the server's (it adds Physics and PlatformStanding). 448's take-up fix, proposed: Locomotion fits a 240 Hz
+  step accumulator to the travel it sees and takes up this frame's predicted steps, falling back to D-334's take-up when
+  a frame's travel is not a whole number of steps; on the PC's patterns the per-row error drops from 1 to 0 substeps at
+  144 and from 4 to 2 at 60, and on item 282's irregular 2–6 pattern no take-up can hold 0.04 a frame at run speed.
+- **From the landing and ribbon fixes.** The landing's Humanoid model is fitted to the PC's P2 rows, not engine
+  internals, so items 479 and 480 are the real test; the pace drops below WalkSpeed 2 on the last rows, where P2 only
+  measured starts from rest. A slam's landing aims 4 studs into the wall, so the Humanoid pushes on the face until the
+  halt (under 0.1 s in Lune). 441(c)'s +0.043 one second after Done is not reproduced in Lune; the suspect is Recover's
+  AlignOrientation turn about the centre of mass, which 480(c) logs. Set lags from about 0.116 give a catch-up of 0.15 or
+  more, past the snap's landing, so they draw no ribbon.
 - **From the ribbon fixes.** 376(b), the sword drawn in the idle hand for one frame as it leaves the back, is a
   real screen fault; its fix (WeaponMount's swap on the step that writes the grab pose) is approved and comes with the
   next guard and Draw round, and item 466 measures it until then. Studio's own lag adds about 0.034 s to the catch-up

@@ -229,12 +229,23 @@ describe("Locomotion.attach", function()
 		expect(idle.weight).toBe(1)
 
 		local walkSpeed = Rigs.Boar.walkSpeed
+		-- The player's gait rule (D-541): from stride.rateFloor of the walk speed up the walk shows
+		-- alone, paced to the body (a boar wheeling at half speed walks on its hooves, not half on
+		-- its idle's); below it the walk holds rateFloor and hands weight to Idle.
 		state.speed = walkSpeed / 2
 		for _ = 1, 60 do
 			animator:step(FRAME)
 		end
-		expect(walk.weight).toBeCloseTo(0.5, 1e-6)
+		expect(walk.weight).toBeCloseTo(1, 1e-6)
 		expect(walk.speed).toBeCloseTo(0.5, 1e-6)
+
+		state.speed = Config.stride.rateFloor * walkSpeed / 2
+		for _ = 1, 60 do
+			animator:step(FRAME)
+		end
+		expect(walk.weight).toBeCloseTo(0.5, 1e-6)
+		expect(idle.weight).toBeCloseTo(0.5, 1e-6)
+		expect(walk.speed).toBeCloseTo(Config.stride.rateFloor, 1e-6)
 
 		state.speed = walkSpeed * 2
 		for _ = 1, 60 do
@@ -283,13 +294,14 @@ describe("Locomotion.attach", function()
 			animator:step(FRAME)
 			expect(walk.targetWeight).toBe(0)
 		end
-		-- The drawn body moves at half the walk speed while its root stands.
+		-- The drawn body moves at half the walk speed while its root stands: the walk alone at half
+		-- its pace (D-541).
 		state.speed = 0
 		state.moveDir = Vector3.zero
 		for _ = 1, 3 do
 			drawnAt = (drawnAt :: Vector3) + Vector3.new(0, 0, -walkSpeed / 2 * FRAME)
 			animator:step(FRAME)
-			expect(walk.targetWeight).toBeCloseTo(0.5, 1e-3)
+			expect(walk.targetWeight).toBeCloseTo(1, 1e-3)
 			expect(walk.speed).toBeCloseTo(0.5, 1e-3)
 		end
 		-- Back on its root: the root's own state again.

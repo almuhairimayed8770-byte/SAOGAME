@@ -2335,9 +2335,16 @@ describe("the legs follow the drawn body while it is drawn away from its root (D
 						local speed = moved.Magnitude / FRAME
 						if speed > THRESHOLD then
 							moving += 1
-							local paced = math.clamp(speed, ChoreoData.minSpeed * WALK, ChoreoData.maxSpeed * WALK)
+							-- The rig's gait rule (D-541): the walk alone from stride.rateFloor of the
+							-- walk speed up, paced to the drawn body; below it rateFloor and the idle.
+							local floor = ChoreoData.locomotion.stride.rateFloor * WALK
+							local paced = math.clamp(
+								math.max(speed, floor),
+								ChoreoData.minSpeed * WALK,
+								ChoreoData.maxSpeed * WALK
+							)
 							expect(math.abs(frame.gait - paced) <= 1e-2).toBe(true)
-							expect(frame.walkTarget).toBeCloseTo(math.min(1, speed / WALK), 1e-3)
+							expect(frame.walkTarget).toBeCloseTo(math.min(1, speed / floor), 1e-3)
 						else
 							still += 1
 							expect(frame.walkTarget).toBe(0)

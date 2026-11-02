@@ -3547,7 +3547,7 @@ describe("Replication: a remote opener drawn from the sheath (D-473)", function(
 		expect(worst < 10).toBe(true)
 	end)
 
-	it("a drawn opener at the same catch-up stays as it was (2.8 to 4.6 degrees)", function()
+	it("a drawn opener at the same catch-up stays under 10 degrees (0 to 6.9)", function()
 		local worst = 0
 		for _, late in { 0.085, 0.1, 0.12, 0.15, 0.2, 0.25 } do
 			local off = opener(true, late)
