@@ -52,9 +52,12 @@
 	  HandBack  it slides from where it stood onto the root over handBackSeconds, longer for a longer
 	            way at the catch-up pace, on handBackEasing; then it is Done and drawn on its root.
 	            A late root still coming in under the body (within settleStuds of where it stood,
-	            closing on it faster than settleRestSpeed: the server still landing it) is waited
-	            for first, the slide's clock held for at most settleSeconds, so the body never slides
-	            back to meet a root that then carries it forward again (D-602).
+	            closing on it faster than settleRestSpeed on some step of the last
+	            settleRestSeconds: the server still landing it) is waited for first, for at most
+	            settleSeconds, so the body never slides back to meet a root that then carries it
+	            forward again (D-602). A step on which the replicated root did not move is no rest:
+	            on 30 fps rows the root comes in on some rows only (D-648). While it waits the
+	            body stands where it was drawn, and the slide starts again from there.
 	  Frozen    a death: the body stays where it was drawn (the death freeze and the shatter play
 	            there); it never goes back.
 	A root put somewhere else while the body is drawn away from it (a placement, a teleport: it
@@ -165,6 +168,9 @@ export type State = {
 	handSeconds: number,
 	handLast: number?, -- the server time of the hand-back's last step
 	handWaited: number, -- seconds the slide has waited for a late root coming in under it
+	-- The server time of the last step on which the root (before physics) came nearer to where the
+	-- body was drawn faster than settleRestSpeed (D-648); nil: none seen.
+	rootCameAt: number?,
 	drawn: CFrame?, -- the CFrame last drawn (Frozen keeps it)
 	shown: Vector3?, -- where the root stood on the last frame drawn before the rush (RushDraw.new)
 	released: boolean, -- an Armed crouch that will not launch (RushDraw.release)
@@ -175,6 +181,7 @@ export type State = {
 	dustAt: number?, -- how far down the path the skid's next puff rises (nil: from the strike beat)
 	rootSeen: Vector3?, -- where the root stood on the last step (RushDraw.step's `root`)
 	standingSeen: Vector3?, -- where the root stood before physics on the last step (`standing`)
+	standingAt: number?, -- the server time of that step
 }
 
 local RushDraw = {}
@@ -352,6 +359,7 @@ function RushDraw.new(line: Line, shown: Vector3?): State
 		handSeconds = 0,
 		handLast = nil,
 		handWaited = 0,
+		rootCameAt = nil,
 		drawn = nil,
 		shown = shown,
 		released = false,
@@ -362,6 +370,7 @@ function RushDraw.new(line: Line, shown: Vector3?): State
 		dustAt = nil,
 		rootSeen = nil,
 		standingSeen = nil,
+		standingAt = nil,
 	}
 end
 
@@ -1053,23 +1062,29 @@ local function teleported(state: State, root: CFrame): boolean
 	return jump - math.max(0, forward) > TUNING.teleportStuds
 end
 
--- D-602: whether the hand-back's slide waits this step for a late root still coming in under the
--- body: the root (before physics, `stands`; `stood` the last step's) is within settleStuds, flat, of
--- where the body stood, and came nearer to it by more than settleRestSpeed over the `since` seconds
--- since the last step, while the slide has waited less than settleSeconds. The server lands a rush's
--- root on its stop over several frames, each covering part of what is left (D-525): a slide begun
--- on the way would draw the body back toward a root that then carries it forward again (AR 506(c),
--- 30 fps: back 0.024 to 0.064, then forward). A root far behind (a jam or a stagger told mid-run) is
--- slid onto as it comes: there the slide only shortens.
-local function comingIn(state: State, spot: Vector3, stands: Vector3, stood: Vector3?, since: number): boolean
-	if stood == nil or state.handWaited >= TUNING.settleSeconds then
+-- D-602, D-648: whether the hand-back's slide waits this step for a late root still coming in
+-- under the body: the root the slide goes to (`root`, where the frame draws it: Settle hands back
+-- once that is within settleStuds) is within settleStuds, flat, of where the body stood, and on some
+-- step of the last settleRestSeconds the root before physics came nearer to where the body was
+-- drawn by more than settleRestSpeed over that step's seconds (`rootCameAt`), while the slide has
+-- waited less than settleSeconds. Read on the root before physics, a root 1.0 to 1.4 short on a
+-- 1/30 s row was past settleStuds while the place the frame draws had already handed back. The
+-- server lands a rush's root on its stop over several frames, each covering part of what is left
+-- (D-525): a slide begun on the way would draw the body back toward a root that then carries it
+-- forward again (AR 506(c), 30 fps: back 0.024 to 0.064, then forward).
+-- One step is no rest: on 30 fps rows the replicated root came in on some rows only, so a row on
+-- which it did not move let the slide's clock run a row toward a root still landing (AS 527,
+-- Q527_30_2: back 0.017 against 0.010, then forward 0.009 and 0.003). A root far behind (a jam or a
+-- stagger told mid-run) is slid onto as it comes: there the slide only shortens.
+local function comingIn(state: State, spot: Vector3, goal: Vector3, now: number): boolean
+	local came = state.rootCameAt
+	if came == nil or state.handWaited >= TUNING.settleSeconds then
 		return false
 	end
-	local near = (flat(stands) - flat(spot)).Magnitude
-	if near > TUNING.settleStuds then
+	if (flat(goal) - flat(spot)).Magnitude > TUNING.settleStuds then
 		return false
 	end
-	return (flat(stood) - flat(spot)).Magnitude - near > TUNING.settleRestSpeed * since
+	return now - came < TUNING.settleRestSeconds
 end
 
 --- One frame: where to draw the root part at server time `now` (`dt` the frame's length) given
@@ -1099,8 +1114,19 @@ function RushDraw.step(
 		return state.drawn
 	end
 	local stands = (standing or root).Position
-	local stood = state.standingSeen
+	local stood, stoodAt = state.standingSeen, state.standingAt
 	state.standingSeen = stands
+	state.standingAt = now
+	-- A step on which the root came nearer to where the body was drawn faster than settleRestSpeed
+	-- (D-648): the hand-back waits settleRestSeconds past the last one.
+	local lastDrawn = state.drawn
+	if lastDrawn ~= nil and stood ~= nil and stoodAt ~= nil then
+		local spot = flat(lastDrawn.Position)
+		local came = (flat(stood) - spot).Magnitude - (flat(stands) - spot).Magnitude
+		if came > TUNING.settleRestSpeed * math.max(0, now - stoodAt) then
+			state.rootCameAt = now
+		end
+	end
 	if teleported(state, root) then
 		if phase ~= "Armed" then
 			state.phase = "Done"
@@ -1211,10 +1237,17 @@ function RushDraw.step(
 	local from = state.handFrom or root
 	local since = math.max(0, now - (state.handLast or now))
 	state.handLast = now
-	if since > 0 and comingIn(state, from.Position, stands, stood, since) then
-		-- A late root still landing under the body: the slide waits for it (D-602).
-		state.handAt += since
+	if since > 0 and comingIn(state, from.Position, root.Position, now) then
+		-- A late root still landing under the body: the slide waits for it (D-602). The body stands
+		-- where it was drawn, never carried on by a root that moves under a slide begun (a held
+		-- slide drew it forward by its share of the root's step: AS 527, 0.009 and 0.003), and the
+		-- slide starts again from there (D-648).
+		local held = state.drawn or from
+		state.handFrom = held
+		state.handAt = now
 		state.handWaited += since
+		state.drawn = held
+		return held
 	end
 	local u = if state.handSeconds > 0 then math.clamp((now - state.handAt) / state.handSeconds, 0, 1) else 1
 	if u >= 1 then

@@ -120,6 +120,40 @@ describe("CollisionGroups (D-167)", function()
 		end
 	)
 
+	it("joinPlayers makes the character's column collide, a Head that arrives not colliding too (D-630)", function()
+		-- The owner's avatar brings a MeshPart Head with CanCollide off; the stand-off's keep-out and
+		-- its wall room cast keepOut.parts as what the engine collides (D-314, D-517).
+		local Combat = Harness.load("src/shared/data/combat")
+		local character = Instance.new("Model")
+		local column: { BasePart } = {}
+		for _, name in Combat.contact.standOff.keepOut.parts do
+			table.insert(column, part(name, character, nil, name ~= "Head"))
+		end
+		local accessory = Instance.new("Accessory")
+		accessory.Parent = character
+		local hair = part("Handle", accessory, nil, false)
+		local hat = part("Head", accessory, nil, false) -- named like the head, not the character's own
+		local hand = part("LeftHand", character, nil, false)
+		CollisionGroups.joinPlayers(character)
+		for _, columnPart in column do
+			expect(columnPart.CanCollide).toBe(true)
+			expect(columnPart.CollisionGroup).toBe(GROUPS.players)
+		end
+		-- Accessories and the limbs keep their own CanCollide.
+		expect(hair.CanCollide).toBe(false)
+		expect(hat.CanCollide).toBe(false)
+		expect(hand.CanCollide).toBe(false)
+		-- A Head an appearance swaps in later collides as it joins; a part added under it does not.
+		local swapped = part("Head", character, nil, false)
+		CollisionGroups.playerPartAdded(swapped, character)
+		expect(swapped.CanCollide).toBe(true)
+		expect(swapped.CollisionGroup).toBe(GROUPS.players)
+		local face = part("Head", swapped, nil, false)
+		CollisionGroups.playerPartAdded(face, character)
+		expect(face.CanCollide).toBe(false)
+		expect(face.CollisionGroup).toBe(GROUPS.players)
+	end)
+
 	it("clear: a root overlapping a colliding player or enemy part is not clear; the world and props are", function()
 		local boar = Instance.new("Model")
 		boar.PrimaryPart = part("HumanoidRootPart", boar, GROUPS.rushing)

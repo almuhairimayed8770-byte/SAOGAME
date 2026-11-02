@@ -1334,7 +1334,8 @@ local function keepOutOf(
 	hurt: { BasePart },
 	poseLag: number,
 	motion: TargetMotion?,
-	stance: number?
+	stance: number?,
+	stillUntil: number?
 ): KeepOut?
 	-- The faces as they stand now: a frame, a size and whether it is over a held part, each.
 	local faceFrames: { CFrame } = {}
@@ -1462,6 +1463,15 @@ local function keepOutOf(
 			open -= math.max(0, math.min(last, span[2]) - math.max(first, span[1]))
 		end
 		return math.max(open, 0)
+	end
+	-- And outside the activation hold a swing planned before its end waits for (StandOff.still,
+	-- D-604): the tell holds still in every direction, so the keep-out grows none of its way, back or
+	-- aside, before `stillUntil` (D-631). The target's clock still runs through it (openBetween).
+	local function growBetween(first: number, last: number): number
+		if stillUntil == nil or last <= first then
+			return openBetween(first, last)
+		end
+		return openBetween(math.clamp(stillUntil, first, last), last)
 	end
 	-- The target as its clips carry it on through the swing (D-565, StandOffOptions.target): each
 	-- body part on its joint path from the target's root, posed at a clip time of the swing by the
@@ -2199,6 +2209,17 @@ local function keepOutOf(
 		backRoom[k], asideRoom[k] = roomBack, roomAside
 		return roomBack, roomAside
 	end
+	-- The share of sample k's stretch (as roomOf reads it) the lead may grow in: none of it before
+	-- `stillUntil`, the activation hold a swing planned before its end waits for (D-631).
+	local function leadShare(k: number): number
+		if stillUntil == nil then
+			return 1
+		end
+		local first = math.min(from + (k - 2) * step, endTime)
+		local last = math.min(from + (k - 1) * step, endTime)
+		local open = openBetween(first, last)
+		return if open > 0 then growBetween(first, last) / open else 1
+	end
 	local function show(last: number)
 		for k = #shownBack, math.min(last, count) do
 			local ahead = math.min(k + lead, count)
@@ -2208,17 +2229,30 @@ local function keepOutOf(
 				shownBack[2], shownAside[2] = 0, 0
 				continue
 			end
-			-- As far as any sample within the lead calls for, less what the speed covers to it.
+			-- As far as any sample within the lead calls for, less what the speed covers to it. In
+			-- the activation hold the tell holds still (D-604, D-631): a sample there grows only
+			-- to what it needs itself (the held pose's hands out of a target that walked in on it;
+			-- at a lock the stance took that before the hold, D-606), never toward a later sample,
+			-- and the lead starts with the hold's end, at the speed from there on.
 			local wantBack, wantAside = back[k + 1], aside[k + 1]
-			local spentBack, spentAside = 0, 0
-			for j = k + 1, ahead do
-				local roomBack, roomAside = roomOf(j)
-				spentBack += roomBack
-				spentAside += roomAside
-				wantBack = math.max(wantBack, back[j + 1] - spentBack)
-				wantAside = math.max(wantAside, aside[j + 1] - spentAside)
-			end
 			local roomBack, roomAside = roomOf(k)
+			local share = leadShare(k)
+			if share <= 0 and from + k * step > (stillUntil :: number) + KEY_EPSILON then
+				-- A pose past the hold's end, a sample ahead: it waits for the hold's end too.
+				wantBack, wantAside = wasBack, wasAside
+			elseif share > 0 then
+				local spentBack, spentAside = 0, 0
+				for j = k + 1, ahead do
+					local nextBack, nextAside = roomOf(j)
+					local nextShare = leadShare(j)
+					spentBack += nextBack * nextShare
+					spentAside += nextAside * nextShare
+					wantBack = math.max(wantBack, back[j + 1] - spentBack)
+					wantAside = math.max(wantAside, aside[j + 1] - spentAside)
+				end
+				roomBack *= share
+				roomAside *= share
+			end
 			local grewAside = math.clamp(wantAside - wasAside, 0, roomAside)
 			-- Back and aside are one slide: together within the sprint cap.
 			local sprint = SPRINT * step
@@ -2241,13 +2275,13 @@ local function keepOutOf(
 			end
 			local below = series[index + 1]
 			-- Between two samples the series moves on with the clip time outside the strikes'
-			-- holds (D-427), so a hold the hit-stop skips carries none of it.
+			-- holds (D-427), so a hold the hit-stop skips carries none of it, nor the activation hold.
 			local fraction = position - index
-			if #stills > 0 then
+			if #stills > 0 or stillUntil ~= nil then
 				local first = from + (index - 1) * step
-				local whole = openBetween(first, first + step)
+				local whole = growBetween(first, first + step)
 				if whole > 0 and whole < step then
-					fraction = math.clamp(openBetween(first, clipTime) / whole, 0, 1)
+					fraction = math.clamp(growBetween(first, clipTime) / whole, 0, 1)
 				end
 			end
 			return below + (series[index + 2] - below) * fraction
@@ -2479,6 +2513,7 @@ function ContactPredictor.standOff(
 	-- The step waits for the activation hold to end (D-604).
 	local stepFrom = if distance ~= nil then ContactPredictor.stepStart(clip, from, to, distance) else from
 	local holdEnd = holdEndOf(clip)
+	local still = if holdEnd ~= nil and holdEnd > from and opts.stance == nil then holdEnd else nil
 	local keepOut = if opts.keepOut == true
 		then keepOutOf(
 			model,
@@ -2493,7 +2528,8 @@ function ContactPredictor.standOff(
 			parts,
 			math.max(opts.poseLag or DEFAULT_POSE_LAG, 0),
 			opts.target,
-			opts.stance
+			opts.stance,
+			still
 		)
 		else nil
 	if distance == nil and keepOut == nil then
@@ -2509,7 +2545,7 @@ function ContactPredictor.standOff(
 		away = away,
 		from = stepFrom,
 		to = to,
-		still = if holdEnd ~= nil and holdEnd > from and opts.stance == nil then holdEnd else nil,
+		still = still,
 		room = room,
 		keep = if keepOut ~= nil then keepOut.keep else nil,
 		keepUntil = if keepOut ~= nil then math.min(clip.duration, opts.stance or math.huge) else nil,

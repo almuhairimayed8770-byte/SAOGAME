@@ -509,6 +509,11 @@ local Fx = {
 			Fabric = "Wood",
 		},
 		defaultSurface = "Stone",
+		-- Humanoid states (Enum.HumanoidStateType names) a character walks the ground in: while in
+		-- one, a FloorMaterial of Air is no new floor, and its footsteps keep the set of the last
+		-- floor it stood on (D-636; a copy that read Air for 30 s of walking on grass played the
+		-- stone set, AS 518(i)). In any other state Air plays defaultSurface, as before.
+		airFloorStates = { "Running", "RunningNoPhysics" },
 		armoredAttribute = "Armored", -- a character attribute the server writes for heavy sets
 		-- The world beds (section 15: wind at the rim everywhere, an ambience per biome), played by
 		-- Ambience.luau through SfxPool.loop. On the Playground island (playground.luau fieldRadius

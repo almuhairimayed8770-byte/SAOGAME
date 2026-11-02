@@ -10,7 +10,8 @@
 	target along the line from the body (a fighter backed to a wall or a pillar), the stop grows so
 	the fighter's swing has its room between that world and the body's own blocker face
 	(stopDistanceFor, D-627): from stopDistance alone a kobold stood 2.2-2.7 from a wall behind a
-	fighter, where the swings lean 2.0-2.8 deep, and the engine shoved the body out. When the
+	fighter, where the swings lean 2.0-2.8 deep, and the engine shoved the body out. That stop is
+	landed on (D-643), so the walk's last tick and its brake never carry the body inside it. When the
 	target is inside reach * engageFraction and roughly ahead, it begins the attack: the 1.0 s
 	overhead wind-up with the yellow (GuardBreak) edge from the attack def. During the wind-up it
 	keeps facing the target, but only at the Brute's slow wind-up turn rate, so a late sidestep or a
@@ -44,20 +45,17 @@ local Brute: BruteModule = {
 function Brute.onChaseStart(_brain: Brain.Brain) end
 
 --- Where the chase stops (D-627): stopDistance, grown when the world stands close behind the
---- target along the line from the body, so that wherever the walk's last tick and the brake leave
---- the body, at least backRoom.leanStuds stand between that world and the body's own blocker face
---- (faceReach: the face across its facing line, square to the target it turns to face), and never
---- past backRoom.maxStopDistance. The world is looked for only as far behind as a face could still
---- call for more than stopDistance.
+--- target along the line from the body, so that at least backRoom.leanStuds stand between that
+--- world and the body's own blocker face (faceReach: the face across its facing line, square to the
+--- target it turns to face), with backRoom.brakeSeconds of its pace to spare, and never past
+--- backRoom.maxStopDistance. A grown stop is landed on (chase, D-643), so neither the walk's last
+--- tick nor a brake carries the body inside it. The world is looked for only as far behind as a face
+--- could still call for more than stopDistance.
 function Brute.stopDistanceFor(brain: Brain.Brain, target: Brain.Target): number
 	local base = tuning.stopDistance
 	local room = tuning.backRoom
-	local pace = brain:speed()
-	-- The tick that stops the walk finds the body up to a tick's walk inside the stop, and the brake
-	-- carries it on a little past where it was told.
-	local slack = pace * AI.tickSeconds() + pace * room.brakeSeconds
 	-- The stop that leaves leanStuds with the world at the target's own centre.
-	local needed = room.leanStuds + brain:faceReach() + slack
+	local needed = room.leanStuds + brain:faceReach() + brain:speed() * room.brakeSeconds
 	local look = needed - base
 	if look <= 0 then
 		return base
@@ -70,14 +68,28 @@ function Brute.stopDistanceFor(brain: Brain.Brain, target: Brain.Target): number
 end
 
 --- Turns toward the target and walks up to its stop (stopDistanceFor): along its facing, slowed,
---- while it wheels round from more than wheelAngle off (D-598), then straight at the target.
+--- while it wheels round from more than wheelAngle off (D-598), then straight at the target. A stop
+--- grown for a fighter backed to the world is landed on (D-643): from within the walk's last tick
+--- and its brake of it (the pace times AI.tickSeconds() + backRoom.brakeSeconds), the body goes
+--- straight onto the stop and rests there (EnemyService's landing, D-525). Between the swing's room
+--- (leanStuds) and the attacks' engage range a flush wall leaves a band narrower than a tick's walk
+--- (0.2 against the kobold's 0.5): a walk that stops where a tick finds it inside its stop, and
+--- then brakes, would stand anywhere across it.
 function Brute.chase(brain: Brain.Brain, dt: number, target: Brain.Target): Types.EnemyAttackDef?
 	brain:turnToward(target.direction, tuning.turnRate, dt)
-	if target.distance > Brute.stopDistanceFor(brain, target) then
+	local stop = Brute.stopDistanceFor(brain, target)
+	if target.distance > stop then
+		local pace = brain:speed()
 		if brain:angleTo(target.direction) > tuning.wheelAngle then
-			brain:moveForward(brain:speed() * tuning.wheelSpeedMultiplier)
+			brain:moveForward(pace * tuning.wheelSpeedMultiplier)
+		elseif
+			stop > tuning.stopDistance
+			and target.distance - stop <= pace * (AI.tickSeconds() + tuning.backRoom.brakeSeconds)
+		then
+			local at = target.position - target.direction * stop
+			brain:moveDirect(Vector3.new(at.X, brain:position().Y, at.Z), pace, true)
 		else
-			brain:moveToward(target.position, brain:speed())
+			brain:moveToward(target.position, pace)
 		end
 	else
 		brain.context.stop()

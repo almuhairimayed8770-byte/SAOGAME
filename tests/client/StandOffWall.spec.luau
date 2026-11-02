@@ -1321,7 +1321,8 @@ local PUSH_PASSES = 4
 -- 3.5 to 8.1 ms); `contact`: the engine leaves a pressed colliding part this deep in the face (the
 -- PC's walk-in rests the deepest colliding part 0.050-0.056 in; 0.04 rests the bench's at
 -- 0.055-0.058); `headDepth` and `headCollides`: the owner's Head, a MeshPart 1.27 deep that does
--- not collide.
+-- not collide (with `headCollides` nil each column part collides as its CanCollide reads, D-630);
+-- `art`: the Art swung 3 times after Basic1 (a clip name; Sharp Nail when nil).
 local CombatData = Harness.load("src/shared/data/combat")
 local HIT_STOP_FRAMES = CombatData.hitStopFrames
 local STRIKE_EPSILON: number = CombatData.contact.keyEpsilon
@@ -1361,10 +1362,14 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 	for _, name in b.column do
 		sizes[name] = (avatar.model:FindFirstChild(name) :: BasePart).Size
 	end
-	-- What the engine collides (and pushes out): the column, less a Head that does not collide.
+	-- What the engine collides (and pushes out): the column, less a Head that does not collide, and
+	-- with `headCollides` nil less any part whose CanCollide reads false (D-630).
 	local colliding: { string } = {}
 	for _, name in b.column do
-		if name ~= "Head" or pc.headCollides ~= false then
+		local collides = if name == "Head" and pc.headCollides ~= nil
+			then pc.headCollides
+			else (avatar.model:FindFirstChild(name) :: BasePart).CanCollide
+		if collides then
 			table.insert(colliding, name)
 		end
 	end
@@ -2054,20 +2059,90 @@ describe("the stand-off at the kobold's own stand under the PC's conditions (ite
 	end)
 end)
 
-describe("the stand-off at a Brute's stop by a fighter backed to the world (D-627)", function()
+-- The owner's Head as the PC logged it (F1e, items 496 and 519; dev.luau hitMatrix.ownerHead): a
+-- MeshPart 1.27 deep whose box's back sits 0.16 behind the UpperTorso's at the drawn idle (the
+-- pre-check read UpperTorso 0.050 in and the Head 0.212), arriving with CanCollide off. The bench's
+-- own Head sits further forward on the torso, so its neck is moved back until the box stands there,
+-- measured on the avatar's own parts as the drawn idle poses them (as HitMatrix.leanColumns fits
+-- its second body, D-642): the Head the bench pushes is the part as posed, not a number.
+local OWNER_HEAD = Harness.load("src/shared/data/dev").hitMatrix.ownerHead
+local OWNER_HEAD_DEPTH: number = OWNER_HEAD.depthStuds
+local OWNER_HEAD_BEHIND: number = OWNER_HEAD.behindStuds
+
+-- How far back (+Z, the root's space) a box's furthest corner stands.
+local function backOf(frame: CFrame, size: Vector3): number
+	local most = -math.huge
+	for _, x in { -1, 1 } do
+		for _, y in { -1, 1 } do
+			for _, z in { -1, 1 } do
+				most = math.max(most, frame:PointToWorldSpace(size / 2 * Vector3.new(x, y, z)).Z)
+			end
+		end
+	end
+	return most
+end
+
+local function ownerHead(b: any): BasePart
+	local Joints = Harness.load("src/shared/choreo/Joints")
+	local Pose = Harness.load("src/shared/choreo/Pose")
+	local model = b.avatar.model
+	local head = model:FindFirstChild("Head") :: BasePart
+	local torso = model:FindFirstChild("UpperTorso") :: BasePart
+	head.Size = Vector3.new(head.Size.X, head.Size.Y, OWNER_HEAD_DEPTH)
+	local idle = ClipSampler.sample(Harness.load("src/shared/clips/player/OneHandedSword/IdleDrawn"), 0)
+	for _ = 1, 2 do
+		local solved = Pose.solve(model, CFrame.identity, idle)
+		local shift = backOf(solved.UpperTorso, torso.Size) + OWNER_HEAD_BEHIND - backOf(solved.Head, head.Size)
+		for _, joint in Joints.list(model) do
+			if joint.Name == "Neck" then
+				if joint:IsA("Motor6D") then
+					joint.C0 = CFrame.new(0, 0, shift) * joint.C0
+				else
+					local attachment = (joint :: any).Attachment0 :: Attachment
+					attachment.CFrame = CFrame.new(0, 0, shift) * attachment.CFrame
+				end
+			end
+		end
+		local chain = Pose.chain(model)
+		b.chain = chain
+		b.solve = function(root: CFrame, transforms: { [string]: CFrame }): { [string]: CFrame }
+			local posed: { [string]: CFrame } = { [chain.rootName] = root }
+			for _, link in chain.links do
+				local transform = transforms[link.name] or CFrame.identity
+				posed[link.part1] = posed[link.part0] * link.c0 * transform * link.c1Inverse
+			end
+			return posed
+		end
+	end
+	local solved = Pose.solve(model, CFrame.identity, idle)
+	local behind = backOf(solved.Head, head.Size) - backOf(solved.UpperTorso, torso.Size)
+	assert(math.abs(behind - OWNER_HEAD_BEHIND) < 1e-3, ("the owner's Head stands %.4f behind"):format(behind))
+	head.CanCollide = false
+	return head
+end
+
+describe("the stand-off at a Brute's stop by a fighter backed to the world (D-627, D-642)", function()
 	it(
-		"leaves Sharp Nail and Vertical their lean, the kobold's blockers never pushing the body, at 60 and 144",
+		"leaves Sharp Nail and Vertical their lean with the owner's Head colliding, the kobold's blockers never pushing the body, at 60 and 144",
 		function()
 			-- A Brute stops far enough off a fighter backed to a wall or a pillar to leave its lean
-			-- (ai.luau backRoom.leanStuds) between the world and its Blocker: server/BruteBackRoom
-			-- measures the gap through EnemyService, data/ai pins leanStuds to the deepest Art's lean
-			-- column. Here the PC's take swings Basic1 and three of the Art at that gap, and the engine
-			-- never pushes the body out of the kobold's blockers (the share `koboldPush` reads). At the
-			-- old stop (stopDistance less the last tick's walk, and efa907c's stop square on a wall,
-			-- 3.367) the same take is squeezed between the two: the kobold shoves it.
+			-- (ai.luau backRoom.leanStuds) between the world and its Blocker, and lands on that stop
+			-- (D-643): server/BruteBackRoom measures the gap through EnemyService, data/ai pins
+			-- leanStuds to the deepest lean column. The column is read on the parts that collide, on a
+			-- body whose Head stands where the owner's does (D-642): the owner's Head collides
+			-- (D-630), and Vertical's held start pose leans it 1.68 behind the root, into a wall the
+			-- engine then pushes the body off, 2.01 in front at the strike 0.07 s later. Here the PC's
+			-- take swings Basic1 and three of the Art at that gap with the owner's colliding Head, and
+			-- the engine never pushes the body out of the kobold's blockers (the share `koboldPush`
+			-- reads). At c4f0e1c's lean (2.95, read on the matrix's Head, which sits forward of the
+			-- owner's, as the deepest front plus the behind at the same moment) Vertical is squeezed
+			-- between the two: the engine pushes the leaning Head off the wall and the kobold shoves
+			-- the strike back.
 			local AI = Harness.load("src/shared/data/ai")
-			local Enemies = Harness.load("src/shared/data/enemies")
+			local CollisionGroups = Harness.load("src/server/world/CollisionGroups")
 			local b = bench()
+			local head = ownerHead(b)
+			CollisionGroups.joinPlayers(b.avatar.model)
 			-- The blockers' face on the line (x within the root box's half width of the kobold's).
 			local rootSize = (b.avatar.model.PrimaryPart :: BasePart).Size
 			local blockerFace = math.huge
@@ -2089,19 +2164,18 @@ describe("the stand-off at a Brute's stop by a fighter backed to the world (D-62
 					hits = true,
 					jitter = if fps == 144 then 0.45 else nil,
 					contact = 0.04,
-					headDepth = 1.27,
-					headCollides = false,
 					art = art,
 				}
 			end
 			local function line(label: string, art: string, shape: string, fps: number, gap: number, result: any)
 				print(
-					("[G6b] %s %s %s %d, gap %.3f: pre %.3f | root %.3f UT %.3f LT %.3f Head %.3f | First-to-First over the long-row bar %d | push %.3f (path %.3f), of it the kobold's %.3f (path %.3f)"):format(
+					("[F1g] %s %s %s %d, gap %.3f, Head CanCollide %s: pre %.3f | root %.3f UT %.3f LT %.3f Head %.3f | First-to-First over the long-row bar %d | push %.3f (path %.3f), of it the kobold's %.3f (path %.3f)"):format(
 						label,
 						art,
 						shape,
 						fps,
 						gap,
+						tostring(head.CanCollide),
 						result.pre,
 						result.root,
 						result.torso.UpperTorso,
@@ -2115,44 +2189,127 @@ describe("the stand-off at a Brute's stop by a fighter backed to the world (D-62
 					)
 				)
 			end
+			expect(head.CanCollide).toBe(true)
 			local lean: number = AI.archetypes.Brute.backRoom.leanStuds
 			for _, art in { "SharpNail", "Vertical" } do
 				for _, shape in { "wall", "pillar" } do
 					for _, fps in { 60, 144 } do
 						local face = blockerFace - lean
 						local result = take(b, shape, face, fps, face + 0.9, conditions(fps, art))
-						line("the new stop", art, shape, fps, lean, result)
+						line("the stop", art, shape, fps, lean, result)
 						-- The engine's own contact before the chain, no colliding part deeper through it.
 						expect(result.pre <= 0.07).toBe(true)
 						expect(result.root <= 0.07).toBe(true)
 						expect(result.torso.UpperTorso <= 0.07).toBe(true)
 						expect(result.torso.LowerTorso <= 0.07).toBe(true)
+						expect(result.torso.Head <= 0.07).toBe(true)
 						expect(result.firstLag).toBe(0)
 						-- The swing fits between the two faces: the kobold's blockers never push the body.
+						expect(result.koboldPush <= 1e-6).toBe(true)
 						expect(result.koboldPath <= 1e-6).toBe(true)
 					end
 				end
 			end
-			-- The old stop, root to root, as gaps: less the Blocker's front, plus the root resting the
-			-- engine's 0.05 in the wall (its half depth off the face).
+			-- The stops before, as gaps: c4f0e1c's lean (the least gap its stop left), and the old stop
+			-- root to root (stopDistance less the last tick's walk, and efa907c's stop square on a wall,
+			-- 3.367) less the Blocker's front, plus the root resting the engine's 0.05 in the wall (its
+			-- half depth off the face). Each is squeezed with the owner's Head: the kobold shoves it.
 			local brute = AI.archetypes.Brute
-			local pace = Enemies.byId("KoboldAxeman").moveSpeed * brute.chaseSpeedMultiplier
+			local pace = Harness.load("src/shared/data/enemies").byId("KoboldAxeman").moveSpeed
+				* brute.chaseSpeedMultiplier
 			local front = KOBOLD_AT.Z - blockerFace
 			local behind = rootSize.Z / 2 - 0.05
 			for _, old in
 				{
-					{ art = "SharpNail", stop = brute.stopDistance - pace * AI.tickSeconds() },
-					{ art = "Vertical", stop = 3.367 },
+					{ label = "c4f0e1c's lean", art = "Vertical", gap = 2.95 },
+					{
+						label = "the old stop",
+						art = "SharpNail",
+						gap = brute.stopDistance - pace * AI.tickSeconds() - front + behind,
+					},
+					{ label = "the old stop", art = "Vertical", gap = 3.367 - front + behind },
 				}
 			do
-				local gap = old.stop - front + behind
-				local face = blockerFace - gap
+				local face = blockerFace - old.gap
 				local result = take(b, "wall", face, 60, face + 0.9, conditions(60, old.art))
-				line("the old stop", old.art, "wall", 60, gap, result)
-				expect(gap < lean).toBe(true)
+				line(old.label, old.art, "wall", 60, old.gap, result)
+				expect(old.gap < lean).toBe(true)
 				expect(result.koboldPush > 0.05).toBe(true)
 			end
 			b.kobold:Destroy()
 		end
 	)
+end)
+
+describe("the owner's Head at a flush wall and a pillar behind (item 519, D-630)", function()
+	it("the character's column collides: the Head rests and swings no deeper than the torsos", function()
+		-- Item 519's takes on the owner's Head, as the server's own join leaves the character: the
+		-- Head arrives not colliding, CharacterReady joins it (CollisionGroups.joinPlayers), and the
+		-- bench's engine pushes what then collides. Before D-630 nothing pushed the Head: it stood
+		-- 0.19 in at rest, 0.24 through Sharp Nail and 0.56 through Vertical, whose lean carries the
+		-- Head about 0.5 behind the torso's back (the PC 0.14-0.21 and up to 0.40). Now it rests on
+		-- the face with the torsos, at the engine's contact, and no lean carries it deeper. Every
+		-- other line of item 519 holds on the colliding Head. Vertical at the kobold's own stand is
+		-- a squeeze for the colliding Head (the face leaves 2.44 to the Blocker): the engine pushes
+		-- the leaning body forward and the Blocker pushes it back at the strike, 0.24-0.30 a row on
+		-- 3 / 6 / 5 rows at 30 / 60 / 144, all the engine's, so there (f) holds by its code share.
+		local CollisionGroups = Harness.load("src/server/world/CollisionGroups")
+		local b = bench()
+		local head = ownerHead(b)
+		CollisionGroups.joinPlayers(b.avatar.model)
+		for _, art in { "SharpNail", "Vertical" } do
+			for _, shape in (if art == "SharpNail" then { "wall", "pillar" } else { "wall" }) do
+				for _, fps in { 30, 60, 144 } do
+					local result = take(b, shape, 25.7, fps, 26.6, {
+						hits = true,
+						jitter = if fps == 144 then 0.45 else nil,
+						contact = 0.04,
+						art = art,
+					})
+					print(
+						("[519 Head] %s %s %d: CanCollide %s, size %.2f x %.2f x %.2f | pre-check Head %.3f, colliding %.3f | through the take Head %.3f, UpperTorso %.3f, LowerTorso %.3f, root %.3f | (d) past the long-row bar %.4f | (f) First-to-First over it %d | slide %.2f"):format(
+							art,
+							shape,
+							fps,
+							tostring(head.CanCollide),
+							head.Size.X,
+							head.Size.Y,
+							head.Size.Z,
+							result.preHead,
+							result.pre,
+							result.torso.Head,
+							result.torso.UpperTorso,
+							result.torso.LowerTorso,
+							result.root,
+							result.stepLag,
+							result.firstLag,
+							result.slide
+						)
+					)
+					-- The Head at rest and through the swings, as the colliding parts (item 519's 0.07).
+					expect(result.preHead <= 0.07).toBe(true)
+					expect(result.torso.Head <= 0.07).toBe(true)
+					-- The pre-check: the engine's own contact, not a squeeze.
+					expect(result.pre > b.gap).toBe(true)
+					expect(result.pre <= 0.07).toBe(true)
+					-- (b), (c), (d) and (f) as item 519 reads them.
+					expect(result.touching > 30).toBe(true)
+					expect(result.normal <= 1e-3).toBe(true)
+					expect(result.into <= 1e-3).toBe(true)
+					expect(result.root <= 0.07).toBe(true)
+					expect(result.torso.UpperTorso <= 0.07).toBe(true)
+					expect(result.torso.LowerTorso <= 0.07).toBe(true)
+					expect(result.stepLag <= 1e-3).toBe(true)
+					if art == "SharpNail" then
+						expect(result.firstLag).toBe(0)
+					end
+					expect(math.abs(result.slide) <= 1).toBe(true)
+					-- (e) on the rows that draw the swing alone at full weight.
+					expect(result.aloneRows > 100).toBe(true)
+					expect(result.alone <= 0.05).toBe(true)
+				end
+			end
+		end
+		b.kobold:Destroy()
+	end)
 end)

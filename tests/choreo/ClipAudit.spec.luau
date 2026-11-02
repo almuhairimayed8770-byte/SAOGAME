@@ -402,6 +402,41 @@ describe("ClipAudit: the rules catch what they are for", function()
 		expect(table.find(kinds(clip), "Sink") ~= nil).toBe(true)
 	end)
 
+	it(
+		"a stance change plays out of the stance it starts in, the Base set turning at its full weight (D-640)",
+		function()
+			local config = Audit.rigs.PlayerR15
+			local sheathe = ClipLibrary.get("player/OneHandedSword/SheatheStep")
+			local labels = {}
+			for _, plan in ClipAudit.plans(sheathe, ClipLibrary.get) do
+				table.insert(labels, plan.label)
+				local weights: { [string]: number? } = {}
+				for _, play in plan.plays do
+					weights[play.clip.id] = play.weight
+				end
+				-- Out of the drawn idle; the Base set turns to the idle once the clip is in.
+				expect(weights[config.drawnIdle]).toBe(1)
+				expect(weights[config.idle]).toBe(0)
+				local turns = Audit.leadSeconds + (if plan.cutIn then 0 else sheathe.blendIn)
+				for _, retarget in plan.retargets or {} do
+					expect(math.abs(retarget.at - turns) < 1e-9).toBe(true)
+					expect(retarget.weight).toBe(if retarget.clipId == config.idle then 1 else 0)
+				end
+				expect(#(plan.retargets or {})).toBe(2)
+			end
+			expect(#labels).toBe(1 + #Audit.idlePhases)
+			expect(kinds(sheathe)).toEqual({})
+			-- Played as any other one-shot (over the drawn idle, which it never leaves), its feet,
+			-- set down in the idle's stance, are dragged back to the drawn one by its blend out.
+			local stances = config.stances
+			config.stances = nil
+			local ok, _, findings = pcall(ClipAudit.audit, bodyOf("PlayerR15"), sheathe, ClipLibrary.get)
+			config.stances = stances
+			expect(ok).toBe(true)
+			expect(table.find(ClipAudit.kindsOf(findings), "Slide") ~= nil).toBe(true)
+		end
+	)
+
 	it("a basic is chained mashed (one BasicAttackRequest refill after the swing before it) and on its beat", function()
 		-- CharacterController.basicAttack starts the next basic as soon as the request refills.
 		local World = Harness.load("src/shared/data/world")

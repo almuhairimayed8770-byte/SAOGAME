@@ -293,9 +293,10 @@ local Combat = {
 			wallGapStuds = 0.05,
 			-- The keep-out (D-314): a swing's own motion (the clip's root motion, its pose, and the
 			-- step above) never carries the body's colliding parts (`parts`: the R15 root, torsos and
-			-- head, what the engine collides of a character) deeper into the target's blocker
-			-- (D-198: its faces, the body's `bodyFace` and one `heldFace` over each part it holds,
-			-- D-315) than the swing found them. The plan poses the
+			-- head, what the engine collides of a character: CollisionGroups.joinPlayers switches
+			-- their CanCollide on, a Head that arrives without it too, D-630) deeper into the
+			-- target's blocker (D-198: its faces, the body's `bodyFace` and one `heldFace` over
+			-- each part it holds, D-315) than the swing found them. The plan poses the
 			-- clip every sampleSeconds from where the swing starts to its end and steps the body
 			-- back along the stand-off's line (straight away from the target) as far as the pose
 			-- went in (to within depthEpsilon of where it started); off a held part's face (a

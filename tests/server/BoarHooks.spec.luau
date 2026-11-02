@@ -1853,3 +1853,105 @@ describe("A rush's landing ends on a halt row, a row before the log's landed mar
 		end
 	)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- AS 525(g) and 526(g): the halt row in either order of the log's Heartbeat and the service's
+-- ------------------------------------------------------------------------------------------
+
+describe(
+	"A rush's halt row is the first row with landSlackStuds or less left, whichever order the log's Heartbeat and the service's run in (AS 525(g), 526(g))",
+	function()
+		it("halts on that row; a log after the service reads landed there, a log before it a row later", function()
+			-- The PC on 97cea9d (items 525 and 526): landed − 1 read left 0.025 to 0.049 as an ordinary
+			-- paced row (0.74 to 1.42 at 60, 2.24 to 2.82 at 144), and the first row with 0.02 or less
+			-- left already read velocity 0 (left 0.016 to 0.020), so the halt and landed fell on the same
+			-- row; one 526 take had the halt on landed − 1. EnemyService connects its step to the server's
+			-- Heartbeat (its heartbeat dependency); the PC's runtime log script connects its own, and the
+			-- engine, not the code, sets which of the two runs first. The service halts on the first row
+			-- from land with landSlackStuds or less left, and writes velocity 0 there: a log read after
+			-- the service (`written`) marks landed on the halt row, a log read before it (`velocity`) a
+			-- row later. Either way the halt row is the first row with left <= 0.02, the rows before it
+			-- are paced landing rows, and the body stands from it. Tolerant Humanoid, Studio-like frames.
+			local speed = AI.rushSpeed(BOAR.attacks[1])
+			local slack = AI.movement.landSlackStuds
+			local report = {}
+			for _, fps in { 60, 144 } do
+				for _, kind in { "slam", "open" } do
+					local stat = {
+						beforeLeft = { math.huge, -math.huge },
+						beforePaced = { math.huge, -math.huge },
+						haltLeft = { math.huge, -math.huge },
+						landedA = { math.huge, -math.huge },
+						landedB = { math.huge, -math.huge },
+					}
+					local function note(key: string, value: number)
+						local span = (stat :: any)[key]
+						span[1] = math.min(span[1], value)
+						span[2] = math.max(span[2], value)
+					end
+					for seed = 0, 7 do
+						local rows, landIndex, landedBefore = logRun(
+							if kind == "slam" then WALL_Z else nil,
+							{ mode = "tolerant", fps = fps, jitter = if seed == 0 then 0 else 0.06, seed = seed },
+							speed
+						)
+						local halt: number? = nil
+						for index = landIndex, #rows do
+							if rows[index].left <= slack then
+								halt = index
+								break
+							end
+						end
+						expect(halt).never.toBeNil()
+						local h = halt :: number
+						local landedAfter: number? = nil
+						for index = landIndex, #rows do
+							if rows[index].written < 1e-6 then
+								landedAfter = index
+								break
+							end
+						end
+						expect(rows[h].halts).toBe(1)
+						expect(rows[h].lands).toBe(0)
+						expect(landedBefore).toBe(h + 1)
+						expect(landedAfter).toBe(h)
+						for index = landIndex, h - 1 do
+							local row = rows[index]
+							expect(row.lands).toBe(1)
+							expect(row.left > slack).toBe(true)
+							local pace = math.min(speed, row.left / (AI.movement.landFrames * row.dt))
+							expect(math.abs(row.paced - pace)).toBeLessThanOrEqual(1e-4)
+						end
+						for index = h, #rows do
+							expect(math.abs(rows[index].along - rows[h].along)).toBeLessThanOrEqual(1e-6)
+						end
+						local landT = rows[landIndex].t
+						note("beforeLeft", rows[h - 1].left)
+						note("beforePaced", rows[h - 1].paced)
+						note("haltLeft", rows[h].left)
+						note("landedA", rows[h + 1].t - landT)
+						note("landedB", rows[h].t - landT)
+					end
+					table.insert(
+						report,
+						("%s %d Hz: halt row left %.4f-%.4f; the row before it left %.4f-%.4f paced %.3f-%.3f; land to landed %.3f-%.3f s read after the service (landed = halt row), %.3f-%.3f s read before it (halt row + 1)"):format(
+							kind,
+							fps,
+							stat.haltLeft[1],
+							stat.haltLeft[2],
+							stat.beforeLeft[1],
+							stat.beforeLeft[2],
+							stat.beforePaced[1],
+							stat.beforePaced[2],
+							stat.landedB[1],
+							stat.landedB[2],
+							stat.landedA[1],
+							stat.landedA[2]
+						)
+					)
+				end
+			end
+			print("[525(g)/526(g)] " .. table.concat(report, "\n  "))
+		end)
+	end
+)

@@ -27,6 +27,31 @@
 		local offsets = WalkStopPlant.step(state, dt, basePose, idlePose)
 		animator:setProcedural("walkStopPlant", offsets, 1)
 		if WalkStopPlant.done(state) then WalkStopPlant.cancel(state) end
+
+	The same machinery plants the feet under an attack (D-632; Studio item 511(c)). An attack clip
+	is authored from the idle's stand and blends in over a few frames: over a walk (or a stand the
+	clip moves a foot from) that blend swept each planted foot across the field from where it stood
+	to where the clip has it, 0.25 to 0.51 a 60 Hz row and down to -0.08. In the anime a monster
+	about to charge plants, digs in and lowers; its feet never skate. So when the clip comes in,
+	each leg holds the field point it stood on (not the root's: the root may still be braking under
+	it), and a leg that stood further than settleStuds from where the clip's first pose has it (at
+	the clock the network catch-up started it on) digs in: one group at a time (every group but the
+	lowest first), over stepSeconds of the clip's clock (its beat paces the dig-in, a hit-stop holds
+	it), its sole liftStuds clear of the straight path at the step's middle, onto where the clip has
+	the foot then. A leg that stood there already
+	follows the clip from the start, gliding off what it stood away. Every leg hangs from its hip as
+	the layers drew the body that step: it turns about the corner of its sole it stands on so the hip
+	holds it (the body moves over a planted foot as the clip's own solve does), and is never drawn
+	lower than that corner stood. The plant writes the hips over the composed pose
+	(Mixer.setPoseHook), so the blend, the clip's beat and the body's own motion are what the step
+	really drew. The field point is read on the root the row is drawn on: RigDriver carries the root
+	it read on by its last row's move, braking (enemy.gait.attackBrakeShare, attackBrakeSeconds).
+
+		WalkStopPlant.beginUnder(state, shownLastFrame, clipFirstPose, rootLastFrame)
+		mixer:setPoseHook("attackPlant", function(pose)
+			WalkStopPlant.stepUnder(state, clipAdvance, pose, clipPoseNow, rootThisRow)
+		end)
+		if WalkStopPlant.done(state) and not mixer:blendingIn(handle) then -- take the hook off
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -38,6 +63,7 @@ local Pose = require(Shared.choreo.Pose)
 local Easing = require(Shared.util.Easing)
 
 local NOISE = 1e-9 -- unit: seconds, float noise in a sum of frame times
+local SPACE_NOISE = 1e-9 -- unit: studs, float noise in a turn's axis or a corner's height
 
 export type Config = {
 	groups: { { string } }, -- the rig's foot parts, by the group each steps with, each hung from its own hip
@@ -53,6 +79,7 @@ type Leg = {
 	path: { Pose.Link }, -- the joints from the root part down to the leg, the hip last
 	corners: { Vector3 }, -- the sole's four corners in the leg's own space
 	sole: Vector3, -- the sole's centre in the leg's own space
+	attach: Vector3, -- where the hip hangs the leg, in the leg's own space
 }
 
 export type Plan = {
@@ -71,6 +98,11 @@ export type State = {
 	starts: { number }, -- per group: the stop's clock its step starts at
 	glides: { boolean }, -- per group: it glides to the idle's spots (no lift)
 	offsets: ClipSampler.Offsets,
+	-- Under an attack (beginUnder, D-632): per leg, where it stood on the field as the clip came
+	-- in, and, for a leg that stood where the clip's first pose has it (within settleStuds), its
+	-- offset from there (it follows the clip, gliding the offset off over stepSeconds).
+	field: { CFrame },
+	follows: { [number]: CFrame },
 }
 
 local WalkStopPlant = {}
@@ -121,6 +153,7 @@ function WalkStopPlant.plan(character: Model, rigId: string, config: Config): Pl
 				path = path,
 				corners = corners,
 				sole = Vector3.new(0, -half.Y, 0),
+				attach = hip.c1Inverse:Inverse().Position,
 			})
 		end
 	end
@@ -147,6 +180,8 @@ function WalkStopPlant.new(plan: Plan): State
 		starts = {},
 		glides = {},
 		offsets = offsets,
+		field = {},
+		follows = {},
 	}
 end
 
@@ -292,6 +327,151 @@ function WalkStopPlant.step(
 		offset.rot[3] = math.deg(rz) - under.rot[3]
 	end
 	return state.offsets
+end
+
+-- Groups that step, highest first and the lowest last (the swinging foot lands, the body stands on
+-- a group while another steps), each stepSeconds after the one before, from the stop's clock 0.
+local function schedule(state: State, height: { number }, steps: { boolean })
+	local plan = state.plan
+	local steppers: { number } = {}
+	for group = 1, plan.groups do
+		state.starts[group] = 0
+		if steps[group] and height[group] > -math.huge then
+			table.insert(steppers, group)
+		end
+	end
+	table.sort(steppers, function(a: number, b: number): boolean
+		if height[a] ~= height[b] then
+			return height[a] > height[b]
+		end
+		return a < b
+	end)
+	for slot, group in steppers do
+		state.starts[group] = (slot - 1) * plan.config.stepSeconds
+	end
+	state.total = math.max(#steppers, 1) * plan.config.stepSeconds
+end
+
+--- Starts the plant under an attack clip (D-632): `shown` is the pose the rig showed on the last
+--- frame, `root` the root part's CFrame it was drawn on, `first` the clip's first pose (where it
+--- has the feet as it starts). Each leg holds the field point it stood on; a leg further than
+--- settleStuds from the clip's first pose digs in, group by group (every group but the lowest
+--- first); one that stood there follows the clip.
+function WalkStopPlant.beginUnder(state: State, shown: ClipSampler.Offsets, first: ClipSampler.Offsets, root: CFrame)
+	local plan = state.plan
+	local height: { number } = {}
+	local steps: { boolean } = {}
+	for group = 1, plan.groups do
+		height[group] = -math.huge
+		steps[group] = false
+	end
+	table.clear(state.follows)
+	for index, leg in plan.legs do
+		local stood = legFrame(leg, shown)
+		state.field[index] = root * stood
+		local start = legFrame(leg, first)
+		if ((stood * leg.sole) - (start * leg.sole)).Magnitude <= plan.config.settleStuds then
+			state.follows[index] = start:Inverse() * stood
+		else
+			steps[leg.group] = true
+			height[leg.group] = math.max(height[leg.group], lowest(plan, leg, stood))
+		end
+	end
+	schedule(state, height, steps)
+	state.clock = 0
+	state.active = true
+end
+
+-- A point turned about an axis through the origin (Rodrigues), for a leg turned about a corner.
+local function turnAbout(pivot: Vector3, from: Vector3, to: Vector3): CFrame
+	local axis = from:Cross(to)
+	if axis.Magnitude <= SPACE_NOISE then
+		return CFrame.identity
+	end
+	local angle = math.atan2(axis.Magnitude, from:Dot(to))
+	return CFrame.new(pivot) * CFrame.fromAxisAngle(axis.Unit, angle) * CFrame.new(-pivot)
+end
+
+-- The leg at `frame` (root space) hung from its hip at `socket` (root space): turned about the
+-- corner of its sole it stands on so the point its hip holds lies on the line from that corner to
+-- the socket, as a rigid leg follows a body moving over its planted foot (the gap left along that
+-- line is the joint's). The corner it stands on is the one no other comes lower than once it is
+-- turned; where every turn sinks another, the leg is raised by the least sink.
+local function hang(leg: Leg, frame: CFrame, socket: Vector3): CFrame
+	local attach = frame * leg.attach
+	local best = frame
+	local bestSink = -math.huge
+	for _, corner in leg.corners do
+		local pivot = frame * corner
+		local turned = turnAbout(pivot, attach - pivot, socket - pivot) * frame
+		local low = math.huge
+		for _, other in leg.corners do
+			low = math.min(low, (turned * other).Y)
+		end
+		local sink = low - pivot.Y
+		if sink > bestSink + SPACE_NOISE then
+			best, bestSink = turned, sink
+		end
+	end
+	if bestSink < 0 then
+		best = CFrame.new(0, -bestSink, 0) * best
+	end
+	return best
+end
+
+--- One step of `dt` seconds of the clip's clock under the attack (D-632). `pose`: the pose the
+--- layers composed this step (Mixer.setPoseHook's), whose hips it sets; `clip`: the clip's own pose
+--- now; `root`: the root part's CFrame this step is drawn on. A leg holds its field point until its group's step,
+--- steps (lifted) onto where the clip has it, and then is the clip's; a leg that stood where the
+--- clip starts is the clip's, less what it stood away gliding off. Each hangs from its hip as
+--- `pose` draws the body. Nothing when no plant is under way.
+function WalkStopPlant.stepUnder(
+	state: State,
+	dt: number,
+	pose: ClipSampler.Offsets,
+	clip: ClipSampler.Offsets,
+	root: CFrame
+)
+	if not state.active then
+		return
+	end
+	state.clock += math.max(dt, 0)
+	local plan = state.plan
+	local config = plan.config
+	local unroot = root:Inverse()
+	for index, leg in plan.legs do
+		local lands = legFrame(leg, clip)
+		local frame: CFrame
+		local follow = state.follows[index]
+		if follow ~= nil then
+			local left = 1 - Easing.SineInOut(math.clamp(state.clock / config.stepSeconds, 0, 1))
+			frame = lands * CFrame.identity:Lerp(follow, left)
+		else
+			local held = unroot * state.field[index]
+			local progress = (state.clock - state.starts[leg.group]) / config.stepSeconds
+			if progress <= 0 then
+				frame = held
+			elseif progress >= 1 - NOISE then
+				frame = lands
+			else
+				local eased = Easing.SineInOut(progress)
+				frame = held:Lerp(lands, eased)
+				local from, to = lowest(plan, leg, held), lowest(plan, leg, lands)
+				local path = math.max(
+					from + (to - from) * eased,
+					math.min(from, to) + config.liftStuds * math.sin(math.pi * progress)
+				)
+				frame = CFrame.new(0, math.max(0, path - lowest(plan, leg, frame)), 0) * frame
+			end
+		end
+		local hip = leg.path[#leg.path]
+		local parent = frameOf(leg, pose, #leg.path - 1)
+		frame = hang(leg, frame, parent * hip.c0.Position)
+		local transform = hip.c0:Inverse() * parent:Inverse() * frame * hip.c1Inverse:Inverse()
+		local rx, ry, rz = transform:ToEulerAnglesXYZ()
+		local at = transform.Position
+		pose[leg.joint] = { pos = { at.X, at.Y, at.Z }, rot = { math.deg(rx), math.deg(ry), math.deg(rz) } }
+	end
 end
 
 return WalkStopPlant

@@ -33,7 +33,8 @@
 	  of its parts (the weapon's pieces the rig's or weaponModels.luau guardPart / gripPart); the
 	  tip an attachment name or a part with a three-number offset; visible shares above 0; every
 	  clip it names (idle, breathing, drawnIdle, drawnRun, walk, chain, over, rush, airborne,
-	  slideFree) a clip file of that rig, the chain and over clips non-looping on their keys' side;
+	  slideFree, stances) a clip file of that rig, the chain, over and stances clips non-looping on
+	  their keys' side; each stances value true or false, on a rig with an idle and a drawnIdle;
 	  a rush names an enemies.luau Charger and one of its attacks; views a list of "Behind" and
 	  "Front", at least one and each once; each
 	  cancels entry a clip and the clip it cuts (both clip files of that rig) and a gap at least 0
@@ -446,6 +447,25 @@ return function(ctx: Context): { string }
 		for _, key in { "airborne", "slideFree" } do
 			for index, id in config[key] or {} do
 				clipOf(id, rigId, ("%s[%d]"):format(key, index))
+			end
+		end
+		-- D-640: a stance change names a one-shot of the rig and which way it goes, on a rig
+		-- with both stances.
+		for id, into in config.stances or {} do
+			local clip = clipOf(id, rigId, "stances")
+			if clip ~= nil and clip.loop then
+				problem(("rigs.%s.stances names %s, which loops"):format(rigId, tostring(id)))
+			end
+			if typeof(into) ~= "boolean" then
+				problem(
+					("rigs.%s.stances[%s] must be true (into the drawn idle) or false (into the idle)"):format(
+						rigId,
+						tostring(id)
+					)
+				)
+			end
+			if config.idle == nil or config.drawnIdle == nil then
+				problem(("rigs.%s.stances needs the rig's idle and drawnIdle"):format(rigId))
 			end
 		end
 		for id, rush in config.rush or {} do

@@ -634,6 +634,67 @@ local function checkDodgeTurn(ctx: Context, dev: any, problem: (message: string)
 	end
 end
 
+-- DodgeTap.spec.luau's cases (D-646): taps and presses inside a turn's first half second, an
+-- engine that moves and turns the body, and a read that outlasts the longest dodge and its blend out.
+local function checkDodgeTap(ctx: Context, dev: any, problem: (message: string) -> ())
+	local cases = dev.groundClearance and dev.groundClearance.dodgeTap
+	if typeof(cases) ~= "table" then
+		problem("groundClearance.dodgeTap must be a table (DodgeTap.spec.luau's cases)")
+		return
+	end
+	if not isNumber(cases.settle) or cases.settle <= 0 then
+		problem("groundClearance.dodgeTap.settle must be a number above 0")
+	end
+	for _, key in { "holdSeconds", "pressAfter" } do
+		local list = cases[key]
+		if typeof(list) ~= "table" or #list == 0 then
+			problem(("groundClearance.dodgeTap.%s must list at least one time"):format(key))
+			continue
+		end
+		for index, seconds in list do
+			if not isNumber(seconds) or seconds <= 0 or seconds > 0.5 then
+				problem(
+					("groundClearance.dodgeTap.%s[%d] (%s) must be seconds above 0 and at most 0.5: a tap and a press inside the turn"):format(
+						key,
+						index,
+						tostring(seconds)
+					)
+				)
+			end
+		end
+	end
+	local engine = cases.engine
+	if typeof(engine) ~= "table" then
+		problem("groundClearance.dodgeTap.engine must be a table (lagFrames, accel, decel, turnRate)")
+	else
+		if not isNumber(engine.lagFrames) or engine.lagFrames < 0 or engine.lagFrames % 1 ~= 0 then
+			problem("groundClearance.dodgeTap.engine.lagFrames must be a whole number of frames, 0 or more")
+		end
+		for _, key in { "accel", "decel", "turnRate" } do
+			if not isNumber(engine[key]) or engine[key] <= 0 then
+				problem(("groundClearance.dodgeTap.engine.%s must be a number above 0"):format(key))
+			end
+		end
+	end
+	local choreo = ctx.load("src/shared/data/choreo")
+	local locomotion = choreo.locomotion
+	local longest = 0
+	for _, name in locomotion.dodgeHandOff.clips do
+		local ok, clip = pcall(ctx.load, "src/shared/clips/" .. tostring(locomotion.clipPrefix) .. tostring(name))
+		if ok and typeof(clip) == "table" and isNumber(clip.duration) then
+			longest = math.max(longest, clip.duration + (clip.blendOut or choreo.blendOut))
+		end
+	end
+	if not isNumber(cases.after) or cases.after <= longest then
+		problem(
+			("groundClearance.dodgeTap.after (%s) must be longer than the longest dodge clip and its blend out (%s s)"):format(
+				tostring(cases.after),
+				tostring(longest)
+			)
+		)
+	end
+end
+
 -- SkidRate.spec.luau's cases (D-612): a sprint above the Skid's threshold, stops that fall
 -- faster than the Skid's drop (locomotion.stopSpeedDrop / stopDropSeconds; 0 is at once) and eased
 -- ones that fall slower, at step rates of 60 a second and up.
@@ -987,8 +1048,32 @@ end
 -- LockTurnShown.spec.luau's bars (D-505, D-507): a planted foot's bars inside ClipAudit's own
 -- (review.audit), the turns real lock turns, and a lead slack under a pop. AR 513 (D-615): a
 -- row's bar inside the frame's, and the idle starts inside one cycle of the drawn idle. D-626:
+-- D-642: the owner's Head the hit matrix fits on its second body (HitMatrix.leanColumns, the
+-- Brute's back room) and the StandOffWall bench fits on its avatar: a positive depth, and its box's
+-- back behind the UpperTorso's by zero or more and less than the Head is deep (a Head whose box
+-- stood wholly behind the torso's back would hang off the neck).
+local function checkOwnerHead(dev: any, problem: (message: string) -> ())
+	local matrix = dev.hitMatrix
+	local head = if typeof(matrix) == "table" then matrix.ownerHead else nil
+	if typeof(head) ~= "table" then
+		problem("hitMatrix.ownerHead must be a table of depthStuds and behindStuds (D-642)")
+		return
+	end
+	if not isNumber(head.depthStuds) or head.depthStuds <= 0 then
+		problem("hitMatrix.ownerHead.depthStuds must be a positive number of studs")
+		return
+	end
+	if not isNumber(head.behindStuds) or head.behindStuds < 0 or head.behindStuds >= head.depthStuds then
+		problem(
+			("hitMatrix.ownerHead.behindStuds must be zero or more and under depthStuds (%s)"):format(
+				tostring(head.depthStuds)
+			)
+		)
+	end
+end
+
 -- the sheathed idle starts inside one cycle of the sheathed idle, and every rate a whole number
--- of at least 30.
+-- of at least 30. D-640, D-641: the sweep's phase count, the PC's row times and their seed.
 local IDLE_DRAWN_CLIP = "player/OneHandedSword/IdleDrawn"
 local IDLE_CLIP = "player/OneHandedSword/Idle"
 local function checkLockTurn(ctx: Context, dev: any, problem: (message: string) -> ())
@@ -1073,6 +1158,27 @@ local function checkLockTurn(ctx: Context, dev: any, problem: (message: string) 
 				)
 			end
 		end
+	end
+	-- D-640 and D-641: the sweep's phases a whole number at least 1, the PC's row times a
+	-- range of real frame times (above 0, the second at least the first, under 1/30 s: a row
+	-- longer reads two 60 Hz rows), and its seed a whole number 0 or more.
+	if not isWhole(bar.idlePhaseCount) or bar.idlePhaseCount < 1 then
+		problem("groundClearance.lockTurn.idlePhaseCount must be a whole number, at least 1")
+	end
+	local rows = bar.pcRowSeconds
+	if
+		typeof(rows) ~= "table"
+		or #rows ~= 2
+		or not isNumber(rows[1])
+		or not isNumber(rows[2])
+		or rows[1] <= 0
+		or rows[2] < rows[1]
+		or rows[2] >= 1 / 30
+	then
+		problem("groundClearance.lockTurn.pcRowSeconds must be { least, most } seconds, above 0 and under 1/30")
+	end
+	if not isWhole(bar.rowSeed) or bar.rowSeed < 0 then
+		problem("groundClearance.lockTurn.rowSeed must be a whole number, 0 or more")
 	end
 	for _, key in { "stepHz", "sheathedStepHz" } do
 		local rates = bar[key]
@@ -2818,9 +2924,11 @@ return function(ctx: Context): { string }
 	checkSheathStop(ctx, dev, problem)
 	checkSkidRate(ctx, dev, problem)
 	checkDodgeTurn(ctx, dev, problem)
+	checkDodgeTap(ctx, dev, problem)
 	checkDodgeSheath(ctx, dev, problem)
 	checkDodgeRun(ctx, dev, problem)
 	checkStandHeight(ctx, dev, problem)
 	checkLockTurn(ctx, dev, problem)
+	checkOwnerHead(dev, problem)
 	return problems
 end

@@ -61,6 +61,11 @@
 	about the root part's vertical axis: the position the layers give the root joint (a stance's
 	weight shift) turns round with it, so the hips stand where they stood while the root yaws
 	under them (D-615).
+
+	A pose hook (setPoseHook, D-632) sees the pose the layers composed on a step and may set
+	joints in it, before the procedural channels add on top: a joint it sets is drawn from where the
+	layers drew its parents on that very step (an enemy's legs held on the field under an attack's
+	blend-in, whatever the blend, the clip's beat and the layers above did to the body).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -158,6 +163,10 @@ export type Handle = {
 	lastTime: number,
 }
 
+-- A pose hook (Mixer.setPoseHook): the pose the layers composed this step, which it may change
+-- (a joint it sets takes a new table: an entry can alias clip data).
+export type PoseHook = (pose: Offsets) -> ()
+
 -- jumped: a render stall's gap crossed it (the step, or this handle's part of it, was a jump).
 export type FiredEvent = { clipId: string, event: Types.ClipEvent, handle: Handle, jumped: boolean }
 
@@ -187,6 +196,7 @@ export type Mixer = {
 	setTimeScale: (self: Mixer, scale: number) -> (),
 	timeScale: (self: Mixer) -> number,
 	setProcedural: (self: Mixer, name: string, offsets: Offsets?, weight: number?) -> (),
+	setPoseHook: (self: Mixer, name: string, hook: PoseHook?) -> (),
 	isPlaying: (self: Mixer, clipId: string) -> boolean,
 	find: (self: Mixer, clipId: string) -> Handle?,
 	handles: (self: Mixer) -> { Handle },
@@ -307,6 +317,8 @@ function Mixer.new(): Mixer
 	local self = setmetatable({
 		_handles = {} :: { Handle },
 		_procedural = {} :: { [string]: { offsets: Offsets, weight: number } },
+		-- The pose hooks (setPoseHook, D-632), by name.
+		_poseHooks = {} :: { [string]: PoseHook },
 		-- The procedural channels as the last step outside a pause added them (D-314), in order.
 		_heldChannels = {} :: { { offsets: Offsets, weight: number } },
 		_heldCount = -1, -- -1: no step has added them yet
@@ -476,6 +488,18 @@ function Mixer.snapIn(_self: any, handle: Handle)
 	end
 	handle.blendIn = math.min(handle.blendIn, ChoreoData.handOver.seconds)
 	handle.handOver = true
+	if handle.blendIn <= 0 then
+		handle.fade = 1
+	end
+end
+
+--- Caps a handle's blend-in at `seconds` before its first step (D-635): at 0 it shows at its
+--- full weight on its first step. A handle that already stepped, or is going, keeps its blend.
+function Mixer.blendWithin(_self: any, handle: Handle, seconds: number)
+	if handle.done or handle.stopping or not handle.fresh then
+		return
+	end
+	handle.blendIn = math.min(handle.blendIn, math.max(0, seconds))
 	if handle.blendIn <= 0 then
 		handle.fade = 1
 	end
@@ -696,6 +720,14 @@ function Mixer.setProcedural(self: any, name: string, offsets: Offsets?, weight:
 	end
 end
 
+--- Sets (or with nil takes off) the pose hook `name` (D-632): each step, once the layers are
+--- composed and before the procedural channels add on top, it is handed that pose to change (a
+--- hit-stop's step too: the clocks held). Hooks run in no set order: each sets joints no other
+--- hook touches.
+function Mixer.setPoseHook(self: any, name: string, hook: PoseHook?)
+	self._poseHooks[name] = hook
+end
+
 function Mixer.isPlaying(self: any, clipId: string): boolean
 	for _, handle in self._handles do
 		if handle.clipId == clipId and not handle.stopping then
@@ -725,6 +757,7 @@ end
 function Mixer.clear(self: any)
 	table.clear(self._handles)
 	table.clear(self._procedural)
+	table.clear(self._poseHooks)
 	self._heldCount = -1
 	self._pause = 0
 	self._pauseFrames = nil
@@ -1418,6 +1451,10 @@ function Mixer.step(self: any, dt: number): StepResult
 		else
 			composeOverrideLayer(result, layerHandles)
 		end
+	end
+	-- The pose hooks see the layers' pose (D-632).
+	for _, hook in self._poseHooks do
+		hook(result)
 	end
 	if paused and self._heldCount >= 0 then
 		-- A hit-stop holds the procedural channels too (D-314): what the last moving frame showed.

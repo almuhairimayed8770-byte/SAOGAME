@@ -34,6 +34,9 @@
 	moment's cue with its contour and checks every sub layer starts with the bass back).
 	The HP heartbeat (fx.audio.heartbeatLoop) plays mix.heartbeatOverAllDb above its entry's
 	volume, and that lifted volume is at or under limits.maxPlayVolume too.
+	fx.audio.airFloorStates lists, once each, only the engine's walking Humanoid states (Running,
+	RunningNoPhysics): in them an Air floor keeps a character's last footstep floor (D-636), and
+	an airborne state there would sound a floor under a jump.
 	music.stemIds holds one rbxassetid:// id per music.stems name and nothing else (MusicDirector
 	makes a stem's Sound only for a real id).
 	The shatter's balance (F15, sfx.shatterBalance): glassGapDb is positive, the glass and bass
@@ -928,6 +931,28 @@ return function(ctx: Context): { string }
 				tostring(lift),
 				tostring(limits.maxPlayVolume)
 			)
+		end
+	end
+
+	-- The footstep floor pick (D-636): only walking states keep the last floor on an Air read.
+	local walking = { Running = true, RunningNoPhysics = true }
+	local states = audio.airFloorStates
+	if typeof(states) ~= "table" or #states == 0 then
+		problem("fx.audio.airFloorStates must list the Humanoid states a character walks in")
+	else
+		local seen: { [string]: boolean } = {}
+		for index, state in states do
+			if typeof(index) ~= "number" or typeof(state) ~= "string" or walking[state] ~= true then
+				problem(
+					"fx.audio.airFloorStates[%s] '%s' is not a walking Humanoid state (Running, RunningNoPhysics)",
+					tostring(index),
+					tostring(state)
+				)
+			elseif seen[state] then
+				problem("fx.audio.airFloorStates names %s twice", state)
+			else
+				seen[state] = true
+			end
 		end
 	end
 

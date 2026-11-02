@@ -309,8 +309,10 @@ end
 -- combat.basicHitDuration after the press (CharacterController.endAction: its root motion stops
 -- there; the clip plays on, and its plan with it, D-568). `bare`: the kobold without its
 -- HeldBlocker, what the keep-out holds alone where the HeldBlocker beside the line holds nothing
--- off.
-type Play = { played: boolean?, bare: boolean? }
+-- off. `lead`: seconds added to the first frame past clip 0.2 (inside the cut's hold), so the
+-- frames after the cut fall on another phase of the clip's clock (the PC's 60 Hz rows read clip
+-- 0.2836 where Lune's read 0.2833, item 523).
+type Play = { played: boolean?, bare: boolean?, lead: number? }
 -- The frames after a contact the hit's word comes (inside the hold at every rate).
 local WORD_FRAMES = 1
 
@@ -331,6 +333,10 @@ type Result = {
 	bladeWhere: string,
 	bladeScreen: number,
 	bladeScreenWhere: string,
+	-- The blade as drawn on the rows whose own clip time is in a cut's span while the pose they
+	-- draw (the step before's) is not: the first row a window read on the row's clock adds (523(a)).
+	bladeEarly: number,
+	bladeEarlyWhere: string,
 	-- The blade's trail line at each strike's key (the frame nearest it), the deepest, and the
 	-- blade's own part there (item 464(b)).
 	bladeKey: number,
@@ -427,6 +433,8 @@ local function swingAt(
 		bladeWhere = "",
 		bladeScreen = -math.huge,
 		bladeScreenWhere = "",
+		bladeEarly = -math.huge,
+		bladeEarlyWhere = "",
 		bladeKey = -math.huge,
 		bladeKeyWhere = "",
 		bladeKeyBox = -math.huge,
@@ -468,8 +476,14 @@ local function swingAt(
 	local shownHurt = shown()
 	-- A word on its way: the frames until it comes.
 	local word: number? = nil
+	local led = how.lead == nil
 	for _ = 1, math.ceil(swing.clip.duration * fps) + 120 do
 		shownHurt = shown()
+		local dt = 1 / fps
+		if not led and handle.time > 0.2 then
+			led = true
+			dt += how.lead :: number
+		end
 		if enemyMixer ~= nil then
 			if word ~= nil then
 				word -= 1
@@ -480,15 +494,15 @@ local function swingAt(
 					end
 				end
 			end
-			for name, solved in Pose.solve(model, enemyFrame, enemyMixer:step(1 / fps).offsets) do
+			for name, solved in Pose.solve(model, enemyFrame, enemyMixer:step(dt).offsets) do
 				local part = model:FindFirstChild(name)
 				if part ~= nil and part:IsA("BasePart") then
 					part.CFrame = solved
 				end
 			end
 		end
-		local stepped = mixer:step(1 / fps)
-		elapsed += 1 / fps
+		local stepped = mixer:step(dt)
+		elapsed += dt
 		if idleTime ~= nil and enemyMixer == nil then
 			poseAt(model, enemyFrame, idle, idleTime + elapsed)
 		end
@@ -542,6 +556,12 @@ local function swingAt(
 				local depth, where = bladeDepth(shownHurt, Pose.solve(avatar.model, shownRoot, lastOffsets))
 				if depth > result.bladeScreen then
 					result.bladeScreen, result.bladeScreenWhere = depth, ("%s at %.3f s"):format(where, time)
+				end
+			elseif outAt(time) then
+				local depth, where = bladeDepth(shownHurt, Pose.solve(avatar.model, shownRoot, lastOffsets))
+				if depth > result.bladeEarly then
+					result.bladeEarly, result.bladeEarlyWhere =
+						depth, ("%s at clip %.4f, drawing %.4f"):format(where, time, lastTime)
 				end
 			end
 		end
@@ -888,6 +908,61 @@ describe(
 				expect(drawn <= DEEPEST).toBe(true)
 				expect(key <= KEY_BAR).toBe(true)
 				expect(limb <= DEEPEST).toBe(true)
+			end
+		)
+		it(
+			"on the screen from the first row that draws a pose in the blade's span, on other phases of the frames (AS 523(a))",
+			function()
+				-- The PC on 97cea9d, C523_60_S3: the row at clip 0.2836 (Character+1) read the Weapon
+				-- BasePart 0.195 into the flinching kobold's LeftArm while its chain read was 0.005 out.
+				-- The BasePart is the pose physics solved, the row before's (clip 0.267, D-342): before
+				-- the blade's span (exit plus bladeOutSeconds, 0.28), where the plan holds nothing out. A
+				-- row is judged on the screen by the pose it draws, the row before's clip time at
+				-- Character+1. Here the frames after the cut fall `lead` later on the clip's clock (a
+				-- quarter and three quarters of a frame; the item 464 case above runs them on time).
+				local drawn, drawnAt = {}, {}
+				local early, earlyAt = {}, {}
+				for _, fps in { 30, 60, 144 } do
+					drawn[fps], early[fps] = -math.huge, -math.huge
+					for _, eighth in { 2, 6 } do
+						for _, phase in BLADE_PHASES do
+							local result = swingAt(
+								"KoboldAxeman",
+								frame,
+								rest,
+								fps,
+								basic1,
+								phase,
+								{ played = true, lead = eighth / 8 / fps }
+							)
+							local tag = ("lead %d/8, from %.1f s"):format(eighth, phase)
+							expect(result.hits).toBe(1)
+							if result.bladeScreen > drawn[fps] then
+								drawn[fps], drawnAt[fps] = result.bladeScreen, tag .. ": " .. result.bladeScreenWhere
+							end
+							if result.bladeEarly > early[fps] then
+								early[fps], earlyAt[fps] = result.bladeEarly, tag .. ": " .. result.bladeEarlyWhere
+							end
+						end
+					end
+					expect(drawn[fps] <= DEEPEST).toBe(true)
+				end
+				print(
+					("[523(a)] as drawn from the first pose in the span: %.3f / %.3f / %.3f at 30 / 60 / 144 (%s; %s; %s); the row before it, in the span on its own clock: %.3f / %.3f / %.3f (%s; %s; %s)"):format(
+						drawn[30],
+						drawn[60],
+						drawn[144],
+						drawnAt[30],
+						drawnAt[60],
+						drawnAt[144],
+						early[30],
+						early[60],
+						early[144],
+						earlyAt[30],
+						earlyAt[60],
+						earlyAt[144]
+					)
+				)
 			end
 		)
 	end

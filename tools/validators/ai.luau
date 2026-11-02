@@ -332,21 +332,27 @@ local function validate(ctx: Context): { string }
 				)
 			end
 			if typeof(cap) == "number" and typeof(brute.engageFraction) == "number" then
+				-- The grown stop is landed on (D-643), and a landing may rest landSlackStuds short.
+				local movement = AI.movement
+				local slack = if typeof(movement) == "table" and typeof(movement.landSlackStuds) == "number"
+					then movement.landSlackStuds
+					else 0
 				for _, def in Enemies.list() do
 					if def.archetype ~= "Brute" then
 						continue
 					end
 					for _, attack in def.attacks do
 						local engage = attack.reach * brute.engageFraction
-						if cap > engage + 1e-9 then
+						if cap + slack > engage + 1e-9 then
 							problem(
-								("%s: archetypes.Brute.backRoom.maxStopDistance %s is past %s's engage range %.2f (reach %s x engageFraction %s): from its farthest stop it would never swing"):format(
+								("%s: archetypes.Brute.backRoom.maxStopDistance %s is past %s's engage range %.2f (reach %s x engageFraction %s) less the landing's slack %s (movement.landSlackStuds): from its farthest stop it would never swing"):format(
 									def.id,
 									tostring(cap),
 									attack.id,
 									engage,
 									tostring(attack.reach),
-									tostring(brute.engageFraction)
+									tostring(brute.engageFraction),
+									tostring(slack)
 								)
 							)
 						end

@@ -20,9 +20,11 @@
 	stop and swings again. Read when that second wind-up begins: the flat root-to-root distance (the
 	stop) and the gap from the world to the kobold's Blocker along the line, over the fighter's root
 	width (rays from the fighter's root, one to each box). On efa907c it stopped 3.06-3.41 root to
-	root and left 2.52-2.74, where the swings lean 2.0-2.8 deep (Vertical 2.845, Sharp Nail 2.757):
-	the bar is the deepest lean plus the stand-off's gap off each face, 2.945. Both of its blows
-	must still land on the fighter.
+	root and left 2.52-2.74, where the swings lean 2.0-2.8 deep on the matrix's Head. With the
+	owner's Head colliding (D-630) they lean up to 3.688 (Vertical, D-642): the bar is the
+	deepest lean plus the stand-off's gap off each face, 3.788. On c4f0e1c it stopped 3.93-4.30 and
+	left 3.42-3.66; it now lands on its stop (D-643), 4.52-4.70, and leaves 3.87-3.91. Both of its
+	blows must still land on the fighter.
 ]]
 
 local function fakeSignal()
@@ -70,9 +72,10 @@ local World = Harness.load("src/shared/data/world")
 local Playground = Harness.load("src/shared/data/playground")
 local CollectionService = Harness.game():GetService("CollectionService")
 
--- The room every player swing needs (D-627), read from the clips' own extents as the stand-off
--- reads them (HitMatrix.leanColumns: Vertical's 2.845 the deepest), with the stand-off's gap off
--- each face: a stop that leaves less than this between the world and the Blocker squeezes a swing.
+-- The room every player swing needs (D-627), read from the clips' own extents on the parts the
+-- engine collides (HitMatrix.leanColumns, D-642: Vertical's 3.688 on the owner's Head the
+-- deepest), with the stand-off's gap off each face: a stop that leaves less than this between the
+-- world and the Blocker squeezes a swing.
 local function swingRoom(): (number, string)
 	local fs = require("@lune/fs")
 	local luau = require("@lune/luau")

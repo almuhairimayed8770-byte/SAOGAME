@@ -455,9 +455,10 @@ local Dev = {
 			},
 			-- The clips the audit plays (tests/choreo/ClipAudit.spec.luau, the review's Problems
 			-- column): every player attack and every player one-shot (the dodges, guard, parry,
-			-- reactions, death, jump, landing, fall, skid and breathing), and every boar and kobold
-			-- clip. The player's locomotion loops and the draw and sheathe have their own specs
-			-- (Stride, SheathTip, GroundClearance).
+			-- reactions, death, jump, landing, fall, skid and breathing, and the stance changes,
+			-- D-640), and every boar and kobold clip. The player's locomotion loops, the turns in
+			-- place and the draw and sheathe have their own specs (Stride, TurnPlant, LockTurnShown,
+			-- SheathTip, GroundClearance).
 			clips = {
 				"player/OneHandedSword/Basic1",
 				"player/OneHandedSword/Basic2",
@@ -485,6 +486,10 @@ local Dev = {
 				"player/OneHandedSword/Fall",
 				"player/OneHandedSword/Skid",
 				"player/OneHandedSword/Breathe",
+				"player/OneHandedSword/DrawStep",
+				"player/OneHandedSword/SheatheStep",
+				"player/OneHandedSword/TurnLeftDraw",
+				"player/OneHandedSword/TurnRightDraw",
 				"enemy/Boar/Charge",
 				"enemy/Boar/Idle",
 				"enemy/Boar/Walk",
@@ -614,6 +619,16 @@ local Dev = {
 					airborne = { "player/OneHandedSword/Jump", "player/OneHandedSword/Fall" },
 					-- The two-step stop's skid: the controller slides the body to a stop under it.
 					slideFree = { "player/OneHandedSword/Skid" },
+					-- Played as a standing body changes stance (D-640): out of the stance it stands
+					-- in, the Base set turning to the other once the clip shows at full weight
+					-- (Locomotion holds it until then). true: out of the idle into the drawn idle;
+					-- false: out of the drawn idle into the idle.
+					stances = {
+						["player/OneHandedSword/DrawStep"] = true,
+						["player/OneHandedSword/SheatheStep"] = false,
+						["player/OneHandedSword/TurnLeftDraw"] = true,
+						["player/OneHandedSword/TurnRightDraw"] = true,
+					},
 					views = { "Behind" },
 				},
 				Boar = {
@@ -714,6 +729,15 @@ local Dev = {
 				LeftAnkle = { { 0, -0.5472, 0 }, { 0, 0.1019, 0 } },
 			},
 		},
+		-- The owner's avatar's Head as the PC logged it (items 496 and 519): a MeshPart this deep
+		-- front to back, whose box's back stands this far behind the UpperTorso's at the drawn idle
+		-- (the blank avatar's Head sits forward, its back about flush with the torso's). The matrix
+		-- body with this Head is the second body the swing's room is read on (HitMatrix.leanColumns,
+		-- D-642), and the StandOffWall bench's owner-like Head. The Head collides (D-630).
+		ownerHead = {
+			depthStuds = 1.27,
+			behindStuds = 0.16,
+		},
 		-- Where the first server frame after the swing starts lands, as a fraction of a 60 Hz frame:
 		-- the clip clock and the Heartbeat are not in step, so every hit is swung at each phase and
 		-- must register at all of them.
@@ -764,7 +788,7 @@ local Dev = {
 				-- The head reaches 0.75 in front of the root and meets the player's (0.53) at 1.28;
 				-- the body is at reach from 5.25. 3.5 is where the Brute stops walking in (ai.luau
 				-- stopDistance; with the fighter backed to the world up to backRoom.maxStopDistance
-				-- 4.6, D-627) and 4.8 where it starts its overhead (reach 6 x engageFraction 0.8).
+				-- 4.75, D-627, D-643) and 4.8 where it starts its overhead (reach 6 x engageFraction 0.8).
 				realFight = { min = 1.3, max = 5.25 },
 				distances = { 1.3, 2.3, 3.5, 4.8, 5.25, 6.5 },
 			},
@@ -1012,6 +1036,21 @@ local Dev = {
 			pressAfter = { 0.02, 0.05, 0.1, 0.15, 0.2 },
 			after = 0.9,
 		},
+		-- A dodge pressed after an unlocked key has turned the body on the spot (DodgeTap.spec.luau,
+		-- D-646; 531(b)(d)): standing, drawn and sheathed, `settle` seconds, then A or D held for
+		-- each of `holdSeconds` on a Studio-like Humanoid (its move `engine.lagFrames` frames late,
+		-- its speed toward the run at `engine.accel` studs/s/s and to a stop at `engine.decel`, its
+		-- facing toward the move at `engine.turnRate` degrees a second), and the dodge the
+		-- controller picks for the stick pressed each of `pressAfter` seconds after the key went
+		-- down; then `after` seconds more. Each part's turn per review.fps row in the root's frame,
+		-- from the dodge's first row until it has gone, stays within review.audit.popDegrees.
+		dodgeTap = {
+			settle = 1.5,
+			holdSeconds = { 0.08, 0.16 },
+			pressAfter = { 0.05, 0.08, 0.1, 0.2 },
+			engine = { lagFrames = 1, accel = 360, decel = 576, turnRate = 720 },
+			after = 0.9,
+		},
 		-- The lock turn as the frame shows it (LockTurnShown.spec.luau, D-505): the turn written
 		-- after the step, posed with that step's offsets, at each of `degrees` each way and each of
 		-- `stepHz`. Over any 60 Hz frame a planted foot moves at most `slideStuds`, and over one
@@ -1037,6 +1076,18 @@ local Dev = {
 			-- most rowStuds in a 60 Hz row's time.
 			sheathedIdleStarts = { 5, 6.5 },
 			sheathedStepHz = { 60, 144 },
+			-- D-640: a lock-on from the sheathed body (the predicted draw on the lock's first
+			-- frame) from `idlePhaseCount` points a quarter second apart over one 12 s idle cycle: the
+			-- turns of `degrees` each way and a standing lock-on, at each of sheathedStepHz, each
+			-- row's least-moving corner within stride.contact of the field on both rows moves at
+			-- most rowStuds in a 60 Hz row's time (the stance change slid both soles 0.033 to 0.105).
+			idlePhaseCount = 48,
+			-- D-641: the turns again, drawn and sheathed, from each phase on the owner's PC's row
+			-- times: each row's time drawn from `pcRowSeconds` (its rows wrote 11.2 to 12.7 degrees of
+			-- the lock's 720 a second: 15.6 to 17.6 ms) by a generator seeded `rowSeed` plus the
+			-- phase's index. Each row moves at most rowStuds.
+			pcRowSeconds = { 0.01556, 0.01764 },
+			rowSeed = 3,
 		},
 		-- The soles on the floor the Humanoid holds the root over (StandHeight.spec.luau, D-506):
 		-- the hit matrix's player with its Humanoid's HipHeight short of its legs' hang by each of

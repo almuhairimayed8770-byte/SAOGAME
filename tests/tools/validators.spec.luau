@@ -2581,13 +2581,17 @@ describe("choreo validator: the turn plant (D-416)", function()
 			}),
 			"TurnLeftDrawn must step the pivot foot (Left)"
 		)).toBe(true)
-		-- Half a turn on SineInOut at 20 a frame needs 180 x (pi / 2) / (20 x 60) = 0.236 s.
+		-- Half a turn on SineInOut at 20 a frame needs 180 x (pi / 2) / (20 x 60) = 0.236 s; the
+		-- window ends leadSeconds (0.02) before the second Footstep (D-641): 0.2 s apart is 0.18.
 		local short = runWith(function() end, nil, {
 			[PREFIX .. "TurnLeft"] = turnWith("TurnLeft", { { 0.1, "Left" }, { 0.3, "Right" }, { 0.46, "Left" } }),
 		})
-		expect(hasProblem(short, "TurnLeft's window between its first two Footsteps (0.200 s) is under 0.236 s")).toBe(
-			true
-		)
+		expect(
+			hasProblem(
+				short,
+				"TurnLeft's window from its first Footstep to leadSeconds before its second (0.180 s) is under 0.236 s"
+			)
+		).toBe(true)
 		-- A slower cap wants a longer window: the real 0.26 s is short at 10 a frame.
 		expect(hasProblem(
 			runWith(function(c)
@@ -2602,6 +2606,49 @@ describe("choreo validator: the turn plant (D-416)", function()
 			end),
 			"locomotion.clips.TurnRightDrawn (NoSuchTurn) must name a clip"
 		)).toBe(true)
+		-- The turns from the sheathed stance into the drawn one (D-640) are turn clips too.
+		expect(hasProblem(
+			runWith(function() end, nil, {
+				[PREFIX .. "TurnRightDraw"] = turnWith("TurnRightDraw", { { 0.1, "Left" }, { 0.36, "Right" } }),
+			}),
+			"TurnRightDraw must step the pivot foot (Right) and then the other (Left)"
+		)).toBe(true)
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.clips.TurnLeftDraw = "NoSuchTurn"
+			end),
+			"locomotion.clips.TurnLeftDraw (NoSuchTurn) must name a clip"
+		)).toBe(true)
+	end)
+
+	it("brings the hips round leadSeconds before the second Footstep (D-641)", function()
+		for _, bad in { -0.01, 0 / 0, "0.02", math.huge } :: { any } do
+			expect(hasProblem(
+				runWith(function(c)
+					c.locomotion.turnPlant.leadSeconds = bad
+				end),
+				"locomotion.turnPlant.leadSeconds"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.turnPlant.leadSeconds = nil
+			end),
+			"locomotion.turnPlant.leadSeconds (nil)"
+		)).toBe(true)
+		-- 0 ends the window on the second Footstep, as before D-641.
+		expect(runWith(function(c)
+			c.locomotion.turnPlant.leadSeconds = 0
+		end)).toEqual({})
+		-- 0.03 leaves the real clips' 0.26 s between Footsteps 0.23 s: under half a turn's 0.236.
+		expect(
+			hasProblem(
+				runWith(function(c)
+					c.locomotion.turnPlant.leadSeconds = 0.03
+				end),
+				"TurnLeft's window from its first Footstep to leadSeconds before its second (0.230 s) is under 0.236 s"
+			)
+		).toBe(true)
 	end)
 
 	it("never lets a second turn cut a turn's own steps", function()
@@ -2719,6 +2766,39 @@ describe("rushDraw validator: the drawn rush's pass and its skid's dust (FB1, FB
 		local problems = runRush()
 		choreo.enemy.rush.settleRestSpeed = original
 		expect(problems).toEqual({})
+	end)
+
+	it("wants enemy.rush.settleRestSeconds positive, over two 30 fps rows and under settleSeconds (D-648)", function()
+		local choreo = Harness.load("src/shared/data/choreo")
+		local original = choreo.enemy.rush.settleRestSeconds
+		for _, bad in { 0, -1, 0 / 0, math.huge, "0.1" :: any, nil } do
+			choreo.enemy.rush.settleRestSeconds = bad
+			local ok, problems = pcall(runRush)
+			choreo.enemy.rush.settleRestSeconds = original
+			expect(ok).toBe(true)
+			expect(hasProblem(problems, "enemy.rush.settleRestSeconds must be a positive")).toBe(true)
+		end
+		-- Two of DevFrameCap 30's longest rows (0.035 s): one row the root stands on reads as its rest.
+		for _, bad in { 0.035, 0.069 } do
+			choreo.enemy.rush.settleRestSeconds = bad
+			local problems = runRush()
+			choreo.enemy.rush.settleRestSeconds = original
+			expect(hasProblem(problems, "must be at least two of the longest rows")).toBe(true)
+		end
+		-- At or over settleSeconds the wait for a root at rest outlasts the hand-back's.
+		local settle = choreo.enemy.rush.settleSeconds
+		for _, bad in { settle, settle + 0.1 } do
+			choreo.enemy.rush.settleRestSeconds = bad
+			local problems = runRush()
+			choreo.enemy.rush.settleRestSeconds = original
+			expect(hasProblem(problems, "must be under settleSeconds")).toBe(true)
+		end
+		for _, good in { 0.07, settle - 0.01 } do
+			choreo.enemy.rush.settleRestSeconds = good
+			local problems = runRush()
+			choreo.enemy.rush.settleRestSeconds = original
+			expect(problems).toEqual({})
+		end
 	end)
 
 	it("wants the pass block with positive studs, lead under full and the centre band inside the line", function()
@@ -3526,6 +3606,37 @@ describe("camera, dev capture and sfx shatter rules", function()
 	local function outline(mutate: ((any) -> ())?): { string }
 		return runWith("outline", "src/shared/data/fx", mutate)
 	end
+
+	it("sfx: fx.audio.airFloorStates names walking Humanoid states only, once each (D-636)", function()
+		local function audio(mutate: (any) -> ()): { string }
+			return runWith("sfx", "src/shared/data/fx", function(copy)
+				mutate(copy.audio)
+			end)
+		end
+		expect(audio(function() end)).toEqual({})
+		for _, bad in { "Freefall", "Jumping", "FallingDown", "running", 1 } do
+			expect(hasProblem(
+				audio(function(copy)
+					copy.airFloorStates = { "Running", bad }
+				end),
+				"fx.audio.airFloorStates[2] '" .. tostring(bad) .. "' is not a walking Humanoid state"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			audio(function(copy)
+				copy.airFloorStates = { "Running", "Running" }
+			end),
+			"fx.audio.airFloorStates names Running twice"
+		)).toBe(true)
+		for _, missing: any in { {}, "Running", false } do
+			expect(hasProblem(
+				audio(function(copy)
+					copy.airFloorStates = if missing == false then nil else missing
+				end),
+				"fx.audio.airFloorStates must list the Humanoid states a character walks in"
+			)).toBe(true)
+		end
+	end)
 
 	it("each is clean on a copy of the real table", function()
 		expect(camera()).toEqual({})
@@ -6345,6 +6456,17 @@ describe("clipAudit validator: the clip audit's thresholds and rigs", function()
 		flags(function(a)
 			a.rigs.PlayerR15.airborne = { "player/OneHandedSword/Hover" }
 		end, "rigs.PlayerR15.airborne[1] names player/OneHandedSword/Hover")
+		-- D-640: the stance changes are one-shots of the rig, each going one way.
+		flags(function(a)
+			a.rigs.PlayerR15.stances = table.clone(a.rigs.PlayerR15.stances)
+			a.rigs.PlayerR15.stances["player/OneHandedSword/IdleDrawn"] = true
+		end, "rigs.PlayerR15.stances names player/OneHandedSword/IdleDrawn, which loops")
+		flags(function(a)
+			a.rigs.PlayerR15.stances = { ["player/OneHandedSword/DrawStep"] = "drawn" }
+		end, "rigs.PlayerR15.stances[player/OneHandedSword/DrawStep] must be true")
+		flags(function(a)
+			a.rigs.Boar.stances = { ["enemy/Boar/Charge"] = true }
+		end, "rigs.Boar.stances needs the rig's idle and drawnIdle")
 	end)
 
 	it("audits only clip files of a rig it has, each once", function()
@@ -6697,12 +6819,19 @@ describe("ai validator: the Brute's stop at a fighter backed to the world (D-627
 	end)
 
 	it("keeps the farthest stop inside every Brute attack's engage range, so it still swings", function()
-		-- The kobold's Overhead engages at reach 6 x 0.8 = 4.8.
-		expect(withRoom(room({ maxStopDistance = 4.8 }), nil, 5.25)).toEqual({})
-		local problems = withRoom(room({ maxStopDistance = 4.85 }), nil, 5.25)
+		-- The kobold's Overhead engages at reach 6 x 0.8 = 4.8, and the landing onto the stop may rest
+		-- movement.landSlackStuds (0.02) short of it (D-643).
+		expect(withRoom(room({ maxStopDistance = 4.78 }), nil, 5.25)).toEqual({})
+		local problems = withRoom(room({ maxStopDistance = 4.8 }), nil, 5.25)
 		expect(
 			hasProblem(
 				problems,
+				"KoboldAxeman: archetypes.Brute.backRoom.maxStopDistance 4.8 is past Overhead's engage range 4.80 (reach 6 x engageFraction 0.8) less the landing's slack 0.02"
+			)
+		).toBe(true)
+		expect(
+			hasProblem(
+				withRoom(room({ maxStopDistance = 4.85 }), nil, 5.25),
 				"KoboldAxeman: archetypes.Brute.backRoom.maxStopDistance 4.85 is past Overhead's engage range 4.80"
 			)
 		).toBe(true)
@@ -6710,11 +6839,11 @@ describe("ai validator: the Brute's stop at a fighter backed to the world (D-627
 	end)
 
 	it("keeps the farthest stop inside the hit matrix's real fight, so every player swing reaches it", function()
-		expect(withRoom(real, nil, 4.6)).toEqual({})
+		expect(withRoom(real, nil, 4.75)).toEqual({})
 		expect(
 			hasProblem(
-				withRoom(real, nil, 4.5),
-				"archetypes.Brute.backRoom.maxStopDistance 4.6 is past hit matrix setup Kobold's real fight (max 4.5)"
+				withRoom(real, nil, 4.7),
+				"archetypes.Brute.backRoom.maxStopDistance 4.75 is past hit matrix setup Kobold's real fight (max 4.7)"
 			)
 		).toBe(true)
 	end)
@@ -7037,6 +7166,142 @@ describe("choreo validator: an enemy walk's stop plant (D-623)", function()
 		expect(withStops(real(), 0.5)).toEqual({})
 		for _, bad in { 0, 1, -0.5, 0 / 0, "0.5", "none" } :: { any } do
 			expect(hasProblem(withStops(real(), bad), "enemy.gait.stopBrakeShare")).toBe(true)
+		end
+	end)
+end)
+
+describe("choreo validator: an attack's plant (D-632)", function()
+	local function withAttacks(value: any, brake: any?, seconds: any?): { string }
+		local real = Harness.load("src/shared/data/choreo")
+		local copy = table.clone(real)
+		copy.enemy = table.clone(real.enemy)
+		copy.enemy.gait = table.clone(real.enemy.gait)
+		copy.enemy.gait.attackPlant = value
+		if brake ~= nil then
+			copy.enemy.gait.attackBrakeShare = if brake == "none" then nil else brake
+		end
+		if seconds ~= nil then
+			copy.enemy.gait.attackBrakeSeconds = if seconds == "none" then nil else seconds
+		end
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/choreo" then
+				return copy
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/choreo")(context)
+	end
+	local function real(): any
+		return Harness.load("src/shared/data/choreo").enemy.gait.attackPlant
+	end
+	local function plantOf(rig: string, change: (any) -> ()): any
+		local plant = table.clone(real()[rig])
+		plant.groups = table.clone(plant.groups)
+		for index, group in plant.groups do
+			plant.groups[index] = table.clone(group)
+		end
+		change(plant)
+		return { [rig] = plant }
+	end
+	local function boar(change: (any) -> ()): any
+		return plantOf("Boar", change)
+	end
+
+	it("passes the real tables", function()
+		expect(withAttacks(real())).toEqual({})
+		expect(withAttacks({})).toEqual({})
+	end)
+
+	it("wants a table of rigs with a walk", function()
+		expect(hasProblem(withAttacks(nil), "enemy.gait.attackPlant must be a table")).toBe(true)
+		expect(hasProblem(withAttacks({ Boar = 1 }), "enemy.gait.attackPlant.Boar must be a table")).toBe(true)
+		expect(
+			hasProblem(
+				withAttacks({ PlayerR15 = real().Boar }),
+				"enemy.gait.attackPlant.PlayerR15 names no rig with a walk"
+			)
+		).toBe(true)
+	end)
+
+	it("keeps the stop plant's groups, step, lift and glide", function()
+		expect(hasProblem(
+			withAttacks(boar(function(p)
+				p.groups = { p.groups[1] }
+			end)),
+			"enemy.gait.attackPlant.Boar.groups must list two or more groups"
+		)).toBe(true)
+		expect(
+			hasProblem(
+				withAttacks(boar(function(p)
+					p.groups[2][1] = "FrontLeftLeg"
+				end)),
+				"enemy.gait.attackPlant.Boar.groups: FrontLeftLeg must be a part of the rig hung from its own joint, named once"
+			)
+		).toBe(true)
+		expect(hasProblem(
+			withAttacks(boar(function(p)
+				p.stepSeconds = 0.12
+			end)),
+			"enemy.gait.attackPlant.Boar.stepSeconds 0.12 must be at least 1 / locomotion.weightBlendRate"
+		)).toBe(true)
+		for _, bad in { 0.02, 0.91, 0 / 0 } do
+			expect(hasProblem(
+				withAttacks(boar(function(p)
+					p.liftStuds = bad
+				end)),
+				"enemy.gait.attackPlant.Boar.liftStuds"
+			)).toBe(true)
+		end
+		-- Over a 0.125 s SineInOut step the fastest 60 Hz frame is settle x pi / 0.25 / 60: 0.095 is
+		-- 0.0199 a frame, 0.1 is 0.021.
+		expect(withAttacks(boar(function(p)
+			p.settleStuds = 0.095
+		end))).toEqual({})
+		expect(hasProblem(
+			withAttacks(boar(function(p)
+				p.settleStuds = 0.1
+			end)),
+			"enemy.gait.attackPlant.Boar.settleStuds 0.1 glides a foot 0.021 a 60 Hz frame"
+		)).toBe(true)
+	end)
+
+	it("is done before each attack clip's first hit window, after the deepest catch-up", function()
+		-- catchUpMaxJump is 0.25 s: the Charge opens at 0.6 s (two steps of 0.175 s at most, longer
+		-- than the boar's 0.3 s trot allows a stop), the Overhead at 1.3 s (0.525 s).
+		expect(withAttacks(boar(function(p)
+			p.stepSeconds = 0.175
+		end))).toEqual({})
+		expect(
+			hasProblem(
+				withAttacks(boar(function(p)
+					p.stepSeconds = 0.18
+				end)),
+				"enemy.gait.attackPlant.Boar: its 2 steps of 0.18 s after a 0.25 s catch-up must be done by enemy/Boar/Charge's first HitWindowOpen (0.6 s)"
+			)
+		).toBe(true)
+		expect(withAttacks(plantOf("Kobold", function(p)
+			p.stepSeconds = 0.525
+		end))).toEqual({})
+		expect(
+			hasProblem(
+				withAttacks(plantOf("Kobold", function(p)
+					p.stepSeconds = 0.53
+				end)),
+				"enemy.gait.attackPlant.Kobold: its 2 steps of 0.53 s after a 0.25 s catch-up must be done by enemy/Kobold/Overhead's first HitWindowOpen (1.3 s)"
+			)
+		).toBe(true)
+	end)
+
+	it("wants a first-row share from 0 to 1 and a positive brake time constant", function()
+		expect(withAttacks(real(), 0)).toEqual({})
+		expect(withAttacks(real(), 1)).toEqual({})
+		for _, bad in { -0.1, 1.1, 0 / 0, "0.5", "none" } :: { any } do
+			expect(hasProblem(withAttacks(real(), bad), "enemy.gait.attackBrakeShare")).toBe(true)
+		end
+		expect(withAttacks(real(), nil, 0.02)).toEqual({})
+		for _, bad in { 0, -0.01, 0 / 0, math.huge, "0.01", "none" } :: { any } do
+			expect(hasProblem(withAttacks(real(), nil, bad), "enemy.gait.attackBrakeSeconds")).toBe(true)
 		end
 	end)
 end)

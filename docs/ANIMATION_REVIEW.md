@@ -40,6 +40,7 @@ regeneration, matched by clip id.
 | `player/OneHandedSword/DodgeLeft` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none | yes 2026-10-25 (gate footage) | Carries the player into the boar's flank (locomotion f250-262); whole-view whip on DodgeRight (kill-shatter f27-30) | D-237, D-240; re-record |
 | `player/OneHandedSword/DodgeRight` | PlayerR15 | one-shot | 0.38 s / 23f | - | - | - | - | - | - | - | - | - | 8.00 | none | yes 2026-10-25 (gate footage) | Carries the player into the boar's flank (locomotion f250-262); whole-view whip on DodgeRight (kill-shatter f27-30) | D-237, D-240; re-record |
 | `player/OneHandedSword/Draw` | PlayerR15 | one-shot | 0.97 s / 58f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | Not seen in locomotion; nothing obvious at kobold-overhead f196-203 |  |
+| `player/OneHandedSword/DrawStep` | PlayerR15 | one-shot | 0.45 s / 27f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Fall` | PlayerR15 | loop | 0.80 s / 48f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/FlinchBack` | PlayerR15 | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/FlinchFront` | PlayerR15 | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | (clip inferred from the footage) Reads with a clean return (kobold-overhead f168-171); no readable flinch when hit in the Sharp Nail stance (art-sharp-nail f51-58), then a 26-frame low pose matching no SharpNail key (f63-88) | D-231; open (re-record) |
@@ -56,13 +57,16 @@ regeneration, matched by clip id.
 | `player/OneHandedSword/Run` | PlayerR15 | loop | 0.60 s / 36f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/RunDrawn` | PlayerR15 | loop | 0.60 s / 36f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Sheathe` | PlayerR15 | one-shot | 0.81 s / 49f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/SheatheStep` | PlayerR15 | one-shot | 0.45 s / 27f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Skid` | PlayerR15 | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Sprint` | PlayerR15 | loop | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/SprintDrawn` | PlayerR15 | loop | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/Stagger` | PlayerR15 | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 1.50 | none |  |  |  |
 | `player/OneHandedSword/TurnLeft` | PlayerR15 | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/TurnLeftDraw` | PlayerR15 | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/TurnLeftDrawn` | PlayerR15 | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/TurnRight` | PlayerR15 | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
+| `player/OneHandedSword/TurnRightDraw` | PlayerR15 | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/TurnRightDrawn` | PlayerR15 | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/WalkBack` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `player/OneHandedSword/WalkBackDrawn` | PlayerR15 | loop | 0.90 s / 54f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
@@ -95,5 +99,5 @@ regeneration, matched by clip id.
 
 ## Summary
 
-- 66 clips (9 attacks) across 3 rigs; 3 with problems found by the rules; 0 that do not load.
+- 70 clips (9 attacks) across 3 rigs; 3 with problems found by the rules; 0 that do not load.
 - Watch every attack at 0.25x in `places/ClipLab.rbxl` before a gate and fill the last three columns.

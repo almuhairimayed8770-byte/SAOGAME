@@ -557,28 +557,37 @@ local AI = {
 			-- A fighter backed to the world (D-627, the owner's call: the monster looms close, but the
 			-- hero always has room to swing and nobody is shoved by physics). The stop grows when the
 			-- world stands close behind the target along the line from the Brute (the target's root box
-			-- cast on past it against the world alone): far enough that, wherever the walk's last tick
-			-- and the brake leave the body, at least leanStuds stand between that world and the Brute's
-			-- own blocker face (the one across its facing line, square to the target it turns to face).
-			-- From stopDistance 3.5 a kobold stood 3.0-3.5 root to root, 2.2-2.7 from a wall behind a
-			-- fighter whose root rests 0.45 off it, where the swings lean 2.0-2.8 deep and the engine
-			-- shoved the leaning body out (F1e openIssue 1).
+			-- cast on past it against the world alone): far enough that at least leanStuds stand
+			-- between that world and the Brute's own blocker face (the one across its facing line,
+			-- square to the target it turns to face), and the grown stop is landed on (D-643), not
+			-- reached by a tick and a brake. From stopDistance 3.5 a kobold stood 3.0-3.5 root to root,
+			-- 2.2-2.7 from a wall behind a fighter whose root rests 0.45 off it, where the swings lean
+			-- 2.0-3.7 deep and the engine shoved the leaning body out (F1e openIssue 1).
 			backRoom = {
-				-- The deepest column front to back of any player Art or basic, posed on the player rig
-				-- with its root held (a stand-off step back stays, D-534: the deepest the body leans in
-				-- front so far plus how far it leans behind now), and the stand-off's wallGapStuds (0.05)
-				-- off each face. Vertical 2.845, Sharp Nail 2.757, Rising Arc 2.546, Horizontal 2.357,
-				-- the basics 2.017-2.281 (tests/data/ai.spec.luau measures them from the clips).
-				leanStuds = 2.95,
+				-- The deepest column front to back of any player Art or basic, posed with its root held
+				-- on the parts the engine collides (combat.luau keepOut.parts, the Head among them,
+				-- D-630): the deepest it leans in front at any pose plus the deepest it leans behind at
+				-- any pose (D-642; a stand-off step back stays, D-534, and so does the engine's push off
+				-- a wall a Head leaning back into it gets), on the matrix's body and on it with the
+				-- owner's Head (dev.luau hitMatrix.ownerHead), the deeper kept; and the stand-off's
+				-- wallGapStuds (0.05) off each face. Vertical 3.688 on the owner's Head (its held start
+				-- pose leans the Head 1.68 behind the root, its strike 2.01 in front), Sharp Nail 3.264,
+				-- Rising Arc 3.012, Basic3 2.602, Horizontal 2.510, Basic1 2.273, Basic2 2.175
+				-- (tests/data/ai.spec.luau measures them from the clips).
+				leanStuds = 3.79,
 				-- A Humanoid told to stop runs on about its pace times this: 0.085 at the kobold's 10
-				-- studs/s on BoarHooks.spec's studio Humanoid (braking 0.672 a 1/240 s step). The walk's
-				-- last tick, its pace over one AI tick, is added on top.
+				-- studs/s on BoarHooks.spec's studio Humanoid (braking 0.672 a 1/240 s step). The grown
+				-- stop keeps this much of its pace to spare, and the walk lands on it (D-643) from
+				-- within its last AI tick's walk and this of it, where a walk that stopped would run on
+				-- past.
 				brakeSeconds = 0.01,
-				-- At most this far root to root, inside every Brute attack's engage range (reach x
+				-- At most this far root to root: with the landing's movement.landSlackStuds (a landing
+				-- may rest that much short), inside every Brute attack's engage range (reach x
 				-- engageFraction: the Overhead's 4.8) so it still swings, and its blow (reach 6) still
 				-- lands, and inside the hit matrix's kobold real fight (5.25), so every player Art and
-				-- basic still reaches it (tools/validators/ai.luau checks both).
-				maxStopDistance = 4.6,
+				-- basic still reaches it (tools/validators/ai.luau checks both). A fighter's root box
+				-- square to a flush wall asks for 4.675 (3.79 + the kobold's Blocker 1.235 + 0.1 - 0.45).
+				maxStopDistance = 4.75,
 			},
 		} :: BruteTuning,
 		-- The other seven archetypes land in Phase 1; until then they borrow the Brute's numbers.

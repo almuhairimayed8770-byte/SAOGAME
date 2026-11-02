@@ -37,3 +37,16 @@ describe("fx.outline (D-476)", function()
 		expect(set["far-rest"]).toBeNil()
 	end)
 end)
+
+describe("fx.audio.airFloorStates (D-636)", function()
+	it("keeps a walking character's last floor on an Air read: the walking states, no airborne one", function()
+		-- AS 518(i): a copy that read Air while Running for 30 s on grass played the stone set.
+		local states = Fx.audio.airFloorStates
+		expect(table.find(states, "Running") ~= nil).toBe(true)
+		for _, airborne in { "Freefall", "Jumping", "FallingDown", "Ragdoll", "Flying", "Landed" } do
+			expect(table.find(states, airborne)).toBeNil()
+		end
+		-- Air itself is no floor: it maps to no surface, so it never becomes the floor kept.
+		expect((Fx.audio.materialSurface :: any).Air).toBeNil()
+	end)
+end)

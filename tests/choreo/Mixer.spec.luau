@@ -607,6 +607,38 @@ describe("Mixer", function()
 		expect(plain.pos[3]).toBeCloseTo(0.06)
 		expect(plain.rot[2]).toBeCloseTo(0)
 	end)
+
+	-- D-632: an enemy's attack plant sets its legs on the pose the layers composed, before the
+	-- procedural channels add on top, on every step (a hit-stop's too).
+	it("a pose hook changes the layers' pose before the channels add, until it is taken off", function()
+		local mixer = Mixer.new()
+		mixer:play(clip("a"))
+		mixer:setProcedural("lean", { Waist = { pos = { 0, 0, 0 }, rot = { 0, 0, 2 } } }, 1)
+		local seen: { number } = {}
+		mixer:setPoseHook("plant", function(pose: any)
+			-- The layers' Neck at the clip's clock, before any channel.
+			table.insert(seen, pose.Neck.rot[2])
+			expect(pose.Waist).toBeNil()
+			pose.Waist = { pos = { 0, 0, 0 }, rot = { 0, 0, 1 } }
+		end)
+		local result = mixer:step(FRAME)
+		expect(seen[1]).toBeCloseTo(100 * FRAME)
+		expect(result.offsets.Waist.rot[3]).toBeCloseTo(3)
+		mixer:hitStop(2)
+		mixer:step(FRAME)
+		expect(#seen).toBe(2)
+		expect(seen[2]).toBeCloseTo(100 * FRAME)
+		mixer:step(FRAME * 3)
+		mixer:setPoseHook("plant", nil)
+		expect(mixer:step(FRAME).offsets.Waist.rot[3]).toBeCloseTo(2)
+		expect(#seen).toBe(3)
+		mixer:setPoseHook("plant", function(pose: any)
+			pose.Waist = { pos = { 0, 0, 0 }, rot = { 0, 0, 1 } }
+		end)
+		mixer:clear()
+		mixer:play(clip("a"))
+		expect(mixer:step(FRAME).offsets.Waist).toBeNil()
+	end)
 end)
 
 -- ------------------------------------------------------------------------------------------

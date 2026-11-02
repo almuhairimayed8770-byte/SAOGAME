@@ -15,6 +15,11 @@
 	landFrames 60 Hz server frames, 0.6): a late root the server still lands never reads at rest, so
 	the hand-back waits for it.
 
+	choreo.luau enemy.rush.settleRestSeconds (D-648) is positive seconds over two of the longest
+	rows a rush is drawn on (a 30 fps row of up to 0.035 s, item 527) and under settleSeconds: a row
+	or two on which the replicated root did not move never reads as its rest, and the wait it adds
+	stays inside the hand-back's.
+
 	choreo.luau enemy.rush.pass (RushDraw's swing past a player's body in its path, D-167):
 	- leadStuds, fullStuds and returnStuds are positive studs; marginStuds and centreStuds are
 	  studs at least 0.
@@ -37,6 +42,8 @@
 local THROTTLED_FRAME_SECONDS = 0.1
 -- The server's frame a landing is paced on (its Heartbeat at 60 Hz, EnemyService's landStep).
 local SERVER_FRAME_SECONDS = 1 / 60
+-- The longest row a rush is judged on: DevFrameCap 30's rows of 1/30 and 0.0349 s (item 527).
+local LONGEST_ROW_SECONDS = 0.035
 
 local function finite(value: any): boolean
 	return typeof(value) == "number" and value == value and value > -math.huge and value < math.huge
@@ -103,6 +110,27 @@ return function(ctx: any): { string }
 				movement.landFrames
 			)
 		)
+	end
+	local restSeconds = if typeof(rush) == "table" then rush.settleRestSeconds else nil
+	check(positive(restSeconds), "choreo enemy.rush.settleRestSeconds must be a positive number of seconds")
+	if positive(restSeconds) then
+		check(
+			restSeconds >= 2 * LONGEST_ROW_SECONDS,
+			("enemy.rush.settleRestSeconds %.3f must be at least two of the longest rows (2 x %.3f s): a row on which the late root did not move would read as its rest"):format(
+				restSeconds,
+				LONGEST_ROW_SECONDS
+			)
+		)
+		local settle = if typeof(rush) == "table" then rush.settleSeconds else nil
+		if positive(settle) then
+			check(
+				restSeconds < settle,
+				("enemy.rush.settleRestSeconds %.3f must be under settleSeconds %.3f: the wait for a root at rest stays inside the hand-back's"):format(
+					restSeconds,
+					settle
+				)
+			)
+		end
 	end
 	local pass = if typeof(rush) == "table" then rush.pass else nil
 	if typeof(pass) ~= "table" then

@@ -23,8 +23,10 @@
 	(the root's move against speed x dt, held within locomotion.stride.travelSlipSeconds of travel)
 	moves the phase too, so the planted foot stays where it is on the ground instead of hopping by
 	that step every frame. Grounded and moving only; a teleport or shove past the bound is dropped.
-	The root's physics position never changes. One-shots (Jump, Fall, Land, TurnLeft, TurnRight, Skid) play
-	on the FullBody layer (a turn in place or a standing Land stops when the root starts to move;
+	The root's physics position never changes. One-shots (Jump, Fall, Land, TurnLeft, TurnRight, Skid,
+	and the stance steps of D-640: a standing body changes sets with TurnLeftDraw / TurnRightDraw,
+	DrawStep or SheatheStep, the Base set held until that clip shows at full weight) play
+	on the FullBody layer (a turn in place, a stance step or a standing Land stops when the root starts to move;
 	a landing on the move plays Land with no weight, for its sounds; a Skid called while a FullBody
 	clip that outranks it holds the body, a dodge or an attack, does not play: it would only be
 	heard, D-472); the lean into turns, the drawn sprint "weapon low and back" pose and the
@@ -366,8 +368,8 @@ end
 
 -- The turn plant (D-416, TurnPlant): before every step the hips hold the yaw they stood at while
 -- the root turns, and come round between a turn clip's two Footsteps on the pivot foot. It holds
--- while the body stands (update sets plantHolds) and no full-body clip but the turn or a standing
--- Land has it; else its lag lets go over locomotion.turnPlant.plantSeconds.
+-- while the body stands (update sets plantHolds) and no full-body clip but the turn, a standing
+-- Land or a stance step (D-640) has it; else its lag lets go over locomotion.turnPlant.plantSeconds.
 local PLANT_CHANNEL = "turnPlant"
 local STAND_CHANNEL = "standHeight" -- D-506
 local function stepTurnPlant(self: any, dt: number, handles: { any }?)
@@ -390,6 +392,7 @@ local function stepTurnPlant(self: any, dt: number, handles: { any }?)
 				and handle.weight > 0
 				and handle ~= turn
 				and handle ~= self.landHandle
+				and handle ~= self.stanceHandle
 			then
 				holds = false
 				break
@@ -436,8 +439,10 @@ local function stepTurnPlant(self: any, dt: number, handles: { any }?)
 end
 
 -- The turn in place for the stance the body stands in (D-416): over the drawn idle the drawn
--- turn (its feet start and end where the drawn stance has them), else the sheathed one.
-local function turnClipName(self: any, name: string): string
+-- turn (its feet start and end where the drawn stance has them), else the sheathed one; and over
+-- the sheathed idle with the drawn set wanted (`wantsDrawn`, a lock-on's predicted draw) the turn
+-- that steps from the sheathed stance into the drawn one (D-640). True with a stance's turn.
+local function turnClipName(self: any, name: string, wantsDrawn: boolean): (string, boolean)
 	local drawnIdle = self.handles[LocomotionState.clipFor("Idle", true)]
 	local idle = self.handles.Idle
 	local drawnName = name .. "Drawn"
@@ -447,9 +452,13 @@ local function turnClipName(self: any, name: string): string
 		and drawnIdle.weight > idle.weight
 		and (Config.clips :: any)[drawnName] ~= nil
 	then
-		return drawnName
+		return drawnName, false
 	end
-	return name
+	local intoName = name .. "Draw"
+	if wantsDrawn and (Config.clips :: any)[intoName] ~= nil then
+		return intoName, true
+	end
+	return name, false
 end
 
 -- The arm joints the Draw and Sheathe clips move (the sword's own joint left out). Read once from
@@ -1084,6 +1093,13 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		turnHandle = nil :: any,
 		landHandle = nil :: any,
 		drawn = character:GetAttribute(DRAWN_ATTRIBUTE) == true,
+		-- D-640: the set the Base layer stands in (LocomotionState's drawn), and the clip that
+		-- steps a standing body from one stance into the other (a turn into the drawn stance,
+		-- DrawStep or SheatheStep) with the set it ends in.
+		baseDrawn = false,
+		stanceHandle = nil :: any,
+		stanceTo = false,
+		baseShown = false, -- an update has run: the Base set has shown a stance
 		lastYaw = nil :: number?,
 		raycast = dependencies.raycast,
 		footIK = dependencies.footIK ~= false,
@@ -1157,6 +1173,7 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		self.shownLast[name] = 0
 	end
 	animator:setWeight(self.handles[LocomotionState.clipFor("Idle", self.drawn)], 1, true)
+	self.baseDrawn = self.drawn
 
 	-- The sword starts where the target wants it, with no clip.
 	self.mount = WeaponMount.new(
@@ -1256,6 +1273,98 @@ local function dropJumpHandoff(self: any)
 		self.jumpHandoff:Disconnect()
 		self.jumpHandoff = nil
 	end
+end
+
+-- D-640: a standing body changes stance with a step. The two idles stand the feet 0.2 and 0.6
+-- studs apart, so the Base set crossfading under nothing (weightBlendRate) slid a sole up to 0.08
+-- a 60 Hz row on a standing lock-on or sheathe, and up to 0.11 on a lock turn's fades (the sheathed
+-- turn blending out into the drawn idle; LockTurnShown.spec.luau, 48 idle phases). The Base set
+-- (baseDrawn) follows the set the body shows (showsDrawn) at once off the ground and on the move;
+-- standing, it holds until a clip that steps from one stance into the other shows at full weight
+-- (a turn from the sheathed stance into the drawn one, else DrawStep or SheatheStep), and then
+-- changes under it. Every foot of those clips moves only while it is lifted.
+
+-- The live stance clip, or nil (one let go is forgotten).
+local function stanceLive(self: any): any
+	local handle = self.stanceHandle
+	if handle ~= nil and (handle.done or handle.stopping) then
+		self.stanceHandle = nil
+		return nil
+	end
+	return handle
+end
+
+local function turnLive(self: any): boolean
+	local handle = self.turnHandle
+	return handle ~= nil and not handle.done and not handle.stopping
+end
+
+-- True while a full-body clip other than the turn or the stance clip holds the body (a Land, a
+-- Skid, an action): it covers the legs, and the Base set changes under it as it always did.
+local function bodyTaken(self: any): boolean
+	local mixer = self.animator.mixer
+	if typeof(mixer) ~= "table" or typeof(mixer.handles) ~= "function" then
+		return false
+	end
+	for _, handle in mixer:handles() do
+		if
+			handle.layer == "FullBody"
+			and not handle.done
+			and not handle.stopping
+			and handle.weight > 0
+			and handle ~= self.turnHandle
+			and handle ~= self.stanceHandle
+		then
+			return true
+		end
+	end
+	return false
+end
+
+-- Before the state's update: the Base set this step. `standing`: grounded under the idle speed.
+-- The first update takes the stance asked at once: the body has shown none yet.
+local function holdBase(self: any, standing: boolean)
+	local wants = showsDrawn(self)
+	local first = not self.baseShown
+	self.baseShown = true
+	if self.baseDrawn == wants then
+		return
+	end
+	if first or not standing then
+		self.baseDrawn = wants
+		return
+	end
+	local stance = stanceLive(self)
+	if stance ~= nil and self.stanceTo == wants then
+		if stance.fade >= 1 then
+			self.baseDrawn = wants
+		end
+	elseif bodyTaken(self) then
+		self.baseDrawn = wants
+	end
+end
+
+-- After the state's update: a standing stance change no turn takes plays its step. A turn under
+-- way, or one playing, takes it (a turn into the drawn stance) or the step waits for it.
+local function stepStance(self: any, output: LocomotionState.Output, grounded: boolean)
+	local wants = showsDrawn(self)
+	if self.baseDrawn == wants or output.phase ~= "Idle" or not grounded then
+		return
+	end
+	if stanceLive(self) ~= nil and self.stanceTo == wants then
+		return
+	end
+	if output.turnUnderWay or turnLive(self) then
+		return
+	end
+	local name = if wants then "DrawStep" else "SheatheStep"
+	local listed = (Config.clips :: any)[name]
+	if listed == nil or not ClipLibrary.has(clipId(name)) or bodyTaken(self) then
+		self.baseDrawn = wants
+		return
+	end
+	self.stanceHandle = playOneShot(self, name)
+	self.stanceTo = wants
 end
 
 -- D-506: how far below the root's center this body's soles hang in its bind pose (no clip), from
@@ -1556,15 +1665,19 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 	-- While a dodge holds the body the gait's weights stand where the dodge found them (D-528;
 	-- its pace, stepGait): the root's dodge speed is no run, and a blend that turned to it under
 	-- the dodge's fade crossed the legs to another stride in a row. The blend still hears the root
-	-- (a stop under the dodge is over when it lets go: no Skid after it, D-472).
+	-- (a stop under the dodge is over when it lets go: no Skid after it, D-472). Standing means
+	-- each weight's target is set to the weight itself (D-646): left alone, the Mixer carried
+	-- the weights on to the targets of the frame before the press (a tapped key's walk or run), so
+	-- the legs strode on under the dodge's first rows and crossed back to the idle in its fade.
 	local dodging = typeof(animator.mixer) == "table" and GaitHandOff.dodgeLive(animator.mixer)
+	holdBase(self, state.grounded and blendSpeed <= Config.idleSpeedThreshold)
 	local input: LocomotionState.Input = {
 		forward = forward,
 		right = right,
 		speed = blendSpeed,
 		sprinting = state.sprinting,
 		grounded = state.grounded,
-		drawn = showsDrawn(self),
+		drawn = self.baseDrawn,
 		turning = state.turning,
 		yawRate = yawRate,
 		verticalVelocity = state.verticalVelocity or 0,
@@ -1577,6 +1690,11 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 	if not dodging then
 		for name, weight in output.weights do
 			animator:setWeight(self.handles[name], weight)
+		end
+	else
+		for name in output.weights do
+			local handle = self.handles[name]
+			animator:setWeight(handle, handle.weight)
 		end
 	end
 
@@ -1624,7 +1742,13 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 		end
 		local half = Config.turnInPlaceDegrees / 2
 		if math.abs(pending) > half or math.abs(state.turning) > half then
-			self.turnHandle = playOneShot(self, turnClipName(self, oneShot))
+			local name, into = turnClipName(self, oneShot, showsDrawn(self))
+			self.turnHandle = playOneShot(self, name)
+			if into then
+				-- D-640: the turn steps into the drawn stance; the Base set follows at its full weight.
+				self.stanceHandle = self.turnHandle
+				self.stanceTo = true
+			end
 		end
 	elseif oneShot == "Skid" then
 		-- A stop under an action (a sprint cut by a dodge or an attack) is the action's: the Skid
@@ -1635,18 +1759,25 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 	elseif oneShot ~= nil then
 		playOneShot(self, oneShot)
 	end
-	-- A turn in place or a standing Land gives way to the first steps (their feet would slide
-	-- under the moving root).
+	-- A turn in place, a stance step or a standing Land gives way to the first steps (their feet
+	-- would slide under the moving root).
 	if output.phase == "Move" then
 		if self.turnHandle ~= nil then
 			animator:stop(self.turnHandle, ChoreoData.oneShotBlendIn)
 			self.turnHandle = nil
+		end
+		if self.stanceHandle ~= nil then
+			if not self.stanceHandle.stopping then
+				animator:stop(self.stanceHandle, ChoreoData.oneShotBlendIn)
+			end
+			self.stanceHandle = nil
 		end
 		if self.landHandle ~= nil then
 			animator:stop(self.landHandle, ChoreoData.oneShotBlendIn)
 			self.landHandle = nil
 		end
 	end
+	stepStance(self, output, state.grounded)
 	-- The turn plant holds the hips while the body stands on the ground (D-416).
 	self.plantHolds = output.phase == "Idle" and state.grounded
 
@@ -1747,11 +1878,17 @@ end
 -- clock when its root brakes under the walk, holds each foot where it stood and steps them into
 -- the idle's stand one group at a time while the walk's share falls to 0; a full-body clip or the
 -- root setting off again ends it.
+-- A rig with an attack plant (choreo enemy.gait.attackPlant, D-632, WalkStopPlant.beginUnder)
+-- holds each foot on the field point it stood on when an attack clip comes in, out of a walk, a
+-- stop or a stand, and digs in onto the clip's spots one group at a time, lifted; each leg hangs
+-- from the body the step draws (a Mixer pose hook), until the steps are done and the clip is in.
 RigDriver.__index = RigDriver
 
--- RigDriver's walking-turn plant channel (D-619) and stop plant channel (D-623).
+-- RigDriver's walking-turn plant channel (D-619) and stop plant channel (D-623), and its attack
+-- plant's pose hook (D-632).
 local WALK_PLANT_CHANNEL = "walkTurnPlant"
 local STOP_PLANT_CHANNEL = "walkStopPlant"
+local ATTACK_PLANT_HOOK = "attackPlant"
 local TRAVEL_TIME_SLACK = 1e-9 -- unit: seconds, float noise in a sum of frame times
 
 local function newRigDriver(
@@ -1763,7 +1900,8 @@ local function newRigDriver(
 	startPhase: number?,
 	character: Model?,
 	plantConfig: WalkTurnPlant.Config?,
-	stopConfig: WalkStopPlant.Config?
+	stopConfig: WalkStopPlant.Config?,
+	attackConfig: WalkStopPlant.Config?
 ): any
 	local walkDuration = ClipLibrary.get(walkId).duration
 	local plan = if character ~= nil and plantConfig ~= nil
@@ -1771,6 +1909,9 @@ local function newRigDriver(
 		else nil
 	local stopPlan = if character ~= nil and stopConfig ~= nil
 		then WalkStopPlant.plan(character, ClipLibrary.get(walkId).rig, stopConfig)
+		else nil
+	local attackPlan = if character ~= nil and attackConfig ~= nil
+		then WalkStopPlant.plan(character, ClipLibrary.get(walkId).rig, attackConfig)
 		else nil
 	local self = setmetatable({
 		animator = animator,
@@ -1798,6 +1939,13 @@ local function newRigDriver(
 		stopFade = 1,
 		stopLetGo = false,
 		stopEnds = false,
+		-- The attack plant (D-632), the attack clip it plants under, the root the last step read
+		-- and that step's dt, and the root this step's row is drawn on.
+		attackPlant = if attackPlan ~= nil then WalkStopPlant.new(attackPlan) else nil,
+		attackHandle = nil :: any,
+		attackRoot = nil :: CFrame?,
+		attackRootDt = 0,
+		attackDrawn = CFrame.identity,
 		unhook = nil :: (() -> ())?,
 		destroyed = false,
 	}, RigDriver)
@@ -2038,7 +2186,91 @@ local function letGoWalkStop(self: any, dt: number)
 	self.animator:setProcedural(STOP_PLANT_CHANNEL, WalkStopPlant.step(stop, clockDt, base, idlePose), self.stopFade)
 end
 
+-- Ends an attack plant: its hook comes off and the clip has the legs.
+local function endAttackPlant(self: any)
+	WalkStopPlant.cancel(self.attackPlant)
+	self.attackHandle = nil
+	self.animator.mixer:setPoseHook(ATTACK_PLANT_HOOK, nil)
+end
+
+-- The attack plant's step (D-632), before the mixer's. The root a step reads is where the last
+-- row was drawn; this row is drawn on the root physics moves next, carried on here over the row as
+-- it went over the last (yaw too), as the gait paced by the root's travel carries a planted foot.
+-- An attack starts with its mover stopped (Brain.beginAttack): its first row carries on
+-- attackBrakeShare of that, each later row what a braking root keeps of its speed from the last
+-- row's middle to this one's (attackBrakeSeconds its time constant) and none of its turn (the
+-- wind-up's align holds the facing or turns it at its slow windUpTurnRate).
+-- An attack clip just played (it has not stepped) begins a plant from the legs the last row drew
+-- and the pose the clip starts at; the plant ends once its steps are done and the clip is in, or
+-- when the clip goes.
+local function stepAttackPlant(self: any, dt: number)
+	local plant = self.attackPlant
+	local root: BasePart? = if self.character ~= nil then self.character.PrimaryPart else nil
+	if plant == nil or root == nil then
+		return
+	end
+	local now = root.CFrame
+	local last: CFrame? = self.attackRoot
+	local lastDt: number = self.attackRootDt
+	self.attackRoot, self.attackRootDt = now, dt
+	local moved, turn = Vector3.zero, 0
+	if last ~= nil and lastDt > 0 and dt > 0 then
+		local step = now.Position - last.Position
+		if Vector3.new(step.X, 0, step.Z).Magnitude <= ChoreoData.enemy.rush.teleportStuds then
+			local look = (last.Rotation:Inverse() * now.Rotation).LookVector
+			moved, turn = step * (dt / lastDt), math.atan2(-look.X, -look.Z) * (dt / lastDt)
+		end
+	end
+	local gait = ChoreoData.enemy.gait
+	local function carry(share: number, turnShare: number)
+		self.attackDrawn = CFrame.new(now.Position + moved * share)
+			* CFrame.Angles(0, turn * turnShare, 0)
+			* now.Rotation
+	end
+	carry(math.exp(-(lastDt + dt) / 2 / gait.attackBrakeSeconds), 0)
+	local mixer = self.animator.mixer
+	local handle = self.attackHandle
+	if handle ~= nil and (handle.stopping or handle.done) then
+		endAttackPlant(self)
+		handle = nil
+	end
+	for _, other in mixer:handles() do
+		if
+			other.fresh
+			and other ~= self.attackHandle
+			and other.layer == "FullBody"
+			and not other.stopping
+			and not other.done
+			and other.clip.attack == true
+		then
+			carry(gait.attackBrakeShare, gait.attackBrakeShare)
+			-- The clip starts where the network catch-up put its clock.
+			WalkStopPlant.beginUnder(plant, mixer:lastOffsets(), ClipSampler.sample(other.clip, other.time), now)
+			self.attackHandle = other
+			mixer:setPoseHook(ATTACK_PLANT_HOOK, function(pose: ClipSampler.Offsets)
+				local attack = self.attackHandle
+				if attack ~= nil then
+					-- The plant keeps the clip's clock: its beat paces the dig-in, a hit-stop holds it.
+					WalkStopPlant.stepUnder(
+						plant,
+						attack.time - attack.lastTime,
+						pose,
+						ClipSampler.sample(attack.clip, attack.time),
+						self.attackDrawn
+					)
+				end
+			end)
+			return
+		end
+	end
+	if handle ~= nil and WalkStopPlant.done(plant) and not mixer:blendingIn(handle) then
+		-- Every leg is down where the clip has it and the clip has the body: it has the legs too.
+		endAttackPlant(self)
+	end
+end
+
 function RigDriver.update(self: any, dt: number, state: State): LocomotionState.Output
+	stepAttackPlant(self, dt)
 	if self.stopEnds then
 		-- The stop's last step drew every leg on the idle: its channel goes.
 		self.stopEnds = false
@@ -2119,6 +2351,9 @@ function RigDriver.destroy(self: any)
 	if self.walkStop ~= nil then
 		self.animator:setProcedural(STOP_PLANT_CHANNEL, nil)
 	end
+	if self.attackPlant ~= nil then
+		endAttackPlant(self)
+	end
 end
 
 --- Drives a rig the local controller does not own from the animator's own step. The state comes
@@ -2158,7 +2393,8 @@ function Locomotion.attach(animator: any, character: Model, deps: Dependencies?)
 			ChoreoData.enemy.gait.startPhase[rigId],
 			character,
 			ChoreoData.enemy.gait.turnPlant[rigId],
-			ChoreoData.enemy.gait.stopPlant[rigId]
+			ChoreoData.enemy.gait.stopPlant[rigId],
+			ChoreoData.enemy.gait.attackPlant[rigId]
 		)
 		if tracker == nil then
 			tracker = Locomotion.travelTracker(character, Locomotion.humanoidTracker(character))

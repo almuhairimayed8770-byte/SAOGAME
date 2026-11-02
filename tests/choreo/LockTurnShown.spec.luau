@@ -39,6 +39,24 @@
 	drawn idle's were (D-417), and the idle's own soles hold within stride.contact of their start.
 	As every case above, the body stays sheathed: a lock-on's own draw (the stance changing under
 	the turn) is not in this read.
+
+	D-640: a lock-on from the sheathed body, the sword rig the server's WeaponBuilder hung, the
+	lock calling the predicted draw as Main.client.luau hooks TargetController.targetChanged
+	(CharacterController.predictDraw's stamp, read through ActionLogic.drawnTarget on the lock's
+	first frame). The draw changed the stance under the turn: the Base set crossfaded Idle to
+	IdleDrawn under the sheathed turn's entry and the turn blended out into the drawn stance, whose
+	feet stand 0.2 and 0.6 studs off the sheathed one (0.10 to 0.15 a 60 Hz row's time); a standing
+	lock-on and a standing sheathe slid the same way under nothing (0.08 to 0.10). Now the turn
+	steps into the drawn stance (TurnLeftDraw, TurnRightDraw), a standing change takes a step
+	(DrawStep, SheatheStep), and the Base set holds until that clip shows at full weight. From
+	lockTurn.idlePhaseCount phases of the idle, at each of sheathedStepHz, every row's read moves
+	at most rowStuds over a 60 Hz row's time, and the Draw still starts on the lock's frame
+	standing, after the turn turning (D-050, 323(b)).
+
+	D-641: the turns, drawn and sheathed, from each phase on the owner's PC's row times
+	(lockTurn.pcRowSeconds, seeded): the hips' come-round ended on the second plant's touchdown row,
+	which read up to 0.026 on 11 and 19 of 288 turns. It now ends turnPlant.leadSeconds of clip time
+	before it (one row at 60, three at 144).
 ]]
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
@@ -578,6 +596,368 @@ describe("the lock turn from the sheathed idle's weight shift (D-626)", function
 					("LockTurnShown sheathed idle phases side %d: worst row in a 60 Hz row's time %s"):format(
 						side,
 						table.concat(parts, ", ")
+					)
+				)
+				expect(table.concat(problems, "\n")).toBe("")
+			end
+		)
+	end
+end)
+
+-- D-640 and D-641: the lock-on from the sheathed body, and the turns on the PC's row times.
+local Signal = Harness.load("src/shared/util/Signal")
+local ActionLogic = Harness.load("src/client/controllers/ActionLogic")
+local WeaponBuilder = Harness.load("src/server/world/WeaponBuilder")
+local RigBuilder = Harness.load("src/server/world/RigBuilder")
+local WeaponModels = Harness.load("src/shared/data/weaponModels")
+local Weapons = Harness.load("src/shared/data/weapons")
+local world = Instance.new("Folder")
+world.Name = "World"
+
+-- A player rig the server's WeaponBuilder hung its sword on (SheathLockTurn.spec.luau's): the
+-- Draw plays on it, and the turn under way holds it back as it does in play.
+local function buildSwordRig(): any
+	local model = Instance.new("Model")
+	model.Name = "Player"
+	model:SetAttribute("Rig", "PlayerR15")
+	local parts = {}
+	local function part(name: string): any
+		local existing = parts[name]
+		if existing then
+			return existing
+		end
+		local created = Instance.new("Part")
+		created.Name = name
+		created.Size = Vector3.new(1, 1, 1)
+		created.CFrame = CFrame.new(0, 3, 0)
+		created.Position = Vector3.new(0, 3, 0)
+		created.Parent = model
+		parts[name] = created
+		return created
+	end
+	for _, joint in Rigs.PlayerR15.joints do
+		if joint.name == WeaponModels.motorName then
+			continue
+		end
+		local motor = Instance.new("Motor6D")
+		motor.Name = joint.name
+		motor.Part0 = part(joint.part0)
+		motor.Part1 = part(joint.part1)
+		motor.C0 = RigBuilder.frameOf(joint.c0)
+		motor.Parent = motor.Part1
+	end
+	model.PrimaryPart = parts.HumanoidRootPart
+	WeaponBuilder.equip(model, Weapons.byId("TrialistSword"))
+	model.Parent = world
+	return model
+end
+
+type LockRun = {
+	degrees: number, -- the lock turns the body this far (0: a standing lock-on, the target ahead)
+	side: number, -- -1 to the right, 1 to the left
+	start: number, -- seconds into the idle the lock comes
+	hz: number?, -- each row 1 / hz seconds, or
+	seed: number?, -- each row's time drawn from lockTurn.pcRowSeconds by a generator seeded so
+	drawn: boolean, -- the body stands drawn
+	lockOn: boolean?, -- the lock-on asks for the sword (the sword rig, standing sheathed)
+	-- The sword rig stands drawn, sword in hand, and the server's Drawn turns false at `start`
+	-- (no lock, the combat tag run out): the Sheathe plays after sheath.sheatheDelay.
+	sheathe: boolean?,
+	clips: { [string]: boolean }?, -- filled with every full-body clip that played after the lock
+}
+-- The most a foot's least-moving corner within stride.contact of the field on both rows (AR
+-- 513(a)'s read) moved over a 60 Hz row's time after the lock, when (seconds after it), and the
+-- Draw's start (seconds after the lock; nil: none played).
+type LockRead = { LeftFoot: { worst: number, at: number }, RightFoot: { worst: number, at: number }, drawAt: number? }
+local DRAW_ID = ChoreoData.locomotion.clipPrefix .. ChoreoData.sheath.clips.draw
+local SHEATHE_ID = ChoreoData.locomotion.clipPrefix .. ChoreoData.sheath.clips.sheathe
+-- The read runs this long after the lock: a turn's clip comes about 4 rows in and is gone by
+-- +0.72 s (0.5 s and its 0.15 s blend out); a stance step by +0.6 s.
+local LOCK_READ_SECONDS = 0.9
+local function lockRun(opts: LockRun): LockRead
+	local model = if opts.lockOn or opts.sheathe then buildSwordRig() else buildRig()
+	if opts.sheathe then
+		model:SetAttribute("Drawn", true)
+	end
+	local animator: any = Choreo.get(model)
+	local locomotion: any = Locomotion.new(animator, model, { footIK = false })
+	-- TargetController.targetChanged as Main.client.luau hooks it up: a lock calls
+	-- CharacterController.predictDraw, which stamps the clock; every frame the controller hands
+	-- Locomotion ActionLogic.drawnTarget(the server's Drawn, that stamp, now, sheath.predictSeconds).
+	local targetChanged = Signal.new()
+	local clock = 0
+	local lastPredictAt: number? = nil
+	targetChanged:Connect(function(record: any)
+		if record ~= nil then
+			lastPredictAt = clock
+		end
+	end)
+	local seeded = opts.seed ~= nil
+	local seed: number = opts.seed or 0
+	local function rowTime(): number
+		if not seeded then
+			return 1 / (opts.hz or 60)
+		end
+		seed = (seed * 1103515245 + 12345) % 2147483648
+		local least, most = Bar.pcRowSeconds[1], Bar.pcRowSeconds[2]
+		return least + (most - least) * seed / 2147483648
+	end
+	-- Rows that cover a 60 Hz row's time (one on the PC's rows).
+	local rows60 = if seeded then 1 else math.max(1, math.ceil((opts.hz or 60) / 60 - 1e-9))
+	local read: LockRead = {
+		LeftFoot = { worst = 0, at = 0 },
+		RightFoot = { worst = 0, at = 0 },
+		drawAt = nil,
+	}
+	local recent: { [string]: { number } } = { LeftFoot = {}, RightFoot = {} }
+	local last: { [string]: { Vector3 } } = {}
+	local yaw, left = 0, opts.degrees
+	local locked = false
+	-- The body stands until two 60 Hz rows before the lock on rows of a fifth of a second (the
+	-- idle's clocks only run on: every number below is the same on 60 Hz rows), then on the run's
+	-- own rows.
+	local settle = opts.start - 2 / 60
+	-- A sheathe changes the stance once the Sheathe has come in over the arm (Locomotion's
+	-- showsDrawn): sheatheDelay and the clip's blend in later.
+	local reads = LOCK_READ_SECONDS
+		+ (if opts.sheathe then ChoreoData.sheath.sheatheDelay + ClipLibrary.get(SHEATHE_ID).blendIn else 0)
+	while clock < opts.start + reads do
+		local dt = if clock < settle then math.min(0.2, settle - clock) else rowTime()
+		local fine = clock >= settle
+		clock += dt
+		local ahead = 0
+		if fine and clock > opts.start then
+			if not locked then
+				locked = true
+				if opts.lockOn then
+					targetChanged:Fire({})
+				end
+			end
+			local step = math.min(left, Combat.aim.lockTurnRate * dt)
+			left -= step
+			ahead = step * opts.side
+		end
+		model.PrimaryPart.CFrame = CFrame.Angles(0, math.rad(yaw), 0)
+		locomotion:update(dt, {
+			moveDir = Vector3.zero,
+			speed = 0,
+			sprinting = false,
+			grounded = true,
+			drawn = opts.drawn or ActionLogic.drawnTarget(
+				opts.sheathe == true and clock <= opts.start,
+				lastPredictAt,
+				clock,
+				ChoreoData.sheath.predictSeconds
+			),
+			turning = 0,
+			verticalVelocity = 0,
+			yawAhead = ahead,
+		})
+		animator:step(dt)
+		yaw += ahead
+		model.PrimaryPart.CFrame = CFrame.Angles(0, math.rad(yaw), 0)
+		if not fine then
+			continue
+		end
+		if locked then
+			for _, handle in animator.mixer:handles() do
+				if handle.clipId == DRAW_ID and read.drawAt == nil then
+					read.drawAt = clock - opts.start
+				end
+				if opts.clips ~= nil and handle.layer == "FullBody" and handle.weight > 0 then
+					(opts.clips :: { [string]: boolean })[handle.clipId:match("[^/]+$") or handle.clipId] = true
+				end
+			end
+		end
+		local rootFrame = avatar.base * CFrame.Angles(0, math.rad(yaw), 0)
+		local solved = Pose.solve(avatar.model, rootFrame, animator.mixer:lastOffsets(), chain)
+		for _, name in FOOT do
+			local now = bottom(solved[name], (avatar.model:FindFirstChild(name) :: any).Size)
+			local before = last[name]
+			last[name] = now
+			if before == nil or not locked then
+				continue
+			end
+			local least = math.huge
+			for i = 1, 4 do
+				if math.abs(now[i].Y - FIELD_TOP) <= CONTACT and math.abs(before[i].Y - FIELD_TOP) <= CONTACT then
+					least = math.min(least, (flat(now[i]) - flat(before[i])).Magnitude)
+				end
+			end
+			local moves = recent[name]
+			table.insert(moves, if least < math.huge then least else 0)
+			if #moves > rows60 then
+				table.remove(moves, 1)
+			end
+			local sum = 0
+			for _, moved in moves do
+				sum += moved
+			end
+			local foot = (read :: any)[name]
+			if sum > foot.worst then
+				foot.worst = sum
+				foot.at = clock - opts.start
+			end
+		end
+	end
+	locomotion:destroy()
+	Choreo.release(model)
+	return read
+end
+
+-- Every phase of the sweep: lockTurn.idlePhaseCount points spread evenly over one cycle of the
+-- idle (12 s: a quarter second apart), from half a second stood (the other cases' start).
+local function phases(): { number }
+	local cycle = ClipLibrary.get(ChoreoData.locomotion.clipPrefix .. ChoreoData.locomotion.clips.Idle).duration
+	local out = {}
+	for index = 0, Bar.idlePhaseCount - 1 do
+		table.insert(out, 0.5 + index * cycle / Bar.idlePhaseCount)
+	end
+	return out
+end
+
+-- Runs every run of the sweep and returns the problems, the worst read and how many runs were over.
+local function sweep(label: string, runs: { LockRun }): ({ string }, number, number, number)
+	local problems = {}
+	local worst, over, count = 0, 0, 0
+	for _, opts in runs do
+		local read = lockRun(opts)
+		count += 1
+		local most = 0
+		for _, name in FOOT do
+			local foot = (read :: any)[name]
+			most = math.max(most, foot.worst)
+			if foot.worst > Bar.rowStuds + 1e-6 then
+				table.insert(
+					problems,
+					("%s %d deg side %d %s from %.2f s into the idle: %s moves %.4f in a 60 Hz row's time on the field at +%.3f s (max %.3f)"):format(
+						label,
+						opts.degrees,
+						opts.side,
+						if opts.seed ~= nil then "on the PC's rows" else ("at %d Hz"):format(opts.hz or 60),
+						opts.start,
+						name,
+						foot.worst,
+						foot.at,
+						Bar.rowStuds
+					)
+				)
+			end
+		end
+		worst = math.max(worst, most)
+		if most > Bar.rowStuds + 1e-6 then
+			over += 1
+		end
+	end
+	return problems, worst, over, count
+end
+
+describe("a lock-on from the sheathed body steps into the drawn stance (D-640)", function()
+	for _, side in { -1, 1 } do
+		it(
+			("the lock turns the sheathed body to the %s as it draws, from every idle phase: no sole slides"):format(
+				if side < 0 then "right" else "left"
+			),
+			function()
+				local lines, parts = {}, {}
+				for _, hz in Bar.sheathedStepHz do
+					local runs: { LockRun } = {}
+					for _, start in phases() do
+						for _, degrees in Bar.degrees do
+							table.insert(
+								runs,
+								{ degrees = degrees, side = side, start = start, hz = hz, drawn = false, lockOn = true }
+							)
+						end
+					end
+					local problems, worst, over, count = sweep("lock turn", runs)
+					table.move(problems, 1, #problems, #lines + 1, lines)
+					table.insert(parts, ("%d Hz worst %.4f, %d of %d over"):format(hz, worst, over, count))
+				end
+				print(("LockTurnShown lock-on side %d: %s"):format(side, table.concat(parts, "; ")))
+				expect(table.concat(lines, "\n")).toBe("")
+			end
+		)
+	end
+
+	it("a standing lock-on draws from every idle phase: the feet step into the drawn stance", function()
+		local lines, parts = {}, {}
+		for _, hz in Bar.sheathedStepHz do
+			local runs: { LockRun } = {}
+			for _, start in phases() do
+				table.insert(runs, { degrees = 0, side = 1, start = start, hz = hz, drawn = false, lockOn = true })
+			end
+			local problems, worst, over, count = sweep("standing lock-on", runs)
+			table.move(problems, 1, #problems, #lines + 1, lines)
+			table.insert(parts, ("%d Hz worst %.4f, %d of %d over"):format(hz, worst, over, count))
+		end
+		print(("LockTurnShown standing lock-on: %s"):format(table.concat(parts, "; ")))
+		expect(table.concat(lines, "\n")).toBe("")
+	end)
+
+	it("a standing sheathe from every idle phase: the feet step back into the idle's stance", function()
+		local lines, parts = {}, {}
+		for _, hz in Bar.sheathedStepHz do
+			local runs: { LockRun } = {}
+			for _, start in phases() do
+				table.insert(runs, { degrees = 0, side = 1, start = start, hz = hz, drawn = false, sheathe = true })
+			end
+			local problems, worst, over, count = sweep("standing sheathe", runs)
+			table.move(problems, 1, #problems, #lines + 1, lines)
+			table.insert(parts, ("%d Hz worst %.4f, %d of %d over"):format(hz, worst, over, count))
+		end
+		print(("LockTurnShown standing sheathe: %s"):format(table.concat(parts, "; ")))
+		expect(table.concat(lines, "\n")).toBe("")
+	end)
+
+	it("plays the turn into the drawn stance, and the Draw on the lock's frame or after the turn", function()
+		-- The Draw's timing stands (D-050): a standing lock-on draws on its first frame; a lock
+		-- turn holds the Draw for the turn (323(b)), as the sheathed turn did.
+		local seen: { [string]: boolean } = {}
+		local standing = lockRun({ degrees = 0, side = 1, start = 0.5, hz = 60, drawn = false, lockOn = true })
+		local turn =
+			lockRun({ degrees = 135, side = -1, start = 0.5, hz = 60, drawn = false, lockOn = true, clips = seen })
+		print(
+			("LockTurnShown lock-on Draw: standing +%.3f s, 135 to the right +%.3f s"):format(
+				standing.drawAt or -1,
+				turn.drawAt or -1
+			)
+		)
+		expect(standing.drawAt).toBeCloseTo(1 / 60, 1e-6)
+		expect(seen[ChoreoData.locomotion.clips.TurnRightDraw]).toBe(true)
+		expect(seen[ChoreoData.locomotion.clips.TurnRight]).toBeNil()
+		expect((turn.drawAt or 0) > ChoreoData.locomotion.turnClipDuration).toBe(true)
+	end)
+end)
+
+describe("the hips are round before the second plant lands (D-641)", function()
+	for _, drawn in { true, false } do
+		it(
+			("the lock turns the standing %s body from every idle phase on the PC's row times: no sole slides"):format(
+				if drawn then "drawn" else "sheathed"
+			),
+			function()
+				local runs: { LockRun } = {}
+				for index, start in phases() do
+					for _, side in { -1, 1 } do
+						for _, degrees in Bar.degrees do
+							table.insert(runs, {
+								degrees = degrees,
+								side = side,
+								start = start,
+								seed = Bar.rowSeed + index,
+								drawn = drawn,
+							})
+						end
+					end
+				end
+				local problems, worst, over, count = sweep(if drawn then "drawn" else "sheathed", runs)
+				print(
+					("LockTurnShown %s on the PC's rows: worst %.4f, %d of %d over"):format(
+						if drawn then "drawn" else "sheathed",
+						worst,
+						over,
+						count
 					)
 				)
 				expect(table.concat(problems, "\n")).toBe("")

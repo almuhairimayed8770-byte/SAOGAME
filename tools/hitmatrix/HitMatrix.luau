@@ -513,48 +513,127 @@ function HitMatrix.standing(Harness: any): (Avatar, any)
 	return buildAvatar(ctx), fieldPart(ctx)
 end
 
-export type LeanColumn = { id: string, clipId: string, depth: number, at: number }
+export type LeanColumn = {
+	id: string,
+	clipId: string,
+	depth: number,
+	at: number,
+	behindAt: number,
+	body: string,
+}
+
+-- The deepest front and back corner of a box along +Z (the root's space as leanColumns poses it).
+local function zBack(frame: any, size: any): number
+	local most = -math.huge
+	for _, x in { -1, 1 } do
+		for _, y in { -1, 1 } do
+			for _, z in { -1, 1 } do
+				most = math.max(most, frame:PointToWorldSpace(size * 0.5 * Vector3.new(x, y, z)).Z)
+			end
+		end
+	end
+	return most
+end
+
+-- Fits the owner's Head (dev.luau hitMatrix.ownerHead) on the matrix's body in place: the Head
+-- made ownerHead.depthStuds deep, its neck moved back until the box's back stands
+-- ownerHead.behindStuds behind the UpperTorso's at the drawn idle (the loadout weapon's IdleDrawn
+-- at clip 0), measured on the body's own parts as the idle poses them.
+local function fitOwnerHead(ctx: Context, model: any)
+	local spec = ctx.Dev.hitMatrix.ownerHead
+	local head = model:FindFirstChild("Head")
+	local torso = model:FindFirstChild("UpperTorso")
+	assert(head ~= nil and torso ~= nil, "the matrix body has no Head or UpperTorso")
+	head.Size = Vector3.new(head.Size.X, head.Size.Y, spec.depthStuds)
+	local weapon = ctx.Weapons.byId(ctx.Playground.loadout.weapon)
+	local idle = ctx.ClipSampler.sample(
+		ctx.Harness.load("src/shared/clips/" .. ("player/%s/IdleDrawn"):format(weapon.category)),
+		0
+	)
+	-- The neck's turn at the idle bends the shift a hair: two passes land it within 1e-6.
+	for _ = 1, 2 do
+		local solved = ctx.Pose.solve(model, CFrame.new(), idle)
+		local shift = zBack(solved.UpperTorso, torso.Size) + spec.behindStuds - zBack(solved.Head, head.Size)
+		for _, joint in ctx.Joints.list(model) do
+			if joint.Name == "Neck" then
+				if joint:IsA("Motor6D") then
+					joint.C0 = CFrame.new(0, 0, shift) * joint.C0
+				else
+					local attachment = joint.Attachment0
+					attachment.CFrame = CFrame.new(0, 0, shift) * attachment.CFrame
+				end
+			end
+		end
+	end
+end
+
+--- The owner's Head on a model built like the matrix's body (the StandOffWall bench's avatar):
+--- dev.luau hitMatrix.ownerHead's depth, its box's back that far behind the UpperTorso's at the
+--- drawn idle. Changes `model` in place; the caller re-reads any joint chain it holds.
+function HitMatrix.ownerHead(Harness: any, model: any)
+	fitOwnerHead(load(Harness), model)
+end
 
 --- How deep front to back each of the matrix's attacks (the loadout's Arts, then the basic chain)
---- leans the parts the engine collides (combat.luau contact.standOff.keepOut.parts) on the matrix's
---- body, posed every `sampleSeconds` (1/120 when nil) with its root held, as the stand-off holds a
---- swing's own motion against a target it touches (D-502): at each pose, the deepest it has leant
---- in front so far plus how far it leans behind now, since a stand-off step back stays (D-534). The
---- room a fighter backed to the world needs between that world and a foe's blocker face, before the
---- stand-off's own gaps (D-627); `at` is the clip time of the deepest pose.
+--- leans the parts the engine collides (combat.luau contact.standOff.keepOut.parts, the Head
+--- among them, D-630), posed every `sampleSeconds` (1/120 when nil) with the root held, as the
+--- stand-off holds a swing's own motion against a target it touches (D-502): the deepest it leans
+--- in front at any pose plus the deepest it leans behind at any pose (D-642). Both stay: a
+--- stand-off step back off the front stays (D-534), and so does the engine's push off a wall
+--- behind, which a colliding Head leaning back into it gets (Vertical's held start pose leans the
+--- owner's Head 1.68 behind the root and the strike 2.01 in front, 0.07 s apart: no keep-out step
+--- at 12 studs/s takes the push back by the strike). Read on two bodies, the matrix's and the
+--- matrix's with the owner's Head (dev.luau hitMatrix.ownerHead), the deeper kept (`body`). The
+--- room a fighter backed to the world needs between that world and a foe's blocker face, before
+--- the stand-off's own gaps (D-627); `at` is the clip time of the deepest pose in front and
+--- `behindAt` that of the deepest behind.
 function HitMatrix.leanColumns(Harness: any, sampleSeconds: number?): { LeanColumn }
 	local ctx = load(Harness)
-	local avatar = buildAvatar(ctx)
+	local matrix = buildAvatar(ctx)
+	local owner = buildAvatar(ctx)
+	fitOwnerHead(ctx, owner.model)
 	local step = sampleSeconds or 1 / 120
 	local parts = ctx.Combat.contact.standOff.keepOut.parts
 	local facing = CFrame.lookAt(Vector3.zero, Vector3.new(0, 0, 1))
 	local columns: { LeanColumn } = {}
 	for _, attack in HitMatrix.attacks(ctx) do
 		local clip = attack.clip
-		local deepest, deepestAt, frontSoFar = -math.huge, 0, -math.huge
-		local time = 0
-		while true do
-			local solved = ctx.Pose.solve(avatar.model, facing, ctx.ClipSampler.sample(clip, time))
-			local front, back = -math.huge, -math.huge
-			for _, name in parts do
-				local part = avatar.model:FindFirstChild(name)
-				local frame = solved[name]
-				if part ~= nil and frame ~= nil then
-					local reach = boundsHalf(frame, part.Size).Z
-					front = math.max(front, frame.Position.Z + reach)
-					back = math.max(back, reach - frame.Position.Z)
+		local best: LeanColumn? = nil
+		for _, body in { { name = "matrix", model = matrix.model }, { name = "ownerHead", model = owner.model } } do
+			local front, frontAt, back, backAt = -math.huge, 0, -math.huge, 0
+			local time = 0
+			while true do
+				local solved = ctx.Pose.solve(body.model, facing, ctx.ClipSampler.sample(clip, time))
+				for _, name in parts do
+					local part = body.model:FindFirstChild(name)
+					local frame = solved[name]
+					if part ~= nil and frame ~= nil then
+						local reach = boundsHalf(frame, part.Size).Z
+						if frame.Position.Z + reach > front then
+							front, frontAt = frame.Position.Z + reach, time
+						end
+						if reach - frame.Position.Z > back then
+							back, backAt = reach - frame.Position.Z, time
+						end
+					end
 				end
+				if time >= clip.duration then
+					break
+				end
+				time = math.min(time + step, clip.duration)
 			end
-			frontSoFar = math.max(frontSoFar, front)
-			if frontSoFar + back > deepest then
-				deepest, deepestAt = frontSoFar + back, time
+			if best == nil or front + back > best.depth then
+				best = {
+					id = attack.id,
+					clipId = attack.clipId,
+					depth = front + back,
+					at = frontAt,
+					behindAt = backAt,
+					body = body.name,
+				}
 			end
-			if time >= clip.duration then
-				break
-			end
-			time = math.min(time + step, clip.duration)
 		end
-		table.insert(columns, { id = attack.id, clipId = attack.clipId, depth = deepest, at = deepestAt })
+		table.insert(columns, best :: LeanColumn)
 	end
 	return columns
 end

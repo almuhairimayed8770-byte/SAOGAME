@@ -161,6 +161,15 @@ local Choreo = {
 			plantSeconds = 0.12,
 			twistDegrees = 45,
 			easing = "SineInOut",
+			-- D-641: the hips are round this many seconds of clip time before the second
+			-- Footstep, so the other foot sets down under hips that stand still. Ending on it, the
+			-- curve's last row and the touchdown's first fell on one frame: a drawn lock turn of
+			-- 179 degrees on the PC's row times (15.6 to 17.6 ms) moved a sole corner 0.0128 in a
+			-- 60 Hz row on 7 of 48 idle phases, a sheathed one up to 0.0239. With 0.02 (1.2 rows
+			-- at 60, 2.9 at 144) the worst is 0.0049 and 0.0072, none over 0.01. At least 0 and
+			-- at most what leaves every turn clip's window half a turn at stepDegrees
+			-- (tools/validators/choreo.luau: 0.24 of the 0.26 s between Footsteps).
+			leadSeconds = 0.02,
 		},
 		-- An attack that cuts a moving gait (D-404): the gait's phase stands where the attack
 		-- found it until the attack lets go, and the attack takes each joint listed here over its
@@ -237,7 +246,16 @@ local Choreo = {
 			-- first frames of a standing turn turned the left forearm 40.9 and the left hand up to
 			-- 48.9 degrees on its first 60 Hz row (the owner's PC on c78acd1, 515(b): the sheathed
 			-- standing dodge to the left, its right lower leg 33.6 on the second row).
-			takesFrom = { "TurnLeft", "TurnRight", "TurnLeftDrawn", "TurnRightDrawn" },
+			takesFrom = {
+				"TurnLeft",
+				"TurnRight",
+				"TurnLeftDrawn",
+				"TurnRightDrawn",
+				"TurnLeftDraw",
+				"TurnRightDraw",
+				"DrawStep",
+				"SheatheStep",
+			},
 		},
 		skidSpeedThreshold = 18, -- above run speed: stopping plays Skid
 		-- The two-step stop below the skid threshold: after the stick lets go the root slows down
@@ -421,6 +439,14 @@ local Choreo = {
 			-- Over the drawn stance (D-416): Locomotion plays these when the drawn idle shows.
 			TurnLeftDrawn = "TurnLeftDrawn",
 			TurnRightDrawn = "TurnRightDrawn",
+			-- From the sheathed stance into the drawn one (D-640): Locomotion plays a turn when
+			-- the Base set stands sheathed and the drawn set is wanted (a lock-on's predicted
+			-- draw), a step when the stance changes with no turn, and holds the Base set until the
+			-- clip shows at full weight. Each foot moves only while it is lifted.
+			TurnLeftDraw = "TurnLeftDraw",
+			TurnRightDraw = "TurnRightDraw",
+			DrawStep = "DrawStep",
+			SheatheStep = "SheatheStep",
 			Skid = "Skid",
 		},
 		clipPrefix = "player/OneHandedSword/",
@@ -587,11 +613,56 @@ local Choreo = {
 					settleStuds: number,
 				},
 			},
+			-- A rig's attack plant (D-632, WalkStopPlant.beginUnder; tools/validators/choreo.luau):
+			-- when an attack clip comes in, each foot of `groups` holds the field point it stood on, and
+			-- one that stood further than settleStuds from where the clip's first pose has it digs in
+			-- over stepSeconds onto where the clip has it, its sole liftStuds clear of the straight
+			-- path at the step's middle, one group at a time (every group but the lowest first); one
+			-- that stood there follows the clip. stepSeconds is the clip's clock and no quicker than the
+			-- gait's crossfade; both steps are done by the Charge's first HitWindowOpen after the
+			-- deepest catch-up (0.25 + 2 x 0.125 of 0.6 s). The Charge's crouch blended in over the
+			-- walking legs swept the hooves 0.51 a 60 Hz row (0.43 at 144) down to -0.08, and out of
+			-- its idle 0.25 (0.11); the kobold's Overhead out of its walk up to 0.51 (0.23). Planted:
+			-- 0.044 (0.039) and 0.020 (0.010), the kobold 0.016 (0.027), no foot under the clip's own.
+			attackPlant = {
+				Kobold = {
+					groups = { { "LeftLeg" }, { "RightLeg" } },
+					stepSeconds = 0.125,
+					liftStuds = 0.15,
+					settleStuds = 0.08,
+				},
+				Boar = {
+					groups = { { "FrontLeftLeg", "BackRightLeg" }, { "FrontRightLeg", "BackLeftLeg" } },
+					stepSeconds = 0.125,
+					liftStuds = 0.12,
+					settleStuds = 0.08,
+				},
+			} :: {
+				[string]: {
+					groups: { { string } },
+					stepSeconds: number,
+					liftStuds: number,
+					settleStuds: number,
+				},
+			},
 			-- A root that moved less than this share of its walk's own pace over a row has braked (the
 			-- server's Humanoid stops it within two frames): the stop plant takes the legs from the
 			-- next row. A walking root a 144 Hz client draws steps at least 0.6 of its pace a row
 			-- (511(g) on c78acd1: 0.030 to 0.066 a row at 7 studs/s).
 			stopBrakeShare = 0.5,
+			-- An attack starts with its mover stopped (Brain.beginAttack): the attack plant draws its
+			-- first row on the root carried on by this share of the last row's move (D-632). The
+			-- client cannot see where in the row the brake bites, so it takes the middle of carrying
+			-- on (1) and standing (0): the brake row kept 0.41 of the walk's move at 60 Hz and 0.53 to
+			-- 0.88 at 144; carried on whole, the boar's hooves slid 0.19 on it (0.05 at 144).
+			attackBrakeShare = 0.5,
+			-- Each later row the attack plant carries the root on by what a braking root keeps of its
+			-- speed from the last row's middle to this one's, e^(-t / attackBrakeSeconds): the studio
+			-- Humanoid (BoarHooks.spec, the PC's server log on 4b18b5c) brakes 0.672 a 1/240 s step,
+			-- a time constant of 0.0105 s, so 0.20 a 60 Hz row (the server's rows after the brake row
+			-- kept 0.20) and 0.52 a 144 Hz row. Carried on by what the last row kept of the one
+			-- before, the hooves slid 0.078 at 144 (the interpolated root steps unevenly).
+			attackBrakeSeconds = 0.0105,
 		},
 		-- The attack clip ActionStarted plays keeps that beat up to its first HitWindowOpen (D-172):
 		-- the rig's hit-stop is the only freeze, and what it held beyond the server's pause (or
@@ -624,6 +695,13 @@ local Choreo = {
 			-- dead (ai.luau movement.landSlackStuds over landFrames 60 Hz frames: 0.6), so a root
 			-- still landing never reads at rest.
 			settleRestSpeed = 0.5,
+			-- The root counts as at rest only once no step of it has come in faster than
+			-- settleRestSpeed for this long (D-648): on 30 fps rows the replicated root came in on
+			-- some rows only, and one row on which it did not move let the slide begin toward a root
+			-- still 0.05 short, then follow it forward (AS 527, Q527_30_2: back 0.017 against 0.010,
+			-- forward 0.009 and 0.003). Over two of the longest 30 fps rows (0.035 s each), under
+			-- settleSeconds.
+			settleRestSeconds = 0.1,
 			-- A replicated root that moves more than this in one step, flat, other than forward down
 			-- the path, was put there (a placement, a teleport, D-553): the drawn rush is over at
 			-- once and the body is drawn on its root where it now stands, never slid there. A late

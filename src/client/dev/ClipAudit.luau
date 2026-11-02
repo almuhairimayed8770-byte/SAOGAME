@@ -18,7 +18,10 @@
 	sends it), and the rig's cancels (review.audit.rigs.<rig>.cancels: an Art, the guard or a dodge
 	cutting a swing, a dodge cutting the guard or an Art's start-pose hold), each played over the
 	cancel hand-over (choreo.luau handOver, D-408) whose first cancel.snapFrames frames are the
-	cut's snap. A clip
+	cut's snap. A clip that changes a standing body's stance (review.audit.rigs.<rig>.stances,
+	D-640) plays out of the stance it starts in instead, cut in ("Lab") and blended in at points
+	of the idles' cycle ("Stance@"), the Base set turning to the other stance once it shows at full
+	weight (Locomotion's hold). A clip
 	whose body the server carries (the boar's rush, an enemy's walk) is traced with its root carried
 	along its facing at the game's speed; an enemy's walk sets off from standing as the game sets it
 	off (movement.startPace eased up at paceChangeRate, the walk paced to it; D-624). Every
@@ -612,6 +615,48 @@ function ClipAudit.plans(clip: Types.ClipDef, library: (string) -> Types.ClipDef
 		return plans
 	end
 	local drawnIdle = config.drawnIdle
+	-- A clip that changes a standing body's stance (D-640, review.audit.rigs `stances`): out of
+	-- the stance it starts in, the Base set turning to the other once the clip shows at full
+	-- weight, as Locomotion holds it; the Lab cuts it in and turns the set at once.
+	local into = if config.stances ~= nil then config.stances[clip.id] else nil
+	if into ~= nil and config.idle ~= nil and drawnIdle ~= nil then
+		local idle, drawn = library(config.idle), library(drawnIdle)
+		plans = {}
+		local function stancePlan(label: string, phase: number, cutIn: boolean): Plan
+			local plays: { Play } = {}
+			if config.breathing ~= nil then
+				table.insert(plays, { clip = library(config.breathing), at = 0, coexist = true, blendIn = 0 })
+			end
+			for _, stance in { idle, drawn } do
+				table.insert(plays, {
+					clip = stance,
+					at = 0,
+					startTime = phase % stance.duration,
+					coexist = true,
+					weight = if (stance == drawn) == into then 0 else 1,
+					blendIn = 0,
+				})
+			end
+			table.insert(plays, { clip = clip, at = lead, blendIn = if cutIn then 0 else nil, measured = true })
+			local turns = lead + (if cutIn then 0 else clip.blendIn or ChoreoData.blendIn)
+			return {
+				label = label,
+				plays = plays,
+				retargets = {
+					{ at = turns, clipId = idle.id, weight = if into then 0 else 1 },
+					{ at = turns, clipId = drawn.id, weight = if into then 1 else 0 },
+				},
+				travel = travel,
+				settle = settle,
+				cutIn = cutIn or nil,
+			}
+		end
+		table.insert(plans, stancePlan("Lab", 0, true))
+		for _, phase in Audit.idlePhases do
+			table.insert(plans, stancePlan(("Stance@%g"):format(phase), phase, false))
+		end
+		return plans
+	end
 	-- The clip the game plays it out of (a guard reaction out of the guard), stopped as it starts.
 	local overId = if config.over ~= nil then config.over[clip.id] else nil
 	for _, phase in Audit.idlePhases do

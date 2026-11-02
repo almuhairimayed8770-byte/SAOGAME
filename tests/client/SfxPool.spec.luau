@@ -2522,3 +2522,126 @@ describe("SfxPool death silence: the local player's own sounds play through it (
 		end)
 	end)
 end)
+
+describe("SfxPool.footstep: a walking character whose floor reads Air keeps its last floor (D-636)", function()
+	-- A copy with a Humanoid whose FloorMaterial the spec sets; Lune's Humanoid has no state
+	-- machine, so the state seam answers for it.
+	local function walker(): (Model, Humanoid)
+		local model = Instance.new("Model")
+		local root = Instance.new("Part")
+		root.Name = "HumanoidRootPart"
+		root.Position = HIT
+		root.Parent = model
+		model.PrimaryPart = root
+		local humanoid = Instance.new("Humanoid")
+		humanoid.Parent = model
+		return model, humanoid
+	end
+
+	local function step(w: any, model: Model, surface: string?)
+		-- A stride apart: the dedupe never folds two steps into one.
+		w.run(w.now + 0.4)
+		SfxPool.footstep(model, surface)
+	end
+
+	local function repeated(name: string, count: number): { string }
+		local names = {}
+		for _ = 1, count do
+			table.insert(names, name)
+		end
+		return names
+	end
+
+	local DEFAULT = "footsteps." .. fx.audio.defaultSurface .. "Light"
+
+	it("plays the grass set on every walking step that reads Air after grass (AS 518(i))", function()
+		-- Before: the stone set (fx.audio.defaultSurface) on every Air step, the PC's 8 of 8.
+		for _, walking in fx.audio.airFloorStates do
+			scenario(function(w)
+				w.rebind({
+					state = function(_humanoid: Instance): string?
+						return walking
+					end,
+				})
+				local kobold, humanoid = walker()
+				humanoid.FloorMaterial = Enum.Material.Grass
+				step(w, kobold)
+				humanoid.FloorMaterial = Enum.Material.Air
+				for _ = 1, 8 do
+					step(w, kobold)
+				end
+				expect({ walking, w.names() }).toEqual({ walking, repeated("footsteps.GrassLight", 9) })
+			end)
+		end
+	end)
+
+	it("keeps the last floor read, per character; the event's own surface still wins", function()
+		-- The surfaces SfxPool.footstep plays (its pick; the Wood, Snow and Gravel sets are still
+		-- placeholders, which never call Play).
+		scenario(function(w)
+			w.rebind({
+				state = function(_humanoid: Instance): string?
+					return "Running"
+				end,
+			})
+			local kobold, humanoid = walker()
+			local boar, boarHumanoid = walker()
+			local picks = {}
+			local function pick(model: Model, surface: string?)
+				table.insert(picks, SfxPool.surfaceOf(model, surface))
+			end
+			humanoid.FloorMaterial = Enum.Material.Grass
+			pick(kobold)
+			humanoid.FloorMaterial = Enum.Material.WoodPlanks
+			pick(kobold)
+			boarHumanoid.FloorMaterial = Enum.Material.Snow
+			pick(boar)
+			humanoid.FloorMaterial = Enum.Material.Air
+			boarHumanoid.FloorMaterial = Enum.Material.Air
+			pick(kobold)
+			pick(boar)
+			pick(kobold, "Gravel")
+			pick(kobold)
+			humanoid.FloorMaterial = Enum.Material.Grass
+			pick(kobold)
+			expect(picks).toEqual({ "Grass", "Wood", "Snow", "Wood", "Snow", "Gravel", "Wood", "Grass" })
+		end)
+	end)
+
+	it("plays the default set on Air as before: airborne, never on a floor, or its state unread", function()
+		scenario(function(w)
+			local state: string? = "Freefall"
+			w.rebind({
+				state = function(_humanoid: Instance): string?
+					return state
+				end,
+			})
+			local kobold, humanoid = walker()
+			humanoid.FloorMaterial = Enum.Material.Grass
+			step(w, kobold)
+			humanoid.FloorMaterial = Enum.Material.Air
+			step(w, kobold)
+			state = nil
+			step(w, kobold)
+			-- One that read Air from its first step on (the PC's rescued copies on 318f0a3) has no
+			-- floor to keep.
+			state = "Running"
+			local fresh, freshHumanoid = walker()
+			freshHumanoid.FloorMaterial = Enum.Material.Air
+			step(w, fresh)
+			expect(w.names()).toEqual({ "footsteps.GrassLight", DEFAULT, DEFAULT, DEFAULT })
+		end)
+	end)
+
+	it("reads the state through Humanoid:GetState() by default (an unread state keeps nothing)", function()
+		scenario(function(w)
+			local kobold, humanoid = walker()
+			humanoid.FloorMaterial = Enum.Material.Grass
+			step(w, kobold)
+			humanoid.FloorMaterial = Enum.Material.Air
+			-- Lune's Humanoid has no GetState: the default seam reads nil, so Air plays the default.
+			step(w, kobold)
+			expect(w.names()).toEqual({ "footsteps.GrassLight", DEFAULT })
+		end)
+	end)
+end)

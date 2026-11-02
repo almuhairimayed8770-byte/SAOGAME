@@ -266,7 +266,8 @@ describe("ai data", function()
 		"a Brute at a fighter backed to the world leaves every player Art's and basic's lean its room (D-627)",
 		function()
 			-- The lean read from the clips' own extents, as the stand-off reads it: the matrix's attacks
-			-- on the matrix's body, the colliding parts posed with the root held, a step back kept.
+			-- on the matrix's body and on it with the owner's Head, the colliding parts posed with the
+			-- root held, the deepest in front and the deepest behind kept (D-642).
 			local fs = require("@lune/fs")
 			local luau = require("@lune/luau")
 			local source = fs.readFile(Harness.repoRoot() .. "/tools/hitmatrix/HitMatrix.luau")
@@ -280,15 +281,24 @@ describe("ai data", function()
 			local line = {}
 			for _, column in HitMatrix.leanColumns(Harness) do
 				deepest = math.max(deepest, column.depth)
-				table.insert(line, ("%s %.3f at %.3f"):format(column.id, column.depth, column.at))
+				table.insert(
+					line,
+					("%s %.3f at %.3f/%.3f (%s)"):format(
+						column.id,
+						column.depth,
+						column.at,
+						column.behindAt,
+						column.body
+					)
+				)
 			end
 			print("[G6b] lean columns: " .. table.concat(line, ", "))
 			-- Every swing fits with the stand-off's gap off each face, and the stop grows no more than that.
 			expect(room.leanStuds).toBeGreaterThanOrEqual(deepest + 2 * gap - 1e-9)
 			expect(room.leanStuds).toBeLessThanOrEqual(deepest + 2 * gap + 0.05)
 			-- The kobold square to a fighter whose root box (the matrix body's) rests the engine's 0.05 in
-			-- the face: its grown stop (the walk's last tick and the brake added) is inside the cap, so the
-			-- cap never cuts its room.
+			-- the face: its grown stop (the brake's spare added; the walk lands on it, D-643) is inside
+			-- the cap, so the cap never cuts its room.
 			local RigBuilder = Harness.load("src/server/world/RigBuilder")
 			local kobold = Enemies.byId("KoboldAxeman")
 			local rig = RigBuilder.build(kobold.skin)
@@ -301,7 +311,7 @@ describe("ai data", function()
 			local behind = avatar.root.Size.Z / 2 - 0.05
 			local tuning = AI.archetypes.Brute
 			local pace = kobold.moveSpeed * tuning.chaseSpeedMultiplier
-			local stop = room.leanStuds + front + pace * (AI.tickSeconds() + room.brakeSeconds) - behind
+			local stop = room.leanStuds + front + pace * room.brakeSeconds - behind
 			print(
 				("[G6b] kobold: Blocker front %.3f, root %.3f off the face, grown stop %.3f (cap %.2f)"):format(
 					front,

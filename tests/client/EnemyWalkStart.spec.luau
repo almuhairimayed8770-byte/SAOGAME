@@ -78,6 +78,8 @@ Choreo.configure({
 	end,
 })
 local Locomotion = Harness.load("src/client/choreo/Locomotion")
+local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
+local Pose = Harness.load("src/shared/choreo/Pose")
 
 local FRAME = 1 / 60
 local PHYSICS_STEP = 1 / 240
@@ -90,6 +92,8 @@ local FROM, TO = 0.15, 0.5
 -- is under BRAKE of the row before's) for STOP_SECONDS.
 local BRAKE = 0.5
 local STOP_SECONDS = 0.5
+-- An attack out of the walk (D-632): its first CROUCH_SECONDS, from the first row it is drawn.
+local CROUCH_SECONDS = 0.3
 -- What the server sends while a take runs (EnemyService's fireAll): a take that draws actions
 -- plays an ActionStarted's clip on the client copy as Replication does.
 local onFire: ((string, any) -> ())? = nil
@@ -386,6 +390,26 @@ type Take = {
 	-- on the rig on a row a full-body clip showed.
 	played: { string },
 	channelUnderFullBody: boolean,
+	-- The first attack clip ActionStarted played (D-632), when the take draws actions: its id, its
+	-- first drawn row (seconds after the release), the walk's weight on the row before it, and over
+	-- its first CROUCH_SECONDS (that row on) the worst one-row slide of a grounded foot, where (seconds
+	-- after the attack's first row), which foot, the root's flat step on that row, and the lowest
+	-- corner of any foot; the lowest corner the clip's own pose puts a foot at on those rows (the
+	-- clip alone at the time it showed, on the root it was drawn on: what its crouch sinks itself),
+	-- and whether a pose hook (the attack plant's) was still on the mixer on the last of them.
+	crouchClip: string?,
+	crouchAt: number?,
+	crouchWalk: number?,
+	crouchSlide: number,
+	crouchSlideAt: number,
+	crouchFoot: string,
+	crouchStep: number,
+	crouchLowest: number,
+	crouchOwnLowest: number,
+	crouchHooked: boolean?,
+	-- Each of those rows: seconds after the attack's first row, the root's flat step, and per foot
+	-- its slide (-1 when no corner was grounded through the row), its lowest corner and the clip's.
+	crouchRows: { { at: number, step: number, feet: { [string]: { slide: number, low: number, own: number } } } },
 }
 
 -- How the client sees the server's root. `hz`: client rows a second. `interpolated`: the root is
@@ -507,7 +531,21 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 		stopHighest = nil,
 		played = {},
 		channelUnderFullBody = false,
+		crouchClip = nil,
+		crouchAt = nil,
+		crouchWalk = nil,
+		crouchSlide = 0,
+		crouchSlideAt = 0,
+		crouchFoot = "",
+		crouchStep = 0,
+		crouchLowest = math.huge,
+		crouchOwnLowest = math.huge,
+		crouchHooked = nil,
+		crouchRows = {},
 	}
+	local crouchRow: number? = nil
+	local crouchHandle: any = nil
+	local walkBefore = 0
 	local sent: { any } = {}
 	onFire = function(name: string, payload: any)
 		if actions == true and name == "ActionStarted" then
@@ -529,9 +567,26 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 		clientNow += dt
 		clientT += dt
 		local drawnT = if seen.interpolated then clientT - FRAME else clock.t
+		local walkShown = walkHandle()
+		walkBefore = if walkShown ~= nil then walkShown.weight else 0
 		while #sent > 0 and sent[1].serverTime <= drawnT + GAP do
 			local payload = table.remove(sent, 1)
-			animator:play(payload.clipId, {})
+			-- As Replication plays an enemy's ActionStarted: on the server's clock (Choreo's clock is
+			-- the server's; here the client's runs clientT - clientNow behind it), so the network
+			-- catch-up jumps it by the time since it was sent, its attack kept on the server's beat
+			-- (D-172). An enemy's ActionStarted carries no speed.
+			local sentAt = payload.serverTime - (clientT - clientNow)
+			local handle = animator:play(payload.clipId, { serverTime = sentAt })
+			if handle.clip.attack == true then
+				animator:keepBeat(handle, sentAt)
+				if crouchHandle == nil then
+					crouchHandle = handle
+					crouchRow = row
+					result.crouchClip = payload.clipId
+					result.crouchAt = row * dt
+					result.crouchWalk = walkBefore
+				end
+			end
 			table.insert(result.played, payload.clipId)
 		end
 		animator:step(dt)
@@ -592,6 +647,15 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 		lastAt, lastStep = here, step
 		local stopRows = math.floor(STOP_SECONDS * seen.hz + 0.5)
 		local inStop = brakeRow ~= nil and row - (brakeRow :: number) <= stopRows
+		local crouchRows = math.floor(CROUCH_SECONDS * seen.hz + 0.5)
+		local inCrouch = crouchRow ~= nil and row - (crouchRow :: number) <= crouchRows
+		local own = if inCrouch
+			then Pose.solve(client, clientRoot.CFrame, ClipSampler.sample(crouchHandle.clip, crouchHandle.time))
+			else nil
+		if crouchRow ~= nil and row - (crouchRow :: number) == crouchRows then
+			local hooks = mixer._poseHooks
+			result.crouchHooked = hooks ~= nil and next(hooks) ~= nil
+		end
 		local stopEnd = brakeRow ~= nil and row - (brakeRow :: number) == stopRows
 		local highest = -math.huge
 		local inWindow = rowT > FROM + 1e-9 and rowT <= TO + 1e-9
@@ -601,15 +665,30 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 		local inStart = (started == nil or rowT > GAP) and rowT <= FROM + 1e-9
 		local standing = started ~= nil and math.abs(rowT) < GAP
 		local points: { [string]: { Vector3 } } = {}
+		local crouchFeet: { [string]: { slide: number, low: number, own: number } } = {}
+		if inCrouch then
+			table.insert(
+				result.crouchRows,
+				{ at = (row - (crouchRow :: number)) * dt, step = step or 0, feet = crouchFeet }
+			)
+		end
 		for _, foot in feet do
 			points[foot] = {}
 			local footLowest = math.huge
+			local ownLowest = math.huge
 			for index, corner in local_[foot] do
 				local point = solved[foot] * corner
 				points[foot][index] = point
 				footLowest = math.min(footLowest, point.Y)
 				if inStop then
 					result.stopLowest = math.min(result.stopLowest, point.Y)
+				end
+				if inCrouch then
+					result.crouchLowest = math.min(result.crouchLowest, point.Y)
+				end
+				if own ~= nil then
+					ownLowest = math.min(ownLowest, (own[foot] * corner).Y)
+					result.crouchOwnLowest = math.min(result.crouchOwnLowest, ownLowest)
 				end
 				if inWindow then
 					result.lowest = math.min(result.lowest, point.Y)
@@ -622,8 +701,9 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 				end
 			end
 			highest = math.max(highest, footLowest)
+			crouchFeet[foot] = { slide = -1, low = footLowest, own = ownLowest }
 			local before = if previous ~= nil then previous[foot] else nil
-			if (inWindow or inStart or inStop) and before ~= nil then
+			if (inWindow or inStart or inStop or inCrouch) and before ~= nil then
 				local least = math.huge
 				for index, point in points[foot] do
 					local was = before[index]
@@ -639,6 +719,15 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 				end
 				if least < math.huge and inStop and least > result.stopSlide then
 					result.stopSlide, result.stopSlideAt = least, rowT
+				end
+				if least < math.huge then
+					crouchFeet[foot].slide = least
+				end
+				if least < math.huge and inCrouch and least > result.crouchSlide then
+					result.crouchSlide = least
+					result.crouchSlideAt = (row - (crouchRow :: number)) * dt
+					result.crouchFoot = foot
+					result.crouchStep = step or 0
 				end
 			end
 		end
@@ -997,6 +1086,90 @@ describe("EnemyWalkStart: an enemy's stop keeps its feet planted (AO 511(k); D-6
 			expect(result.channelUnderFullBody).toBe(false)
 		end
 	end)
+end)
+
+-- An attack out of the walk (D-632, AO 511(c)). An attack clip is authored from the idle's stand
+-- and blended in over the walking legs, so the blend swept each planted foot across the field from
+-- where it stood to where the clip has it (ActionStarted played as Replication plays it, on the
+-- server's beat). On c3d0e8f, over the clip's first CROUCH_SECONDS: the boar's Charge slid a hoof
+-- 0.509 and 0.458 a 60 Hz row out of the walk at 60 and 90 degrees (0.430 and 0.251 at 144), 0.250
+-- and 0.362 at 135 and 180 (0.255, 0.181) and 0.248 out of its idle (0.114), hooves to -0.082 (its
+-- own crouch -0.029); the kobold's Overhead 0.088 to 0.511 (0.093 to 0.228), feet to -0.065 (its
+-- own -0.010).
+-- RigDriver's attack plant holds each foot on the field point it stood on and digs the ones the
+-- clip has elsewhere in, lifted, one group at a time. Bars, over the clip's first CROUCH_SECONDS
+-- from its first drawn row: the walk start's (footSlideStuds a 60 Hz row, as many at 144 as its
+-- share of the frame); no corner under stride.contact or the clip's own pose, whichever is deeper
+-- (the Charge's crouch sinks its front right hoof 0.029 itself, inside ClipAudit's footSinkStuds:
+-- its pose after the blend-in is the clip's); and by the window's end the plant has let the legs
+-- go (no pose hook is left on the mixer). The boar at 0 degrees charges out of its idle; every
+-- other take attacks out of the walk at its walkSpeed (the kobold's Overhead as it closes in).
+-- The clip's own pose re-solved from its clock (Pose.solve) and the one Choreo drew differ by float
+-- noise: 0.00003 at most over these takes.
+local OWN_SLACK = 1e-4
+local CROUCH_TAKES: { { rig: string, off: number, seconds: number } } = {
+	{ rig = "Boar", off = 0, seconds = 1 },
+	{ rig = "Boar", off = 60, seconds = 1.2 },
+	{ rig = "Boar", off = 90, seconds = 1.5 },
+	{ rig = "Boar", off = 135, seconds = 5.4 },
+	{ rig = "Boar", off = 180, seconds = 2.6 },
+	{ rig = "Kobold", off = 0, seconds = 2.1 },
+	{ rig = "Kobold", off = 60, seconds = 2.1 },
+	{ rig = "Kobold", off = 90, seconds = 2.2 },
+	{ rig = "Kobold", off = 135, seconds = 2.4 },
+	{ rig = "Kobold", off = 180, seconds = 2.8 },
+}
+
+describe("EnemyWalkStart: an attack out of the walk keeps its feet planted (AO 511(c); D-632)", function()
+	for _, case in CROUCH_TAKES do
+		for _, view in { SERVER, PC144 } do
+			local label = if view.interpolated then "on a 144 Hz client over the interpolated root" else "60 Hz"
+			it(("%s attacking after it set off %d deg, %s"):format(case.rig, case.off, label), function()
+				local result = take(case.rig, case.off, view, case.seconds, true)
+				print(
+					("%s off %d @%d Hz, %s from %s s (walk %s): slide %.4f at +%.3f s (%s, root step %.4f), lowest %.4f (own %.4f), hooked %s"):format(
+						case.rig,
+						case.off,
+						view.hz,
+						tostring(result.crouchClip),
+						if result.crouchAt ~= nil then ("%.3f"):format(result.crouchAt :: number) else "-",
+						if result.crouchWalk ~= nil then ("%.2f"):format(result.crouchWalk :: number) else "-",
+						result.crouchSlide,
+						result.crouchSlideAt,
+						result.crouchFoot,
+						result.crouchStep,
+						result.crouchLowest,
+						result.crouchOwnLowest,
+						tostring(result.crouchHooked)
+					)
+				)
+				assert(result.crouchHooked ~= nil, "the take ended before the attack's first CROUCH_SECONDS did")
+				expect(result.crouchClip).toBe(
+					if case.rig == "Boar" then "enemy/Boar/Charge" else "enemy/Kobold/Overhead"
+				)
+				local bound = SLIDE * 60 / view.hz
+				if result.crouchSlide > bound then
+					error(
+						("a planted foot slides %.3f in a row %.3f s into the attack (max %.3f)"):format(
+							result.crouchSlide,
+							result.crouchSlideAt,
+							bound
+						)
+					)
+				end
+				local floor = math.min(result.crouchOwnLowest, -CONTACT)
+				if result.crouchLowest < floor - OWN_SLACK then
+					error(
+						("a foot corner %.3f under the field as the attack comes in (max %.3f)"):format(
+							-result.crouchLowest,
+							-floor
+						)
+					)
+				end
+				expect(result.crouchHooked).toBe(false)
+			end)
+		end
+	end
 end)
 
 -- A stop the root walks off from mid-step (D-623): the client copy alone, its root carried at

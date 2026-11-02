@@ -419,6 +419,45 @@ describe("dev.luau groundClearance.dodgeTurn (D-613)", function()
 	end)
 end)
 
+describe("dev.luau groundClearance.dodgeTap (D-646)", function()
+	it("passes as written", function()
+		expect(hasProblem(runValidator(nil), "dodgeTap")).toBe(false)
+	end)
+
+	it("catches a tap of no time, a press past the turn, an engine that does not turn and a short read", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.dodgeTap.holdSeconds = { 0.08, 0 }
+			end),
+			"dodgeTap.holdSeconds[2]"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.dodgeTap.pressAfter = { 0.6 }
+			end),
+			"dodgeTap.pressAfter[1]"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.dodgeTap.engine.turnRate = 0
+			end),
+			"dodgeTap.engine.turnRate"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.dodgeTap.engine.lagFrames = 0.5
+			end),
+			"dodgeTap.engine.lagFrames"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.dodgeTap.after = 0.4
+			end),
+			"dodgeTap.after"
+		)).toBe(true)
+	end)
+end)
+
 describe("dev.luau groundClearance.skidRate (D-612)", function()
 	it("passes as written", function()
 		expect(hasProblem(runValidator(nil), "skidRate")).toBe(false)
@@ -680,5 +719,73 @@ describe("dev.luau groundClearance.lockTurn (D-505, D-507)", function()
 			end),
 			"lockTurn.stepHz[2]"
 		)).toBe(true)
+	end)
+
+	it("catches a sweep with no phases and PC row times that are no frame's (D-640, D-641)", function()
+		for _, bad in { 0, 2.5, "48" } :: { any } do
+			expect(hasProblem(
+				runValidator(function(dev: any)
+					dev.groundClearance.lockTurn.idlePhaseCount = bad
+				end),
+				"lockTurn.idlePhaseCount"
+			)).toBe(true)
+		end
+		for _, bad in { { 0, 0.0176 }, { 0.0176, 0.0156 }, { 0.0156, 0.04 }, { 0.0156 }, "0.0156" } :: { any } do
+			expect(hasProblem(
+				runValidator(function(dev: any)
+					dev.groundClearance.lockTurn.pcRowSeconds = bad
+				end),
+				"lockTurn.pcRowSeconds"
+			)).toBe(true)
+		end
+		for _, bad in { -1, 0.5 } do
+			expect(hasProblem(
+				runValidator(function(dev: any)
+					dev.groundClearance.lockTurn.rowSeed = bad
+				end),
+				"lockTurn.rowSeed"
+			)).toBe(true)
+		end
+	end)
+end)
+
+describe("dev.luau hitMatrix.ownerHead (D-642)", function()
+	it("passes as written: the owner's Head 1.27 deep, its back 0.16 behind the torso's", function()
+		expect(hasProblem(runValidator(nil), "ownerHead")).toBe(false)
+		expect(Dev.hitMatrix.ownerHead.depthStuds).toBe(1.27)
+		expect(Dev.hitMatrix.ownerHead.behindStuds).toBe(0.16)
+	end)
+
+	it("wants a positive depth and a back behind the torso's by less than the depth", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.hitMatrix.ownerHead = nil
+			end),
+			"hitMatrix.ownerHead must be a table"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.hitMatrix.ownerHead.depthStuds = 0
+			end),
+			"hitMatrix.ownerHead.depthStuds must be a positive number"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.hitMatrix.ownerHead.behindStuds = -0.1
+			end),
+			"hitMatrix.ownerHead.behindStuds must be zero or more and under depthStuds (1.27)"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.hitMatrix.ownerHead.behindStuds = 1.27
+			end),
+			"hitMatrix.ownerHead.behindStuds must be zero or more"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.hitMatrix.ownerHead.behindStuds = 0
+			end),
+			"ownerHead"
+		)).toBe(false)
 	end)
 end)

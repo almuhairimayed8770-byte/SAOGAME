@@ -62,7 +62,11 @@
 	sliding) and at most half the shortest foot part's height (a step, not a hop); its settleStuds
 	is 0 or more, and a glide over that far within stepSeconds (SineInOut, its fastest pi / 2 times
 	the mean) slides a foot at most stride.contact a 60 Hz frame. enemy.gait.stopBrakeShare is above
-	0 and below 1 (a root that moved its whole pace on a row walks on).
+	0 and below 1 (a root that moved its whole pace on a row walks on). Each enemy.gait.attackPlant
+	(D-632) keeps the stop plant's rules but the walk's cycle; instead its groups' steps, after the
+	deepest network catch-up (catchUpMaxJump), are done by the first HitWindowOpen of each attack
+	clip in its walk's folder (the clip has the legs for its strike). enemy.gait.attackBrakeShare is
+	0 to 1 (standing to carrying on) and enemy.gait.attackBrakeSeconds a positive number of seconds.
 ]]
 
 local TIERS = { "High", "Medium", "Low" }
@@ -71,7 +75,7 @@ local MAX_HAND_OFF_FACTOR = 3
 local RATES = { "distantHz", "farHz" }
 -- The turn plant's turn clips (locomotion.clips keys), its most twist, the turn it must bring
 -- round (a target straight behind) and the samples its curve's slope is read at.
-local TURN_CLIPS = { "TurnLeft", "TurnRight", "TurnLeftDrawn", "TurnRightDrawn" }
+local TURN_CLIPS = { "TurnLeft", "TurnRight", "TurnLeftDrawn", "TurnRightDrawn", "TurnLeftDraw", "TurnRightDraw" }
 local MAX_TURN_TWIST = 90
 local HALF_TURN = 180
 local SLOPE_SAMPLES = 1000
@@ -475,14 +479,15 @@ return function(ctx: any): { string }
 	end
 
 	-- The turn plant (D-416): the hips come round between a turn clip's first two Footsteps, the
-	-- pivot foot's and then the other's, at most stepDegrees a 60 Hz frame (a pop is the most);
-	-- the window is long enough for half a turn at that cap on the curve's steepest stretch; a
+	-- pivot foot's and then the other's, at most stepDegrees a 60 Hz frame (a pop is the most),
+	-- and are round leadSeconds before the second (D-641, 0 or more); the window left is long
+	-- enough for half a turn at that cap on the curve's steepest stretch; a
 	-- lag the body leaves standing lets go by every attack's first strike key; the Waist's lead
 	-- stays a twist; and a second turn never cuts a turn clip's own steps.
 	local loco = if typeof(choreo.locomotion) == "table" then choreo.locomotion else {}
 	local plant = loco.turnPlant
 	if typeof(plant) ~= "table" then
-		check(false, "locomotion.turnPlant is missing (stepDegrees, plantSeconds, twistDegrees, easing)")
+		check(false, "locomotion.turnPlant is missing (stepDegrees, plantSeconds, twistDegrees, easing, leadSeconds)")
 	else
 		local pop = if typeof(audit) == "table" then audit.popDegrees else nil
 		local step = plant.stepDegrees
@@ -538,6 +543,16 @@ return function(ctx: any): { string }
 				last = value
 			end
 		end
+		-- D-641: the hips are round leadSeconds before the second Footstep: 0 or more seconds,
+		-- and the window left (checked per clip below) still brings half a turn round.
+		local lead = plant.leadSeconds
+		local leadOk = typeof(lead) == "number" and lead == lead and lead >= 0 and lead < math.huge
+		check(
+			leadOk,
+			("locomotion.turnPlant.leadSeconds (%s) must be 0 or more seconds: the hips are round before the second Footstep"):format(
+				tostring(lead)
+			)
+		)
 		local clips = if typeof(loco.clips) == "table" then loco.clips else {}
 		local prefix = tostring(loco.clipPrefix)
 		for _, name in TURN_CLIPS do
@@ -576,11 +591,11 @@ return function(ctx: any): { string }
 				)
 				continue
 			end
-			local span = second.time - first.time
+			local span = second.time - first.time - (if leadOk then lead else 0)
 			local need = if positive(step) and eased then HALF_TURN * slope / (step * 60) else 0
 			check(
 				span >= need - 1e-9,
-				("%s's window between its first two Footsteps (%.3f s) is under %.3f s: half a turn on %s at stepDegrees would not come round"):format(
+				("%s's window from its first Footstep to leadSeconds before its second (%.3f s) is under %.3f s: half a turn on %s at stepDegrees would not come round"):format(
 					name,
 					span,
 					need,
@@ -753,125 +768,177 @@ return function(ctx: any): { string }
 		end
 	end
 
-	-- An enemy rig's stop plant (D-623): each names a rig with a walk; two or more groups of that
-	-- rig's feet hung from their own joints, each foot named once; steps no quicker than the gait's
-	-- crossfade and no slower together than the walk's cycle; a lift that clears the contact band
-	-- and is no hop; a glide no faster than stride.contact a 60 Hz frame.
+	-- An enemy rig's stop plant (D-623) or attack plant (D-632): it names a rig with a walk; two
+	-- or more groups of that rig's feet hung from their own joints, each foot named once; steps no
+	-- quicker than the gait's crossfade; a lift that clears the contact band and is no hop; a glide
+	-- no faster than stride.contact a 60 Hz frame. Returns the rig's walk clip id (nil when it names
+	-- none), its groups' count and its stepSeconds when that is a positive number.
+	local Rigs = ctx.load("src/shared/data/rigs")
+	local locomotion = if typeof(choreo.locomotion) == "table" then choreo.locomotion else {}
+	local stride = if typeof(locomotion.stride) == "table" then locomotion.stride else {}
+	local contact = stride.contact
+	local function checkPlant(where: string, rigId: any, plant: any): (string?, number, number?)
+		local rigClips = if typeof(choreo.rigs) == "table" then choreo.rigs[rigId] else nil
+		local rig = Rigs[rigId]
+		local walkId = if typeof(rigClips) == "table" then rigClips.walk else nil
+		check(
+			typeof(walkId) == "string" and typeof(rig) == "table",
+			("%s names no rig with a walk clip (choreo rigs)"):format(where)
+		)
+		if typeof(plant) ~= "table" then
+			check(false, ("%s must be a table (groups, stepSeconds, liftStuds, settleStuds)"):format(where))
+			return nil, 0, nil
+		end
+		local hung: { [string]: boolean } = {}
+		if typeof(rig) == "table" and typeof(rig.joints) == "table" then
+			for _, joint in rig.joints do
+				hung[joint.part1] = true
+			end
+		end
+		local shortest = math.huge
+		local groups = plant.groups
+		check(
+			typeof(groups) == "table" and #groups >= 2,
+			("%s.groups must list two or more groups of the rig's foot parts"):format(where)
+		)
+		local seen: { [string]: boolean } = {}
+		if typeof(groups) == "table" then
+			for index, group in groups do
+				check(
+					typeof(group) == "table" and #group > 0,
+					("%s.groups[%s] must list one or more foot parts"):format(where, tostring(index))
+				)
+				if typeof(group) ~= "table" then
+					continue
+				end
+				for _, foot in group do
+					local part = if typeof(rig) == "table" and typeof(rig.parts) == "table"
+						then rig.parts[foot]
+						else nil
+					check(
+						typeof(foot) == "string" and part ~= nil and hung[foot] == true and not seen[foot],
+						("%s.groups: %s must be a part of the rig hung from its own joint, named once"):format(
+							where,
+							tostring(foot)
+						)
+					)
+					if typeof(foot) == "string" then
+						seen[foot] = true
+					end
+					if part ~= nil and typeof(part.size) == "table" and typeof(part.size[2]) == "number" then
+						shortest = math.min(shortest, part.size[2])
+					end
+				end
+			end
+		end
+		local step = plant.stepSeconds
+		local blendRate = locomotion.weightBlendRate
+		check(
+			positive(step) and positive(blendRate) and step >= 1 / blendRate - 1e-9,
+			("%s.stepSeconds %s must be at least 1 / locomotion.weightBlendRate (%s s): a step no quicker than the gait's crossfade"):format(
+				where,
+				tostring(step),
+				if positive(blendRate) then ("%.3f"):format(1 / blendRate) else "?"
+			)
+		)
+		local lift = plant.liftStuds
+		check(
+			typeof(lift) == "number"
+				and positive(contact)
+				and lift > contact
+				and shortest < math.huge
+				and lift <= shortest / 2,
+			("%s.liftStuds %s must be above locomotion.stride.contact (%s) and at most half the shortest foot's height (%s)"):format(
+				where,
+				tostring(lift),
+				tostring(contact),
+				if shortest < math.huge then tostring(shortest / 2) else "?"
+			)
+		)
+		local settleStuds = plant.settleStuds
+		check(
+			typeof(settleStuds) == "number" and settleStuds >= 0,
+			("%s.settleStuds %s must be 0 or more"):format(where, tostring(settleStuds))
+		)
+		if typeof(settleStuds) == "number" and settleStuds >= 0 and positive(step) and positive(contact) then
+			local fastest = settleStuds * math.pi / (2 * step) / 60
+			check(
+				fastest <= contact + 1e-9,
+				("%s.settleStuds %s glides a foot %.3f a 60 Hz frame over stepSeconds (max stride.contact %s)"):format(
+					where,
+					tostring(settleStuds),
+					fastest,
+					tostring(contact)
+				)
+			)
+		end
+		return if typeof(walkId) == "string" then walkId else nil,
+			if typeof(groups) == "table" then #groups else 0,
+			if positive(step) then step else nil
+	end
+
+	-- The stop plant's steps together take no longer than the walk's cycle (a stop steps no slower
+	-- than its walk).
 	local stops = if typeof(gait) == "table" then gait.stopPlant else nil
 	check(typeof(stops) == "table", "enemy.gait.stopPlant must be a table of rig ids to stop plants")
 	if typeof(stops) == "table" then
-		local Rigs = ctx.load("src/shared/data/rigs")
-		local locomotion = if typeof(choreo.locomotion) == "table" then choreo.locomotion else {}
-		local stride = if typeof(locomotion.stride) == "table" then locomotion.stride else {}
-		local contact = stride.contact
 		for rigId, stop in stops do
 			local where = ("enemy.gait.stopPlant.%s"):format(tostring(rigId))
-			local rigClips = if typeof(choreo.rigs) == "table" then choreo.rigs[rigId] else nil
-			local rig = Rigs[rigId]
-			local walkId = if typeof(rigClips) == "table" then rigClips.walk else nil
-			check(
-				typeof(walkId) == "string" and typeof(rig) == "table",
-				("%s names no rig with a walk clip (choreo rigs)"):format(where)
-			)
-			if typeof(stop) ~= "table" then
-				check(false, ("%s must be a table (groups, stepSeconds, liftStuds, settleStuds)"):format(where))
-				continue
-			end
-			local hung: { [string]: boolean } = {}
-			if typeof(rig) == "table" and typeof(rig.joints) == "table" then
-				for _, joint in rig.joints do
-					hung[joint.part1] = true
-				end
-			end
-			local shortest = math.huge
-			local groups = stop.groups
-			check(
-				typeof(groups) == "table" and #groups >= 2,
-				("%s.groups must list two or more groups of the rig's foot parts"):format(where)
-			)
-			local seen: { [string]: boolean } = {}
-			if typeof(groups) == "table" then
-				for index, group in groups do
-					check(
-						typeof(group) == "table" and #group > 0,
-						("%s.groups[%s] must list one or more foot parts"):format(where, tostring(index))
-					)
-					if typeof(group) ~= "table" then
-						continue
-					end
-					for _, foot in group do
-						local part = if typeof(rig) == "table" and typeof(rig.parts) == "table"
-							then rig.parts[foot]
-							else nil
-						check(
-							typeof(foot) == "string" and part ~= nil and hung[foot] == true and not seen[foot],
-							("%s.groups: %s must be a part of the rig hung from its own joint, named once"):format(
-								where,
-								tostring(foot)
-							)
-						)
-						if typeof(foot) == "string" then
-							seen[foot] = true
-						end
-						if part ~= nil and typeof(part.size) == "table" and typeof(part.size[2]) == "number" then
-							shortest = math.min(shortest, part.size[2])
-						end
-					end
-				end
-			end
-			local step = stop.stepSeconds
-			local blendRate = locomotion.weightBlendRate
-			check(
-				positive(step) and positive(blendRate) and step >= 1 / blendRate - 1e-9,
-				("%s.stepSeconds %s must be at least 1 / locomotion.weightBlendRate (%s s): a step no quicker than the gait's crossfade"):format(
-					where,
-					tostring(step),
-					if positive(blendRate) then ("%.3f"):format(1 / blendRate) else "?"
-				)
-			)
-			if positive(step) and typeof(groups) == "table" and typeof(walkId) == "string" then
+			local walkId, count, step = checkPlant(where, rigId, stop)
+			if step ~= nil and count > 0 and walkId ~= nil then
 				local ok, walk = pcall(ctx.load, "src/shared/clips/" .. walkId)
 				local cycle = if ok and typeof(walk) == "table" then walk.duration else nil
 				check(
-					positive(cycle) and #groups * step <= cycle + 1e-9,
+					positive(cycle) and count * step <= cycle + 1e-9,
 					("%s: its %d steps of %s s must take at most the walk's cycle (%s s): a stop steps no slower than its walk"):format(
 						where,
-						#groups,
+						count,
 						tostring(step),
 						tostring(cycle)
 					)
 				)
 			end
-			local lift = stop.liftStuds
-			check(
-				typeof(lift) == "number"
-					and positive(contact)
-					and lift > contact
-					and shortest < math.huge
-					and lift <= shortest / 2,
-				("%s.liftStuds %s must be above locomotion.stride.contact (%s) and at most half the shortest foot's height (%s)"):format(
-					where,
-					tostring(lift),
-					tostring(contact),
-					if shortest < math.huge then tostring(shortest / 2) else "?"
-				)
-			)
-			local settleStuds = stop.settleStuds
-			check(
-				typeof(settleStuds) == "number" and settleStuds >= 0,
-				("%s.settleStuds %s must be 0 or more"):format(where, tostring(settleStuds))
-			)
-			if typeof(settleStuds) == "number" and settleStuds >= 0 and positive(step) and positive(contact) then
-				local fastest = settleStuds * math.pi / (2 * step) / 60
-				check(
-					fastest <= contact + 1e-9,
-					("%s.settleStuds %s glides a foot %.3f a 60 Hz frame over stepSeconds (max stride.contact %s)"):format(
-						where,
-						tostring(settleStuds),
-						fastest,
-						tostring(contact)
+		end
+	end
+
+	-- The attack plant's steps are done, after the deepest network catch-up (catchUpMaxJump), before
+	-- the first HitWindowOpen of each attack clip in the rig's walk's folder: the clip has the legs
+	-- for its strike.
+	local attackPlants = if typeof(gait) == "table" then gait.attackPlant else nil
+	check(typeof(attackPlants) == "table", "enemy.gait.attackPlant must be a table of rig ids to attack plants")
+	if typeof(attackPlants) == "table" then
+		local catchUp = choreo.catchUpMaxJump
+		for rigId, attackPlant in attackPlants do
+			local where = ("enemy.gait.attackPlant.%s"):format(tostring(rigId))
+			local walkId, count, step = checkPlant(where, rigId, attackPlant)
+			local folder = if walkId ~= nil then walkId:match("^(.+)/[^/]+$") else nil
+			if step == nil or count <= 0 or folder == nil or not positive(catchUp) then
+				continue
+			end
+			for _, file in ctx.listFiles("src/shared/clips/" .. folder, "%.luau$") do
+				local ok, clip = pcall(ctx.load, (file:gsub("%.luau$", "")))
+				if not ok or typeof(clip) ~= "table" or clip.attack ~= true then
+					continue
+				end
+				local open: number? = nil
+				for _, event in clip.events or {} do
+					if event.kind == "HitWindowOpen" and (open == nil or event.time < open) then
+						open = event.time
+					end
+				end
+				if open ~= nil then
+					check(
+						catchUp + count * step <= open + 1e-9,
+						("%s: its %d steps of %s s after a %s s catch-up must be done by %s's first HitWindowOpen (%s s)"):format(
+							where,
+							count,
+							tostring(step),
+							tostring(catchUp),
+							tostring(clip.id or file),
+							tostring(open)
+						)
 					)
-				)
+				end
 			end
 		end
 	end
@@ -879,6 +946,18 @@ return function(ctx: any): { string }
 	check(
 		typeof(brake) == "number" and brake > 0 and brake < 1,
 		("enemy.gait.stopBrakeShare %s must be above 0 and below 1"):format(tostring(brake))
+	)
+	-- The attack plant's first row carries the root on by a share from standing (0) to carrying on
+	-- (1); a braking root's speed falls with a positive time constant.
+	local attackBrake = if typeof(gait) == "table" then gait.attackBrakeShare else nil
+	check(
+		typeof(attackBrake) == "number" and attackBrake >= 0 and attackBrake <= 1,
+		("enemy.gait.attackBrakeShare %s must be 0 to 1"):format(tostring(attackBrake))
+	)
+	local attackBrakeSeconds = if typeof(gait) == "table" then gait.attackBrakeSeconds else nil
+	check(
+		positive(attackBrakeSeconds),
+		("enemy.gait.attackBrakeSeconds %s must be a positive number of seconds"):format(tostring(attackBrakeSeconds))
 	)
 
 	local settle = if typeof(camera.stall) == "table" then camera.stall.settleSeconds else nil

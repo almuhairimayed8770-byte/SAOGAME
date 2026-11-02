@@ -1631,6 +1631,12 @@ local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boole
 		return
 	end
 	local starting = not entry.stroke
+	if starting then
+		-- A new stroke is no back-filled one until its own start says so: the last stroke's
+		-- back-fill (a late copy before) ends with that stroke, else this one is drawn on the
+		-- last one's cut and lays nothing (D-634).
+		entry.lateFull = false
+	end
 	local opened = followSource(entry, starting)
 	if starting and cameLate and entry.source ~= nil then
 		-- The stroke from its window's open, back-filled on its clip's own blade (D-550).

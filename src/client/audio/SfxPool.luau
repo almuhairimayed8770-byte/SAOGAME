@@ -131,6 +131,8 @@ export type Deps = {
 	onEnded: (sound: Sound, fn: () -> ()) -> (() -> ())?,
 	timeLength: (sound: Sound) -> number, -- the loaded length in seconds, 0 while not loaded
 	preload: (sounds: { Instance }) -> (), -- asks the engine to load these sounds' assets
+	-- Humanoid:GetState()'s name (the footstep floor pick, D-636); nil when it cannot be read
+	state: (humanoid: Instance) -> string?,
 }
 
 export type Overrides = {
@@ -143,6 +145,7 @@ export type Overrides = {
 	onEnded: ((sound: Sound, fn: () -> ()) -> (() -> ())?)?,
 	timeLength: ((sound: Sound) -> number)?,
 	preload: ((sounds: { Instance }) -> ())?,
+	state: ((humanoid: Instance) -> string?)?,
 }
 
 export type MixState = {
@@ -229,6 +232,8 @@ local recent: { { name: string, position: Vector3?, time: number } } = {}
 -- shatter cue name -> when and where each of its plays inside fx.audio.dedupeSeconds started:
 -- shatters that crack together inside one sound's reach of any of them are one sound (D-478).
 local recentShatters: { [string]: { { at: number, position: Vector3? } } } = {}
+-- The footstep surface each character last stood on (a floor that was not Air), by its model.
+local lastFloor: { [Instance]: string } = setmetatable({}, { __mode = "k" }) :: any
 -- When the newest sfx.mix.heartbeatDuck started (an own hit's cue), nil when none holds.
 local heartbeatDuckAt: number? = nil
 -- Plays asked for, played, deduped, placeholders that never play, risers skipped unloaded, and
@@ -308,6 +313,12 @@ local function defaultDeps(): Deps
 					(game:GetService("ContentProvider") :: any):PreloadAsync(sounds)
 				end)
 			end)
+		end,
+		state = function(humanoid: Instance): string?
+			local ok, state = pcall(function(): any
+				return (humanoid :: any):GetState()
+			end)
+			return if ok and typeof(state) == "EnumItem" then state.Name else nil
 		end,
 	}
 end
@@ -1120,6 +1131,7 @@ function SfxPool.bind(overrides: Overrides?)
 		base.onEnded = overrides.onEnded or base.onEnded
 		base.timeLength = overrides.timeLength or base.timeLength
 		base.preload = overrides.preload or base.preload
+		base.state = overrides.state or base.state
 	end
 	deps = base
 	local busy = #fades > 0
@@ -1138,6 +1150,7 @@ end
 function SfxPool.reset()
 	stopStepper()
 	table.clear(recent)
+	table.clear(lastFloor)
 	table.clear(recentShatters)
 	heartbeatDuckAt = nil
 	stats = freshStats()
@@ -1505,6 +1518,8 @@ function SfxPool.shatter(position: Vector3?, weight: (ShatterWeight | string | b
 end
 
 --- The footstep surface for a character: the event's surface, else the Humanoid's floor material.
+--- A floor that reads Air while the Humanoid walks (a fx.audio.airFloorStates state) is the last
+--- floor the character stood on (D-636): its steps keep that floor's set, never the default's.
 function SfxPool.surfaceOf(model: Instance?, surface: string?): string
 	if surface ~= nil and Sfx.families.footsteps.entries[surface .. "Light"] ~= nil then
 		return surface
@@ -1516,9 +1531,17 @@ function SfxPool.surfaceOf(model: Instance?, surface: string?): string
 				return (humanoid :: any).FloorMaterial
 			end)
 			if ok and material ~= nil then
-				local mapped = (Fx.audio.materialSurface :: { [string]: string })[(material :: any).Name]
-				if mapped ~= nil then
-					return mapped
+				if material == Enum.Material.Air then
+					local kept = lastFloor[model]
+					local state = if kept ~= nil then deps.state(humanoid) else nil
+					if kept ~= nil and state ~= nil and table.find(Fx.audio.airFloorStates, state) ~= nil then
+						return kept
+					end
+				else
+					local mapped = (Fx.audio.materialSurface :: { [string]: string })[(material :: any).Name]
+					local floor = mapped or Fx.audio.defaultSurface
+					lastFloor[model] = floor
+					return floor
 				end
 			end
 		end

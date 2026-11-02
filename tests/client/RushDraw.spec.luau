@@ -399,9 +399,17 @@ describe("RushDraw's timeline (D-171)", function()
 			short /= 2
 		end
 		expect(state.phase).toBe("HandBack")
-		-- Landed: it slides onto the root, each step back the ease's share of the rest, never forward.
+		-- Landed: it stands until settleRestSeconds have gone by since the root's last step in
+		-- (D-648), then slides onto the root, each step back the ease's share of the rest, never
+		-- forward.
 		local share = Easing.evaluate(TUNING.handBackEasing, FRAME / TUNING.handBackSeconds)
+		local cameAt = now
 		local first = stepAt(LENGTH - rest)
+		while math.abs(first) <= EPSILON and now - cameAt < TUNING.settleRestSeconds + 2 * FRAME do
+			first = stepAt(LENGTH - rest)
+		end
+		expect(now - cameAt).toBeGreaterThanOrEqual(TUNING.settleRestSeconds - 1e-6)
+		expect(now - cameAt).toBeLessThanOrEqual(TUNING.settleRestSeconds + FRAME + 1e-6)
 		expect(first).toBeLessThan(0)
 		expect(-first).toBeLessThanOrEqual(share * rest + 1e-6)
 		while state.phase == "HandBack" do
@@ -436,6 +444,57 @@ describe("RushDraw's timeline (D-171)", function()
 		expect(moved).never.toBeNil()
 		expect((moved :: number) - began).toBeLessThanOrEqual(TUNING.settleSeconds + 2 * FRAME)
 		expect((moved :: number) - began).toBeGreaterThanOrEqual(TUNING.settleSeconds - FRAME)
+	end)
+
+	it("a row on which the landing root did not move is no rest: the body stands until it rests (D-648)", function()
+		-- AS 527 (Q527_30_2, 30 fps): the replicated root came in on some rows only. A row on which it
+		-- stood let the slide run the first row's share toward it (on 3d59958 here 0.031 back), and
+		-- its next step in carried the held slide forward again (0.016).
+		local Easing = Harness.load("src/shared/util/Easing")
+		local ROW = 1 / 30
+		local state = RushDraw.new(line(0))
+		local now = 0
+		while now < RushDraw.finishSeconds(state.line) + ROW do
+			now += ROW
+			RushDraw.step(state, now, ROW, at(0))
+		end
+		expect(state.phase).toBe("Settle")
+		expect(state.along).toBeCloseTo(LENGTH, EPSILON)
+		local previous = LENGTH
+		local function stepAt(along: number): number
+			now += ROW
+			local drawn = RushDraw.step(state, now, ROW, at(along)) or at(along)
+			local drawnAlong = -drawn.Position.Z
+			local step = drawnAlong - previous
+			previous = drawnAlong
+			return step
+		end
+		-- The root comes in 0.4 short, then half of what is left a row, standing still one row on the
+		-- way, to rest 0.02 short: the body stands throughout.
+		local rest = 0.02
+		for _, short in { 0.4, 0.2, 0.1, 0.1, 0.05, rest } do
+			expect(stepAt(LENGTH - short)).toBeCloseTo(0, EPSILON)
+		end
+		expect(state.phase).toBe("HandBack")
+		-- At rest: it stands until settleRestSeconds have gone by since the root's last step in, then
+		-- slides onto it, each step back the ease's row share of the rest, never forward.
+		local cameAt = now
+		local first = stepAt(LENGTH - rest)
+		while math.abs(first) <= EPSILON and now - cameAt < TUNING.settleRestSeconds + 2 * ROW do
+			first = stepAt(LENGTH - rest)
+		end
+		expect(now - cameAt).toBeGreaterThanOrEqual(TUNING.settleRestSeconds - 1e-6)
+		expect(now - cameAt).toBeLessThanOrEqual(TUNING.settleRestSeconds + ROW + 1e-6)
+		-- Within single precision some 22 studs out (an ulp there is 2e-6).
+		local share = Easing.evaluate(TUNING.handBackEasing, ROW / TUNING.handBackSeconds)
+		expect(first).toBeLessThan(0)
+		expect(-first).toBeLessThanOrEqual(share * rest + 1e-5)
+		while state.phase == "HandBack" do
+			local step = stepAt(LENGTH - rest)
+			expect(step).toBeLessThanOrEqual(1e-5)
+			expect(-step).toBeLessThanOrEqual(share * rest + 1e-5)
+		end
+		expect(state.phase).toBe("Done")
 	end)
 
 	it("a root put somewhere else takes the drawn body with it at once, never slid there (D-553)", function()

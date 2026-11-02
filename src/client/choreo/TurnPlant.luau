@@ -14,7 +14,9 @@
 
 	The hips come round only between a turn clip's first two Footsteps. The first is the pivot
 	foot's: the clip has set it with the inner corner of its sole on the root's axis. The other foot
-	is off the ground until the second, when it plants where the stance has it. In between the
+	is off the ground until the second, when it plants where the stance has it; the hips are round
+	turnPlant.leadSeconds of clip time before it (D-641), so it sets down under hips that stand
+	still (ending on it, the curve's last row and the touchdown's first fell on one frame). In between the
 	hips turn about the root's own axis, so the pivot foot turns about the corner the turn holds
 	still and the other foot is in the air: neither slides. They come round on turnPlant.easing over
 	that clip time and turn at most turnPlant.stepDegrees in a 60 Hz frame (a pop is 20). A lag the
@@ -63,8 +65,9 @@ end
 
 local windows: { [string]: { number } } = {}
 
---- The clip time a turn clip brings the hips round between: its first two Footsteps (the pivot
---- foot's plant, then the other foot's). Nil for a clip with fewer than two.
+--- The clip time a turn clip brings the hips round between: its first Footstep (the pivot foot's
+--- plant) and turnPlant.leadSeconds before its second (the other foot's, D-641), so the hips
+--- stand still when that foot sets down. Nil for a clip with fewer than two, or none that far apart.
 function TurnPlant.window(clip: Types.ClipDef): (number?, number?)
 	local cached = windows[clip.id]
 	if cached == nil then
@@ -75,7 +78,8 @@ function TurnPlant.window(clip: Types.ClipDef): (number?, number?)
 			end
 		end
 		table.sort(times)
-		local found: { number } = if #times >= 2 and times[2] > times[1] then { times[1], times[2] } else {}
+		local close = if #times >= 2 then times[2] - Data.leadSeconds else 0
+		local found: { number } = if #times >= 2 and close > times[1] then { times[1], close } else {}
 		windows[clip.id] = found
 		cached = found
 	end

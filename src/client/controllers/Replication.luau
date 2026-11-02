@@ -2183,6 +2183,38 @@ local function takeRemoteAction(record: any)
 	end
 end
 
+-- A copy that a late start brings in short of its clip's ActivationHold, or in it (D-635): its
+-- blend-in ends where the hold begins, so the hold draws the still tell. One that starts in the
+-- hold or past it shows the clip's pose on its first drawn frame (a cut, never a sweep through the
+-- air from what the copy drew before); one that starts in time for its whole blend keeps it.
+local function blendBeforeHold(animator: any, handle: any)
+	local mixer = if typeof(animator) == "table" then animator.mixer else nil
+	if typeof(mixer) ~= "table" or typeof(mixer.blendWithin) ~= "function" then
+		return
+	end
+	if typeof(handle) ~= "table" or typeof(handle.time) ~= "number" or typeof(handle.blendIn) ~= "number" then
+		return
+	end
+	local clip = handle.clip
+	if typeof(clip) ~= "table" or typeof(clip.events) ~= "table" then
+		return
+	end
+	local hold = math.huge
+	for _, event in clip.events do
+		if event.kind == "ActivationHold" then
+			hold = math.min(hold, event.time)
+		end
+	end
+	if hold == math.huge then
+		return
+	end
+	local speed = if typeof(handle.speed) == "number" and handle.speed > 0 then handle.speed else 1
+	local left = math.max(0, (hold - handle.time) / speed)
+	if left < handle.blendIn then
+		mixer:blendWithin(handle, left)
+	end
+end
+
 local handlers: { [string]: (payload: any) -> () } = {}
 
 -- D-469: the speed the server sweeps a clip at (ActionStarted.speed), or nil, the clip at its own
@@ -2231,6 +2263,7 @@ function handlers.ActionStarted(payload: any)
 		end
 	end
 	local handle = animator:play(payload.clipId, options)
+	blendBeforeHold(animator, handle)
 	clipSpeeds[record.id] = { clipId = payload.clipId, speed = speed }
 	if record.kind == "Player" then
 		remoteActions[record.id] = handle

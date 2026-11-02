@@ -28,6 +28,12 @@
 	asked; the root starts on the map, not at the world's origin, as on any real place. A drawn
 	clock summed to the hold's end lands a hair past it (0.25 + 6e-17 at 144 fps): the hold-back
 	reads it as the hold within combat.contact.keyEpsilon (D-616).
+
+	M12s's open line (D-631): the keep-out's lead, back and aside, also waits for the hold's end.
+	On efa907c the step-aside ran inside the hold, 0.20 a 60 fps row sideways at a kobold 2.7 off at
+	130 degrees turned 30 (0.42 in all locked, 0.64 unlocked), and the judges above read along
+	`away` only. The last describe reads every hold row flat, in every direction, at that placement
+	and over a sweep of bearings.
 ]]
 
 local fs = require("@lune/fs")
@@ -42,6 +48,8 @@ local Rigs = Harness.load("src/shared/data/rigs")
 local World = Harness.load("src/shared/data/world")
 local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
 local Pose = Harness.load("src/shared/choreo/Pose")
+local BodyShell = Harness.load("src/shared/choreo/BodyShell")
+local BladeContact = Harness.load("src/shared/choreo/BladeContact")
 local RigBuilder = Harness.load("src/server/world/RigBuilder")
 local PlaygroundLayout = Harness.load("src/server/world/PlaygroundLayout")
 local RealContactPredictor = Harness.load("src/client/controllers/ContactPredictor")
@@ -515,7 +523,7 @@ local function load(target: any): Rig
 end
 
 -- One row as item 397's logger reads it at Last+2: the clip the frame stepped to, and the root.
-type Row = { clip: number, root: Vector3 }
+type Row = { clip: number, root: Vector3, frame: CFrame }
 
 -- One Vertical cast: the rows from the release on, the swing's plan and the clip time it was
 -- released at; and from the press to the release, the stance's ask (nil with no lock), the rows
@@ -557,7 +565,7 @@ local function cast(target: any, ahead: number, fps: number, locked: boolean): C
 	local slot = 2
 	local art = rig.controller.slots()[slot]
 	assert(art ~= nil and art.clip == VERTICAL, "quick slot 2 is Vertical")
-	local held: { Row } = { { clip = 0, root = rig.root.Position } }
+	local held: { Row } = { { clip = 0, root = rig.root.Position, frame = rig.root.CFrame } }
 	rig.controller.beginArt(slot)
 	local handle = rig.animator.mixer:find(VERTICAL)
 	-- A held lock plans the stance at the press (D-606): one ask, keep-out alone, to the hold pose.
@@ -573,7 +581,7 @@ local function cast(target: any, ahead: number, fps: number, locked: boolean): C
 	local holdFrames = math.ceil(0.2 * fps)
 	for _ = 1, holdFrames do
 		rig.frame(dt)
-		table.insert(held, { clip = handle.time, root = rig.root.Position })
+		table.insert(held, { clip = handle.time, root = rig.root.Position, frame = rig.root.CFrame })
 	end
 	local released = handle.time
 	local before = rig.root.Position
@@ -581,10 +589,10 @@ local function cast(target: any, ahead: number, fps: number, locked: boolean): C
 	local releaseStep = rig.root.Position - before
 	assert(#rig.stances == (if locked then 1 else 0), "the release asks for no stance plan")
 	assert(#rig.asked == 1, "the release asks for one swing plan")
-	local rows: { Row } = { { clip = handle.time, root = rig.root.Position } }
+	local rows: { Row } = { { clip = handle.time, root = rig.root.Position, frame = rig.root.CFrame } }
 	while handle.time < 0.45 do
 		rig.frame(dt)
-		table.insert(rows, { clip = handle.time, root = rig.root.Position })
+		table.insert(rows, { clip = handle.time, root = rig.root.Position, frame = rig.root.CFrame })
 	end
 	return {
 		rows = rows,
@@ -769,9 +777,9 @@ describe("the Art stand-off waits for the activation hold (item 492(a), D-604)",
 			expect(whole > 0.5).toBe(true)
 			-- Its 0.65 studs from the first 60 Hz sample past the hold's end to the snap need a hair
 			-- more than the speed covers in that sample at 144 fps (the plan's samples start at the
-			-- release, 0.1528 there), so the speed's lead starts it that hair sooner: under 0.002 a
-			-- row in the hold. 30 and 60 fps rows fall on the samples and read none of it.
-			judge("reach 0.65", fps, c.rows, plan.away, plan.keep, whole, if fps == 144 then 0.002 else 0)
+			-- release, 0.1528 there); the speed's lead no longer starts it inside the hold (D-631:
+			-- under 0.002 a row there before), so no row in the hold reads any of it at any rate.
+			judge("reach 0.65", fps, c.rows, plan.away, plan.keep, whole, 0)
 		end
 	end)
 
@@ -793,5 +801,331 @@ describe("the Art stand-off waits for the activation hold (item 492(a), D-604)",
 			expect(plan.still).toBe(HOLD_END)
 			judge("stance, then blade step 0.25", fps, c.rows, plan.away, shownOf(plan), plan.distance, 0)
 		end
+	end)
+end)
+
+-- Item M12s's open line (D-631): the keep-out's step-aside ran inside the hold at some
+-- placements, up to 0.20 a 60 fps row sideways on the hold rows for a kobold 2.7 off at 130 degrees
+-- turned 30 (0.64 in all unlocked, 0.42 locked), and the judges above read along `away` only. The
+-- hold rows are read flat here, every direction: the frozen rows from the press to the release
+-- and the release's rows that draw the clip up to the hold's end.
+local KEEP_OUT = Combat.contact.standOff.keepOut
+
+-- How deep the hit matrix avatar's hands and arms (keepOut.limbs) stand in `target`'s body parts
+-- (what a blade may wound) with the controller's root at `frame`, at their deepest over the poses
+-- Vertical shows from `clipTime` to the hold's end (every 1/240 s).
+local function handsIn(target: any, frame: CFrame, clipTime: number): number
+	local deepest = -math.huge
+	local rootFrame = avatar.base * START:ToObjectSpace(frame)
+	local time = math.min(clipTime, HOLD_END)
+	while true do
+		local solved = Pose.solve(avatar.model, rootFrame, ClipSampler.sample(vertical, time))
+		for _, name in KEEP_OUT.limbs do
+			local limb = avatar.model:FindFirstChild(name)
+			local at = solved[name]
+			if limb == nil or at == nil then
+				continue
+			end
+			for _, part in target:GetDescendants() do
+				if part:IsA("BasePart") and BladeContact.hurtbox(part) then
+					deepest = math.max(deepest, (BodyShell.depth(at, limb.Size, part.CFrame, part.Size)))
+				end
+			end
+		end
+		if time >= HOLD_END then
+			return deepest
+		end
+		time = math.min(time + 1 / 240, HOLD_END)
+	end
+end
+
+-- Each hold row of a cast that moves the root (flat, any direction), with the clip that row's
+-- screen drew before it and how far its step goes square to `away`: the frozen rows from the press
+-- to the release, then the release's rows that draw the clip up to the hold's end.
+type Moved = { clip: number, step: Vector3, before: Row, frozen: boolean }
+local function holdMoves(c: Cast): ({ Moved }, number)
+	local moved: { Moved } = {}
+	local count = 0
+	for index = 2, #c.held do
+		if c.held[index - 1].clip >= c.released - 1e-9 then
+			count += 1
+			local step = c.held[index].root - c.held[index - 1].root
+			step = Vector3.new(step.X, 0, step.Z)
+			if step.Magnitude > 1e-6 then
+				table.insert(
+					moved,
+					{ clip = c.held[index - 1].clip, step = step, before = c.held[index - 1], frozen = true }
+				)
+			end
+		end
+	end
+	if c.releaseStep.Magnitude > 1e-6 then
+		table.insert(moved, { clip = c.released, step = c.releaseStep, before = c.held[#c.held], frozen = true })
+	end
+	for index = 2, #c.rows do
+		local drawn = c.rows[index - 1].clip
+		if drawn <= HOLD_END + 1e-6 then
+			count += 1
+			local step = c.rows[index].root - c.rows[index - 1].root
+			step = Vector3.new(step.X, 0, step.Z)
+			if step.Magnitude > 1e-6 then
+				table.insert(moved, { clip = drawn, step = step, before = c.rows[index - 1], frozen = false })
+			end
+		end
+	end
+	return moved, count
+end
+
+-- Judges a cast's hold rows (holdMoves) in every direction: the frozen rows and the release itself
+-- move nothing, and no release row that draws the hold moves the root unless a hand or arm stood
+-- in the kobold at the release (deeper than keepOut.depthEpsilon, the plan's own bar, over the poses
+-- the hold still shows, where the root then stood), which the release's plan takes out there, or
+-- the blade step is one too long for the speed from the hold's end (D-604), along `away` alone.
+-- Returns the hold rows read, the hands' depth at the release, and the moving rows the hands' and
+-- the blade step's.
+local function judgeHold(label: string, fps: number, c: Cast, target: any): (number, number, number, number)
+	local plan = c.plan
+	local moved, count = holdMoves(c)
+	local release = c.rows[1]
+	local depth = handsIn(target, release.frame, release.clip)
+	local early = plan ~= nil and plan.distance > 0 and plan.from < HOLD_END - 1e-6
+	local hands, blade = 0, 0
+	for _, move in moved do
+		local square = if plan ~= nil
+			then (move.step - plan.away * move.step:Dot(plan.away)).Magnitude
+			else move.step.Magnitude
+		if not move.frozen and depth > KEEP_OUT.depthEpsilon then
+			hands += 1
+		elseif not move.frozen and early and square <= 1e-6 then
+			blade += 1
+		else
+			error(
+				("%s at %d fps: a hold row drawing clip %.4f moves the root %.4f (%.4f square to away), the hands %.4f in the kobold at the release"):format(
+					label,
+					fps,
+					move.clip,
+					move.step.Magnitude,
+					square,
+					depth
+				)
+			)
+		end
+	end
+	return count, depth, hands, blade
+end
+
+describe("the hold rows stand still in every direction (M12s, D-604, D-631)", function()
+	it("at a kobold 2.7 off at 130 degrees turned 30, locked and not, at 30, 60 and 144", function()
+		-- The placement M12s read the step-aside at. The keep-out's lead (back and aside) starts with
+		-- the hold's end, under keepOut.maxSpeedStudsPerSecond from there, as the blade step does.
+		-- Locked, the stance took the held pose's hands out before the hold (D-606), and no hold row
+		-- moves. Unlocked nothing plans before the release (D-606), and the frozen pose stands with
+		-- its right hand in the kobold from the press on, so the release takes the hand out on its
+		-- first rows (HandsOut's line) and does nothing more inside the hold.
+		local target = kobold(130, 30, 2.7)
+		for _, locked in { true, false } do
+			for _, fps in { 30, 60, 144 } do
+				local c = cast(target, 2.8, fps, locked)
+				local label = ("130/30/2.7 %s"):format(if locked then "locked" else "unlocked")
+				local plan = c.plan
+				expect(plan).never.toBeNil()
+				expect(plan.still).toBe(HOLD_END)
+				local count, depth, hands, blade = judgeHold(label, fps, c, target)
+				local moves = holdMoves(c)
+				local total = 0
+				for _, move in moves do
+					total += move.step.Magnitude
+				end
+				expect(count > 0).toBe(true)
+				expect(blade).toBe(0)
+				if locked then
+					expect(hands).toBe(0)
+				else
+					-- What moves is the frozen pose's own need, the hand out (and the aside that step
+					-- calls for off the axe's face), on the first rows of the release.
+					expect(depth > KEEP_OUT.depthEpsilon).toBe(true)
+				end
+				-- The step-aside still lands, after the hold, within the speed on every row to the open.
+				local aside = if plan.keepSide ~= nil then plan.keepSide(OPEN) else 0
+				for index = 2, #c.rows do
+					local drawn = c.rows[index - 1].clip
+					if drawn > HOLD_END + 1e-6 and drawn < OPEN - 1e-6 then
+						local step = c.rows[index].root - c.rows[index - 1].root
+						local square = step - plan.away * step:Dot(plan.away)
+						expect(Vector3.new(square.X, 0, square.Z).Magnitude <= SPEED / fps + 1e-6).toBe(true)
+					end
+				end
+				print(
+					("[M12s] %s at %d fps: %d hold rows, %d moved, %.3f in all (a hand %.3f in at the release); aside %.3f by the open, back %.3f"):format(
+						label,
+						fps,
+						count,
+						hands,
+						total,
+						depth,
+						aside,
+						shownOf(plan)(OPEN)
+					)
+				)
+			end
+		end
+		target:Destroy()
+	end)
+
+	it("over a sweep of bearings, a hold row moves only to take a hand out of the kobold", function()
+		-- Locked, the stance takes the held pose's hands out before the hold (D-606); unlocked, nothing
+		-- plans before the release, so where the frozen pose already stands with a hand in the
+		-- kobold, or the hold's own poses bring one in (Vertical's hold key moves the arms on toward
+		-- the anticipation), the release's plan takes it out on the hold rows (HandsOut's line),
+		-- and nothing more: no step toward a sample past the hold. Here the lock is a point 2.8
+		-- ahead, not the kobold, so the release turns the body to it after the stance's step aside
+		-- and may leave a hair of a hand in (150/30: 0.007). Every other cast holds every hold row
+		-- still, in every direction.
+		local fps = 60
+		local casts, still, inside, insideRows, blade = 0, 0, 0, 0, 0
+		for _, bearing in { 0, 30, 60, 90, 120, 130, 150, 180, -30, -60, -90, -120, -150 } do
+			for _, yaw in { -30, 30 } do
+				local target = kobold(bearing, yaw, 2.7)
+				for _, locked in { true, false } do
+					casts += 1
+					local c = cast(target, 2.8, fps, locked)
+					local label = ("%d/%d/2.7 %s"):format(bearing, yaw, if locked then "locked" else "unlocked")
+					local _, depth, hands, steps = judgeHold(label, fps, c, target)
+					if hands + steps == 0 then
+						still += 1
+					end
+					if depth > KEEP_OUT.depthEpsilon then
+						inside += 1
+					end
+					insideRows += hands
+					blade += steps
+				end
+				target:Destroy()
+			end
+		end
+		print(
+			("[M12s] the sweep at %d fps: %d casts, %d with every hold row still; %d with a hand in the kobold at the release, taken out on %d hold rows; %d rows the blade step's (D-604)"):format(
+				fps,
+				casts,
+				still,
+				inside,
+				insideRows,
+				blade
+			)
+		)
+		expect(still > casts / 2).toBe(true)
+	end)
+end)
+
+-- Item 516(e)(f)'s V516A_60_boar1 (D-644): A started 4.225 from the boar and stepped back 1.64
+-- (z 35.775 to 34.135) to where every other take stood (5.86-5.90), the first move on the row
+-- drawing 0.25114, then 0.097, 0.201, 0.216, 0.201, 0.185, 0.204 on the row drawing the open
+-- 0.350227, and 0.192, 0.200 and 0.004 after it. A step that long cannot be whole by the open from a
+-- tell that stands still: from the hold's end (0.25) the open (0.35) leaves 0.10 s, 1.2 studs at
+-- keepOut.maxSpeedStudsPerSecond. The body's spacing is right by the strike's key (0.40, the
+-- blade's contact), which is where the anime reading asks for it.
+local function boar(distance: number, yaw: number): any
+	local def = Enemies.byId("FrenzyBoar")
+	local model = RigBuilder.build(def.skin)
+	local height =
+		PlaygroundLayout.rootHeight(Rigs[def.skin].hipHeight, model.PrimaryPart.Size.Y, World.spawn.groundEpsilon)
+	local frame = avatar.base
+		* CFrame.new(0, height - avatar.rootHeight, -distance)
+		* CFrame.Angles(0, math.pi + math.rad(yaw), 0)
+	for name, solved in Pose.solve(model, frame, {}) do
+		local part = model:FindFirstChild(name)
+		if part ~= nil and part:IsA("BasePart") then
+			part.CFrame = solved
+		end
+	end
+	assert(RigBuilder.addBlocker(model) ~= nil, "no blocker for the boar")
+	return model
+end
+
+describe("a stand-off step longer than the hold leaves the open (item 516(e)(f), D-644)", function()
+	it("stands still through the tell, steps after it within the speed and is whole by the strike's key", function()
+		-- The boar 4.225 ahead with its rump to A (Lune's boar there calls for 1.343 back, 1.180 after
+		-- a lock's stance; 5.88 off it calls for none, as the PC's other takes). The keep-out's step
+		-- is whole when the pose that leans deepest needs it, Vertical's strike (D-534), not by the
+		-- open, which only the blade step and the reach are planned to (D-604). Back and aside are each held to
+		-- keepOut.maxSpeedStudsPerSecond of the clip's clock (D-608), so a row's flat step may read up
+		-- to that times the square root of 2 where both run.
+		local key = RealContactPredictor.strikeKey(vertical, ClipSampler.hitWindows(vertical)[1])
+		local target = boar(4.225, 180)
+		local far = boar(5.88, 180)
+		for _, locked in { false, true } do
+			for _, fps in { 30, 60, 144 } do
+				local label = ("boar 4.225 %s"):format(if locked then "locked" else "unlocked")
+				local c = cast(target, 4.225, fps, locked)
+				local plan = c.plan
+				expect(plan).never.toBeNil()
+				expect(plan.still).toBe(HOLD_END)
+				if locked then
+					judgeStance(label, fps, c)
+				else
+					expect((c.held[#c.held].root - c.held[1].root).Magnitude).toBe(0)
+				end
+				expect(c.releaseStep.Magnitude).toBe(0)
+				local final = c.rows[#c.rows].root
+				local total = (final - c.rows[1].root).Magnitude
+				expect(total > 1).toBe(true)
+				local steps, firstDrawn, toOpen, wholeAt = {}, -1, 0, -1
+				for index = 2, #c.rows do
+					local drawn = c.rows[index - 1].clip
+					local step = c.rows[index].root - c.rows[index - 1].root
+					local flat = Vector3.new(step.X, 0, step.Z)
+					local back = flat:Dot(plan.away)
+					local aside = (flat - plan.away * back).Magnitude
+					local advance = c.rows[index].clip - drawn
+					local before = if index > 2 then drawn - c.rows[index - 2].clip else advance
+					local bar = SPEED * math.max(advance, before) + 1e-6
+					if flat.Magnitude > 1e-6 then
+						table.insert(steps, ("%.3f@%.4f"):format(flat.Magnitude, drawn))
+						if firstDrawn < 0 then
+							firstDrawn = drawn
+						end
+					end
+					-- The tell stands still: nothing moves on a row that draws the hold or before.
+					if drawn <= HOLD_END + 1e-6 then
+						expect(flat.Magnitude <= 1e-6).toBe(true)
+					end
+					expect(math.abs(back) <= bar).toBe(true)
+					expect(aside <= bar).toBe(true)
+					if drawn < OPEN - 1e-6 then
+						toOpen += flat.Magnitude
+					end
+					-- Whole on the first row that draws the key: nothing moves after it.
+					if drawn >= key - 1e-6 then
+						if wholeAt < 0 then
+							wholeAt = drawn
+							expect((c.rows[index].root - final).Magnitude <= 1e-6).toBe(true)
+						else
+							expect(flat.Magnitude <= 1e-6).toBe(true)
+						end
+					end
+				end
+				expect(firstDrawn > HOLD_END).toBe(true)
+				expect(wholeAt >= key - 1e-6).toBe(true)
+				-- Not whole by the open: what item 516(e)'s line as written failed on.
+				expect(total - toOpen > 0.3).toBe(true)
+				print(
+					("[516ef] %s at %d fps: first move on the row drawing %.4f, %.3f by the open, %.3f in all, whole by the row drawing %.4f (key %.3f) | %s"):format(
+						label,
+						fps,
+						firstDrawn,
+						toOpen,
+						total,
+						wholeAt,
+						key,
+						table.concat(steps, " ")
+					)
+				)
+				-- 5.88 off the boar: no step at all, as the PC's other takes.
+				local still = cast(far, 5.88, fps, locked)
+				expect((still.rows[#still.rows].root - still.rows[1].root).Magnitude <= 1e-6).toBe(true)
+			end
+		end
+		target:Destroy()
+		far:Destroy()
 	end)
 end)

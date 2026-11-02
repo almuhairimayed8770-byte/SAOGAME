@@ -2375,3 +2375,190 @@ describe("the hand-back onto a late root the server still lands (AR 506(c), D-60
 		)
 	end
 end)
+
+describe("the hand-back onto a late root that comes in on some rows only (AS 527, D-648)", function()
+	-- The PC on 97cea9d, item 527 (Q527_30_2, a 30 fps first launch on DevFrameCap's rows of 1/30 and
+	-- 0.0349 s, the root 0.626 to 1.411 short on the stop row): a back step at stop+3 of 0.017
+	-- against s × g + 0.005 = 0.010 (g 0.016), then forward steps 0.009 (stop+4) and 0.003 (stop+5).
+	-- The replicated root came in on some rows only: D-602's wait took a row on which it did not move
+	-- as its rest, so the slide ran a row (the first row's share, 0.31 at 1/30 s) toward a root still
+	-- landing, and the slide's lerp then carried the body forward by its share of the root's next
+	-- step in. Its near test also read the root before physics, 1.0 to 1.4 short on a 1/30 s row,
+	-- while the place the frame draws (rootAhead) had already handed back. Lune on 3d59958, the root
+	-- 0.29 to 0.35 s late and stepping in on a 20 or 30 Hz grid (0.53 to 2.40 short on the stop
+	-- row), largest forward / back step: 0.020 / 0.020 at 30 fps, 0.026 / 0.019 at 60, 0.068 / 0.023
+	-- at 144; one row on which the landing root did not move at 30 fps: 0.143 / 0.143. The slide now
+	-- waits settleRestSeconds past the root's last step in, the body standing where it was drawn.
+	local RUSH = ChoreoData.enemy.rush
+	local MOVE = AI.movement
+	local Easing = Harness.load("src/shared/util/Easing")
+	local SERVER_FRAME = 1 / 60
+	-- The server's body down the line on its 60 Hz Heartbeat, landed on the line end each frame
+	-- leaving `ratio` of what is left (the server's own pace leaves 1 - 1 / landFrames; the PC's
+	-- replicated rows read up to 0.73), stopped dead within landSlackStuds. Rows of {seconds after
+	-- the launch, along, the velocity it carries}.
+	local function trackOf(ratio: number): { { number } }
+		local track: { { number } } = { { 0, 0, 0 } }
+		local along, t, landing = 0, 0, false
+		while t < 3 do
+			local left = LENGTH - along
+			landing = landing or left <= SPEED * MOVE.haltLeadSeconds
+			local move = if not landing
+				then math.min(SPEED * SERVER_FRAME, left)
+				elseif left > MOVE.landSlackStuds then left * (1 - ratio)
+				else 0
+			along += move
+			t += SERVER_FRAME
+			table.insert(track, { t, along, move / SERVER_FRAME })
+		end
+		return track
+	end
+	-- Where the server's body is `t` seconds after the launch and the velocity it carries, read on a
+	-- `hz` grid (the latest step at or before `t`; nil: every instant).
+	local function serverAt(track: { { number } }, t: number, hz: number?): (number, number)
+		if t <= 0 then
+			return 0, 0
+		end
+		local at = if hz ~= nil then math.floor(t * hz + 1e-9) / hz else t
+		for index = 2, #track do
+			local a, b = track[index - 1], track[index]
+			if at <= b[1] then
+				return a[2] + (b[2] - a[2]) / (b[1] - a[1]) * (at - a[1]), b[3]
+			end
+		end
+		return track[#track][2], 0
+	end
+	local function alongOf(position: Vector3): number
+		return (position - ORIGIN):Dot(DIRECTION)
+	end
+	-- DevFrameCap 30's rows: 1/30 s and the PC's 0.0349 s in turn.
+	local function capped(frame: number): number
+		return if frame % 2 == 0 then 0.0349 else 1 / 30
+	end
+	-- Judges one take from the drawn body's stop (the skid's last row forward): never forward again,
+	-- each back step at most the ease's row share of the root's rest, and the body on its root at
+	-- the end. Returns the largest forward and back steps and the root's shortfall on the stop row.
+	local function judge(frames: { any }): (number, number, number)
+		local stop: number? = nil
+		for index = 2, #frames do
+			local step = alongOf(frames[index].drawnBody) - alongOf(frames[index - 1].drawnBody)
+			if alongOf(frames[index].drawnBody) > LENGTH - 1 and step <= 1e-3 then
+				stop = index - 1
+				break
+			end
+		end
+		expect(stop).never.toBeNil()
+		local s = stop :: number
+		local rest = LENGTH - alongOf(frames[#frames].root)
+		expect(rest).toBeGreaterThan(0)
+		expect(rest).toBeLessThanOrEqual(MOVE.landSlackStuds)
+		local forward, back = 0, 0
+		for index = s + 1, #frames do
+			local frame, before = frames[index], frames[index - 1]
+			local step = alongOf(frame.drawnBody) - alongOf(before.drawnBody)
+			local share = Easing.evaluate(RUSH.handBackEasing, math.min(1, frame.dt / RUSH.handBackSeconds))
+			expect(step).toBeLessThanOrEqual(1e-3)
+			expect(-step).toBeLessThanOrEqual(share * rest + 1e-3)
+			forward = math.max(forward, step)
+			back = math.max(back, -step)
+		end
+		local last = frames[#frames]
+		expect(last.offset).toBe(false)
+		expect((last.drawnBody - last.root).Magnitude).toBeLessThanOrEqual(1e-3)
+		return forward, back, LENGTH - alongOf(frames[s].root)
+	end
+	for _, fps in { 30, 60, 144 } do
+		it(("a root stepping in on a 20 or 30 Hz grid is waited for until it rests, %d fps"):format(fps), function()
+			local worstForward, worstBack, shortMin, shortMax = 0, 0, math.huge, 0
+			for _, ratio in { 1 - 1 / MOVE.landFrames, 0.67 } do
+				local track = trackOf(ratio)
+				for _, hz in { 20, 30 } do
+					for _, lag in { 0.29, 0.32, 0.35 } do
+						local run = rush({
+							latency = 0.05,
+							lag = lag,
+							fps = fps,
+							frames = math.ceil((0.2 + CHARGE.windUp + 1.9) * fps),
+							studioOrder = true,
+							frameTime = if fps == 30 then capped else nil,
+							rootAt = function(t: number): CFrame
+								local position = ORIGIN + DIRECTION * (serverAt(track, t - lag - LAUNCH, hz))
+								return CFrame.lookAt(position, position + DIRECTION)
+							end,
+							rootVelocity = function(t: number): Vector3
+								local _, speed = serverAt(track, t - lag - LAUNCH, hz)
+								return DIRECTION * speed
+							end,
+						})
+						local forward, back, short = judge(run.frames)
+						worstForward = math.max(worstForward, forward)
+						worstBack = math.max(worstBack, back)
+						shortMin, shortMax = math.min(shortMin, short), math.max(shortMax, short)
+					end
+				end
+			end
+			print(
+				("[527(a)(b)] %d fps, the root 0.29 to 0.35 s late on a 20 / 30 Hz grid, %.2f to %.2f short on the stop row: largest forward step %.4f, back %.4f"):format(
+					fps,
+					shortMin,
+					shortMax,
+					worstForward,
+					worstBack
+				)
+			)
+		end)
+	end
+	it("a row on which the landing root did not move is no rest, 30 fps", function()
+		local worstForward, worstBack = 0, 0
+		local landStart = (LENGTH - SPEED * MOVE.haltLeadSeconds) / SPEED
+		for _, ratio in { 1 - 1 / MOVE.landFrames, 0.67 } do
+			local track = trackOf(ratio)
+			for _, lag in { 0.32, 0.34 } do
+				for _, stallAt in { 0, 1 / 30, 2 / 30, 3 / 30 } do
+					-- The first row whose server time passes the landing's start plus stallAt reads the
+					-- row before's place and velocity: the replicated root stands that row.
+					local stalled = false
+					local shownFrame = -1
+					local place, speed = 0, 0
+					local function read(t: number): (number, number)
+						if frameNow ~= shownFrame then
+							shownFrame = frameNow
+							local s = t - lag - LAUNCH
+							if not stalled and s >= landStart + stallAt then
+								stalled = true
+							else
+								place, speed = serverAt(track, s)
+							end
+						end
+						return place, speed
+					end
+					local run = rush({
+						latency = 0.05,
+						lag = lag,
+						fps = 30,
+						frames = math.ceil((0.2 + CHARGE.windUp + 1.9) * 30),
+						studioOrder = true,
+						frameTime = capped,
+						rootAt = function(t: number): CFrame
+							local position = ORIGIN + DIRECTION * (read(t))
+							return CFrame.lookAt(position, position + DIRECTION)
+						end,
+						rootVelocity = function(t: number): Vector3
+							local _, carried = read(t)
+							return DIRECTION * carried
+						end,
+					})
+					local forward, back = judge(run.frames)
+					worstForward = math.max(worstForward, forward)
+					worstBack = math.max(worstBack, back)
+				end
+			end
+		end
+		print(
+			("[527(a)(b)] 30 fps, one row on which the landing root did not move: largest forward step %.4f, back %.4f"):format(
+				worstForward,
+				worstBack
+			)
+		)
+	end)
+end)

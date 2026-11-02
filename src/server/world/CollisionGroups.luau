@@ -32,6 +32,16 @@
 	that still draws the body where it was; that push is what lifted one boar onto another, and a
 	player onto a boar's back.
 
+	A character's column collides (D-630): joinPlayers switches CanCollide on for each part
+	combat.contact.standOff.keepOut.parts names (the root, the torsos and the head), the parts the
+	stand-off's keep-out and its wall room already cast as what the engine collides (D-314, D-517).
+	An avatar may bring a Head that does not collide (the owner's MeshPart Head, 1.27 deep, its box
+	0.16 behind the torso's back), and nothing then kept it out of a wall the fighter backs onto:
+	the PC read it 0.14-0.21 in at rest and up to 0.40 through the swings. A colliding Head is
+	pushed out with the torsos by the engine, sized by the real part, through every lean and walk.
+	A part of that name added later (an appearance that swaps the head) collides as it joins.
+	Accessories and every other part keep their own CanCollide.
+
 	Queries are unaffected: a RaycastParams / OverlapParams query runs as the Default group, which
 	collides with the three fighter groups, so blades, spherecasts and overlap tests see every
 	fighter as before, and not with the blockers, so none of them sees a blocker (HitSweep and
@@ -44,6 +54,10 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AI = require(ReplicatedStorage.Shared.data.ai)
+local Combat = require(ReplicatedStorage.Shared.data.combat)
+
+-- The character's column: the parts the engine must collide (D-630).
+local COLUMN: { string } = Combat.contact.standOff.keepOut.parts
 
 -- The PhysicsService calls register makes (a stand-in in tests).
 export type Physics = {
@@ -124,19 +138,37 @@ function CollisionGroups.assign(model: Instance, group: string)
 	end
 end
 
---- A part added to a character after it joined (an accessory, the weapon) joins the players group.
-function CollisionGroups.playerPartAdded(descendant: Instance)
-	if descendant:IsA("BasePart") then
-		descendant.CollisionGroup = AI.collision.players
+-- A part of the character's column (keepOut.parts, a child of the character) collides (D-630).
+local function collideColumn(part: BasePart, character: Instance?)
+	if character ~= nil and part.Parent == character and table.find(COLUMN, part.Name) ~= nil then
+		part.CanCollide = true
 	end
 end
 
---- Puts a character in the players group, and every part added to it later. Returns the watch's
---- connection (the character's Destroy ends it), or nil where the instance has no events (Lune).
+--- A part added to a character after it joined (an accessory, the weapon) joins the players group;
+--- with the character given, a column part (a swapped Head) collides too (D-630).
+function CollisionGroups.playerPartAdded(descendant: Instance, character: Instance?)
+	if descendant:IsA("BasePart") then
+		descendant.CollisionGroup = AI.collision.players
+		collideColumn(descendant, character)
+	end
+end
+
+--- Puts a character in the players group, and every part added to it later, with its column
+--- colliding (D-630). Returns the watch's connection (the character's Destroy ends it), or nil
+--- where the instance has no events (Lune).
 function CollisionGroups.joinPlayers(character: Model): Connection?
 	CollisionGroups.assign(character, AI.collision.players)
+	for _, name in COLUMN do
+		local part = character:FindFirstChild(name)
+		if part ~= nil and part:IsA("BasePart") then
+			collideColumn(part, character)
+		end
+	end
 	local ok, connection = pcall(function(): Connection
-		return character.DescendantAdded:Connect(CollisionGroups.playerPartAdded) :: any
+		return character.DescendantAdded:Connect(function(descendant: Instance)
+			CollisionGroups.playerPartAdded(descendant, character)
+		end) :: any
 	end)
 	return if ok then connection else nil
 end
