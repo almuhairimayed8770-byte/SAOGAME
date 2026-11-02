@@ -1581,6 +1581,15 @@ local function step(dt: number)
 			-- The reading `speed` came from: a velocity off the stick blocks the body (D-144).
 			velocity = velocity,
 			yawAhead = pendingLockYaw, -- D-505
+			-- D-657: the stick's walk speed once the action lets go (a dodge ends in Idle): a
+			-- dodge aims the gait it hides at the stick's gait.
+			stickSpeed = if stickNow.Magnitude > 0
+				then AimLogic.moveSpeed(
+					ActionLogic.speedFor("Idle", sprinting, speeds),
+					AimLogic.facesLock("Idle", lockAt ~= nil, sprintingNow, AIM),
+					speeds.walk
+				)
+				else 0,
 		})
 	end
 
@@ -1704,9 +1713,12 @@ local function onCharacter(model: Model)
 	-- frame that draws it (FrameClock.atStepPose, D-555); with no FrameClock, at once.
 	local stepPose = if typeof(FrameClock) == "table" then rawget(FrameClock, "atStepPose") else nil
 	local stepPoseSolve = if typeof(FrameClock) == "table" then rawget(FrameClock, "atStepPoseSolve") else nil
+	-- This controller's render step writes the pose the frame's physics then moves the root under
+	-- (D-343), so the gait also takes up the steps that physics is about to make (D-651).
 	locomotion = Locomotion.new(animator, model, {
 		atStepPose = if typeof(stepPose) == "function" then stepPose else nil,
 		atStepPoseSolve = if typeof(stepPoseSolve) == "function" then stepPoseSolve else nil,
+		stepsAhead = true,
 	})
 	model:GetAttributeChangedSignal(ART_SLOTS_ATTRIBUTE):Connect(refreshSlots)
 	refreshSlots()

@@ -3997,3 +3997,52 @@ describe("CharacterController: the sword's move lands with its step's pose (AG 3
 		expect(older ~= nil and older.atStepPose == gate and older.atStepPoseSolve == nil).toBe(true)
 	end)
 end)
+
+describe("CharacterController: the stick's walk speed out of the action, for a dodge's gait (D-657)", function()
+	it(
+		"hands Locomotion the speed the stick walks at once the action lets go, while a dodge locks the walk too",
+		function()
+			local Locomotion = ChoreoData.locomotion
+			-- The run: the stick's speed is the run's, and stays so under the dodge, whose lock walks 0.
+			local rig = load()
+			for _ = 1, 10 do
+				rig.frame(FORWARD)
+			end
+			expect(rig.locomotionInput().stickSpeed).toBe(Locomotion.runSpeed)
+			rig.controller.dodge()
+			rig.frame(FORWARD)
+			expect(rig.controller.state()).toBe("Dodge")
+			expect(rig.humanoid.WalkSpeed).toBe(0)
+			expect(rig.locomotionInput().stickSpeed).toBe(Locomotion.runSpeed)
+			-- Let go under the dodge: 0, the idle.
+			rig.frame(STILL)
+			expect(rig.locomotionInput().stickSpeed).toBe(0)
+
+			-- Facing a lock: the walk's.
+			local locked = load()
+			locked.frame(STILL)
+			locked.setLock(pointAt(locked, 0, 8))
+			for _ = 1, 5 do
+				locked.frame(Vector3.new(1, 0, 0))
+			end
+			expect(locked.locomotionInput().stickSpeed).toBe(Locomotion.walkSpeed)
+			locked.controller.dodge()
+			locked.frame(Vector3.new(1, 0, 0))
+			expect(locked.controller.state()).toBe("Dodge")
+			expect(locked.locomotionInput().stickSpeed).toBe(Locomotion.walkSpeed)
+
+			-- The sprint key held: the sprint's, though Locomotion hears no sprint while the dodge locks.
+			local sprinting = load()
+			sprinting.controller.setSprinting(true)
+			for _ = 1, 10 do
+				sprinting.frame(FORWARD)
+			end
+			expect(sprinting.locomotionInput().stickSpeed).toBe(Locomotion.sprintSpeed)
+			sprinting.controller.dodge()
+			sprinting.frame(FORWARD)
+			expect(sprinting.controller.state()).toBe("Dodge")
+			expect(sprinting.locomotionInput().sprinting).toBe(false)
+			expect(sprinting.locomotionInput().stickSpeed).toBe(Locomotion.sprintSpeed)
+		end
+	)
+end)

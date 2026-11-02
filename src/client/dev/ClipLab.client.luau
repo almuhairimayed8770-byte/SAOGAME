@@ -30,6 +30,12 @@
 	The lab owns the clock: Choreo is configured with silent frame signals before the first
 	animator exists, and every step comes from this script (speed, pause, single frames), so what
 	the frame counter says is exactly what the rig shows.
+
+	Two views pace a clip as the game does (LabPlayback, D-653). Walk pace (W) plays a rig's data
+	walk at a share of its walkSpeed (dev.luau clipLab.walkShares, then back in place) as RigDriver
+	plays it, the rig carried along its facing at that speed and put back on its pedestal every
+	clipLab.walkLoopSeconds. Play once (Q) plays a one-shot once over the rig's idle with the
+	game's own blend in and out, holds the idle clipLab.onceIdleSeconds and plays it again.
 ]]
 
 local Players = game:GetService("Players")
@@ -56,6 +62,7 @@ local ClipLibrary = require(Client.choreo.ClipLibrary)
 local WeaponMount = require(Client.choreo.WeaponMount)
 local ReviewMarkers = require(script.Parent.ReviewMarkers)
 local LabKeys = require(script.Parent.LabKeys)
+local LabPlayback = require(script.Parent.LabPlayback)
 
 local Trails, hasTrails = Siblings.load(Client, "fx.Trails")
 local Smear, hasSmear = Siblings.load(Client, "fx.Smear")
@@ -174,6 +181,16 @@ local pendingStop: { at: number, frames: number }? = nil
 -- not stepping: a Mixer hit-stop would also let its clock skip the authored Hold after the key.
 local labHold = 0
 local connectedAnimators: { [Choreo.Animator]: boolean } = {}
+-- Walk pace (LabPlayback): the share of the rig's walkSpeed (nil: in place), the lab seconds the
+-- rig has been carried, and where it stood when its clip was picked.
+local walkShare: number? = nil
+local walkElapsed = 0
+local walkOrigin: CFrame? = nil
+-- Play once (LabPlayback): on, the rig's idle under the clip, and the lab seconds the idle has
+-- shown since the clip blended out.
+local onceEnabled = false
+local idleHandle: Choreo.Handle? = nil
+local onceIdle = 0
 local yaw = CameraData.startYaw
 local orbitDirection = 0
 local cameraPosition: Vector3? = nil
@@ -600,6 +617,95 @@ local function syncMount()
 	end
 end
 
+-- The walk pace the selected clip plays at: its rig's data walk with a share picked, else nil.
+local function currentPace(): LabPlayback.WalkPace?
+	local def = clip
+	local share = walkShare
+	if def == nil or share == nil or LabPlayback.walkOf(def.rig) ~= def.id then
+		return nil
+	end
+	return LabPlayback.walkPace(def.rig, share, def.duration)
+end
+
+-- Whether the selected clip plays once into its rig's idle.
+local function playsOnce(): boolean
+	local def = clip
+	return onceEnabled and def ~= nil and not def.loop and LabPlayback.idleOf(def.rig) ~= nil
+end
+
+local function dropIdle()
+	local target = animator
+	local idle = idleHandle
+	idleHandle = nil
+	if target ~= nil and idle ~= nil and not idle.done then
+		target:stop(idle, 0)
+	end
+end
+
+-- The rig's idle under the clip at `weight` (played once, coexisting with the clip's layer).
+local function idleUnder(weight: number)
+	local def = clip
+	local target = animator
+	local idleId = if def ~= nil then LabPlayback.idleOf(def.rig) else nil
+	if target == nil or idleId == nil or (def :: Types.ClipDef).id == idleId then
+		dropIdle()
+		return
+	end
+	local idle = idleHandle
+	if idle == nil or idle.done then
+		idleHandle = target:play(idleId, { coexist = true, blendIn = 0, weight = weight })
+	else
+		target:setWeight(idle, weight, true)
+	end
+end
+
+-- The selected clip's rate and weight and the idle under it, for the walk pace and play once.
+local function applyPace()
+	local target = animator
+	local current = handle
+	if target == nil or current == nil then
+		return
+	end
+	local pace = currentPace()
+	if pace ~= nil then
+		target:setSpeed(current, pace.rate)
+		target:setWeight(current, pace.walk, true)
+		if pace.idle > 0 then
+			idleUnder(pace.idle)
+		else
+			dropIdle()
+		end
+	else
+		target:setSpeed(current, 1)
+		target:setWeight(current, 1, true)
+		if playsOnce() then
+			idleUnder(1)
+		else
+			dropIdle()
+		end
+	end
+end
+
+-- Puts a carried rig back where it stood when its clip was picked.
+local function standOrigin()
+	local target = animator
+	local origin = walkOrigin
+	if target ~= nil and origin ~= nil then
+		target.model:PivotTo(origin)
+	end
+end
+
+-- Carries the rig on the walk pace to where `walkElapsed` puts it (a rig in place is not moved).
+local function carry()
+	local target = animator
+	local origin = walkOrigin
+	local pace = currentPace()
+	if target == nil or origin == nil or pace == nil then
+		return
+	end
+	target.model:PivotTo(LabPlayback.carried(origin, pace.speed, walkElapsed, Lab.walkLoopSeconds))
+end
+
 local function play(startTime: number)
 	local def = clip
 	local target = animator
@@ -610,7 +716,20 @@ local function play(startTime: number)
 	clearTrail(target.model)
 	pendingStop = nil
 	labHold = 0
-	handle = target:play(def.id, { startTime = startTime, blendIn = 0, blendOut = 0 })
+	onceIdle = 0
+	local previous = handle
+	if previous ~= nil and not previous.done then
+		target:stop(previous, 0)
+	end
+	if playsOnce() then
+		-- As the game plays it over the locomotion: its own blend in (from its start) and out.
+		idleUnder(1)
+		handle =
+			target:play(def.id, { startTime = startTime, blendIn = if startTime > 0 then 0 else nil, coexist = true })
+	else
+		handle = target:play(def.id, { startTime = startTime, blendIn = 0, blendOut = 0, coexist = true })
+	end
+	applyPace()
 	target:step(0)
 	syncMount()
 end
@@ -629,10 +748,15 @@ local function selectClip(index: number)
 	end
 	index = (index - 1) % #entries + 1
 	local previous = animator
+	standOrigin()
+	dropIdle()
 	if previous ~= nil and handle ~= nil then
 		previous:stop(handle, 0)
 		quietFx(previous.model)
 	end
+	handle = nil
+	walkElapsed = 0
+	walkOrigin = nil
 	local oldMount = mount
 	if oldMount ~= nil then
 		oldMount:destroy()
@@ -652,6 +776,7 @@ local function selectClip(index: number)
 		return
 	end
 	animator = animatorFor(model)
+	walkOrigin = model:GetPivot()
 	mount = WeaponMount.new(animator, model)
 	motorCache[model] = nil
 	abRest = false
@@ -687,8 +812,12 @@ local function stepFrames(count: number)
 		for _ = 1, count do
 			target:step(FRAME)
 		end
+		walkElapsed += count * FRAME
+		carry()
 		syncMount()
 	else
+		walkElapsed = math.max(0, walkElapsed + count * FRAME)
+		carry()
 		local time = current.time + count * FRAME
 		if def.loop and def.duration > 0 then
 			time = time % def.duration
@@ -707,6 +836,13 @@ local speedButtons: { [number]: TextButton } = {}
 local playButton: TextButton
 local abButton: TextButton
 local hitStopButton: TextButton
+local walkButton: TextButton
+local onceButton: TextButton
+
+local function lit(control: TextButton, on: boolean)
+	control.BackgroundColor3 = El.color(if on then PanelData.selectedToken else PanelData.backgroundToken)
+	control.TextColor3 = El.color(if on then PanelData.backgroundToken else PanelData.textToken)
+end
 
 local function refreshControls()
 	for value, control in speedButtons do
@@ -720,6 +856,10 @@ local function refreshControls()
 	hitStopButton.BackgroundColor3 =
 		El.color(if hitStopEnabled then PanelData.selectedToken else PanelData.backgroundToken)
 	hitStopButton.TextColor3 = El.color(if hitStopEnabled then PanelData.backgroundToken else PanelData.textToken)
+	local share = walkShare
+	walkButton.Text = if share ~= nil then ("Walk %g"):format(share) else "Walk"
+	lit(walkButton, share ~= nil)
+	lit(onceButton, onceEnabled)
 end
 
 local function setSpeed(value: number)
@@ -748,6 +888,23 @@ end
 
 local function toggleHitStop()
 	hitStopEnabled = not hitStopEnabled
+	refreshControls()
+end
+
+-- The next walk pace share (LabPlayback.nextShare): in place, then each of clipLab.walkShares.
+local function cycleWalk()
+	walkShare = LabPlayback.nextShare(walkShare, Lab.walkShares)
+	walkElapsed = 0
+	standOrigin()
+	applyPace()
+	carry()
+	refreshControls()
+end
+
+-- Play once into the idle on or off; the clip plays again from its start.
+local function toggleOnce()
+	onceEnabled = not onceEnabled
+	play(0)
 	refreshControls()
 end
 
@@ -782,6 +939,12 @@ do
 	order += 1
 	hitStopButton = button("Hit-stop", order, toggleHitStop)
 	hitStopButton.Parent = controls
+	order += 1
+	walkButton = button("Walk", order, cycleWalk)
+	walkButton.Parent = controls
+	order += 1
+	onceButton = button("Once", order, toggleOnce)
+	onceButton.Parent = controls
 end
 
 for index, row in rows do
@@ -839,6 +1002,8 @@ bind(keys.restart, function()
 end)
 bind(keys.abToggle, toggleAb)
 bind(keys.hitStopToggle, toggleHitStop)
+bind(keys.walkPace, cycleWalk)
+bind(keys.playOnce, toggleOnce)
 bind(keys.previousClip, function()
 	selectClip(selected - 1)
 end)
@@ -910,6 +1075,12 @@ local function readoutText(): string
 	end
 	local state = if abRest then "rest pose" elseif not playing then "paused" else "playing"
 	local pauseNote = if labHold > 0 or (animator ~= nil and animator:isPaused()) then "  hit-stop" else ""
+	local pace = currentPace()
+	if pace ~= nil then
+		pauseNote ..= ("  walk %.1f studs/s"):format(pace.speed)
+	elseif playsOnce() then
+		pauseNote ..= if current.done then "  idle" elseif current.stopping then "  into idle" else "  once"
+	end
 	return ("%s\n%gx  %s%s"):format(ReviewMarkers.frameLabel(current.time, def.duration), speed, state, pauseNote)
 end
 
@@ -963,9 +1134,21 @@ RunService.RenderStepped:Connect(function(dt: number)
 			end
 			if clipDt > 0 then
 				Choreo.stepAll(clipDt)
+				walkElapsed += clipDt
+				carry()
 			end
 			local current = handle
-			if current ~= nil and (current.ended or current.done) then
+			if current ~= nil and playsOnce() then
+				-- Once: the clip blends out into the idle, which holds onceIdleSeconds; then again.
+				if current.done then
+					onceIdle += dt * speed
+					if onceIdle >= Lab.onceIdleSeconds then
+						play(0)
+					end
+				else
+					syncMount()
+				end
+			elseif current ~= nil and (current.ended or current.done) then
 				play(0)
 			else
 				syncMount()

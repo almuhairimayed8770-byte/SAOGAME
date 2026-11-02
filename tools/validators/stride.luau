@@ -15,6 +15,13 @@
 	move alone (LocomotionState.heldShare, D-292), is a positive number of seconds.
 	stride.travelSlipDecaySeconds (D-411) is at least four frames and at most travelSlipSeconds / 2
 	/ 0.01: a lasting 1% bias in the root's travel holds the travel slip at half its bound at most.
+	stride.takeUp (StepTakeUp, D-651): whole numbers of frames, a planned-phase window of at
+	least three frames (144 fps plans 2, 2, 1) and a span that holds it, the gate's window and the
+	first guess's frames; the planned phase fitted again within its own window; a grid of at least
+	two phases; a drift window that holds two drift steps
+	at item 530's 1.5% drift and fits in the span at 60 fps; a gate share from a half to all; a
+	whole-step tolerance under half a step; and a p90 bar above 0 and under one physics step's
+	travel at walkSpeed (the slide one missed step shows).
 	tests/choreo/Stride.spec.luau re-measures the ground speeds and touchdowns from the clips.
 ]]
 
@@ -25,6 +32,14 @@ local GAITS = { "WalkForward", "WalkBack", "WalkLeft", "WalkRight", "Run", "Spri
 -- in the owner's run log); a 1% one must hold the running difference at half its bound at most.
 local MAX_TRAVEL_BIAS = 0.01
 local MIN_SLIP_DECAY_FRAMES = 4
+-- The take-up's fit (D-651): 144 fps plans its steps 2, 2, 1, so the planned phase needs three
+-- frames at least; item 530's engine ran 1.5% ahead of every clock the code reads, and a drift
+-- fit needs two of its steps; the span holds the drift window at 60 fps.
+local MIN_PLAN_ROWS = 3
+local MIN_PHASES = 2
+local ITEM_530_DRIFT = 0.015
+local MIN_DRIFT_STEPS = 2
+local SPAN_FPS = 60
 
 return function(ctx: any): { string }
 	local problems = {}
@@ -66,6 +81,81 @@ return function(ctx: any): { string }
 			tostring(if typeof(slipSeconds) == "number" then slipSeconds / 2 / MAX_TRAVEL_BIAS else slipSeconds)
 		)
 	)
+	local takeUp = stride.takeUp
+	if typeof(takeUp) ~= "table" then
+		check(false, "takeUp must hold the step take-up's numbers (D-651)")
+	else
+		local function whole(value: any, least: number): boolean
+			return typeof(value) == "number" and value == math.floor(value) and value >= least
+		end
+		local function number(value: any): boolean
+			return typeof(value) == "number" and value == value and value > -math.huge and value < math.huge
+		end
+		check(
+			whole(takeUp.planRows, MIN_PLAN_ROWS),
+			("takeUp.planRows (%s) must be a whole number of frames, at least %d (144 fps plans its steps 2, 2, 1)"):format(
+				tostring(takeUp.planRows),
+				MIN_PLAN_ROWS
+			)
+		)
+		check(
+			whole(takeUp.refitRows, 1) and number(takeUp.planRows) and takeUp.refitRows <= takeUp.planRows,
+			("takeUp.refitRows (%s) must be a whole number of frames from 1 to planRows: the carried phase is fitted again within its own window"):format(
+				tostring(takeUp.refitRows)
+			)
+		)
+		check(
+			whole(takeUp.gateRows, 1) and whole(takeUp.minRows, 1),
+			"takeUp.gateRows and takeUp.minRows must be whole numbers of frames, at least 1"
+		)
+		check(
+			whole(takeUp.minRows, 1) and whole(takeUp.planRows, 1) and takeUp.minRows >= takeUp.planRows,
+			"takeUp.minRows must be at least planRows: the first guess has its whole window"
+		)
+		check(
+			whole(takeUp.spanRows, 1)
+				and number(takeUp.planRows)
+				and number(takeUp.gateRows)
+				and number(takeUp.minRows)
+				and takeUp.spanRows >= math.max(takeUp.planRows, takeUp.gateRows, takeUp.minRows),
+			"takeUp.spanRows must be a whole number of frames holding planRows, gateRows and minRows"
+		)
+		check(
+			whole(takeUp.phases, MIN_PHASES),
+			("takeUp.phases must be a whole number, at least %d"):format(MIN_PHASES)
+		)
+		check(number(takeUp.stepHz) and takeUp.stepHz > 0, "takeUp.stepHz must be physics steps a second, above 0")
+		check(
+			number(takeUp.extraSeconds)
+				and number(takeUp.stepHz)
+				and takeUp.extraSeconds * takeUp.stepHz * ITEM_530_DRIFT >= MIN_DRIFT_STEPS
+				and whole(takeUp.spanRows, 1)
+				and takeUp.extraSeconds * SPAN_FPS <= takeUp.spanRows,
+			("takeUp.extraSeconds (%s) must hold %d drift steps at item 530's %g drift and fit in spanRows at %d fps"):format(
+				tostring(takeUp.extraSeconds),
+				MIN_DRIFT_STEPS,
+				ITEM_530_DRIFT,
+				SPAN_FPS
+			)
+		)
+		check(
+			number(takeUp.gateShare) and takeUp.gateShare >= 0.5 and takeUp.gateShare <= 1,
+			"takeUp.gateShare must be from 0.5 to 1 (a guess wrong on half its frames is no guess)"
+		)
+		check(
+			number(takeUp.wholeSteps) and takeUp.wholeSteps > 0 and takeUp.wholeSteps < 0.5,
+			"takeUp.wholeSteps must be above 0 and under half a step"
+		)
+		local oneStep = if number(takeUp.stepHz) and takeUp.stepHz > 0 then locomotion.walkSpeed / takeUp.stepHz else 0
+		check(
+			number(takeUp.p90Bar) and takeUp.p90Bar > 0 and takeUp.p90Bar < oneStep,
+			("takeUp.p90Bar (%s) must be above 0 and under one physics step's travel at walkSpeed (%.4f)"):format(
+				tostring(takeUp.p90Bar),
+				oneStep
+			)
+		)
+	end
+
 	local handOver = locomotion.stopHandOverCycles
 	check(
 		typeof(handOver) == "number" and handOver > 0 and handOver < 0.5,

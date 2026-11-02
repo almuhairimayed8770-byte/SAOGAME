@@ -86,6 +86,9 @@ local function fakeLocomotion(calls)
 		destroy = function(driver)
 			table.insert(calls, { module = "locomotion", fn = "destroy", args = { driver } })
 		end,
+		windUpAt = function(driver, origin)
+			table.insert(calls, { module = "locomotion", fn = "windUpAt", args = { driver, origin } })
+		end,
 	}
 end
 
@@ -741,6 +744,32 @@ describe("Replication", function()
 		expect(shows[1].args[4]).toBe(Vector3.new(1, 0, 1))
 		expect(shows[1].args[5]).toBe(Vector3.new(0, 0, -1))
 		expect(shows[1].args[6]).toBe(shape)
+	end)
+
+	it("Telegraph names where an enemy's wind-up began to its locomotion driver (D-652)", function()
+		local t = setup()
+		Replication.watch(t.records[7])
+		local driver = t.find("locomotion", "attach")[1].driver
+		local function telegraph(entityId: number, origin: { number }?)
+			Replication.dispatch("Telegraph", {
+				entityId = entityId,
+				attackId = if entityId == 7 then "Charge" else "Overhead",
+				kind = "Unblockable",
+				windUp = 0.6,
+				serverTime = 1,
+				origin = origin,
+				facing = { 0, 0, -1 },
+			})
+		end
+		telegraph(7, { 1, 0, 1 })
+		local named = t.find("locomotion", "windUpAt")
+		expect(#named).toBe(1)
+		expect(named[1].args[1]).toBe(driver)
+		expect(named[1].args[2]).toBe(Vector3.new(1, 0, 1))
+		-- No origin, or an enemy with no driver on this client: its attack has nothing to wait for.
+		telegraph(7, nil)
+		telegraph(8, { 2, 0, 2 })
+		expect(#t.find("locomotion", "windUpAt")).toBe(1)
 	end)
 
 	it("StateChanged plays directional flinches, staggers, guard breaks and breaks", function()

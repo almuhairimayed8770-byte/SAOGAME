@@ -162,6 +162,51 @@ describe("stride validator", function()
 		)).toBe("")
 	end)
 
+	it("flags step take-up numbers that are missing or out of range (D-651)", function()
+		expect(hasProblem(
+			run(function(choreo: any)
+				choreo.locomotion.stride.takeUp = nil
+			end),
+			"takeUp"
+		)).toBe(true)
+		local walkSpeed = Harness.load("src/shared/data/choreo").locomotion.walkSpeed
+		local cases: { { field: string, value: any, needle: string? } } = {
+			{ field = "planRows", value = 2 },
+			{ field = "planRows", value = 30.5 },
+			{ field = "refitRows", value = 0 },
+			{ field = "refitRows", value = 31 },
+			{ field = "refitRows", value = 1.5 },
+			{ field = "gateRows", value = 0 },
+			{ field = "minRows", value = 29, needle = "takeUp.minRows" },
+			{ field = "spanRows", value = 59 },
+			{ field = "phases", value = 1 },
+			{ field = "stepHz", value = 0 },
+			{ field = "extraSeconds", value = 0.5 },
+			{ field = "extraSeconds", value = 10.1 },
+			{ field = "gateShare", value = 0.49 },
+			{ field = "gateShare", value = 1.01 },
+			{ field = "wholeSteps", value = 0 },
+			{ field = "wholeSteps", value = 0.5 },
+			{ field = "p90Bar", value = 0 },
+			{ field = "p90Bar", value = walkSpeed / 240 },
+			{ field = "p90Bar", value = nil },
+		}
+		for _, case in cases do
+			local problems = run(function(choreo: any)
+				choreo.locomotion.stride.takeUp[case.field] = case.value
+			end)
+			expect(hasProblem(problems, case.needle or ("takeUp." .. case.field))).toBe(true)
+		end
+		-- A gate that takes only right guesses, and a bar just under a step, are fine.
+		expect(table.concat(
+			run(function(choreo: any)
+				choreo.locomotion.stride.takeUp.gateShare = 1
+				choreo.locomotion.stride.takeUp.p90Bar = walkSpeed / 240 * 0.99
+			end),
+			"; "
+		)).toBe("")
+	end)
+
 	it("flags a stop hand-over margin that is missing or leaves no settle point in a half cycle", function()
 		for _, value in { nil :: number?, 0, 0.5, -0.1 } do
 			local problems = run(function(choreo: any)

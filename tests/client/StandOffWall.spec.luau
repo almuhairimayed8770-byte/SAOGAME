@@ -1325,6 +1325,8 @@ local PUSH_PASSES = 4
 -- `art`: the Art swung 3 times after Basic1 (a clip name; Sharp Nail when nil).
 local CombatData = Harness.load("src/shared/data/combat")
 local HIT_STOP_FRAMES = CombatData.hitStopFrames
+local LIMBS: { string } = CombatData.contact.standOff.keepOut.limbs
+local BladeContact = Harness.load("src/shared/choreo/BladeContact")
 local STRIKE_EPSILON: number = CombatData.contact.keyEpsilon
 local ChoreoPose = Harness.load("src/shared/choreo/Pose")
 
@@ -1336,6 +1338,20 @@ type Conditions = {
 	headCollides: boolean?,
 	-- The Art swung 3 times after Basic1 (a name in its clip id; Sharp Nail when nil), D-627.
 	art: string?,
+	-- The Arts swung 3 times each after Basic1, in order (item 535's Sharp Nail then Vertical);
+	-- `art` alone when nil.
+	arts: { string }?,
+	-- Item 535's walk-in: the kobold's blows left the root standing this far off the face, and
+	-- nothing walks it back (no S hold); the take places the root at `start` and stands still.
+	off: number?,
+	-- Item 535's held kobold as the game draws it: it idles on through the take (its own Mixer, its
+	-- Idle from clip 0, held by each hit-stop with the swing) and flinches on each cut's word (the
+	-- frame after the key, HandsOut's played kobold), and the plan is told how it moves
+	-- (ContactPredictor.targetMotion, as CharacterController asks the kobold's animator, D-565).
+	played: boolean?,
+	-- Item 535(d)'s long rows at 144: every `stall`-th frame lasts 2.25 frames (the PC's 15-16 ms
+	-- rows among 5-7 ms ones).
+	stall: number?,
 }
 
 -- One take as the PC ran it: placed at z `start` facing the kobold (locked), still 0.3 s, S held
@@ -1384,6 +1400,14 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 	end
 	local rig: any = nil
 	local shown: { [string]: CFrame } = {}
+	-- The kobold's own Mixer and its front flinch (`played`).
+	local enemyMixer: any = nil
+	local flinch: any = nil
+	if pc.played then
+		enemyMixer = Harness.load("src/client/choreo/Mixer").new()
+		enemyMixer:play(Harness.load("src/shared/clips/enemy/Kobold/Idle"), { startTime = 0, blendIn = 0 })
+		flinch = Harness.load("src/shared/clips/enemy/Kobold/FlinchFront")
+	end
 	-- The real plan on the avatar as the screen shows it, asked again on the root of the moment.
 	local function standOffWith(
 		_model: any,
@@ -1395,7 +1419,12 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		options: any
 	): any
 		pose(rootCFrame, shown)
-		local real = ContactPredictor.standOff(avatar.model, clip, from, rootCFrame, b.kobold, cast, options)
+		local told = options
+		if enemyMixer ~= nil then
+			told = table.clone(options)
+			told.target = ContactPredictor.targetMotion(enemyMixer:handles(), flinch)
+		end
+		local real = ContactPredictor.standOff(avatar.model, clip, from, rootCFrame, b.kobold, cast, told)
 		if real == nil then
 			return nil
 		end
@@ -1462,25 +1491,29 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 	rig.setLock(koboldAt)
 	rig.animator:play("player/OneHandedSword/IdleDrawn", {})
 	local basicId = "player/OneHandedSword/Basic1"
-	local slot, artId = 1, ""
-	local artName = pc.art or "SharpNail"
-	for index, art in rig.controller.slots() do
-		if art.clip:find(artName) then
-			slot, artId = index, art.clip
-		end
-	end
-	assert(artId ~= "", "no " .. artName .. " in the slots")
 	local clips = {
 		[basicId] = Harness.load("src/shared/clips/" .. basicId),
-		[artId] = Harness.load("src/shared/clips/" .. artId),
 	}
+	-- The Arts in the order they are swung, each its slot and clip id.
+	local swung: { { slot: number, id: string } } = {}
+	for _, artName in pc.arts or { pc.art or "SharpNail" } do
+		local slot, artId = 1, ""
+		for index, art in rig.controller.slots() do
+			if art.clip:find(artName) then
+				slot, artId = index, art.clip
+			end
+		end
+		assert(artId ~= "", "no " .. artName .. " in the slots")
+		table.insert(swung, { slot = slot, id = artId })
+		clips[artId] = Harness.load("src/shared/clips/" .. artId)
+	end
 	-- Each cut's strike key and its hold (combat.luau hitStopFrames: an Art's last cut is its Final).
 	local strikes: { [string]: { { key: number, frames: number } } } = {}
 	for id, clip in clips do
 		local windows = ClipSampler.hitWindows(clip)
 		local list = {}
 		for index, window in windows do
-			local final = id == artId and index == #windows
+			local final = id ~= basicId and index == #windows
 			table.insert(list, {
 				key = ContactPredictor.strikeKey(clip, window),
 				frames = if final then HIT_STOP_FRAMES.Final else HIT_STOP_FRAMES.Normal,
@@ -1496,10 +1529,32 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 	end
 	local rows: { any } = {}
 	local swingWas: { [number]: number } = {}
+	-- Frames until a cut's word plays the kobold's flinch (`played`).
+	local word: number? = nil
+	-- The kobold's body parts a blade or a hand may meet (BladeContact.hurtbox: not its axe), and
+	-- the hands' and arms' sizes (`played`).
+	local hurt: { BasePart } = {}
+	local limbSizes: { [string]: Vector3 } = {}
+	if enemyMixer ~= nil then
+		for _, part in b.kobold:GetDescendants() do
+			if part:IsA("BasePart") and BladeContact.hurtbox(part) then
+				table.insert(hurt, part)
+			end
+		end
+		for _, name in LIMBS do
+			local part = avatar.model:FindFirstChild(name)
+			if part ~= nil and part:IsA("BasePart") then
+				limbSizes[name] = part.Size
+			end
+		end
+	end
 	local function row(label: string)
 		local dt = 1 / fps
 		if pc.jitter ~= nil then
 			dt *= 1 + pc.jitter * nextShare()
+		end
+		if pc.stall ~= nil and (#rows + 1) % pc.stall == 0 then
+			dt = 2.25 / fps
 		end
 		rig.setFrameSeconds(dt)
 		local first = rig.root.CFrame
@@ -1510,6 +1565,22 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 			local handle = rig.animator.mixer:find(id)
 			if handle ~= nil then
 				before[id] = handle.time
+			end
+		end
+		-- The kobold's rig steps before the character's (Camera-1), its word's flinch first.
+		if enemyMixer ~= nil then
+			if word ~= nil then
+				word -= 1
+				if word <= 0 then
+					word = nil
+					enemyMixer:play(flinch)
+				end
+			end
+			for name, solved in ChoreoPose.solve(b.kobold, b.koboldRoot, enemyMixer:step(dt).offsets) do
+				local part = b.kobold:FindFirstChild(name)
+				if part ~= nil and part:IsA("BasePart") then
+					part.CFrame = solved
+				end
 			end
 		end
 		local stick = Vector3.zero
@@ -1531,6 +1602,10 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 					for _, strike in strikes[id] do
 						if was < strike.key - STRIKE_EPSILON and handle.time >= strike.key - STRIKE_EPSILON then
 							rig.animator:hitStop(strike.frames)
+							if enemyMixer ~= nil then
+								enemyMixer:holdSteps(strike.frames * fps / 60)
+								word = 1
+							end
 						end
 					end
 				end
@@ -1552,7 +1627,25 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 			end
 		end
 		local after = rig.root.CFrame
+		-- `played`: the hands and arms on the screen against the kobold's body as it stands.
+		local limb, limbPart = -math.huge, ""
+		if enemyMixer ~= nil then
+			local screen = b.solve(after - pushed - walked, drawn)
+			for _, name in LIMBS do
+				local frame = screen[name]
+				if frame ~= nil then
+					for _, part in hurt do
+						local apart = separation(frame, limbSizes[name], part.CFrame, part.Size)
+						if -apart > limb then
+							limb, limbPart = -apart, name .. " in " .. part.Name
+						end
+					end
+				end
+			end
+		end
 		table.insert(rows, {
+			limb = limb,
+			limbPart = limbPart,
 			label = label,
 			dt = dt,
 			first = first,
@@ -1570,7 +1663,7 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		end
 	end
 	hold("place", 0.3)
-	hold("S", 0.5)
+	hold(if pc.off ~= nil then "rest" else "S", 0.5)
 	local holdEnd = #rows
 	hold("rest", 0.3)
 	local chainStart = #rows + 1
@@ -1582,17 +1675,19 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		end
 	end
 	hold("idle", 0.4)
-	for k = 1, 3 do
-		rig.controller.beginArt(slot)
-		hold("hold", 0.2)
-		rig.controller.releaseArt(slot, 0.2)
-		for _ = 1, math.floor(2.5 * fps) do
-			row("Art" .. k)
-			if rig.controller.state() ~= "Art" and rig.controller.state() ~= "Holding" then
-				break
+	for _, art in swung do
+		for k = 1, 3 do
+			rig.controller.beginArt(art.slot)
+			hold("hold", 0.2)
+			rig.controller.releaseArt(art.slot, 0.2)
+			for _ = 1, math.floor(2.5 * fps) do
+				row("Art" .. k .. ":" .. art.id)
+				if rig.controller.state() ~= "Art" and rig.controller.state() ~= "Holding" then
+					break
+				end
 			end
+			hold("idle", 0.4)
 		end
-		hold("idle", 0.4)
 	end
 	-- The lines (462 and 431(c)/(e)) on this bench.
 	local result = {
@@ -1623,6 +1718,10 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		blend = 0, -- (e) the same on rows that draw it fading in or out
 		blendRows = 0,
 		firstLag = 0, -- (f) First-to-First rows over (d)'s long-row bar
+		-- (f) as the PC's AT check paired them: the step into row N (First of N less First of N-1,
+		-- row N-1's code share and its engine's) against row N's bar, a row off (D-655).
+		firstLagShifted = 0,
+		shiftedOver = 0, -- the most such a step went past that bar
 		-- The engine's shove over the chain (D-627): the most it moved the root on one row (out of
 		-- the world and the blockers, flat) and the path it moved it in all.
 		push = 0,
@@ -1630,6 +1729,25 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		-- Of it, the share out of the kobold's blockers: the most on one row and the path in all.
 		koboldPush = 0,
 		koboldPath = 0,
+		-- (f) each First-to-First step over the long-row bar: its row, the swing and its clip time,
+		-- the step, the bar, and its code share (C1 - First) and engine share (First of N+1 - C1).
+		over = {} :: { any },
+		-- Item 535(e): each swing's rows, the code's and the engine's moves along the line to the
+		-- kobold summed over them (a step away from the kobold reads negative).
+		spans = {} :: { { label: string, rows: number, code: number, engine: number } },
+		-- `played`: the deepest hand or arm in the kobold's body on the screen over the chain.
+		limb = -math.huge,
+		limbWhere = "",
+		-- Item 535(d)(f): rows a colliding part on the screen overlaps a kobold blocker, the boxes as
+		-- they stand (`blockerRows`) and as workspace:GetPartBoundsInBox tests them, the part's box
+		-- against each blocker's world-axis bounds (`boundsRows`).
+		blockerRows = 0,
+		boundsRows = 0,
+		blockerDeep = 0,
+		blockerWhere = "",
+		-- Item 535(e): the most the engine pushed the root toward the kobold on a row whose code
+		-- stepped it back (a code step into the wall reads here).
+		intoWall = 0,
 	}
 	local rootSize: Vector3 = avatar.model.PrimaryPart.Size
 	local function depth(frame: CFrame, size: Vector3): number
@@ -1668,6 +1786,57 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 			result.codeShare += code:Dot(toward)
 			result.engineShare += engine:Dot(toward)
 		end
+		do
+			local exact, bounds = false, false
+			for _, name in colliding do
+				for _, blocker in b.blockers do
+					local apart = separation(screen[name], sizes[name], blocker.CFrame, blocker.Size)
+					if apart < 0 then
+						exact = true
+						if -apart > result.blockerDeep then
+							result.blockerDeep = -apart
+							result.blockerWhere = ("%s in %s, %s at %.3f"):format(
+								name,
+								blocker.Name,
+								r.label,
+								if r.swing ~= nil then r.swing.time else -1
+							)
+						end
+					end
+					local frame, size = blocker.CFrame, blocker.Size
+					local extent = Vector3.new(
+						halfAlong(frame, size, Vector3.xAxis),
+						halfAlong(frame, size, Vector3.yAxis),
+						halfAlong(frame, size, Vector3.zAxis)
+					)
+					if separation(screen[name], sizes[name], CFrame.new(frame.Position), extent * 2) < 0 then
+						bounds = true
+					end
+				end
+			end
+			result.blockerRows += if exact then 1 else 0
+			result.boundsRows += if bounds then 1 else 0
+		end
+		if r.limb > result.limb then
+			result.limb = r.limb
+			result.limbWhere = ("%s, %s at %.3f"):format(
+				r.limbPart,
+				r.label,
+				if r.swing ~= nil then r.swing.time else -1
+			)
+		end
+		-- Item 535(e) (D-656): the engine's push along the line on a row whose code steps back.
+		if code:Dot(toward) < -1e-4 then
+			result.intoWall = math.max(result.intoWall, engine:Dot(toward))
+		end
+		local span = result.spans[#result.spans]
+		if span == nil or span.label ~= r.label then
+			span = { label = r.label, rows = 0, code = 0, engine = 0 }
+			table.insert(result.spans, span)
+		end
+		span.rows += 1
+		span.code += code:Dot(toward)
+		span.engine += engine:Dot(toward)
 		local shove = Vector3.new(engine.X, 0, engine.Z).Magnitude
 		result.push = math.max(result.push, shove)
 		result.pushPath += shove
@@ -1735,8 +1904,28 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		if firstStep > 12 * dt + 1e-4 then
 			result.firstOver += 1
 		end
+		local intoStep = Vector3.new(r.first.X - previous.first.X, 0, r.first.Z - previous.first.Z).Magnitude
+		if index > chainStart and intoStep > bar + 1e-3 then
+			result.firstLagShifted += 1
+			result.shiftedOver = math.max(result.shiftedOver, intoStep - bar)
+		end
 		if firstStep > bar + 1e-3 then
 			result.firstLag += 1
+			local share = Vector3.new(nextFirst.X - r.after.X, 0, nextFirst.Z - r.after.Z)
+			table.insert(result.over, {
+				row = index,
+				label = r.label,
+				clip = if r.swing ~= nil then r.swing.clip.id else "",
+				was = if r.swing ~= nil then r.swing.was else 0,
+				time = if r.swing ~= nil then r.swing.time else 0,
+				step = firstStep,
+				bar = bar,
+				code = flat,
+				codeToward = code:Dot(toward),
+				engine = Vector3.new(engine.X, 0, engine.Z).Magnitude + share.Magnitude,
+				carried = r.carried.Magnitude,
+				m = m.Magnitude,
+			})
 		end
 		-- Item 496 (e): the UpperTorso in the root's frame as the screen draws it (the pose before)
 		-- against the clip's own at the clip time that pose was written at.
@@ -1796,6 +1985,14 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 	print(line)
 	headPart.Size = headSize
 	block:Destroy()
+	if enemyMixer ~= nil then
+		for name, solved in ChoreoPose.solve(b.kobold, b.koboldRoot, {}) do
+			local part = b.kobold:FindFirstChild(name)
+			if part ~= nil and part:IsA("BasePart") then
+				part.CFrame = solved
+			end
+		end
+	end
 	return result
 end
 
@@ -2310,6 +2507,170 @@ describe("the owner's Head at a flush wall and a pillar behind (item 519, D-630)
 				end
 			end
 		end
+		b.kobold:Destroy()
+	end)
+end)
+
+describe("item 535 under the PC's conditions (D-655, D-656)", function()
+	-- The PC's takes (item 535): the fighter placed 0.45 off a wall or a pillar, the kobold's blows
+	-- leave its root standing about 0.9 off the face (no S hold walks it back), the kobold idles on
+	-- and flinches on each cut's word, and the chain is Basic1 then Sharp Nail x3 and Vertical x3.
+	-- The blockers' face on the line, as D-627's take reads it.
+	local function blockerFaceOf(b: any): number
+		local rootSize = (b.avatar.model.PrimaryPart :: BasePart).Size
+		local blockerFace = math.huge
+		for _, blocker in b.blockers do
+			local frame = blocker.CFrame
+			local reachZ = halfAlong(frame, blocker.Size, Vector3.zAxis)
+			local reachX = halfAlong(frame, blocker.Size, Vector3.xAxis)
+			if math.abs(frame.Position.X - KOBOLD_AT.X) < reachX + rootSize.X / 2 then
+				blockerFace = math.min(blockerFace, frame.Position.Z - reachZ)
+			end
+		end
+		return blockerFace
+	end
+	local function conditions(fps: number, extra: Conditions?): Conditions
+		local told: Conditions = {
+			hits = true,
+			contact = 0.04,
+			jitter = if fps == 144 then 0.45 else nil,
+			arts = { "SharpNail", "Vertical" },
+			off = 0.9,
+			played = true,
+		}
+		for key, value in (extra or {}) :: any do
+			(told :: any)[key] = value
+		end
+		return told
+	end
+	local function line(label: string, result: any)
+		print(
+			("[535 %s] pre %.3f | root %.3f UT %.3f LT %.3f Head %.3f | (d) past the long-row bar %.4f | (f) over its own row's bar %d, a row off %d (most %.4f past) | push %.3f (path %.3f), the kobold's %.3f | code stepping back, the engine toward the kobold %.4f | blockers %d rows (deepest %.3f: %s) | hand %.3f (%s)"):format(
+				label,
+				result.pre,
+				result.root,
+				result.torso.UpperTorso,
+				result.torso.LowerTorso,
+				result.torso.Head,
+				result.stepLag,
+				result.firstLag,
+				result.firstLagShifted,
+				result.shiftedOver,
+				result.push,
+				result.pushPath,
+				result.koboldPush,
+				result.intoWall,
+				result.blockerRows,
+				result.blockerDeep,
+				result.blockerWhere,
+				result.limb,
+				result.limbWhere
+			)
+		)
+		for _, span in result.spans do
+			if span.label ~= "idle" and span.label ~= "rest" and span.label ~= "place" then
+				print(
+					("    %-40s %4d rows, code %+.3f engine %+.3f along"):format(
+						span.label,
+						span.rows,
+						span.code,
+						span.engine
+					)
+				)
+			end
+		end
+		for _, over in result.over do
+			print(
+				("    over row %d %s %s %.4f->%.4f: step %.3f, bar %.3f, code %.3f, engine %.3f"):format(
+					over.row,
+					over.label,
+					over.clip,
+					over.was,
+					over.time,
+					over.step,
+					over.bar,
+					over.code,
+					over.engine
+				)
+			)
+		end
+	end
+
+	it("(d) at 144 the step after a long row lies within its own row's bar; a row off it reads over (D-655)", function()
+		-- 3eee415's body as the PC ran it: the Head does not collide, the gap 3.52. Every 37th row
+		-- lasts 2.25 frames (the PC's 15-16 ms rows among 5-7 ms ones). After a hit-stop the root
+		-- runs a row behind its pose (D-496), so the clip's step lands on the row after the long
+		-- one: 519(d)'s bar takes that row's dt and m with the row before's, and the step First of
+		-- N+1 less First of N (row N's code and engine shares) stays within row N's bar (0 rows
+		-- over). The PC's check paired First of N less First of N-1 (row N-1's shares) with row N's
+		-- bar, a row off: there the long row's step is judged on the next short row's 12 x dt (2
+		-- rows over, by up to 0.015; the PC's wall 0 take 2, row 55342: 0.133 against 0.067, its
+		-- own row 55341's bar 0.188).
+		local CollisionGroups = Harness.load("src/server/world/CollisionGroups")
+		local b = bench()
+		ownerHead(b)
+		CollisionGroups.joinPlayers(b.avatar.model)
+		local face = blockerFaceOf(b) - 3.52
+		local result = take(b, "wall", face, 144, face + 0.9, conditions(144, { headCollides = false, stall = 37 }))
+		line("(d) 144 long rows", result)
+		expect(result.stepLag <= 1e-3).toBe(true)
+		expect(result.firstLag).toBe(0)
+		expect(result.firstLagShifted >= 1).toBe(true)
+		b.kobold:Destroy()
+	end)
+
+	it(
+		"(e) the code's steps back never meet an engine push the same row; the engine pushes the next swing's lean (D-656)",
+		function()
+			-- a885919's body: the owner's Head collides, the gap 3.90 (F1g's stop). The keep-out steps
+			-- the root back along the line on each Art (code, negative: Sharp Nail -0.43 to -0.53,
+			-- Vertical -0.66 to -0.76) and the engine pushes it forward again (positive: +0.24 to +0.36
+			-- and +0.05 to +0.09). The engine's push never lands on a row whose code steps back
+			-- (`intoWall` 0): the step's room is checked for its own swing's poses (D-534). It lands on
+			-- the next swing's held start pose and its anticipation lean, which carry the UpperTorso
+			-- and the Head behind the root into the wall the last step back closed in on; at 144 one
+			-- Vertical hold row steps over the long-row bar (0.115 against 0.110), all the engine's.
+			-- The kobold never pushes the body.
+			local CollisionGroups = Harness.load("src/server/world/CollisionGroups")
+			local b = bench()
+			ownerHead(b)
+			CollisionGroups.joinPlayers(b.avatar.model)
+			local face = blockerFaceOf(b) - 3.9
+			for _, fps in { 60, 144 } do
+				local result = take(b, "wall", face, fps, face + 0.9, conditions(fps))
+				line(("(e) %d"):format(fps), result)
+				expect(result.intoWall <= 1e-6).toBe(true)
+				expect(result.stepLag <= 1e-3).toBe(true)
+				for _, over in result.over do
+					expect(over.code <= 1e-3).toBe(true)
+				end
+				expect(result.koboldPush <= 1e-6).toBe(true)
+				expect(result.root <= 0.07).toBe(true)
+				expect(result.torso.UpperTorso <= 0.07).toBe(true)
+				expect(result.torso.LowerTorso <= 0.07).toBe(true)
+				expect(result.torso.Head <= 0.07).toBe(true)
+			end
+			b.kobold:Destroy()
+		end
+	)
+
+	it("(f) the open field at 144: the kobold's blockers graze the drawn body, the engine never pushes it", function()
+		-- No world behind; the kobold held 2.897 off the root (the PC's 144 stop). Basic1's reach and
+		-- the keep-out back the root off a kobold inside its band (here 2.33, the PC's 2.82 at 12
+		-- studs/s), so no colliding part stands in a Blocker deeper than a hairline on the drawn
+		-- pose (the Head 0.010 in the HeldBlocker at Sharp Nail's thrust), and the engine never
+		-- pushes the body.
+		local CollisionGroups = Harness.load("src/server/world/CollisionGroups")
+		local b = bench()
+		ownerHead(b)
+		CollisionGroups.joinPlayers(b.avatar.model)
+		local result = take(b, "wall", 0, 144, KOBOLD_AT.Z - 2.897, conditions(144))
+		line("(f) open 144", result)
+		print(("[535 (f) open 144] Basic1 along: code %.3f, engine %.3f"):format(result.codeShare, result.engineShare))
+		expect(result.push <= 1e-6).toBe(true)
+		expect(result.koboldPush <= 1e-6).toBe(true)
+		expect(result.blockerDeep <= 0.011).toBe(true)
+		expect(result.codeShare < 0).toBe(true)
 		b.kobold:Destroy()
 	end)
 end)

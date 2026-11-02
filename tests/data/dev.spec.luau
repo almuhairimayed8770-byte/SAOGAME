@@ -456,6 +456,48 @@ describe("dev.luau groundClearance.dodgeTap (D-646)", function()
 			"dodgeTap.after"
 		)).toBe(true)
 	end)
+
+	it(
+		"catches a held-key press past the turn and step rates that are missing, slow or skip review.fps (D-657)",
+		function()
+			expect(hasProblem(
+				runValidator(function(dev: any)
+					dev.groundClearance.dodgeTap.heldPressAfter = { 0.05, 0.6 }
+				end),
+				"dodgeTap.heldPressAfter[2]"
+			)).toBe(true)
+			expect(hasProblem(
+				runValidator(function(dev: any)
+					dev.groundClearance.dodgeTap.heldPressAfter = nil
+				end),
+				"dodgeTap.heldPressAfter"
+			)).toBe(true)
+			expect(hasProblem(
+				runValidator(function(dev: any)
+					dev.groundClearance.dodgeTap.stepHz = {}
+				end),
+				"dodgeTap.stepHz"
+			)).toBe(true)
+			expect(hasProblem(
+				runValidator(function(dev: any)
+					dev.groundClearance.dodgeTap.stepHz = { 60, 30 }
+				end),
+				"dodgeTap.stepHz[2]"
+			)).toBe(true)
+			expect(hasProblem(
+				runValidator(function(dev: any)
+					dev.groundClearance.dodgeTap.stepHz = { 144.5, 60 }
+				end),
+				"dodgeTap.stepHz[1]"
+			)).toBe(true)
+			expect(hasProblem(
+				runValidator(function(dev: any)
+					dev.groundClearance.dodgeTap.stepHz = { 144 }
+				end),
+				"dodgeTap.stepHz must list review.fps"
+			)).toBe(true)
+		end
+	)
 end)
 
 describe("dev.luau groundClearance.skidRate (D-612)", function()

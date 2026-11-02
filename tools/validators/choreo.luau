@@ -67,6 +67,9 @@
 	deepest network catch-up (catchUpMaxJump), are done by the first HitWindowOpen of each attack
 	clip in its walk's folder (the clip has the legs for its strike). enemy.gait.attackBrakeShare is
 	0 to 1 (standing to carrying on) and enemy.gait.attackBrakeSeconds a positive number of seconds.
+	enemy.gait.attackWaitSeconds (D-652) is a positive number of seconds, at most (1 - 1 /
+	enemy.beat.maxRate) of the first HitWindowOpen of each of those attack clips: a clip that waited
+	that long for its walking body to brake can still even the beat by its mark.
 ]]
 
 local TIERS = { "High", "Medium", "Low" }
@@ -906,6 +909,17 @@ return function(ctx: any): { string }
 	-- for its strike.
 	local attackPlants = if typeof(gait) == "table" then gait.attackPlant else nil
 	check(typeof(attackPlants) == "table", "enemy.gait.attackPlant must be a table of rig ids to attack plants")
+	-- An attack clip waits at most attackWaitSeconds for its walking body to brake (D-652): a
+	-- positive number of seconds that the beat, run at enemy.beat.maxRate, can still even by each
+	-- attack clip's first HitWindowOpen with no catch-up.
+	local wait = if typeof(gait) == "table" then gait.attackWaitSeconds else nil
+	check(
+		positive(wait),
+		("enemy.gait.attackWaitSeconds %s must be a positive number of seconds"):format(tostring(wait))
+	)
+	local beat = if typeof(choreo.enemy) == "table" then choreo.enemy.beat else nil
+	local maxRate = if typeof(beat) == "table" then beat.maxRate else nil
+	local evens = if typeof(maxRate) == "number" and maxRate > 1 then 1 - 1 / maxRate else nil
 	if typeof(attackPlants) == "table" then
 		local catchUp = choreo.catchUpMaxJump
 		for rigId, attackPlant in attackPlants do
@@ -925,6 +939,18 @@ return function(ctx: any): { string }
 					if event.kind == "HitWindowOpen" and (open == nil or event.time < open) then
 						open = event.time
 					end
+				end
+				if open ~= nil and positive(wait) and evens ~= nil then
+					check(
+						wait <= evens * open + 1e-9,
+						("enemy.gait.attackWaitSeconds %s is more than %s's beat can even by its first HitWindowOpen (%s s at maxRate %s: at most %s s)"):format(
+							tostring(wait),
+							tostring(clip.id or file),
+							tostring(open),
+							tostring(maxRate),
+							tostring(math.floor(evens * open * 1e4 + 0.5) / 1e4)
+						)
+					)
 				end
 				if open ~= nil then
 					check(

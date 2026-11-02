@@ -3870,6 +3870,47 @@ describe("camera, dev capture and sfx shatter rules", function()
 		end
 	end)
 
+	it("dev: the ClipLab's walk pace and play once (D-653)", function()
+		for _, bad in { {}, { 0, 0.5 }, { 0.5, 1.2 }, { 0.5, 0.25 }, "0.5" } :: { any } do
+			expect(hasProblem(
+				dev(function(copy)
+					copy.clipLab.walkShares = bad
+				end),
+				"clipLab.walkShares"
+			)).toBe(true)
+		end
+		for _, bad in { 0, -1, 0 / 0, math.huge, "1.5" } :: { any } do
+			expect(hasProblem(
+				dev(function(copy)
+					copy.clipLab.walkLoopSeconds = bad
+				end),
+				"clipLab.walkLoopSeconds"
+			)).toBe(true)
+			expect(hasProblem(
+				dev(function(copy)
+					copy.clipLab.onceIdleSeconds = bad
+				end),
+				"clipLab.onceIdleSeconds"
+			)).toBe(true)
+		end
+		-- The boar's pedestal stands 14 studs from the stage's middle and it walks 14 studs/s at its
+		-- fastest share: 3.28 s carries it to the stage's 60, 3.3 s past it.
+		expect(hasProblem(
+			dev(function(copy)
+				copy.clipLab.walkLoopSeconds = 3.28
+			end),
+			"clipLab.walkLoopSeconds"
+		)).toBe(false)
+		expect(
+			hasProblem(
+				dev(function(copy)
+					copy.clipLab.walkLoopSeconds = 3.3
+				end),
+				"clipLab.walkLoopSeconds 3.3 carries the Boar 60.20 studs from the stage's middle at its walk pace 1, past clipLab.stage.radius 60"
+			)
+		).toBe(true)
+	end)
+
 	it("dev: prompt beats start at 0, run in order and show inside the take", function()
 		expect(hasProblem(
 			dev(function(copy)
@@ -7167,6 +7208,57 @@ describe("choreo validator: an enemy walk's stop plant (D-623)", function()
 		for _, bad in { 0, 1, -0.5, 0 / 0, "0.5", "none" } :: { any } do
 			expect(hasProblem(withStops(real(), bad), "enemy.gait.stopBrakeShare")).toBe(true)
 		end
+	end)
+end)
+
+describe("choreo validator: an attack's wait for its walking body (D-652)", function()
+	local function withWait(wait: any, maxRate: any?): { string }
+		local real = Harness.load("src/shared/data/choreo")
+		local copy = table.clone(real)
+		copy.enemy = table.clone(real.enemy)
+		copy.enemy.gait = table.clone(real.enemy.gait)
+		copy.enemy.gait.attackWaitSeconds = if wait == "none" then nil else wait
+		if maxRate ~= nil then
+			copy.enemy.beat = table.clone(real.enemy.beat)
+			copy.enemy.beat.maxRate = maxRate
+		end
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/choreo" then
+				return copy
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/choreo")(context)
+	end
+
+	it("passes the real table", function()
+		expect(withWait(Harness.load("src/shared/data/choreo").enemy.gait.attackWaitSeconds)).toEqual({})
+	end)
+
+	it("wants a positive number of seconds", function()
+		for _, bad in { 0, -0.1, 0 / 0, math.huge, "0.25", "none" } :: { any } do
+			expect(hasProblem(withWait(bad), "enemy.gait.attackWaitSeconds")).toBe(true)
+		end
+	end)
+
+	it("waits no longer than the beat can even by each attack clip's first hit window", function()
+		-- At maxRate 2 a clip evens half its time to the mark: the Charge opens at 0.6 s (0.3 s),
+		-- the Overhead at 1.3 s.
+		expect(withWait(0.3)).toEqual({})
+		expect(
+			hasProblem(
+				withWait(0.31),
+				"enemy.gait.attackWaitSeconds 0.31 is more than enemy/Boar/Charge's beat can even by its first HitWindowOpen (0.6 s at maxRate 2: at most 0.3 s)"
+			)
+		).toBe(true)
+		-- At maxRate 1.5 a third: 0.2 s of the Charge's.
+		expect(
+			hasProblem(
+				withWait(0.25, 1.5),
+				"enemy.gait.attackWaitSeconds 0.25 is more than enemy/Boar/Charge's beat can even by its first HitWindowOpen (0.6 s at maxRate 1.5: at most 0.2 s)"
+			)
+		).toBe(true)
 	end)
 end)
 

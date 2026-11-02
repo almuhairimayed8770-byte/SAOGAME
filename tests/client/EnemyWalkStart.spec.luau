@@ -391,7 +391,9 @@ type Take = {
 	played: { string },
 	channelUnderFullBody: boolean,
 	-- The first attack clip ActionStarted played (D-632), when the take draws actions: its id, its
-	-- first drawn row (seconds after the release), the walk's weight on the row before it, and over
+	-- first drawn row (seconds after the release; a clip that waited for the drawn body, D-652,
+	-- shows from the row it stops waiting, crouchWaited seconds after it was played), the walk's
+	-- weight on the row before it, and over
 	-- its first CROUCH_SECONDS (that row on) the worst one-row slide of a grounded foot, where (seconds
 	-- after the attack's first row), which foot, the root's flat step on that row, and the lowest
 	-- corner of any foot; the lowest corner the clip's own pose puts a foot at on those rows (the
@@ -399,6 +401,7 @@ type Take = {
 	-- and whether a pose hook (the attack plant's) was still on the mixer on the last of them.
 	crouchClip: string?,
 	crouchAt: number?,
+	crouchWaited: number?,
 	crouchWalk: number?,
 	crouchSlide: number,
 	crouchSlideAt: number,
@@ -418,10 +421,17 @@ type Take = {
 -- row); otherwise it is the server's root of the frame just run (60 Hz, the server's own frames).
 -- `share`: the share of the root's velocity the replicated AssemblyLinearVelocity reads on a row
 -- (nil: all of it).
+-- `lag`: how far behind the server's latest frame an interpolated root is drawn (nil: 1/60 s).
+-- `arrival`: ActionStarted and Telegraph play on the row the server sent them (a remote event comes
+-- in ahead of the replicated root that lags it), not once the drawn root reached their time.
+-- `yawLead`: the seconds the drawn yaw leads the drawn position on a row (an uneven drawn turn).
 type View = {
 	hz: number,
 	interpolated: boolean,
 	share: ((row: number) -> number)?,
+	lag: number?,
+	arrival: boolean?,
+	yawLead: ((row: number) -> number)?,
 }
 
 local SERVER: View = { hz = 60, interpolated = false }
@@ -459,7 +469,9 @@ local function sampled(history: { any }, at: number): (CFrame, Vector3)
 end
 
 -- `seconds`: how long the take runs from the release (1.5 when nil). `actions`: ActionStarted's
--- clips play on the client copy once the drawn root has reached the server time they were sent at.
+-- clips play on the client copy once the drawn root has reached the server time they were sent at
+-- (the view's `arrival`: as they are sent), and each Telegraph names its wind-up's origin to the
+-- driver as Replication does (Locomotion.windUpAt, D-652).
 local function take(rig: string, off: number, view: View?, seconds: number?, actions: boolean?): Take
 	local seen = view or SERVER
 	fresh()
@@ -533,6 +545,7 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 		channelUnderFullBody = false,
 		crouchClip = nil,
 		crouchAt = nil,
+		crouchWaited = nil,
 		crouchWalk = nil,
 		crouchSlide = 0,
 		crouchSlideAt = 0,
@@ -545,13 +558,16 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 	}
 	local crouchRow: number? = nil
 	local crouchHandle: any = nil
+	local crouchPlayed: number? = nil
 	local walkBefore = 0
 	local sent: { any } = {}
 	onFire = function(name: string, payload: any)
-		if actions == true and name == "ActionStarted" then
-			table.insert(sent, payload)
+		if actions == true and (name == "ActionStarted" or name == "Telegraph") then
+			table.insert(sent, { name = name, payload = payload })
 		end
 	end
+	local windUpAt = (Locomotion :: any).windUpAt
+	local lag = seen.lag or FRAME
 	local mixer = animator.mixer :: any
 	local lastAt: Vector3? = nil
 	local lastStep: number? = nil
@@ -566,11 +582,19 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 		-- frames due by the row's end, then the root this client draws the row on.
 		clientNow += dt
 		clientT += dt
-		local drawnT = if seen.interpolated then clientT - FRAME else clock.t
+		local drawnT = if seen.interpolated then clientT - lag else clock.t
+		local playBy = if seen.arrival == true then clock.t else drawnT
 		local walkShown = walkHandle()
 		walkBefore = if walkShown ~= nil then walkShown.weight else 0
-		while #sent > 0 and sent[1].serverTime <= drawnT + GAP do
-			local payload = table.remove(sent, 1)
+		while #sent > 0 and sent[1].payload.serverTime <= playBy + GAP do
+			local entry = table.remove(sent, 1)
+			local payload = entry.payload
+			if entry.name == "Telegraph" then
+				if windUpAt ~= nil and payload.origin ~= nil then
+					windUpAt(driver, Vector3.new(table.unpack(payload.origin)))
+				end
+				continue
+			end
 			-- As Replication plays an enemy's ActionStarted: on the server's clock (Choreo's clock is
 			-- the server's; here the client's runs clientT - clientNow behind it), so the network
 			-- catch-up jumps it by the time since it was sent, its attack kept on the server's beat
@@ -581,15 +605,20 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 				animator:keepBeat(handle, sentAt)
 				if crouchHandle == nil then
 					crouchHandle = handle
-					crouchRow = row
+					crouchPlayed = row
 					result.crouchClip = payload.clipId
-					result.crouchAt = row * dt
-					result.crouchWalk = walkBefore
 				end
 			end
 			table.insert(result.played, payload.clipId)
 		end
 		animator:step(dt)
+		if crouchHandle ~= nil and crouchRow == nil and crouchHandle.fadeHeld ~= true then
+			-- Its first drawn row: the clip shows (it waits, hidden, while its fade in stands).
+			crouchRow = row
+			result.crouchAt = row * dt
+			result.crouchWaited = (row - (crouchPlayed :: number)) * dt
+			result.crouchWalk = walkBefore
+		end
 		local fullBody = false
 		for _, handle in mixer:handles() do
 			if handle.layer == "FullBody" and not handle.done and handle.weight > 0 then
@@ -613,7 +642,11 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 		end
 		local cframe, velocity
 		if seen.interpolated then
-			cframe, velocity = sampled(history, clientT - FRAME)
+			cframe, velocity = sampled(history, clientT - lag)
+			if seen.yawLead ~= nil then
+				local turned = sampled(history, clientT - lag + seen.yawLead(row))
+				cframe = CFrame.new(cframe.Position) * turned.Rotation
+			end
 		else
 			local last = history[#history]
 			cframe, velocity = last.cframe, last.velocity
@@ -1120,54 +1153,109 @@ local CROUCH_TAKES: { { rig: string, off: number, seconds: number } } = {
 	{ rig = "Kobold", off = 180, seconds = 2.8 },
 }
 
+-- The crouch's bars (above) on a take of `case` attacking.
+local function crouchCheck(case: { rig: string, off: number, seconds: number }, view: View, result: Take)
+	print(
+		("%s off %d @%d Hz, %s from %s s (waited %s, walk %s): slide %.4f at +%.3f s (%s, root step %.4f), lowest %.4f (own %.4f), hooked %s"):format(
+			case.rig,
+			case.off,
+			view.hz,
+			tostring(result.crouchClip),
+			if result.crouchAt ~= nil then ("%.3f"):format(result.crouchAt :: number) else "-",
+			if result.crouchWaited ~= nil then ("%.3f"):format(result.crouchWaited :: number) else "-",
+			if result.crouchWalk ~= nil then ("%.2f"):format(result.crouchWalk :: number) else "-",
+			result.crouchSlide,
+			result.crouchSlideAt,
+			result.crouchFoot,
+			result.crouchStep,
+			result.crouchLowest,
+			result.crouchOwnLowest,
+			tostring(result.crouchHooked)
+		)
+	)
+	assert(result.crouchHooked ~= nil, "the take ended before the attack's first CROUCH_SECONDS did")
+	expect(result.crouchClip).toBe(if case.rig == "Boar" then "enemy/Boar/Charge" else "enemy/Kobold/Overhead")
+	local bound = SLIDE * 60 / view.hz
+	if result.crouchSlide > bound then
+		error(
+			("a planted foot slides %.3f in a row %.3f s into the attack (max %.3f)"):format(
+				result.crouchSlide,
+				result.crouchSlideAt,
+				bound
+			)
+		)
+	end
+	local floor = math.min(result.crouchOwnLowest, -CONTACT)
+	if result.crouchLowest < floor - OWN_SLACK then
+		error(
+			("a foot corner %.3f under the field as the attack comes in (max %.3f)"):format(
+				-result.crouchLowest,
+				-floor
+			)
+		)
+	end
+	expect(result.crouchHooked).toBe(false)
+end
+
 describe("EnemyWalkStart: an attack out of the walk keeps its feet planted (AO 511(c); D-632)", function()
 	for _, case in CROUCH_TAKES do
 		for _, view in { SERVER, PC144 } do
 			local label = if view.interpolated then "on a 144 Hz client over the interpolated root" else "60 Hz"
 			it(("%s attacking after it set off %d deg, %s"):format(case.rig, case.off, label), function()
-				local result = take(case.rig, case.off, view, case.seconds, true)
-				print(
-					("%s off %d @%d Hz, %s from %s s (walk %s): slide %.4f at +%.3f s (%s, root step %.4f), lowest %.4f (own %.4f), hooked %s"):format(
-						case.rig,
-						case.off,
-						view.hz,
-						tostring(result.crouchClip),
-						if result.crouchAt ~= nil then ("%.3f"):format(result.crouchAt :: number) else "-",
-						if result.crouchWalk ~= nil then ("%.2f"):format(result.crouchWalk :: number) else "-",
-						result.crouchSlide,
-						result.crouchSlideAt,
-						result.crouchFoot,
-						result.crouchStep,
-						result.crouchLowest,
-						result.crouchOwnLowest,
-						tostring(result.crouchHooked)
-					)
-				)
-				assert(result.crouchHooked ~= nil, "the take ended before the attack's first CROUCH_SECONDS did")
-				expect(result.crouchClip).toBe(
-					if case.rig == "Boar" then "enemy/Boar/Charge" else "enemy/Kobold/Overhead"
-				)
-				local bound = SLIDE * 60 / view.hz
-				if result.crouchSlide > bound then
-					error(
-						("a planted foot slides %.3f in a row %.3f s into the attack (max %.3f)"):format(
-							result.crouchSlide,
-							result.crouchSlideAt,
-							bound
-						)
-					)
-				end
-				local floor = math.min(result.crouchOwnLowest, -CONTACT)
-				if result.crouchLowest < floor - OWN_SLACK then
-					error(
-						("a foot corner %.3f under the field as the attack comes in (max %.3f)"):format(
-							-result.crouchLowest,
-							-floor
-						)
-					)
-				end
-				expect(result.crouchHooked).toBe(false)
+				crouchCheck(case, view, take(case.rig, case.off, view, case.seconds, true))
 			end)
+		end
+	end
+end)
+
+-- An attack out of the walk as the PC draws it (AT 532(a), (h), (k); D-652). The PC draws an
+-- enemy's root 0.13 to 0.27 s behind the server (the replicated root's interpolation: the client's
+-- row 0 came 8 to 16 rows at 60 and 20 to 27 at 144 after the server's first MoveTo), while
+-- ActionStarted comes in on the server's beat: the attack clip came in with the drawn body still
+-- walking to where the server's body began its wind-up, and the attack plant (built for the brake
+-- row) dug the clip's legs in under a root that walked on. Here the root is drawn LAG_60 (60 Hz)
+-- and LAG_144 (144 Hz) behind the server and ActionStarted and Telegraph play as the server sends
+-- them. On 6ac48e7, over the clip's first CROUCH_SECONDS: PENDING_LAG's numbers.
+-- RigDriver's attack wait holds the clip, hidden, while the drawn body walks to the Telegraph's
+-- origin: the crouch's bars as above, from the clip's first drawn row, and it waits at most
+-- attackWaitSeconds. The boar's turning walk keeps the walk start's window bars on such a client,
+-- attacking: on 6ac48e7 the Charge came in over the window's last rows at 90 deg (0.055 a 144 Hz
+-- row, bar 0.042; 0.044 at 60).
+local LAG_60, LAG_144 = 0.2, 0.17
+local PC60_LAG: View = { hz = 60, interpolated = true, lag = FRAME + LAG_60, arrival = true }
+local PC144_LAG: View =
+	{ hz = 144, interpolated = true, lag = FRAME + LAG_144, arrival = true, share = underRead(0.5, 0.95) }
+
+describe("EnemyWalkStart: an attack waits for the body the PC draws behind the server (AT 532; D-652)", function()
+	for _, case in CROUCH_TAKES do
+		for _, view in { PC60_LAG, PC144_LAG } do
+			it(
+				("%s attacking after it set off %d deg, its root drawn behind at %d Hz"):format(
+					case.rig,
+					case.off,
+					view.hz
+				),
+				function()
+					local result = take(case.rig, case.off, view, case.seconds + (view.lag :: number), true)
+					crouchCheck(case, view, result)
+					expect(
+						(result.crouchWaited :: number) <= ChoreoData.enemy.gait.attackWaitSeconds + 1 / view.hz + 1e-9
+					).toBe(true)
+				end
+			)
+		end
+	end
+	for _, off in { 90, 135, 180 } do
+		for _, view in { PC60_LAG, PC144_LAG } do
+			it(
+				("the boar set off %d deg keeps its feet over the window, its root drawn behind at %d Hz"):format(
+					off,
+					view.hz
+				),
+				function()
+					check("Boar", off, take("Boar", off, view, 1.5 + (view.lag :: number), true), view.hz, nil, false)
+				end
+			)
 		end
 	end
 end)

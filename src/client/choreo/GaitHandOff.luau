@@ -61,6 +61,33 @@ function GaitHandOff.dodgeLive(mixer: any): boolean
 	return false
 end
 
+--- D-657: the dodge clip playing on `mixer` whose pose hides the gait, or nil: one that holds
+--- the body (not letting go) at its whole weight, its envelope and every hand-off joint's own
+--- blend come in. A dodge keys every joint a gait clip keys, so the gait's weights may move under
+--- it unseen. A joint left to a live sheath clip (D-580) never comes in: such a dodge hides none.
+--- No allocation.
+function GaitHandOff.coveringDodge(mixer: any): any?
+	for id in DODGES do
+		local handle = mixer:find(id)
+		if handle ~= nil and not handle.done and handle.weight >= 1 and handle.fade >= 1 then
+			local covers = true
+			local fades = handle.jointFade
+			if fades ~= nil then
+				for _, fade in fades do
+					if fade < 1 then
+						covers = false
+						break
+					end
+				end
+			end
+			if covers then
+				return handle
+			end
+		end
+	end
+	return nil
+end
+
 -- The one-shots a dodge takes the body from over its joints' blends (dodgeHandOff.takesFrom), by
 -- clip id, and the longest of those blends.
 local TAKES_FROM: { [string]: boolean } = {}

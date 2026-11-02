@@ -1044,10 +1044,17 @@ local Dev = {
 		-- controller picks for the stick pressed each of `pressAfter` seconds after the key went
 		-- down; then `after` seconds more. Each part's turn per review.fps row in the root's frame,
 		-- from the dodge's first row until it has gone, stays within review.audit.popDegrees.
+		-- D-657: the key held through the dodge as well, pressed each of `heldPressAfter` seconds
+		-- after the key went down (the dodge lets go into the run), and every take run at each of
+		-- `stepHz`: at review.fps every row is judged, at another rate the dodge's first row and its
+		-- blend out (each frame's turn scaled to a review.fps row; between them the dodge's own keys
+		-- turn a forearm 21.7 a 60 Hz row's worth on one 144 Hz frame of its landing, the gait hidden).
 		dodgeTap = {
 			settle = 1.5,
 			holdSeconds = { 0.08, 0.16 },
 			pressAfter = { 0.05, 0.08, 0.1, 0.2 },
+			heldPressAfter = { 0.05, 0.075, 0.1, 0.2 },
+			stepHz = { 60, 144 },
 			engine = { lagFrames = 1, accel = 360, decel = 576, turnRate = 720 },
 			after = 0.9,
 		},
@@ -1819,6 +1826,15 @@ local Dev = {
 		defaultSpeed = 1,
 		abInterval = 1.2, -- seconds per half of the A/B (clip / rest pose) alternation
 		hitStopPreview = true, -- pause the clock on each strike key like a landed hit would
+		-- Walk pace (LabPlayback, D-653): a rig's data walk played as RigDriver plays it at these
+		-- shares of the rig's walkSpeed (the boar's 0.5: 7 studs/s, its wheel's pace), the rig
+		-- carried along its facing at that speed and put back on its pedestal every
+		-- walkLoopSeconds; the walk pace key cycles them and back to in place.
+		walkShares = { 0.25, 0.5, 1 },
+		walkLoopSeconds = 1.5,
+		-- Play once (LabPlayback): a one-shot over the rig's idle with the game's own blends, the
+		-- idle held this long after it has blended out before it plays again.
+		onceIdleSeconds = 1,
 		stageWaitSeconds = 10,
 		-- ContextActionService priority name the hotkeys bind at (LabKeys, D-413): above the
 		-- default character scripts, which bind the arrows and Space to move and jump.
@@ -1837,6 +1853,8 @@ local Dev = {
 			orbitLeft = "Left",
 			orbitRight = "Right",
 			hitStopToggle = "H",
+			walkPace = "W",
+			playOnce = "Q",
 		},
 		rigs = {
 			-- One pedestal per rig id; the player's own character stands on the PlayerR15 one.
@@ -1884,7 +1902,7 @@ local Dev = {
 			textSize = 13,
 			titleTextSize = 16,
 			controlsHeight = 36,
-			controlRows = 3, -- 3 speeds + 6 transport and toggle buttons at 4 per row inside listWidth
+			controlRows = 3, -- 3 speeds + 8 transport and toggle buttons at 4 per row inside listWidth
 			buttonWidth = 64,
 			buttonGap = 6,
 			padding = 10,

@@ -526,13 +526,13 @@ function LocomotionState.heldShare(speed: number, input: Input, walkSpeed: numbe
 	return clamp01((ceiling - speed) / (ceiling - Config.walkSpeed))
 end
 
--- Writes the weights of a moving frame into `weights` (the set's walks by direction, Run, Sprint
--- and Idle by cadence, the walks alone for the held share) and returns the Sprint share. Sprint
--- shows only while sprinting, and then as soon as the speed clears Run's ground speed. The held
--- share follows heldShare: down at once, up over stride.heldRiseSeconds, so a run's two-step stop,
--- which passes walkSpeed in a few frames, hands its run to the walk by cadence as it slows, while
--- a body a lock or Guard holds to walkSpeed is soon on its walks alone.
-local function moveWeights(self: any, weights: { [string]: number }, speed: number, input: Input, dt: number): number
+-- The cadence part of moveWeights, with no state: writes the set's walks by direction, Run, Sprint
+-- and Idle into `weights` and returns the walk direction, the Sprint share and heldShare's target.
+local function cadenceWeights(
+	weights: { [string]: number },
+	speed: number,
+	input: Input
+): ({ [string]: number }, number, number)
 	local drawn = input.drawn
 	local direction = LocomotionState.walkWeights(input.forward, input.right, drawn)
 	local walkSpeed, walkDuration = LocomotionState.walkGait(direction, input.forward, input.right, drawn)
@@ -550,9 +550,18 @@ local function moveWeights(self: any, weights: { [string]: number }, speed: numb
 	weights[clipFor("Run", drawn)] = run
 	weights[clipFor("Sprint", drawn)] = sprint
 	weights[clipFor("Idle", drawn)] = idle
-	local target = LocomotionState.heldShare(speed, input, walkSpeed)
-	local held = if target <= self.held then target else math.min(target, self.held + dt / Stride.heldRiseSeconds)
-	self.held = held
+	return direction, sprint, LocomotionState.heldShare(speed, input, walkSpeed)
+end
+
+-- The held share's part of moveWeights: `held` of the move goes to the set's walks by direction.
+-- Returns the Sprint share left.
+local function holdWalks(
+	weights: { [string]: number },
+	direction: { [string]: number },
+	drawn: boolean,
+	held: number,
+	sprint: number
+): number
 	if held > 0 then
 		for name, weight in weights do
 			weights[name] = weight * (1 - held)
@@ -563,6 +572,36 @@ local function moveWeights(self: any, weights: { [string]: number }, speed: numb
 		sprint *= 1 - held
 	end
 	return sprint
+end
+
+-- Writes the weights of a moving frame into `weights` (the set's walks by direction, Run, Sprint
+-- and Idle by cadence, the walks alone for the held share) and returns the Sprint share. Sprint
+-- shows only while sprinting, and then as soon as the speed clears Run's ground speed. The held
+-- share follows heldShare: down at once, up over stride.heldRiseSeconds, so a run's two-step stop,
+-- which passes walkSpeed in a few frames, hands its run to the walk by cadence as it slows, while
+-- a body a lock or Guard holds to walkSpeed is soon on its walks alone.
+local function moveWeights(self: any, weights: { [string]: number }, speed: number, input: Input, dt: number): number
+	local direction, sprint, target = cadenceWeights(weights, speed, input)
+	local held = if target <= self.held then target else math.min(target, self.held + dt / Stride.heldRiseSeconds)
+	self.held = held
+	return holdWalks(weights, direction, input.drawn, held, sprint)
+end
+
+--- D-657: the weights a grounded frame at `input` aims at, written into `into` (every name of
+--- WEIGHT_NAMES), with no state read or moved: a move's cadence shares with heldShare's own share
+--- (no rise), or the set's Idle at or under idleSpeedThreshold. Locomotion aims the gait at the
+--- stick's gait with it while a dodge's pose hides the gait (its `speed` is the stick's).
+function LocomotionState.aimWeights(input: Input, into: { [string]: number })
+	for _, name in WEIGHT_NAMES do
+		into[name] = 0
+	end
+	local speed = math.max(0, input.speed)
+	if speed > Config.idleSpeedThreshold then
+		local direction, sprint, target = cadenceWeights(into, speed, input)
+		holdWalks(into, direction, input.drawn, target, sprint)
+	else
+		into[clipFor("Idle", input.drawn)] = 1
+	end
 end
 
 --- Landing squash weight from the fall height (data: minSquash .. 1 at fullSquashHeight).

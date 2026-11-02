@@ -107,6 +107,7 @@ local ClipLibrary = require(script.Parent.ClipLibrary)
 local GaitHandOff = require(script.Parent.GaitHandOff)
 local LocomotionState = require(script.Parent.LocomotionState)
 local SheathState = require(script.Parent.SheathState)
+local StepTakeUp = require(script.Parent.StepTakeUp)
 local TurnPlant = require(script.Parent.TurnPlant)
 local WalkTurnPlant = require(script.Parent.WalkTurnPlant)
 local WalkStopPlant = require(script.Parent.WalkStopPlant)
@@ -116,6 +117,7 @@ local Config = ChoreoData.locomotion
 local Sheath = ChoreoData.sheath
 local Stride = Config.stride
 local Blocked = Stride.blocked
+local TakeUp = Stride.takeUp
 -- A velocity whose direction is within stride.blocked.degrees of the stick has a dot above this.
 local BLOCKED_COS = math.cos(math.rad(Blocked.degrees))
 local GAIT_NAMES = LocomotionState.GAIT_NAMES
@@ -175,6 +177,11 @@ export type State = {
 	-- facing is read as the root will stand then, so the turn plant takes back the yaw the frame
 	-- shows with this pose, not the one before it. Nil or 0: the root as it stands.
 	yawAhead: number?,
+	-- D-657: the speed (studs a second, at 1x) the stick walks the body at once no action locks
+	-- it, 0 with the stick at rest: CharacterController's walk speed out of the action. Read only
+	-- while a dodge's pose hides the gait, whose weights are then aimed at the stick's gait. Nil:
+	-- they stand under the dodge (D-646).
+	stickSpeed: number?,
 }
 
 export type Raycast = (origin: Vector3, direction: Vector3) -> Vector3?
@@ -194,6 +201,10 @@ export type Dependencies = {
 	-- FrameClock.atStepPoseSolve, handed to WeaponMount ahead of atStepPose: that move lands right
 	-- before the physics that solves the step's pose, so the blade is drawn on its key (D-590).
 	atStepPoseSolve: ((fn: () -> ()) -> () -> ())?,
+	-- The pose this update writes is drawn on the root that this frame's physics then moves (the
+	-- local character's render step, D-343): the take-up also takes up the steps it guesses that
+	-- physics will make (StepTakeUp, D-651). Nil or false: the root as it stands (D-334 alone).
+	stepsAhead: boolean?,
 }
 
 export type Locomotion = {
@@ -1086,6 +1097,19 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		animator = animator,
 		character = character,
 		state = LocomotionState.new(),
+		-- D-657: the stick's gait a dodge's hidden gait is aimed at, and the input read for it.
+		aimWeights = {} :: { [string]: number },
+		aimInput = {
+			forward = 0,
+			right = 0,
+			speed = 0,
+			sprinting = false,
+			grounded = true,
+			drawn = false,
+			turning = 0,
+			yawRate = 0,
+			verticalVelocity = 0,
+		} :: LocomotionState.Input,
 		handles = {} :: { [string]: any },
 		fallHandle = nil :: any,
 		jumpHandle = nil :: any,
@@ -1132,6 +1156,8 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		travelFrom = nil :: Vector3?,
 		travelSlip = 0,
 		travelExtra = 0,
+		-- With deps.stepsAhead (D-651): the fit of the steps the root's travel came in.
+		takeUp = if dependencies.stepsAhead == true then StepTakeUp.new(TakeUp) else nil,
 		shownNow = {} :: { [string]: number }, -- each Base clip's shown weight at this step's start
 		shownLast = {} :: { [string]: number }, -- and at the last step's
 		-- The body is held off its stick (stride.blocked, D-144): the gait follows the velocity.
@@ -1235,6 +1261,14 @@ function Locomotion.serverDrawn(self: any): boolean
 		readAttributes(self)
 	end
 	return self.attributeDrawn
+end
+
+--- Where the server's body began an enemy's attack wind-up (the Telegraph's origin, D-652): an
+--- enemy rig's attack clip waits for its drawn body to walk there. A player rig keeps no such wait.
+function Locomotion.windUpAt(self: any, origin: Vector3)
+	if getmetatable(self) == RigDriver then
+		RigDriver.windUpAt(self, origin)
+	end
 end
 
 local function playOneShot(self: any, name: string, weight: number?)
@@ -1560,6 +1594,34 @@ end
 -- past it is dropped), forgets itself over stride.travelSlipDecaySeconds (a lasting bias in the
 -- root's travel never pins it at the bound, D-411) and starts over standing, in the air, on a
 -- stalled frame or held still.
+--
+-- With deps.stepsAhead (D-651) the phase takes up the steps StepTakeUp guesses this frame's
+-- physics will make in place of the last frame's: the screen draws this pose on the root after
+-- that physics (D-343). So it moves on by the guess less the steps the root just took, and the
+-- planted foot moves on screen only by a guess's miss (D-334 alone moved it by every change in
+-- the frames' steps). With no sure guess nothing is added (D-334 alone), so the gate opening or
+-- closing moves nothing. A frame whose travel is not whole steps at the speed starts the fit over.
+local function stepAhead(takeUp: StepTakeUp.TakeUp, along: number?, speed: number, dt: number): number
+	local studsPerStep = speed / TakeUp.stepHz
+	local taken: number? = nil
+	if along ~= nil then
+		local steps = along / studsPerStep
+		local whole = math.floor(steps + 0.5)
+		if whole >= 0 and math.abs(steps - whole) < TakeUp.wholeSteps then
+			takeUp:observe(whole)
+			taken = whole
+		end
+	end
+	if taken == nil then
+		takeUp:reset()
+	end
+	local guess = takeUp:guess(dt)
+	if guess == nil or taken == nil then
+		return 0
+	end
+	return (guess - taken) * studsPerStep
+end
+
 local function stepTravel(self: any, root: BasePart, state: State, dt: number, followX: number?, followZ: number?)
 	local position = root.CFrame.Position
 	local from = self.travelFrom
@@ -1581,19 +1643,29 @@ local function stepTravel(self: any, root: BasePart, state: State, dt: number, f
 		local bound = Stride.travelSlipSeconds * speed
 		local step = along - speed * dt
 		local kept = self.travelSlip * (1 - math.min(1, dt / Stride.travelSlipDecaySeconds))
+		local takeUp = self.takeUp
 		if math.abs(kept + step) <= bound then
 			-- Inside the bound the frame's step is taken up whole and the memory forgets itself.
 			extra = step
 			self.travelSlip = kept + step
+			if takeUp ~= nil then
+				extra += stepAhead(takeUp, along, speed, dt)
+			end
 		else
 			-- Past it the overrun is dropped and the memory holds: a lasting one (a stuck or shoved
 			-- root) moves the phase no more than it ever did.
 			local slip = math.clamp(self.travelSlip + step, -bound, bound)
 			extra = slip - self.travelSlip
 			self.travelSlip = slip
+			if takeUp ~= nil then
+				extra += stepAhead(takeUp, nil, speed, dt) -- not the engine's steps: start over
+			end
 		end
 	else
 		self.travelSlip = 0
+		if self.takeUp ~= nil then
+			self.takeUp:reset()
+		end
 	end
 	self.travelExtra = extra
 end
@@ -1607,6 +1679,9 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 	local blendSpeed = if clock > 0 then math.max(0, state.speed) / clock else math.max(0, state.speed)
 	local forward, right = 0, 0
 	local stickX, stickZ = 0, 0
+	-- The stick's own way in the body's frame (D-657): `forward` and `right` may turn to a
+	-- blocked body's velocity or a coast's last move below.
+	local stickForward, stickRight = 0, 0
 	local yawRate = 0
 	if root ~= nil then
 		local cframe = root.CFrame
@@ -1616,6 +1691,7 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 			forward = move:Dot(cframe.LookVector)
 			right = move:Dot(cframe.RightVector)
 			stickX, stickZ = move.X, move.Z
+			stickForward, stickRight = forward, right
 		end
 		local yaw = yawOf(cframe) + (state.yawAhead or 0)
 		if self.lastYaw ~= nil and dt > 0 and clock > 0 then
@@ -1669,7 +1745,19 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 	-- each weight's target is set to the weight itself (D-646): left alone, the Mixer carried
 	-- the weights on to the targets of the frame before the press (a tapped key's walk or run), so
 	-- the legs strode on under the dodge's first rows and crossed back to the idle in its fade.
+	-- Once the dodge's pose hides the gait (GaitHandOff.coveringDodge) the weights are aimed at the
+	-- stick's gait instead (D-657): the run while a key is down, the idle when not, at the
+	-- stick's speed (State.stickSpeed), so the dodge lets go into the gait the body leaves in. A
+	-- key held through the dodge from standing started the run only under its fade, the gait
+	-- crossing from the press's mix to the run there: 21.0 degrees a row sheathed, pressed 0.075 s
+	-- after the key went down.
 	local dodging = typeof(animator.mixer) == "table" and GaitHandOff.dodgeLive(animator.mixer)
+	local stickSpeed = state.stickSpeed
+	local covering = if dodging
+			and stickSpeed ~= nil
+			and state.grounded
+		then GaitHandOff.coveringDodge(animator.mixer)
+		else nil
 	holdBase(self, state.grounded and blendSpeed <= Config.idleSpeedThreshold)
 	local input: LocomotionState.Input = {
 		forward = forward,
@@ -1689,6 +1777,27 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 
 	if not dodging then
 		for name, weight in output.weights do
+			animator:setWeight(self.handles[name], weight)
+		end
+	elseif covering ~= nil then
+		-- The dodge holds the gait's phase and pace, and hands the legs back at resumePhase
+		-- (D-609), from a stance too: a gait aimed in from a standing press stepped on under the
+		-- dodge and was picked up mid-stride (20.0 degrees a row, sheathed, DodgeLeft into the run).
+		if self.gaitHeldBy == nil then
+			self.gaitHeldBy = covering
+		end
+		local aim = self.aimInput
+		local pushed = stickForward ~= 0 or stickRight ~= 0
+		aim.forward, aim.right = stickForward, stickRight
+		aim.speed = if pushed then math.max(0, stickSpeed :: number) else 0
+		-- The controller's speeds are the data's (ActionLogic.resolveSpeeds): past the run's, the
+		-- stick sprints (the sprint flag itself is off while the dodge locks the movement).
+		aim.sprinting = aim.speed > Config.runSpeed
+		aim.drawn = self.baseDrawn
+		aim.turning = state.turning
+		aim.yawRate = yawRate
+		LocomotionState.aimWeights(aim, self.aimWeights)
+		for name, weight in self.aimWeights do
 			animator:setWeight(self.handles[name], weight)
 		end
 	else
@@ -1946,6 +2055,12 @@ local function newRigDriver(
 		attackRoot = nil :: CFrame?,
 		attackRootDt = 0,
 		attackDrawn = CFrame.identity,
+		-- An attack clip waiting, hidden, for the walking body to brake (D-652), and how long it has.
+		attackWait = nil :: any,
+		attackWaited = 0,
+		-- Where the server's body began its latest wind-up (RigDriver.windUpAt), and the seconds since.
+		windUpOrigin = nil :: Vector3?,
+		windUpAge = 0,
 		unhook = nil :: (() -> ())?,
 		destroyed = false,
 	}, RigDriver)
@@ -2015,7 +2130,7 @@ local function stepWalkPlant(self: any, dt: number)
 	local weight = if walkHandle ~= nil and not walkHandle.done then walkHandle.targetWeight or walkHandle.weight else 0
 	if weight > 0 then
 		for _, handle in mixer:handles() do
-			if handle.layer == "FullBody" and not handle.done and handle.weight > 0 then
+			if handle.layer == "FullBody" and not handle.done and handle.weight > 0 and handle ~= self.attackWait then
 				weight = 0
 				break
 			end
@@ -2035,10 +2150,11 @@ local function stepWalkPlant(self: any, dt: number)
 	self.animator:setProcedural(WALK_PLANT_CHANNEL, offsets, weight)
 end
 
--- True while a full-body clip shows on `mixer`: it has the body, and the plants let it go.
-local function fullBodyShows(mixer: any): boolean
+-- True while a full-body clip shows on `mixer`: it has the body, and the plants let it go. An
+-- attack clip waiting for the walking body to brake (`waiting`, D-652) shows nothing yet.
+local function fullBodyShows(mixer: any, waiting: any?): boolean
 	for _, handle in mixer:handles() do
-		if handle.layer == "FullBody" and not handle.done and handle.weight > 0 then
+		if handle.layer == "FullBody" and not handle.done and handle.weight > 0 and handle ~= waiting then
 			return true
 		end
 	end
@@ -2117,7 +2233,7 @@ local function stepWalkStop(self: any, dt: number): string?
 	local walkHandle = self.handles.Walk
 	local idleHandle = self.handles.Idle
 	local mixer = self.animator.mixer
-	local full = fullBodyShows(mixer)
+	local full = fullBodyShows(mixer, self.attackWait)
 	if stop.active then
 		if full or self.stopFade <= 0 then
 			endWalkStop(self)
@@ -2203,6 +2319,17 @@ end
 -- An attack clip just played (it has not stepped) begins a plant from the legs the last row drew
 -- and the pose the clip starts at; the plant ends once its steps are done and the clip is in, or
 -- when the clip goes.
+-- A client draws the root behind the server (the replicated root's interpolation; the PC's 0.13 to
+-- 0.27 s, 532(h)) while ActionStarted plays the clip on the server's beat, so an attack out of a
+-- walk can come in while the drawn body still walks toward where the server's body began its
+-- wind-up (D-652; the Telegraph's origin, RigDriver.windUpAt). Such a clip waits, hidden (its clock
+-- and its fade stand, the beat owed the time), while the drawn root is short of that origin by more
+-- than the attack's first row carries on: the body walks there (its walk, or its walk's start, shows),
+-- and the attack takes it on the row after, the brake row the plant was built for (the server's body
+-- brakes from where it began the wind-up).
+-- It waits at most attackWaitSeconds and never past what the beat can still even by its mark
+-- (enemy.beat.maxRate). A root that braked before it got there (or an attack with no origin) has
+-- its first row carried on as a braking root keeps, the brake already seen.
 local function stepAttackPlant(self: any, dt: number)
 	local plant = self.attackPlant
 	local root: BasePart? = if self.character ~= nil then self.character.PrimaryPart else nil
@@ -2214,13 +2341,22 @@ local function stepAttackPlant(self: any, dt: number)
 	local lastDt: number = self.attackRootDt
 	self.attackRoot, self.attackRootDt = now, dt
 	local moved, turn = Vector3.zero, 0
+	local lastMove: number? = nil
+	local heading = Vector3.zero
 	if last ~= nil and lastDt > 0 and dt > 0 then
 		local step = now.Position - last.Position
-		if Vector3.new(step.X, 0, step.Z).Magnitude <= ChoreoData.enemy.rush.teleportStuds then
+		local flat = Vector3.new(step.X, 0, step.Z)
+		if flat.Magnitude <= ChoreoData.enemy.rush.teleportStuds then
 			local look = (last.Rotation:Inverse() * now.Rotation).LookVector
 			moved, turn = step * (dt / lastDt), math.atan2(-look.X, -look.Z) * (dt / lastDt)
+			lastMove = flat.Magnitude
+			heading = if flat.Magnitude > 0 then flat.Unit else Vector3.zero
 		end
 	end
+	-- The wind-up's origin the Telegraph named, while it is fresh.
+	local gaitAge = self.windUpAge + math.max(dt, 0)
+	self.windUpAge = gaitAge
+	local origin: Vector3? = if gaitAge <= ChoreoData.enemy.gait.attackWaitSeconds then self.windUpOrigin else nil
 	local gait = ChoreoData.enemy.gait
 	local function carry(share: number, turnShare: number)
 		self.attackDrawn = CFrame.new(now.Position + moved * share)
@@ -2229,10 +2365,92 @@ local function stepAttackPlant(self: any, dt: number)
 	end
 	carry(math.exp(-(lastDt + dt) / 2 / gait.attackBrakeSeconds), 0)
 	local mixer = self.animator.mixer
+	-- The drawn body walks on: its last row moved at least stopBrakeShare of the walk's own pace.
+	local function walksOn(): boolean
+		local walkHandle = self.handles.Walk
+		if lastMove == nil or walkHandle == nil or walkHandle.done or walkHandle.weight <= 0 then
+			return false
+		end
+		local pace = (walkHandle.speed or 0) * self.walkSpeed * lastDt
+		return lastMove > Config.idleSpeedThreshold * lastDt and lastMove >= gait.stopBrakeShare * pace
+	end
+	-- Short of the wind-up's origin by more than the attack's first row carries on (attackBrakeShare
+	-- of the last row's move, along the way it moves; of a walking row's, to a root that stands): the
+	-- row coming still walks there, and the server's body braked only once it stood there.
+	local function short(): boolean
+		if origin == nil or lastMove == nil then
+			return false
+		end
+		local way = Vector3.new(origin.X - now.Position.X, 0, origin.Z - now.Position.Z)
+		if (lastMove :: number) > Config.idleSpeedThreshold * lastDt then
+			return way:Dot(heading) > gait.attackBrakeShare * (lastMove :: number) + TRAVEL_TIME_SLACK
+		end
+		return way.Magnitude > gait.attackBrakeShare * self.walkSpeed * math.max(dt, 0) + TRAVEL_TIME_SLACK
+	end
+	-- What this step holds a waiting clip for (a hit-stop's own hold the mixer owes itself), and
+	-- whether `waiting` may wait that much more: within attackWaitSeconds, and within what the beat
+	-- it keeps can still even by its mark at enemy.beat.maxRate.
+	local more = if mixer:pauseRemaining() <= ChoreoData.pauseEpsilon then dt else 0
+	local function mayWait(waiting: any): boolean
+		if self.attackWaited + more > gait.attackWaitSeconds + TRAVEL_TIME_SLACK then
+			return false
+		end
+		local beat = waiting.beat
+		if beat == nil then
+			return true
+		end
+		local speed = math.max(waiting.speed or 1, 1e-6)
+		local room = math.max(0, beat.untilTime - waiting.time) / speed * (1 - 1 / ChoreoData.enemy.beat.maxRate)
+		return beat.owed + more <= room + TRAVEL_TIME_SLACK
+	end
+	local function begin(attack: any, braked: boolean)
+		self.windUpOrigin = nil
+		if not braked then
+			carry(gait.attackBrakeShare, gait.attackBrakeShare)
+		end
+		-- The clip starts where the network catch-up put its clock.
+		WalkStopPlant.beginUnder(plant, mixer:lastOffsets(), ClipSampler.sample(attack.clip, attack.time), now)
+		self.attackHandle = attack
+		mixer:setPoseHook(ATTACK_PLANT_HOOK, function(pose: ClipSampler.Offsets)
+			local shown = self.attackHandle
+			if shown ~= nil then
+				-- The plant keeps the clip's clock: its beat paces the dig-in, a hit-stop holds it.
+				WalkStopPlant.stepUnder(
+					plant,
+					shown.time - shown.lastTime,
+					pose,
+					ClipSampler.sample(shown.clip, shown.time),
+					self.attackDrawn
+				)
+			end
+		end)
+	end
 	local handle = self.attackHandle
 	if handle ~= nil and (handle.stopping or handle.done) then
 		endAttackPlant(self)
 		handle = nil
+	end
+	local waiting = self.attackWait
+	if waiting ~= nil then
+		if waiting.stopping or waiting.done then
+			self.attackWait = nil
+		else
+			local walks = walksOn()
+			if short() and mayWait(waiting) then
+				mixer:shiftBeat(waiting, -more)
+				self.attackWaited += more
+				return
+			end
+			-- The body gets to the wind-up's origin on this row (or braked, or waited all it may):
+			-- the attack takes it from here.
+			self.attackWait = nil
+			mixer:hold(waiting, false)
+			if handle ~= nil then
+				endAttackPlant(self)
+			end
+			begin(waiting, not walks)
+			return
+		end
 	end
 	for _, other in mixer:handles() do
 		if
@@ -2243,23 +2461,16 @@ local function stepAttackPlant(self: any, dt: number)
 			and not other.done
 			and other.clip.attack == true
 		then
-			carry(gait.attackBrakeShare, gait.attackBrakeShare)
-			-- The clip starts where the network catch-up put its clock.
-			WalkStopPlant.beginUnder(plant, mixer:lastOffsets(), ClipSampler.sample(other.clip, other.time), now)
-			self.attackHandle = other
-			mixer:setPoseHook(ATTACK_PLANT_HOOK, function(pose: ClipSampler.Offsets)
-				local attack = self.attackHandle
-				if attack ~= nil then
-					-- The plant keeps the clip's clock: its beat paces the dig-in, a hit-stop holds it.
-					WalkStopPlant.stepUnder(
-						plant,
-						attack.time - attack.lastTime,
-						pose,
-						ClipSampler.sample(attack.clip, attack.time),
-						self.attackDrawn
-					)
-				end
-			end)
+			self.attackWaited = 0
+			if other.fade <= 0 and short() and mayWait(other) then
+				-- Hidden until the drawn body brakes: its clock and its fade stand.
+				mixer:hold(other, true, true)
+				mixer:shiftBeat(other, -more)
+				self.attackWaited = more
+				self.attackWait = other
+				return
+			end
+			begin(other, false)
 			return
 		end
 	end
@@ -2332,6 +2543,13 @@ function RigDriver.serverDrawn(_self: any): boolean
 	return false
 end
 
+-- Where the server's body began an attack's wind-up (the Telegraph's origin, D-652): the attack's
+-- clip waits for the drawn body to walk there.
+function RigDriver.windUpAt(self: any, origin: Vector3)
+	self.windUpOrigin = origin
+	self.windUpAge = 0
+end
+
 function RigDriver.destroy(self: any)
 	if self.destroyed then
 		return
@@ -2353,6 +2571,12 @@ function RigDriver.destroy(self: any)
 	end
 	if self.attackPlant ~= nil then
 		endAttackPlant(self)
+	end
+	local waiting = self.attackWait
+	if waiting ~= nil then
+		-- A clip still waiting for the body is let go as it is: it shows from here.
+		self.attackWait = nil
+		self.animator.mixer:hold(waiting, false)
 	end
 end
 

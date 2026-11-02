@@ -1150,20 +1150,20 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - 528: passed (a) at 60 on the Sheathe (5 of 5, 71.4–77.4 studs/s) and on 3 of 5 Draws, (b) on 20 of 20 (the Skid on every step 1 and 2 take), (c), and (e) at 60 on 8 of 8. (d) was not logged (the tip point only). The logger lost 40–80 rows inside 9 of the 18 clip windows at 240, and the Draw takes' release came about 0.4 s late.
   - Failed (a) at 240 on 8 of 10 (up to 146.5 and 148.9 on the Sheathe, 132.7–171.8 on the Draw), (a) at 60 on 2 Draws after a Skid (90.01 and 85.08, both on clip row 32), and (e) at 240 (113.1–175.9; one Sheathe passed at 77.3). The 240 Hz reads were on PostSimulation clocks, where a step over a frame that ran no physics reads twice its speed; on the Last+2 clock Lune keeps the Sheathe ≤ 78.4 and the Draw ≤ 75.0 at 60, 144 and 240. The two Draws at 60 were let go 0.95 and 1.05 s into the Draw, so row 32 came at a full sprint (Lune 59.0–61.6 there). No code changed: item 549 reads the tip on the Last+2 clock and keys each release to the clip's first row (D-647).
 - 529: passed (a) on 12 of 12 (0.0022–0.0054 after standing 3 s and 10 s), with no row over 0.01.
-- 530: PreSimulation fired once a row at 60 and at 144, its deltaTime the frame's. 477(a) passed (each foot's lowest corner within ±0.02 on 59.1–61.0% of rows). (a) the step p90 read 0.047 at 60 and 0.050 at 144; (b) 4.063 and 1.693 steps a row on the mean; (c) PreSimulation's deltaTime × 240 missed the row's steps by 0.5 or more on 45 of 713 rows at 60 (4.0 against 5.0, about every 16th row) and 43 of 1648 at 144. Workspace.PhysicsSteppingMethod could not be read or set from a script, so 477(c)'s Fixed repeat was not run. The take-up's call is queued for the next round.
+- 530: PreSimulation fired once a row at 60 and at 144, its deltaTime the frame's. 477(a) passed (each foot's lowest corner within ±0.02 on 59.1–61.0% of rows). (a) the step p90 read 0.047 at 60 and 0.050 at 144; (b) 4.063 and 1.693 steps a row on the mean; (c) PreSimulation's deltaTime × 240 missed the row's steps by 0.5 or more on 45 of 713 rows at 60 (4.0 against 5.0, about every 16th row) and 43 of 1648 at 144. Workspace.PhysicsSteppingMethod could not be read or set from a script, so 477(c)'s Fixed repeat was not run. The take-up's call is built: the fitted-drift accumulator in the render step (D-651; item 555).
 - 531: passed (a) on every judged take (row 1's largest 2.3–20.3, the sheathed run's RightFoot 20.3 under its stride bar) and (c) over the Draw. (c) over the Sheathe could not be judged: pressed at clip 0.734, the sword was already on the back. A sheathed locked walk could not be run (the lock draws the sword).
   - Failed (b) on 4 takes (row 2 at 21.05–31.84 on DodgeBack after a turn tap and on DodgeLeft standing sheathed, and row 17's LeftLowerArm at 20.40 on a drawn run) and (d) on 4 (row 31 at 20.16–21.63). Row 2 on the PC is the dodge's first shown row, where the legs strode on into the run of the key pressed before the dodge; a dodge now stands the gait's weights (D-646: Lune's first row after a turn tap 22.4 → ≤ 14.8, and from a held A 18.5 → 10.4; the blend-out 20.3 → ≤ 12.2). The drawn run's 20.40 and the walk's 21.63 are not reproduced (Lune 19.6 and ≤ 15.0) and fit a row scaled on PostSimulation clocks; item 550 scales the rows by the render dt (D-647) and presses the take over the Sheathe at clip 0.25 or more (D-580 works as designed).
 
 ## Section AT on the PC (2026-11-02, 3eee415)
 
 - 532: the Playground's own boar and kobold, held and released 15 studs off, walked back to their spawn instead of to the player, so every judged take used a boar and a kobold packed at the take's spot. Passed (b) (the boar's WalkSpeed from 30 × its first dt to 14 in rises of 30 × each Heartbeat's own dt, 14 at 0.784 s at 60 and 0.763 s at 144), (f) (the kobold at 135° and 180°: 0.079 / 0.072 at 60, 0.031 / 0.034 at 144), (i) (the kobold's wheel, its look within 10.6–15.4° of its velocity), (k) on the kobold's stops (0.006–0.017 after the brake row, the last row's feet at −0.010 to −0.012) and (n) (every walking row's root step within 2 × the server's move; InterpolationThrottling Default, 15.0 studs off).
-  - Failed (a): the boar at 90° slid 0.146 at 60 (row 27, BackLeftLeg) and 0.180 at 144 (row 72). Failed (c) at 144: the boar at 90° went down to −0.062 (row 65, BackLeftLeg), where 60 read −0.016 to −0.017. Failed (e) on the kobold at 0°: 0.123 at 60 and 0.058 at 144, and −0.034 at 144 (its idle's own stand). Failed (j) on 4 takes at 60 (0.102–0.161) and 5 at 144 (0.043–0.060), with three lows of −0.027 to −0.033. Failed (k) on the boar at 60°: its stop runs into the Charge, which comes on before the brake row. (m) could not be run: ClipLab's walk view takes no speed. The enemy walk on the PC's client rows is queued for the next round.
+  - Failed (a): the boar at 90° slid 0.146 at 60 (row 27, BackLeftLeg) and 0.180 at 144 (row 72). Failed (c) at 144: the boar at 90° went down to −0.062 (row 65, BackLeftLeg), where 60 read −0.016 to −0.017. Failed (e) on the kobold at 0°: 0.123 at 60 and 0.058 at 144, and −0.034 at 144 (its idle's own stand). Failed (j) on 4 takes at 60 (0.102–0.161) and 5 at 144 (0.043–0.060), with three lows of −0.027 to −0.033. Failed (k) on the boar at 60°: its stop runs into the Charge, which comes on before the brake row. (m) could not be run: ClipLab's walk view takes no speed. An enemy's attack now waits for the body the PC draws behind the server (D-652; item 556), the walk's window and start rows are read on the PC's drawn steps and the idle's own sink (D-654; items 557 and 558), and ClipLab takes a walk pace (D-653; item 559).
   - Reports: the 60° take's Charge showed 13 rows (60) and 26 rows (144) before the brake row (the window sliding 0.151 / 0.077, the lowest −0.074 / −0.032 from the release); the 0° take's lowest from the release −0.091 / −0.099; (d) 0.104 / 0.126 at 60 and 0.053 / 0.052 at 144; (g) the server's yaw steps −1.67 to −1.90° a 60 Hz Heartbeat, the client rows' uneven; (h) the client's row 0 came 8–16 rows (60) and 20–27 rows (144) after the server's first MoveTo, not before it; (l) the brake row 0.030 and 0.051 on the kobold at 60, and 0.092 on the boar at 60°.
-- 533: passed (b) (over the Idle loop the corners at −0.0134 to +0.0180, at both rates), (c) (the Torso 0.050 higher at 1.0 s) and (d). (a) could not be run as written: ClipLab loops the Stagger from 0 to 1.00 with no blend into the idle (the clip's own rows down to −0.0133 / −0.0140). Queued for the next round, with 532.
+- 533: passed (b) (over the Idle loop the corners at −0.0134 to +0.0180, at both rates), (c) (the Torso 0.050 higher at 1.0 s) and (d). (a) could not be run as written: ClipLab loops the Stagger from 0 to 1.00 with no blend into the idle (the clip's own rows down to −0.0133 / −0.0140). ClipLab now plays a clip once into the idle (D-653; item 560).
 - 534: passed (a) at both rates (across 0.0022 / 0.0050 and up or down 0.0020 / 0.0080, left / right).
   - Failed (b) on all 24 turns: the turn clip's first full-weight rows carry the stance change, RightFoot 0.093–0.112 on the left turns and LeftFoot 0.036–0.039 on the right turns at 60, and 3-row sums of 0.101–0.116 and 0.037–0.041 at 144 (and 0.013–0.016 at +0.35–0.37 s on the ±135° turns at 144). (c)'s rows read RightFoot 0.074–0.111 in the fade-in and up to 0.096 in the fade-out at 60, and a lock straight ahead 0.073–0.083. The stance steps fix these (D-640; Lune 0.100–0.106 → ≤ 0.0049 at 60; items 546 and 547). (d) read 0.0001–0.0003 on the fail rows.
 - 535: the Playground's own kobolds walk home, so every take used a fresh kobold, S("pack") at (30, 0, 40), walking in unheld by its own brain; the root was placed at its rest (z 26.17, facing the kobold) instead of holding S, which walks an unlocked body sideways to the camera (a locked S rests at z 26.167). Roblox's HTTP request limit dropped batches on eight early takes at 60; those and the open field were re-run with the logger posting batched, one post per file per second, and the judged rows come from the re-runs. Passed (a) on 64 of 64 (the stop 3.158–4.213 and both blows landing; its angle −0.3–0.0 / 5.1–5.4 / 10.0–10.5 / 15.2–16.6° on the wall and −0.2–0.0 / 10.3–10.8 / 21.0–21.6 / 31.5–32.8° at the pillar; first engaged at 4.10–4.58 at 60 and 4.19–4.75 at 144) and (b) on 64 of 64 (the gap 3.29–3.96 against 2.95; the root 0.71–1.21 off the face at the stop, placed at 0.45, the kobold's blows putting it further off).
-  - Failed (d) at 144 only. Read with 519(d)'s whole bar (the PC's first check left |m N−1| out of it, so Sharp Nail's lunge read over), no row at 60 is over (five rounding rows of 0.0001–0.0007; one pillar take's 0.515 step spans a gap in the log, not a move), while 30 of 32 takes at 144 have 1–5 rows over by up to 0.09, each just after a long row of 15–16 ms: the code's step lands a row late, on a short row. UpperTorso went 0.0711–0.0752 into the face on four takes at 144 (the wall at 0°, takes 2 to 4, and at 20°, take 3; 60 read 0.050–0.056), and on one pillar take at 144 (30°, take 2) UpperTorso was in the HeldBlocker for 15 rows; no take at 60 met a Blocker. The fighter at a wall under a kobold's stand, with (e)'s engine share and (f) at 144, is queued for the next round.
+  - Failed (d) at 144 only. Read with 519(d)'s whole bar (the PC's first check left |m N−1| out of it, so Sharp Nail's lunge read over), no row at 60 is over (five rounding rows of 0.0001–0.0007; one pillar take's 0.515 step spans a gap in the log, not a move), while 30 of 32 takes at 144 have 1–5 rows over by up to 0.09, each just after a long row of 15–16 ms: the code's step lands a row late, on a short row. UpperTorso went 0.0711–0.0752 into the face on four takes at 144 (the wall at 0°, takes 2 to 4, and at 20°, take 3; 60 read 0.050–0.056), and on one pillar take at 144 (30°, take 2) UpperTorso was in the HeldBlocker for 15 rows; no take at 60 met a Blocker. Those 144 Hz rows were the check's pairing, a row off: each passes on its own row's bar (D-655), and (e)'s share is the next Art's held lean pushed off the face (D-656; item 561).
   - Reports: (c) Sharp Nail's deepest column, the Head taken as 1.27 deep, 3.06–3.29 at 60 and 2.98–3.29 at 144, the Head the deepest every time (clip 0.37–0.60); (e) the engine's share along the line, toward the kobold positive, 2.59–2.78 on the wall at 0° (0.97–2.18 / 0.41–1.29 / 0.28–0.35 at 10 / 20 / 30°) and 1.72–2.47 at the pillar at 0° (then 0.22–0.86 and 0.00–0.06), against Lune's 0.043–0.075: a ping-pong, the code stepping the root about 0.4–0.5 back into the wall on each Sharp Nail and Vertical and the wall pushing it out the same (on the wall at 0° at 60, the Sharp Nails' code −0.40 / −0.37 / −0.51 and the engine +0.36 / +0.37 / +0.44); the Head, not colliding, −0.13 to 0.48 into the face at 60 and 0.17 to 0.48 at 144; nothing met above or below the root box's band; (f) the open field's stop 3.240 at 60 and 2.897 at 144, where the kobold's Blockers overlapped the colliding parts on 39 rows and the code backed the root 2.82 off the kobold at 12 studs/s during Basic1; (g) the squeeze probe logged, the same dev-only squeeze as 519(g) on 97cea9d.
 - 536 (report only, 60 fps): walks A and B show no stepped drawing on 3eee415. Walk A's largest client root step was 0.237 on one row against the server's 0.167 a Heartbeat (DrawnBody 0.237; about 21.5 studs off), and walk B's 0.224 against 0.208 (about 6.9 off); neither had a 0 step followed by one over 0.3, and InterpolationThrottling read Default. Walk C could not be run: workspace.InterpolationThrottling stays Default when set from a plugin or from Studio's command bar (with no error), and the Properties panel lists no such property on Workspace. So 518(f)'s stepping on 97cea9d is not seen on 3eee415, and every walking take in 532 and 536 is within 2 × the server's move.
 - 537: passed (a) on 18 of 18 (θS on the landing row 0.00–0.248° against 1.5°; the Hand rows before it 75.6–89.6°, the 3 rows after 0.00–0.43°). (b) A's own θS from section AS's solo run: 0.052–0.079°.
@@ -1184,19 +1184,26 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - New specs: CollisionGroups (the column collides, a Head that arrives not colliding too); StandOffWall (the owner's Head at a wall and a pillar; the back room on the colliding Head); StandOffHold (the hold rows still in every direction; a stand-off step longer than the hold leaves the open); EnemyWalkStart (an attack out of the walk keeps its feet planted); Mixer (a pose hook); RibbonAfterBackfill and LateArtTell (new); SfxPool (the floor kept under an Air read); LockTurnShown (the stance steps; the hips round before the second plant); ClipAudit (the stance plan); DodgeTap (new: a dodge pressed after a turn tap, drawn and sheathed); RushDraw and RushDrawOrder (the hand-back onto a late root that comes in on some rows only); HandsOut (the blade from the first row that draws a pose in its span); BoarHooks (the halt row in either log order); ai, dev and fx data specs; and validator cases for every new data key. Changed expectations: StandOffHold's reach allows 0 on the hold rows at 144, was 0.002 (D-631); ai.spec pins leanStuds at 3.79 and the kobold's grown stop at 4.700 against the cap 4.75, was 4.36 against 4.6, and BruteBackRoom's room goes from 2.945 to 3.788 (D-642, D-643); the validator's engage rule takes off the landing's slack, so a cap of 4.8 now fails and 4.78 passes, and the real fight's kobold cap goes from 4.6 to 4.75; StandOffWall's back-room describe swings the owner's colliding Head at 3.79, was a Head not colliding at 2.95; the turn window's validator message reads 0.180 s, was 0.200 s (D-641); RushDraw's D-602 case now waits settleRestSeconds past the root's last step in, the body standing (every step 0 within 1e-4), its first back step 0.100–0.117 s after that step (D-648).
 - Studio: section AU (items 538 to 554), run after section AT. Sections AS and AT mark each line it replaces "Superseded by item …".
 
+## Locked walk take-up, enemy attack wait, ClipLab views, wall stand-off line and dodge stick gait fixes (2026-11-02, D-651 to D-657)
+
+- The locked walk's planted foot now takes up the physics steps its frame is about to make (D-651, the take-up call's second way): StepTakeUp, a fitted-drift accumulator in the render step, guesses each frame's steps from the render dt, and the gait phase moves on by the guess less the steps the root just took. While a guess is not sure, the walk is D-334's alone. On clocks drawn to item 530's counts, the walk at 8 in screen order, Lune's step p90 goes 0.020–0.033 → 0.018–0.019 at 60 and 0.051 → 0.020–0.021 at 144, and stays 0.019–0.020 at 240 (the PC on 97cea9d read 0.047 and 0.050). Item 282's pattern, no drift at 60 and a steady 60 are unchanged; no drift at 144 and steps in pairs at 144 go from 0.049–0.065 to 0.020–0.023; 477(a)'s share stays 58–61%. The run and the sprint, not judged, read better too: at 16, 0.074–0.083 → 0.028–0.048; at 24, 0.099 → 0.011–0.033 at 60 and 0.102 → 0.079–0.086 at 144. Only CharacterController turns it on (Locomotion's deps.stepsAhead): a pose read after physics already has the frame's steps. New data: locomotion.stride.takeUp (p90Bar 0.025, gateShare 0.98), with its validator rules. The cost: about 26 µs a frame in Lune.
+- An enemy's attack out of its walk waits for the body the PC draws (D-652). The PC draws an enemy's root 0.13–0.27 s behind the server, while ActionStarted plays on the server's beat, so on 3eee415 the boar's Charge crouched on a body that still walked. Replication's Telegraph now hands the wind-up's origin to the enemy's driver; a fresh attack clip waits, hidden, until the drawn root reaches it, at most 0.25 s, the attack plant (D-632) takes it on its brake row, and its beat runs on to meet the server's by the first hit window. Lune with the root drawn 0.2 s (60) and 0.17 s (144) behind, over the attack's first 0.3 s, aa27e35 → now: the boar's Charge 0.157–0.259 → 0.029–0.044 a 60 Hz row and 0.066–0.130 → 0.0095–0.030 at 144, its hooves no deeper than its own −0.0288; the kobold's Overhead 0.083–0.167 → 0.011–0.015 and 0.061–0.086 → 0.016–0.020. The clips wait 0.181–0.217 s. A lost Telegraph means no wait. New data: enemy.gait.attackWaitSeconds 0.25, with a validator rule that keeps it within what the beat can make up by each attack clip's first HitWindowOpen.
+- ClipLab plays a clip paced as the game plays it (D-653, LabPlayback). Walk pace (the Walk button, key W) cycles in place → 0.25 → 0.5 → 1 of the rig's walkSpeed: the rig plays its data walk at RigDriver's rate and weights and is carried along its facing, back on its pedestal every 1.5 s (the boar at 0.5 walks 7.0 studs/s at clip rate 0.5). Play once (the Once button, key Q) plays a one-shot once over the rig's idle with the game's own blends, holds the idle 1 s and plays it again. AT's 532(m) and 533(a) can now be run (items 559 and 560). New data: dev.luau clipLab.walkShares, walkLoopSeconds and onceIdleSeconds and hotkeys walkPace and playOnce, with validator rules (every pedestal rig with a data walk stays inside the stage at its fastest share).
+- Lines corrected (Studio only, D-654): 532(j)'s start rows judge their lowest corner against the deeper of −0.02 and the rig's idle loop's own deepest corner (kobold −0.0325, boar −0.0134), and the kobold's 0° window lowest against the deeper of its idle's stand and −0.02. The kobold's 4 s idle reaches −0.0325 from phase 0.2 to 0.5 of its loop, so a stand row at a shallow point failed when the start ran on into the idle's own sink (the PC on 3eee415: −0.033 against a stand of −0.031 at 60°). The enemy walk's slides on the PC's drawn rows are reports (items 557(a), 557(d) and 558(b)): the PC draws an enemy's yaw and position unevenly from row to row, and since the joints are written before the root the row is drawn on lands, a planted foot moves by each row's deviation (Lune with a yaw cycle read off the PC's rows: 0.078–0.115 on the boar's turning rows at 60). Drawing a walking enemy on a detached, even body is queued for the next round; it also takes the boar's idle turn in place (Lune 0.057 even, 0.114 under the PC's yaw; the PC 0.102).
+- The fighter at a wall under a kobold's stand (D-655 and D-656, Studio lines only; no code changed). AT 535(d)'s First-to-First fails were the check's pairing, not the code: at 60 the bar had left row N−1's root motion out (the PC's own correction), and at 144 the step after a 15–16 ms row was judged on the next short row's bar; all 8 of the PC's rows pass on their own row (the worst margin −0.0028), each the code's share with the engine's 0.000. 535(e)'s engine share at a wall is the next Art's held start pose pushed off the face (Lune's holds +0.13–0.70 with the code at 0.000), after the keep-out stepped back into its room; the code never steps into the wall (0.0000 at 60 and 144). Lune's chain is 1.67 on 3eee415's body (the PC 2.59–2.78) and 3.5 on the owner's colliding Head. 535(f): the brain's stop does not depend on the client's 144 (Lune 3.05–3.43 at 60 server frames and 3.07–3.41 at 144), and the 39 overlap rows are not a push (the engine's 0.000); the 2.897 stop waits on the PC's server rows. StandOffWall's bench now runs the PC's 535 take (the kobold played, both Arts, long rows, the root off the face); at tilted stops it finds Sharp Nail's first lunge row over the bar by its code, up to 0.030, and the kobold pushing the body up to 0.047 a row (open items).
+- A key held through a dodge into a run lets go into the run as the run's own dodge does (D-657, D-646's follow-up): once a dodge's pose hides the gait, its weights aim at the stick's gait (the run with a key down, the idle without), and the covering dodge holds the gait's phase from a standing press too. The held-key blend out goes 21.0 → 15.5 at 60 and 24.0 → 15.7 at 144 (13.6 drawn and 15.3–15.5 sheathed at 60, against DodgeRun's own 13.6 and 15.4), and a turn tap's ≤ 10.8 at every press (was up to 18.3 at 60, 20.1 at 144). Over D-646's 168-take sweep no blend out is over 20 at 60 or 144 (was 2 and 17), and row +1 and the rows under the dodge's hold are unchanged in every take. CharacterController sends the stick's walk speed (stickSpeed); remote rigs send none and keep D-646. Every other dodge, gait, sheath, skid and stride spec prints the same.
+- New specs: StepTakeUp and StrideScreenSteps (new: the take-up's guesses on item 530's clocks, and the walk's step p90 within 0.025 at 60 and 144 in screen order, with the clocks that must not get worse); locomotion-validators (the take-up's numbers); EnemyWalkStart (an attack out of the walk waits for the body drawn behind the server, boar and kobold, at 60 and 144); Replication (the Telegraph's origin goes to the enemy's driver); LabPlayback (new: walk pace and play once); validators (attackWaitSeconds within the beat's make-up; the lab's walk pace and play once); StandOffWall (item 535 under the PC's conditions: each row's own step, the engine's share per hold and per swing, and the open field); DodgeTap (a key held through a dodge, and a 144 Hz run); CharacterController (the stick's walk speed under a dodge); dev data (the held-key presses and the step rate); and validator cases for every new data key. Changed expectations: EnemyWalkStart's crouch window now starts at the clip's first drawn row (the first row its fade is not held), as its comment said, which is the row it was played when nothing waits; its numbers moved only where the 144 Hz view's drawn root makes a clip wait a row: the boar at 60° 0.0255 → 0.0163 and at 135° 0.0391 → 0.0389, the kobold at 0° 0.0230 → 0.0162, 60° 0.0189 → 0.0198, 90° 0.0265 → 0.0154 and 135° 0.0265 → 0.0161; no bar moved.
+- Studio: section AV (items 555 to 562), run after section AU. Sections AS, AT and AU mark each line it replaces "Superseded by item …".
+
 ## Next three tasks
 
-1. Run section AU (items 538 to 554) of `docs/STUDIO_TASKS.md` on the owner's PC with the build that has these fixes,
-   after section AT, every item with item 397's frame names, at the frame rates each names, judged on the BasePart
+1. Run section AV (items 555 to 562) of `docs/STUDIO_TASKS.md` on the owner's PC with the build that has these fixes,
+   after section AU, every item with item 397's frame names, at the frame rates each names, judged on the BasePart
    read. Report every pass line with its numbers. Earlier sections' lines not superseded stand as written.
-2. Fix what sections AT and AU find. Queued for the next round: the locked walk's take-up on the PC's step clocks
-   (section AS's 530, for 448 and 477); the enemy walk on the PC's client rows (section AT's 532(a), (c) at 144, (e),
-   (j) and the boar's stop into the Charge in (k), with ClipLab's walk speed for 532(m) and the Stagger's blend into
-   the idle for 533(a)); the fighter at a wall under a kobold's stand (section AT's 535(d) at 144, with (e)'s ping-pong
-   against the wall and the open field's stop at 144 in (f)); the Charge's front-right hoof raised 0.009 as a clip
-   item, with item 510 re-read; an idle turn plant for the boar; and the stick-steered dodge blend, for a key held
-   through a dodge into a run. Their re-tests follow as later Studio sections. The owner's calls (below, and in AI) go
-   to the owner.
+2. Fix what sections AU and AV find. Queued for the next round: the Charge's front-right hoof raised 0.009 as a clip
+   item, with item 510 re-read; and a walking enemy drawn on a detached, even body (the PC's uneven drawn yaw and
+   position, which also takes the boar's idle turn in place: items 557 and 558's reports). Their re-tests follow as
+   later Studio sections. The owner's calls (below, and in AI) go to the owner.
 3. The rehearsal and the recording (item 438), once every line passes: rehearse the 11 shots in dev.luau order with the
    frame-tick square on and log any take that fails its own pass lines; if all pass, record each with Game Bar at 60
    fps, High quality, with **View > Stats** open during the fight for the fps reading, and hand the files over (here in
@@ -1204,8 +1211,89 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
    of `docs/ANIMATION_REVIEW.md` are filled (with AG item 391(f)'s enemy cells), and anything that reads wrong is fixed
    with the PoseEditor and recorded again. The section 16 numbers and the merge into `main` follow (Open items).
 
-### Open items (after the colliding Head, Art hold, enemy attack plant, watcher tell and ribbon, stance step, Brute landing, dodge tap and rush hand-back fixes, not in the three above)
+### Open items (after the locked walk take-up, enemy attack wait, ClipLab views, wall stand-off line and dodge stick gait fixes, not in the three above)
 
+- **Owner calls from the locked walk take-up, enemy attack wait, ClipLab views, wall stand-off line and dodge stick
+  gait fixes (the default is chosen; say if not).**
+  - The take-up's bar, locomotion.stride.takeUp.p90Bar, is 0.025: between the gait's own 0.018–0.023 (what a perfect
+    take-up reads in Lune) and one missed step at the walk's speed (0.033). The default judges item 555(a) at 0.025;
+    say if not.
+  - The take-up guesses only while 59 of its last 60 guesses were right (gateShare 0.98), so no modelled clock gets
+    worse: at 0.9 the gate opened on lucky runs, and a modelled clock that drifts at 60 fps rose from 0.0236 to 0.0301.
+    A lower share keeps the take-up on more of the time and slides more on clocks it cannot follow. The default keeps
+    0.98; say if not.
+  - An enemy's attack pose now shows up to 0.25 s after the Telegraph's ring, while its drawn body walks to the spot,
+    then runs up to 2 times as fast to be back on the server's beat by its first hit window, so the strike still lands
+    on the server's time (D-652). A smaller attackWaitSeconds shows the pose sooner, with the hooves sliding on rows
+    where the body still walks (at 0.1 s about half the lag is left). The default waits up to 0.25 s; say if not.
+  - ClipLab's walk pace carries the rig across the stage, so its planted feet hold the ground, rather than walking it
+    in place on its pedestal, a treadmill whose feet slide (D-653). Walking in place stays the first step of the W
+    cycle. The default carries the rig; say if an in-place option is wanted at the speeds too.
+  - The PC's uneven drawn yaw and position under a walking enemy, and the boar's idle turn in place, are report-only
+    this round (items 557(a), 557(d) and 558(b)): fixing them is a detached, even drawn body, too large for this round,
+    and it is queued for the next. The default reports them; say if not.
+  - At a wall the next Art's held start pose leans into the face, and the engine pushes it off, toward the kobold, once
+    a hold (D-656: Lune +0.13–0.70 a hold on the owner's colliding Head; the PC on 3eee415 up to 0.48 a clip); at a
+    turned face that push grazes the kobold. A fighter backed to a wall could brace instead. Reserving the next Arts'
+    lean in the keep-out's step back cuts the push's path at 60 from 3.53 to 0.16 but leaves Sharp Nail's hand 0.56
+    into the kobold at the thrust key (0.26 now); a brace in the stance plan (D-606, D-640), the stance stepping the
+    root off the face by the start pose's lean during the hold at up to 12 studs/s, is not built. The default leaves
+    it: the push is the engine's, the code never steps into the wall, and item 561 judges the code and reports the
+    push; say if not.
+  - The owner's colliding Head grazes the kobold's HeldBlocker by 0.010 square on at Sharp Nail's thrust, and by up to
+    0.040–0.052 at tilted stops. The default counts a graze within the engine's contact, 0.04, as no overlap (item
+    561(a), square on), and item 561(g) reports the tilted stops; say if not.
+  - Item 550(d)'s held-key group was report only, since the run started under the dodge's fade (Lune 17.4–21.0). It now
+    reads as the run's own dodge (13.6 drawn and 15.3–15.5 sheathed at 60), so item 562(a) judges it against 20. The
+    default judges it; say if it should stay a report.
+  - At 144 the dodge clip's own landing key reads 21.7 a 60 Hz row's worth on one frame (DodgeForward's left forearm
+    and hand, its 0.25 s key), the gait hidden under it, where 60 reads 19.5. Re-easing that key, a clip change, would
+    let the 144 hold be judged at 20. The default reports those rows (item 562(c)); say if not.
+- **From the locked walk take-up fixes.** The take-up's rate is the mean render dt over 600 frames, so after a lasting
+  frame-rate change (a monitor switch, a cap) it lags until the span refills, up to 10 s at 60, and the gate stays shut
+  meanwhile (D-334 alone); two misses in 60 frames also shut it for up to 60 frames. Not measured on the PC. The fit
+  assumes the engine's steps follow its own frame clock, with about 0.3 ms of jitter, while the render dt's work jitter
+  telescopes (read from item 530's spread: 3.4 on the render dt, 2.0 on PreSimulation's); if the PC's clocks behave
+  otherwise, the gate stays shut and the walk is D-334's, no worse. Lune's D-334 baseline at 60 is lower than the PC's
+  (0.020–0.033 against 0.047; at 144 they agree, 0.051 against 0.050), so something in the PC's 60 fps clock is not
+  modelled yet: item 555's CSV can be replayed through StepTakeUp. On item 282's 2–6 pattern, and on clocks whose steps
+  catch up on the render dt itself (Stride.spec's and TravelSlipLeak's jitter clocks), the walk stays D-334's (0.12 p90
+  on 282); a render-dt accumulator would be needed there, and item 530 says the PC is not such a clock now. The cost is
+  about 26 µs a frame in Lune unloaded, 30–60 µs on a loaded machine; the drift fit compares corner pairs, which grows
+  with the square of the drift steps in its 2 s (about 7 at 1.5%). The largest row at 144 (0.062–0.076) is the gait's
+  own, near a perfect take-up's 0.061–0.081.
+- **From the enemy attack wait and ClipLab fixes.** The joints are written at the render step, before the root the row
+  is drawn on lands, so a row whose drawn yaw or position step is off the even pace moves every planted foot by that
+  deviation: Lune with a yaw cycle read off the PC's rows reads 0.078–0.115 at 60 on the boar's turning rows, and 0.043
+  for the boar at 180° at 144 with no lag. Prediction cannot fix it (the step's deviation is not known when the joints
+  are written), and a longer turn window gained nothing. The fix queued for the next round draws a walking enemy's body
+  detached (D-531) on a root rebuilt from the replicated snapshots at the server's pace and yaw rate, and paces the
+  gait and the turn plant against it. The boar's idle turn in place (the PC 0.102; Lune 0.057 even, 0.114 under the
+  PC's yaw) needs a field hold for a turn with no travel, which would still read about 0.075 under the uneven yaw, so
+  it is built with the even body. The 0° Charge's lowest on 3eee415, −0.091 / −0.099, is not reproduced (Lune −0.0288 /
+  −0.032; item 557(c) asks whether the drawn rush holds the root there), nor are the kobold start rows' 0.129 and 0.132
+  at 60 (Lune 0.077 at most in every view; item 558(a) asks for their drawn root steps). The wait reads the Telegraph,
+  which is unreliable as ActionStarted is: a lost Telegraph means no wait, and the attack draws as on aa27e35.
+- **From the wall stand-off line fixes.** At a tilted stop, on aa27e35's code, Sharp Nail's first lunge row (clip 0.333
+  → 0.350) takes the keep-out's aside on the same row as the clip's lunge, so the code's step goes over the long-row
+  bar: 0.296–0.315 against 0.285 at 60 (the aside 0.071–0.128) and 0.118–0.161 against 0.116–0.157 at 144 (the aside
+  0.017–0.047), on 1–4 rows a take at the wall at 13.5° and 19.2° and the pillar at 10–30°, up to 0.030 past; none
+  square on, and none on 3eee415's body at 60, whose stops stand closer. Letting the aside share the row's budget with
+  the lunge and carry the rest to the next rows would fit the anime; it needs a check that the hand still stays off the
+  held part at the key and a fail-first spec at a turned face, and is not built. At tilted stops the kobold also pushes
+  the body, up to 0.047 a row (0.087 on 3eee415's body): the hold's lean is pushed off a turned face along its normal,
+  partly across the line, into the HeldBlocker (the deepest, the Head at the hold's clip 0.117); a hold that does not
+  lean into the face (the brace above) would not be pushed across. The PC's 0.0711–0.0752 at 144 (Lune 0.058 at most),
+  the open field's 2.897 stop and its 39 overlap rows have no Lune match yet: item 561 logs the columns that place
+  them.
+- **From the dodge stick gait fixes.** At 144, on 6 of the sweep's 168 takes, row +1 reads over 20 a 60 Hz row's worth:
+  up to 27.8 (drawn, A tapped 0.08 s, DodgeBack pressed 0.225 s after it, LeftLowerLeg) and 22.6 for a held key's
+  DodgeForward at 0.35 s, the same before and after D-657, where 60 reads ≤ 19.1; it is the press frame (the stride's
+  last step or the two-step stop's carry, with the dodge's first blend), D-614's row, and item 562(e) reports it. The
+  dodge clip's own landing key at 144 reads 21.7 on one frame (DodgeBack's 20.0–20.1), a clip key's ease (the owner
+  call above). After the dodge has gone (not judged), the run starting and turning to the key reads up to 24.7, the run
+  at 16's own lower leg while AutoRotate turns the body, before and after. Remote players' rigs send no stickSpeed and
+  keep D-646.
 - **Owner calls from the colliding Head, Art hold, enemy attack plant, watcher tell and ribbon, stance step, Brute
   landing, dodge tap and rush hand-back fixes (the default is chosen; say if not).**
   - An unlocked Art plans nothing before the release (D-606), so a frozen pose that stands with a hand in an enemy has
@@ -1248,8 +1336,9 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
     after the key went down, the blend-out reads 21.0 (was 15.3), and the worst over 168 takes goes from 21.8 to 21.0;
     a tap before a dodge, the PC's flagged takes, now passes everywhere. Aiming the gait's weights under the dodge at
     the stick's gait (the run while a key is down, the idle when not) needs LocomotionState's output for the stick's
-    speed, not the root's dodge speed. The default accepts D-646's trade as written, item 550(d) reports those takes as
-    their own group, and the stick-steered dodge blend is queued for the next round; say if not.
+    speed, not the root's dodge speed. The default accepted D-646's trade, and the stick-steered dodge blend is now
+    built (D-657: over the 168-take sweep the blend out goes from 21.0 to 15.5 at 60 and from 24.0 to 15.7 at 144; item
+    562).
   - The Sheathe's and the Draw's tip (item 549, which replaces 528) is read on the Last+2 clock (D-647). Making the
     PC's PostSimulation clock the bar instead would need, for 84 at 240 Hz, the pose to move at half speed on short
     frames, which the screen never shows. The default reads the tip on the Last+2 clock and reports the PostSimulation
@@ -1273,7 +1362,7 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   torsos.
 - **From the enemy attack plant fixes.** The 144 Hz brake row has the least margin: the boar's 135° take reads 0.039
   against 0.042, since the first row's share is a fixed 0.5 while the interpolated root kept 0.53–0.88 of its last move
-  there; item 540(c) reports the PC's rows. The rows after the brake row assume the studio Humanoid's brake (0.672 per
+  there; item 556(d) reports the PC's rows. The rows after the brake row assume the studio Humanoid's brake (0.672 per
   1/240 s, from the PC's server log on 4b18b5c); a live Humanoid that brakes differently moves them by about the
   difference, under 0.02 a row with the Humanoid stopping in about two frames. The Brute's wind-up turn (25°/s) is not
   carried after the first row, a steady error of about 0.01 a hoof that does not slide. ClipAudit and ClipLab play
@@ -1305,15 +1394,16 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   stops further short of a landing could leave a stop at the cap outside the engage range, though at a flush wall the
   stop is 4.675 against the cap of 4.75, so it does not bind there.
 - **From the dodge tap fixes.** D-646 stands the weights at the press's mix; on 3eee415 the stale targets happened to
-  be the run at a press 0.075 s after the key and not at 0.05 s, so a key held through the dodge reads 21.0 at 0.075 s
-  (was 15.3) and 17.4 at 0.05 s (was 21.7; the owner call above). The Draw at a sprint read 79.9–90.0 on the PC at 60
-  on its own rows before any stop, against Lune's ≤ 67.3: 1.19–1.25× on its passing takes, more than D-293's 6%
-  moving-base share, so the owner's avatar is the likely rest, and it sits close to 84 with no stop involved; item
-  549(h) reports it. The PC's chain read at 60 on 97cea9d (up to 150 on the Sheathe) is not reproduced: Lune's chain
-  read equals its screen read, ≤ 76.7 at 60, and item 549's log (the render dt, the PreSimulation counts) should show
-  which clock it was read on. walkD_F's LeftFoot 21.63 and runD_5's 20.40 on 97cea9d are not reproduced (Lune ≤ 15.0
-  and 19.6); the likely cause is the per-row scaling on PostSimulation clocks, which item 550 replaces with the render
-  dt.
+  be the run at a press 0.075 s after the key and not at 0.05 s, so a key held through the dodge read 21.0 at 0.075 s
+  (was 15.3) and 17.4 at 0.05 s (was 21.7). D-657 now aims the weights at the stick's gait once the dodge hides the
+  gait, and those takes read as the run's own dodge, 13.6 drawn and 15.3–15.5 sheathed at 60 (item 562). The Draw at a
+  sprint read 79.9–90.0 on the PC at 60 on its own rows before any stop, against Lune's ≤ 67.3: 1.19–1.25× on its
+  passing takes, more than D-293's 6% moving-base share, so the owner's avatar is the likely rest, and it sits close to
+  84 with no stop involved; item 549(h) reports it. The PC's chain read at 60 on 97cea9d (up to 150 on the Sheathe) is
+  not reproduced: Lune's chain read equals its screen read, ≤ 76.7 at 60, and item 549's log (the render dt, the
+  PreSimulation counts) should show which clock it was read on. walkD_F's LeftFoot 21.63 and runD_5's 20.40 on 97cea9d
+  are not reproduced (Lune ≤ 15.0 and 19.6); the likely cause is the per-row scaling on PostSimulation clocks, which
+  item 550 replaces with the render dt.
 - **From the rush hand-back and halt row fixes.** 523(a)'s C523_144_S4 (0.013 into the LeftArm at clip 0.375 at 144, a
   take from sheathed; the chain +0.023 out, the BasePart and the chain 0.003 apart) is not the pose lag and is not
   reproduced (Lune −0.016 at worst at 144), nor are c78acd1's 144 Hz rows at 0.368–0.375 (0.073 / 0.037); it may share
@@ -1333,7 +1423,8 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   - The boar's Charge out of a walk: its crouch comes on the brake row and blends in over the walking legs, 0.485 a 60
     Hz row and 0.425 at 144 with hooves at −0.060 on the 60° take. The default, hooves that stay planted under the
     crouch's blend-in with a hoof that must move stepping there lifted (a dig-in), is built (D-632: 0.029 a 60 Hz row
-    and 0.026 at 144 on the 60° take, the hooves no deeper than the Charge's own −0.029; item 540).
+    and 0.026 at 144 on the 60° take, the hooves no deeper than the Charge's own −0.029; item 540), and the Charge now
+    waits for the body the PC draws behind the server (D-652; item 556).
   - The stop's brake row stays as one row at the bar: it is drawn before the client sees the brake, and
     EnemyWalkStart's STOP_PENDING holds 0.01 for it on three takes, at most 0.004 over (0.1006, 0.0459 and 0.0423).
     Easing the server's stop instead would stop enemies 1.67–3.3 studs early and move attack spacing, so the server's
@@ -1350,21 +1441,24 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   - A Brute's stop grows only for the world on the line between it and its target (D-627). A wall beside that line does
     not squeeze the fighter between the Brute and the world, and a corner counts where the line meets a wall, so
     neither grows the stop further. The default is the line alone; say if not. A rail or a ledge outside the root box's
-    height band is not seen by the cast and stays open; the PC met none on 3eee415 (item 535(e)), and item 548(e)
+    height band is not seen by the cast and stays open; the PC met none on 3eee415 (item 535(e)), and item 561(d)
     reports any it meets.
 - **From the enemy walk start, turn and stop fixes.** Every walk from standing now arrives later, by (pace −
   startPace)² / 60 studs: 1.67 (0.17 s) for the kobold at 10 and 3.27 (0.23 s) for the boar at 14; the fight kobold's
   first wind-up moved from 0.75 to 0.90 s. The root's uneven yaw at 144 Hz (the PC's 5-row cycle on c78acd1) is the
   engine's replication and interpolation in Lune's model, since the server turns evenly at 1.833° a 60 Hz Heartbeat;
   the PC's 532(g) on 3eee415 read the server's steps at 1.67–1.90° (about 1.83 on the mean) and the client rows'
-  unevenly, 0.02–2.89° at 60, and the PC's 0.116 at 60 against Lune's 0.091 is not explained. On 3eee415 the PC's
-  client row 0 came after the server's first move, not before it: 8–16 rows (60) and 20–27 rows (144) after the first
-  MoveTo (532(h)); the start is judged from the release now, so its lines do not depend on it. The boar at 180° on a
-  144 Hz client with the PC's uneven yaw reads 0.043, a report line (532(d)). From the release the boar turns in place
-  under its idle for 0.367 s before its walk, and its back right hoof is swept 0.057 a 60 Hz row (0.035 at 144), within
-  the bars: an idle turn plant like the player's TurnPlant (D-416) would hold it, and the stop plant's stepping would
-  carry over, but it is not built. The kobold walk's Lab drift (0.57 over one plant, pending 0.33) is the Lab's
-  fallback idle fading under the walk over 0.15 s, not the game's.
+  unevenly, 0.02–2.89° at 60, and Lune with a yaw cycle read off the PC's rows reads 0.078–0.115 at 60 on the boar's
+  turning rows, which the PC's 0.116 at 60 fits. On 3eee415 the PC's client row 0 came after the server's first move,
+  not before it: 8–16 rows (60) and 20–27 rows (144) after the first MoveTo (532(h)): 0.13–0.27 s, the engine's
+  interpolation buffer for a server-owned part, which only the engine sets. The start is judged from the release, and
+  an attack now waits for the body drawn that far behind (D-652; item 556). The boar at 180° on a 144 Hz client with
+  the PC's uneven yaw reads 0.043, a report line (item 557(a)). From the release the boar turns in place under its idle
+  for 0.367 s before its walk, and its back right hoof is swept 0.057 a 60 Hz row (0.035 at 144), within the bars; the
+  PC read 0.102 at 135° on 3eee415, which Lune reads 0.114 under the PC's yaw cycle. An idle turn plant like the
+  player's TurnPlant (D-416) would still read about 0.075 under that yaw, so it waits for an evenly drawn body, and
+  item 558(b) reports the turn. The kobold walk's Lab drift (0.57 over one plant, pending 0.33) is the Lab's fallback
+  idle fading under the walk over 0.15 s, not the game's.
 - **From the sheathed idle and Brute room fixes.** The sheathed Idle's neutral soles still sit 0.020–0.068 below the
   field (Idle's feet below the field, under Clip re-keys); the turn clips stand the feet at the same places, so the
   turn read is unaffected. A longer-legged avatar (legs × 1.1 in Lune) reads 0.0111 on ±135 and 0.0153 on ±179
@@ -1416,10 +1510,10 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
     Item 531 keeps the unlocked run's S, A and D takes as a report-only group. The default accepts all four.
   - The take-up for 448 and item 530: item 530 ran on 97cea9d, where PreSimulation fired once a row but its deltaTime ×
     240 missed the row's physics steps by 0.5 or more on 45 of 713 rows at 60 and 43 of 1648 at 144, so the take-up
-    does not move to PreSimulation. The default is a fitted-drift accumulator in the render step (Lune 0.022–0.032 at
-    60, 0.020 at 144) with a screen-order spec judged on the walk's step p90, queued for the next round; keeping D-334
-    (the PC's p90 0.047 at 60 and 0.050 at 144 on 97cea9d) is the other way. This replaces the earlier call on 448 and
-    477(b).
+    does not move to PreSimulation. The default, a fitted-drift accumulator in the render step with a screen-order spec
+    judged on the walk's step p90, is built (D-651: Lune 0.018–0.019 at 60 and 0.020–0.021 at 144 on clocks drawn to
+    item 530's counts, where D-334 alone reads 0.020–0.033 and 0.051; item 555). This replaces the earlier call on 448
+    and 477(b).
   - A sheathed lock turn's pivot foot gets the same 0.01 a row from any point of the sheathed idle: from its
     weight-shift phase (4.25–7.75 s) the blend into TurnLeft or TurnRight still slides 0.0475 / 0.0445 on 16–18 of 48
     phases. It was the sheathed idle's weight shift, now re-keyed so the feet stay where the turn clips stand them
@@ -1456,11 +1550,11 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   a resting root that jitters toward the body faster than 0.5 studs/s would hold the slide for up to 0.6 s; and a
   hand-back that waits out settleSeconds with the root still farther than settleStuds slides as before. The 144 fps
   Torso row of 0.059 implies a row of about 12.6 ms; 527(c) logs its dt.
-- **From the enemy wheel and walk start fixes.** The kobold's idle stands its lowest foot corner at −0.0325, outside
-  stride.contact and inside footSinkStuds, and the start rows' low bar uses that stand. The dev walk
-  (EnemyService.walk) still walks straight at its goal while it turns, so it can crab from behind (dev only). The
-  kobold's 0.25 s alert turn in place comes before row 0, so a log from the first root move never sees it; one from the
-  release would.
+- **From the enemy wheel and walk start fixes.** The kobold's idle reaches its lowest foot corner, −0.0325, from phase
+  0.2 to 0.5 of its 4 s loop, outside stride.contact and inside footSinkStuds; the start rows' low bar now uses the
+  idle loop's own deepest corner, not the stand on row 0 (D-654; item 558). The dev walk (EnemyService.walk) still
+  walks straight at its goal while it turns, so it can crab from behind (dev only). The kobold's 0.25 s alert turn in
+  place comes before row 0, so a log from the first root move never sees it; one from the release would.
 - **From the held stance and kobold blade fixes.** 499(a) is not reproduced: Lune is out at every rate and idle phase,
   and a late HitConfirmed only moves the arm further out; a smaller avatar's arm reaches in at clip 0.45, past the
   plan's horizon, so a plan that runs past the clip's end against a flinching target is the next step if item 523 shows
@@ -1559,9 +1653,9 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   re-keyed out of the field (D-601). The fitted velocity under-read gives the PC's kobold at 0° and 60° at 144 about
   40% low (0.059 against 0.098 / 0.094).
 - **From the sheath-arm, lock-turn and dodge fixes.** 476(a)'s pivot slide was the drawn idle's weight shift left on
-  the turning root, fixed by D-615 (item 529). 448's take-up waits on item 530's step clocks (the newer owner call
-  above). The dodge's legs into and out of the run are fixed by D-609 and D-610. A sprint stopped without a Skid under
-  a mid-swing Sheathe is fixed by D-611 (item 528(e)).
+  the turning root, fixed by D-615 (item 529). 448's take-up is built on item 530's step clocks (D-651; item 555). The
+  dodge's legs into and out of the run are fixed by D-609 and D-610. A sprint stopped without a Skid under a mid-swing
+  Sheathe is fixed by D-611 (item 528(e)).
 - **Owner calls from the watcher hit-stop and wall stand-off fixes (the default is chosen; say if not).**
   - At lag 0.1 a watcher's copy of a swing starts about 0.134 s in and fades in from idle over 0.08 s, so the
     activation's 0.1 s still hold shows for only 0 / 2 / 5 rows at 30 / 60 / 144 fps (item 492(b)). A faster blend into
@@ -1630,8 +1724,9 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
   interpolation (item 473 (g) reports it).
 - **From the client upright and measure fixes.** An EntityId that arrived after the Humanoid would miss the arrival
   catch and fall once into the rescue (the PC data show EntityId arriving with the tag). The client's fall-state list
-  is wider than the server's (it adds Physics and PlatformStanding). 448's take-up fix waits on item 530 (the newer
-  owner call above); on item 282's irregular 2–6 pattern no take-up can hold 0.04 a frame at run speed.
+  is wider than the server's (it adds Physics and PlatformStanding). 448's take-up is built on item 530's clocks
+  (D-651; item 555); on item 282's irregular 2–6 pattern no take-up can hold 0.04 a frame at run speed, and D-651 gives
+  no guess there (0.1228 with or without it).
 - **From the landing and ribbon fixes.** The landing's Humanoid model is fitted to the PC's P2 rows, not engine
   internals, so items 479 and 480 are the real test; the pace drops below WalkSpeed 2 on the last rows, where P2 only
   measured starts from rest. A slam's landing aims 4 studs into the wall, so the Humanoid pushes on the face until the
@@ -1670,12 +1765,13 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
     i-frames are unchanged, and a dodge out of an attack still snaps (D-528).
   - The stride-own rule for one-shots out of a sprint (a row's foot turn within the shown gait's own per-row turn
     + 1°), already open from 436(b), now also reads 435(d) and 436(a) (D-529).
-- **From the section AI fixes, second part.** At 144 fps the drawn walk's planted foot slides 0.050 p90 a row on
-  screen (0.019 at 60): the gait builds its pose for the last frame's root travel (D-334) and physics moves the root
-  over 1 or 2 substeps a frame. Proposed: build the pose for this frame's physics travel; item 448(c) first confirms
-  the substep pattern. Out of a drawn sprint into an attack the arms still turn 21–22° a row (the Sprint@ hand-off);
-  proposed: stretch locomotion.handOff's arm factors when the gait shown is a sprint, within the first strike key.
-  A drawn guard's tip moves 340–358 studs/s for its one snap row at 60 Hz, by design, and no line judges it.
+- **From the section AI fixes, second part.** At 144 fps the drawn walk's planted foot slides 0.050 p90 a row on screen
+  (0.019 at 60): the gait builds its pose for the last frame's root travel (D-334) and physics moves the root over 1 or
+  2 substeps a frame. D-651 now takes up the steps this frame's physics is about to make: 0.051 → 0.020–0.021 at 144 in
+  Lune on item 530's clocks (item 555). Out of a drawn sprint into an attack the arms still turn 21–22° a row (the
+  Sprint@ hand-off); proposed: stretch locomotion.handOff's arm factors when the gait shown is a sprint, within the
+  first strike key. A drawn guard's tip moves 340–358 studs/s for its one snap row at 60 Hz, by design, and no line
+  judges it.
 
 - **Owner calls from the section AI fixes, first part (the default is chosen; say if not).**
   - A client copy of an enemy found already fallen stands up to Running (chosen), not GettingUp: Running is the

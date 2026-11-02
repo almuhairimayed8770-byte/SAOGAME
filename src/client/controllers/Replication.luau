@@ -2312,6 +2312,11 @@ function handlers.Telegraph(payload: any)
 	local now = serverClock()
 	local lateBy = if now ~= nil then math.max(0, now - payload.serverTime) else nil
 	local origin, facing = toVector(payload.origin), toVector(payload.facing)
+	local windUpAt = method(d.locomotion, "windUpAt")
+	if record.kind == "Enemy" and payload.origin ~= nil and drivers[record.id] ~= nil and windUpAt ~= nil then
+		-- Its attack clip waits for the drawn body to walk to where the wind-up began (D-652).
+		windUpAt(drivers[record.id], origin)
+	end
 	local def, attackDef = attackDefOf(record, payload.attackId, nil)
 	local rush = attackDef ~= nil and hasRushDraw and RushDraw.isRush(def.archetype, attackDef)
 	-- A blow's tell holds to its snap (F7); a rush's line ends at its launch. Its shape lies on the

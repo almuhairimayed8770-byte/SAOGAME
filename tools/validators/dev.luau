@@ -26,6 +26,10 @@
 	starts on (clipLab.camera.startYaw) and the rim behind them, so the faces the camera sees are
 	lit and a dark outfit's edge reads against the backdrop; the backdrop a part name and a palette
 	color; the lab's ambient colors and diffuse scale in [0, 1] and its exposure in [-3, 3].
+	Its walk pace (D-653): clipLab.walkShares rising shares of a rig's walkSpeed, each above 0 and
+	at most 1; clipLab.walkLoopSeconds positive, short enough that each pedestal rig with a data walk
+	carried at its fastest share stays on the stage (clipLab.stage.radius); clipLab.onceIdleSeconds
+	positive.
 
 	The capture's timeScale.steps are each above 0 and at most 1, and timeScale.default is one of
 	them: the capture slows the local body with them (CharacterController.setCaptureTimeScale), so
@@ -645,7 +649,7 @@ local function checkDodgeTap(ctx: Context, dev: any, problem: (message: string) 
 	if not isNumber(cases.settle) or cases.settle <= 0 then
 		problem("groundClearance.dodgeTap.settle must be a number above 0")
 	end
-	for _, key in { "holdSeconds", "pressAfter" } do
+	for _, key in { "holdSeconds", "pressAfter", "heldPressAfter" } do
 		local list = cases[key]
 		if typeof(list) ~= "table" or #list == 0 then
 			problem(("groundClearance.dodgeTap.%s must list at least one time"):format(key))
@@ -661,6 +665,26 @@ local function checkDodgeTap(ctx: Context, dev: any, problem: (message: string) 
 					)
 				)
 			end
+		end
+	end
+	-- D-657: the step rates, review.fps among them (every row is judged at that one).
+	if typeof(cases.stepHz) ~= "table" or #cases.stepHz == 0 then
+		problem("groundClearance.dodgeTap.stepHz must list at least one step rate")
+	else
+		local judged = false
+		for index, hz in cases.stepHz do
+			if not isWhole(hz) or hz < 60 then
+				problem(
+					("groundClearance.dodgeTap.stepHz[%d] must be a whole number of steps a second, at least 60"):format(
+						index
+					)
+				)
+			elseif dev.review ~= nil and hz == dev.review.fps then
+				judged = true
+			end
+		end
+		if not judged then
+			problem("groundClearance.dodgeTap.stepHz must list review.fps (every row is judged there)")
 		end
 	end
 	local engine = cases.engine
@@ -1317,6 +1341,57 @@ return function(ctx: Context): { string }
 					lab.actionPriority
 				)
 			)
+		end
+		-- Walk pace and play once (LabPlayback, D-653).
+		local shares = lab.walkShares
+		local fastest = 0
+		if typeof(shares) ~= "table" or #shares == 0 then
+			problem("clipLab.walkShares must list shares of a rig's walkSpeed")
+		else
+			for index, share in shares do
+				if not isNumber(share) or share <= 0 or share > 1 then
+					problem(("clipLab.walkShares[%d] %s must be above 0 and at most 1"):format(index, tostring(share)))
+				elseif index > 1 and isNumber(shares[index - 1]) and share <= shares[index - 1] then
+					problem(
+						("clipLab.walkShares[%d] %s must be above the share before it"):format(index, tostring(share))
+					)
+				else
+					fastest = math.max(fastest, share)
+				end
+			end
+		end
+		local loop = lab.walkLoopSeconds
+		if not isNumber(loop) or loop <= 0 or loop == math.huge then
+			problem(("clipLab.walkLoopSeconds %s must be a positive number of seconds"):format(tostring(loop)))
+		elseif typeof(lab.rigs) == "table" and typeof(lab.stage) == "table" and isNumber(lab.stage.radius) then
+			local rigData = ctx.load("src/shared/data/rigs")
+			local clips = ctx.load("src/shared/data/choreo").rigs
+			for _, pedestal in lab.rigs do
+				local rig = rigData[pedestal.rig]
+				local walks = typeof(clips) == "table"
+					and clips[pedestal.rig] ~= nil
+					and clips[pedestal.rig].walk ~= nil
+				local at = pedestal.position
+				if not walks or rig == nil or not isNumber(rig.walkSpeed) or typeof(at) ~= "table" then
+					continue
+				end
+				local reach = math.sqrt((at[1] or 0) ^ 2 + (at[3] or 0) ^ 2) + rig.walkSpeed * fastest * loop
+				if reach > lab.stage.radius + 1e-9 then
+					problem(
+						("clipLab.walkLoopSeconds %s carries the %s %.2f studs from the stage's middle at its walk pace %s, past clipLab.stage.radius %s"):format(
+							tostring(loop),
+							tostring(pedestal.rig),
+							reach,
+							tostring(fastest),
+							tostring(lab.stage.radius)
+						)
+					)
+				end
+			end
+		end
+		local idle = lab.onceIdleSeconds
+		if not isNumber(idle) or idle <= 0 or idle == math.huge then
+			problem(("clipLab.onceIdleSeconds %s must be a positive number of seconds"):format(tostring(idle)))
 		end
 	end
 

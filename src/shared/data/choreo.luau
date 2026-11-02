@@ -346,6 +346,39 @@ local Choreo = {
 			-- 0.6% bias holds the difference at 0.15% of a second of travel, a twentieth of the
 			-- bound, and each frame's own step is still taken up whole.
 			travelSlipDecaySeconds = 0.25,
+			-- The take-up of the steps a frame is about to make (StepTakeUp, D-651): the screen
+			-- draws a render step's pose on the root that frame's physics then moves (D-343), so
+			-- with a sure guess the phase moves on by the guessed steps in place of the ones the
+			-- root just took. The owner's PC steps 4 a frame at 60 fps with a fifth every 16th
+			-- (2, 2, 1 at 144, 1 at 240, one more every 64 planned), about 1.5% ahead of every
+			-- clock the code reads, while the render dt jitters up to about 6 ms (item 530). The
+			-- planned steps' rate is the mean dt over spanRows frames (10 s at 60 fps: the jitter
+			-- cancels over it), their phase fitted to the last planRows frames on a grid of
+			-- `phases` and carried refitRows frames between fits; the drift's steps are fitted to
+			-- the last extraSeconds (about 7 of them at 1.5%). A guess is used while the last
+			-- gateRows guesses were right on gateShare of them (59 of 60: at 0.9 a 60 fps clock
+			-- whose steps drift off a jittered frame opened it on lucky runs and its misses took
+			-- the walk's p90 from 0.0236 to 0.0301), after minRows frames. stepHz is the engine's
+			-- physics steps a second. A frame whose travel is wholeSteps or more off a whole
+			-- number of steps at the speed (the root speeding up, slowing or held) starts the fit
+			-- over. p90Bar: on the PC's step clocks in the screen order (StrideScreenSteps.spec),
+			-- the locked drawn walk at walkSpeed moves its least-moving grounded foot corner at
+			-- most this a frame on nine frames in ten: above the gait's own (0.018 at 60 fps,
+			-- 0.020-0.023 at 144 with a perfect take-up), under one missed step at walkSpeed
+			-- (0.033), which D-334 alone shows on the frames whose steps change.
+			takeUp = {
+				spanRows = 600,
+				planRows = 30,
+				phases = 12,
+				refitRows = 2,
+				extraSeconds = 2,
+				gateRows = 60,
+				gateShare = 0.98,
+				minRows = 30,
+				stepHz = 240,
+				wholeSteps = 0.25,
+				p90Bar = 0.025,
+			},
 			-- A body held off its stick (D-144): walking into an enemy or a wall, or slid along its
 			-- flank. Once the stick has stayed within `degrees` of one direction for
 			-- `settleSeconds` (a turn swings the root's velocity across after the stick; a pan
@@ -663,6 +696,18 @@ local Choreo = {
 			-- kept 0.20) and 0.52 a 144 Hz row. Carried on by what the last row kept of the one
 			-- before, the hooves slid 0.078 at 144 (the interpolated root steps unevenly).
 			attackBrakeSeconds = 0.0105,
+			-- An attack clip that comes in while the drawn body still walks waits for it to brake
+			-- (D-652): its clock and fade stand, owing the server's beat the time, until the root's
+			-- last row moved under stopBrakeShare of the walk's pace, at most this long and never past
+			-- what enemy.beat.maxRate can still even by the clip's first HitWindowOpen. The PC's client
+			-- draws an enemy's root 0.13 to 0.27 s behind the server (532(h) on 3eee415: row 0 came 8
+			-- to 16 rows at 60 and 20 to 27 at 144 after the first MoveTo) while ActionStarted plays
+			-- on the server's beat, so the Charge showed 13 rows (60) and 26 rows (144) before the
+			-- drawn root braked, and the attack plant held the legs on a body still walking: Lune
+			-- with the root 0.2 s behind, the boar's Charge out of its walk 0.255 a 60 Hz row (0.106
+			-- at 144), the kobold's Overhead 0.083 (0.064). At most (1 - 1 / maxRate) of each attack
+			-- clip's first HitWindowOpen (tools/validators/choreo.luau): the Charge's 0.6 s evens 0.3.
+			attackWaitSeconds = 0.25,
 		},
 		-- The attack clip ActionStarted plays keeps that beat up to its first HitWindowOpen (D-172):
 		-- the rig's hit-stop is the only freeze, and what it held beyond the server's pause (or
