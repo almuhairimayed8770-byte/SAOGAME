@@ -1,7 +1,8 @@
 --!strict
 --[[
 	A held enemy stands upright on this client too (D-508, D-523, D-543, D-544, the client side
-	of D-494). The server turns its enemy Humanoids' fall states off (ai.upright.offStates) on the
+	of D-494), and a copy stood up with its state machine off gets it back at its release (D-559).
+	The server turns its enemy Humanoids' fall states off (ai.upright.offStates) on the
 	frame each model is made, but Humanoid:SetStateEnabled does not replicate. The real
 	EntityTracker meets the models the way Studio hands them over (the SkyspireEntity tag's
 	InstanceAdded, the attributes the server published, each attribute change on its own signal),
@@ -25,28 +26,44 @@
 	- with the state machine on, from the row its root is let go it reads the server's state
 	  (Running), FallingDown or not before;
 	- its root stays at its standing height throughout (nothing visible was measured: P1 Torso y
-	  3.40-3.46, lowest leg corner -0.032 to 0.000 with and without FallingDown).
+	  3.40-3.46, lowest leg corner -0.032 to 0.000 with and without FallingDown);
+	- with the state machine on, physics reads the floor under the copy into FloorMaterial (474(a)
+	  on 209875b: Grass on the field); with it off the copy reads Air (474(e): 536 of 536 rows,
+	  held and walking). Written on the copy's Humanoid, so the real SfxPool.surfaceOf and
+	  Locomotion.humanoidTracker read it.
 
 	One frame here: the beforePhysics step (PreSimulation), then what replication brings (each
 	arrival with its handlers, in order; a Humanoid's parenting fires the model's arrival seam,
-	start()'s ChildAdded), then this client's physics on every copy, then the logged row. Where in
-	Studio's frame the copy first falls is not measured; that it has fallen by the next
-	PreSimulation and not inside its own arrival handler is (442, P1). Also assumed for one case
-	only: an engine that loses the first SetStateEnabled made on a copy (never seen since 4b18b5c).
+	start()'s ChildAdded; a hold's end is the root's Anchored replicated), then this client's
+	physics on every copy, then the logged row. Where in Studio's frame the copy first falls is not
+	measured; that it has fallen by the next PreSimulation and not inside its own arrival handler
+	is (442, P1). Assumed: a state machine turned back on reads the floor again on its next step
+	(474(e) checks it). Also assumed, each for one case only: an engine that loses the first
+	SetStateEnabled made on a copy (never seen since 4b18b5c), and one whose state machine, turned
+	back on, lays the copy down on its next step (never seen).
 ]]
 
 local EntityTracker = Harness.load("src/client/controllers/EntityTracker")
 local Replication = Harness.load("src/client/controllers/Replication")
 local RigBuilder = Harness.load("src/server/world/RigBuilder")
+local SfxPool = Harness.load("src/client/audio/SfxPool")
+local Locomotion = Harness.load("src/client/choreo/Locomotion")
 local AI = Harness.load("src/shared/data/ai")
+local Fx = Harness.load("src/shared/data/fx")
 
 local UPRIGHT = AI.upright.client
 local NAMES = UPRIGHT.attributes
 local FALLS = UPRIGHT.offStates
+-- The Playground field under the copies (the PC's FloorMaterial on 474(a)) and its footstep surface.
+local FIELD = "Grass"
+local FIELD_SURFACE = Fx.audio.materialSurface[FIELD]
 
 -- The PC's longest held stretch in a take (rows from the spawn to the release, 398(a)).
 local HELD_ROWS = 196
 local AFTER_ROWS = 60
+-- 474(e)'s walk after the release: 5 s at 60 Hz, 39 studs.
+local WALK_ROWS = 300
+local WALK_STEP = 39 / WALK_ROWS
 
 local function fakeSignal(): any
 	local handlers: { (...any) -> () } = {}
@@ -96,6 +113,12 @@ type Copy = {
 	fallingRows: number,
 	enabledOnFirstRow: boolean?, -- GetStateEnabled(FallingDown) on the first logged row
 	stateOnFirstRow: string?,
+	floor: string, -- Humanoid.FloorMaterial's name, as physics last left it
+	heldEvaluates: boolean?, -- EvaluateStateMachine on the last row its root was anchored
+	machineWrites: { boolean }, -- every EvaluateStateMachine write, in order
+	reads: number, -- GetState calls
+	downOnResume: boolean, -- the other assumed engine (see the header)
+	layDown: boolean, -- that engine lays it down on its next step
 }
 
 type World = {
@@ -109,7 +132,7 @@ type World = {
 	players: { [Instance]: boolean }, -- Players:GetPlayerFromCharacter
 }
 
-local function newCopy(loseFirstSet: boolean, root: BasePart): Copy
+local function newCopy(loseFirstSet: boolean, root: BasePart, downOnResume: boolean?): Copy
 	local enabled: { [string]: boolean } = {}
 	for _, name in FALLS do
 		enabled[name] = true
@@ -128,6 +151,12 @@ local function newCopy(loseFirstSet: boolean, root: BasePart): Copy
 		fallingRows = 0,
 		enabledOnFirstRow = nil,
 		stateOnFirstRow = nil,
+		floor = "Air",
+		heldEvaluates = nil,
+		machineWrites = {},
+		reads = 0,
+		downOnResume = downOnResume == true,
+		layDown = false,
 	}
 end
 
@@ -136,6 +165,7 @@ end
 local function engineHumanoid(copy: Copy): any
 	local methods = {
 		GetState = function(_self: any): any
+			copy.reads += 1
 			return (Enum.HumanoidStateType :: any)[copy.state]
 		end,
 		GetStateEnabled = function(_self: any, stateType: any): boolean
@@ -168,6 +198,10 @@ local function engineHumanoid(copy: Copy): any
 		end,
 		__newindex = function(_, key: string, value: any)
 			assert(key == "EvaluateStateMachine", "the fake Humanoid has no property " .. key)
+			table.insert(copy.machineWrites, value == true)
+			if value == true and not copy.evaluates and copy.downOnResume then
+				copy.layDown = true
+			end
 			copy.evaluates = value == true
 		end,
 	})
@@ -225,7 +259,7 @@ local function enemy(
 	return model, humanoid
 end
 
-local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolean?): World
+local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolean?, downOnResume: boolean?): World
 	EntityTracker.reset()
 	local copies: { [Instance]: Copy } = {}
 	local players: { [Instance]: boolean } = {}
@@ -238,7 +272,7 @@ local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolea
 	local function copyOf(humanoid: Instance): Copy
 		local copy = copies[humanoid]
 		if copy == nil then
-			copy = newCopy(loseFirstSet == true, rootOf(humanoid.Parent :: Model))
+			copy = newCopy(loseFirstSet == true, rootOf(humanoid.Parent :: Model), downOnResume)
 			copies[humanoid] = copy
 		end
 		return copy
@@ -348,6 +382,13 @@ local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolea
 				return engineHumanoid(copy)
 			end)
 		end
+		-- start()'s resume seam on the same copy: the real Replication.resumeModel (D-559).
+		deps.resumeUpright = function(model: Model): string?
+			return Replication.resumeModel(model, function(body: Model): any
+				local humanoid = body:FindFirstChildOfClass("Humanoid")
+				return if humanoid ~= nil then engineHumanoid(copyOf(humanoid)) else nil
+			end)
+		end
 	end
 	Replication.bind(deps)
 	local function stepCopies()
@@ -367,6 +408,16 @@ local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolea
 				end
 			elseif copy.evaluates then
 				copy.state = "Running" -- the server's state, once the root is let go
+			end
+			if copy.layDown and copy.evaluates then
+				copy.state = "FallingDown" -- the assumed engine (header)
+				copy.layDown = false
+			end
+			-- 474(a): the state machine reads the field under it; 474(e): with it off, Air.
+			copy.floor = if copy.evaluates then FIELD else "Air"
+			(humanoid :: any).FloorMaterial = (Enum.Material :: any)[copy.floor]
+			if copy.root.Anchored then
+				copy.heldEvaluates = copy.evaluates
 			end
 			if copy.enabledOnFirstRow == nil then
 				copy.enabledOnFirstRow = copy.enabled.FallingDown
@@ -452,12 +503,16 @@ end
 
 -- Upright to the end: Running through the release, the client's fall states read off, the log aid
 -- done. A copy caught in time keeps its state machine (P1 L2) and never reads FallingDown; one
--- stood up (StoodUp) read it on the one row before and has its state machine off (P1 L3).
+-- stood up (StoodUp) read it on the one row before and has its state machine off while it is held
+-- (P1 L3), back on from the step after its release (D-559), so every copy ends on the field's
+-- floor with it on.
 local function expectUpright(w: World, model: Model, state: string, tries: number)
 	local copy = copyOf(w, model)
 	expect(copy.fallingRows).toBe(if state == UPRIGHT.states.stoodUp then 1 else 0)
 	expect(copy.state).toBe("Running")
-	expect(copy.evaluates).toBe(state ~= UPRIGHT.states.stoodUp)
+	expect(copy.heldEvaluates).toBe(state ~= UPRIGHT.states.stoodUp)
+	expect(copy.evaluates).toBe(true)
+	expect(copy.floor).toBe(FIELD)
 	for _, name in FALLS do
 		expect(copy.enabled[name]).toBe(false)
 	end
@@ -916,5 +971,268 @@ describe("Every arrival order keeps the copy upright from its first physics step
 				.. "GetStateEnabled Ragdoll,GetStateEnabled Physics,GetStateEnabled PlatformStanding,"
 				.. "EvaluateStateMachine false,ChangeState Running"
 		)
+	end)
+end)
+
+-- One logged row of 474(e)'s take: the copy as the engine left it, and what the game's readers
+-- of its floor get from it (the real SfxPool's footstep surface, the real enemy gait tracker's
+-- grounded).
+type Row = {
+	held: boolean,
+	state: string,
+	evaluates: boolean,
+	floor: string,
+	surface: string,
+	grounded: boolean,
+}
+
+-- 474(e)'s take on this client (P1 #8, 443 #38): a fresh kobold whose Humanoid comes after its tag
+-- in the same frame, held at spawn for HELD_ROWS rows, let go (its root's Anchored replicated in a
+-- frame's arrivals), then walking WALK_ROWS rows (39 studs over 5 s). Rows from the first frame.
+local function rescueWalk(downOnResume: boolean?): (World, Model, { Row })
+	local w = world(true, {}, nil, downOnResume)
+	local kobold, humanoid = enemy(8, "Kobold", "KoboldAxeman", true, true, true)
+	local root = rootOf(kobold)
+	-- Lune's parts keep Position apart from CFrame; the tracker reads both.
+	root.Position = root.CFrame.Position
+	root.AssemblyLinearVelocity = Vector3.zero;
+	(humanoid :: any).MoveDirection = Vector3.zero
+	local tracker = Locomotion.humanoidTracker(kobold)
+	local rows: { Row } = {}
+	local function log()
+		local copy = copyOf(w, kobold)
+		local state = tracker(1 / 60)
+		table.insert(rows, {
+			held = root.Anchored,
+			state = copy.state,
+			evaluates = copy.evaluates,
+			floor = copy.floor,
+			surface = SfxPool.surfaceOf(kobold),
+			grounded = state ~= nil and state.grounded == true,
+		})
+	end
+	w.frame({
+		function()
+			w.tag(kobold)
+		end,
+		function()
+			w.parent(humanoid, kobold)
+		end,
+	})
+	log()
+	for _ = 2, HELD_ROWS do
+		w.frame()
+		log()
+	end
+	w.frame({
+		function()
+			root.Anchored = false
+		end,
+	})
+	log()
+	for _ = 2, WALK_ROWS do
+		root.CFrame += Vector3.new(0, 0, WALK_STEP)
+		root.Position = root.CFrame.Position
+		root.AssemblyLinearVelocity = Vector3.new(0, 0, WALK_STEP * 60)
+		w.frame()
+		log()
+	end
+	return w, kobold, rows
+end
+
+-- How many of rows[from .. to] match.
+local function count(rows: { Row }, from: number, to: number, match: (row: Row) -> boolean): number
+	local n = 0
+	for index = from, to do
+		if match(rows[index]) then
+			n += 1
+		end
+	end
+	return n
+end
+
+local function onField(row: Row): boolean
+	return row.floor == FIELD and row.surface == FIELD_SURFACE and row.grounded
+end
+
+describe("A copy stood up with its state machine off gets it back at its release (D-559)", function()
+	local RELEASE = HELD_ROWS + 1 -- the row whose frame let the root go
+	local LAST = HELD_ROWS + WALK_ROWS
+
+	it("with the stand-up's state machine kept off, the copy reads the PC's 474(e) rows on 209875b", function()
+		-- The fake against the PC (474(e), the rescue build): StoodUp, tries 2, Running on every held
+		-- row, EvaluateStateMachine false, FloorMaterial Air on every row held and walking (536 of 536)
+		withSwitches({ catchOnArrival = false, resumeOnRelease = false }, function()
+			local w, kobold, rows = rescueWalk()
+			-- the fall on the first step (the PC's first logged row is after the stand-up), then
+			-- every row from the stand-up on
+			expect(rows[1].state).toBe("FallingDown")
+			expect(count(rows, 2, LAST, function(row)
+				return row.state == "Running" and not row.evaluates
+			end)).toBe(LAST - 1)
+			expect(count(rows, 2, LAST, function(row)
+				return row.floor == "Air" and row.surface == Fx.audio.defaultSurface and not row.grounded
+			end)).toBe(LAST - 1)
+			expect(kobold:GetAttribute(NAMES.state)).toBe(UPRIGHT.states.stoodUp)
+			expect(kobold:GetAttribute(NAMES.tries)).toBe(2)
+			expect(copyOf(w, kobold).machineWrites).toEqual({ false })
+		end)
+	end)
+
+	it(
+		"the rescue build: off while held, back on the step after the release, the field's floor on every walking row",
+		function()
+			-- 318f0a3: FloorMaterial Air, footsteps on Stone and the gait tracker airborne on 300 of 300
+			-- released rows, the state machine off for good
+			withSwitches({ catchOnArrival = false }, function()
+				local w, kobold, rows = rescueWalk()
+				local copy = copyOf(w, kobold)
+				-- held: P1 L3's rows, unchanged (FallingDown on at most the first row, then Running)
+				expect(rows[1].state).toBe("FallingDown")
+				expect(count(rows, 2, HELD_ROWS, function(row)
+					return row.held and row.state == "Running" and not row.evaluates
+				end)).toBe(HELD_ROWS - 1)
+				-- the release row is stepped before the next PreSimulation sees it: still off, Air
+				expect(rows[RELEASE].held).toBe(false)
+				expect(rows[RELEASE].evaluates).toBe(false)
+				expect(rows[RELEASE].floor).toBe("Air")
+				-- every walking row after it: the state machine on, Running, the field's floor and surface
+				expect(count(rows, RELEASE + 1, LAST, function(row)
+					return row.evaluates and row.state == "Running" and onField(row)
+				end)).toBe(WALK_ROWS - 1)
+				expect(copy.fallingRows).toBe(1)
+				expect(copy.machineWrites).toEqual({ false, true })
+				-- read once by the stand-up, then resumeChecks times after the turn-on, then let go
+				expect(copy.reads).toBe(1 + UPRIGHT.resumeChecks)
+				expect(kobold:GetAttribute(NAMES.state)).toBe(UPRIGHT.states.stoodUp)
+				expect(kobold:GetAttribute(NAMES.tries)).toBe(2)
+				for _, name in FALLS do
+					expect(copy.enabled[name]).toBe(false)
+				end
+				-- held again later (S("hold")): the main path's copy, Running on every row (P1 L2 #13)
+				rootOf(kobold).Anchored = true
+				for _ = 1, HELD_ROWS do
+					w.frame()
+				end
+				expect(copy.fallingRows).toBe(1)
+				expect(copy.state).toBe("Running")
+				expect(copy.evaluates).toBe(true)
+				expect(copy.floor).toBe(FIELD)
+			end)
+		end
+	)
+
+	it("the main path is unchanged: caught at its arrival, the state machine never written", function()
+		-- D-543 (474(a) on 209875b): Off, tries 2, Running and EvaluateStateMachine true on every
+		-- row, FloorMaterial Grass
+		local w, kobold, rows = rescueWalk()
+		expect(count(rows, 1, LAST, function(row)
+			return row.evaluates and row.state == "Running" and onField(row)
+		end)).toBe(LAST)
+		expect(copyOf(w, kobold).machineWrites).toEqual({})
+		expect(kobold:GetAttribute(NAMES.state)).toBe(UPRIGHT.states.off)
+		expect(kobold:GetAttribute(NAMES.tries)).toBe(2)
+	end)
+
+	it("a copy the state machine lays down again is stood up with it off for good (D-544)", function()
+		-- The assumed engine (header): the step after the turn-on reads FallingDown; the next
+		-- PreSimulation reads it back, turns the state machine off and stands it up, and nothing
+		-- turns it on again. 318f0a3: never turned on (one write).
+		withSwitches({ catchOnArrival = false }, function()
+			local w, kobold, rows = rescueWalk(true)
+			local copy = copyOf(w, kobold)
+			expect(rows[RELEASE + 1].state).toBe("FallingDown")
+			expect(rows[RELEASE + 1].evaluates).toBe(true)
+			expect(count(rows, RELEASE + 2, LAST, function(row)
+				return row.state == "Running" and not row.evaluates
+			end)).toBe(WALK_ROWS - 2)
+			expect(copy.fallingRows).toBe(2)
+			expect(copy.machineWrites).toEqual({ false, true, false })
+			expect(copy.state).toBe("Running")
+		end)
+	end)
+
+	it("the ChangeState stand-up never turns the state machine off, so nothing comes back on", function()
+		withSwitches({ catchOnArrival = false, rescue = UPRIGHT.rescues.changeState }, function()
+			local w, kobold, rows = rescueWalk()
+			local copy = copyOf(w, kobold)
+			-- P1 L4: FallingDown on every held row; Running from the release with it on
+			expect(copy.fallingRows).toBe(HELD_ROWS)
+			expect(copy.machineWrites).toEqual({})
+			expect(count(rows, RELEASE, LAST, function(row)
+				return row.evaluates and row.state == "Running" and onField(row)
+			end)).toBe(WALK_ROWS)
+		end)
+	end)
+
+	it("resumeUpright waits while held, turns the state machine on once let go, then reads the copy back", function()
+		local calls: { string } = {}
+		local copy = newCopy(false, Instance.new("Part"))
+		copy.root.Anchored = true
+		copy.evaluates = false
+		copy.state = "Running"
+		local engine = engineHumanoid(copy)
+		local spy: any = setmetatable({}, {
+			__index = function(_, key: string): any
+				if key == "EvaluateStateMachine" then
+					return engine.EvaluateStateMachine
+				end
+				return function(_self: any, ...: any)
+					local args = { ... }
+					table.insert(calls, key .. (if args[1] ~= nil then " " .. args[1].Name else ""))
+					return engine[key](engine, ...)
+				end
+			end,
+			__newindex = function(_, property: string, value: any)
+				table.insert(calls, property .. " " .. tostring(value))
+				engine[property] = value
+			end,
+		})
+		local RESUME = Replication.RESUME
+		-- held: nothing written (P1 L3's anchored copy, off)
+		expect(Replication.resumeUpright(spy, copy.root)).toBe(RESUME.held)
+		expect(table.concat(calls, ",")).toBe("")
+		-- let go: on, before that step's physics
+		copy.root.Anchored = false
+		expect(Replication.resumeUpright(spy, copy.root)).toBe(RESUME.resumed)
+		expect(table.concat(calls, ",")).toBe("EvaluateStateMachine true")
+		-- read back upright
+		expect(Replication.resumeUpright(spy, copy.root)).toBe(RESUME.on)
+		-- read back in a fall state: D-544's stand-up, the state machine off first
+		copy.state = "FallingDown"
+		expect(Replication.resumeUpright(spy, copy.root)).toBe(RESUME.keptOff)
+		expect(table.concat(calls, ",")).toBe(
+			"EvaluateStateMachine true,GetState,GetState,EvaluateStateMachine false,ChangeState Running"
+		)
+		expect(copy.state).toBe(UPRIGHT.standUpState)
+		expect(copy.evaluates).toBe(false)
+		-- no root (a model without its PrimaryPart yet) counts as held
+		local idle = newCopy(false, Instance.new("Part"))
+		idle.evaluates = false
+		expect(Replication.resumeUpright(engineHumanoid(idle), nil)).toBe(RESUME.held)
+		expect(idle.machineWrites).toEqual({})
+	end)
+
+	it("a copy that leaves before its release is let go", function()
+		withSwitches({ catchOnArrival = false }, function()
+			local w = world(true, {})
+			local kobold, humanoid = enemy(8, "Kobold", "KoboldAxeman", true, true, true)
+			holdAndRelease(w, {}, {
+				function()
+					w.tag(kobold)
+				end,
+				function()
+					w.parent(humanoid, kobold)
+				end,
+			})
+			local copy = copyOf(w, kobold)
+			expect(copy.machineWrites).toEqual({ false })
+			Replication.unwatch(EntityTracker.fromModel(kobold))
+			rootOf(kobold).Anchored = false
+			for _ = 1, 5 do
+				w.frame()
+			end
+			expect(copy.machineWrites).toEqual({ false })
+		end)
 	end)
 end)

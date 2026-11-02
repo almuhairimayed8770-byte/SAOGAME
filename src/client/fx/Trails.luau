@@ -42,7 +42,9 @@
 	the clip has faded in, waits while a freeze holds the clip where it came in, and draws nothing
 	at or past its end pose, so a window whose snap landed before the start stays dark. The
 	ribbon's ages stand still while the rig is drawn held (Choreo heldShown, D-353: the frames the
-	screen shows its blade frozen, a frame behind the hold's flag). The chain is read again when the
+	screen shows its blade frozen, a frame behind the hold's flag), and such a frame lays no sample:
+	its pose is the one the frame before drew, and a body that moves under it (a watcher's copy
+	whose replicated root goes on, D-556) is no part of the cut. The chain is read again when the
 	Weapon's joint changes (WeaponMount moves the sword between the hand and the back), and that
 	jump is never a cut. A rig with no chain (a placeholder weapon) keeps the engine Trail.
 
@@ -52,7 +54,9 @@
 	slot of the Highlight budget while it shows. The blade glows with it (F13, D-263): unlit
 	camera-facing bands from the guard to the tip in the light's color at the ribbon's saturation
 	(fx.activationLight.glow), so the activation reads on a thin blade in daylight, from the
-	activation to the first damage frame. A cancelled Art's light and glow fade out over
+	activation to the first damage frame. A light put out while the ribbon it lit has laid no
+	segment of its stroke yet stays on until the frame that lays one (D-558), so no frame draws
+	the lit blade with neither its light nor its trail. A cancelled Art's light and glow fade out over
 	fx.activationLight.cancelFadeSeconds (issue 13; the Heartbeat step eases them down).
 	`flashWhite` is the two-frame white flash on a Switch landing or a parry.
 
@@ -218,10 +222,13 @@ type Entry = {
 	tipAt: Vector3,
 	stroke: boolean, -- the ribbon's newest sample continues a stroke that is still drawing
 	cutSourced: boolean, -- the stroke started at its clip's open (D-273), so it may end on a turn back
-	cutTip: Vector3, -- the tip of the stroke's newest kept sample
+	-- The tip of the stroke's newest kept sample, or of the last frame drawn held since (the body
+	-- that moved under a held pose is no part of the cut, D-556).
+	cutTip: Vector3,
 	cutWay: Vector3?, -- the unit way the tip went to reach it; nil before the stroke has moved
 	cutSwept: number, -- studs the stroke's tip has swept
 	cutDone: boolean, -- the tip turned back: the window draws nothing more (D-335)
+	drew: boolean, -- the stroke has laid a segment since it began (a sample joined to the one before)
 	-- The clip time the stroke's strike snap lands on (its end pose, ClipSampler.strikeLandingAt):
 	-- once the frame shows the clip there or past it, the window draws nothing more (D-539).
 	cutEnd: number?,
@@ -252,6 +259,9 @@ type Entry = {
 	-- Counts the activation light's changes made at once (D-479): one asked for the frame that
 	-- draws a step's pose carries the count it saw and is dropped once another change came first.
 	lightSerial: number,
+	-- The light was put out while the lit ribbon had not yet laid its stroke's first segment: it
+	-- stays on until the frame that does (D-558).
+	lightOut: boolean,
 }
 
 local KIND_PRIORITY: { Kind } = { "Art", "Smear", "Basic" }
@@ -832,6 +842,7 @@ function Trails.attach(model: Instance): boolean
 		cutWay = nil,
 		cutSwept = 0,
 		cutDone = false,
+		drew = false,
 		cutEnd = nil,
 		late = nil,
 		lateFrom = 0,
@@ -877,6 +888,7 @@ function Trails.attach(model: Instance): boolean
 			pending = false,
 		},
 		lightSerial = 0,
+		lightOut = false,
 	}
 	entry.light.Color = color
 	entries[model] = entry
@@ -896,6 +908,7 @@ function Trails.detach(model: Instance)
 	end
 	endWeaponFlash(entry)
 	entry.lightFade = nil
+	entry.lightOut = false
 	hideGlow(entry)
 	entry.removedCancel()
 	entry.trail.Enabled = false
@@ -981,6 +994,26 @@ function Trails.activationLight(model: Instance, on: boolean, token: string?, fa
 		entry.light.Color = Palette.color3(token :: any)
 	else
 		entry.light.Color = entry.color
+	end
+	-- Any change takes the place of a light-out still waiting for the ribbon.
+	entry.lightOut = false
+	if
+		not on
+		and fade ~= true
+		and entry.light.Enabled
+		and entry.lightFade == nil
+		and entry.lit
+		and entry.chain ~= nil
+		and renderedAt ~= nil
+		and not (entry.stroke and entry.drew)
+	then
+		-- The window that puts the light out lit the ribbon, and its stroke has laid no segment
+		-- yet: the light stays on until the frame whose ribbon lays it (stepRibbons). A first
+		-- drawn frame that shows the clip a hair past the open (60 fps lands Vertical's 0.35 on
+		-- a frame) has the blade under trail.minLength from it: lit, no segment, and dark with
+		-- the light out, a still frame between the glow and the trail (D-558).
+		entry.lightOut = true
+		return
 	end
 	if not on and fade == true and entry.light.Enabled then
 		-- Already fading: it goes on from where it is.
@@ -1386,10 +1419,12 @@ local function beginCut(entry: Entry, tip: Vector3, sourced: boolean)
 	entry.cutWay = nil
 	entry.cutSwept = 0
 	entry.cutDone = false
+	entry.drew = false
 end
 
 -- The stroke kept a sample at `tip`: the way the tip went and how far it has swept.
 local function advanceCut(entry: Entry, tip: Vector3)
+	entry.drew = true
 	local move = tip - entry.cutTip
 	local length = move.Magnitude
 	if length > 1e-6 then
@@ -1585,6 +1620,16 @@ local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boole
 		-- The cut turned back: the rest of the window (the settle) draws nothing (D-335).
 		return
 	end
+	if entry.stroke and deps.held(entry.model) then
+		-- This frame draws the rig held (a hit-stop, D-353): the pose is the one the frame before
+		-- drew, so the stroke lays nothing new, whatever moves the body under it (a watcher's copy
+		-- whose replicated root still moves: the stand-off it shows late, D-556). The ribbon's
+		-- ages stand still with it, and its stroke's clip clock stands, so the clip is followed on
+		-- from where it held. The first frame that moves again goes on from this frame's blade, and
+		-- the cut's way is measured from it: the body's move under the held pose is no turn of the cut.
+		entry.cutTip = tip
+		return
+	end
 	local starting = not entry.stroke
 	local opened = followSource(entry, starting)
 	if starting and cameLate and entry.source ~= nil then
@@ -1714,6 +1759,14 @@ local function stepRibbons(at: number, viewer: Vector3?)
 			else
 				entry.stroke = false
 			end
+		end
+		if entry.lightOut and (chain == nil or not entry.lit or (entry.stroke and (entry.drew or entry.cutDone))) then
+			-- The light waited for the stroke's first segment (activationLight, D-558): it goes out
+			-- on the frame that lays it, or once the ribbon will lay none (the trail out, no chain,
+			-- the stroke over).
+			entry.lightOut = false
+			entry.light.Enabled = false
+			hideGlow(entry)
 		end
 		local ribbon = entry.ribbon
 		if ribbon ~= nil then

@@ -2996,6 +2996,44 @@ describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", fun
 		end
 	)
 
+	it(
+		"a rescued copy's state machine comes back by a switch and is read back a whole number of steps (D-559)",
+		function()
+			local function withClient(change: (client: any) -> ()): { string }
+				return runAi(function(copy)
+					local upright = table.clone(copy.upright)
+					local client = table.clone(upright.client)
+					change(client)
+					upright.client = client
+					copy.upright = upright
+				end)
+			end
+			expect(withClient(function(client)
+				client.resumeOnRelease = false
+			end)).toEqual({})
+			expect(withClient(function(client)
+				client.resumeChecks = 1
+			end)).toEqual({})
+			-- `false` stands for a missing field (a nil in the list would end it)
+			for _, bad in { "yes", 1, false } do
+				expect(hasProblem(
+					withClient(function(client)
+						client.resumeOnRelease = if bad == false then nil else bad
+					end),
+					"upright.client.resumeOnRelease must be true or false"
+				)).toBe(true)
+			end
+			for _, bad in { 0, 1.5, -60, "60", false } do
+				expect(hasProblem(
+					withClient(function(client)
+						client.resumeChecks = if bad == false then nil else bad
+					end),
+					"upright.client.resumeChecks must be a whole number of at least 1"
+				)).toBe(true)
+			end
+		end
+	)
+
 	it("a Charger needs a positive jamLagStuds", function()
 		expect(hasProblem(
 			runAi(function(copy)

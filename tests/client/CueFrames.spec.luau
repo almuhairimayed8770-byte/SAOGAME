@@ -561,7 +561,8 @@ end)
 -- The real Trails: the ribbon, the light, the glow and the flash
 -- ---------------------------------------------------------------------------------------------
 
-type Push = { tip: Vector3, frame: number }
+-- `segment`: the ribbon kept it joined to the sample before (a Beam between them shows).
+type Push = { tip: Vector3, frame: number, segment: boolean }
 type Shown = { light: boolean, glow: boolean, flash: boolean, flashBudget: number }
 
 -- Plays `name` through Replication into the real Trails at `fps`: each frame's ribbon pushes, the
@@ -627,8 +628,11 @@ local function playTrails(
 	local shown: { [number]: Shown } = {}
 	local realPush = TrailRibbon.push
 	TrailRibbon.push = function(ribbon: any, guard: Vector3, tip: Vector3, born: number, joined: boolean): boolean
-		table.insert(pushes, { tip = tip, frame = frame })
-		return realPush(ribbon, guard, tip, born, joined)
+		local push: Push = { tip = tip, frame = frame, segment = false }
+		table.insert(pushes, push)
+		local kept = realPush(ribbon, guard, tip, born, joined)
+		push.segment = kept and joined
+		return kept
 	end
 	local weapon = weaponPart(model)
 	local chain = BladeContact.chain(model :: any) :: any
@@ -846,6 +850,68 @@ describe("the trail and the blade light on the frames that draw them (D-479)", f
 			end
 		end
 	)
+
+	it("hands the light to the ribbon: a window drawn a hair past its open keeps it to the first segment", function()
+		-- At 60 fps Vertical's open (0.35 s) is 21 frames in, so a clip on the frame grid crosses it
+		-- by a sliver: the snap's first 0.1 ms moves the tip under trail.minLength (0.05), and the
+		-- window's first drawn frame lit the ribbon with no segment while the light and glow went
+		-- out (the PC's V467_60_air1 row 63: TrailLit true, 0 Beams, the light out). Before: the
+		-- light out on that frame, the first segment the next. Now the light goes out on the frame
+		-- the first segment shows (D-558), and a window whose first frame lays one is unchanged.
+		local report: { string } = {}
+		for _, isLocal in { true, false } do
+			for _, delta in { 0, 1e-5, 5e-5, 1e-3 } do
+				local phase = math.max(delta * 60, 1e-9)
+				local pushes, _, shown, fired = playTrails("Vertical", 60, phase, isLocal)
+				local label = ("%s, crossed %.5f s past the open"):format(if isLocal then "local" else "remote", delta)
+				local open = firstFired(fired, "HitWindowOpen")
+				expect(open).never.toBeNil()
+				local firstSegment: number? = nil
+				for _, push in pushes do
+					if push.segment and firstSegment == nil then
+						firstSegment = push.frame
+					end
+				end
+				expect({ label, firstSegment ~= nil }).toEqual({ label, true })
+				local windowDrawn = open.frame + LAG
+				local out = firstSegment :: number
+				-- A sliver past the open lays the first segment a frame later; a millisecond lays it at once.
+				local wantOut = if delta < 1e-4 then windowDrawn + 1 else windowDrawn
+				if out ~= wantOut then
+					table.insert(
+						report,
+						("%s: first segment on frame %d, wanted %d (the window's first drawn frame %d)"):format(
+							label,
+							out,
+							wantOut,
+							windowDrawn
+						)
+					)
+				end
+				for at = windowDrawn - 1, out + 1 do
+					local state = shown[at]
+					local want = at < out
+					if state ~= nil and (state.light ~= want or state.glow ~= want) then
+						table.insert(
+							report,
+							("%s: frame %d light %s glow %s, wanted %s (window drawn from %d, first segment %d)"):format(
+								label,
+								at,
+								tostring(state.light),
+								tostring(state.glow),
+								tostring(want),
+								windowDrawn,
+								out
+							)
+						)
+					end
+				end
+			end
+		end
+		if #report > 0 then
+			error(("%d light frames off the ribbon's first segment:\n%s"):format(#report, table.concat(report, "\n")))
+		end
+	end)
 
 	it(
 		"a cancel between the hold's step and its drawn frame leaves the blade dark (no light, glow or chime)",

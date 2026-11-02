@@ -68,7 +68,9 @@
 	stretches it. A contact the server never confirms shows no number. A local hit the
 	server confirmed before this client's blade got there (the client's clip runs behind by its
 	hit-stops) plays as it always did and is not predicted again (`confirmedAlready`). Everyone
-	else's hits play as before.
+	else's hits play as before, but the word for another player's hit waits, as the local fighter's
+	own does (D-267), until this client's copy of that swing shows its strike's key (D-557): the
+	hold freezes the copy on its end pose, never on the snap in the air short of it.
 
 	Nothing here decides damage; a rejected hit is simply a `rejected` Signal that the character
 	controller turns into a cancelled prediction (section 17).
@@ -246,6 +248,14 @@ export type Deps = {
 	-- D-543): Studio's Humanoid comes after the tag and has had a physics step by the next
 	-- PreSimulation, and an anchored copy that fell on it stays down. Without it: not asked there.
 	humanoidAdded: ((model: Model, fn: () -> ()) -> { Disconnect: (self: any) -> () })?,
+	-- One beforePhysics step of an enemy copy keepUpright stood up with its state machine off
+	-- (D-544; start() hands Replication.resumeModel): it answers "Held" while the copy's root is
+	-- anchored, "Resumed" on the step it turns Humanoid.EvaluateStateMachine back on (the first
+	-- with the root let go), then "On" while the copy reads upright, "KeptOff" when it found the
+	-- copy in a fall state and stood it up again with the state machine off for good, and nil when
+	-- the model has no Humanoid (D-559, ai.upright.client.resumeOnRelease). Without it: the
+	-- state machine stays off for the copy's life (D-544).
+	resumeUpright: ((model: Model) -> string?)?,
 }
 
 -- Sound names (family.Name in sfx.luau) the reactions play; Replication.spec checks each resolves.
@@ -306,6 +316,9 @@ local uprightWaiting: { [number]: any } = {}
 local uprightTries: { [number]: number } = {}
 -- entity id -> the waiting copy's Humanoid arrival handler on its model (D-543).
 local uprightCatches: { [number]: { Disconnect: (self: any) -> () } } = {}
+-- entity id -> a copy stood up with its state machine off, until it has it back and read upright
+-- ai.upright.client.resumeChecks steps after (D-559): its record and those steps so far.
+local uprightResumes: { [number]: { record: any, checks: number } } = {}
 local kindConnection: { Disconnect: (self: any) -> () }? = nil -- entities.changed (EntityKind)
 local drivers: { [number]: any } = {} -- entity id -> locomotion driver on a rig this client does not own
 -- entity id -> the trail kind the playing clip's TrailOn named; HitWindowOpen / Close, TrailOff and
@@ -318,6 +331,9 @@ local clipSpeeds: { [any]: { clipId: string, speed: number? } } = {}
 -- remote player id -> the handle of the action its last ActionStarted played (an Art, a basic
 -- swing): a state that takes the body from it lets that clip go (D-422).
 local remoteActions: { [number]: any } = {}
+-- remote player id -> the Art that action is (ActionStarted artId), nil for a basic swing: a word
+-- for another player's hit waits on the copy of that swing only (D-557).
+local remoteArts: { [number]: string } = {}
 -- Per attacker (its entity id, NO_ATTACKER when the payload names none): when its sweep's camera
 -- nudge was given (a sweep's hits confirm within a few frames and nudge once), and its sweep's
 -- hit-stop tick (when the sweep began and the strongest tier it ticked). A trade is two sweeps.
@@ -707,11 +723,51 @@ local function takeMatch(list: { any }, targetId: number, windowIndex: number, a
 	return nil
 end
 
--- True when the server's word for one of the local fighter's hits is to wait for its strike's key
--- on this client's clip (D-267). A kill's word waits too, and its EntityDied with it (D-267
--- amended). Words wait only on a client that ticks Heartbeat (deps.onHeartbeat), which lets them go.
+-- True while the server's word for another player's hit is ahead of this client's copy of that
+-- swing (D-557): the word waits for the copy to show the strike's key, as the local fighter's
+-- does (D-267), so the hold freezes the key pose where the caster's own contact froze it, never the
+-- snap in the air before it. The copy is the action that player's last ActionStarted played here
+-- (the same Art, or a basic swing for a word with none), still playing; the key is where window
+-- `hitIndex`'s strike snap lands (ClipSampler.strikeLandingAt of its open: Vertical's 0.40, a
+-- basic's 0.15). Not for a parry (it holds no rig), a hit on the local fighter (its own timing,
+-- D-258, D-355) or one of the local fighter's own (keyAhead), and only on a client that ticks
+-- Heartbeat, which lets it go: the copy at the key, its swing stopped or changed, or
+-- combat.luau contact.wordWaitSeconds of play.
+local function remoteKeyAhead(payload: any): boolean
+	if not playTicking or payload.parried == true or typeof(payload.hitIndex) ~= "number" then
+		return false
+	end
+	local localId = dependencies().localId()
+	local attackerId = payload.attackerId
+	if attackerId == nil or attackerId == localId or payload.targetId == localId then
+		return false
+	end
+	local handle = remoteActions[attackerId]
+	if
+		typeof(handle) ~= "table"
+		or handle.done == true
+		or handle.stopping == true
+		or typeof(handle.time) ~= "number"
+		or typeof(handle.clip) ~= "table"
+		or remoteArts[attackerId] ~= payload.artId
+	then
+		return false
+	end
+	local window = ClipSampler.hitWindows(handle.clip)[payload.hitIndex]
+	local key = if window ~= nil then ClipSampler.strikeLandingAt(handle.clip, window.open) else nil
+	return key ~= nil and handle.time < key - Combat.contact.keyEpsilon
+end
+
+-- True when the server's word for a hit is to wait for its strike's key on this client's clip: one
+-- of the local fighter's hits (D-267), or another player's on its copy here (remoteKeyAhead,
+-- D-557). A kill's word waits too, and its EntityDied with it (D-267 amended). Words wait only on
+-- a client that ticks Heartbeat (deps.onHeartbeat), which lets them go.
 local function waitsForKey(payload: any): boolean
-	local keyAhead = dependencies().keyAhead
+	local d = dependencies()
+	if payload.attackerId ~= d.localId() then
+		return remoteKeyAhead(payload)
+	end
+	local keyAhead = d.keyAhead
 	return playTicking
 		and keyAhead ~= nil
 		and typeof(payload.hitIndex) == "number"
@@ -2099,6 +2155,7 @@ end
 local function takeRemoteAction(record: any)
 	local handle = remoteActions[record.id]
 	remoteActions[record.id] = nil
+	remoteArts[record.id] = nil
 	if typeof(handle) ~= "table" or handle.done == true or handle.stopping == true then
 		return
 	end
@@ -2167,6 +2224,7 @@ function handlers.ActionStarted(payload: any)
 	clipSpeeds[record.id] = { clipId = payload.clipId, speed = speed }
 	if record.kind == "Player" then
 		remoteActions[record.id] = handle
+		remoteArts[record.id] = if typeof(payload.artId) == "string" then payload.artId else nil
 	end
 	replaySkipped(record, handle, payload.clipId)
 	replayTrail(record, handle, payload.clipId)
@@ -2447,6 +2505,16 @@ function handlers.HitConfirmed(payload: any)
 				seen = seen,
 			})
 		end
+	end
+	-- Another player's hit whose swing this client's copy has not yet brought to its strike's key:
+	-- the word is held until it does (D-557), its kill's death with it, as the local fighter's
+	-- are (D-267). Let go on its key, the hold freezes the key pose; played at once, a watcher's
+	-- copy froze the snap 0.01 to 0.02 clip-s short of its landing and skipped the clip's own hold
+	-- after it.
+	if payload ~= releasing and remoteKeyAhead(payload) then
+		local deaths = if payload.killed == true then takeDeaths(payload.targetId) else nil
+		table.insert(heldWords, { payload = payload, seen = playClock(), deaths = deaths })
+		return
 	end
 	-- A death held for this word plays first, as it came (D-267 amended), on its contact's beat.
 	if #heldDeaths > 0 then
@@ -3076,7 +3144,8 @@ function Replication.contact(contact: any): boolean
 	for index, word in heldWords do
 		local payload = word.payload
 		if
-			payload.targetId == contact.targetId
+			payload.attackerId == localId
+			and payload.targetId == contact.targetId
 			and payload.hitIndex == contact.windowIndex
 			and payload.artId == contact.artId
 			and (payload.swing == nil or contact.swing == nil or payload.swing == contact.swing)
@@ -3432,8 +3501,9 @@ local UPRIGHT = AI.upright.client
 --- the PC's working probe did, turns each ai.upright.client.offStates entry off where it still
 --- reads on, and reads them back: one still on is NotTaken (asked again next step). A copy found in
 --- a fall state is then stood up to standUpState; with rescue "StateMachine" its
---- Humanoid.EvaluateStateMachine goes false first and stays false (Studio, P1 L3: an anchored copy
---- already FallingDown takes a ChangeState only with its state machine off, L4).
+--- Humanoid.EvaluateStateMachine goes false first and stays false while it is held (Studio, P1 L3:
+--- an anchored copy already FallingDown takes a ChangeState only with its state machine off, L4);
+--- resumeUpright turns it back on at the release (D-559).
 function Replication.standUpright(humanoid: any): (string, string?)
 	local state = humanoid:GetState()
 	for _, name in UPRIGHT.offStates do
@@ -3477,6 +3547,46 @@ function Replication.uprightModel(
 	return Replication.standUpright(humanoid)
 end
 
+-- What one step of a rescued copy's resume answers (Deps.resumeUpright, D-559).
+local RESUME = { held = "Held", resumed = "Resumed", on = "On", keptOff = "KeptOff" }
+Replication.RESUME = RESUME
+
+--- One beforePhysics step of a copy standUpright stood up with its state machine off (D-544,
+--- D-559). While `root` is anchored (held) the state machine stays off ("Held": P1 L3, Running on
+--- every anchored row). On the first step its root is let go, Humanoid.EvaluateStateMachine goes
+--- back on ("Resumed"), its fall states still off: the main path's copy (D-543, P1 L2), whose
+--- Humanoid updates FloorMaterial again. On each step after, the copy's state is read back: upright
+--- is "On"; one in a fall state goes back to D-544 (the state machine off, then
+--- ChangeState(standUpState)) and stays there ("KeptOff").
+function Replication.resumeUpright(humanoid: any, root: any): string
+	if humanoid.EvaluateStateMachine == true then
+		local state = humanoid:GetState()
+		for _, name in UPRIGHT.offStates do
+			if state == (Enum.HumanoidStateType :: any)[name] then
+				humanoid.EvaluateStateMachine = false
+				humanoid:ChangeState((Enum.HumanoidStateType :: any)[UPRIGHT.standUpState])
+				return RESUME.keptOff
+			end
+		end
+		return RESUME.on
+	end
+	if root == nil or root.Anchored then
+		return RESUME.held
+	end
+	humanoid.EvaluateStateMachine = true
+	return RESUME.resumed
+end
+
+--- start()'s resumeUpright seam for one model (D-559): nil when `humanoidOf`
+--- (FindFirstChildOfClass) finds no Humanoid, else resumeUpright on it with the model's root.
+function Replication.resumeModel(model: Model, humanoidOf: (model: Model) -> any): string?
+	local humanoid = humanoidOf(model)
+	if humanoid == nil then
+		return nil
+	end
+	return Replication.resumeUpright(humanoid, model.PrimaryPart)
+end
+
 -- The log aid (D-523): this client's upright state of the model, why it waits and how often it
 -- asked, on the Model, client only; written only when a value changes. Nil clears each.
 local function publishUpright(model: Instance, state: string?, why: string?, tries: number?)
@@ -3512,6 +3622,15 @@ local function tryUpright(record: any): boolean
 		state, why = UPRIGHT.states.waiting, UPRIGHT.whys.notEnemy
 	end
 	publishUpright(model, state, why, if state ~= nil then tries else nil)
+	if
+		state == UPRIGHT.states.stoodUp
+		and UPRIGHT.rescue == UPRIGHT.rescues.stateMachine
+		and UPRIGHT.resumeOnRelease
+		and dependencies().resumeUpright ~= nil
+	then
+		-- Its state machine is off now (D-544): it comes back at the release (D-559).
+		uprightResumes[record.id] = { record = record, checks = 0 }
+	end
 	return state ~= UPRIGHT.states.waiting
 end
 
@@ -3555,6 +3674,31 @@ local function retryUpright()
 	end
 end
 
+-- Every beforePhysics step, before the retries (so a copy stood up on this step keeps its state
+-- machine off through at least one physics step): each copy stood up with its state machine off is
+-- stepped through Deps.resumeUpright until it has it back and has read upright resumeChecks steps
+-- after, or was kept off, or lost its Humanoid (D-559).
+local function resumeUprights()
+	local resume = dependencies().resumeUpright
+	if resume == nil then
+		table.clear(uprightResumes)
+		return
+	end
+	for id, entry in uprightResumes do
+		local answer = resume(entry.record.model)
+		if answer == RESUME.held or answer == RESUME.resumed then
+			continue
+		end
+		if answer == RESUME.on then
+			entry.checks += 1
+			if entry.checks < UPRIGHT.resumeChecks then
+				continue
+			end
+		end
+		uprightResumes[id] = nil
+	end
+end
+
 --- Starts watching a tracked rig: the enemy body's fall states off (D-508), outline, trail
 --- attachment, clip events, and the locomotion driver when the rig is not the local player's own.
 function Replication.watch(record: any)
@@ -3594,6 +3738,7 @@ function Replication.unwatch(record: any)
 	endRush(record.id)
 	settleUpright(record.id)
 	uprightTries[record.id] = nil
+	uprightResumes[record.id] = nil
 	attacks[record.id] = nil
 	launches[record.id] = nil
 	stateClips[record.id] = nil
@@ -3602,6 +3747,7 @@ function Replication.unwatch(record: any)
 	trailKinds[record.id] = nil
 	clipSpeeds[record.id] = nil
 	remoteActions[record.id] = nil
+	remoteArts[record.id] = nil
 	switchOpeners[record.id] = nil
 	lastNudges[record.id] = nil
 	lastTicks[record.id] = nil
@@ -3622,11 +3768,13 @@ function Replication.bind(newDeps: Deps)
 	end
 	table.clear(uprightWaiting)
 	table.clear(uprightTries)
+	table.clear(uprightResumes)
 	table.clear(drivers)
 	table.clear(trailKinds)
 	table.clear(switchOpeners)
 	table.clear(clipSpeeds)
 	table.clear(remoteActions)
+	table.clear(remoteArts)
 	table.clear(lastNudges)
 	table.clear(lastTicks)
 	table.clear(deathVocals)
@@ -3663,8 +3811,12 @@ function Replication.bind(newDeps: Deps)
 		end)
 	end
 	if typeof(newDeps.beforePhysics) == "function" then
-		-- An enemy copy not upright yet, asked again before this client's physics steps it (D-523).
-		(newDeps.beforePhysics :: any)(retryUpright)
+		-- A rescued copy's state machine back at its release (D-559), then an enemy copy not
+		-- upright yet asked again, before this client's physics steps them (D-523).
+		(newDeps.beforePhysics :: any)(function()
+			resumeUprights()
+			retryUpright()
+		end)
 	end
 	if playTicking then
 		local onHeartbeat = newDeps.onHeartbeat :: any
@@ -3933,6 +4085,12 @@ function Replication.start()
 				if child:IsA("Humanoid") then
 					fn()
 				end
+			end)
+		end,
+		-- A copy stood up with its state machine off gets it back at its release (D-559).
+		resumeUpright = function(model: Model): string?
+			return Replication.resumeModel(model, function(body: Model): any
+				return body:FindFirstChildOfClass("Humanoid")
 			end)
 		end,
 	})

@@ -690,10 +690,12 @@ local function columnOf(model: Model): { BasePart }
 	return list
 end
 
--- ContactPredictor.room for the whole column (D-517): the root's box as before, and each torso
--- and the head posed where it stands now relative to `rootPart`, cast along `along` from the root
--- at `at`; the least room any leaves. A torso or head the clip has already leant into the world
--- leaves none: the step never carries it deeper.
+-- ContactPredictor.room for the whole column (D-517): the root's box, and each torso and the head
+-- posed where it stands now relative to `rootPart`, cast along `along` from the root at `at`; the
+-- least room any leaves. Each is cast from a box-depth ahead, so a part the clip has leant, or the
+-- engine has pressed, into the world leaves none: the step never carries it deeper. The root too
+-- (D-560): the engine's Blockcast never meets a part it starts in, and a root box pressed past
+-- the gap into a pillar, the torsos and head turned beside it, read no world and stepped on in.
 local function columnRoom(
 	rootPart: BasePart,
 	column: { BasePart },
@@ -709,7 +711,7 @@ local function columnRoom(
 			return 0
 		end
 		if part == rootPart then
-			most = boxRoom(at, part.Size, along, most, cast, false)
+			most = boxRoom(at, part.Size, along, most, cast, true)
 		else
 			most = boxRoom(at * rootFrame:ToObjectSpace(part.CFrame), part.Size, along, most, cast, true)
 		end

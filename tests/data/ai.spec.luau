@@ -145,6 +145,15 @@ describe("ai data", function()
 		end
 	)
 
+	it("a rescued copy gets its state machine back at its release and is read back for a second (D-559)", function()
+		local client = AI.upright.client
+		-- 474(e) on 209875b: with it off, FloorMaterial Air on 536 of 536 rows held and walking
+		expect(client.resumeOnRelease).toBe(true)
+		-- P1: every copy let go with it on read Running over the 60 rows logged after its release
+		expect(client.resumeChecks).toBeGreaterThanOrEqual(60)
+		expect(client.resumeChecks % 1).toBe(0)
+	end)
+
 	it("interrupt fallbacks are the section 6 durations", function()
 		expect(AI.interrupt.durations.Stagger).toBe(Combat.staggerDuration)
 		expect(AI.interrupt.durations.Break).toBe(Combat.breakDuration)

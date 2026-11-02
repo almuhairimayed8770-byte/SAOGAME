@@ -992,18 +992,40 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - New specs: SwordToHand (4 tests), WeaponMount (+6), CharacterController (+1), RushDrawOrder (the re-attach and the placement), and DrawnBody, RushDraw and validators cases.
 - Studio: section AP (items 482 to 490), run after section AO. Sections AL, AN and AH mark each line they replace "Superseded by item …".
 
+## Section AO on the PC (2026-11-02, 209875b)
+
+- Passed: the Kobold Break's axe stays on the floor and turns ≤ 4.72° a row, in the ClipLab and in game at 60 and 144 fps (471), and the Kobold Walk's axe ≥ +0.008 over the field (472); the boar Stagger's front hooves rear and come down (470(a), (b)); enemies stay upright on the client from the game's own script, Running on every held and released row with the state machine on (474(a) to (d)); the guard and Draw tip speed on the screen ≤ 70.7 studs/s (475); the locked drawn walk plants 59–61% of rows at 60 and 144 fps (477(a)); the dodge's press rows (478, 20 of 20); the slam's and the open run's rests within 0.02 (479(a), (c) to (e), 480(b), (c)); a late remote basic draws its whole slash (481).
+- Failed: the boar Stagger rolls onto its left side, its right hooves up to 0.0965 at clip 0.45–0.72 (470(c)), and the boar's only attack is unblockable, so its parry stagger cannot be reached in game; the walk start slides 0.168 for the boar turned 90° and 0.098–0.140 for the kobold at 144 fps (473(a), (e)); a rescued copy reads FloorMaterial Air on all 536 rows of its walk (474(e)); the lock turn's pivot foot moves 0.030–0.086 a row on 5 of 6 turns (476(a)); the dodge out of the drawn run at 16 swings the right arm 20–32° after the press (478(a), 4 of 20); at 144 fps the boar's landing keeps WalkSpeed 28 for 2–3 rows (479(b), 480(a)); one open-run take slid back 0.101 (480(d), 1 of 12). Seen outside the judged clips: the Sheathe at a sprint's Skid stop moves the tip at up to 241 studs/s. Fixed stepping does not make the drawn walk's physics steps regular (477(c)). Being fixed.
+
+## Section AP on the PC (2026-11-02, 318f0a3)
+
+- Passed: the boar's Torso goes back on its joint on the hand-back's last row at 0.000 off its chain and steps ≤ 0.033 at 60 fps, ≤ 0.013 at 144 and ≤ 0.050 at 30 (482, every take); the nameplate rides the drawn body at 0.000 and never steps on the stagger rows (483, 484); shot 6's wall runs keep the Torso within +0.077 of the drawn root (486); a boar placed during its charge is drawn on its new place on the next row (488(a), (b)); the sword lands in the hand on the row that draws the grab on 48 of 48 takes at 30, 60 and 144 fps, local and remote at lags 0 to 0.25 (490(b), (f)).
+- Failed or wrongly asked: on the uphill run the drawn root's 3D steps read 0.58–0.635 against a flat bar of about 0.52, and 4–5 run rows a take are over the slope bar by up to 0.107 (485(a), 487(a)); just after the launch snap the Torso steps over its 28 × dt + 0.05 bar on 1 row a take at 60 fps (0.50–0.57) and 2–3 rows at 144 (0.25–0.39) (485(b)); at 30 fps the drawn root steps back 0.018–0.032 after the stop against 0.02 (485(c)); a fresh boar's plate is adorned to the Model, which draws at its bounding box's centre, 1.3 studs off the root (489); 488(c) cannot launch as written, since a placement drops the wind-up (the next charge launched from where it stood); 490(a)'s idle bar (0.003) fails on 12 of 48 takes on idle motion, mostly at lag 0.25, and 490(c) on 2 mid-stroke rows at 30 fps where the blade turns round the wrist. Being fixed or corrected.
+
+## Watcher hit-stop, blade light, rescued upright and wall stand-off fixes (2026-11-02, D-556 to D-564)
+
+- A watcher's copy of another player now freezes on the stroke's end pose, as the swinger's own screen does (D-557): Lune at lag 0 freezes at clip 0.4267 / 0.410 / 0.4003 at 30 / 60 / 144 fps, against 0.3933 / 0.3933 / 0.3864 before (the PC on 006f057 0.383–0.391), with the hit's cues and the last ribbon segment on the row that draws the key.
+- A frame drawn held lays no ribbon, however the watcher's copy drifts with its replicated root (D-556): Lune 0 samples on held frames, against 3 / 6 / 7 under a 4 studs/s drift before (the PC saw 1 on 2–4 frozen rows).
+- The blade light goes out on the ribbon's first segment, never a frame before it (D-558): Lune 0 of 8 crossing phases off, against 6 of 8 (the PC's one air take of 27).
+- A kobold rescued with its state machine off gets it back when let go (D-559), so its floor reads the field and its footsteps play the grass set: Lune walking rows 0 → 299 of 299, against the PC's Air on 536 of 536.
+- The stand-off no longer steps a root box the engine pressed into a pillar further in (D-560): Lune's Studio-like body 0.106 / 0.100 a frame on 11 rows at 30 / 60 fps before, 0.000 after. Item 462's setup was squeezed (the face 1.165 from the kobold's Blocker against the drawn idle's 1.558), so its takes now stand where a kobold at its own stop distance leaves the body (D-561), and Lune passes every line there; (b) and (d) read less the clip's own root motion (D-562).
+- Corrected without code: 465(a)'s row count (4 rows at 60 fps on 209875b, 3 on this build), 481(b)'s slash is whole on its first row at every rate, and 469(b) uses each take's own arrival (its second take now 0.0001 off).
+- Item 490's sword grab passed its headline lines on all 48 takes; its other lines asked for the wrong thing and are corrected without code (D-563, D-564): row P−1 is judged in the root's frame against the sheathed idle's real size (up to 0.40 studs/s for the hand), the 30 fps mid-stroke fails are Basic1's own settle roll about the wrist, 1 row local and 2 remote are the right counts, and the grip bar is the joint's 0.30 offset ± 0.01. Row P's blade turn (θP) and six whole-body rows on B at lag 0.25 go to Studio.
+- New specs: WatcherFreeze (3 tests), CueFrames (+1), EnemyUprightClient (+7), StandOffWall (+4, a Studio-like body at a wall and a pillar), and ai and validators cases.
+- Studio: section AQ (items 491 to 497), run after section AP. Sections AM, AN, AO and AP mark each line they replace "Superseded by item …".
+
 ## Next three tasks
 
-1. Run section AO (items 470 to 481) of `docs/STUDIO_TASKS.md`, in progress on the owner's PC on 209875b, and then
-   section AP (items 482 to 490) on the build with these fixes, every item with item 397's frame names, at the frame
-   rates and lags each names, judged on the BasePart read. Report every pass line with its numbers. Earlier sections'
-   lines not superseded stand as written.
-2. Fix what is still open: section AM's lines (the hands and blade inside the kobold, 461 and 464; the body in the wall
-   behind, 462; one 144 fps step, 460(a)), section AN's (the watcher's ribbon through a hit freeze, 468(a); the light
-   over a wind-up compressed by the catch-up and the 30 fps ribbon head, 468(b); 465(a)'s row count; 469(b)'s second
-   take), section AL's slope settle (458(b), diagnosed; item 487 reads its height), and whatever sections AO and AP
-   find; all in progress. 448's planted feet wait on item 477 and the owner's call below. Their re-tests follow as
-   later Studio sections. The owner's calls (below, and in AI) go to the owner.
+1. Run section AQ (items 491 to 496) of `docs/STUDIO_TASKS.md` on the build with these fixes, every item with item
+   397's frame names, at the frame rates and lags each names, judged on the BasePart read. Report every pass line with
+   its numbers. Earlier sections' lines not superseded stand as written.
+2. Fix what is still open: section AM's hands and blade inside the kobold (461, 464) and one 144 fps step (460(a));
+   section AO's boar stagger roll (470(c)), walk start (473), lock-turn pivot foot (476(a)), drawn-run dodge arm
+   (478(a)), the landing's pace at 144 fps (479(b), 480(a)), the one open-run slide (480(d)) and the Sheathe at a
+   sprint's Skid stop; section AP's uphill steps (485(a), 487(a)), the rows after the launch snap (485(b)), the 30 fps
+   back-step (485(c)), the nameplate on a Model (489), 488(c)'s wording and item 490's idle and mid-stroke bars; all in
+   progress. 448's planted feet wait on the owner's call below. Their re-tests follow as later Studio sections. The
+   owner's calls (below, and in AI) go to the owner.
 3. The rehearsal and the recording (item 438), once every line passes: rehearse the 11 shots in dev.luau order with the
    frame-tick square on and log any take that fails its own pass lines; if all pass, record each with Game Bar at 60
    fps, High quality, with **View > Stats** open during the fight for the fps reading, and hand the files over (here in
@@ -1011,8 +1033,31 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
    of `docs/ANIMATION_REVIEW.md` are filled (with AG item 391(f)'s enemy cells), and anything that reads wrong is fixed
    with the PoseEditor and recorded again. The section 16 numbers and the merge into `main` follow (Open items).
 
-### Open items (after the boar rush hand-over and sword-to-hand fixes, not in the three above)
+### Open items (after the watcher hit-stop, blade light, rescued upright and wall stand-off fixes, not in the three above)
 
+- **Owner calls from the watcher hit-stop and wall stand-off fixes (the default is chosen; say if not).**
+  - At lag 0.1 a watcher's copy of a swing starts about 0.134 s in and fades in from idle over 0.08 s, so the
+    activation's 0.1 s still hold shows for only 0 / 2 / 5 rows at 30 / 60 / 144 fps (item 492(b)). A faster blend into
+    the stance would show the hold at the cost of a quicker snap; the default keeps the blend.
+  - A watcher's frozen copy still slides with its replicated root during a hit-stop (0.02–0.07 a row on the PC); the
+    ribbon no longer follows it (D-556), the body does. Holding the drawn body still under a freeze (an offset like
+    the boar's DrawnBody) is a follow-up; the default leaves the body to replication.
+  - When an enemy pins a fighter to a wall closer than the fighter's drawn stance fits (under about 1.6 studs between
+    the wall and the enemy's body), the engine pushes the body out sideways today. The other ways are an AI rule that
+    keeps a pinning enemy at its stop distance from a fighter backed to the world, or a lean-off pose. The default
+    leaves it to the engine (only a dev hold pins that close).
+  - If item 497(e) reads θP ≈ 0° on every take, row P draws the sword with the back mount's rest turn, 4–10° off the
+    stroke's key at 60 fps and 15–27° at 30, for one row. The default is to fix it next round, failing first, so the
+    grab lands on the stroke's pose.
+- **From the watcher hit-stop, upright and stand-off fixes.** A held word waits at most 0.25 s for the watcher's copy
+  to show its key (D-557), so a copy frozen by another blow first lets it go where it stands. A held, rescued copy still
+  reads Air while held, by design (D-559), so a Stagger struck into it while held plays stone footsteps; item 495(i)
+  shows whether the state machine can come back while held. D-559 assumes a state machine turned back on reads the
+  floor on its next step (495(c) checks it). The wall slide the PC saw at the squeezed setup (5.7–5.9 studs) is not
+  reproduced by Lune's Studio-like body; item 496(g) settles it. StandOffWall's Studio-like takes add about 90 s to the
+  Lune suite. If item 497(g) shows A's replicated speed over 0.25 studs/s while A stands, a remote-only
+  speed deadband in Locomotion would keep B's copy idle. The PC's row-P hand moves are 1.5–2.5 times Lune's blank
+  rig's; a Lune rig with the owner's avatar proportions would let them be compared directly.
 - **Owner calls from the boar rush and sword fixes (the default is chosen; say if not).**
   - A replicated root that jumps more than 4 studs off its path in one step ends a drawn rush at once (D-553): that is
     over a late root's sideways move (never above 1.7 studs a row in the PC's logs) and under the P3 probe's 13–16-stud

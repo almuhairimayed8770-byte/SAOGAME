@@ -24,7 +24,8 @@
 	each client's copy stands up to Running or GettingUp, retries a whole number of steps and logs
 	under three distinct names the server never publishes (upright.client, D-523), turns off at
 	least the server's fall states, says whether it is asked at its Humanoid's arrival, and stands
-	a fallen copy up by one of its two named rescues (D-543, D-544).
+	a fallen copy up by one of its two named rescues (D-543, D-544), saying whether a rescued
+	copy's state machine comes back at its release and over how many steps it is read back (D-559).
 ]]
 
 type Context = {
@@ -789,6 +790,15 @@ local function validate(ctx: Context): { string }
 			problem('upright.client.rescues must name stateMachine "StateMachine" and changeState "ChangeState"')
 		elseif client.rescue ~= rescues.stateMachine and client.rescue ~= rescues.changeState then
 			problem(("upright.client.rescue %s must be one of upright.client.rescues"):format(tostring(client.rescue)))
+		end
+		-- D-559: a rescued copy's state machine comes back at its release, and its state is read
+		-- back on a whole number of steps after.
+		if typeof(client.resumeOnRelease) ~= "boolean" then
+			problem("upright.client.resumeOnRelease must be true or false")
+		end
+		local checks = client.resumeChecks
+		if typeof(checks) ~= "number" or checks < 1 or checks % 1 ~= 0 then
+			problem("upright.client.resumeChecks must be a whole number of at least 1")
 		end
 		local published = {
 			EntityId = true,

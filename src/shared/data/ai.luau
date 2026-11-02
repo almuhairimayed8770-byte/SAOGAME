@@ -217,9 +217,23 @@ local AI = {
 			catchOnArrival = true,
 			-- How a copy found in a fall state is stood up (D-544): `rescues.stateMachine` sets its
 			-- Humanoid.EvaluateStateMachine false, then ChangeState(standUpState) (P1 L3), and leaves it
-			-- off; `rescues.changeState` is the ChangeState alone (9063a60, P1 L4: no take while held).
+			-- off until its release (resumeOnRelease); `rescues.changeState` is the ChangeState alone
+			-- (9063a60, P1 L4: no take while held).
 			rescue = "StateMachine",
 			rescues = { stateMachine = "StateMachine", changeState = "ChangeState" },
+			-- A copy stood up with its state machine off gets it back on the first PreSimulation its
+			-- root reads let go (no longer Anchored), its fall states still off: the main path's copy
+			-- from then on (D-559). With it off the Humanoid never updates FloorMaterial (the PC's
+			-- 474(e) on 209875b: Air on 536 of 536 rows, held and walking), so the footstep surface
+			-- read the default Stone on the field's grass; every copy with it on read Grass (474(a)), and
+			-- every copy let go with it on read Running from its release row (P1 L0, L4). While the
+			-- root stays anchored it stays off (P1 L3: Running on 862 of 862 anchored rows).
+			-- false: off for the copy's life (D-544).
+			resumeOnRelease = true,
+			-- After turning it back on, the copy's state is read on this many PreSimulation steps; one
+			-- in a fall state is stood up again with the state machine off for good (D-544). The P1
+			-- probe's 60 rows after each release (1 s at 60 Hz) all read Running.
+			resumeChecks = 60,
 			standUpState = "Running", -- the server's state on every held row the PC logged
 			maxTries = 240, -- 4 s of 60 Hz PreSimulation steps, then only an EntityKind change retries
 			-- A log aid on the enemy Model, client only (client attributes do not replicate), in the
