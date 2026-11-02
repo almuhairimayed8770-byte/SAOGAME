@@ -1440,6 +1440,9 @@ end
 -- and an Art's hold it jumped over (replayHold). They play on the first frame that draws the clip
 -- (onDrawn, D-479), from where the clip stands there (its step since has moved it on), and not at
 -- all for a clip taken away before it (F5).
+-- The window a late start jumped into (D-538), defined with the trail kinds below.
+local replayTrail: (record: any, handle: any, clipId: string) -> ()
+
 local function replaySkipped(record: any, handle: any, clipId: string)
 	if typeof(handle) ~= "table" or typeof(handle.time) ~= "number" or handle.time <= 0 then
 		return
@@ -2157,6 +2160,7 @@ function handlers.ActionStarted(payload: any)
 		remoteActions[record.id] = handle
 	end
 	replaySkipped(record, handle, payload.clipId)
+	replayTrail(record, handle, payload.clipId)
 	local def, attackDef = attackDefOf(record, nil, payload.clipId)
 	if attackDef ~= nil and typeof(handle) == "table" then
 		-- An enemy's attack clip keeps the server's beat (D-172), shifted by any pause already given.
@@ -3110,6 +3114,74 @@ local function resolveTrailKind(record: any, clipId: string, event: any): string
 		return remembered.kind
 	end
 	return if string.find(clipId, "/Basic", 1, true) then "Basic" else "Art"
+end
+
+-- The events that light a clip's trail kind and those that put it out (routeClipEvent).
+local TRAIL_OPENS: { [string]: boolean } = { TrailOn = true, HitWindowOpen = true }
+local TRAIL_CLOSES: { [string]: boolean } = { HitWindowClose = true, TrailOff = true, PostMotionStart = true }
+
+-- A late start's trail (D-538). The network catch-up starts a clip `handle.time` in, and the
+-- Mixer's first step fires its events from there on, so a window the start jumped into (an open
+-- before the start, no close between) never lit: a remote basic at 0.1 s of lag or more (its
+-- TrailOn and HitWindowOpen at 0.1) drew no ribbon at all. That window lights on the first frame
+-- that draws the clip (onDrawn), in the kind the clip's TrailOn named, unless the clip was taken
+-- away first or its strike snap had already landed. Every late clip with a trail is named to Trails (lateStroke) at once, so a stroke its
+-- first step lights starts on its own blade where it came in, never on the pose before the jump.
+replayTrail = function(record: any, handle: any, clipId: string)
+	if typeof(handle) ~= "table" or typeof(handle.time) ~= "number" or handle.time <= 0 then
+		return
+	end
+	local clip = handle.clip
+	if typeof(clip) ~= "table" or typeof(clip.events) ~= "table" or clip.loop == true then
+		return
+	end
+	local startTime: number = handle.time
+	local opener: any, named: any = nil, nil
+	local openAt, closeAt = -math.huge, -math.huge
+	local hasTrail = false
+	for _, event in clip.events do
+		local kind = event.kind
+		if TRAIL_OPENS[kind] then
+			hasTrail = true
+		end
+		-- An event at the start itself fires on the first step (its first step includes its start).
+		if event.time < startTime then
+			if TRAIL_OPENS[kind] and event.time >= openAt then
+				opener, openAt = event, event.time
+				if kind == "TrailOn" then
+					named = event
+				end
+			elseif TRAIL_CLOSES[kind] and event.time >= closeAt then
+				closeAt = event.time
+			end
+		end
+	end
+	if not hasTrail then
+		return
+	end
+	local d = dependencies()
+	local model = record.model
+	local mark = if typeof(d.trails) == "table" then rawget(d.trails, "lateStroke") else nil
+	if typeof(mark) == "function" then
+		mark(model, handle)
+	end
+	if opener == nil or closeAt >= openAt then
+		return
+	end
+	-- A window whose strike snap already landed by the start has none of its stroke left to draw
+	-- (D-539): it stays dark, as it did.
+	local landing = ClipSampler.strikeLandingAt(clip, startTime)
+	if landing ~= nil and landing <= startTime then
+		return
+	end
+	-- What it decides (the kind for the clip's later events) does at once, as routeClipEvent's.
+	local trailKind = resolveTrailKind(record, clipId, named or opener)
+	onDrawn(record, function()
+		if handle.stopping == true and handle.ended ~= true then
+			return
+		end
+		d.trails.setActive(model, true, trailKind)
+	end)
 end
 
 -- A clip's one-shot on a rig (a clip sound or voice, an Art's activation, a footstep), on the

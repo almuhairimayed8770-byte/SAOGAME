@@ -231,6 +231,21 @@ function ClipSampler.strikeHoldAfter(clip: Types.ClipDef, time: number): number?
 	return nil
 end
 
+--- The clip time the strike snap a stroke at clip time `time` belongs to lands on (its key pose,
+--- section 10 beat 2: the stroke's end pose), or nil when no strike snap began at or before
+--- `time`. As for strikeHoldAfter, the stroke belongs to the latest snap begun by `time`; a landing
+--- at or before `time` means that stroke's end pose is already behind it (D-539).
+function ClipSampler.strikeLandingAt(clip: Types.ClipDef, time: number): number?
+	local keys = clip.keys
+	local snaps = cacheFor(clip).snaps
+	for index = #keys, 2, -1 do
+		if snaps[index] == true and keys[index - 1].time <= time + SNAP_EPSILON then
+			return keys[index].time
+		end
+	end
+	return nil
+end
+
 --- The set of joint names a clip touches (plus the root if any key moves it), sorted. The list is
 --- cached per clip and frozen: read it, never edit it. After editing a clip's keys call `invalidate`.
 function ClipSampler.jointNames(clip: Types.ClipDef): { string }

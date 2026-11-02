@@ -949,17 +949,25 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - Studio: section AM (items 459 to 464), run after section AL. Section AI marks each line they replace "Superseded by item …".
 - Merge: F1's patches went on f446653; its specs pass with every earlier part's; the hit-matrix tool now runs 73 s (was 55).
 
+## Ribbon fixes (2026-11-02, D-538 and D-539)
+
+- A watcher now draws a late remote basic's ribbon (D-538): at a catch-up of 0.11–0.134 s it drew nothing; now the rest of the stroke, 0.06–3.6 studs at 30, 60 and 144, from the clip's own blade with no streak from the back. When none of the stroke is left (a catch-up of 0.15 or more, or the 0.25 cap) nothing is drawn.
+- The ribbon ends on the frame that shows the stroke's end pose, on local and remote rigs, at 30, 60 and 144, with or without a hit (D-539): 51 of 66 Lune cases drew segments after it → 0.
+- 374(b) needed no code: the catch-up is right above speed 1, and the PC's 0.106 s came from the message's 0.284 s lateness (0.092 expected, within a frame); the line is corrected.
+- 376(b), the sword in the idle hand for one frame when it leaves the back, is real on screen; the fix (WeaponMount's swap on the step that writes the grab pose) is chosen and comes with the next guard and Draw round.
+- Studio: section AN (items 465 to 469), run after section AM. Section AG marks each line they replace "Superseded by item …".
+
 ## Next three tasks
 
-1. Run the rest of section AL (items 454 to 458, in progress on the PC) and then section AM (items 459 to 464) of
-   `docs/STUDIO_TASKS.md` on the owner's PC on the build with these fixes, every item with item 397's frame names, at
+1. Run the rest of section AL (items 454 to 458, in progress on the PC) and then sections AM (items 459 to 464) and AN
+   (items 465 to 469) of `docs/STUDIO_TASKS.md` on the owner's PC on the build with these fixes, every item with item 397's frame names, at
    the frame rates and lags each names, judged on the BasePart read. Report every pass line with its numbers. Section
    AI's and AJ's lines not superseded stand as written.
 2. Fix section AJ's fails (the client's enemy copies falling, 442 and 443; the server landing short at 60 fps and the
    client's slide back, 440(e), 441(b) and (d)), section AK's (the tip on short frames, 444 and 445; the pivot foot,
    446; the locked walk's planted feet, 448; the dodge's legs on the press row, 452), section AL's (the Torso's pop
-   when it goes back on its joint, 453(b)), and the AG fails the PC found on 4b18b5c (376(a), no remote ribbon under
-   lag; 383 and 384, ribbon segments after the stroke; 391(c), the boar Stagger's rear; 392(b), the boar's walk start);
+   when it goes back on its joint, 453(b)), and the AG fails the PC found on 4b18b5c (391(c), the boar Stagger's rear; 392(b), the boar's walk start; 376(a),
+   383 and 384 are fixed and re-tested in section AN);
    all in progress, with the PC's engine probes. Their re-tests follow as later Studio sections. The owner's calls
    (below, and in AI) go to the owner.
 3. The rehearsal and the recording (item 438), once every line passes: rehearse the 11 shots in dev.luau order with the
@@ -971,6 +979,11 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 
 ### Open items (after the section AI fixes, fourth part, not in the three above)
 
+- **From the ribbon fixes.** 376(b), the sword drawn in the idle hand for one frame as it leaves the back, is a
+  real screen fault; its fix (WeaponMount's swap on the step that writes the grab pose) is approved and comes with the
+  next guard and Draw round, and item 466 measures it until then. Studio's own lag adds about 0.034 s to the catch-up
+  (0.134 at a set 0.1), so a lag-0.1 ribbon is very short there. Kobold Overhead's ribbon now ends at its snap's
+  landing, 1.35, not at HitWindowClose 1.50.
 - **Owner calls from the section AI fixes, fourth part (the default is chosen; say if not).**
   - The drawn hands stay fully out of the enemy (D-535), so Rising Arc's first key stands up to 0.20 further back at
     60 Hz (0.30 at 30 fps) and every cut still lands; the other way is to allow a hair of drawn overlap (≤ 0.05) for a

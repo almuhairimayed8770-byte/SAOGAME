@@ -1417,13 +1417,13 @@ Run these on the round F build on the owner's PC. Setups A to D and the per-fram
    (b) Pass: the plain blocked hit still freezes 3 frames with a Normal shake.
 374. [ ] **A faster clip on a remote rig (D-469; new).** Test > Clients and Servers with 2 players, a boar held beside player A. In the Server command bar require CombatService and call beginArt(<player A's entity id>, "OneHandedSword.Horizontal", nil, 1.3). Then set Incoming Replication Lag to 0.25 s and repeat.
    (a) Pass: at lag 0, on client B the swing plays visibly faster and the boar is struck as the blade passes it, not after.
-   (b) Report: at lag 0.25 the remote clip starts at most choreo catchUpMaxJump (0.25 clip-s) late, so at 1.3 it is expected to run 0.075 clip-s (about 0.058 s) behind the server. Report whether the strike reads late on B (Lune: 0 behind at lag 0 and 0.05 for 0.6, 1.15 and 1.4; at lag 0.25, 0.0375 clip-s behind at 1.15 and 0.100 at 1.4).
+   (b) Report: at lag 0.25 the remote clip starts at most choreo catchUpMaxJump (0.25 clip-s) late, so at 1.3 it is expected to run 0.075 clip-s (about 0.058 s) behind the server. Report whether the strike reads late on B (Lune: 0 behind at lag 0 and 0.05 for 0.6, 1.15 and 1.4; at lag 0.25, 0.0375 clip-s behind at 1.15 and 0.100 at 1.4). Superseded by item 469.
 375. [ ] **No skid under a remote dodge (D-472; new).** Two clients. Client A sprints and taps dodge mid-sprint; then A sprints and lets go with no dodge.
    (a) Pass: on client B, A's dodge plays one whoosh with no skid scrape or LandSoft thud just before it.
    (b) Pass: the plain sprint stop still plays the Skid and its landing on B.
 376. [ ] **A sheath-drawn opener's first ribbon under lag (D-473; new).** Two clients with Incoming Replication Lag 0.1 s, then 0.25 s. Client A, sword sheathed, opens with a basic attack; record B with the per-frame logger.
-   (a) Pass: on B the first trail ribbon follows the hand's slash, with no streak from the back.
-   (b) Report: log the frame the Weapon motor's Part0 changes from the back mount to the hand against the first frame the hand's pose is drawn there. Part0 is a property and shows on its step's frame, while the pose shows a frame later (impact.poseLagFrames 1), so the blade may show in the hand one frame before the arm reaches it.
+   (a) Pass: on B the first trail ribbon follows the hand's slash, with no streak from the back. Superseded by item 465.
+   (b) Report: log the frame the Weapon motor's Part0 changes from the back mount to the hand against the first frame the hand's pose is drawn there. Part0 is a property and shows on its step's frame, while the pose shows a frame later (impact.poseLagFrames 1), so the blade may show in the hand one frame before the arm reaches it. Superseded by item 466.
 377. [ ] **The stop with controls off (D-474; new).** Setup A.
    (a) Pass: walk, then open a menu or disable the controls mid-walk (require(Players.LocalPlayer.PlayerScripts.PlayerModule):GetControls():Disable()): the body stops within the two-step stop and does not keep walking.
    (b) Pass: a gamepad half tilt and a keyboard diagonal both walk and stop normally.
@@ -1447,9 +1447,9 @@ Run these on the round F build on the owner's PC. Setups A to D and the per-fram
    (d) Pass: on every frame of the stroke the ribbon's newest end touches the blade tip (0 px ahead).
    (e) Pass: no new ribbon segment appears after the frame that shows the stroke's end pose.
 383. [ ] **The same at 30 and 144 Hz (D-479; new).** Item 382's setup. Run workspace:SetAttribute("DevFrameCap", 30) and repeat item 382; then clear the cap and repeat on a 144 Hz display.
-   (a) Pass: 382 (a) to (e) hold at both rates.
+   (a) Pass: 382 (a) to (e) hold at both rates. Superseded by item 467.
 384. [ ] **The same on a remote rig (D-479; new).** Item 382's setup. On client B record A casting Vertical (A's rig is remote there).
-   (a) Pass: 382 (a) to (e) hold on B's recording.
+   (a) Pass: 382 (a) to (e) hold on B's recording. Superseded by item 468.
 385. [ ] **Footsteps on their pose (D-479; new).** Item 382's setup, recording audio. Run A straight on stone, then cast Vertical.
    (a) Pass: each footstep's sound starts after the frame where its foot touches down by the same amount (±1 frame) as the chime starts after the light's first frame. Both cues now share their pose's frame, so this holds whatever the engine's audio latency.
 386. [ ] **A dodge cancels the light (D-479; new).** Item 382's setup. On A cast Vertical and dodge as early in the wind-up as the input allows.
@@ -2045,3 +2045,23 @@ Run these on the build with the fourth part of the section AI fixes (D-534 to D-
    (a) Pass: the blade (the Weapon BasePart at Last+2) is out of the kobold by the row at clip time 0.283 and stays out, whether that row read Back or Hand (Lune's screen read: out by 0.283; the chain beside it 0.25 +0.21, 0.267 −0.01, 0.283 −0.13).
    (b) Pass: at the key (0.15) the blade is ≤ 0.25 deep (the plan caps the reach at 0.2 + 0.005; Lune 0.19–0.21 with the PC's own 0.45 keep).
    (c) Report: the root's back step at Character+1 over clip 0 to 0.15 (Lune keep 1.05 back by 0.133; the PC's −0.47 at 0.15 on 4b18b5c meant no keep-out was shown).
+
+## AN. AG re-test after the ribbon fixes (D-538 and D-539)
+
+Run these on the build with the ribbon fixes (D-538, D-539) on the owner's PC, after section AM. Setup for every item: Playground, Test > Clients and Servers with 2 players; A swings and B watches, B's window in front at 60 fps (DevFrameCap where a rate is named). Item 397's logger at Last+2 with item 406's TrailLit and TrailOwner columns and item 415's Weapon motor Part0 column; positions from BasePart reads (the tip is Weapon.CFrame * TrailEnd.CFrame, the hand RightHand.CFrame). Rows: P is the first row whose Part0 reads RightHand; T the first row whose TrailLit reads true for A's rig; N the row that shows the stroke's end pose, as 382(e) reads it. B's Incoming Replication Lag is set to 0, 0.1 and 0.25 s in turn.
+
+465. [ ] **A late remote basic's ribbon (D-538; replaces 376(a)).** A's Basic1, from sheathed and again already drawn, 4 takes per lag.
+   (a) Lag 0, as before: T is 5 rows after P (0.084 s), the ribbon about 5.4 studs, its first point at least 5 studs from row P−1's tip.
+   (b) Pass at lag 0.1 (Studio's actual catch-up is about 0.134): at least 1 ribbon segment on rows T to T+3 in 4 of 4 takes; the first point within 1.5 studs of row T's tip and at least 5 studs from row P−1's tip; no segment longer than 1.5 studs and none after row N. Expect very short ribbons (Lune at 60 fps, catch-up 0.10 / 0.11 / 0.12 / 0.134: 2.48 / 1.49 / 0.66 / 0.06 studs sheathed, 3.90 / 2.62 / 1.21 / 0.06 drawn); a take with no visible ribbon at a catch-up of 0.13 or more is the rule working, not a fail.
+   (c) Pass at lag 0.25: no segment, and TrailLit never true for the swing (the window closed at 0.24).
+466. [ ] **The sword in the hand a frame early (measurement only; replaces 376(b)).** Sheathed takes at lags 0, 0.1 and 0.25, on B (remote) and on A's own screen (local).
+   (a) Report: row P's tip jump (P−1 to P) and the hand's move on P, and the hand's move on P+1. Expected now: on P the tip jumps 4.10–4.14 studs while the hand moves ≤ 0.003; on P+1 the hand moves 0.03–0.15 (Lune 0.038 at lag 0, 0.133 at catch-up 0.25). The fix is approved and comes with a later section; its pass line will be: on row P the hand moves at least 0.03, and no row shows the sword in an unmoved hand.
+467. [ ] **No ribbon after the end pose, on A's own screen (D-539; replaces 383(a)).** Vertical at DevFrameCap 30, 60 and 144; 3 takes each: into the boar, into a kobold, into the air. Count ribbon segments on every row.
+   (a) Pass: no new segment on any row after N, the row after the last paused row and the settle included; the last new segment is on row N (the PC on 4b18b5c: 2 after the hit-stop at 30, 4 in the settle at 144; Lune before 1 at 30 and 60, 2 at 144; now 0).
+   (b) 382(a) to (d) as written.
+468. [ ] **No ribbon after the end pose, on a remote rig (D-539; replaces 384(a)).** On B, A's Vertical at 60, 30 and 144 fps, lags 0 and 0.1, 2 takes each.
+   (a) Pass: item 467's (a) on B's rows (the PC on 4b18b5c: 4 right after the end pose at 60).
+   (b) 382(a) to (d) as written.
+469. [ ] **A faster remote clip under lag (corrects 374(b); no code change).** A's Horizontal at speed 1.0 and 1.3 (item 374's beginArt call), B's lag 0 and then 0.25.
+   (a) First read B's lag-0 offset from the lag-0 takes (the PC about +0.019 / +0.020). Then d = (the 1.0 take's lateness at lag 0.25) − that offset.
+   (b) Pass: the 1.3 take at lag 0.25 runs ((0.25 + d) × 1.3 − 0.25) / 1.3 + the offset behind, ± 0.017 (one 60 fps frame). With the PC's 4b18b5c numbers d = 0.014, expected 0.091, read 0.106: a pass. The old line's 0.058 assumed the message came exactly 0.25 s late.

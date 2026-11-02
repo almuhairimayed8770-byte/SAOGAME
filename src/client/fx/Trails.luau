@@ -31,7 +31,14 @@
 	that lights starts a new stroke at the clip time the window opened, never joined to the last
 	stroke's tail: the frame before shows the wind-up, which points back along the cut, and the
 	window opens between it and this frame. With no such clip (a flash, a rig no animator plays),
-	the sub-steps interpolate the two frames' poses and a stroke starts from the frame before. The
+	the sub-steps interpolate the two frames' poses and a stroke starts from the frame before. A
+	stroke ends on the frame that shows the clip at its strike snap's landing (the stroke's end
+	pose, ClipSampler.strikeLandingAt): the hold and the settle after it draw no new segment, with
+	or without a hit's freeze (D-539). A clip the network catch-up started late (`lateStroke`,
+	D-538) has no frame of its own before its first step: a stroke its first step lights starts on
+	its own blade at the clock it came in at (the window Replication lit for it, or one that step
+	opens), never from the pose before the jump, and draws only what is still ahead of its end
+	pose; a window whose snap landed before the start draws nothing. The
 	ribbon's ages stand still while the rig is drawn held (Choreo heldShown, D-353: the frames the
 	screen shows its blade frozen, a frame behind the hold's flag). The chain is read again when the
 	Weapon's joint changes (WeaponMount moves the sword between the hand and the back), and that
@@ -68,7 +75,8 @@
 	last sample before the strike to its first sample past those frames, so a low frame rate
 	still reads the strike, not the settle. A strike whose first frame also pulls the sword from
 	its sheath (an opener caught up past its TrailOn's frame) measures from its first sample in
-	the hand (D-473). It answers for
+	the hand (D-473), as does one a late start's first step lights (D-538), over the snap frames
+	from that sample. It answers for
 	accents.swing.memorySeconds after it was sampled, while the trail is still on in the
 	overshoot and settle and once the swing is over, so a HitConfirmed that arrives a round trip
 	late still gets the swing that hit, never the settle. The last good direction sampled while a
@@ -158,6 +166,7 @@ type Drawn = {
 	sourceTime: number, -- its clock then
 	sourceDone: boolean,
 	sourceWeight: number,
+	late: boolean, -- `light` is a late start's clip on its first step (lateFirst, D-538)
 }
 
 type Entry = {
@@ -191,6 +200,7 @@ type Entry = {
 	lastSwingAt: number, -- Engine.now() of that sample
 	strikeAt: number?, -- Engine.now() when the strike began (an Art or Basic kind turned on)
 	snapFrom: Vector3?, -- the tip's last sample before the strike (its first sample when none)
+	snapLate: boolean, -- a late start's strike (D-538): its snap's clock starts at its first sample
 	snapSwing: Vector3?, -- the tip's chord since then, over the snap frames at most
 	snapAt: number, -- Engine.now() of the sample that measured it
 	lit: boolean, -- the trail is on (the engine Trail or the ribbon draws it)
@@ -209,6 +219,13 @@ type Entry = {
 	cutWay: Vector3?, -- the unit way the tip went to reach it; nil before the stroke has moved
 	cutSwept: number, -- studs the stroke's tip has swept
 	cutDone: boolean, -- the tip turned back: the window draws nothing more (D-335)
+	-- The clip time the stroke's strike snap lands on (its end pose, ClipSampler.strikeLandingAt):
+	-- once the frame shows the clip there or past it, the window draws nothing more (D-539).
+	cutEnd: number?,
+	-- A clip that came in late (Trails.lateStroke, D-538) and the clock it came in at: while its
+	-- last step is its first, the frame before shows another clip's pose.
+	late: any,
+	lateFrom: number,
 	source: any, -- the Mixer handle whose clip lit the stroke (its sub-steps sample it); nil: none
 	sourceMixer: any, -- the mixer that plays it
 	sourceTime: number, -- its clock at `pose`
@@ -789,6 +806,7 @@ function Trails.attach(model: Instance): boolean
 		lastSwingAt = 0,
 		strikeAt = nil,
 		snapFrom = nil,
+		snapLate = false,
 		snapSwing = nil,
 		snapAt = 0,
 		lit = false,
@@ -807,6 +825,9 @@ function Trails.attach(model: Instance): boolean
 		cutWay = nil,
 		cutSwept = 0,
 		cutDone = false,
+		cutEnd = nil,
+		late = nil,
+		lateFrom = 0,
 		source = nil,
 		sourceMixer = nil,
 		sourceTime = 0,
@@ -843,6 +864,7 @@ function Trails.attach(model: Instance): boolean
 			sourceTime = 0,
 			sourceDone = false,
 			sourceWeight = 1,
+			late = false,
 		},
 		lightSerial = 0,
 	}
@@ -868,6 +890,7 @@ function Trails.detach(model: Instance)
 	entry.removedCancel()
 	entry.trail.Enabled = false
 	entry.lit = false
+	entry.late = nil
 	releaseRibbon(entry)
 	entry.light.Enabled = false
 	entry.light.Brightness = Fx.activationLight.brightness
@@ -882,7 +905,16 @@ function Trails.setActive(model: Instance, on: boolean, kind: Kind)
 	local entry = entries[model] :: Entry
 	if on and kind ~= "Smear" then
 		-- A strike begins (TrailOn, or the next damage window of the same trail): its snap is new,
-		-- a chord from the tip's last sample before it.
+		-- a chord from the tip's last sample before it. One that a late start's first step lights
+		-- has no sample of its clip before it (the ring holds the pose before the jump): the ring
+		-- starts over and the snap measures from its first sample, as a sheath-drawn opener's
+		-- does (D-473, D-538).
+		local late = entry.late
+		local lateStrike = late ~= nil and late.done ~= true and late.lastTime == entry.lateFrom
+		if lateStrike then
+			entry.tipCount = 0
+		end
+		entry.snapLate = lateStrike
 		entry.strikeAt = Engine.now()
 		entry.snapFrom = if entry.tipCount > 0 then entry.tips[entry.tipHead] else nil
 		entry.snapSwing = nil
@@ -894,6 +926,25 @@ function Trails.setActive(model: Instance, on: boolean, kind: Kind)
 	entry.active[kind] = if on then true else nil
 	applyAppearance(entry)
 	rebalance()
+end
+
+--- A clip that came in late (D-538): the network catch-up started the Mixer `handle` past its
+--- start, so the frames before the one that draws its first step showed another clip's pose. A
+--- stroke its first step lights (a window the start jumped into, which Replication lights, or an
+--- open that first step crosses) starts on the clip's own blade at the clock it came in at, the
+--- frame before standing in by the frame's own pose (as on a rig's first read, D-336), never
+--- joined to the blade before the jump; its strike's snap measures from its first sample. Call it
+--- when the clip starts, before the frame that draws its first step.
+function Trails.lateStroke(model: Instance, handle: any)
+	if typeof(handle) ~= "table" or typeof(handle.lastTime) ~= "number" then
+		return
+	end
+	if entries[model] == nil and not Trails.attach(model) then
+		return
+	end
+	local entry = entries[model] :: Entry
+	entry.late = handle
+	entry.lateFrom = handle.lastTime
 end
 
 --- The activation light on the blade (range 8, brightness 2) in the trail color and the blade's
@@ -1038,6 +1089,12 @@ local function measureSnap(entry: Entry, position: Vector3, at: number)
 	local from = entry.snapFrom
 	if from == nil then
 		entry.snapFrom = position
+		if entry.snapLate then
+			-- A late start's strike, lit before the frame that draws its first step: the snap
+			-- spans the snap frames from its first sample, as an opener's does (D-473, D-538).
+			entry.strikeAt = at
+			entry.snapLate = false
+		end
 		return
 	end
 	local direction = unitMotion(position - from)
@@ -1052,11 +1109,39 @@ end
 
 -- The clip events that light a trail (Replication.routeClipEvent and ClipLab route them so).
 local LIGHTS: { [string]: boolean } = { TrailOn = true, HitWindowOpen = true, SmearOn = true }
+-- The events that light the clip's trail kind and those that put it out (Replication.routeClipEvent).
+local TRAIL_OPENS: { [string]: boolean } = { TrailOn = true, HitWindowOpen = true }
+local TRAIL_CLOSES: { [string]: boolean } = { HitWindowClose = true, TrailOff = true, PostMotionStart = true }
+
+-- True when `handle` is the clip a late start jumped in (Trails.lateStroke) and its last step was
+-- its first, so the frame before showed another clip's pose (D-538).
+local function lateFirst(entry: Entry, handle: any): boolean
+	local late = entry.late
+	return late ~= nil and handle == late and late.done ~= true and late.lastTime == entry.lateFrom
+end
+
+-- True when a clip's own events have its trail lit at clip time `time`: its last open (TrailOn,
+-- HitWindowOpen) at or before `time` has no close (HitWindowClose, TrailOff, PostMotionStart) after
+-- it up to `time`.
+local function litAt(clip: any, time: number): boolean
+	local openAt, closeAt = -math.huge, -math.huge
+	for _, event in clip.events do
+		if event.time <= time then
+			if TRAIL_OPENS[event.kind] then
+				openAt = math.max(openAt, event.time)
+			elseif TRAIL_CLOSES[event.kind] then
+				closeAt = math.max(closeAt, event.time)
+			end
+		end
+	end
+	return openAt > closeAt
+end
 
 -- Of the rig's playing clips now, the handle whose clock crossed a lighting event in its last step
 -- (Mixer handle.lastTime to its time), its mixer, and the event's clip time (the earliest crossed).
--- Nil when no clip lit it in that step (a flash, a rig no animator plays, a trail that lit while out
--- of the budget).
+-- With none, a late start's clip on its first step whose trail is lit where it came in (the
+-- catch-up jumped into its window, D-538), opened at that clock. Nil when no clip lit it in that
+-- step (a flash, a rig no animator plays, a trail that lit while out of the budget).
 local function liveLighting(entry: Entry): (any, any, number?)
 	local animator = deps.animator(entry.model)
 	local mixer = if typeof(animator) == "table" then animator.mixer else nil
@@ -1077,6 +1162,20 @@ local function liveLighting(entry: Entry): (any, any, number?)
 			end
 		end
 	end
+	local late = entry.late
+	if found == nil and late ~= nil then
+		if not lateFirst(entry, late) then
+			-- Past its first step: the frame before shows its own pose now.
+			entry.late = nil
+		elseif late.time > late.lastTime and litAt(late.clip, late.lastTime) then
+			for _, handle in mixer:handles() do
+				if handle == late then
+					found, opened = late, late.lastTime
+					break
+				end
+			end
+		end
+	end
 	return found, if found ~= nil then mixer else nil, opened
 end
 
@@ -1092,17 +1191,18 @@ end
 
 -- The clip that lit a stroke on this frame: the handle whose clock crossed a lighting event in the
 -- step this frame shows (read at the frame's start where the drawn pose's step runs, D-479, else
--- now), its mixer, the event's clip time and the handle's clock over that step.
-local function lighting(entry: Entry): (any, any, number?, number, number)
+-- now), its mixer, the event's clip time and the handle's clock over that step, and whether that
+-- step was a late start's first (the frame before shows another clip's pose, D-538).
+local function lighting(entry: Entry): (any, any, number?, number, number, boolean)
 	local drawn = freshDrawn(entry)
 	if drawn ~= nil then
-		return drawn.light, drawn.mixer, drawn.opened, drawn.from, drawn.to
+		return drawn.light, drawn.mixer, drawn.opened, drawn.from, drawn.to, drawn.late
 	end
 	local handle, mixer, opened = liveLighting(entry)
 	if handle == nil then
-		return nil, nil, nil, 0, 0
+		return nil, nil, nil, 0, 0, false
 	end
-	return handle, mixer, opened, handle.lastTime, handle.time
+	return handle, mixer, opened, handle.lastTime, handle.time, lateFirst(entry, handle)
 end
 
 -- A stroke clip's clock and whether it is done, as the step this frame shows left them.
@@ -1291,10 +1391,12 @@ end
 -- to this one (each end moving at most trail.ribbon.maxStep), born along the ribbon clock between
 -- the two frames, posed from the stroke's clip where it is known (bladeAt). A stroke that starts
 -- on a frame its clip lit takes its first sample at the clip time the window opened (the frame
--- before is the wind-up, D-269), even on a rig's first read (standIn); one with no such clip starts
+-- before is the wind-up, D-269), even on a rig's first read (standIn) or on a late start's first
+-- step (the frame before shows the pose before the jump, D-538); one with no such clip starts
 -- from the frame before's blade, and one with no frame before (a stall, a new chain) where the
--- blade is. A clip's stroke ends where its tip turns back on the cut (turnsBack): the settle after
--- a cut is not drawn (D-335).
+-- blade is. A clip's stroke ends on the frame that shows its end pose, the clip at or past the
+-- landing of the strike snap it began in (D-539), or sooner where its tip turns back on the cut
+-- (turnsBack): the settle after a cut is not drawn (D-335).
 local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boolean, clockBefore: number)
 	local ribbon = acquireRibbon(entry)
 	local guard, tip = entry.guardAt, entry.tipAt
@@ -1306,8 +1408,17 @@ local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boole
 			TrailRibbon.push(ribbon, guard, tip, clock, false)
 			entry.stroke = true
 			entry.source = nil
+			entry.cutEnd = nil
 			beginCut(entry, tip, false)
 			return
+		end
+	elseif not entry.stroke then
+		-- The clip that lights this stroke came in late on the step this frame shows (the network
+		-- catch-up jumped it in): the frame before shows the pose from before the jump, not this
+		-- clip's, so this frame's pose stands in for it, as on a rig's first read (D-538).
+		local _, _, _, _, _, cameLate = lighting(entry)
+		if cameLate then
+			standing = standIn(entry)
 		end
 	end
 	if entry.stroke and entry.cutDone then
@@ -1326,14 +1437,28 @@ local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boole
 	end
 	local start = opened or 0
 	local fromGuard, fromTip
-	if start > 0 then
+	if start > 0 or standing then
+		-- The clip's own blade at the open (or, stood in, at the clock the frame before stands for).
 		fromGuard, fromTip = bladeAt(entry, chain, start)
 	else
 		fromGuard, fromTip = BladeContact.blade(chain, entry.lastPose)
 	end
 	if starting then
-		TrailRibbon.push(ribbon, fromGuard, fromTip, clockBefore + (clock - clockBefore) * start, false)
 		entry.stroke = true
+		local source = entry.source
+		local openedAt = if source ~= nil and opened ~= nil
+			then entry.fromTime + (entry.sourceTime - entry.fromTime) * start
+			else nil
+		local cutEnd = if openedAt ~= nil then ClipSampler.strikeLandingAt(source.clip, openedAt) else nil
+		entry.cutEnd = cutEnd
+		if openedAt ~= nil and cutEnd ~= nil and openedAt >= cutEnd then
+			-- The stroke's end pose is already behind it (a late start past its snap's landing):
+			-- what is left of the window is the settle, and it draws nothing (D-539).
+			beginCut(entry, fromTip, true)
+			entry.cutDone = true
+			return
+		end
+		TrailRibbon.push(ribbon, fromGuard, fromTip, clockBefore + (clock - clockBefore) * start, false)
 		beginCut(entry, fromTip, opened ~= nil)
 	end
 	local config = Fx.trail.ribbon
@@ -1351,6 +1476,12 @@ local function pushBlade(entry: Entry, chain: BladeContact.Chain, hadPose: boole
 		if TrailRibbon.push(ribbon, stepGuard, stepTip, clockBefore + (clock - clockBefore) * alpha, true) then
 			advanceCut(entry, stepTip)
 		end
+	end
+	-- This frame shows the stroke's clip at or past its strike snap's landing (the end pose): the
+	-- rest of the window (the hold, the overshoot and settle) draws nothing (D-539).
+	local cutEnd = entry.cutEnd
+	if cutEnd ~= nil and entry.source ~= nil and entry.sourceTime >= cutEnd then
+		entry.cutDone = true
 	end
 end
 
@@ -1450,6 +1581,7 @@ local function readDrawn()
 		drawn.from = if handle ~= nil then handle.lastTime else 0
 		drawn.to = if handle ~= nil then handle.time else 0
 		drawn.lightWeight = if handle ~= nil then weightOf(mixer, handle) else 1
+		drawn.late = handle ~= nil and lateFirst(entry, handle)
 		local source = entry.source
 		drawn.source = source
 		if source ~= nil then

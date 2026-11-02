@@ -3301,6 +3301,35 @@ describe("Replication on a remote player's rig: the server's clip speed (D-469)"
 		end
 	end)
 
+	it("a late swing above speed 1 jumps catchUpMaxJump clip seconds and keeps the rest of its lateness", function()
+		-- AG 374(b). Mixer.catchUpStart: lateBy * speed clip seconds in, at most catchUpMaxJump clip
+		-- seconds; what the cap leaves runs behind the server for the whole swing,
+		-- (lateBy * speed - cap) / speed real seconds: 0.25 s late at 1.3, 0.0577 s. The PC's take
+		-- ran 0.034 s behind at 1.0, so it came in 0.284 s late: at 1.3 that is 0.0918 s (the PC
+		-- read 0.106, within a 60 fps frame).
+		local cap = ChoreoData.catchUpMaxJump
+		for _, case in { { 0.25, 1, 0 }, { 0.25, 1.3, 0.0577 }, { 0.284, 1, 0.034 }, { 0.284, 1.3, 0.0918 } } do
+			local lateBy, speed, expected = case[1], case[2], case[3]
+			local live = drawnRemote()
+			local startedAt = live.now() - lateBy
+			Replication.dispatch(
+				"ActionStarted",
+				{ entityId = 2, clipId = horizontal, serverTime = startedAt, facing = { 0, 0, -1 }, speed = speed }
+			)
+			local handle = handleOf(live)
+			expect(handle).toBeTruthy()
+			expect(math.abs(handle.time - math.min(lateBy * speed, cap))).toBeLessThan(1e-6)
+			for _ = 1, 12 do
+				live.step()
+			end
+			local behind = ((live.now() - startedAt) * speed - handle.time) / speed
+			expect(math.abs(behind - math.max(0, lateBy * speed - cap) / speed)).toBeLessThan(1e-6)
+			expect(math.abs(behind - expected)).toBeLessThan(5e-4)
+			expect(live.handlerErrors()).toEqual({})
+			live.release()
+		end
+	end)
+
 	it("a speed the server never sends plays the clip at its own speed", function()
 		for _, bad in { 0 / 0, 9, 0.2 } do
 			local live = drawnRemote()

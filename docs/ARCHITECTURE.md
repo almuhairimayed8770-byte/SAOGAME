@@ -1068,6 +1068,11 @@ the sweep.
 - Damage numbers (D-536). Each pooled digit records when it last faded (`freed`), and Digits.acquire picks the oldest free one.
 - The blade chain for plans (D-537). Stand-off plans pose the blade through ContactPredictor swingChain: BladeContact.chain with the Weapon link re-rooted on the hand at the rigs.luau grip C0 (GRIP, GRIP_C0). WeaponMount's client-only back mount no longer reaches any plan; the live contact predictor still reads the blade where it is drawn.
 
+### Ribbon fixes (D-538 and D-539)
+
+- A late remote start's trail (D-538). Replication.replayTrail runs right after replaySkipped in ActionStarted and reaches Trails.lateStroke(model, handle) through `rawget(d.trails, "lateStroke")`, so spec recorder packages, whose __index answers every key, record no extra call. Call lateStroke when a late clip starts, before the frame that draws its first step. While the handle's lastTime still equals the clock it came in at (its first step), lighting() returns a 6th value saying the step is a late first one and the drawn-pose step records `drawn.late`; liveLighting falls back to the late handle when no lighting event was crossed but the clip is lit at lastTime; setActive starts the sample ring over and sets `snapLate`.
+- The stroke's end (D-539). Each ribbon stroke stores `cutEnd` = ClipSampler.strikeLandingAt(clip, openedAt), the landing of the latest strike snap begun by that time (a sibling of strikeHoldAfter); pushBlade stops the stroke when the source clock reaches it, and a stroke opened at or past cutEnd is cut at birth.
+
 ## Data tables (src/shared/data)
 
 | File | Holds |
