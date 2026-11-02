@@ -50,6 +50,28 @@ describe("ai data", function()
 		expect(charger.wheelAngle).toBeGreaterThan(charger.lineUpLooseToleranceDegrees)
 	end)
 
+	it(
+		"a walk's change of pace eases over frames, and a Charger comes out of its wheel within a re-issue (D-574)",
+		function()
+			local rate = AI.movement.paceChangeRate
+			local charger = AI.archetypes.Charger
+			expect(rate).toBeGreaterThan(0)
+			-- The slide a frame's change gives a gait a frame behind its root stays inside the contact band.
+			local contact = Harness.load("src/shared/data/choreo").locomotion.stride.contact
+			expect(rate / 60 / 60).toBeLessThanOrEqual(contact)
+			for _, def in Enemies.list() do
+				if def.archetype == "Charger" then
+					local change = def.moveSpeed * charger.chaseSpeedMultiplier * (1 - charger.wheelSpeedMultiplier)
+					local seconds = change / rate
+					expect(seconds).toBeGreaterThan(1 / 60)
+					expect(seconds).toBeLessThanOrEqual(AI.movement.reissueInterval)
+				end
+			end
+			-- The Frenzy Boar: 7 to 14 studs/s over 0.23 s.
+			expect(7 / rate).toBeCloseTo(0.2333, 1e-3)
+		end
+	)
+
 	it("every Charger can find a line from circleDistance that starts inside the charge band", function()
 		local charger = AI.archetypes.Charger
 		for _, def in Enemies.list() do

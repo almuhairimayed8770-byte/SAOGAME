@@ -1552,3 +1552,106 @@ describe("A rush's landing against Studio's MoveTo tolerance (AI 440, 441, D-548
 		expect(held.farthest - 21.6).toBeLessThanOrEqual(0.01)
 	end)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- AO 479(b) and 480(a) at 144 fps: the landing's WalkSpeed column (the PC on 209875b)
+-- ------------------------------------------------------------------------------------------
+
+describe("A rush's landing paced on every server frame at 60 and 144 Hz (AO 479(b), 480(a))", function()
+	it(
+		"lands every Heartbeat row at min(speed, left / (landFrames x dt)); a log read before the service reads the row before's",
+		function()
+			-- The PC on 209875b: at 144 fps the slam's WalkSpeed read 28 on the land row and the 3 rows
+			-- after it, then 0.57, 0.35, 0.65 … of the row before; at 60 the land row read 28 and the next
+			-- 20.3 to 27.2 (0.72 to 0.97 of 28) for 0.691 to 0.924 left, = left / (2 x 0.017 s): the land
+			-- row's own write, a row late. The service lands the body on every Heartbeat (frameAll, not
+			-- the 20 Hz tick) with that Heartbeat's dt, at the pace left / max(left / speed, landFrames x
+			-- dt): never faster than the rush, so at 144 Hz it runs at 28 until it is within landFrames
+			-- frames of travel of its stop (28 x 2 / 144 = 0.389) and the land row and the 2 or 3 after
+			-- it write 28. A log whose Heartbeat runs before the service's reads each row's write on the
+			-- next row. Frames here are Studio's at 60 and 144 fps (dt within 6 %, physics in 1/240 s
+			-- steps: 3 to 5 a 60 Hz frame, 1 or 2 a 144 Hz frame).
+			local speed = AI.rushSpeed(BOAR.attacks[1])
+			local frameCount = AI.movement.landFrames
+			local report = {}
+			for _, fps in { 60, 144 } do
+				for _, kind in { "slam", "open" } do
+					local worstRatio, worstPace, under = 0, 0, {}
+					for seed = 0, 4 do
+						table.clear(lands)
+						local run = restRun(
+							if kind == "slam" then WALL_Z else nil,
+							{ mode = "tolerant", fps = fps, jitter = if seed == 0 then 0 else 0.06, seed = seed }
+						)
+						local landAt, landedAt = landRows(run)
+						expect(landAt ~= nil and landedAt ~= nil).toBe(true)
+						local first: number? = nil
+						for index, row in run.rows do
+							if first == nil and math.abs(row.t - (landAt :: number)) < 1e-9 then
+								first = index
+							end
+						end
+						local landRow = first :: number
+						local loggedUnder: number? = nil
+						for index = landRow, #run.rows do
+							local row, before = run.rows[index], run.rows[index - 1]
+							if row.t > (landedAt :: number) + 1e-9 then
+								break
+							end
+							if row.t < (landedAt :: number) - 1e-9 then
+								-- One land on this Heartbeat row, at the pace of this row's left and dt.
+								local count = 0
+								for _, entry in lands do
+									if math.abs(entry.time - run.launch - row.t) < 1e-9 then
+										count += 1
+									end
+								end
+								expect(count).toBe(1)
+								local dt = row.t - before.t
+								local pace = math.min(speed, (run.told - row.along) / (frameCount * dt))
+								worstPace = math.max(worstPace, math.abs(row.walkSpeed - pace))
+							end
+							-- The PC's column: this row's log reads the write of the row before.
+							local logged, loggedBefore = before.walkSpeed, run.rows[index - 2].walkSpeed
+							if loggedUnder == nil and logged < speed - 1e-6 then
+								loggedUnder = index - landRow
+							elseif loggedUnder ~= nil then
+								worstRatio = math.max(worstRatio, logged / loggedBefore)
+							end
+						end
+						expect(loggedUnder).never.toBeNil()
+						table.insert(under, loggedUnder :: number)
+						if kind == "slam" and seed == 0 then
+							-- The land row and the next rows the PC read at 28: 0 at 60 Hz, 3 at 144 Hz.
+							expect(loggedUnder).toBe(if fps == 60 then 1 else 4)
+						end
+						expect((landedAt :: number) - (landAt :: number)).toBeLessThanOrEqual(
+							if fps == 60 then 0.15 else 0.08
+						)
+						expect(math.abs(run.rest - run.told)).toBeLessThanOrEqual(0.02)
+						expect(run.farthest - run.told).toBeLessThanOrEqual(0)
+					end
+					expect(worstPace).toBeLessThanOrEqual(1e-4)
+					if fps == 60 then
+						expect(worstRatio).toBeLessThanOrEqual(0.75)
+					end
+					local text = {}
+					for _, rows in under do
+						table.insert(text, tostring(rows))
+					end
+					table.insert(
+						report,
+						("%s %d Hz: logged under %d first at land+%s, then each <= %.3f of the row before"):format(
+							kind,
+							fps,
+							speed,
+							table.concat(text, "/"),
+							worstRatio
+						)
+					)
+				end
+			end
+			print("[479(b)/480(a)] " .. table.concat(report, "; "))
+		end
+	)
+end)

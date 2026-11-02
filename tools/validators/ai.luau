@@ -18,7 +18,9 @@
 	and a walking body's snout slack in a wall stays below a rush's corner margin (D-278, D-279); a
 	rush's landing paces over at least one frame, ends within less than that margin of its stop and
 	lasts long enough to land the fastest Charger rush from its lead (D-525), and its MoveTo aims
-	past its stop by more than the Humanoid's MoveTo tolerance plus that lead (D-548); a
+	past its stop by more than the Humanoid's MoveTo tolerance plus that lead (D-548); a walk's
+	change of pace eases by a positive rate whose 60 Hz frame's change times the frame stays within
+	choreo stride.contact (D-574); a
 	blocked step tells running from blocked and is told before the jam lag (D-280). Every enemy
 	Humanoid keeps out of FallingDown and only ever out of fall states (upright.offStates, D-494);
 	each client's copy stands up to Running or GettingUp, retries a whole number of steps and logs
@@ -403,6 +405,25 @@ local function validate(ctx: Context): { string }
 					("movement.landAimStuds %s must be past moveToToleranceStuds plus the fastest rush's lead (%.3f)"):format(
 						tostring(aim),
 						need
+					)
+				)
+			end
+		end
+		-- A walk's change of pace eases (D-574): a 60 Hz frame's change times the frame, the slide
+		-- it gives a gait a frame behind its root, stays within choreo.luau's stride.contact.
+		local pace = AI.movement.paceChangeRate
+		positiveNumber(pace, "movement.paceChangeRate")
+		local choreo = ctx.load("src/shared/data/choreo")
+		local stride = if typeof(choreo.locomotion) == "table" then choreo.locomotion.stride else nil
+		local contact = if typeof(stride) == "table" then stride.contact else nil
+		if typeof(pace) == "number" and pace > 0 and typeof(contact) == "number" then
+			local frame = 1 / 60
+			if not (pace * frame * frame <= contact) then
+				problem(
+					("movement.paceChangeRate %s must slide a gait a 60 Hz frame behind by at most stride.contact (%s studs: at most %.0f studs/s a second)"):format(
+						tostring(pace),
+						tostring(contact),
+						contact / (frame * frame)
 					)
 				)
 			end

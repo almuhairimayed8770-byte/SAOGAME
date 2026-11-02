@@ -54,8 +54,14 @@
 	that pose, so the sword never hangs for a frame in the hand of the pose before (D-555).
 	The walk set follows the target at once; the Draw and Sheathe clips cover
 	the arms. A clip above them that keys the right arm (a turn, a landing, a dodge, a stagger)
-	hides the hand from the hilt, so the sword waits for it (SheathState "covered"). Nothing starts
-	while the State attribute is Dead. A rig that cannot sheathe keeps the sword in the hand.
+	hides the hand from the hilt, so the sword waits for it (SheathState "covered"), until it has
+	faded out. A Skid that starts while a Draw or Sheathe is under way leaves that clip the arm and
+	the sword's joint, and the clip's clock stands for the Skid's brake (sheath.skidBrakeSeconds,
+	D-579): the stop never takes the swing over in a frame or throws the raised blade with the
+	torso. A dodge does the same until it has gone (D-580): the arm stands where the clip had it
+	while the body dodges, and the clip plays on after. Nothing starts while the State attribute is
+	Dead. A rig that cannot sheathe keeps the
+	sword in the hand.
 
 	The Drawn and State attributes are followed through their change signals, so no step reads
 	them (`serverDrawn()` gives the Drawn attribute to the character controller). An instance with
@@ -429,6 +435,75 @@ local function sheathArmJoints(): { [string]: boolean }
 	return joints :: { [string]: boolean }
 end
 
+-- The joints a clip that takes the body leaves a live sheath clip (D-579, D-580): the Draw's and
+-- Sheathe's arm joints and the sword's own, each given a blend in that never starts
+-- (Mixer.handOff, math.huge).
+local leftJoints: { [string]: number }? = nil
+local function sheathLeftJoints(): { [string]: number }
+	local joints = leftJoints
+	if joints == nil then
+		local found: { [string]: number } = { [WeaponModels.motorName] = math.huge }
+		for name in sheathArmJoints() do
+			found[name] = math.huge
+		end
+		leftJoints = found
+		joints = found
+	end
+	return joints :: { [string]: number }
+end
+
+-- A Skid or a dodge that starts while a Draw or Sheathe is under way leaves that clip the arm and
+-- the sword's joint: its own keys there never blend in, so it hides nothing from the hilt, and the
+-- sheath clip's clock stands under it (stepSkidBrake): through a Skid's brake (D-579), through a
+-- dodge until it is gone (`whole`, D-580). The clip's other joints keep the blends they had (a
+-- dodge's own, D-528). Taken over by the Skid, the arm crossed from the Sheathe's swing to the
+-- Skid's flung-back arm in 0.1 s; taken over by the dodge, the clip's swing showed through the
+-- dodge's 0.18 s arm blend (stopped, its own 0.1 s fade crossed it).
+local function leaveSheathArm(self: any, handle: any, whole: boolean?)
+	if handle == nil or not self.mount:sheathable() then
+		return
+	end
+	local mixer = self.animator.mixer
+	if typeof(mixer) ~= "table" or typeof(mixer.handles) ~= "function" then
+		return
+	end
+	for _, other in mixer:handles() do
+		if (other.clipId == DRAW_ID or other.clipId == SHEATHE_ID) and not other.stopping and not other.done then
+			local blends = sheathLeftJoints()
+			local own = handle.jointBlendIn
+			if own ~= nil then
+				blends = table.clone(own)
+				for name, seconds in sheathLeftJoints() do
+					blends[name] = seconds
+				end
+			end
+			mixer:handOff(handle, blends)
+			self.armLeft[handle] = true
+			self.armTaker = handle
+			self.armTakerWhole = whole == true
+			return
+		end
+	end
+end
+
+-- A dodge's first step (D-580): it leaves a Draw or Sheathe under way the arm until it is gone
+-- (leaveSheathArm). A dodge from the drawn run with the DevAim draw's clip still on turned the
+-- right forearm up to 88 degrees a 60 Hz row after the press (the owner's PC 31.6 on 209875b).
+-- Runs after the dodge's own hand-off and before the brake.
+local function dodgeLeavesSheath(self: any, handles: { any })
+	for _, handle in handles do
+		local clip = handle.clip
+		if
+			handle.fresh
+			and not handle.stopping
+			and not handle.done
+			and typeof(clip) == "table"
+			and GaitHandOff.dodges(clip)
+		then
+			leaveSheathArm(self, handle, true)
+		end
+	end
+end
 -- Clip id -> whether the clip keys one of the sheath clips' arm joints.
 local keysArmById: { [string]: boolean } = {}
 
@@ -539,7 +614,24 @@ local function scanClips(self: any, handles: { any }?): SheathState.Input
 	local firstCut, otherCut, drawOver, drawTime = false, false, false, 0
 	local sheatheShown = 0
 	for _, handle in handles or self.animator.mixer:handles() do
-		if handle.done or handle.stopping then
+		if handle.done then
+			continue
+		end
+		if handle.stopping then
+			-- A clip above the sheath clips still hides the hand while it fades out (D-579): a
+			-- Sheathe that started under a Skid's fade-out took the arm from its last pose while the
+			-- Skid let go of it (the tip 85 studs a second at 240 Hz).
+			if
+				handle.clipId ~= DRAW_ID
+				and handle.clipId ~= SHEATHE_ID
+				and handle.weight > 0
+				and handle.fade > 0
+				and coversArm(handle)
+				and not isDrawFirst(handle.clip)
+				and not self.armLeft[handle]
+			then
+				covered = true
+			end
 			continue
 		end
 		if handle.clipId == DRAW_ID then
@@ -562,7 +654,7 @@ local function scanClips(self: any, handles: { any }?): SheathState.Input
 					otherCut = true
 				end
 			end
-			if handle.weight > 0 and coversArm(handle) and not first then
+			if handle.weight > 0 and coversArm(handle) and not first and not self.armLeft[handle] then
 				covered = true
 			end
 		end
@@ -668,6 +760,41 @@ local function sheathShownAfter(self: any, dt: number): number
 		end
 	end
 	return shown
+end
+
+-- The sheath clips' stand under the clip that left them the arm (leaveSheathArm): while a Skid is
+-- in its first sheath.skidBrakeSeconds (its brake, D-579), or a dodge has not gone yet (D-580,
+-- its fade in standing too), every live sheath clip's clock stands (Mixer.hold); after it, the
+-- clocks this stood run on. A sheath clip that was stopped meanwhile keeps the hold (a cut back
+-- holds its own). Runs before the mixer steps.
+local function stepSkidBrake(self: any, handles: { any }?)
+	local taker = self.armTaker
+	local braking = taker ~= nil
+		and not taker.done
+		and (self.armTakerWhole or (not taker.stopping and taker.time < Sheath.skidBrakeSeconds))
+		and handles ~= nil
+	local mixer = self.animator.mixer
+	if braking then
+		for _, handle in handles :: { any } do
+			if
+				(handle.clipId == DRAW_ID or handle.clipId == SHEATHE_ID)
+				and not handle.stopping
+				and not handle.done
+				and not handle.held
+			then
+				mixer:hold(handle, true, self.armTakerWhole)
+				table.insert(self.brakeHeld, handle)
+			end
+		end
+		return
+	end
+	self.armTaker = nil
+	for _, handle in self.brakeHeld do
+		if not handle.stopping and not handle.done then
+			mixer:hold(handle, false)
+		end
+	end
+	table.clear(self.brakeHeld)
 end
 
 -- The sheath step: runs before the mixer, and the sword's move shows with the pose this step
@@ -923,6 +1050,12 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		plantWaist = 0, -- D-507: the Waist yaw the turn plant added last step
 		plantHolds = false,
 		turnUnderWay = false, -- LocomotionState's last word on a standing turn (323(b))
+		-- D-579: the Skid that left a live Draw or Sheathe the arm, the sheath clips its brake
+		-- stood, and the handles whose arm keys never show (they hide nothing from the hilt).
+		armTaker = nil :: any,
+		armTakerWhole = false,
+		brakeHeld = {} :: { any },
+		armLeft = setmetatable({}, { __mode = "k" }) :: { [any]: boolean },
 		destroyed = false,
 	}, Locomotion)
 	if self.raycast == nil and self.footIK then
@@ -957,6 +1090,10 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 				handOffAttacks(self, mixer, handles)
 				snapRaises(self, mixer, handles)
 			end
+			if handles ~= nil then
+				dodgeLeavesSheath(self, handles)
+			end
+			stepSkidBrake(self, handles)
 			stepSheath(self, dt, handles)
 			stepGait(self, dt)
 			stepTurnPlant(self, dt, handles)
@@ -1400,7 +1537,7 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 		-- A stop under an action (a sprint cut by a dodge or an attack) is the action's: the Skid
 		-- would only sound under it (D-472).
 		if not actionHoldsBody(self, oneShot) then
-			playOneShot(self, oneShot)
+			leaveSheathArm(self, playOneShot(self, oneShot))
 		end
 	elseif oneShot ~= nil then
 		playOneShot(self, oneShot)
@@ -1582,8 +1719,9 @@ function RigDriver.destroy(self: any)
 end
 
 --- Drives a rig the local controller does not own from the animator's own step. The state comes
---- from deps.tracker (default Locomotion.humanoidTracker(character)); a frame with no state (the
---- Humanoid or root is gone) is skipped. A player rig runs the full blend space; an enemy rig its
+--- from deps.tracker (default Locomotion.humanoidTracker(character); an enemy rig's paced by its
+--- root's own travel, Locomotion.travelTracker); a frame with no state (the Humanoid or root is
+--- gone) is skipped. A player rig runs the full blend space; an enemy rig its
 --- data Idle / Walk pair. Destroy it when the rig leaves (the animator's own destroy drops the hook).
 function Locomotion.attach(animator: any, character: Model, deps: Dependencies?): Locomotion
 	local dependencies: Dependencies = deps or {}
@@ -1615,6 +1753,9 @@ function Locomotion.attach(animator: any, character: Model, deps: Dependencies?)
 			(rig and rig.walkSpeed) or Config.walkSpeed,
 			dependencies.phase or 0
 		)
+		if tracker == nil then
+			tracker = Locomotion.travelTracker(character, Locomotion.humanoidTracker(character))
+		end
 	end
 	local source: (dt: number) -> State? = tracker or Locomotion.humanoidTracker(character)
 	local follow = Locomotion.drawnTracker(animator, character)
@@ -1659,6 +1800,69 @@ function Locomotion.drawnTracker(animator: any, character: Model): (dt: number, 
 		followed.moveDir = if speed > Config.idleSpeedThreshold then moved.Unit else Vector3.zero
 		followed.sprinting = speed > (Config.runSpeed + Config.sprintSpeed) / 2
 		return followed
+	end
+end
+
+local TRAVEL_TIME_SLACK = 1e-9 -- unit: seconds, float noise in a sum of frame times
+
+--- An enemy rig's gait paced by its root's own travel (D-575): `source`'s state with its flat
+--- speed, velocity and move direction those of the root's flat travel over the last
+--- choreo.enemy.gait.travelSeconds of frames (all of it until that much has gone by). The
+--- replicated velocity the default tracker reads under-reads the root's move (AH 401(c)), and a
+--- walk paced short of the root slides its planted feet by the gap each frame. A step longer than
+--- choreo.enemy.rush.teleportStuds is a placement: the travel starts afresh there, and until a
+--- frame has gone by `source`'s own reading stands. A frame with no time leaves the travel as it was.
+function Locomotion.travelTracker(character: Model, source: (dt: number) -> State?): (dt: number) -> State?
+	local times: { number } = {}
+	local points: { Vector3 } = {}
+	local clock = 0
+	return function(dt: number): State?
+		local state = source(dt)
+		local root = character.PrimaryPart
+		if state == nil or root == nil then
+			table.clear(times)
+			table.clear(points)
+			return state
+		end
+		local gait = ChoreoData.enemy.gait
+		local at = root.CFrame.Position
+		local count = #points
+		local last = points[count]
+		if
+			last ~= nil
+			and Vector3.new(at.X - last.X, 0, at.Z - last.Z).Magnitude > ChoreoData.enemy.rush.teleportStuds
+		then
+			table.clear(times)
+			table.clear(points)
+			count = 0
+		end
+		if dt > 0 or count == 0 then
+			clock += math.max(dt, 0)
+			table.insert(times, clock)
+			table.insert(points, at)
+		else
+			points[count] = at
+		end
+		-- The oldest sample kept is the newest at or before the window's start (a sum of the same
+		-- frames' seconds may land a hair either side of it).
+		local from = clock - gait.travelSeconds + TRAVEL_TIME_SLACK
+		while #times > 2 and times[2] <= from do
+			table.remove(times, 1)
+			table.remove(points, 1)
+		end
+		local span = clock - times[1]
+		if not (span > 0) then
+			return state
+		end
+		local first = points[1]
+		local moved = Vector3.new(at.X - first.X, 0, at.Z - first.Z) / span
+		local speed = moved.Magnitude
+		local travelled = table.clone(state)
+		travelled.speed = speed
+		travelled.velocity = Vector3.new(moved.X, if state.velocity ~= nil then state.velocity.Y else 0, moved.Z)
+		travelled.moveDir = if speed > Config.idleSpeedThreshold then moved.Unit else Vector3.zero
+		travelled.sprinting = speed > (Config.runSpeed + Config.sprintSpeed) / 2
+		return travelled
 	end
 end
 

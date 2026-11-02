@@ -167,7 +167,21 @@ export type StandOffOptions = {
 	-- frames later, D-342). The keep-out holds the hands and arms out of the target as drawn too.
 	-- Nil: a 60 Hz frame's (keepOut.sampleSeconds); 0: as posed alone.
 	poseLag: number?,
+	-- How the target moves on through the swing (D-565, ContactPredictor.targetMotion): the
+	-- keep-out holds the hands and arms, and the reach the blade, out of the body parts where the
+	-- target's clips carry them, not where they stood when the plan was made. Nil: as they stand.
+	target: TargetMotion?,
 }
+
+--- A clip the target plays on through a swing, as its rig's mixer holds it when the plan is made:
+--- the clip, its clock and its speed (ContactPredictor.targetMotion).
+export type TargetTrack = { clip: Types.ClipDef, time: number, speed: number }
+
+--- How the target moves on while a swing plays (D-565, StandOffOptions.target): the clip its
+--- Base layer shows (a held enemy's idle loop, on from its clock), and the additive reaction a cut
+--- plays on it (its flinch, from the side the swing comes from) from each strike's key once the
+--- key's hold is over, as Replication plays it on the hit's word.
+export type TargetMotion = { base: TargetTrack?, flinch: Types.ClipDef? }
 
 --- A box cast for the stand-off: how far the box `size` at `start` moves along `vector` before it
 --- meets the world, nil when it never does (ContactPredictor.worldCast).
@@ -977,18 +991,99 @@ local function stepOut(
 	return least
 end
 
+-- stepOut for a sweep against a part that moves (D-565): `a0` and `a1` are the sweep's ends as
+-- they stand to the box `b` (each end carried with the part from its own clip time to where the
+-- sweep leaves it), so a step along `away` in the world moves each end along its own direction
+-- there (`away0`, `away1`), and `shift` likewise (`shift0`, `shift1`): a part that turns 9 degrees
+-- in a sample (a kobold's flinch) turns a 1.2 stud keep 0.19 studs off its line. Along each axis
+-- the hull of the two ends is apart from `b` once both ends stand past one side of it; each end
+-- moves on its own line, so the steps that part them there are the span both ends' bounds leave.
+local function stepOutMoving(
+	a0: CFrame,
+	a1: CFrame,
+	aSize: Vector3,
+	b: CFrame,
+	bSize: Vector3,
+	away0: Vector3,
+	away1: Vector3,
+	from: number,
+	allowed: number,
+	shift0: Vector3,
+	shift1: Vector3
+): number
+	local aHalf, bHalf = aSize * 0.5, bSize * 0.5
+	local bX, bY, bZ = b.RightVector, b.UpVector, b.LookVector
+	local bPosition = b.Position
+	local p0, p1 = a0.Position + shift0, a1.Position + shift1
+	local x0, y0, z0 = a0.RightVector, a0.UpVector, a0.LookVector
+	local x1, y1, z1 = a1.RightVector, a1.UpVector, a1.LookVector
+	local least = math.huge
+	-- The least t at or past `from` with `c + t * slope` at or past `bound` on the side `sign` says
+	-- (1: at or above, -1: at or below) for both ends: an interval of t, intersected.
+	local function side(c0: number, s0: number, c1: number, s1: number, bound: number, sign: number): number
+		local low, high = from, math.huge
+		for _, line in { { c0, s0 }, { c1, s1 } } do
+			local gap = (line[1] - bound) * sign
+			local slope = line[2] * sign
+			if slope == 0 then
+				if gap < 0 then
+					return math.huge
+				end
+			elseif slope > 0 then
+				low = math.max(low, -gap / slope)
+			else
+				high = math.min(high, -gap / slope)
+			end
+		end
+		return if low <= high then low else math.huge
+	end
+	local function along(axis: Vector3)
+		local length = axis.Magnitude
+		if length < 1e-6 or least <= from then
+			return
+		end
+		local unit = axis / length
+		local r0 = math.abs(x0:Dot(unit)) * aHalf.X
+			+ math.abs(y0:Dot(unit)) * aHalf.Y
+			+ math.abs(z0:Dot(unit)) * aHalf.Z
+		local r1 = math.abs(x1:Dot(unit)) * aHalf.X
+			+ math.abs(y1:Dot(unit)) * aHalf.Y
+			+ math.abs(z1:Dot(unit)) * aHalf.Z
+		local c0, c1 = p0:Dot(unit), p1:Dot(unit)
+		local s0, s1 = away0:Dot(unit), away1:Dot(unit)
+		local centre = bPosition:Dot(unit)
+		local rb = math.abs(bX:Dot(unit)) * bHalf.X
+			+ math.abs(bY:Dot(unit)) * bHalf.Y
+			+ math.abs(bZ:Dot(unit)) * bHalf.Z
+		-- Past b's far side (both ends' low bounds at or above it), or short of its near side.
+		local above = side(c0 - r0, s0, c1 - r1, s1, centre + rb - allowed, 1)
+		local below = side(c0 + r0, s0, c1 + r1, s1, centre - rb + allowed, -1)
+		least = math.min(least, above, below)
+	end
+	for _, v in { bX, bY, bZ } do
+		along(v)
+	end
+	for _, u in { x0, y0, z0, x1, y1, z1 } do
+		along(u)
+		for _, v in { bX, bY, bZ } do
+			along(u:Cross(v))
+		end
+	end
+	return least
+end
+
 -- One part of the body the engine collides (combat.contact.standOff.keepOut.parts): its size and
 -- the joints from the root part out to it, and where on that part a box of its own sits (the
 -- blade: keepOut.bladeDepthStuds), nil for the part's own box.
 type BodyPart = { size: Vector3, links: { BladeContact.Link }, offset: CFrame? }
 
--- The parts named `names` the model has, each with its joint path from the root part (a part no
--- joint path reaches is left out; the root part itself has none).
-local function bodyParts(model: Model, names: { string }): { BodyPart }
+-- Each of `parts`' joint path from the model's root part (paths[i] for parts[i]; none for a part
+-- no joint path reaches, an empty one for the root part itself).
+local function jointPaths(model: Model, parts: { BasePart }): { [number]: { BladeContact.Link } }
 	local root = model.PrimaryPart
-	local list: { BodyPart } = {}
+	local paths: { [number]: { BladeContact.Link } } = {}
 	if root == nil then
-		return list
+		return paths
 	end
 	local resolved = Joints.collect(model)
 	local placing: { [BasePart]: Joints.Resolved } = {}
@@ -997,12 +1092,7 @@ local function bodyParts(model: Model, names: { string }): { BodyPart }
 			placing[each.part1] = each
 		end
 	end
-	for _, name in names do
-		local found = model:FindFirstChild(name)
-		if found == nil or not found:IsA("BasePart") then
-			continue
-		end
-		local part = found :: BasePart
+	for index, part in parts do
 		local reversed: { BladeContact.Link } = {}
 		local at: BasePart = part
 		while at ~= root and #reversed <= #resolved do
@@ -1015,9 +1105,30 @@ local function bodyParts(model: Model, names: { string }): { BodyPart }
 		end
 		if at == root then
 			local links: { BladeContact.Link } = {}
-			for index = #reversed, 1, -1 do
-				table.insert(links, reversed[index])
+			for each = #reversed, 1, -1 do
+				table.insert(links, reversed[each])
 			end
+			paths[index] = links
+		end
+	end
+	return paths
+end
+
+-- The parts named `names` the model has, each with its joint path from the root part (a part no
+-- joint path reaches is left out; the root part itself has none).
+local function bodyParts(model: Model, names: { string }): { BodyPart }
+	local found: { BasePart } = {}
+	for _, name in names do
+		local part = model:FindFirstChild(name)
+		if part ~= nil and part:IsA("BasePart") then
+			table.insert(found, part :: BasePart)
+		end
+	end
+	local paths = jointPaths(model, found)
+	local list: { BodyPart } = {}
+	for index, part in found do
+		local links = paths[index]
+		if links ~= nil then
 			table.insert(list, { size = part.Size, links = links })
 		end
 	end
@@ -1048,6 +1159,22 @@ local function bladePart(model: Model): BodyPart?
 		links = blade.links,
 		offset = CFrame.fromMatrix((guard + tip) / 2, right, right:Cross(look), -look),
 	}
+end
+
+-- The blade's own part (the Weapon part the trail's ends sit on, as the PC's logger reads it) as
+-- a box on the same joint path (D-566); nil when the model holds none.
+local function weaponBox(model: Model): BodyPart?
+	local blade = swingChain(model)
+	if blade == nil or #blade.links == 0 then
+		return nil
+	end
+	local motor = blade.links[#blade.links].joint
+	for _, resolved in Joints.collect(model) do
+		if resolved.joint == motor then
+			return { size = resolved.part1.Size, links = blade.links }
+		end
+	end
+	return nil
 end
 
 -- A keep-out plan (keepOutOf): how far back along `away`, and aside along `side`, the body stands
@@ -1128,7 +1255,8 @@ local function keepOutOf(
 	distance: number,
 	to: number,
 	hurt: { BasePart },
-	poseLag: number
+	poseLag: number,
+	motion: TargetMotion?
 ): KeepOut?
 	-- The faces as they stand now: a frame, a size and whether it is over a held part, each.
 	local faceFrames: { CFrame } = {}
@@ -1184,7 +1312,14 @@ local function keepOutOf(
 		table.insert(hurtFrames, part.CFrame)
 		table.insert(hurtSizes, part.Size)
 	end
+	-- The target moves on through the swing (D-565: told how, options.target).
+	local targetRoot = target.PrimaryPart
+	local moving = motion ~= nil
+		and (motion.base ~= nil or motion.flinch ~= nil)
+		and targetRoot ~= nil
+		and #hurtFrames > 0
 	local bladeIndex = 0
+	local weaponIndex = 0
 	local strikes: { Strike } = {}
 	if #hurtFrames > 0 then
 		reach = bodyParts(model, KEEP_OUT.limbs)
@@ -1192,6 +1327,13 @@ local function keepOutOf(
 		if blade ~= nil then
 			table.insert(reach, blade)
 			bladeIndex = #reach
+			-- The blade's own part, held out between the cuts of a swing at a target that moves on
+			-- onto it (D-566); a still body is the clip's own follow-through's to leave (D-493).
+			local box = if moving then weaponBox(model) else nil
+			if box ~= nil then
+				table.insert(reach, box)
+				weaponIndex = #reach
+			end
 		end
 		local last = from
 		for _, window in ClipSampler.hitWindows(clip) do
@@ -1213,6 +1355,136 @@ local function keepOutOf(
 				last = key
 			end
 		end
+	end
+	-- The clip's authored holds after its strike snaps (ClipSampler.strikeHoldAfter), as clip-time
+	-- spans: a contact's hit-stop stands in for one, and the step after the hit-stop skips it in a
+	-- single frame (Mixer.hitStop), so what the series grew across one would land in that frame
+	-- (D-427: Sharp Nail stepped back 0.50 studs in the frame after its second cut's freeze at
+	-- 60 Hz). The series grows none of its way inside them.
+	local stills: { { number } } = {}
+	local keys = clip.keys
+	for index = 3, #keys do -- index: a hold key, after its snap key and the key before that
+		if keys[index].easing == "Hold" and ClipSampler.isStrikeSnap(clip, index - 1) then
+			table.insert(stills, { keys[index - 1].time, keys[index].time })
+		end
+	end
+	-- The clip time from `first` to `last` outside those holds.
+	local function openBetween(first: number, last: number): number
+		local open = last - first
+		for _, span in stills do
+			open -= math.max(0, math.min(last, span[2]) - math.max(first, span[1]))
+		end
+		return math.max(open, 0)
+	end
+	-- The target as its clips carry it on through the swing (D-565, StandOffOptions.target): each
+	-- body part on its joint path from the target's root, posed at a clip time of the swing by the
+	-- Base clip on from its clock (the target's clock stands still through a hit-stop, as the
+	-- swing's does, and runs on through the hold the step after it skips, so it runs the swing's
+	-- clock outside those holds) and the flinch from the latest strike's key on (Replication plays
+	-- it on the hit's word, which comes inside the key's hold: it starts as the hold ends), times
+	-- what the part stood off that pose when the plan was made (a part as it stands at the start).
+	-- The PC's held kobold idled and flinched through the swing at its walk-in rests: Basic3's right
+	-- arm 0.12-0.20 studs into its torso, Horizontal's 0.053 (item 461), against a plan that held
+	-- the hands out of the torso as it stood when the swing began.
+	-- Its root as it stands now, as its parts are read (the plan is posed lazily, frames later).
+	local targetFrame: CFrame = if targetRoot ~= nil then targetRoot.CFrame else CFrame.identity
+	local hurtLinks: { [number]: { BladeContact.Link } } = {}
+	local hurtFixes: { CFrame } = {}
+	local function targetOffsets(time: number): ClipSampler.Offsets
+		local moves = motion :: TargetMotion
+		local offsets: ClipSampler.Offsets = {}
+		local base = moves.base
+		if base ~= nil then
+			local duration = base.clip.duration
+			local clock = base.time + openBetween(from, time) * base.speed
+			clock = if base.clip.loop and duration > 0 then clock % duration else math.clamp(clock, 0, duration)
+			offsets = ClipSampler.sample(base.clip, clock)
+		end
+		local flinch = moves.flinch
+		if flinch ~= nil then
+			local struck: number? = nil
+			for _, strike in strikes do
+				if strike.key <= time + KEY_EPSILON then
+					struck = strike.key
+				end
+			end
+			if struck ~= nil then
+				local into = openBetween(struck, time)
+				if into < flinch.duration then
+					offsets = ClipSampler.add(offsets, ClipSampler.sample(flinch, into), 1)
+				end
+			end
+		end
+		return offsets
+	end
+	-- The target's body parts at clip time `time` (no earlier than `from`) into `into`.
+	local function placeTarget(time: number, into: { CFrame })
+		local offsets = targetOffsets(math.max(time, from))
+		for part in hurtFrames do
+			local frame = targetFrame
+			local links = hurtLinks[part]
+			if links ~= nil then
+				for _, link in links do
+					local offset = offsets[link.joint.Name]
+					local transform = if offset ~= nil then ClipSampler.toCFrame(offset) else CFrame.identity
+					frame = frame * link.c0 * transform * link.c1Inverse
+				end
+			end
+			into[part] = frame * (hurtFixes[part] or CFrame.identity)
+		end
+	end
+	if moving then
+		hurtLinks = jointPaths(target, hurt)
+		local posed: { CFrame } = table.create(#hurtFrames)
+		placeTarget(from, posed)
+		for part, frame in hurtFrames do
+			hurtFixes[part] = posed[part]:Inverse() * frame
+		end
+	end
+	-- The target at clip time `time`: a fresh table while it moves, its parts as they stand else.
+	local function targetAt(time: number): { CFrame }
+		if not moving then
+			return hurtFrames
+		end
+		local into: { CFrame } = table.create(#hurtFrames)
+		placeTarget(time, into)
+		return into
+	end
+	-- The blade's own part between the cuts (D-566), at a target that moves on: from
+	-- keepOut.bladeOutSeconds after a strike's hold (its key when it has none: the follow-through's
+	-- exit, D-484) to the next strike's snap or the clip's end, no point of it stands deeper than
+	-- depthEpsilon in a body part, on every sample, as posed and as drawn (the clip-time spans
+	-- `outs`). The reach holds only the trail's line, and only at the keys: Basic1's blade stood
+	-- 0.19-0.40 studs into the PC's idling, flinching kobold at clip 0.283, after its cut, and still
+	-- in at the clip's end (item 464). A body that stands still is left to the clip: its
+	-- follow-through carries the blade out by itself (FollowThrough's Late rule, D-493).
+	local outs: { { number } } = {}
+	if weaponIndex > 0 then
+		local cuts: { { number } } = {}
+		for _, window in ClipSampler.hitWindows(clip) do
+			local key = ContactPredictor.strikeKey(clip, window)
+			local snap = window.open
+			for index = 2, #keys do
+				if math.abs(keys[index].time - key) <= KEY_EPSILON and ClipSampler.isStrikeSnap(clip, index) then
+					snap = keys[index - 1].time
+				end
+			end
+			local hold = ClipSampler.strikeHoldAfter(clip, key)
+			table.insert(cuts, { snap, if hold ~= nil then keys[hold].time else key })
+		end
+		for index, cut in cuts do
+			local after = cuts[index + 1]
+			table.insert(outs, { cut[2] + KEEP_OUT.bladeOutSeconds, if after ~= nil then after[1] else math.huge })
+		end
+	end
+	-- True when clip times `first` to `last` lie wholly in one of those spans.
+	local function betweenCuts(first: number, last: number): boolean
+		for _, span in outs do
+			if first >= span[1] - KEY_EPSILON and last <= span[2] + KEY_EPSILON then
+				return true
+			end
+		end
+		return false
 	end
 	-- Poses the colliding parts at clip time `time` (the clip's root motion and the blade step)
 	-- into `into`, and the reach into `reachInto`; with `lag`, the joints as they stood that long
@@ -1252,11 +1524,11 @@ local function keepOutOf(
 		end
 	end
 	-- How deep a piece of the reach, posed at `frame` and moved by `moved`, stands in body part
-	-- `part`: a hand or an arm the boxes' overlap (boxDepth), the blade its deepest point's distance
-	-- in from the part's nearest face (segmentDepth), how buried it looks: a blade along a thin arm
-	-- a hair under its skin is not one through it.
-	local function depthIn(index: number, frame: CFrame, moved: Vector3, part: number): number
-		local hurtFrame = hurtFrames[part]
+	-- `part` (as `against` has the target's parts): a hand or an arm the boxes' overlap (boxDepth),
+	-- the blade its deepest point's distance in from the part's nearest face (segmentDepth), how
+	-- buried it looks: a blade along a thin arm a hair under its skin is not one through it.
+	local function depthIn(index: number, frame: CFrame, moved: Vector3, part: number, against: { CFrame }): number
+		local hurtFrame = against[part]
 		if index ~= bladeIndex then
 			return boxDepth(frame + moved, reach[index].size, hurtFrame, hurtSizes[part])
 		end
@@ -1277,7 +1549,8 @@ local function keepOutOf(
 			return known
 		end
 		local floor: number = if index == bladeIndex then KEEP_OUT.bladeDepthStuds else 0
-		local depth = math.max(depthIn(index, startFrames[index], Vector3.zero, part), floor) + KEEP_OUT.depthEpsilon
+		local depth = math.max(depthIn(index, startFrames[index], Vector3.zero, part, hurtFrames), floor)
+			+ KEEP_OUT.depthEpsilon
 		reachAllowed[index][part] = depth
 		return depth
 	end
@@ -1314,16 +1587,32 @@ local function keepOutOf(
 	-- shell's rest starts one inside (Rising Arc's right hand 0.21 studs in a side-on boar's torso),
 	-- which the first samples step out of at the speed cap. A pair whose bounding spheres stand
 	-- apart at `at` stands apart (the step is `at`).
+	--
+	-- While the target moves (D-565) each sweep is of the two bodies' relative motion: the
+	-- target's parts at each piece's clip time (`targetChain`, and `drawnTargetChain` as the screen
+	-- draws them, the pose `poseLag` before), and the blade's own part joins the hands between the
+	-- cuts (D-566: `weaponOut`, `drawnWeaponOut`).
+	local targetChain: { { CFrame } }? = nil
+	local drawnTargetChain: { { CFrame } }? = nil
+	local weaponOut, drawnWeaponOut = false, false
 	local function limbOut(at: number, shift: Vector3): number
 		local need = at
 		local moved = away * at + shift
 		-- One sweep (`links`, `count` pieces) of one hand or arm past one body part.
-		local function sweepOut(links: { { CFrame } }, count: number, index: number, piece: BodyPart, part: number)
-			local hurtFrame = hurtFrames[part]
+		local function sweepOut(
+			links: { { CFrame } },
+			count: number,
+			index: number,
+			piece: BodyPart,
+			part: number,
+			targets: { { CFrame } }?
+		)
+			local hurtFrame = if targets ~= nil then targets[count + 1][part] else hurtFrames[part]
 			local reachOf = reachRadii[index] + hurtRadii[part]
 			local near = false
 			for each = 1, count + 1 do
-				if (links[each][index].Position + moved - hurtFrame.Position).Magnitude <= reachOf then
+				local centre = if targets ~= nil then targets[each][part].Position else hurtFrame.Position
+				if (links[each][index].Position + moved - centre).Magnitude <= reachOf then
 					near = true
 					break
 				end
@@ -1332,31 +1621,64 @@ local function keepOutOf(
 				return
 			end
 			local deep: number = KEEP_OUT.depthEpsilon
+			if targets == nil then
+				for each = 1, count do
+					need = math.max(
+						need,
+						stepOut(
+							links[each][index],
+							links[each + 1][index],
+							piece.size,
+							hurtFrame,
+							hurtSizes[part],
+							away,
+							at,
+							deep,
+							shift
+						)
+					)
+				end
+				return
+			end
+			-- Each end as it stands to the part at its own clip time, carried with the part to where
+			-- the sweep leaves it, the step and the aside turned with it.
+			local carry = hurtFrame * targets[1][part]:Inverse()
+			local first, firstAway, firstShift =
+				carry * links[1][index], carry:VectorToWorldSpace(away), carry:VectorToWorldSpace(shift)
 			for each = 1, count do
+				carry = hurtFrame * targets[each + 1][part]:Inverse()
+				local last, lastAway, lastShift =
+					carry * links[each + 1][index], carry:VectorToWorldSpace(away), carry:VectorToWorldSpace(shift)
 				need = math.max(
 					need,
-					stepOut(
-						links[each][index],
-						links[each + 1][index],
+					stepOutMoving(
+						first,
+						last,
 						piece.size,
 						hurtFrame,
 						hurtSizes[part],
-						away,
+						firstAway,
+						lastAway,
 						at,
 						deep,
-						shift
+						firstShift,
+						lastShift
 					)
 				)
+				first, firstAway, firstShift = last, lastAway, lastShift
 			end
 		end
 		for index, piece in reach do
-			if index == bladeIndex then
+			local isWeapon = index == weaponIndex
+			if index == bladeIndex or (isWeapon and not weaponOut and not drawnWeaponOut) then
 				continue
 			end
 			for part in hurtFrames do
-				sweepOut(limbChain, pieces, index, piece, part)
-				if drawn then
-					sweepOut(drawnChain, drawnPieces, index, piece, part)
+				if weaponOut or not isWeapon then
+					sweepOut(limbChain, pieces, index, piece, part, targetChain)
+				end
+				if drawn and (drawnWeaponOut or not isWeapon) then
+					sweepOut(drawnChain, drawnPieces, index, piece, part, drawnTargetChain)
 				end
 			end
 		end
@@ -1374,13 +1696,15 @@ local function keepOutOf(
 	-- was, plus how far the body has moved since, bounds it. The pair that was worst last time is
 	-- tried first: it is most often the one that settles it.
 	local worstPair = 1
+	-- The target's parts at the key being priced (strikeStep): where its clips carry them by then.
+	local keyHurt: { CFrame } = hurtFrames
 	local pairExcess: { number } = {}
 	local pairBack: { number } = {}
 	local function reachExcess(back: number, shift: Vector3, enough: number): number
 		local moved = away * back + shift
 		local function excessOf(pair: number): number
 			local index = nearPieces[pair]
-			local excess = depthIn(index, reachFrames[index], moved, nearParts[pair]) - nearAllowed[pair]
+			local excess = depthIn(index, reachFrames[index], moved, nearParts[pair], keyHurt) - nearAllowed[pair]
 			pairExcess[pair], pairBack[pair] = excess, back
 			return excess
 		end
@@ -1416,6 +1740,7 @@ local function keepOutOf(
 	local reachPrice: number = KEEP_OUT.stepPerDepth
 	local function strikeStep(key: number, at: number, shift: Vector3, top: number): number
 		pose(key, nil, reachFrames)
+		keyHurt = targetAt(key)
 		local steps = math.floor(math.max(math.min(reachMost, most - at, top - at), 0) / reachStep + 1e-6)
 		-- The pairs whose spheres meet somewhere along the steps; none: the key is clear as it is.
 		table.clear(nearPieces)
@@ -1423,8 +1748,11 @@ local function keepOutOf(
 		table.clear(nearAllowed)
 		local reachLine = away * (steps * reachStep)
 		for index, frame in reachFrames do
+			if index == weaponIndex then
+				continue
+			end
 			local first = frame.Position + away * at + shift
-			for part, hurtFrame in hurtFrames do
+			for part, hurtFrame in keyHurt do
 				local along = math.clamp(
 					(hurtFrame.Position - first):Dot(reachLine) / math.max(reachLine:Dot(reachLine), 1e-6),
 					0,
@@ -1496,9 +1824,10 @@ local function keepOutOf(
 	end
 	-- The most any part turns between two poses (its axes' largest angle), in degrees: a part that
 	-- turns sweeps out past the hull of its two boxes, by a hair for a small turn.
-	local function turnOf(a: { CFrame }, b: { CFrame }, n: number): number
+	local function turnOf(a: { CFrame }, b: { CFrame }, n: number, extra: number?): number
 		local most = 1
-		for index = 1, n do
+		for count = 1, if extra ~= nil then n + 1 else n do
+			local index = if count > n then extra :: number else count
 			local x, y = a[index], b[index]
 			most = math.min(
 				most,
@@ -1544,6 +1873,29 @@ local function keepOutOf(
 		local stride = SPRINT * span
 		return math.min(held, body + math.sqrt(math.max(stride * stride - sidestep * sidestep, 0)))
 	end
+	-- How many pieces a sweep from clip time `first` to `last` takes for the target's own motion
+	-- (D-565), its parts at `start` and `finish`: their turn on top of `turn` (the turn of the
+	-- sweep's own parts: the two bodies' relative turn is at most both), and enough that the bow of
+	-- their path off the straight line, read at the middle, is at most depthEpsilon a piece (a bow
+	-- shrinks as the square of the pieces). A kobold's flinch swings its arm 9 degrees and bends
+	-- its torso's path 0.011 studs in one 60 Hz sample.
+	local function targetPieces(
+		start: { CFrame },
+		finish: { CFrame },
+		first: number,
+		last: number,
+		turn: number
+	): number
+		local bow = 0
+		for part, frame in targetAt((first + last) / 2) do
+			bow = math.max(bow, (frame.Position - (start[part].Position + finish[part].Position) * 0.5).Magnitude)
+		end
+		local count = math.max(
+			math.ceil((turn + turnOf(start, finish, #hurtFrames)) / KEEP_OUT.maxTurnDegrees),
+			math.ceil(math.sqrt(bow / KEEP_OUT.depthEpsilon))
+		)
+		return math.clamp(count, 1, KEEP_OUT.maxPieces)
+	end
 	local function fill(last: number)
 		for k = #back, math.min(last, count) do
 			if not done then
@@ -1560,11 +1912,20 @@ local function keepOutOf(
 				-- A fast turn (a spin) is cut into pieces no part turns more than maxTurnDegrees in.
 				-- The hands and arms count too: a limb swung fast leaves the hull of its two poses.
 				local turn = turnOf(before, frames, #parts)
+				weaponOut = betweenCuts(previous, time)
+				local limbCount = if bladeIndex > 0 then bladeIndex - 1 else #reach
 				if #reach > 0 then
 					turn =
-						math.max(turn, turnOf(limbBefore, limbNow, if bladeIndex > 0 then bladeIndex - 1 else #reach))
+						math.max(turn, turnOf(limbBefore, limbNow, limbCount, if weaponOut then weaponIndex else nil))
 				end
 				pieces = math.clamp(math.ceil(turn / KEEP_OUT.maxTurnDegrees), 1, KEEP_OUT.maxPieces)
+				-- And as the target's own motion asks (D-565).
+				local targetStart: { CFrame } = if targetChain ~= nil then targetChain[#targetChain] else hurtFrames
+				local targetEnd: { CFrame } = hurtFrames
+				if moving and #reach > 0 then
+					targetEnd = targetAt(time)
+					pieces = math.max(pieces, targetPieces(targetStart, targetEnd, previous, time, turn))
+				end
 				for piece = 1, pieces - 1 do
 					local into = chain[piece + 1]
 					if into == nil or into == frames then
@@ -1580,11 +1941,33 @@ local function keepOutOf(
 				end
 				chain[pieces + 1] = frames
 				limbChain[pieces + 1] = limbNow
+				-- The target's parts at the same clip times (D-565).
+				if moving and #reach > 0 then
+					local times: { { CFrame } } = { targetStart }
+					for piece = 1, pieces - 1 do
+						table.insert(times, targetAt(previous + (time - previous) * piece / pieces))
+					end
+					table.insert(times, targetEnd)
+					targetChain = times
+				end
 				-- The hands and arms as the screen draws them over the same stretch (D-535).
 				if drawn then
 					pose(time, nil, drawnNow, poseLag)
-					local drawnTurn = turnOf(drawnBefore, drawnNow, if bladeIndex > 0 then bladeIndex - 1 else #reach)
+					drawnWeaponOut = betweenCuts(math.max(previous - poseLag, from), math.max(time - poseLag, from))
+					local drawnTurn =
+						turnOf(drawnBefore, drawnNow, limbCount, if drawnWeaponOut then weaponIndex else nil)
 					drawnPieces = math.clamp(math.ceil(drawnTurn / KEEP_OUT.maxTurnDegrees), 1, KEEP_OUT.maxPieces)
+					local drawnStart: { CFrame } = if drawnTargetChain ~= nil
+						then drawnTargetChain[#drawnTargetChain]
+						else hurtFrames
+					local drawnEnd: { CFrame } = hurtFrames
+					if moving then
+						drawnEnd = targetAt(time - poseLag)
+						drawnPieces = math.max(
+							drawnPieces,
+							targetPieces(drawnStart, drawnEnd, previous - poseLag, time - poseLag, drawnTurn)
+						)
+					end
 					for piece = 1, drawnPieces - 1 do
 						local into = drawnChain[piece + 1]
 						if into == nil or into == drawnNow then
@@ -1594,6 +1977,14 @@ local function keepOutOf(
 						pose(previous + (time - previous) * piece / drawnPieces, nil, into, poseLag)
 					end
 					drawnChain[drawnPieces + 1] = drawnNow
+					if moving then
+						local times: { { CFrame } } = { drawnStart }
+						for piece = 1, drawnPieces - 1 do
+							table.insert(times, targetAt(previous + (time - previous) * piece / drawnPieces - poseLag))
+						end
+						table.insert(times, drawnEnd)
+						drawnTargetChain = times
+					end
 				end
 				local b, a = currentBack, currentAside
 				-- Out of the body's face first, then the held ones, then the body's again for what an
@@ -1651,26 +2042,6 @@ local function keepOutOf(
 	local speed: number = KEEP_OUT.maxSpeedStudsPerSecond
 	local lead = math.max(1, math.ceil(KEEP_OUT.leadSeconds / step - 1e-6))
 	local speedPieces: number = KEEP_OUT.speedPieces
-	-- The clip's authored holds after its strike snaps (ClipSampler.strikeHoldAfter), as clip-time
-	-- spans: a contact's hit-stop stands in for one, and the step after the hit-stop skips it in a
-	-- single frame (Mixer.hitStop), so what the series grew across one would land in that frame
-	-- (D-427: Sharp Nail stepped back 0.50 studs in the frame after its second cut's freeze at
-	-- 60 Hz). The series grows none of its way inside them.
-	local stills: { { number } } = {}
-	local keys = clip.keys
-	for index = 3, #keys do -- index: a hold key, after its snap key and the key before that
-		if keys[index].easing == "Hold" and ClipSampler.isStrikeSnap(clip, index - 1) then
-			table.insert(stills, { keys[index - 1].time, keys[index].time })
-		end
-	end
-	-- The clip time from `first` to `last` outside those holds.
-	local function openBetween(first: number, last: number): number
-		local open = last - first
-		for _, span in stills do
-			open -= math.max(0, math.min(last, span[2]) - math.max(first, span[1]))
-		end
-		return math.max(open, 0)
-	end
 	local shownBack: { number } = { 0 }
 	local shownAside: { number } = { 0 }
 	-- room[k]: the most the series may grow into sample k, back and aside, as read between clip
@@ -1778,6 +2149,40 @@ local function keepOutOf(
 		side = side,
 		keepSide = if side ~= nil then reader(shownAside) else nil,
 	}
+end
+
+--- What StandOffOptions.target asks for (D-565), read off the target rig's mixer handles
+--- (Mixer.handles, as they stand when the plan is made): the Base clip that shows most (none done,
+--- fading out or held), on from its clock at its speed, and `flinch`, the reaction a cut plays on
+--- it (Replication: the rig's "Flinch" clip from the side the swing comes from). Nil for neither.
+function ContactPredictor.targetMotion(handles: { any }, flinch: Types.ClipDef?): TargetMotion?
+	local shown: any = nil
+	local most = 0
+	for _, handle in handles do
+		if
+			typeof(handle) == "table"
+			and handle.layer == "Base"
+			and handle.done ~= true
+			and handle.stopping ~= true
+			and typeof(handle.clip) == "table"
+			and typeof(handle.time) == "number"
+		then
+			local weight = (if typeof(handle.fade) == "number" then handle.fade else 1)
+				* (if typeof(handle.weight) == "number" then handle.weight else 1)
+			if weight > most then
+				shown, most = handle, weight
+			end
+		end
+	end
+	local base: TargetTrack? = nil
+	if shown ~= nil then
+		local speed = if shown.held == true then 0 elseif typeof(shown.speed) == "number" then shown.speed else 1
+		base = { clip = shown.clip, time = shown.time, speed = speed }
+	end
+	if base == nil and flinch == nil then
+		return nil
+	end
+	return { base = base, flinch = flinch }
 end
 
 -- The column's own poses over the rest of a swing (D-534): each colliding part (keepOut.parts)
@@ -1900,7 +2305,8 @@ end
 --- colliding part (standOff.keepOut.parts) deeper into the target's blocker than the swing found
 --- it (posed lazily, a sample a frame as the clip gets there), and a plan comes back whenever the
 --- target has a blocker (`distance` 0 for a keep-out alone; `keep` may stay 0).
---- `options.step` false plans no blade step (a basic swing).
+--- `options.step` false plans no blade step (a basic swing). `options.target`: how the target
+--- moves on through the swing (ContactPredictor.targetMotion, D-565).
 function ContactPredictor.standOff(
 	model: Model,
 	clip: Types.ClipDef,
@@ -1969,7 +2375,8 @@ function ContactPredictor.standOff(
 			distance or 0,
 			to,
 			parts,
-			math.max(opts.poseLag or DEFAULT_POSE_LAG, 0)
+			math.max(opts.poseLag or DEFAULT_POSE_LAG, 0),
+			opts.target
 		)
 		else nil
 	if distance == nil and keepOut == nil then

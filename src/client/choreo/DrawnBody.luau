@@ -32,6 +32,8 @@
 		DrawnBody.offset(model)              -- CFrame? in the root part's space; nil on its root
 		DrawnBody.follow(gui, model, base)   -- a billboard adorned to the root shows over the body
 		DrawnBody.unfollow(gui)              -- back to `base` and no longer moved
+		DrawnBody.adorn(gui, adornee)        -- the billboard's own adornee: now, or at the hand-back
+		                                     -- while it is on a carrier part
 
 	Nothing here moves the root part or decides anything the server owns. The local blade's contact
 	prediction tests the drawn body's own parts (ContactPredictor, with the hidden root skipped by
@@ -170,6 +172,19 @@ function DrawnBody.follow(gui: any, model: any, base: Vector3)
 	(list :: { [any]: Vector3 })[gui] = base
 	followed[gui] = model
 	place(gui, model, base)
+end
+
+--- Sets a billboard's own adornee (its owner's): at once, or, while it is adorned to the part a
+--- step draws the body on, the one it goes back to when the body is back on its root, so the
+--- billboard never leaves the drawn body mid-rush. Nameplates puts a plate handed out before its
+--- rig's root part replicated onto that root part this way (D-571).
+function DrawnBody.adorn(gui: any, adornee: any)
+	local home = homes[gui]
+	if home ~= nil and gui.Adornee == home.part then
+		home.adornee = adornee
+	elseif gui.Adornee ~= adornee then
+		gui.Adornee = adornee
+	end
 end
 
 --- Stops moving a billboard; it goes back to `base` when one is given, and to its owner's

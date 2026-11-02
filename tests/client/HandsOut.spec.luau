@@ -36,6 +36,15 @@
 	no hand or arm goes more than wallGapStuds into the kobold or its axe, every cut lands, and the
 	shot's Side view still frames both bodies. Its turn is the drawn walk-in's, and it never stands
 	nearer than a walk-in rests.
+
+	Items 461 and 464 (D-565, D-566, D-568): the PC's held kobold idled and flinched on
+	through the swing, against a plan made off it as it stood when the swing began. Played as the
+	game plays it (Play: its idle on through its own Mixer from the phases that failed, held by each
+	hit-stop, each cut's flinch from its word, and a basic's state over after basicHitDuration with
+	its clip and plan playing on), from the 3.15 walk-in rest no hand or arm goes deeper than
+	DEEPEST at 30 to 240 Hz, as posed and as drawn (006f057: 0.035 to 0.115); and from 3.5,
+	Basic1's blade is out of the kobold from clip 0.28 to the clip's end and its trail no more than
+	0.25 in at the key (006f057: 0.192 in after the cut).
 ]]
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
@@ -56,6 +65,7 @@ local RigBuilder = Harness.load("src/server/world/RigBuilder")
 local PlaygroundLayout = Harness.load("src/server/world/PlaygroundLayout")
 local ContactPredictor = Harness.load("src/client/controllers/ContactPredictor")
 local ActionLogic = Harness.load("src/client/controllers/ActionLogic")
+local DamageMath = Harness.load("src/server/combat/DamageMath")
 local AimLogic = Harness.load("src/client/controllers/AimLogic")
 local WalkShell = Harness.load("src/client/controllers/WalkShell")
 local Mixer = Harness.load("src/client/choreo/Mixer")
@@ -173,7 +183,7 @@ local function boxDepth(a: CFrame, aSize: Vector3, b: CFrame, bSize: Vector3): n
 end
 
 -- The deepest hand or arm in any of `parts` of the enemy.
-local function limbDepth(hurt: { BasePart }, rootFrame: CFrame, offsets: any): (number, string)
+local function limbDepth(hurt: { any }, rootFrame: CFrame, offsets: any): (number, string)
 	local solved = Pose.solve(avatar.model, rootFrame, offsets)
 	local worst, where = -math.huge, ""
 	for _, name in KEEP_OUT.limbs do
@@ -215,6 +225,95 @@ local function restOf(enemy: Model, enemyRoot: Vector3, lateral: number): CFrame
 	return at
 end
 
+-- The deepest point of the blade's own part (the Weapon part, read as the PC's logger reads it:
+-- 3 x 9 x 2 points over its box) in any of `parts`, posed by `solved`.
+local function bladeDepth(parts: { any }, solved: { [string]: CFrame }): (number, string)
+	local frame = solved["Weapon"]
+	if frame == nil then
+		return -math.huge, ""
+	end
+	local size = sizes["Weapon"]
+	local worst, where = -math.huge, ""
+	for ix = 0, 2 do
+		for iy = 0, 8 do
+			for iz = 0, 1 do
+				local point = frame * Vector3.new((ix / 2 - 0.5) * size.X, (iy / 8 - 0.5) * size.Y, (iz - 0.5) * size.Z)
+				for _, part in parts do
+					local inside = part.CFrame:PointToObjectSpace(point)
+					local half = part.Size / 2
+					local depth =
+						math.min(half.X - math.abs(inside.X), half.Y - math.abs(inside.Y), half.Z - math.abs(inside.Z))
+					if depth > worst then
+						worst, where = depth, "Weapon in " .. part.Name
+					end
+				end
+			end
+		end
+	end
+	return worst, where
+end
+
+-- The deepest point of the blade's trail line (BladeContact.chain: TrailStart, the guard, to
+-- TrailEnd, the tip; the line the plan's reach caps at the keys, D-424) in any of `parts`.
+local TRAIL = BladeContact.chain(avatar.model)
+local function lineDepth(parts: { any }, solved: { [string]: CFrame }): number
+	local frame = solved["Weapon"]
+	if frame == nil or TRAIL == nil then
+		return -math.huge
+	end
+	local guard, tip = (frame * TRAIL.start).Position, (frame * TRAIL.finish).Position
+	local worst = -math.huge
+	for step = 0, 40 do
+		local inside0 = guard:Lerp(tip, step / 40)
+		for _, part in parts do
+			local inside = part.CFrame:PointToObjectSpace(inside0)
+			local half = part.Size / 2
+			worst = math.max(
+				worst,
+				math.min(half.X - math.abs(inside.X), half.Y - math.abs(inside.Y), half.Z - math.abs(inside.Z))
+			)
+		end
+	end
+	return worst
+end
+
+-- The clip-time spans after each cut the blade is out of the body in (item 464, D-566): from
+-- the strike's hold (its key when it has none) plus keepOut.bladeOutSeconds, the follow-through's
+-- exit (section 10 beat 5), to the next strike's snap or the clip's end.
+local function afterCuts(clip: any): { { number } }
+	local cuts = {}
+	for _, window in ClipSampler.hitWindows(clip) do
+		local key = ContactPredictor.strikeKey(clip, window)
+		local hold = ClipSampler.strikeHoldAfter(clip, key)
+		local snap = window.open
+		for index = 2, #clip.keys do
+			if math.abs(clip.keys[index].time - key) <= 1e-4 and ClipSampler.isStrikeSnap(clip, index) then
+				snap = clip.keys[index - 1].time
+			end
+		end
+		table.insert(cuts, { snap = snap, exit = (if hold ~= nil then clip.keys[hold].time else key) })
+	end
+	local spans = {}
+	for index, cut in cuts do
+		local after = cuts[index + 1]
+		table.insert(spans, { cut.exit + KEEP_OUT.bladeOutSeconds, if after ~= nil then after.snap else math.huge })
+	end
+	return spans
+end
+
+-- How a swing is played (swingAt). `played`: as the game plays it at a held kobold: the kobold
+-- through its own Mixer (its idle on from `idleTime`, held by each hit-stop with the body, and the
+-- flinch Replication plays on each cut's word, which comes the frame after the contact, inside the
+-- hold), the plan told how the kobold moves (ContactPredictor.targetMotion off that Mixer, as
+-- CharacterController asks it of the kobold's animator), and a basic's state over
+-- combat.basicHitDuration after the press (CharacterController.endAction: its root motion stops
+-- there; the clip plays on, and its plan with it, D-568). `bare`: the kobold without its
+-- HeldBlocker, what the keep-out holds alone where the HeldBlocker beside the line holds nothing
+-- off.
+type Play = { played: boolean?, bare: boolean? }
+-- The frames after a contact the hit's word comes (inside the hold at every rate).
+local WORD_FRAMES = 1
+
 -- The deepest limb in the body, and in what the enemy holds (counted only while it idles: the
 -- rest pose is what the server's sweeps read, never what a client draws an idling enemy in).
 type Result = {
@@ -227,6 +326,16 @@ type Result = {
 	heldDepth: number,
 	heldWhere: string,
 	contacts: { number },
+	-- The blade's own part after each cut (afterCuts), as posed and as drawn (item 464).
+	blade: number,
+	bladeWhere: string,
+	bladeScreen: number,
+	bladeScreenWhere: string,
+	-- The blade's trail line at each strike's key (the frame nearest it), the deepest, and the
+	-- blade's own part there (item 464(b)).
+	bladeKey: number,
+	bladeKeyWhere: string,
+	bladeKeyBox: number,
 }
 
 -- One swing at `fps` from `rest`: the deepest limb on any frame and the cuts that landed. With
@@ -237,10 +346,33 @@ local function swingAt(
 	rest: CFrame,
 	fps: number,
 	swing: Swing,
-	idleTime: number?
+	idleTime: number?,
+	play: Play?
 ): Result
+	local how: Play = play or {}
 	local model = placeAt(enemyId, enemyFrame, idleTime)
+	if how.bare then
+		local held = model:FindFirstChild(KEEP_OUT.heldFace)
+		if held ~= nil then
+			held:Destroy()
+		end
+	end
 	local idle = if idleTime ~= nil then idleOf(enemyId) else nil
+	-- The kobold's own Mixer, as the game animates it.
+	local enemyMixer: any = nil
+	local flinch: any = nil
+	if how.played then
+		enemyMixer = Mixer.new()
+		if idle ~= nil then
+			enemyMixer:play(idle, { startTime = idleTime, blendIn = 0 })
+		end
+		local rig = Enemies.byId(enemyId).skin
+		local side = DamageMath.staggerDirection(rest.Position, enemyFrame)
+		local id = ActionLogic.clipId("Enemy", rig, "", "Flinch" .. side)
+		if fs.isFile(root .. "/src/shared/clips/" .. id .. ".luau") then
+			flinch = Harness.load("src/shared/clips/" .. id)
+		end
+	end
 	local hurt: { BasePart } = {}
 	local held: { BasePart } = {}
 	for _, part in model:GetDescendants() do
@@ -252,15 +384,12 @@ local function swingAt(
 	end
 	local elapsed = 0
 	avatar.root.CFrame = rest
-	local plan = ContactPredictor.standOff(
-		avatar.model,
-		swing.clip,
-		swing.from,
-		rest,
-		model,
-		nil,
-		{ keepOut = true, step = swing.art ~= nil, poseLag = Impact.poseLagFrames / fps }
-	)
+	local plan = ContactPredictor.standOff(avatar.model, swing.clip, swing.from, rest, model, nil, {
+		keepOut = true,
+		step = swing.art ~= nil,
+		poseLag = Impact.poseLagFrames / fps,
+		target = if enemyMixer ~= nil then ContactPredictor.targetMotion(enemyMixer:handles(), flinch) else nil,
+	})
 	local records = {
 		{ id = 1, model = avatar.model, kind = "Player", state = "Art", weaponId = WEAPON.id },
 		{ id = 5, model = model, kind = "Enemy", state = "Idle", hp = 1e6, maxHp = 1e6 },
@@ -294,15 +423,73 @@ local function swingAt(
 		heldDepth = -math.huge,
 		heldWhere = "",
 		contacts = {},
+		blade = -math.huge,
+		bladeWhere = "",
+		bladeScreen = -math.huge,
+		bladeScreenWhere = "",
+		bladeKey = -math.huge,
+		bladeKeyWhere = "",
+		bladeKeyBox = -math.huge,
 	}
+	local spans = afterCuts(swing.clip)
+	-- Each strike's key, and the blade at the frame nearest it so far (its gap and depth).
+	local keyed: { { key: number, gap: number, depth: number, where: string, box: number } } = {}
+	for _, window in ClipSampler.hitWindows(swing.clip) do
+		table.insert(keyed, {
+			key = ContactPredictor.strikeKey(swing.clip, window),
+			gap = math.huge,
+			depth = -math.huge,
+			where = "",
+			box = -math.huge,
+		})
+	end
+	local function outAt(time: number): boolean
+		for _, span in spans do
+			if time >= span[1] - 1e-6 and time < span[2] then
+				return true
+			end
+		end
+		return false
+	end
 	-- The step before's pose and root, and whether the root runs a step behind its pose (D-496).
 	local lastOffsets: any = nil
 	local lastFrame: CFrame? = nil
+	local lastTime = swing.from
 	local behind = false
+	-- The enemy's parts as the screen draws them: the pose its step before wrote (D-342: a rig
+	-- step's pose is drawn a frame later, the enemy's as the body's).
+	local function shown(): { any }
+		local list = {}
+		for _, part in hurt do
+			table.insert(list, { Name = part.Name, CFrame = part.CFrame, Size = part.Size })
+		end
+		return list
+	end
+	local shownHurt = shown()
+	-- A word on its way: the frames until it comes.
+	local word: number? = nil
 	for _ = 1, math.ceil(swing.clip.duration * fps) + 120 do
+		shownHurt = shown()
+		if enemyMixer ~= nil then
+			if word ~= nil then
+				word -= 1
+				if word <= 0 then
+					word = nil
+					if flinch ~= nil then
+						enemyMixer:play(flinch)
+					end
+				end
+			end
+			for name, solved in Pose.solve(model, enemyFrame, enemyMixer:step(1 / fps).offsets) do
+				local part = model:FindFirstChild(name)
+				if part ~= nil and part:IsA("BasePart") then
+					part.CFrame = solved
+				end
+			end
+		end
 		local stepped = mixer:step(1 / fps)
 		elapsed += 1 / fps
-		if idleTime ~= nil then
+		if idleTime ~= nil and enemyMixer == nil then
 			poseAt(model, enemyFrame, idle, idleTime + elapsed)
 		end
 		for _, joint in Joints.list(avatar.model) do
@@ -311,7 +498,12 @@ local function swingAt(
 		end
 		-- The clip's root motion is in the root's own space.
 		local delta = stepped.rootDelta
-		carried += carried:VectorToWorldSpace(Vector3.new(delta[1], delta[2], delta[3]))
+		-- A played basic's state ends combat.basicHitDuration after the press (CharacterController.
+		-- endAction): its root motion stops there, its plan holds on to the clip's end (D-568).
+		local over = how.played == true and swing.art == nil and elapsed >= Combat.basicHitDuration - 1e-9
+		if not over then
+			carried += carried:VectorToWorldSpace(Vector3.new(delta[1], delta[2], delta[3]))
+		end
 		local time = handle.time
 		local frame = carried
 		if plan ~= nil then
@@ -327,6 +519,10 @@ local function swingAt(
 			result.hits += 1
 			table.insert(result.contacts, time)
 			mixer:holdSteps(Combat.hitStopFrames[contact.tier] * fps / 60)
+			if enemyMixer ~= nil then
+				enemyMixer:holdSteps(Combat.hitStopFrames[contact.tier] * fps / 60)
+				word = WORD_FRAMES
+			end
 		end
 		local depth, where = limbDepth(hurt, frame, stepped.offsets)
 		if depth > result.depth then
@@ -337,12 +533,41 @@ local function swingAt(
 		behind = moved and (mixer:heldShown() or behind)
 		if lastOffsets ~= nil then
 			local shownRoot = if behind then lastFrame :: CFrame else frame
-			local drawn, drawnWhere = limbDepth(hurt, shownRoot, lastOffsets)
+			local drawn, drawnWhere = limbDepth(shownHurt, shownRoot, lastOffsets)
 			if drawn > result.screen then
 				result.screen, result.screenWhere = drawn, ("%s at %.3f s"):format(drawnWhere, time)
 			end
+			-- The blade as drawn shows the pose of the step before (D-342).
+			if outAt(lastTime) then
+				local depth, where = bladeDepth(shownHurt, Pose.solve(avatar.model, shownRoot, lastOffsets))
+				if depth > result.bladeScreen then
+					result.bladeScreen, result.bladeScreenWhere = depth, ("%s at %.3f s"):format(where, time)
+				end
+			end
 		end
-		lastOffsets, lastFrame = stepped.offsets, frame
+		if outAt(time) then
+			local depth, where = bladeDepth(hurt, Pose.solve(avatar.model, frame, stepped.offsets))
+			if depth > result.blade then
+				result.blade, result.bladeWhere = depth, ("%s at %.3f s"):format(where, time)
+			end
+		end
+		for _, each in keyed do
+			local gap = math.abs(time - each.key)
+			if gap <= each.gap + 1e-9 then
+				local solved = Pose.solve(avatar.model, frame, stepped.offsets)
+				local depth = lineDepth(hurt, solved)
+				local box = bladeDepth(hurt, solved)
+				if gap < each.gap - 1e-9 then
+					each.depth, each.box, each.where = -math.huge, -math.huge, ""
+				end
+				if depth > each.depth then
+					each.depth, each.where = depth, ("at %.3f s"):format(time)
+				end
+				each.box = math.max(each.box, box)
+				each.gap = math.min(each.gap, gap)
+			end
+		end
+		lastOffsets, lastFrame, lastTime = stepped.offsets, frame, time
 		if idleTime ~= nil and #held > 0 then
 			local inHeld, whereHeld = limbDepth(held, frame, stepped.offsets)
 			if inHeld > result.heldDepth then
@@ -352,6 +577,12 @@ local function swingAt(
 		if handle.done then
 			break
 		end
+	end
+	for _, each in keyed do
+		if each.depth > result.bladeKey then
+			result.bladeKey, result.bladeKeyWhere = each.depth, each.where
+		end
+		result.bladeKeyBox = math.max(result.bladeKeyBox, each.box)
 	end
 	predictor:stop()
 	model:Destroy()
@@ -497,6 +728,170 @@ describe("no hand or arm goes into an enemy's body on any frame (items 331(a), 3
 		check("side-on boar, a stud off", "FrenzyBoar", frame, 1)
 	end)
 end)
+
+-- ------------------------------------------------------------------ the played kobold (D-565, D-566)
+
+-- The kobold's idle phases (seconds into its loop) the swing starts in: where the plan read off the
+-- kobold as it stood left a hand in it as it idled and flinched on (item 461, 006f057 at 60 Hz at
+-- the 3.15 rest: Horizontal 0.040 posed and 0.059 drawn from 2.0 and 2.5, Rising Arc 0.025 and
+-- 0.028 from 1.5, Basic2 0.032 from 2.5), and one either side.
+local PLAYED_PHASES = { 1.5, 2.0, 2.5 }
+-- Item 464: Basic1 from 3.5 studs, the idle's loop in steps of a second.
+local BLADE_PHASES = { 0, 1, 2, 3 }
+-- The bar for the blade at the key (item 464(b)), on the trail's line the reach caps at
+-- bladeDepthStuds plus depthEpsilon (D-424); the blade's own part reads up to its half-width more.
+local KEY_BAR = 0.25
+
+-- Every swing at `fps` from `rest`, the kobold played as the game plays it (Play), from each idle
+-- phase: the deepest limb as posed and as drawn, and the swing and phase it was in.
+local function playedWorst(rest: CFrame, frame: CFrame, fps: number, phases: { number }, play: Play, swings: { Swing })
+	local worst =
+		{ depth = -math.huge, where = "", screen = -math.huge, screenWhere = "", held = -math.huge, heldWhere = "" }
+	for _, swing in swings do
+		local windows = #ClipSampler.hitWindows(swing.clip)
+		for _, phase in phases do
+			local result = swingAt("KoboldAxeman", frame, rest, fps, swing, phase, play)
+			local tag = ("%s %d Hz from %.1f s"):format(swing.name, fps, phase)
+			if result.hits ~= windows then
+				error(("%s: %d of %d cuts landed"):format(tag, result.hits, windows))
+			end
+			if result.depth > worst.depth then
+				worst.depth, worst.where = result.depth, tag .. ": " .. result.where
+			end
+			if result.screen > worst.screen then
+				worst.screen, worst.screenWhere = result.screen, tag .. ": " .. result.screenWhere
+			end
+			if result.heldDepth > worst.held then
+				worst.held, worst.heldWhere = result.heldDepth, tag .. ": " .. result.heldWhere
+			end
+		end
+	end
+	return worst
+end
+
+describe("the plan holds the hands out of a kobold that idles and flinches on (item 461, D-565)", function()
+	local frame = CFrame.new(0, rootHeightOf("KoboldAxeman"), -20) * CFrame.Angles(0, math.pi, 0)
+	-- Setup A's walk-ins rested 3.08 to 3.41 studs from the held kobold's root, square on (463(d):
+	-- 0.00 degrees off the line); 3.15 is in every swing's span.
+	local start = Vector3.new(frame.Position.X, avatar.base.Position.Y, frame.Position.Z + 3.15)
+	local rest = CFrame.lookAt(start, Vector3.new(frame.Position.X, start.Y, frame.Position.Z))
+	for _, fps in RATES do
+		it(
+			("at %d Hz from the 3.15 rest, its idle on and each cut's flinch played, as posed and as drawn"):format(fps),
+			function()
+				local worst = playedWorst(rest, frame, fps, PLAYED_PHASES, { played = true }, SWINGS)
+				print(
+					("[461] %d Hz played: deepest limb %.3f (%s); as drawn %.3f (%s); in its axe %.3f (%s)"):format(
+						fps,
+						worst.depth,
+						worst.where,
+						worst.screen,
+						worst.screenWhere,
+						worst.held,
+						worst.heldWhere
+					)
+				)
+				expect(worst.depth <= DEEPEST).toBe(true)
+				expect(worst.screen <= DEEPEST).toBe(true)
+				-- What it holds is no part of the keep-out (D-277), so the axe is reported only: the
+				-- flinch swings it 0.39-0.50 into Rising Arc's left hand at clip 0.67-0.69 here, on
+				-- 006f057 alike, where the PC read nothing deeper than 0.017 (an open issue).
+			end
+		)
+	end
+	-- What the HeldBlocker beside the line does not hold off, the keep-out holds alone.
+	for _, fps in { 60, 144 } do
+		it(("at %d Hz from the 3.15 rest, the same with no HeldBlocker"):format(fps), function()
+			local worst = playedWorst(rest, frame, fps, PLAYED_PHASES, { played = true, bare = true }, SWINGS)
+			print(
+				("[461] %d Hz played, bare: deepest limb %.3f (%s); as drawn %.3f (%s); in its axe %.3f (%s)"):format(
+					fps,
+					worst.depth,
+					worst.where,
+					worst.screen,
+					worst.screenWhere,
+					worst.held,
+					worst.heldWhere
+				)
+			)
+			expect(worst.depth <= DEEPEST).toBe(true)
+			expect(worst.screen <= DEEPEST).toBe(true)
+		end)
+	end
+end)
+
+describe(
+	"Basic1's blade leaves a kobold that idles and flinches on, and stops at the key (item 464, D-566, D-568)",
+	function()
+		-- Setup C's held kobold at 3.5 (its HeldBlocker beside the line, 463(d)), Basic1 alone: its
+		-- state ends combat.basicHitDuration after the press, at clip 0.33, and its clip plays on.
+		local frame = CFrame.new(0, rootHeightOf("KoboldAxeman"), -20) * CFrame.Angles(0, math.pi, 0)
+		local start = Vector3.new(frame.Position.X, avatar.base.Position.Y, frame.Position.Z + 3.5)
+		local rest = CFrame.lookAt(start, Vector3.new(frame.Position.X, start.Y, frame.Position.Z))
+		local basic1: Swing = SWINGS[1]
+		for _, swing in SWINGS do
+			if swing.name == "Basic1" then
+				basic1 = swing
+			end
+		end
+		local spans = afterCuts(basic1.clip)
+		it("is out by clip 0.283, where the PC read it (exit plus keepOut.bladeOutSeconds)", function()
+			expect(#spans).toBe(1)
+			expect(spans[1][1] <= 0.283 + 1e-9).toBe(true)
+		end)
+		it(
+			("at 30, 60, 144 and 240 Hz: out from there to the clip's end as posed and as drawn, the trail at most %.2f in at the key"):format(
+				KEY_BAR
+			),
+			function()
+				local worst, worstAt = -math.huge, ""
+				local drawn, drawnAt = -math.huge, ""
+				local key, keyAt, box = -math.huge, "", -math.huge
+				local limb, limbAt = -math.huge, ""
+				for _, fps in RATES do
+					for _, phase in BLADE_PHASES do
+						local result = swingAt("KoboldAxeman", frame, rest, fps, basic1, phase, { played = true })
+						local tag = ("%d Hz from %.1f s"):format(fps, phase)
+						expect(result.hits).toBe(1)
+						if result.blade > worst then
+							worst, worstAt = result.blade, tag .. ": " .. result.bladeWhere
+						end
+						if result.bladeScreen > drawn then
+							drawn, drawnAt = result.bladeScreen, tag .. ": " .. result.bladeScreenWhere
+						end
+						-- At 30 Hz the frame nearest the key is the contact's held frame at 0.133, before
+						-- the reach's key (open issue: 0.45-0.47 on 006f057 and now alike).
+						if fps ~= 30 and result.bladeKey > key then
+							key, keyAt = result.bladeKey, tag .. " " .. result.bladeKeyWhere
+							box = math.max(box, result.bladeKeyBox)
+						end
+						local deeper = math.max(result.depth, result.screen)
+						if deeper > limb then
+							limb, limbAt = deeper, tag .. ": " .. result.where
+						end
+					end
+				end
+				print(
+					("[464] blade after the cut %.3f (%s), as drawn %.3f (%s); trail at the key %.3f (%s; its part %.3f); limbs %.3f (%s)"):format(
+						worst,
+						worstAt,
+						drawn,
+						drawnAt,
+						key,
+						keyAt,
+						box,
+						limb,
+						limbAt
+					)
+				)
+				expect(worst <= DEEPEST).toBe(true)
+				expect(drawn <= DEEPEST).toBe(true)
+				expect(key <= KEY_BAR).toBe(true)
+				expect(limb <= DEEPEST).toBe(true)
+			end
+		)
+	end
+)
 
 -- ------------------------------------------------------------------ the gate shots (D-518)
 

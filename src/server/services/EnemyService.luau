@@ -192,6 +192,9 @@ type Mover = {
 	issuedGoal: Vector3?,
 	issuedAt: number,
 	walkSpeed: number?,
+	-- The WalkSpeed in hand was set by a walk under way since (not a strike's own movement, a
+	-- landing or a start from standing): a change of pace eases toward the new one (easePace).
+	paced: boolean,
 	path: { Vector3 }?,
 	pathIndex: number,
 	pathComputedAt: number,
@@ -394,6 +397,7 @@ local function newMover(model: Model, speed: number, body: RushWorld.Body?): Mov
 		issuedGoal = nil,
 		issuedAt = -math.huge,
 		walkSpeed = nil,
+		paced = false,
 		path = nil,
 		pathIndex = 1,
 		pathComputedAt = -math.huge,
@@ -426,6 +430,12 @@ local function restartClock(mover: Mover)
 	mover.stuck = false
 end
 
+-- The faster of the pace the walk asked for and the one the body still walks at while it eases
+-- toward it (easePace): how far ahead a walk can get before the next look.
+local function paceOf(mover: Mover): number
+	return math.max(mover.speed, mover.walkSpeed or 0)
+end
+
 -- Forgets the path and drops a result still computing (it was asked for another movement).
 local function dropPath(mover: Mover)
 	mover.path = nil
@@ -443,6 +453,7 @@ local function moverRequest(mover: Mover, goal: Vector3, speed: number, direct: 
 	if isDirect ~= mover.direct then
 		-- A different kind of movement is a new movement: its own clock, and no path from the old one.
 		mover.direct = isDirect
+		mover.paced = false
 		restartClock(mover)
 		dropPath(mover)
 	end
@@ -476,6 +487,7 @@ local function moverStop(mover: Mover, dead: boolean?)
 	mover.direct = false
 	mover.exact = false
 	mover.halted = nil
+	mover.paced = false
 	if mover.moving then
 		mover.moving = false
 		mover.issuedGoal = nil
@@ -541,7 +553,7 @@ local function nearFaces(mover: Mover)
 	local radius = if box ~= nil then box.radius else Vector3.new(half.X, 0, half.Z).Magnitude
 	local swing = if box ~= nil then box.swing else radius
 	local back = 2 * radius
-	local ahead = swing + mover.speed * AI.tickSeconds()
+	local ahead = swing + paceOf(mover) * AI.tickSeconds()
 	local look = Brain.horizontal(d.engine.facing(mover.model)) or FORWARD
 	local right = look:Cross(Vector3.yAxis)
 	local position = d.engine.position(mover.model)
@@ -797,11 +809,15 @@ local function moverUpdate(mover: Mover, now: number)
 		-- so its clock starts now (D-183).
 		restartClock(mover)
 	end
+	-- A walk under way that changes its pace eases toward it on the frame pass (easePace); any other
+	-- movement takes its pace at once.
+	local eases = mover.paced and mover.moving and not mover.direct
 	mover.moving = true
-	if mover.walkSpeed ~= mover.speed then
+	if mover.walkSpeed ~= mover.speed and not eases then
 		engine.setWalkSpeed(mover.model, mover.speed)
 		mover.walkSpeed = mover.speed
 	end
+	mover.paced = not mover.direct
 	if mover.direct then
 		mover.cutStop = nil
 		if mover.exact and mover.halted == nil and stuckAt(mover, engine.position(mover.model), now) then
@@ -910,6 +926,7 @@ local function landStep(mover: Mover, stop: Vector3?, dt: number, now: number)
 				movement.landAimStuds
 			)
 			mover.walkSpeed = nil -- the landing sets its own pace; the next movement sets its own again
+			mover.paced = false
 			mover.issuedGoal = nil
 			mover.landAt = now
 			return
@@ -961,7 +978,7 @@ local function arrive(mover: Mover, dt: number, now: number)
 	end
 	local position = engine.position(mover.model)
 	local left = Brain.horizontalDistance(position, goal)
-	if left > mover.speed * leadSeconds + AI.flatEpsilon then
+	if left > paceOf(mover) * leadSeconds + AI.flatEpsilon then
 		return
 	end
 	mover.halted = goal
@@ -991,6 +1008,22 @@ local function landed(mover: Mover, now: number, dt: number)
 		return
 	end
 	landStep(mover, halted, dt, now)
+end
+
+-- One server frame of a walk under way easing its WalkSpeed toward the pace it asked for (D-574):
+-- at most movement.paceChangeRate times the frame's seconds closer. A whole step at once runs the
+-- body a frame at the new pace while every client's gait, a frame behind its root, plays the old
+-- one, so the planted feet slide.
+local function easePace(mover: Mover, dt: number)
+	local current = mover.walkSpeed
+	if not mover.paced or not mover.moving or mover.direct or current == mover.speed then
+		return
+	end
+	local engine = dependencies().engine
+	local most = AI.movement.paceChangeRate * math.max(dt, 0)
+	local pace = if current == nil then mover.speed else current + math.clamp(mover.speed - current, -most, most)
+	engine.setWalkSpeed(mover.model, pace)
+	mover.walkSpeed = pace
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -2183,6 +2216,7 @@ local function frameAll(dt: number)
 			moverUpdate(entry.mover, now)
 		end
 		arrive(entry.mover, dt, now)
+		easePace(entry.mover, dt)
 	end
 	table.clear(frameList)
 	for _, entry in entries do

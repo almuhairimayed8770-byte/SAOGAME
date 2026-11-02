@@ -21,7 +21,8 @@
 	those clips' priority and priority.Sheath (the Draw lays over the guard) and below
 	priority.Basic (the attacks still draw-cut over it); sheath.handOverTime falls after the Draw's
 	WeaponDraw and before its end (the guard takes the arm with the sword in the hand); and
-	sheath.handOverBlend is a positive number of seconds.
+	sheath.handOverBlend is a positive number of seconds. sheath.skidBrakeSeconds (D-579) is above
+	0 and at most the Skid clip's duration.
 
 	And the cancel hand-over (D-408): handOver.seconds is above 0 and at most dev.luau
 	review.audit.cancel.snapFrames 60 Hz frames (a cancel is a snap, section 10 beat 2),
@@ -38,6 +39,9 @@
 	And the dodge's hand-off (D-528): every locomotion.dodgeHandOff.clips name is a clip under
 	locomotion.clipPrefix that is not an attack; every joint it lists is a PlayerR15 joint whose
 	seconds are above 0 and at most combat.luau dodgeDuration.
+
+	And an enemy rig's gait paced by its root's own travel (D-575): enemy.gait.travelSeconds is a
+	positive number of seconds, at most 1 / locomotion.weightBlendRate.
 ]]
 
 local TIERS = { "High", "Medium", "Low" }
@@ -191,6 +195,19 @@ return function(ctx: any): { string }
 		check(
 			positive(sheath.handOverBlend),
 			("sheath.handOverBlend (%s) must be a positive number of seconds"):format(tostring(sheath.handOverBlend))
+		)
+		-- D-579: the Skid's brake, a part of the Skid's own clock.
+		local skidName = if typeof(choreo.locomotion) == "table" and typeof(choreo.locomotion.clips) == "table"
+			then choreo.locomotion.clips.Skid
+			else nil
+		local okSkid, skid = pcall(ctx.load, "src/shared/clips/" .. tostring(prefix) .. tostring(skidName))
+		local brake = sheath.skidBrakeSeconds
+		check(
+			okSkid and typeof(skid) == "table" and positive(brake) and brake <= skid.duration,
+			("sheath.skidBrakeSeconds (%s) must be above 0 and at most the Skid clip's duration (%s s): a sheath clip stands through the Skid's brake"):format(
+				tostring(brake),
+				tostring(if okSkid and typeof(skid) == "table" then skid.duration else nil)
+			)
 		)
 	end
 
@@ -516,6 +533,22 @@ return function(ctx: any): { string }
 				end
 			end
 		end
+	end
+
+	-- An enemy rig's gait paced by its root's travel (D-575) answers a change of pace no later
+	-- than its own crossfade: travelSeconds is positive and at most 1 / locomotion.weightBlendRate.
+	local gait = if typeof(choreo.enemy) == "table" then choreo.enemy.gait else nil
+	local travel = if typeof(gait) == "table" then gait.travelSeconds else nil
+	check(positive(travel), "enemy.gait.travelSeconds must be a positive number of seconds")
+	local blendRate = if typeof(choreo.locomotion) == "table" then choreo.locomotion.weightBlendRate else nil
+	if positive(travel) and positive(blendRate) then
+		check(
+			travel <= 1 / blendRate,
+			("enemy.gait.travelSeconds %.3f is over 1 / locomotion.weightBlendRate (%.3f s): the gait would answer a change of pace later than its crossfade"):format(
+				travel,
+				1 / blendRate
+			)
+		)
 	end
 
 	local settle = if typeof(camera.stall) == "table" then camera.stall.settleSeconds else nil

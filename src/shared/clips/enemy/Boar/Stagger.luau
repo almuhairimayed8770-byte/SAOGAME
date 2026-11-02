@@ -10,8 +10,10 @@
 	             and land flat where they stood (0.40, the footstep at 0.42); the head snaps down
 	  0.44-0.74  sways onto its left legs (the right feet lift and come straight back down)
 	  0.44-1.00  shakes its head and settles into the idle stance
-	The back feet never leave the field: the body turns about the back hips and every back leg keeps
-	the idle's angle to the field. Generated: one key a 60 fps frame. Rig: Boar. Root X+ pitches the
+	The back feet hold the field through the rear and the crash (0.00-0.44): the body turns about the
+	back hips and every back leg keeps the idle's angle to the field. In the sway the back right foot
+	lifts with the front right (0.097 at 0.58) while both left feet hold the field (D-573;
+	BoarStaggerHooves.spec). Generated: one key a 60 fps frame. Rig: Boar. Root X+ pitches the
 	nose up; Hip X+ swings a leg forward; Neck X- lowers the head; Tail X- lifts it.
 ]]
 

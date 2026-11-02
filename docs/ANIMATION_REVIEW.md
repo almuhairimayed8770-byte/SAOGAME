@@ -81,7 +81,7 @@ regeneration, matched by clip id.
 | `enemy/Boar/FlinchRight` | Boar | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `enemy/Boar/Idle` | Boar | loop | 4.00 s / 240f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | None; often overlapped by the player | D-237, D-259 (spacing) |
 | `enemy/Boar/Stagger` | Boar | one-shot | 1.00 s / 60f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
-| `enemy/Boar/Walk` | Boar | loop | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | Slide BackLeftLeg 0.22 at f1 (Lab); Drift BackRightLeg 0.46 at f5 (Lab) | yes 2026-10-25 (gate footage) | None seen at this size |  |
+| `enemy/Boar/Walk` | Boar | loop | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | Slide BackLeftLeg 0.21 at f1 (Lab); Drift BackRightLeg 0.46 at f5 (Lab) | yes 2026-10-25 (gate footage) | None seen at this size |  |
 | `enemy/Kobold/Overhead` | Kobold | attack | 2.75 s / 165f | Y 78f | Y 3f | Y 2f | Y 3f | Y 9f | Y 72f | Normal | 1 | on 0.0f before, off 1.2f after | 0.00 | none | yes 2026-10-25 (gate footage) | Yellow tell ends 18-19 frames before the chop (kobold-overhead f141 vs chop f160; parry f46 vs f65); smear on the still raised blade (f158-159), drop unsmeared in ~1 frame; trail a thin straight chord (f160-169); hold/settle/recovery hidden behind the player or cut off; cone at hip height, over the player's legs | D-229, D-252, D-253; re-record |
 | `enemy/Kobold/Break` | Kobold | one-shot | 3.00 s / 180f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `enemy/Kobold/DeathFreeze` | Kobold | one-shot | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | Body holds still src 6342-6381; camera pulls back underneath it (camera, not clip) | D-239 (camera); re-record |
@@ -91,7 +91,7 @@ regeneration, matched by clip id.
 | `enemy/Kobold/FlinchRight` | Kobold | one-shot | 0.30 s / 18f | - | - | - | - | - | - | - | - | - | 0.00 | none |  |  |  |
 | `enemy/Kobold/Idle` | Kobold | loop | 4.00 s / 240f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | No pops; overlaps the player, later stands inside the boar (staging) | D-237, D-259 (spacing) |
 | `enemy/Kobold/Stagger` | Kobold | one-shot | 1.00 s / 60f | - | - | - | - | - | - | - | - | - | 0.00 | none | yes 2026-10-25 (gate footage) | One-frame jump at start (axe hip→overhead, blendIn 0.02; parry take f1301); reel ~10 frames, mostly behind the hat, upright from ~f1312; head-up reel and bent-leg catch don't read | D-257; re-record |
-| `enemy/Kobold/Walk` | Kobold | loop | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | Slide LeftLeg 0.11 at f1 (Lab); Drift LeftLeg 0.62 at f7 (Lab) | yes 2026-10-25 (gate footage) | No foot pops seen at this size |  |
+| `enemy/Kobold/Walk` | Kobold | loop | 0.50 s / 30f | - | - | - | - | - | - | - | - | - | 0.00 | Slide LeftLeg 0.11 at f1 (Lab); Drift LeftLeg 0.61 at f7 (Lab) | yes 2026-10-25 (gate footage) | No foot pops seen at this size |  |
 
 ## Summary
 

@@ -23,6 +23,8 @@
 	  blade off the body would cost the hit) and within the sweep's promise (hitSphereRadius less
 	  half of sweepMaxTipStep), the depth a cut still reads as touching at, and
 	  keepOut.stepPerDepth (the studs of step a stud of depth is worth) is a finite 1 or more;
+	- the blade between the cuts (D-566): keepOut.bladeOutSeconds, how long after a strike's hold
+	  the blade is out of the body, is a finite 0 or more;
 	- every rig's `blocker` and `rush` (D-437: the poses a rush is judged against walls in) pose
 	  clips of its own rig (enemy/<Rig>/...) that exist, at least one, every sampleSeconds above 0;
 	- the walk shell (item 236, D-430): a blocker's heldSlices is a whole number of at least 1, and
@@ -217,6 +219,12 @@ return function(ctx: any): { string }
 		isNumber(keepOut.stepPerDepth) and keepOut.stepPerDepth >= 1 and keepOut.stepPerDepth < math.huge,
 		("standOff.keepOut.stepPerDepth (%s) must be 1 or more: a depth moves no farther than the body, so a step that clears a key is at least as long as the depth it takes off"):format(
 			tostring(keepOut.stepPerDepth)
+		)
+	)
+	check(
+		isNumber(keepOut.bladeOutSeconds) and keepOut.bladeOutSeconds >= 0 and keepOut.bladeOutSeconds < math.huge,
+		("standOff.keepOut.bladeOutSeconds (%s) must be a finite 0 or more: how long after a strike's hold the blade is out of the body (D-566)"):format(
+			tostring(keepOut.bladeOutSeconds)
 		)
 	)
 

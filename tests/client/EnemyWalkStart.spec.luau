@@ -9,16 +9,19 @@
 	`off` degrees off the player, over BoarHooks.spec's "studio" Humanoid (its walk settled once a
 	frame, reaching its WalkSpeed at 1320 studs/s², braking 0.672 a 1/240 s step); a client copy
 	(RigBuilder) draws it through Choreo with Locomotion's RigDriver attached as Replication attaches
-	it (its default tracker reads the replicated root's velocity). Each 60 Hz frame: the client
-	step, the server frame, then the replicated root. The row a frame shows is that step's joints on
-	the root physics just moved (Choreo writes the joints before physics; the screen is the part
-	CFrames after it). The enemy is let go and its feet are read from the frame its root first moves.
+	it (its default tracker paces the gait by the replicated root's own travel, D-575). Each row:
+	the client step, the server frames due by then, then the replicated root. The row shows that
+	step's joints on the root physics just moved (Choreo writes the joints before physics; the screen
+	is the part CFrames after it). The enemy is let go and its feet are read from the row its root
+	first moves.
 
 	Measured over the walk start (0.15 to 0.5 s after the root first moves, the PC's window): each
 	foot's least-moving corner grounded through a frame (within stride.contact of the field: the
 	slide ClipAudit and the PC measure) and the lowest corner of any foot.
-	Assumes the client's root and velocity are the server's each frame (no interpolation lag) and a
-	rigid yaw (AlignOrientation RigidityEnabled). The 144 Hz client is a Studio line.
+	The first block takes the client's root and velocity as the server's each 60 Hz frame; the second
+	takes the PC's view (AO 473 on 209875b): a replicated velocity that under-reads the root's move,
+	and a 144 Hz client drawing the root between the server's frames. Both assume a rigid yaw
+	(AlignOrientation RigidityEnabled).
 ]]
 local function fakeSignal()
 	local signal = {}
@@ -346,13 +349,61 @@ local FEET = {
 local DEFS = { Boar = "FrenzyBoar", Kobold = "KoboldAxeman" }
 
 type Take = {
-	slide: number, -- the worst one-frame slide of a grounded foot over the window
+	slide: number, -- the worst one-row slide of a grounded foot over the window
 	slideAt: number,
 	lowest: number, -- the lowest foot corner over the window
 	wheelWalk: number?, -- the least walk weight the driver gives while the body wheels at half speed
+	paces: { number }, -- the server body's WalkSpeed after each server frame from the release on
 }
 
-local function take(rig: string, off: number): Take
+-- How the client sees the server's root. `hz`: client rows a second. `interpolated`: the root is
+-- drawn 1/60 s behind the server's latest frame, lerped between its 60 Hz frames, as Roblox draws
+-- a replicated part between the snapshots it buffers (the PC's 473(g): at 144 the root steps every
+-- row); otherwise it is the server's root of the frame just run (60 Hz, the server's own frames).
+-- `share`: the share of the root's velocity the replicated AssemblyLinearVelocity reads on a row
+-- (nil: all of it).
+type View = {
+	hz: number,
+	interpolated: boolean,
+	share: ((row: number) -> number)?,
+}
+
+local SERVER: View = { hz = 60, interpolated = false }
+
+-- The replicated velocity under-reads the root's move (AH 401(c): the drawn rush's root read
+-- 0.08-0.74 of it at 60 fps, 0.74-0.95 at 144). At walk pace, the PC's walk-start takes (473 on
+-- 209875b) are read back from the real path on 318f0a3's gait by a milder under-read: a share
+-- cycling over 0.5-1.0 at 60 fps (the boar at 90 deg: 0.190, the PC 0.168; the kobold at 0, 60
+-- and 90: 0.116, the PC 0.140, 0.036 and 0.084) and over 0.5-0.95 at 144 on the interpolated root
+-- (the boar at 90, 135 and 180: 0.090, 0.058 and 0.053, the PC 0.086, 0.078 and 0.062; the kobold
+-- at 0, 60, 90, 135 and 180: 0.059, 0.059, 0.063, 0.069 and 0.120, the PC 0.098, 0.094, 0.062,
+-- 0.096 and 0.140). The gait paced by the root's own travel (D-575) reads none of it.
+local function underRead(low: number, high: number): (row: number) -> number
+	return function(row: number): number
+		return low + (high - low) * ((row * 7) % 10) / 9
+	end
+end
+local PC60: View = { hz = 60, interpolated = false, share = underRead(0.5, 1) }
+local PC144: View = { hz = 144, interpolated = true, share = underRead(0.5, 0.95) }
+
+-- The server's root `seconds` ago, lerped between its frames, and its velocity likewise.
+local function sampled(history: { any }, at: number): (CFrame, Vector3)
+	local a, b = history[1], history[1]
+	for index, entry in history do
+		if entry.t <= at + GAP then
+			a = entry
+			b = history[index + 1] or entry
+		end
+	end
+	if b.t <= a.t then
+		return a.cframe, a.velocity
+	end
+	local f = math.clamp((at - a.t) / (b.t - a.t), 0, 1)
+	return a.cframe:Lerp(b.cframe, f), a.velocity:Lerp(b.velocity, f)
+end
+
+local function take(rig: string, off: number, view: View?): Take
+	local seen = view or SERVER
 	fresh()
 	spawnPlayer(Vector3.new(0, 3, 25))
 	local height = Rigs[rig].hipHeight + Rigs[rig].parts[Rigs[rig].rootPart].size[2] / 2
@@ -402,24 +453,40 @@ local function take(rig: string, off: number): Take
 	local rest = clientRoot.CFrame.Position
 	local started: number? = nil
 	local previous: { [string]: { Vector3 } }? = nil
-	local result: Take = { slide = 0, slideAt = 0, lowest = math.huge, wheelWalk = nil }
+	local result: Take = { slide = 0, slideAt = 0, lowest = math.huge, wheelWalk = nil, paces = {} }
 	local walkSpeed = Rigs[rig].walkSpeed
-	for frame = 1, 90 do
-		clientNow += FRAME
-		animator:step(FRAME)
-		serverFrame()
-		local body = bodies[server]
-		clientRoot.CFrame = serverRoot.CFrame
-		clientRoot.Position = serverRoot.CFrame.Position
-		clientRoot.AssemblyLinearVelocity = body.velocity
-		local flat = Vector3.new(body.velocity.X, 0, body.velocity.Z)
+	local dt = 1 / seen.hz
+	local clientT = clock.t
+	local history = { { t = clock.t, cframe = serverRoot.CFrame, velocity = Vector3.zero } }
+	for row = 1, math.ceil(1.5 * seen.hz) do
+		-- The client's step (Camera - 1, on the root as the last frame left it), then the server
+		-- frames due by the row's end, then the root this client draws the row on.
+		clientNow += dt
+		clientT += dt
+		animator:step(dt)
+		while clock.t + FRAME <= clientT + GAP do
+			serverFrame()
+			table.insert(history, { t = clock.t, cframe = serverRoot.CFrame, velocity = bodies[server].velocity })
+			table.insert(result.paces, bodies[server].walkSpeed)
+		end
+		local cframe, velocity
+		if seen.interpolated then
+			cframe, velocity = sampled(history, clientT - FRAME)
+		else
+			local last = history[#history]
+			cframe, velocity = last.cframe, last.velocity
+		end
+		local flat = Vector3.new(velocity.X, 0, velocity.Z)
+		clientRoot.CFrame = cframe
+		clientRoot.Position = cframe.Position
+		clientRoot.AssemblyLinearVelocity = velocity * (if seen.share ~= nil then seen.share(row) else 1)
 		clientHumanoid.MoveDirection = if flat.Magnitude > 0.01 then flat.Unit else Vector3.zero
 
 		local solved = solve(client, clientRoot.CFrame)
 		if started == nil and (clientRoot.CFrame.Position - rest).Magnitude > 1e-3 then
-			started = frame
+			started = row
 		end
-		local rowT = if started ~= nil then (frame - (started :: number)) * FRAME else -1
+		local rowT = if started ~= nil then (row - (started :: number)) * dt else -1
 		local inWindow = rowT > FROM + 1e-9 and rowT <= TO + 1e-9
 		local points: { [string]: { Vector3 } } = {}
 		for _, foot in feet do
@@ -459,15 +526,46 @@ local function take(rig: string, off: number): Take
 	return result
 end
 
+-- The take's checks: no foot corner under the field, a boar wheeling at half its walk speed drawn
+-- on its walk alone, and no planted foot sliding more than footSlideStuds a 60 Hz frame (the
+-- same pace a row at the take's rate: footSlideStuds x 60 / hz) plus what PENDING allows.
+local function check(rig: string, off: number, result: Take, hz: number, pending: number?, wheels: boolean)
+	print(
+		("%s off %d @%d Hz: slide %.3f at %.3f s, lowest %.3f, walk weight wheeling %s"):format(
+			rig,
+			off,
+			hz,
+			result.slide,
+			result.slideAt,
+			result.lowest,
+			if result.wheelWalk ~= nil then ("%.2f"):format(result.wheelWalk) else "-"
+		)
+	)
+	-- No foot in the field: the walk's own keys stand the planted corner within contact.
+	if result.lowest < -CONTACT then
+		error(("a foot corner %.3f under the field (max %.2f)"):format(-result.lowest, CONTACT))
+	end
+	-- A body wheeling at half its walk speed is drawn on its walk alone.
+	if wheels and rig == "Boar" then
+		expect(result.wheelWalk).toBeCloseTo(1, 1e-6)
+	end
+	local bound = SLIDE * 60 / hz
+	local bar = bound + (pending or 0)
+	if result.slide > bar then
+		error(("a planted foot slides %.3f in a row at %.3f s (max %.3f)"):format(result.slide, result.slideAt, bar))
+	end
+	if pending ~= nil and result.slide <= bound then
+		error(("slides %.3f, within the bound %.3f: take it off PENDING"):format(result.slide, bound))
+	end
+end
+
 -- What the walk start does not meet yet, by rig and off angle: how far its worst slide is past
--- footSlideStuds (rounded up to the hundredth). The boar wheeling round from behind: its back
--- hooves, 1.4 behind the root, sweep sideways at the 110 deg/s yaw (0.045 a frame) on top of the
--- walk sampled between its per-frame keys at half rate (D-482, up to 0.035) and the turn's
--- inner/outer difference (0.03). A rigid walk turned about its root cannot plant them; that needs
--- a steering layer (openIssues). The kobold's Brute chases straight at its target while it turns,
--- so from behind it crab-walks (0.17 and 0.29: unchanged by D-541). An entry never grows.
+-- footSlideStuds (rounded up to the hundredth). The kobold's Brute chases straight at its target
+-- while it turns, so from behind it crab-walks (0.16 and 0.28: unchanged by D-541 and D-575).
+-- The boar at 135 and 180 came within the bound with D-574 to D-576 (0.077 and 0.076; were
+-- 0.100 and 0.113). An entry never grows.
 local PENDING: { [string]: { [number]: number } } = {
-	Boar = { [135] = 0.01, [180] = 0.02 },
+	Boar = {},
 	Kobold = { [135] = 0.07, [180] = 0.19 },
 }
 
@@ -475,40 +573,81 @@ describe("EnemyWalkStart: an enemy sets off on its feet (AG 392(b), D-541)", fun
 	for _, case in { { rig = "Boar", offs = { 90, 135, 180 } }, { rig = "Kobold", offs = { 0, 60, 90, 135, 180 } } } do
 		for _, off in case.offs do
 			it(("%s set off %d deg off its target keeps its feet on the field"):format(case.rig, off), function()
-				local result = take(case.rig, off)
-				print(
-					("%s off %d: slide %.3f at %.3f s, lowest %.3f, walk weight wheeling %s"):format(
-						case.rig,
-						off,
-						result.slide,
-						result.slideAt,
-						result.lowest,
-						if result.wheelWalk ~= nil then ("%.2f"):format(result.wheelWalk) else "-"
-					)
-				)
-				-- No foot in the field: the walk's own keys stand the planted corner within contact.
-				if result.lowest < -CONTACT then
-					error(("a foot corner %.3f under the field (max %.2f)"):format(-result.lowest, CONTACT))
-				end
-				-- A body wheeling at half its walk speed is drawn on its walk alone.
-				if case.rig == "Boar" then
-					expect(result.wheelWalk).toBeCloseTo(1, 1e-6)
-				end
-				local pending = PENDING[case.rig][off]
-				local bar = SLIDE + (pending or 0)
-				if result.slide > bar then
-					error(
-						("a planted foot slides %.3f in a frame at %.3f s (max %.3f)"):format(
-							result.slide,
-							result.slideAt,
-							bar
-						)
-					)
-				end
-				if pending ~= nil and result.slide <= SLIDE then
-					error(("slides %.3f, within footSlideStuds: take it off PENDING"):format(result.slide))
-				end
+				check(case.rig, off, take(case.rig, off), 60, PENDING[case.rig][off], true)
 			end)
 		end
 	end
+end)
+
+-- The PC's own view (AO 473(a), (e) on 209875b): the replicated velocity reads short of the root's
+-- move, and on a 144 Hz client the root is drawn between the server's frames. The gait paced on
+-- that velocity slid a planted foot by the gap every row (on 318f0a3: the boar at 90 0.190 a 60 Hz
+-- row and 0.090 a 144 Hz row, the kobold at 0, 60 and 90 0.116 and 0.059 to 0.063), and walks keyed
+-- once a 60 fps frame stop and go between their keys on a 144 Hz row (the kobold at 0: 0.035 with
+-- no under-read). Keyed four times a frame (D-576), the boar's chase stepping its WalkSpeed from 7
+-- to 14 at once slid its hooves 0.126 on that 60 Hz row (the gait a frame behind the root). Now the
+-- gait follows the root's travel (D-575) and the walk's pace eases (D-574). At 144 the bound
+-- is footSlideStuds over a 144 Hz row (0.042, the PC's bar); the window is the same 0.15-0.5 s (rows
+-- 22-72). The boar at 135 and 180 and the kobold at 135 and 180 are the PC's report-only takes: the
+-- boar's within the bound, the kobold's crab-walk PENDING.
+local PENDING144: { [string]: { [number]: number } } = {
+	Boar = {},
+	Kobold = { [135] = 0.03, [180] = 0.09 },
+}
+
+describe("EnemyWalkStart: the walk start as the PC sees it (AO 473(a), (e); D-574 to D-576)", function()
+	for _, case in { { rig = "Boar", offs = { 90 } }, { rig = "Kobold", offs = { 0, 60, 90 } } } do
+		for _, off in case.offs do
+			it(("%s set off %d deg on a velocity that under-reads the root, 60 Hz"):format(case.rig, off), function()
+				check(case.rig, off, take(case.rig, off, PC60), 60, nil, false)
+			end)
+		end
+	end
+	for _, case in { { rig = "Boar", offs = { 90, 135, 180 } }, { rig = "Kobold", offs = { 0, 60, 90, 135, 180 } } } do
+		for _, off in case.offs do
+			it(("%s set off %d deg on a 144 Hz client over the interpolated root"):format(case.rig, off), function()
+				check(case.rig, off, take(case.rig, off, PC144), 144, PENDING144[case.rig][off], false)
+			end)
+		end
+	end
+end)
+
+describe("EnemyWalkStart: the boar's chase eases out of its wheel (D-574)", function()
+	it("takes its WalkSpeed from the wheel's 7 to 14 at paceChangeRate, never in one frame", function()
+		local result = take("Boar", 90)
+		local rate = AI.movement.paceChangeRate
+		local boar = Harness.load("src/shared/data/enemies").byId("FrenzyBoar")
+		local full = boar.moveSpeed * AI.archetypes.Charger.chaseSpeedMultiplier
+		local wheel = full * AI.archetypes.Charger.wheelSpeedMultiplier
+		-- It sets off wheeling at half speed (a start from standing takes its pace at once).
+		local start: number? = nil
+		for index, pace in result.paces do
+			if math.abs(pace - wheel) < 1e-9 then
+				start = index
+				break
+			end
+		end
+		expect(start).toBeTruthy()
+		local leftAt: number? = nil
+		local reachedAt: number? = nil
+		for index = (start :: number) + 1, #result.paces do
+			local pace, before = result.paces[index], result.paces[index - 1]
+			if math.abs(pace - before) > rate * FRAME + 1e-9 then
+				error(
+					("the WalkSpeed stepped %.3f to %.3f in one frame (most %.3f)"):format(before, pace, rate * FRAME)
+				)
+			end
+			if leftAt == nil and pace > wheel + 1e-9 then
+				leftAt = index
+			end
+			if reachedAt == nil and pace >= full - 1e-9 then
+				reachedAt = index
+			end
+		end
+		expect(leftAt).toBeTruthy()
+		expect(reachedAt).toBeTruthy()
+		-- 7 studs/s at paceChangeRate: (full - wheel) / rate seconds of frames.
+		local frames = (reachedAt :: number) - (leftAt :: number) + 1
+		expect(frames).toBe(math.ceil((full - wheel) / (rate * FRAME) - 1e-9))
+	end)
 end)

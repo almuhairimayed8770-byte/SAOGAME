@@ -4858,6 +4858,25 @@ describe("camera, dev capture and sfx shatter rules", function()
 			end),
 			"keepOut.stepPerDepth (inf) must be 1 or more"
 		)).toBe(true)
+		-- D-566: how long after a strike's hold the blade is out of the body.
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.bladeOutSeconds = -0.05
+			end),
+			"keepOut.bladeOutSeconds (-0.05) must be a finite 0 or more"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.bladeOutSeconds = nil
+			end),
+			"keepOut.bladeOutSeconds (nil) must be a finite 0 or more"
+		)).toBe(true)
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.bladeOutSeconds = math.huge
+			end),
+			"keepOut.bladeOutSeconds (inf) must be a finite 0 or more"
+		)).toBe(true)
 	end)
 
 	it("contact: a rig's blocker poses its own rig's clips, every one there (D-315)", function()
@@ -6187,5 +6206,104 @@ describe("rigs validator: every rest pose stands on the floor (D-483)", function
 			end),
 			"Kobold's rootPart Pelvis is not one of its parts"
 		)).toBe(true)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- An enemy walk's pace and gait (D-574, D-575)
+-- ------------------------------------------------------------------------------------------
+
+describe("ai validator: a walk's change of pace eases within the contact band (D-574)", function()
+	local function withPace(value: any, contact: number?): { string }
+		local real = Harness.load("src/shared/data/ai")
+		local copy = table.clone(real)
+		copy.movement = table.clone(real.movement)
+		copy.movement.paceChangeRate = value
+		local choreo = Harness.load("src/shared/data/choreo")
+		if contact ~= nil then
+			choreo = table.clone(choreo)
+			choreo.locomotion = table.clone(choreo.locomotion)
+			choreo.locomotion.stride = table.clone(choreo.locomotion.stride)
+			choreo.locomotion.stride.contact = contact
+		end
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/ai" then
+				return copy
+			elseif path == "src/shared/data/choreo" then
+				return choreo
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/ai")(context)
+	end
+
+	it("passes the real tables", function()
+		expect(withPace(Harness.load("src/shared/data/ai").movement.paceChangeRate)).toEqual({})
+	end)
+
+	it("wants a positive number", function()
+		expect(hasProblem(withPace(nil), "movement.paceChangeRate must be a number")).toBe(true)
+		expect(hasProblem(withPace(0 / 0), "movement.paceChangeRate must be a number")).toBe(true)
+		expect(hasProblem(withPace(0), "movement.paceChangeRate must be positive")).toBe(true)
+		expect(hasProblem(withPace(-30), "movement.paceChangeRate must be positive")).toBe(true)
+	end)
+
+	it("slides a gait a 60 Hz frame behind by at most stride.contact", function()
+		-- 0.02 studs over (1/60)^2 is 72 studs/s a second.
+		expect(withPace(72)).toEqual({})
+		expect(hasProblem(withPace(73), "movement.paceChangeRate 73 must slide a gait a 60 Hz frame behind")).toBe(true)
+		expect(hasProblem(withPace(math.huge), "movement.paceChangeRate inf must slide")).toBe(true)
+		expect(hasProblem(withPace(30, 0.005), "at most 18 studs/s a second")).toBe(true)
+	end)
+end)
+
+describe("choreo validator: an enemy gait paced by its root's travel (D-575)", function()
+	local function withTravel(value: any, blendRate: number?): { string }
+		local real = Harness.load("src/shared/data/choreo")
+		local copy = table.clone(real)
+		copy.enemy = table.clone(real.enemy)
+		copy.enemy.gait = table.clone(real.enemy.gait)
+		copy.enemy.gait.travelSeconds = value
+		if blendRate ~= nil then
+			copy.locomotion = table.clone(real.locomotion)
+			copy.locomotion.weightBlendRate = blendRate
+		end
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/choreo" then
+				return copy
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/choreo")(context)
+	end
+
+	it("passes the real tables", function()
+		expect(withTravel(Harness.load("src/shared/data/choreo").enemy.gait.travelSeconds)).toEqual({})
+	end)
+
+	it("wants positive seconds", function()
+		for _, bad in { 0, -0.05, 0 / 0, math.huge, "0.05" :: any, nil } do
+			expect(hasProblem(withTravel(bad), "enemy.gait.travelSeconds must be a positive number of seconds")).toBe(
+				true
+			)
+		end
+	end)
+
+	it("answers no later than the gait's own crossfade (1 / weightBlendRate)", function()
+		expect(withTravel(0.125)).toEqual({})
+		expect(
+			hasProblem(
+				withTravel(0.13),
+				"enemy.gait.travelSeconds 0.130 is over 1 / locomotion.weightBlendRate (0.125 s)"
+			)
+		).toBe(true)
+		expect(
+			hasProblem(
+				withTravel(0.05, 25),
+				"enemy.gait.travelSeconds 0.050 is over 1 / locomotion.weightBlendRate (0.040 s)"
+			)
+		).toBe(true)
 	end)
 end)

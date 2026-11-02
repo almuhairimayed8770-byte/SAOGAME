@@ -710,6 +710,55 @@ describe("DevCombat Studio test hooks over the real EnemyService (D-333)", funct
 		expect((model.PrimaryPart :: BasePart).CollisionGroup).toBe(AI.collision.enemies)
 	end)
 
+	-- AP 488(c): a placement drops a wind-up the way a hold does (D-254, D-333), so the crouch it
+	-- lands in never launches; the brain starts afresh in Idle from the point, and its next charge
+	-- launches from where the body stands in that charge's own crouch (the PC's take (e) on 318f0a3).
+	it(
+		"enemy on a boar in its wind-up drops it (Dropped, never launched); its next charge starts where it crouches",
+		function()
+			fresh()
+			spawnPlayer(Vector3.new(0, 3, -12))
+			local id = EnemyService.spawn("FrenzyBoar", CFrame.new(0, BOAR_HEIGHT, 0))
+			local model = EnemyService.modelOf(id) :: Model
+			local guard = 0
+			while #sentOf("Telegraph", id) == 0 and guard < 600 do
+				serverFrame()
+				guard += 1
+			end
+			expect(#sentOf("Telegraph", id)).toBe(1)
+			frames(0.15)
+			expect(#sentOf("RushStarted", id)).toBe(0)
+			local reply = invokeDev("enemy", { entityId = id, position = { 10, 0, 14 }, facing = 0 })
+			expect(reply.ok).toBe(true)
+			expect(reply.held).toBe(false)
+			local ends = sentOf("RushEnded", id)
+			expect(#ends).toBe(1)
+			expect(ends[1].payload.reason).toBe("Dropped")
+			expect(ends[1].payload.distance).toBe(0)
+			expect((EnemyService.brainOf(id) :: any):getPhase()).toBe("Idle")
+			-- Its brain takes the player afresh from the point: a new wind-up, launched from where the
+			-- body stands as it crouches (the dropped one's crouch, at the old place, never launches).
+			local crouched: Vector3? = nil
+			guard = 0
+			while #sentOf("RushStarted", id) == 0 and guard < 600 do
+				serverFrame()
+				if crouched == nil and #sentOf("Telegraph", id) == 2 then
+					crouched = bodies[model].position
+				end
+				guard += 1
+			end
+			local started = sentOf("RushStarted", id)
+			expect(#started).toBe(1)
+			expect(#sentOf("Telegraph", id)).toBe(2)
+			expect(started[1].time).toBeGreaterThan(sentOf("Telegraph", id)[2].time)
+			local origin = started[1].payload.origin
+			local from = Vector3.new(origin[1], origin[2], origin[3])
+			expect(crouched).never.toBeNil()
+			expect(flat(from - (crouched :: Vector3)).Magnitude).toBeLessThan(0.05)
+			expect(flat(from).Magnitude).toBeGreaterThan(4)
+		end
+	)
+
 	it("a charge runs the same line and lands the same hit as the boar's own rush, on nobody beside it", function()
 		local natural = rush(false, 10, nil, 1.6)
 		local charged = rush(true, 10, nil, 1.6)

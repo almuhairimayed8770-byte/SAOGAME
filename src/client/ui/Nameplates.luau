@@ -25,7 +25,9 @@
 	through choreo/DrawnBody, which moves it in the same step that draws a rush's body ahead of its
 	hidden root (D-171), so it never trails a charging boar, stays over a body frozen by a death
 	mid-rush, and comes back onto the root with the body when the rush hands back. The fade and
-	the hover test read the drawn position too (Engine.modelPosition).
+	the hover test read the drawn position too (Engine.modelPosition). A rig the server spawns can
+	be tagged before its PrimaryPart replicates; its plate starts on the Model and goes onto the
+	root part on the first frame the rig has one (D-571), so every plate sits on the same part.
 
 	Respawns (D-177): the engine empties the PlayerGui when the local character respawns, keeping
 	only the LayerCollectors whose ResetOnSpawn is false, so the plates' folder goes with it
@@ -408,15 +410,36 @@ function Nameplates.refresh(record: any)
 	end
 end
 
+-- A rig's PrimaryPart (read under pcall: a record's model need not be a Model).
+local function primaryPartOf(model: any): Instance?
+	return model.PrimaryPart
+end
+
+-- Where a record's plate is adorned: its rig's root part when the rig has one, else the rig.
+local function adorneeOf(record: any): Instance?
+	local ok, root = pcall(primaryPartOf, record.model)
+	return if ok and root ~= nil then root else record.model
+end
+
 -- Points a plate at its record's rig: the root when the rig has one, else the model; over the
 -- drawn body while a rush draws it ahead of the root (D-193).
 local function adorn(plate: Plate, record: any)
-	local adornee: Instance? = nil
-	pcall(function()
-		adornee = record.model.PrimaryPart
-	end)
-	plate.gui.Adornee = adornee or record.model
+	plate.gui.Adornee = adorneeOf(record)
 	DrawnBody.follow(plate.gui, record.model, lift(plate.kind))
+end
+
+-- A plate handed out before its rig's root part replicated is adorned to the Model, which the
+-- engine draws at the Model's bounding-box centre, not over the root (D-571): every frame each
+-- plate is put on its rig's root part once the rig has one. Through DrawnBody, so a plate a rush
+-- holds on its Torso stays over the drawn body and goes onto the root part at the hand-back. A
+-- plate the shatter took (hidden until it goes back to the pool) is left where it is.
+local function keepAdornees()
+	for _, plate in plates do
+		local record = plate.record
+		if record ~= nil and not plate.gone then
+			DrawnBody.adorn(plate.gui, adorneeOf(record))
+		end
+	end
 end
 
 -- The folder left the PlayerGui (a respawn's reset, D-177): put it back, or, when the reset
@@ -685,11 +708,12 @@ end
 
 -- The per-frame work: the folder kept in the PlayerGui (a respawn's reset rebuilds it on the
 -- next frame at the latest), a plate whose shatter came due goes on that frame, not at the
--- tier's rate, and the fade and hover at the tier's rate.
+-- tier's rate, every plate on its rig's root part, and the fade and hover at the tier's rate.
 local function heartbeat(dt: number)
 	beats += 1
 	keepFolder()
 	expireDue()
+	keepAdornees()
 	sinceUpdate += dt
 	if sinceUpdate >= 1 / Quality.params().nameplateHz then
 		sinceUpdate = 0

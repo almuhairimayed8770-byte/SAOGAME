@@ -140,6 +140,7 @@ export type Handle = {
 	jointFade: { [string]: number }?,
 	beat: Beat?, -- the server's beat it keeps (keepBeat), nil once past the mark
 	held: boolean, -- Mixer.hold: the clock stands still (a stopped clip fading out where it was)
+	fadeHeld: boolean?, -- Mixer.hold's `fade`: its fade in stands too (D-580)
 	-- PlayOptions.handOver cut a live clip: the fade in is eased by choreo.handOver.easing and the
 	-- handle lies over its priority peers until it is in (D-408).
 	handOver: boolean,
@@ -167,7 +168,7 @@ export type StepResult = {
 export type Mixer = {
 	play: (self: Mixer, clip: Types.ClipDef, opts: PlayOptions?) -> Handle,
 	stop: (self: Mixer, target: Handle | string, blendOut: number?) -> (),
-	hold: (self: Mixer, handle: Handle) -> (),
+	hold: (self: Mixer, handle: Handle, held: boolean?, fade: boolean?) -> (),
 	setWeight: (self: Mixer, handle: Handle, weight: number, immediate: boolean?) -> (),
 	handOff: (self: Mixer, handle: Handle, jointBlendIn: { [string]: number }) -> (),
 	blendingIn: (self: Mixer, handle: Handle) -> boolean,
@@ -520,9 +521,13 @@ end
 --- and moves no root, while its envelope and weight move as ever. A clip cut back (stopped because
 --- the pose it was heading for is no longer wanted) fades out from where it was instead of playing
 --- on into keys meant for a state that will not come (Sheathe's blade lined up with the back mount
---- while the sword stays in the hand).
-function Mixer.hold(_self: any, handle: Handle)
-	handle.held = true
+--- while the sword stays in the hand). `held` false lets a clock stood this way run on again (a
+--- sheath clip a Skid's brake stood, D-579). `fade` true stands a fade in under way as well, so
+--- the pose shows no more of the clip than it did (a sheath clip a dodge left the arm, D-580); a
+--- fade out still runs.
+function Mixer.hold(_self: any, handle: Handle, held: boolean?, fade: boolean?)
+	handle.held = held ~= false
+	handle.fadeHeld = handle.held and fade == true
 end
 
 function Mixer.setWeight(_self: any, handle: Handle, weight: number, immediate: boolean?)
@@ -930,7 +935,7 @@ end
 local function fadeAfter(handle: Handle, handleDt: number): number
 	if handle.stopping then
 		return if handle.blendOut <= 0 then 0 else math.max(0, handle.fade - handleDt / handle.blendOut)
-	elseif handle.fade < 1 then
+	elseif handle.fade < 1 and not handle.fadeHeld then
 		return if handle.blendIn <= 0 then 1 else math.min(1, handle.fade + handleDt / handle.blendIn)
 	end
 	return handle.fade

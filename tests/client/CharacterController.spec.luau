@@ -18,6 +18,7 @@
 	Heartbeat and the timers and no render step; an engine hitch runs nothing at all.
 ]]
 
+local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 
 local Signal = Harness.load("src/shared/util/Signal")
@@ -25,6 +26,9 @@ local Siblings = Harness.load("src/client/controllers/Siblings")
 local ChoreoData = Harness.load("src/shared/data/choreo")
 local AimLogic = Harness.load("src/client/controllers/AimLogic")
 local Rigs = Harness.load("src/shared/data/rigs")
+local RealContactPredictor = Harness.load("src/client/controllers/ContactPredictor")
+local Mixer = Harness.load("src/client/choreo/Mixer")
+local DamageMath = Harness.load("src/server/combat/DamageMath")
 
 local CONTROLLER_PATH = "src/client/controllers/CharacterController"
 local CHOREO_PATH = "src/client/choreo/Choreo"
@@ -119,6 +123,9 @@ type Rig = {
 	setLock: (position: Vector3?) -> (),
 	-- Locks an enemy whose body a rush draws at `drawn`, ahead of its root part at `root` (D-193).
 	setLockDrawn: (root: Vector3, drawn: Vector3) -> (),
+	-- Lock a kobold at `position` facing `facing`, its rig's animator (Choreo.find) holding
+	-- `handles` (D-565: the plan reads how it moves on).
+	setLockAnimated: (position: Vector3, facing: Vector3, handles: { any }) -> (),
 	-- The enemies the soft assist sees: { id, position }.
 	setEnemies: (enemies: { { id: number, position: Vector3 } }) -> (),
 	-- The last input the controller handed Locomotion.update.
@@ -180,6 +187,8 @@ type Options = {
 	studio: boolean?,
 	-- Hand the controller a real Choreo animating a real rig, and run task.delay on the clock.
 	choreo: boolean?,
+	-- Hand the controller a ClipLibrary over the repo's clips (choreo.ClipLibrary) instead of a stub.
+	clipLibrary: boolean?,
 	-- Which runs first in a rendered frame: "bound" (the controller's render step, the default) or
 	-- "connections" (Choreo's RenderStepped connection).
 	renderOrder: string?,
@@ -245,6 +254,8 @@ local function load(options: Options?): Rig
 		end,
 	})
 	local lockRecord: any = nil
+	-- The animators Choreo.find hands out, by model (setLockAnimated).
+	local lockAnimators: { [any]: any } = {}
 	local enemies: { { id: number, position: Vector3 } } = {}
 	local lastInput: any = nil
 	local lastInputYaw: number? = nil -- the root's yaw as Locomotion.update was called (D-505)
@@ -305,6 +316,9 @@ local function load(options: Options?): Rig
 	local choreo: any = {
 		get = function(): any
 			return animator
+		end,
+		find = function(model: any): any
+			return lockAnimators[model]
 		end,
 		setLocalModel = function() end,
 	}
@@ -394,6 +408,8 @@ local function load(options: Options?): Rig
 					roomSide = plan.roomSide,
 				}
 			end,
+			-- The target's motion as the real predictor reads it off the rig's handles (D-565).
+			targetMotion = RealContactPredictor.targetMotion,
 			-- The world the stand-off may not step into (D-235 amended): a marker the plan is asked with.
 			worldCast = function(model: any): any
 				local cast = function(): number?
@@ -505,6 +521,18 @@ local function load(options: Options?): Rig
 				if path == "choreo.DrawnBody" then
 					return Harness.load("src/client/choreo/DrawnBody"), true
 				end
+				if path == "choreo.ClipLibrary" and opts.clipLibrary then
+					local clipsRoot = Harness.repoRoot() .. "/src/shared/clips/"
+					return {
+						has = function(id: string): boolean
+							return fs.isFile(clipsRoot .. id .. ".luau")
+						end,
+						get = function(id: string): any
+							return Harness.load("src/shared/clips/" .. id)
+						end,
+					},
+						true
+				end
 				return Siblings.stub(), false
 			end,
 			call = Siblings.call,
@@ -588,6 +616,9 @@ local function load(options: Options?): Rig
 			end,
 			setLocalModel = function(target: any, ...: any)
 				realChoreo.setLocalModel(if target ~= nil then rigModel else nil, ...)
+			end,
+			find = function(model: any): any
+				return lockAnimators[model]
 			end,
 		}
 		-- Only where this Choreo has it.
@@ -677,6 +708,16 @@ local function load(options: Options?): Rig
 			lockRecord = if position ~= nil
 				then { id = 1, kind = "Enemy", state = "Idle", model = { PrimaryPart = { Position = position } } }
 				else nil
+		end,
+		setLockAnimated = function(position: Vector3, facing: Vector3, handles: { any })
+			local lockModel =
+				{ PrimaryPart = { Position = position, CFrame = CFrame.lookAt(position, position + facing) } }
+			lockRecord = { id = 1, kind = "Enemy", rig = "Kobold", state = "Idle", model = lockModel }
+			lockAnimators[lockModel] = {
+				handles = function(_self: any): { any }
+					return handles
+				end,
+			}
 		end,
 		setLockDrawn = function(rootAt: Vector3, drawnAt: Vector3)
 			local DrawnBody = Harness.load("src/client/choreo/DrawnBody")
@@ -1581,6 +1622,110 @@ describe("CharacterController: the Art stand-off (fix F1)", function()
 		end
 		expect(apart() > 0.1).toBe(true)
 		-- Asked once for the swing.
+		expect(#rig.contacts.standOffs).toBe(1)
+	end)
+
+	it(
+		"tells the plan how the aimed kobold moves on: its idle and that idle's clock, and the flinch from the body's side (D-565)",
+		function()
+			local plan = {
+				distance = 0,
+				away = Vector3.new(0, 0, 1),
+				to = 0,
+				keep = function(): number
+					return 0
+				end,
+				keepUntil = 10,
+			}
+			local idle = Harness.load("src/shared/clips/enemy/Kobold/Idle")
+			local walk = Harness.load("src/shared/clips/enemy/Kobold/Walk")
+			-- Its rig idles from 1.25 s, a walk fading out under it, a flinch on its Additive layer.
+			local mixer = Mixer.new()
+			local walking = mixer:play(walk, { blendIn = 0 })
+			mixer:step(0.2)
+			local idling = mixer:play(idle, { startTime = 1.25 })
+			mixer:step(0.03)
+			expect(walking.stopping).toBe(true)
+			-- From each side of it: the kobold's own front, back, left and right.
+			for _, facing in
+				{ Vector3.new(0, 0, 1), Vector3.new(0, 0, -1), Vector3.new(1, 0, 0), Vector3.new(-1, 0, 0) }
+			do
+				local rig = load({ choreo = true, impact = true, standOff = plan, clipLibrary = true })
+				for _ = 1, 40 do
+					rig.frame(STILL)
+				end
+				local at = rig.root.Position + Vector3.new(0, 0, -3.3)
+				rig.setLockAnimated(at, facing, mixer:handles())
+				rig.controller.basicAttack()
+				rig.frame(STILL)
+				expect(#rig.contacts.standOffs).toBe(1)
+				local target = rig.contacts.standOffs[1].options.target
+				expect(target ~= nil).toBe(true)
+				-- The Base clip that shows, on from its clock (not the walk fading out under it).
+				expect(target.base.clip).toBe(idle)
+				expect(target.base.time).toBeCloseTo(idling.time, 1e-9)
+				expect(target.base.speed).toBe(1)
+				-- The flinch Replication plays for the cut: the side the server names (DamageMath).
+				local side = DamageMath.staggerDirection(rig.root.Position, CFrame.lookAt(at, at + facing))
+				expect(target.flinch ~= nil and target.flinch.id).toBe("enemy/Kobold/Flinch" .. side)
+			end
+			-- A lock this client does not animate: no motion, the plan as before.
+			local rig = load({ choreo = true, impact = true, standOff = plan, clipLibrary = true })
+			for _ = 1, 40 do
+				rig.frame(STILL)
+			end
+			rig.setLock(Vector3.new(0, 0, -3.3))
+			rig.controller.basicAttack()
+			rig.frame(STILL)
+			expect(#rig.contacts.standOffs).toBe(1)
+			expect(rig.contacts.standOffs[1].options.target).toBe(nil)
+		end
+	)
+
+	it("holds a basic's keep-out on past its state while its clip plays on, to the clip's end (D-568)", function()
+		local away = Vector3.new(0, 0, 1)
+		local function keep(t: number): number
+			return t * 2
+		end
+		local plan = { distance = 0, away = away, to = 0, keep = keep, keepUntil = 10 }
+		local rig = load({ choreo = true, impact = true, standOff = plan })
+		local twin = load({ choreo = true, impact = true })
+		local function frame()
+			rig.frame(STILL)
+			twin.frame(STILL)
+		end
+		for _ = 1, 40 do
+			frame()
+		end
+		rig.setLock(Vector3.new(0, 0, -1.6))
+		twin.setLock(Vector3.new(0, 0, -1.6))
+		rig.controller.basicAttack()
+		twin.controller.basicAttack()
+		frame()
+		local asked = rig.contacts.standOffs[1]
+		local handle = rig.animator.mixer:find(asked.clip.id)
+		local function apart(): number
+			return (rig.root.Position - twin.root.Position):Dot(away)
+		end
+		-- combat.basicHitDuration ends the state at 0.35 s; Basic1's clip runs to 0.45.
+		local idle = 0
+		for _ = 1, 90 do
+			frame()
+			if handle.done then
+				break
+			end
+			if rig.controller.state() == "Idle" then
+				idle += 1
+				expect(apart()).toBeCloseTo(keep(handle.time), 1e-4)
+			end
+		end
+		expect(idle >= 3).toBe(true)
+		-- Once the clip is done the plan is gone and the root stands.
+		local stood = apart()
+		for _ = 1, 5 do
+			frame()
+		end
+		expect(apart()).toBeCloseTo(stood, 1e-6)
 		expect(#rig.contacts.standOffs).toBe(1)
 	end)
 

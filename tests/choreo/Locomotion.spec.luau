@@ -632,16 +632,17 @@ describe("Locomotion: the sheathed sword", function()
 					end
 				end
 				expect(clip).toBeTruthy()
-				-- A dodge a few frames before the event hides the arm, so the clip stops. The server
-				-- refuses the dodge at once: the arm is free again and the clip starts over, while the
-				-- stopped one still fades past its event.
+				-- A stagger a few frames before the event hides the arm, so the clip stops. It is let
+				-- go at once: the arm is free again once it has faded and the clip starts over, while
+				-- the stopped one still fades past its event. (A dodge no longer stops a Draw or
+				-- Sheathe under way: it leaves the clip the arm, D-580.)
 				while clip.time + 3 * FRAME < at do
 					animator:step(FRAME)
 				end
-				local dodge = animator:play(DODGE)
+				local cover = animator:play(Config.clipPrefix .. "Stagger")
 				animator:step(FRAME)
 				expect(clip.stopping).toBe(true)
-				animator:stop(dodge, 0.2)
+				animator:stop(cover, 0.2)
 				local staleFired = false
 				animator.events:Connect(function(clipId, event)
 					if clipId == case.clipId and event.kind == case.kind and not clip.done then

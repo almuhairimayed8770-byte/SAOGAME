@@ -508,6 +508,120 @@ local function checkSheathCover(ctx: Context, dev: any, problem: (message: strin
 	end
 end
 
+-- SheathSkid.spec.luau's cases (D-579): a sprint above the Skid's threshold, stopped at times
+-- that reach past the Sheathe's start (sheath.sheatheDelay) into its swing.
+local function checkSheathSkid(ctx: Context, dev: any, problem: (message: string) -> ())
+	local skid = dev.groundClearance and dev.groundClearance.sheathSkid
+	if typeof(skid) ~= "table" then
+		problem("groundClearance.sheathSkid must be a table (SheathSkid.spec.luau's cases)")
+		return
+	end
+	local locomotion = ctx.load("src/shared/data/choreo").locomotion
+	for _, key in { "settle", "seconds" } do
+		if not isNumber(skid[key]) or skid[key] <= 0 then
+			problem(("groundClearance.sheathSkid.%s must be a number above 0"):format(key))
+		end
+	end
+	if not isNumber(skid.speed) or skid.speed <= locomotion.skidSpeedThreshold then
+		problem(
+			("groundClearance.sheathSkid.speed (%s) must be above locomotion.skidSpeedThreshold (%s): its stop is the Skid's"):format(
+				tostring(skid.speed),
+				tostring(locomotion.skidSpeedThreshold)
+			)
+		)
+	end
+	if typeof(skid.stepHz) ~= "table" or #skid.stepHz == 0 then
+		problem("groundClearance.sheathSkid.stepHz must list at least one step rate")
+	else
+		for index, hz in skid.stepHz do
+			if not isWhole(hz) or hz < 60 then
+				problem(
+					("groundClearance.sheathSkid.stepHz[%d] must be a whole number of steps a second, at least 60"):format(
+						index
+					)
+				)
+			end
+		end
+	end
+	if typeof(skid.stopAfter) ~= "table" or #skid.stopAfter == 0 then
+		problem("groundClearance.sheathSkid.stopAfter must list at least one time")
+	else
+		for index, at in skid.stopAfter do
+			if not isNumber(at) or (isNumber(skid.seconds) and at >= skid.seconds) then
+				problem(
+					("groundClearance.sheathSkid.stopAfter[%d] (%s) must be a number of seconds before the case ends"):format(
+						index,
+						tostring(at)
+					)
+				)
+			end
+		end
+	end
+end
+
+-- DodgeSheath.spec.luau's cases (D-580): a run below the Skid's threshold, pressed while a Draw
+-- or a Sheathe still plays (every clip time inside both clips).
+local function checkDodgeSheath(ctx: Context, dev: any, problem: (message: string) -> ())
+	local cases = dev.groundClearance and dev.groundClearance.dodgeSheath
+	if typeof(cases) ~= "table" then
+		problem("groundClearance.dodgeSheath must be a table (DodgeSheath.spec.luau's cases)")
+		return
+	end
+	local choreo = ctx.load("src/shared/data/choreo")
+	for _, key in { "settle", "after" } do
+		if not isNumber(cases[key]) or cases[key] <= 0 then
+			problem(("groundClearance.dodgeSheath.%s must be a number above 0"):format(key))
+		end
+	end
+	if not isNumber(cases.speed) or cases.speed <= 0 or cases.speed > choreo.locomotion.skidSpeedThreshold then
+		problem(
+			("groundClearance.dodgeSheath.speed (%s) must be above 0 and at most locomotion.skidSpeedThreshold (%s): a run, not a sprint's Skid"):format(
+				tostring(cases.speed),
+				tostring(choreo.locomotion.skidSpeedThreshold)
+			)
+		)
+	end
+	if typeof(cases.leads) ~= "table" or #cases.leads == 0 then
+		problem("groundClearance.dodgeSheath.leads must list at least one lead")
+	else
+		for index, lead in cases.leads do
+			if not isNumber(lead) or lead < 0 then
+				problem(("groundClearance.dodgeSheath.leads[%d] must be a number of seconds, at least 0"):format(index))
+			end
+		end
+	end
+	-- Every clip time falls inside the shorter of the two sheath clips.
+	local shortest = math.huge
+	local prefix = choreo.locomotion.clipPrefix
+	for _, name in { choreo.sheath.clips.draw, choreo.sheath.clips.sheathe } do
+		local ok, clip = pcall(ctx.load, "src/shared/clips/" .. tostring(prefix) .. tostring(name))
+		if ok and typeof(clip) == "table" and isNumber(clip.duration) then
+			shortest = math.min(shortest, clip.duration)
+		else
+			problem(("groundClearance.dodgeSheath: the sheath clip %s could not be read"):format(tostring(name)))
+		end
+	end
+	if typeof(cases.clipTimes) ~= "table" or #cases.clipTimes == 0 then
+		problem("groundClearance.dodgeSheath.clipTimes must list at least one time")
+	else
+		local last = 0
+		for index, at in cases.clipTimes do
+			if not isNumber(at) or at <= last or at >= shortest then
+				problem(
+					("groundClearance.dodgeSheath.clipTimes[%d] (%s) must rise, above 0 and under the shorter sheath clip (%s s)"):format(
+						index,
+						tostring(at),
+						tostring(shortest)
+					)
+				)
+			end
+			if isNumber(at) then
+				last = at
+			end
+		end
+	end
+end
+
 -- StandHeight.spec.luau's cases (D-506): every HipHeight error is one the body can take up.
 local function checkStandHeight(ctx: Context, dev: any, problem: (message: string) -> ())
 	local stand = dev.groundClearance and dev.groundClearance.standHeight
@@ -2370,6 +2484,8 @@ return function(ctx: Context): { string }
 	checkHooks(ctx, dev, problem)
 	checkFrameCap(ctx, dev, problem)
 	checkSheathCover(ctx, dev, problem)
+	checkSheathSkid(ctx, dev, problem)
+	checkDodgeSheath(ctx, dev, problem)
 	checkStandHeight(ctx, dev, problem)
 	checkLockTurn(dev, problem)
 	return problems

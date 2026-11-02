@@ -144,6 +144,7 @@ export type Animator = {
 	holdSteps: (self: Animator, steps: number) -> (),
 	setTimeScale: (self: Animator, scale: number) -> (),
 	isPlaying: (self: Animator, clipId: string) -> boolean,
+	handles: (self: Animator) -> { Handle },
 	currentRootMotionDelta: (self: Animator) -> Vector3,
 	seek: (self: Animator, handle: Handle, clipTime: number) -> (),
 	keepBeat: (self: Animator, handle: Handle, serverTime: number?) -> (),
@@ -710,6 +711,12 @@ function AnimatorClass.isPlaying(self: any, clipId: string): boolean
 		end
 	end
 	return false
+end
+
+--- The rig's clips as its mixer holds them now (Mixer.handles; never written by the caller): a
+--- swing's keep-out reads the clip its target idles in and that clip's clock (D-565).
+function AnimatorClass.handles(self: any): { Handle }
+	return self.mixer:handles()
 end
 
 function AnimatorClass.currentRootMotionDelta(self: any): Vector3

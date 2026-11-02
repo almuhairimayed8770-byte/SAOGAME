@@ -151,6 +151,31 @@ describe("DrawnBody", function()
 		DrawnBody.reset()
 	end)
 
+	it("sets a billboard's own adornee at once, or for the hand-back while a carrier part holds it (D-571)", function()
+		DrawnBody.reset()
+		local model, root = rig(ROOT)
+		local torso = Instance.new("Part")
+		torso.Name = "Torso"
+		torso.Parent = model
+		local drawnAt = ROOT * OFFSET
+		torso.CFrame = drawnAt
+		local gui = Instance.new("BillboardGui")
+		gui.Adornee = model
+		DrawnBody.follow(gui, model, LIFT)
+		DrawnBody.adorn(gui, root)
+		expect(gui.Adornee).toBe(root)
+		gui.Adornee = model
+		DrawnBody.publish(model, OFFSET, torso, drawnAt)
+		DrawnBody.adorn(gui, root)
+		expect(gui.Adornee).toBe(torso)
+		near(torso.CFrame.Position + gui.StudsOffsetWorldSpace, drawnAt.Position + LIFT)
+		DrawnBody.publish(model, nil)
+		expect(gui.Adornee).toBe(root)
+		near(gui.StudsOffsetWorldSpace, LIFT)
+		DrawnBody.unfollow(gui, LIFT)
+		DrawnBody.reset()
+	end)
+
 	it("is where Engine.modelPosition places sounds and effects on a rig", function()
 		DrawnBody.reset()
 		local model = rig(ROOT)

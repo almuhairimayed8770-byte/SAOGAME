@@ -753,3 +753,62 @@ describe("a sword this client hangs on its back is planned in the hand (item 437
 		expect(moved > 1).toBe(true)
 	end)
 end)
+
+describe("the plan reads how the target moves on off its rig's handles (D-565)", function()
+	it("takes the Base clip that shows, on from its clock, and the flinch it is given", function()
+		local idle = Harness.load("src/shared/clips/enemy/Kobold/Idle")
+		local walk = Harness.load("src/shared/clips/enemy/Kobold/Walk")
+		local flinch = Harness.load("src/shared/clips/enemy/Kobold/FlinchFront")
+		local base = { layer = "Base", clip = idle, time = 1.25, speed = 1, fade = 0.4, weight = 1 }
+		local handles: { any } = {
+			-- A walk fading out under it, a stopped one and the flinch's own Additive handle: none.
+			{ layer = "Base", clip = walk, time = 0.3, speed = 1, fade = 0.9, weight = 1, stopping = true },
+			{ layer = "Base", clip = walk, time = 0.3, speed = 1, fade = 1, weight = 1, done = true },
+			{ layer = "Additive", clip = flinch, time = 0.1, speed = 1, fade = 1, weight = 1 },
+			base,
+		}
+		local motion = ContactPredictor.targetMotion(handles, flinch)
+		assert(motion ~= nil and motion.base ~= nil, "a motion with its Base clip")
+		expect(motion.base.clip).toBe(idle)
+		expect(motion.base.time).toBe(1.25)
+		expect(motion.base.speed).toBe(1)
+		expect(motion.flinch).toBe(flinch)
+		-- A held handle (Mixer.hold) stands still; one at half speed runs at half speed.
+		base.held = true
+		expect((ContactPredictor.targetMotion(handles, nil) :: any).base.speed).toBe(0)
+		base.held, base.speed = false, 0.5
+		expect((ContactPredictor.targetMotion(handles, nil) :: any).base.speed).toBe(0.5)
+		-- Nothing that shows and no flinch: no motion (the plan reads the target as it stands).
+		expect(ContactPredictor.targetMotion({ handles[1], handles[3] }, nil)).toBe(nil)
+		expect(ContactPredictor.targetMotion({}, flinch) ~= nil).toBe(true)
+	end)
+
+	it("plans exactly as before with no motion, and as the parts stand at the start with one", function()
+		local setup = setupOf("Kobold")
+		local clip = Harness.load("src/shared/clips/player/OneHandedSword/Basic1")
+		local idle = Harness.load("src/shared/clips/enemy/Kobold/Idle")
+		local model = place(setup, 3.3)
+		RigBuilder.addBlocker(model)
+		local function planned(target: any): any
+			return ContactPredictor.standOff(
+				avatar.model,
+				clip,
+				0,
+				avatar.base,
+				model,
+				nil,
+				{ keepOut = true, step = false, target = target }
+			)
+		end
+		local still = planned(nil)
+		-- An idle that does not move (speed 0) at the rest pose's clock leaves the plan the same.
+		local frozen = planned({ base = { clip = idle, time = 0, speed = 0 } })
+		assert(still ~= nil and frozen ~= nil, "both plan a keep-out")
+		local time = 0
+		while time <= clip.duration do
+			expect(frozen.keep(time)).toBeCloseTo(still.keep(time), 1e-6)
+			time += Combat.contact.standOff.keepOut.sampleSeconds
+		end
+		model:Destroy()
+	end)
+end)

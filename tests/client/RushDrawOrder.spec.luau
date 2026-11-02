@@ -344,6 +344,8 @@ type Frame = {
 	-- Where DrawnBody says the body is drawn (DrawnBody.position), read after the frame's render
 	-- steps as the lock camera, the target keys and the PC's logger at Last+2 read it.
 	drawnBody: Vector3,
+	-- The same read after the frame's physics: the next row's at Input+1, before its rig step.
+	drawnNext: Vector3,
 }
 
 -- The following billboard's own offset above the root part (a plate's lift).
@@ -387,7 +389,14 @@ type Options = {
 	-- A replicated root the PC logged, row by row (replaces `lag`, rootAt and velocityScale; see
 	-- Replay).
 	replay: Replay?,
+	-- A ramp (item 403's wedge) rising `degrees` from `start` studs down the line: the client's world
+	-- cast sees it (the drawn body's ground probe and its root's box ahead), and the replicated root
+	-- climbs it, its centre the hover above the ground under it (the Humanoid's HipHeight plus half
+	-- its root's height) on every row.
+	ramp: Ramp?,
 }
+
+type Ramp = { start: number, degrees: number }
 
 -- The PC's log of a wall run (AI 423 on 4b18b5c, x423): per row its number, its frame length in
 -- milliseconds, where physics left the replicated root down the line (PostSimulation) and the
@@ -458,6 +467,66 @@ local function wallCast(face: number?, casts: { Cast }, normal: Vector3?)
 	end
 end
 
+-- The Boar's hover: its root's centre above the ground under it (HipHeight 1.6 plus half its root's
+-- 2.4 height, Replication's hoverOf), so the flat floor stands this far under the crouch point.
+local HOVER: number = Rigs.Boar.hipHeight + Rigs.Boar.parts.HumanoidRootPart.size[2] / 2
+local FLOOR = ORIGIN.Y - HOVER
+
+-- How high a ramp stands over the flat floor `along` studs down the line.
+local function riseOf(ramp: Ramp?, along: number): number
+	if ramp == nil then
+		return 0
+	end
+	return math.max(0, along - ramp.start) * math.tan(math.rad(ramp.degrees))
+end
+
+-- The engine's Blockcast against the floor and a ramp across the line (`wallCast`'s rules: never a
+-- face its box starts in or past): straight down, the ground under the box (the drawn body's ground
+-- probe); flat along the line, the ramp's foot met by the box's bottom front edge, its face leaning
+-- back `degrees` from straight up (ground the body runs over); then `wall`'s own face.
+local function rampCast(ramp: Ramp, wall: (CFrame, Vector3, Vector3, string, Instance) -> (number?, Vector3?))
+	local tan = math.tan(math.rad(ramp.degrees))
+	local face = (Vector3.yAxis * math.cos(math.rad(ramp.degrees)) - DIRECTION * math.sin(math.rad(ramp.degrees))).Unit
+	return function(
+		start: CFrame,
+		size: Vector3,
+		vector: Vector3,
+		group: string,
+		exclude: Instance
+	): (number?, Vector3?)
+		local length = vector.Magnitude
+		local half = size / 2
+		local at = start.Position
+		local along = (at - ORIGIN):Dot(DIRECTION)
+		if length > 1e-9 and vector.Y < -0.99 * length then
+			local below = FLOOR + riseOf(ramp, along)
+			local travelled = at.Y - half.Y - below
+			if travelled < 0 or travelled > length then
+				return nil
+			end
+			return travelled, if along > ramp.start then face else Vector3.yAxis
+		end
+		local hit, normal = wall(start, size, vector, group, exclude)
+		local forward = if length > 1e-9 then (vector / length):Dot(DIRECTION) else 0
+		if forward > 1e-9 then
+			local front = along
+				+ math.abs(start.RightVector:Dot(DIRECTION)) * half.X
+				+ math.abs(start.UpVector:Dot(DIRECTION)) * half.Y
+				+ math.abs(start.LookVector:Dot(DIRECTION)) * half.Z
+			local bottom = at.Y - half.Y
+			-- Where down the line the ramp's surface reaches the box's bottom.
+			local meets = ramp.start + math.max(0, bottom - FLOOR) / tan
+			if front < meets then
+				local travel = (meets - front) / forward
+				if travel <= length and (hit == nil or travel < hit) then
+					return travel, face
+				end
+			end
+		end
+		return hit, normal
+	end
+end
+
 type Run = { frames: { Frame }, front: number, model: Model, root: BasePart, calls: { any }, casts: { Cast } }
 
 local function rush(options: Options): Run
@@ -499,6 +568,11 @@ local function rush(options: Options): Run
 			local next = if replayRow > 0 then rows[replayRow + 1] else rows[replayFirst]
 			root.AssemblyLinearVelocity = DIRECTION * (if next ~= nil then next[4] else 0)
 			return
+		end
+		local ramp = options.ramp
+		if ramp ~= nil then
+			-- Up the ramp: the root's centre the hover above the ground under it.
+			frame = frame + Vector3.yAxis * riseOf(ramp, (frame.Position - ORIGIN):Dot(DIRECTION))
 		end
 		local yaw = options.rootYaw
 		local turned = if yaw ~= nil
@@ -616,7 +690,10 @@ local function rush(options: Options): Run
 		serverNow = function(): number
 			return clock
 		end,
-		worldCast = if options.wall ~= nil then wallCast(options.wall, casts, options.wallNormal) else nil,
+		worldCast = if options.ramp ~= nil
+			then rampCast(options.ramp, wallCast(options.wall, casts, options.wallNormal))
+			elseif options.wall ~= nil then wallCast(options.wall, casts, options.wallNormal)
+			else nil,
 		wallSlam = options.wallSlam,
 		atPose = frameClock.atPose,
 		atStepPose = frameClock.atStepPose,
@@ -788,6 +865,7 @@ local function rush(options: Options): Run
 			shownTorso = shownTorso,
 			chainTorso = chainTorso,
 			drawnBody = drawnBody,
+			drawnNext = DrawnBody.position(model) :: Vector3,
 		})
 	end
 	if options.gait then
@@ -1887,3 +1965,285 @@ describe("a boar placed while its rush is drawn away from its root (PC P3, D-553
 		)
 	end
 end)
+
+describe("an open run's end with the late root still landing (AO 480(d), D-549, D-551, D-552)", function()
+	-- The PC on 209875b, item 480(d): the drawn root read as HumanoidRootPart.CFrame x
+	-- DrawnBody.offset at Input+1 slid back 0.009 to 0.022 on 11 takes and 0.101 on one, which first
+	-- read 22.086, past the line end 22, while the server root rested 0.011 to 0.018 short of it
+	-- (its landing never passes its stop: BoarHooks). That read is the root after physics times an
+	-- offset written against the root its velocity foretold (rootAhead): while the drawn body stands
+	-- at the line end (Settle) and the late root still lands, every row the root moves more than
+	-- its velocity said adds to it, and the screen draws the Torso where the step put it (D-531),
+	-- not there. DrawnBody.position answers the drawn body itself (D-552), read here where the PC's
+	-- logger reads it, after the frame's physics (the next row's Input+1); with D-552 undone it reads
+	-- 0.232 past the line end at 60 fps and 0.076 at 144 with the root 0.2 s late. The Torso's slide
+	-- read 0.62 to 0.71 on 209875b (Lune 0.217): there the hand-back's last row drew the Torso where
+	-- its last physics solve before the detach had it (with D-551 undone, Lune: 0.614 back on that
+	-- row at 60 fps and 0.641 at 144, and forward again; 0.707 and 0.735 from its farthest).
+	-- The server root here lands as BoarHooks' tolerant Humanoid lands an open run at 60 Hz (it
+	-- brakes before Done, then halves what is left each frame, resting 0.017 short), replicated
+	-- `lag` late, its velocity read as the server's run (28 until the run's time, 0 after it).
+	local landing = {
+		{ 0, 0 },
+		{ 0.7667, 20.761 },
+		{ 0.7833, 21.228 },
+		{ 0.8, 21.454 },
+		{ 0.8167, 21.466 },
+		{ 0.8333, 21.733 },
+		{ 0.85, 21.867 },
+		{ 0.8667, 21.933 },
+		{ 0.8833, 21.967 },
+		{ 0.9, 21.983 },
+	}
+	local function serverAlong(t: number): number
+		if t <= 0 then
+			return 0
+		end
+		for index = 2, #landing do
+			local a, b = landing[index - 1], landing[index]
+			if t <= b[1] then
+				return a[2] + (b[2] - a[2]) * (t - a[1]) / (b[1] - a[1])
+			end
+		end
+		return landing[#landing][2]
+	end
+	local function alongOf(position: Vector3): number
+		return (position - ORIGIN):Dot(DIRECTION)
+	end
+	for _, fps in { 60, 144 } do
+		it(
+			("draws the body no farther than the line end and slides the Torso back by the clip's Recovery only, %d fps"):format(
+				fps
+			),
+			function()
+				for _, lag in { 0, 0.2 } do
+					local run = rush({
+						latency = 0,
+						lag = lag,
+						frames = math.ceil(3.2 * fps),
+						fps = fps,
+						studioOrder = true,
+						rootAt = function(t: number): CFrame
+							local position = ORIGIN + DIRECTION * serverAlong(t - lag - LAUNCH)
+							return CFrame.lookAt(position, position + DIRECTION)
+						end,
+					})
+					local frames = run.frames
+					local from: number? = nil
+					for index, frame in frames do
+						expect(alongOf(frame.drawnNext) - LENGTH).toBeLessThanOrEqual(1e-3)
+						if from == nil and alongOf(frame.drawnNext) >= LENGTH - 0.05 then
+							from = index
+						end
+					end
+					expect(from).never.toBeNil()
+					local start = from :: number
+					-- How far it slides back after its farthest row: that row's along less the least after
+					-- it, and the largest back step after it.
+					local function slide(key: string): (number, number)
+						local peak, peakAt = -math.huge, start
+						for index = start, #frames do
+							local along = alongOf((frames[index] :: any)[key])
+							if along > peak then
+								peak, peakAt = along, index
+							end
+						end
+						local low, biggest = peak, 0
+						for index = peakAt + 1, #frames do
+							local along = alongOf((frames[index] :: any)[key])
+							low = math.min(low, along)
+							biggest = math.max(biggest, alongOf((frames[index - 1] :: any)[key]) - along)
+						end
+						return peak - low, biggest
+					end
+					local drawnSlide = slide("drawnNext")
+					local torsoSlide, torsoStep = slide("shownTorso")
+					print(
+						("[480(d)] %d fps, root %.1f s late: drawn root slides back %.3f; Torso %.3f, its largest back step %.3f"):format(
+							fps,
+							lag,
+							drawnSlide,
+							torsoSlide,
+							torsoStep
+						)
+					)
+					-- The rest error (Lune 0.017), then the Charge clip's Recovery on the Torso (0.200).
+					expect(drawnSlide).toBeLessThanOrEqual(0.05)
+					expect(torsoSlide).toBeLessThanOrEqual(0.25)
+					expect(torsoStep).toBeLessThanOrEqual(0.05)
+				end
+			end
+		)
+	end
+end)
+
+describe(
+	"the rush's steps on the screen up a slope, past the launch snap and at the hand-back (AP 485, 487)",
+	function()
+		local RUSH = ChoreoData.enemy.rush
+		local Easing = Harness.load("src/shared/util/Easing")
+		-- A row's frame time a little off the cap's, as the PC's rows are.
+		local function jittered(fps: number): (frame: number) -> number
+			local swing = { -1.2, 0.8, -0.4, 1.0, -0.9, 0.6, 0, -0.7, 0.9 }
+			return function(frame: number): number
+				return (1 / fps) * (1 + swing[frame % #swing + 1] * fps / 60000)
+			end
+		end
+		local function flatOf(vector: Vector3): number
+			return Vector3.new(vector.X, 0, vector.Z).Magnitude
+		end
+
+		-- AP 485(a) on the PC (318f0a3): 27 uphill rows of 3D drawn-root steps at 0.58–0.635 against
+		-- 28 × dt + 0.05; the body climbs a 40° ramp, so its 3D travel is 28 × dt / cos 40°. 487(a): 4–5
+		-- run rows a take over horizontal / cos 40° + 0.05, by up to 0.107; here the Charge clip's own
+		-- bob over the climbing body reads at most -0.028 (60 fps) and -0.036 (144) against that bar.
+		for _, fps in { 60, 144 } do
+			it(
+				("climbs a 40° ramp at the run's speed along the slope, the Torso with it, at %d fps"):format(fps),
+				function()
+					local cos = math.cos(math.rad(40))
+					local climbed, rows = 0, 0
+					for _, lag in { 0, 0.25 } do
+						for _, phase in { 0, 0.5 } do
+							local run = rush({
+								latency = lag,
+								lag = lag,
+								ramp = { start = 2, degrees = 40 },
+								fps = fps,
+								phase = phase,
+								frames = math.ceil((0.2 + CHARGE.windUp + 2.2) * fps),
+								studioOrder = true,
+								velocityScale = underRead(fps),
+								frameTime = jittered(fps),
+							})
+							local frames = run.frames
+							for index = 2, #frames do
+								local frame, before = frames[index], frames[index - 1]
+								local drawn = frame.drawnBody - before.drawnBody
+								expect(flatOf(drawn)).toBeLessThanOrEqual(SPEED * frame.dt + 0.05)
+								expect(drawn.Magnitude).toBeLessThanOrEqual(SPEED * frame.dt / cos + 0.05)
+								climbed = math.max(climbed, frame.drawnBody.Y - ORIGIN.Y)
+								-- The run's rows past the launch snap: the drawn root running down the line.
+								if
+									frame.charge
+									and before.clipTime >= LAUNCH_SNAP.finish - 1e-6
+									and drawn:Dot(DIRECTION) > 0.5 * SPEED * frame.dt
+								then
+									rows += 1
+									local torso = frame.shownTorso - before.shownTorso
+									expect(torso.Magnitude).toBeLessThanOrEqual(flatOf(torso) / cos + 0.05)
+								end
+							end
+						end
+					end
+					-- The run really went up the ramp: 4 takes, each running at least 0.6 s past its snap.
+					expect(climbed).toBeGreaterThan(8)
+					expect(rows).toBeGreaterThan(4 * 0.6 * fps)
+				end
+			)
+		end
+
+		-- AP 485(b) on the PC: past "the first moving row and the two after it" 1 row a take over at 60
+		-- fps and 2–3 at 144. The launch snap is the Charge clip's 0.05 s: 3 rows at 30 fps, 4 to 5 at
+		-- 60 and 9 at 144. Counted by its time (the first moving row, then each row up to the first
+		-- whose summed frame time reaches the snap's), every later row is in 28 × dt + 0.05 (Lune -0.016
+		-- / -0.033 / -0.037), and the snap's rows within the drawn root's step + 0.42 at 60 and 144
+		-- (Lune + 0.394 / + 0.197) and + 0.6 at 30 (Lune + 0.582).
+		for _, case in { { fps = 30, plus = 0.6 }, { fps = 60, plus = 0.42 }, { fps = 144, plus = 0.42 } } do
+			local fps = case.fps
+			it(
+				("steps the Torso over the drawn root only on the launch snap's own time at %d fps"):format(fps),
+				function()
+					local snapSeconds = LAUNCH_SNAP.finish - LAUNCH_SNAP.start
+					for _, lag in { 0, 0.25 } do
+						for p = 0, 4 do
+							local run = rush({
+								latency = math.max(lag, 0.03),
+								lag = lag,
+								phase = p / 5,
+								frames = math.ceil((0.2 + CHARGE.windUp + 0.6) * fps),
+								fps = fps,
+								studioOrder = true,
+								velocityScale = underRead(fps),
+								frameTime = jittered(fps),
+							})
+							local frames = run.frames
+							local first: number? = nil
+							for index = 2, #frames do
+								if (frames[index].drawnBody - frames[index - 1].drawnBody):Dot(DIRECTION) > 1e-3 then
+									first = index
+									break
+								end
+							end
+							expect(first).never.toBeNil()
+							local since = 0
+							for index = first :: number, #frames do
+								local frame, before = frames[index], frames[index - 1]
+								local torso = (frame.shownTorso - before.shownTorso).Magnitude
+								local drawn = (frame.drawnBody - before.drawnBody).Magnitude
+								local inSnap = index == first or since < snapSeconds - 1e-9
+								if index > (first :: number) then
+									since += frame.dt
+								end
+								if inSnap then
+									expect(torso).toBeLessThanOrEqual(drawn + case.plus)
+								else
+									expect(torso).toBeLessThanOrEqual(SPEED * frame.dt + 0.05)
+								end
+							end
+						end
+					end
+				end
+			)
+		end
+
+		-- AP 485(c) on the PC: after the stop the drawn root stepped back 0.018–0.032 a row at 30 fps,
+		-- ≤ 0.004 at 60 and 144. The server's body stopped at the line's end (Done at 22) and its root
+		-- rested short of it; the hand-back slides the body onto that root on handBackEasing, whose
+		-- first row is the bigger share of the way at a lower frame rate (QuadOut over 0.2 s: 0.31 /
+		-- 0.16 / 0.07 at 30 / 60 / 144). A root at rest on the line's end draws no step back.
+		for _, fps in { 30, 60, 144 } do
+			it(
+				("slides back after the stop only onto a root resting short, by the ease's row share, at %d fps"):format(
+					fps
+				),
+				function()
+					for _, short in { 0, 0.1 } do
+						local worst = 0
+						for _, lag in { 0, 0.25 } do
+							local run = rush({
+								latency = 0.05,
+								lag = lag,
+								fps = fps,
+								stopAt = LENGTH - short,
+								frames = math.ceil((0.2 + CHARGE.windUp + 2.4) * fps),
+								studioOrder = true,
+							})
+							local frames = run.frames
+							local stopped: number? = nil
+							for index = 2, #frames do
+								if (frames[index].drawnBody - frames[index - 1].drawnBody):Dot(DIRECTION) > 1e-3 then
+									stopped = index
+								end
+							end
+							expect(stopped).never.toBeNil()
+							for index = (stopped :: number) + 1, math.min(#frames, (stopped :: number) + 10) do
+								local frame, before = frames[index], frames[index - 1]
+								local back = -(frame.drawnBody - before.drawnBody):Dot(DIRECTION)
+								local share =
+									Easing.evaluate(RUSH.handBackEasing, math.min(1, frame.dt / RUSH.handBackSeconds))
+								expect(back).toBeLessThanOrEqual(share * short + 1e-3)
+								worst = math.max(worst, back)
+							end
+						end
+						if short > 0 then
+							-- The slide is there: at least most of the first row's share.
+							local share = Easing.evaluate(RUSH.handBackEasing, 1 / (fps * RUSH.handBackSeconds))
+							expect(worst).toBeGreaterThan(0.9 * share * short)
+						end
+					end
+				end
+			)
+		end
+	end
+)

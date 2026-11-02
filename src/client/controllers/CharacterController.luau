@@ -215,6 +215,8 @@ local standOffLost = 0
 -- still draws (a root shows on its own frame, a pose one frame later), so the room it takes keeps
 -- the gap for that pose too (D-534).
 local standOffClock: number? = nil
+-- True when the plan is a basic swing's: its clip plays on past its state (D-568).
+local standOffBasic = false
 local STAND_OFF_EASING: string = Combat.contact.standOff.easing
 -- The root's move a step held back to the next one (D-496): the root is written in the render
 -- step and shows on its own frame, the pose a frame later (impact.poseLagFrames), so a step taken
@@ -445,16 +447,56 @@ local function aimForRequest(): { number }
 	return facing
 end
 
--- The enemy an Art is cut at: the lock's, else the one the soft assist turned the request to.
-local function aimedTarget(): Model?
+-- The enemy an Art is cut at: the lock's, else the one the soft assist turned the request to
+-- (its model, and its tracker record).
+local function aimedTarget(): (Model?, any)
 	local record = Siblings.call(TargetController, "current")
 	if record == nil and assistTargetId ~= nil then
 		record = EntityTracker.get(assistTargetId :: number)
 	end
 	if record == nil or record.model == nil then
+		return nil, nil
+	end
+	return record.model, record
+end
+
+-- The side a blow from `from` strikes `target` on, in its own frame (-Z its front), as the server
+-- names it (DamageMath.staggerDirection) and Replication plays the flinch from.
+local function sideOf(from: Vector3, target: CFrame): string
+	local offset = target:PointToObjectSpace(from)
+	if math.abs(offset.Z) >= math.abs(offset.X) then
+		return if offset.Z <= 0 then "Front" else "Back"
+	end
+	return if offset.X > 0 then "Right" else "Left"
+end
+
+-- How the aimed enemy moves on through a swing from `from` (D-565, StandOffOptions.target): the
+-- Base clip its rig shows and that clip's clock (its idle, as the screen plays it), and the flinch
+-- Replication plays on it for each cut that lands (the rig's "Flinch" clip from the side the
+-- body stands on). Nil for a model this client does not animate.
+local function targetMotionOf(model: Model, record: any, from: Vector3): ContactPredictor.TargetMotion?
+	local animator = Siblings.call(Choreo, "find", model)
+	local handles = if typeof(animator) == "table" and typeof(animator.handles) == "function"
+		then animator:handles()
+		else nil
+	if typeof(handles) ~= "table" then
 		return nil
 	end
-	return record.model
+	local flinch: Types.ClipDef? = nil
+	local targetRoot = model.PrimaryPart
+	if
+		hasClipLibrary
+		and typeof(record) == "table"
+		and record.kind == "Enemy"
+		and typeof(record.rig) == "string"
+		and targetRoot ~= nil
+	then
+		local id = ActionLogic.clipId("Enemy", record.rig, "", "Flinch" .. sideOf(from, targetRoot.CFrame))
+		if ClipLibrary.has(id) == true then
+			flinch = ClipLibrary.get(id)
+		end
+	end
+	return ContactPredictor.targetMotion(handles, flinch)
 end
 
 -- The swing whose stand-off was last asked for: a basic swing asks on its first frame (D-314).
@@ -472,6 +514,7 @@ local function planStandOff(handle: any, facing: { number }, basic: boolean?)
 	standOffLost = 0
 	standOffClock = nil
 	standOffAsked = handle
+	standOffBasic = basic == true
 	local model, rootPart = character, root
 	if model == nil or rootPart == nil or typeof(handle) ~= "table" then
 		return
@@ -479,7 +522,7 @@ local function planStandOff(handle: any, facing: { number }, basic: boolean?)
 	if typeof(handle.clip) ~= "table" or typeof(handle.time) ~= "number" then
 		return
 	end
-	local target = aimedTarget()
+	local target, record = aimedTarget()
 	local look = Vector3.new(facing[1], 0, facing[3])
 	if target == nil or look.Magnitude == 0 then
 		return
@@ -491,15 +534,12 @@ local function planStandOff(handle: any, facing: { number }, basic: boolean?)
 	-- impact.poseLagFrames behind the root (D-535); before any frame, the plan's own default.
 	local pace = Siblings.call(FrameClock, "pace")
 	local poseLag = if typeof(pace) == "number" then pace * ImpactData.poseLagFrames else nil
-	standOff = ContactPredictor.standOff(
-		model :: Model,
-		handle.clip,
-		handle.time,
-		rootCFrame,
-		target :: Model,
-		world,
-		{ keepOut = true, step = basic ~= true, poseLag = poseLag }
-	)
+	standOff = ContactPredictor.standOff(model :: Model, handle.clip, handle.time, rootCFrame, target :: Model, world, {
+		keepOut = true,
+		step = basic ~= true,
+		poseLag = poseLag,
+		target = targetMotionOf(target :: Model, record, position),
+	})
 	standOffHandle = if standOff ~= nil then handle else nil
 end
 
@@ -522,11 +562,11 @@ end
 local function stepStandOff(rootPart: BasePart, carried: Vector3)
 	local current = predicted
 	if
-		standOff == nil
+		current ~= nil
 		and state == "Basic"
-		and current ~= nil
 		and current.action == "Basic"
 		and current.handle ~= standOffAsked
+		and (standOff == nil or standOffHandle ~= current.handle)
 	then
 		planStandOff(current.handle, facingTable(), true)
 	end
@@ -535,10 +575,16 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3)
 		return
 	end
 	local handle = standOffHandle
+	-- A basic's clip plays on past its state (combat.basicHitDuration, fading or not) while the body
+	-- stands, and its plan with it to the clip's end (D-568): the root holds where the keep-out
+	-- puts it.
+	local tail = standOffBasic
+		and state == "Idle"
+		and current == nil
+		and typeof(handle) == "table"
+		and handle.done ~= true
 	if
-		(state ~= "Art" and state ~= "Basic")
-		or current == nil
-		or current.handle ~= handle
+		not tail and ((state ~= "Art" and state ~= "Basic") or current == nil or current.handle ~= handle)
 		or typeof(handle.time) ~= "number"
 	then
 		standOff, standOffHandle = nil, nil

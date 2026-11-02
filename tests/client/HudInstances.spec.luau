@@ -62,14 +62,18 @@ EntityTracker.bind({
 })
 
 local nextId = 500
-local function rig(kind: string, boss: boolean?)
+-- `rootLater`: the root part is in the model but not yet its PrimaryPart (the engine's replication
+-- can tag a spawned rig before its PrimaryPart reference resolves).
+local function rig(kind: string, boss: boolean?, rootLater: boolean?)
 	nextId += 1
 	local model = Instance.new("Model")
 	model.Name = kind .. nextId
 	local root = Instance.new("Part")
 	root.Name = "HumanoidRootPart"
 	root.Parent = model
-	model.PrimaryPart = root
+	if not rootLater then
+		model.PrimaryPart = root
+	end
 	model:SetAttribute("EntityId", nextId)
 	model:SetAttribute("EntityKind", kind)
 	model:SetAttribute("DisplayName", model.Name)
@@ -126,6 +130,65 @@ describe("Nameplates (instances)", function()
 		expect(reused.gui.Parent.Name).toBe(UI.nameplates.folderName)
 		expect(reused.gui.Adornee).toBe(second.PrimaryPart)
 	end)
+
+	-- A rig the server spawns is tagged before its root part's reference replicates: the plate is
+	-- handed out with PrimaryPart still nil, and a BillboardGui on a Model draws at the Model's
+	-- bounding-box centre (the PC on 318f0a3, AP 489: 0.68 up and 1.16 toward the snout of the
+	-- root), so the hand-back's last row jumped the plate there off the drawn body. Every plate
+	-- goes onto the root part as soon as the rig has one.
+	it("moves a plate handed out before its rig had a root part onto that root part when it arrives", function()
+		local model, id = rig("Enemy", false, true)
+		local root = model:FindFirstChild("HumanoidRootPart") :: BasePart
+		EntityTracker.track(model)
+		task.wait()
+		local plate = Nameplates.plateOf(id)
+		expect(plate).never.toBeNil()
+		expect(plate.gui.Adornee).toBe(model)
+		model.PrimaryPart = root
+		Nameplates.step(1 / 60)
+		-- 318f0a3 kept the Model it read at attach.
+		expect(plate.gui.Adornee).toBe(root)
+		EntityTracker.untrack(model)
+		task.wait()
+	end)
+
+	it(
+		"hands a plate its root part while a rush draws the body on its Torso, and puts it there at the hand-back",
+		function()
+			local DrawnBody = Harness.load("src/client/choreo/DrawnBody")
+			local model, id = rig("Enemy", false, true)
+			local root = model:FindFirstChild("HumanoidRootPart") :: BasePart
+			local torso = Instance.new("Part")
+			torso.Name = "Torso"
+			torso.Parent = model
+			root.CFrame = CFrame.new(10, 3, 20)
+			root.Position = root.CFrame.Position
+			torso.CFrame = CFrame.new(10, 3.4, 14)
+			torso.Position = torso.CFrame.Position
+			EntityTracker.track(model)
+			task.wait()
+			local plate = Nameplates.plateOf(id)
+			expect(plate).never.toBeNil()
+			local lift = Vector3.new(0, UI.nameplates.enemy.offsetStuds, 0)
+			-- The run: the body drawn on the Torso 6 studs ahead of the root.
+			local at = CFrame.new(10, 3, 14)
+			DrawnBody.publish(model, CFrame.new(0, 0, -6), torso, at)
+			expect(plate.gui.Adornee).toBe(torso)
+			model.PrimaryPart = root
+			Nameplates.step(1 / 60)
+			-- The root arriving never pulls the plate off the drawn body.
+			expect(plate.gui.Adornee).toBe(torso)
+			local place = torso.Position + plate.gui.StudsOffsetWorldSpace
+			expect((place - (at.Position + lift)).Magnitude).toBeLessThan(1e-4)
+			-- The hand-back's last row: the body back on its root, and the plate with it (318f0a3 gave
+			-- the plate back to the Model it read at attach).
+			DrawnBody.publish(model, nil)
+			expect(plate.gui.Adornee).toBe(root)
+			expect((plate.gui.StudsOffsetWorldSpace - lift).Magnitude).toBeLessThan(1e-4)
+			EntityTracker.untrack(model)
+			task.wait()
+		end
+	)
 
 	it("holds a dead rig's plate through the freeze, HP bar empty, and lets the shatter take it", function()
 		local model, id = rig("Enemy")

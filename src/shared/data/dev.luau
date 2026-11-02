@@ -927,6 +927,33 @@ local Dev = {
 			speeds = { 0, 8 },
 			releaseAt = 0.5,
 		},
+		-- A sprint let go into the Skid while a Draw or Sheathe plays (SheathSkid.spec.luau,
+		-- D-579): `settle` seconds at `speed` (the sprint) in the start state, the Drawn target
+		-- flips (the combat tag running out, or a draw), and the stick lets go each of `stopAfter`
+		-- seconds after the flip, the root stopping at once (the owner's PC played the Skid at
+		-- 240 fps: the root lost over 6 studs a second in one 4.2 ms frame); then `seconds` more.
+		-- Stepped at each of `stepHz`.
+		sheathSkid = {
+			settle = 1,
+			speed = 24,
+			seconds = 2.5,
+			stepHz = { 60, 240 },
+			stopAfter = { -0.3, -0.1, 0.1, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85 },
+		},
+		-- A dodge from the run while a Draw or Sheathe plays (DodgeSheath.spec.luau, D-580; 478(a):
+		-- the owner's PC dodged from the drawn run with the DevAim draw's clip still on). The stick
+		-- held forward at `speed` for `settle` plus each of `leads` seconds (where in its stride the
+		-- run is at the press), the Drawn target flipped so that the clip has played each of
+		-- `clipTimes` seconds at the press, DodgeForward pressed (the unlocked run's dodge), then
+		-- `after` seconds more. Each part's turn per review.fps row while the dodge holds the body
+		-- stays within review.audit.popDegrees, and the sword ends where the target wants it.
+		dodgeSheath = {
+			settle = 1.5,
+			speed = 16,
+			leads = { 0, 0.3 },
+			after = 1.5,
+			clipTimes = { 0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8 },
+		},
 		-- The lock turn as the frame shows it (LockTurnShown.spec.luau, D-505): the turn written
 		-- after the step, posed with that step's offsets, at each of `degrees` each way and each of
 		-- `stepHz`. Over any 60 Hz frame a planted foot moves at most `slideStuds`, and over one

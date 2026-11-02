@@ -449,12 +449,30 @@ local Choreo = {
 		-- The blade's line, in degrees a second: 18 degrees a 60 Hz frame. Sheathe's jump turned it
 		-- 24.8 in a frame, Draw's 36.4.
 		bladeTurnRate = 1080,
+		-- A Skid that starts while a Draw or Sheathe is under way leaves that clip the arm and the
+		-- sword's joint, and the clip's clock stands for the Skid's brake, its first
+		-- skidBrakeSeconds (D-579). Taken over by the Skid, the arm crossed from the Sheathe's
+		-- swing to the Skid's flung-back arm in 0.1 s (the tip up to 423 studs a second at 240 Hz,
+		-- the owner's PC 241); left to the Sheathe but still swinging, the brake's torso (thrown
+		-- back 34 degrees in 0.15 s) carried the raised blade at up to 137. Held through the brake,
+		-- at most 79 (tests/choreo/SheathSkid.spec.luau).
+		skidBrakeSeconds = 0.27,
 	},
 
 	-- Enemy attacks on the server's beat. The server pauses an enemy's unresolved attack for the
 	-- hit-stop a player's hit gives it (HitConfirmed attackPause: at most ai.luau
 	-- hitStop.maxPausePerAttack an attack, nothing once a rush has launched).
 	enemy = {
+		-- An enemy rig's gait (Locomotion.attach, D-575) is paced by its root's own flat travel over
+		-- the last travelSeconds of frames, not by the replicated velocity: that under-reads the
+		-- root's move (AH 401(c): 0.74-0.95 of it at 144 fps, as low as 0.08 at 60), and a gait
+		-- paced short of the root slides its planted feet by the gap every frame. A step longer
+		-- than enemy.rush.teleportStuds is a placement: the travel starts afresh from there. At most
+		-- 1 / locomotion.weightBlendRate (tools/validators/choreo.luau), so the gait never answers a
+		-- change of pace later than its own crossfade does.
+		gait = {
+			travelSeconds = 0.05,
+		},
 		-- The attack clip ActionStarted plays keeps that beat up to its first HitWindowOpen (D-172):
 		-- the rig's hit-stop is the only freeze, and what it held beyond the server's pause (or
 		-- short of it) the clip evens by running at most maxRate (at least minRate) of its speed,

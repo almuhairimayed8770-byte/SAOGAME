@@ -132,6 +132,15 @@ local AI = {
 		reissueInterval = 0.5, -- but every goal is re-issued at least this often (MoveTo times out)
 		stuckSeconds = 1.5, -- no progress for this long switches to pathfinding
 		stuckProgressStuds = 0.5,
+		-- A walk that changes its pace on the way (the Charger's wheel at half speed and out of it
+		-- again, a spacing step) eases the Humanoid's WalkSpeed toward the new pace by at most this
+		-- many studs/s each second, on every server frame (EnemyService, D-574). The Humanoid
+		-- takes a new WalkSpeed within a physics step, and the client's gait, a frame behind the
+		-- root, plays the old pace for that frame: the planted hooves slid the step's whole
+		-- difference times the frame (the boar out of its wheel, 7 to 14 studs/s: 0.126 on one 60 fps
+		-- row; 7 to 14 over 0.23 s now, 0.091 at most). A walk from standing, a strike's own movement
+		-- and a landing still set theirs at once. At most stride.contact / (1/60)^2 (the validator).
+		paceChangeRate = 30,
 		-- A strike's own movement (the rush) that would reach its goal before the next server frame
 		-- stops dead on it (EnemyService, Engine.halt): the body rests where the rush said it stops,
 		-- never a skid past it. The next frame is taken to come at most this many seconds later, so

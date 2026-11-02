@@ -362,6 +362,16 @@ local Combat = {
 				limbs = { "RightHand", "RightLowerArm", "RightUpperArm", "LeftHand", "LeftLowerArm", "LeftUpperArm" },
 				bladeDepthStuds = 0.2,
 				stepPerDepth = 8, -- unit: studs of step one stud of depth is worth
+				-- The blade between the cuts at a target that moves on (D-566: an idle, a flinch):
+				-- from bladeOutSeconds after a strike's hold (its key when it has none: the
+				-- follow-through's exit, section 10 beat 5, D-484's six 60 Hz frames) to the next
+				-- strike's snap or the clip's end, no point of the blade's own part stands deeper than
+				-- depthEpsilon in the target's body parts, on every sample, as posed and as drawn.
+				-- The reach holds only the trail's line, and only at the keys: the first basic's blade
+				-- stood 0.19-0.40 studs into the PC's idling, flinching kobold at clip 0.283, after its
+				-- cut, and still in at the clip's end (item 464). A body standing still is the clip's
+				-- own follow-through's to leave (D-493).
+				bladeOutSeconds = 0.1,
 			},
 		},
 		-- A contact is predicted to kill only when the hit cannot do less than the enemy has left:
