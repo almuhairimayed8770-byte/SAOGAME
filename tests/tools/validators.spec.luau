@@ -2524,6 +2524,24 @@ describe("rushDraw validator: the drawn rush's pass and its skid's dust (FB1, FB
 		expect(runRush()).toEqual({})
 	end)
 
+	it("wants enemy.rush.detachBody a boolean (D-531)", function()
+		local choreo = Harness.load("src/shared/data/choreo")
+		local original = choreo.enemy.rush.detachBody
+		for _, bad in { "true" :: any, 1, nil } do
+			choreo.enemy.rush.detachBody = bad
+			local ok, problems = pcall(runRush)
+			choreo.enemy.rush.detachBody = original
+			expect(ok).toBe(true)
+			expect(hasProblem(problems, "enemy.rush.detachBody must be a boolean")).toBe(true)
+		end
+		for _, good in { true, false } do
+			choreo.enemy.rush.detachBody = good
+			local problems = runRush()
+			choreo.enemy.rush.detachBody = original
+			expect(problems).toEqual({})
+		end
+	end)
+
 	it("wants the pass block with positive studs, lead under full and the centre band inside the line", function()
 		expect(hasProblem(runRush(nil, nil, true), "enemy.rush.pass is missing")).toBe(true)
 		for _, key in { "leadStuds", "fullStuds", "returnStuds" } do

@@ -2,6 +2,9 @@
 --[[
 	Validates the drawn rush's pass and its skid's dust.
 
+	choreo.luau enemy.rush.detachBody (D-531) is a boolean: whether a drawn rush draws the body's
+	Torso itself, off the replicated root's physics move, or through the root joint.
+
 	choreo.luau enemy.rush.pass (RushDraw's swing past a player's body in its path, D-167):
 	- leadStuds, fullStuds and returnStuds are positive studs; marginStuds and centreStuds are
 	  studs at least 0.
@@ -45,6 +48,10 @@ return function(ctx: any): { string }
 	local palette = ctx.load("src/shared/data/palette")
 
 	local rush = if typeof(choreo.enemy) == "table" then choreo.enemy.rush else nil
+	check(
+		typeof(rush) == "table" and typeof(rush.detachBody) == "boolean",
+		"choreo enemy.rush.detachBody must be a boolean (whether a drawn rush draws the Torso off the root's physics)"
+	)
 	local pass = if typeof(rush) == "table" then rush.pass else nil
 	if typeof(pass) ~= "table" then
 		check(false, "choreo enemy.rush.pass is missing (the drawn rush's swing past a player's body)")

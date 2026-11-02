@@ -77,9 +77,13 @@
 	Nil puts the body back on its root. The offset is written every step and on PreSimulation
 	with the rest of the pose. The step that writes it publishes it (DrawnBody.publish, D-193), so
 	every reader of where the body is drawn, and every billboard over it, follows the body.
-	`redrawBody` writes a new offset into the root joint after the step, on that step's pose (its
-	clips' key there kept): Replication draws a rush again on PostSimulation against the root part
-	physics moved, the one the frame draws (D-514).
+	The screen shows the pose written before physics, solved at physics on the root part where
+	physics leaves it (AI R1 to R5), so a body hung on the root joint is carried by the replicated
+	root's move at physics. Given the root part's CFrame it is drawn from (`at`), the step draws the
+	root joint's Part1 itself instead: on this client only the joint is turned off and Part1
+	anchored where the joint would put it on a root standing at `at`, until the offset is nil
+	again (D-531). The joint's Transform is still written, so a read through the chain from the
+	root part sees the offset as before.
 
 	The engine surface (clocks, camera, frame signals) is one small table that tests replace with
 	Choreo.configure; the logic underneath is the Lune-tested Mixer.
@@ -141,9 +145,8 @@ export type Animator = {
 	seek: (self: Animator, handle: Handle, clipTime: number) -> (),
 	keepBeat: (self: Animator, handle: Handle, serverTime: number?) -> (),
 	shiftBeat: (self: Animator, handle: Handle, seconds: number) -> (),
-	setBodyOffset: (self: Animator, offset: CFrame?) -> (),
+	setBodyOffset: (self: Animator, offset: CFrame?, at: CFrame?) -> (),
 	getBodyOffset: (self: Animator) -> CFrame?,
-	redrawBody: (self: Animator, offset: CFrame) -> boolean,
 	setWeight: (self: Animator, handle: Handle, weight: number, immediate: boolean?) -> (),
 	setSpeed: (self: Animator, handle: Handle, speed: number) -> (),
 	setProcedural: (self: Animator, name: string, offsets: ClipSampler.Offsets?, weight: number?) -> (),
@@ -302,6 +305,41 @@ local function rootJointName(self: any): string?
 	return nil
 end
 
+-- Puts the body back on its root joint (detachBody undone): Part1 unanchored before the joint is
+-- turned on, so the joint never joins an anchored part to the root's assembly.
+local function attachBody(self: any)
+	local held = self.detached
+	if held == nil then
+		return
+	end
+	self.detached = nil
+	held.part.Anchored = false
+	held.motor.Enabled = true
+end
+
+-- Takes the root joint's Part1 off the root part's physics on this client (D-531): the joint off
+-- and Part1 anchored, so the step puts it where the frame draws it. The parts hanging from Part1
+-- still follow their own joints; the root part, its welds and the server's model are untouched.
+-- Nil for a joint that is no Motor6D or has no Part1 (the body stays on the joint).
+local function detachBody(self: any, motor: any): BasePart?
+	local held = self.detached
+	if held ~= nil and held.motor == motor then
+		return held.part
+	end
+	attachBody(self)
+	if typeof(motor) ~= "Instance" or not motor:IsA("Motor6D") then
+		return nil
+	end
+	local part = (motor :: Motor6D).Part1
+	if part == nil then
+		return nil
+	end
+	motor.Enabled = false
+	part.Anchored = true
+	self.detached = { motor = motor, part = part }
+	return part
+end
+
 -- Writes the blended offsets to the joints' Transform; joints that stopped being keyed return to
 -- rest. A pinned joint is skipped, so it returns to rest too and stays there. Every written
 -- Transform is kept in `pose` for the PreSimulation rewrite (reapplyPose). The two touched sets
@@ -309,13 +347,16 @@ end
 -- is composed into the root joint's Transform: Part1 = Part0 * C0 * Transform * C1^-1, so
 -- C0^-1 * offset * C0 in front of the clip's own Transform draws the body as if the root part
 -- stood at root * offset. The offset drawn (nil when none is) is published to DrawnBody (D-193).
+-- With the root part's CFrame it is drawn from (`bodyAt`), Part1 is drawn there itself, off the
+-- joint (detachBody); otherwise the body hangs on the joint again.
 local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 	local motors = self.motors
 	local pinned: { [string]: boolean } = self.pinned
 	local touched: { [string]: boolean } = self.touchedScratch
 	local pose: { [string]: CFrame } = self.pose
 	local drawnAt: CFrame? = nil
-	self.drawnKeyed = nil
+	local held: BasePart? = nil
+	local heldAt: CFrame? = nil
 	table.clear(touched)
 	if not self.rbxActive then
 		for name, offset in offsets do
@@ -339,13 +380,24 @@ local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 				pose[name] = transform
 				touched[name] = true
 				drawnAt = body
-				self.drawnKeyed = keyed
+				local at: CFrame? = self.bodyAt
+				if at ~= nil then
+					held = detachBody(self, motor)
+					if held ~= nil then
+						local _, c1 = Joints.frames(motor)
+						held.CFrame = at * c0 * transform * c1:Inverse()
+						heldAt = at * body
+					end
+				end
 			end
 		end
 	end
+	if held == nil then
+		attachBody(self)
+	end
 	if drawnAt ~= nil or self.drawnPublished then
 		self.drawnPublished = drawnAt ~= nil
-		DrawnBody.publish(self.model, drawnAt)
+		DrawnBody.publish(self.model, drawnAt, held, heldAt)
 	end
 	for name in self.touched do
 		if not touched[name] then
@@ -839,34 +891,12 @@ function AnimatorClass.shiftBeat(self: any, handle: Handle, seconds: number)
 end
 
 --- Draws the body `offset` away from the root part (in the root part's space) from this step on,
---- or back on its root with nil (D-171). The root part itself does not move.
-function AnimatorClass.setBodyOffset(self: any, offset: CFrame?)
+--- or back on its root with nil (D-171). The root part itself does not move. With `at`, the root
+--- part's CFrame the offset is drawn from, the step draws the root joint's Part1 at `at * offset`
+--- in the pose itself, off the root part's move at physics (D-531); without it, through the joint.
+function AnimatorClass.setBodyOffset(self: any, offset: CFrame?, at: CFrame?)
 	self.bodyOffset = offset
-end
-
---- Draws the body `offset` away from the root part now, on the pose the last step wrote (the clips'
---- key in the root joint kept), as if that step had set it: for a caller that learns after the step
---- where the root part is drawn from (Replication's PostSimulation redraw of a rush, D-514). The
---- next step writes its own. False, writing nothing, unless the last step drew the body away from
---- its root.
-function AnimatorClass.redrawBody(self: any, offset: CFrame): boolean
-	local keyed: CFrame? = self.drawnKeyed
-	if self.destroyed or self.rbxActive or keyed == nil then
-		return false
-	end
-	local name = rootJointName(self)
-	local motor = if name ~= nil then self.motors[name] else nil
-	if name == nil or motor == nil or self.pinned[name] then
-		return false
-	end
-	local c0 = Joints.frames(motor)
-	local transform = c0:Inverse() * offset * c0 * keyed
-	motor.Transform = transform
-	self.pose[name] = transform
-	self.bodyOffset = offset
-	self.drawnPublished = true
-	DrawnBody.publish(self.model, offset)
-	return true
+	self.bodyAt = if offset ~= nil then at else nil
 end
 
 --- The offset the body is drawn at from its root part (setBodyOffset), nil while it is on its root.
@@ -927,6 +957,7 @@ function AnimatorClass.destroy(self: any)
 		track:Stop(0)
 	end
 	table.clear(self.stepHooks)
+	attachBody(self)
 	self.mixer:clear()
 	self.events:Destroy()
 	self.finished:Destroy()
@@ -959,7 +990,8 @@ local function newAnimator(model: Model): any
 		rootJoint = nil :: string?, -- the joint hanging the body on the root part (rootJointName)
 		bodyOffset = nil :: CFrame?, -- where the body is drawn from its root part (setBodyOffset)
 		drawnPublished = false, -- the last step published a body offset to DrawnBody
-		drawnKeyed = nil :: CFrame?, -- the clips' key in the root joint under the last step's offset
+		bodyAt = nil :: CFrame?, -- the root part's CFrame the offset is drawn from (setBodyOffset)
+		detached = nil :: { motor: Motor6D, part: BasePart }?, -- Part1 drawn off the joint (detachBody)
 		stepHooks = {} :: { (dt: number) -> () },
 		rootDelta = Vector3.zero,
 		rootDeltaAt = engine.now(), -- engine.now() of the last step (the one that wrote rootDelta)

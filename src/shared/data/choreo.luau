@@ -480,6 +480,12 @@ local Choreo = {
 			handBackEasing = "QuadOut",
 			-- The root part the body is drawn away from hides meanwhile (LocalTransparencyModifier).
 			hiddenRootTransparency = 1,
+			-- While the run, its settle, its hand-back or a frozen death draws the body away from its
+			-- root, this client draws the body's Torso itself (the root joint off and the Torso
+			-- anchored on this client only), so the replicated root's own move at physics carries
+			-- nothing of it (D-531). False draws it through the root joint, where every row the root
+			-- moves other than its velocity foretold shows on the body (AI 423).
+			detachBody = true,
 			-- The pass (RushDraw.pass): the server's body runs through a player in its path (D-167),
 			-- the drawn one shoulders past it. Its path swings off the line from leadStuds before
 			-- its snout meets the body, so the snout still meets it (the blow lands on the body's

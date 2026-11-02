@@ -104,6 +104,45 @@ describe("DrawnBody", function()
 		near(gui.StudsOffsetWorldSpace, LIFT)
 	end)
 
+	it("adorns a following billboard to the part a step draws off the root, over the body, and back (D-533)", function()
+		DrawnBody.reset()
+		local model, root = rig(ROOT)
+		local torso = Instance.new("Part")
+		torso.Name = "Torso"
+		torso.Parent = model
+		local drawnAt = ROOT * OFFSET
+		-- The Torso the step drew a little off the drawn root (the clip's own key there).
+		torso.CFrame = drawnAt * CFrame.new(0, 0.4, 0.2)
+		local gui = Instance.new("BillboardGui")
+		gui.Adornee = root
+		DrawnBody.follow(gui, model, LIFT)
+		DrawnBody.publish(model, OFFSET, torso, drawnAt)
+		expect(gui.Adornee).toBe(torso)
+		near(torso.CFrame.Position + gui.StudsOffsetWorldSpace, drawnAt.Position + LIFT)
+		-- The root part's move after the step carries nothing of it.
+		root.CFrame = ROOT + Vector3.new(0, 0, 1.7)
+		near(torso.CFrame.Position + gui.StudsOffsetWorldSpace, drawnAt.Position + LIFT)
+		-- Drawn on the joint again (no carrier), then back on its root: the owner's adornee.
+		DrawnBody.publish(model, OFFSET)
+		expect(gui.Adornee).toBe(root)
+		DrawnBody.publish(model, OFFSET, torso, drawnAt)
+		DrawnBody.publish(model, nil)
+		expect(gui.Adornee).toBe(root)
+		near(gui.StudsOffsetWorldSpace, LIFT)
+		-- An owner that adorns it anew meanwhile keeps its own adornee; unfollow gives the owner's back.
+		DrawnBody.publish(model, OFFSET, torso, drawnAt)
+		local other = Instance.new("Part")
+		gui.Adornee = other
+		DrawnBody.publish(model, nil)
+		expect(gui.Adornee).toBe(other)
+		gui.Adornee = root
+		DrawnBody.publish(model, OFFSET, torso, drawnAt)
+		DrawnBody.unfollow(gui, LIFT)
+		expect(gui.Adornee).toBe(root)
+		near(gui.StudsOffsetWorldSpace, LIFT)
+		DrawnBody.reset()
+	end)
+
 	it("is where Engine.modelPosition places sounds and effects on a rig", function()
 		DrawnBody.reset()
 		local model = rig(ROOT)

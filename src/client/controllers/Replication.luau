@@ -206,11 +206,6 @@ export type Deps = {
 	-- is drawn where RushDraw puts it, not a frame of the root's own travel past it. Without it the
 	-- root stands where it is (a frame that draws the step's pose before the root moves).
 	rootAhead: ((root: BasePart, dt: number) -> CFrame)?,
-	-- Calls `fn` every frame after physics has moved the replicated roots, before the frame is drawn
-	-- (start(): RunService.PostSimulation): a rush drawn on the server's timeline is drawn again
-	-- there against its root as physics left it (Replication.redrawRushes, D-514). Without it the
-	-- body stays where the step put it against the root rootAhead foretold.
-	afterPhysics: ((fn: () -> ()) -> ())?,
 	-- The local fighter's defence as CharacterController knows it: its state now, and the time on
 	-- `now`'s clock it last stood in a guard or a dodge (nil: not since it spawned). Without it no
 	-- enemy blow on the local fighter shows before the server's word (D-258).
@@ -436,9 +431,6 @@ type Rush = {
 	shownAs: number?,
 	room: ((from: CFrame, direction: Vector3, distance: number) -> (number?, Vector3?))?,
 	ground: ((spot: Vector3) -> number?)?,
-	-- This frame's step drew the body away from its root: redrawRushes draws it again after
-	-- physics (D-514).
-	redraw: boolean?,
 }
 local rushes: { [number]: Rush } = {}
 -- enemy id -> the server time of the last rush launch heard (RushStarted), or of the last drop of
@@ -1219,9 +1211,14 @@ local function stepRush(id: number, rush: Rush, dt: number)
 	local velocity: Vector3? = if ok and typeof(carried) == "Vector3" then carried else nil
 	local bodies = if RushDraw.seeking(rush.state) then bystanders() else nil
 	local drawn = RushDraw.step(rush.state, now, dt, rootFrame, rush.room, rush.ground, velocity, bodies)
-	rush.redraw = drawn ~= nil
 	if drawn ~= nil then
-		rush.animator:setBodyOffset(rootFrame:Inverse() * drawn)
+		-- Away from its root (run, settle, hand-back, a frozen death), the body is drawn off the
+		-- root's own move at physics, which the screen would otherwise carry it by: a row the
+		-- replicated root moved other than its velocity foretold (AI 423: 0 velocity on moving rows,
+		-- 0 to 1.697 in one row) put the snout up to 1.6 studs through a wall (D-531). The crouch's
+		-- turn stands on its root (D-255).
+		local detach = ChoreoData.enemy.rush.detachBody and RushDraw.drawing(rush.state)
+		rush.animator:setBodyOffset(rootFrame:Inverse() * drawn, if detach then rootFrame else nil)
 		hideRoot(rush, true)
 	elseif rush.state.phase == "Done" then
 		endRush(id)
@@ -1266,31 +1263,6 @@ local function stepRush(id: number, rush: Rush, dt: number)
 				gate(function()
 					slamCue(point, normal)
 				end)
-			end
-		end
-	end
-end
-
---- After physics (deps.afterPhysics, RunService.PostSimulation in start()): every rush whose step
---- drew the body away from its root this frame is drawn again against the root part as physics
---- left it, the root the frame draws (D-438), where RushDraw.redrawn puts it. The step wrote the
---- offset against the root rootAhead foretold from the replicated velocity, which in Studio
---- under-reads the move physics gives a late root (AH 401(c): (velocity x dt) minus the move read
---- -0.12 to -0.43 a row at 60 fps), and the body was carried by that error: the snout up to 0.34
---- through a wall's face, steps of 0.75 to 0.82 a row. Drawn again here it shows where its step put
---- it on the server's timeline, and a hand-back slides onto the root where it is (D-514). Once a
---- step.
-function Replication.redrawRushes()
-	for _, rush in rushes do
-		local due = rush.redraw
-		rush.redraw = false
-		local root = rush.root
-		local redraw = method(rush.animator, "redrawBody")
-		if due and root ~= nil and root.Parent ~= nil and redraw ~= nil then
-			local rootFrame = (root :: BasePart).CFrame
-			local drawn = RushDraw.redrawn(rush.state, rootFrame)
-			if drawn ~= nil then
-				redraw(rush.animator, rootFrame:Inverse() * drawn)
 			end
 		end
 	end
@@ -3572,9 +3544,6 @@ function Replication.bind(newDeps: Deps)
 			holdForWords(frameStep)
 		end)
 	end
-	if typeof(newDeps.afterPhysics) == "function" then
-		(newDeps.afterPhysics :: any)(Replication.redrawRushes)
-	end
 	if typeof(newDeps.beforePhysics) == "function" then
 		-- An enemy copy not upright yet, asked again before this client's physics steps it (D-523).
 		(newDeps.beforePhysics :: any)(retryUpright)
@@ -3824,10 +3793,6 @@ function Replication.start()
 		worldCast = worldCast,
 		-- Physics moves a replicated root by its velocity before the frame draws the rigs' pose.
 		rootAhead = Replication.rootAhead,
-		-- A drawn rush again against the root physics moved (D-514).
-		afterPhysics = function(fn)
-			(game:GetService("RunService") :: any).PostSimulation:Connect(fn)
-		end,
 		-- Loaded by name: CharacterController requires this module.
 		localDefence = defenceOf(controller),
 		keyAhead = keyAheadOf(controller),

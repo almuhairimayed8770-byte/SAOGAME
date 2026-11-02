@@ -18,6 +18,12 @@
 	before the rig's step sees the last step's offset on the root as it stands now (at most a
 	frame's change of the offset).
 
+	While Choreo draws the body's Torso itself, off the root part's move at physics (D-531), it
+	publishes that part and where the body is drawn: a following billboard is adorned to that part
+	instead, its offset keeping it over the drawn body, so the root part's own move never carries
+	it off the body; it goes back to its owner's adornee once the body is back on its root
+	(D-533).
+
 		DrawnBody.position(model)            -- Vector3?: the root part's position moved by the offset
 		DrawnBody.cframe(model)              -- CFrame?: the root part's CFrame moved by the offset
 		DrawnBody.offset(model)              -- CFrame? in the root part's space; nil on its root
@@ -36,6 +42,11 @@ local offsets: { [any]: CFrame? } = setmetatable({}, { __mode = "k" }) :: any
 -- model -> the billboards following it and their own offsets; billboard -> the model it follows.
 local followers: { [any]: { [any]: Vector3 } } = {}
 local followed: { [any]: any } = {}
+-- model -> the part its body is drawn on off the root part, and where the body is drawn (world).
+type Carrier = { part: any, at: CFrame }
+local carriers: { [any]: Carrier } = setmetatable({}, { __mode = "k" }) :: any
+-- billboard -> its owner's adornee while it is adorned to a carrier part instead (and that part).
+local homes: { [any]: { adornee: any, part: any } } = {}
 
 -- The root part of a rig model (a plain table with a PrimaryPart in specs), or nil.
 local function rootOf(model: any): any
@@ -47,9 +58,35 @@ local function rootOf(model: any): any
 	return nil
 end
 
+-- Gives a billboard back its owner's adornee, unless the owner has adorned it anew meanwhile.
+local function goHome(gui: any)
+	local home = homes[gui]
+	if home ~= nil then
+		homes[gui] = nil
+		if gui.Adornee == home.part then
+			gui.Adornee = home.adornee
+		end
+	end
+end
+
 -- Moves a following billboard over the body: its own offset, plus the way from the root part to
--- the drawn body in world space (StudsOffsetWorldSpace is world space, from the adornee).
+-- the drawn body in world space (StudsOffsetWorldSpace is world space, from the adornee). While
+-- the body is drawn on a carrier part, it is adorned to that part, the way from the part to the
+-- drawn body added.
 local function place(gui: any, model: any, base: Vector3)
+	local carrier = carriers[model]
+	if carrier ~= nil then
+		local part = carrier.part
+		local home = homes[gui]
+		if home == nil or home.part ~= part then
+			goHome(gui)
+			homes[gui] = { adornee = gui.Adornee, part = part }
+			gui.Adornee = part
+		end
+		gui.StudsOffsetWorldSpace = base + (carrier.at.Position - (part.CFrame :: CFrame).Position)
+		return
+	end
+	goHome(gui)
 	local offset = offsets[model]
 	local shift = Vector3.zero
 	if offset ~= nil then
@@ -92,12 +129,15 @@ function DrawnBody.position(model: any): Vector3?
 end
 
 --- Choreo's step: the body of `model` is drawn at `offset` from its root part this frame (nil: on
---- its root again). Every billboard following it moves with it in this call.
-function DrawnBody.publish(model: any, offset: CFrame?)
+--- its root again). Every billboard following it moves with it in this call. With `carrier`, the
+--- part the step drew off the root part, and `at`, where it drew the body (world), every follower
+--- is adorned to that part and kept over `at` (D-533).
+function DrawnBody.publish(model: any, offset: CFrame?, carrier: any?, at: CFrame?)
 	if offset == nil and offsets[model] == nil then
 		return
 	end
 	offsets[model] = offset
+	carriers[model] = if offset ~= nil and carrier ~= nil and at ~= nil then { part = carrier, at = at } else nil
 	local list = followers[model]
 	if list ~= nil then
 		for gui, base in list do
@@ -121,8 +161,10 @@ function DrawnBody.follow(gui: any, model: any, base: Vector3)
 	place(gui, model, base)
 end
 
---- Stops moving a billboard; it goes back to `base` when one is given.
+--- Stops moving a billboard; it goes back to `base` when one is given, and to its owner's
+--- adornee.
 function DrawnBody.unfollow(gui: any, base: Vector3?)
+	goHome(gui)
 	local model = followed[gui]
 	if model ~= nil then
 		followed[gui] = nil
@@ -144,6 +186,8 @@ function DrawnBody.reset()
 	table.clear(offsets)
 	table.clear(followers)
 	table.clear(followed)
+	table.clear(carriers)
+	table.clear(homes)
 end
 
 return DrawnBody

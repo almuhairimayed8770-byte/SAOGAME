@@ -913,19 +913,34 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - Studio: section AK (items 444 to 452), run after section AJ. Section AI marks each line they replace "Superseded by item …".
 - Merge: F2's patch went on 9063a60 with no conflicts. Its specs pass with the first part's; no existing spec, bound or data value changed.
 
+## Section AJ on the PC (2026-11-01, 9063a60)
+
+- Passed: the slam's told stop and its Interrupted stop (440(a), (c), (d), (f), (g); 6.169), the open run's Done timing (441(a)), and every rest at 144 fps (−0.017 to −0.020). The kobolds' feet now sit in the Idle sink (−0.032 to −0.006, 443).
+- Failed at 60 fps: the landing's WalkSpeed does not halve each frame (28, 25.22, 8.21, 8.26, 7.63, then slowly to about 2.3), so the root rests short of its stop (the slam −0.060 to −0.090, 440(e); the open run −0.114 to −0.144, 441(b)), lands 0.267–0.285 s after it starts (bar 0.25), and the client's Torso slides back 0.23–0.34 after an open run (0.14–0.22 at 144; 441(d)). A probe on the PC then measured the server Humanoid's MoveTo arrival tolerance at about 0.93 studs: a goal nearer than that never moves the body, and every farther goal stops about 0.93 short, so a landing paced over 2 frames never closes. Being fixed.
+- Failed: every enemy copy that arrives while the player's client is present is FallingDown on every held row on the client (442, 443; first row UprightClient StoodUp, tries 2), while the server reads Running. The Humanoid appears on the same frame as the tag but after the tag's handler, the anchored copy falls on its first step, and once down neither turning the state off nor ChangeState gets it up while anchored. A probe on the PC found three ways that hold: turning the fall states off in a DescendantAdded handler the moment the Humanoid appears, setting EvaluateStateMachine false there, or, for a copy already down, EvaluateStateMachine false then ChangeState(Running). The drawn body is the same with or without FallingDown (the root is anchored and Choreo owns the joints). Being fixed.
+
+## Section AI fixes, third part (2026-11-01, D-530 to D-533)
+
+- Why: the render check proved D-514's redraw after physics never reaches the screen, and the PC's x423 wall runs on 4b18b5c showed the boar's snout 0.372 / 0.367 / 1.607 / 0.027 past the wall face on the BasePart read (60 fps lag 0, 0.05, 0.25; 144 lag 0): the screen draws the pose from before physics on the root where physics left it, and the replicated root's move is not what its velocity foretold (0 on most moving rows, 0 → 1.697 in one row).
+- The rush's body is drawn off the root's physics move (D-531): while the rush is away from its root, this client turns the boar's root joint off, anchors the Torso and writes it where the step drew it, and puts it back on its joint when the rush hands back. Lune replays all four PC runs row by row through the real path: snout 0.381 / 0.406 / 1.628 / 0.036 → 0.000 past the face; drawn steps up to 1.248 → ≤ 28·dt. The server is untouched; detachBody = false undoes it.
+- D-514's redraw is removed (D-532), and its specs now judge the screen.
+- The Torso's launch step is the Charge clip's own strike snap on top of the drawn root (D-530): 0.737–0.853 on the screen at 60 fps, as the PC's 0.74–0.85; every other row ≤ 0.484.
+- The nameplate and the SWITCH prompt ride the drawn Torso during a charge (D-533): 0.491 / 0.487 / 0.487 / 0.216 off the body → 0.000.
+- Studio: section AL (items 453 to 458), run after section AK; 453 checks the engine behaviour D-531 assumes (the client-local joint and anchor writes stick and never replicate). Section AI marks each line they replace "Superseded by item …".
+- Merge: E2's patches went on 4e60f11 with no conflicts; its specs pass with every earlier part's; no existing bound or data value changed (RushDrawOrder's existing cases now read the screen with the same numbers).
+
 ## Next three tasks
 
-1. Run section AJ (items 439 to 443) of `docs/STUDIO_TASKS.md` on the owner's PC on the build with these fixes:
-   item 442 (enemies upright, reading UprightClient, UprightClientWhy and UprightClientTries) and item 439's server
-   log first, then 440, 441 and 443, every item with item 397's frame names, at the frame rates and lags each names.
-   Report every pass line with its numbers and the reports AJ asks for (440(h), 441(e), 442(c) and (d), 443(b)).
-   Section AI's lines not superseded stand as written. Then section AK (items 444 to 452), the second part, with each
-   row's physics substep count where an item asks for it.
-2. Fix the remaining section AI fails (430, 431 and 437: the body against the kobold and walls, in progress), re-work
-   422(a), 423(b) and 424 after the render check (in progress), and fix the AG fails the PC found on 4b18b5c (376(a),
-   no remote ribbon under lag; 383 and 384, ribbon segments after the stroke; 391(c), the boar Stagger's rear; 392(b),
-   the boar's walk start; in progress); their re-tests follow as later parts of section AK. The owner's calls (below,
-   and in AI) go to the owner.
+1. Run section AK (items 444 to 452, in progress on the PC) and then section AL (items 453 to 458) of
+   `docs/STUDIO_TASKS.md` on the owner's PC on the build with these fixes, every item with item 397's frame names, at
+   the frame rates and lags each names, judged on the BasePart read. Report every pass line with its numbers. Section
+   AI's and AJ's lines not superseded stand as written.
+2. Fix section AJ's fails (the client's enemy copies falling, 442 and 443; the server landing short at 60 fps and the
+   client's slide back, 440(e), 441(b) and (d); in progress, with the PC's engine probes), the remaining section AI
+   fails (430, 431 and 437: the body against the kobold and walls, in progress), and the AG fails the PC found on
+   4b18b5c (376(a), no remote ribbon under lag; 383 and 384, ribbon segments after the stroke; 391(c), the boar
+   Stagger's rear; 392(b), the boar's walk start; in progress); their re-tests follow as later Studio sections. The
+   owner's calls (below, and in AI) go to the owner.
 3. The rehearsal and the recording (item 438), once every line passes: rehearse the 11 shots in dev.luau order with the
    frame-tick square on and log any take that fails its own pass lines; if all pass, record each with Game Bar at 60
    fps, High quality, with **View > Stats** open during the fight for the fps reading, and hand the files over (here in
@@ -933,7 +948,13 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
    of `docs/ANIMATION_REVIEW.md` are filled (with AG item 391(f)'s enemy cells), and anything that reads wrong is fixed
    with the PoseEditor and recorded again. The section 16 numbers and the merge into `main` follow (Open items).
 
-### Open items (after the section AI fixes, second part, not in the three above)
+### Open items (after the section AI fixes, third part, not in the three above)
+
+- **From the section AI fixes, third part.** The lock camera, its framing and target distances still read
+  DrawnBody.position (root·offset), so during a charge they trail the drawn body by the root's predicted move, as on
+  4b18b5c; the same carrier read would fix it (proposed, not done). D-531 assumes engine behaviour item 453 checks
+  (client-local Enabled and Anchored writes stick and never replicate, the anchored Torso is drawn where the render
+  step writes it, the joint comes back on re-enable); if 453 fails, detachBody = false restores the joint draw.
 
 - **Owner calls from the section AI fixes, second part (the default is chosen; say if not).**
   - The drawn guard raise is a 2-row snap (the arms turn 89–116° on the press row), kept as D-408's hand-over snap,
