@@ -930,15 +930,45 @@ local Dev = {
 		-- A sprint let go into the Skid while a Draw or Sheathe plays (SheathSkid.spec.luau,
 		-- D-579): `settle` seconds at `speed` (the sprint) in the start state, the Drawn target
 		-- flips (the combat tag running out, or a draw), and the stick lets go each of `stopAfter`
-		-- seconds after the flip, the root stopping at once (the owner's PC played the Skid at
-		-- 240 fps: the root lost over 6 studs a second in one 4.2 ms frame); then `seconds` more.
-		-- Stepped at each of `stepHz`.
+		-- seconds after the flip, the root stopping evenly over each of `stopSeconds` (0: at once;
+		-- the owner's PC on 209875b played the Skid at 240 fps when the root lost over 6 studs a
+		-- second in one 4.2 ms frame, and on c78acd1 stopped in about 0.03 s and played it on 3
+		-- of 10 takes, D-612); then `seconds` more. Stepped at each of `stepHz`.
 		sheathSkid = {
 			settle = 1,
 			speed = 24,
 			seconds = 2.5,
 			stepHz = { 60, 240 },
 			stopAfter = { -0.3, -0.1, 0.1, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85 },
+			stopSeconds = { 0, 0.03 },
+		},
+		-- A sprint's stop read at every frame rate (SkidRate.spec.luau, D-612; 512(b)): `settle`
+		-- seconds at `sprint`, then the speed falls evenly to 0 over each of `skidStops` seconds
+		-- (0: at once; the owner's PC stopped in about 0.03 s), which plays one Skid, and over each
+		-- of `easedStops` seconds (a gamepad stick let back), which plays none; updated at each of
+		-- `stepHz`.
+		skidRate = {
+			settle = 0.5,
+			sprint = 24,
+			stepHz = { 60, 144, 240 },
+			skidStops = { 0, 0.03, 0.05 },
+			easedStops = { 0.1, 0.25 },
+		},
+		-- A stop with no Skid while a Draw or Sheathe plays (SheathStop.spec.luau, D-611; 512):
+		-- `settle` seconds moving in the start state, the Drawn target flips, and the stick lets go
+		-- each of `stopAfter` seconds after the flip: the sprint at `sprint` and the run at `run`
+		-- eased off, the root slowing evenly to a stop over each of `eases` seconds (a gamepad
+		-- stick let back, slower than the Skid's drop, locomotion.stopSpeedDrop / stopDropSeconds),
+		-- and the run let go into the two-step stop (ActionLogic.stopCarryStep); then `seconds`
+		-- more. Stepped at each of `stepHz`.
+		sheathStop = {
+			settle = 1,
+			sprint = 24,
+			run = 16,
+			eases = { 0.1, 0.25, 0.5 },
+			seconds = 2,
+			stepHz = { 60, 240 },
+			stopAfter = { 0.1, 0.3, 0.4, 0.45, 0.5, 0.55, 0.65 },
 		},
 		-- A dodge from the run while a Draw or Sheathe plays (DodgeSheath.spec.luau, D-580; 478(a):
 		-- the owner's PC dodged from the drawn run with the DevAim draw's clip still on). The stick
@@ -954,6 +984,33 @@ local Dev = {
 			after = 1.5,
 			clipTimes = { 0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8 },
 		},
+		-- A dodge out of the run at every point of its stride (DodgeRun.spec.luau, D-609 and
+		-- D-610; 515(b) and (d)): the stick held forward at `speed` for `settle` seconds plus each
+		-- of `points` evenly spaced points of one stride cycle, drawn and sheathed, DodgeForward
+		-- pressed (the unlocked run's dodge), then `after` seconds more (past the dodge's blend
+		-- out). Each part's turn per review.fps row: on the first row the dodge shows (the stride's
+		-- last step still in it) and on the rows of its blend out at most review.audit.popDegrees
+		-- or that part's own most over the stride before the press, plus `slack`; on every row
+		-- between at most popDegrees.
+		dodgeRun = {
+			settle = 1.5,
+			speed = 16,
+			points = 24,
+			after = 0.9,
+			slack = 1,
+		},
+		-- A dodge pressed during a turn in place (DodgeTurn.spec.luau, D-613; 515(b)): standing,
+		-- drawn and sheathed, `settle` seconds, then the stick turned `degrees` to each side (the
+		-- root turning toward it at combat.luau aim.lockTurnRate, the turn clip playing), and each
+		-- dodge pressed each of `pressAfter` seconds after the stick turned; then `after` seconds
+		-- more. Each part's turn per review.fps row in the root's frame, from the dodge's first
+		-- row until it has gone, stays within review.audit.popDegrees.
+		dodgeTurn = {
+			settle = 1.5,
+			degrees = 90,
+			pressAfter = { 0.02, 0.05, 0.1, 0.15, 0.2 },
+			after = 0.9,
+		},
 		-- The lock turn as the frame shows it (LockTurnShown.spec.luau, D-505): the turn written
 		-- after the step, posed with that step's offsets, at each of `degrees` each way and each of
 		-- `stepHz`. Over any 60 Hz frame a planted foot moves at most `slideStuds`, and over one
@@ -966,6 +1023,12 @@ local Dev = {
 			-- The chest and head lead the hips by at most turnPlant.twistDegrees, within this many
 			-- degrees (the clip's own neck and the lean's roll move the head a little).
 			leadSlack = 1,
+			-- AR 513 (D-615): the drawn turns again from each of `idleStarts` seconds into the drawn
+			-- idle (its weight shift holds the hips 0.1 stud off the root's axis from 3 s and 0.057
+			-- the other way from 9 s), read at 60 Hz: each row's least-moving corner within
+			-- stride.contact of the field on both rows moves at most `rowStuds` (513(a)'s bar).
+			idleStarts = { 3, 10 },
+			rowStuds = 0.01,
 		},
 		-- The soles on the floor the Humanoid holds the root over (StandHeight.spec.luau, D-506):
 		-- the hit matrix's player with its Humanoid's HipHeight short of its legs' hang by each of

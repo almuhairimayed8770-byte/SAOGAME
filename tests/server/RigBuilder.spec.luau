@@ -335,9 +335,11 @@ describe("RigBuilder.addBlocker (D-198)", function()
 			-- The boar walked into head-on stopped inside its head (the root ends 2.5 studs ahead of its
 			-- centre, the snout 5.6), from behind inside its tail, and on its flank 0.1 into its side.
 			-- Over the rest pose alone, a kobold's idle stood its head 0.49 ahead of the face and its
-			-- arms 0.46 out, and the axe it holds hung 3.9 ahead (D-315). Root space, studs.
+			-- arms 0.46 out, and the axe it holds hung 3.9 ahead (D-315). Root space, studs. The boar's
+			-- idle weight shift rolls its body 1 degree, not 2 (D-601), so its sides came in from
+			-- -1.4211 and 1.318.
 			local expected = {
-				Boar = { Blocker = { -1.4211, 1.318, -5.6325, 3.3142 } },
+				Boar = { Blocker = { -1.4007, 1.3, -5.6325, 3.3142 } },
 				Kobold = {
 					Blocker = { -2.4553, 2.4384, -1.2351, 1.0709 },
 					HeldBlocker = { 1.4, 2.8094, -3.8458, 0.4838 },

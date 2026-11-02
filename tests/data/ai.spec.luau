@@ -176,6 +176,16 @@ describe("ai data", function()
 		expect(client.resumeChecks % 1).toBe(0)
 	end)
 
+	it("a turned-on copy's own fall is waited out for a few steps before the read-back judges it (D-589)", function()
+		local client = AI.upright.client
+		-- 495(d) and (i) on 82b82d4: one FallingDown row on each of 3 turn-ons, then the server's
+		-- Running once let go; a 60 Hz server on a 240 Hz client is 4 frames a packet, 12 at 20 Hz
+		expect(client.resumeSettleSteps % 1).toBe(0)
+		expect(client.resumeSettleSteps).toBeGreaterThanOrEqual(4)
+		-- still well inside the read-back, so a copy that stays down is kept off within it
+		expect(client.resumeSettleSteps).toBeLessThan(client.resumeChecks)
+	end)
+
 	it("interrupt fallbacks are the section 6 durations", function()
 		expect(AI.interrupt.durations.Stagger).toBe(Combat.staggerDuration)
 		expect(AI.interrupt.durations.Break).toBe(Combat.breakDuration)
@@ -197,6 +207,16 @@ describe("ai data", function()
 		end
 		expect(AI.maxTicksPerFrame).toBeGreaterThanOrEqual(1)
 		expect(AI.sleepCheckInterval).toBeGreaterThan(AI.tickSeconds())
+	end)
+
+	-- The rush's ground probe (choreo/RushWorld, D-582): a small box, so it neither falls through a
+	-- seam between parts nor finds a step's top from the spot it reads in front of the step's face;
+	-- the riser rail starts there and looks past the face for anything over riserStuds.
+	it("the rush's ground probe is a small box that reads the ground in front of a face, not on it", function()
+		local world = AI.rushWorld
+		expect(world.probeBoxStuds).toBeGreaterThan(0)
+		expect(world.probeBoxStuds / 2).toBeLessThan(world.riserBeforeStuds)
+		expect(world.riserPastStuds).toBeGreaterThan(0)
 	end)
 
 	it("a rush's landing rests within the 0.05 of AI 423(c) and is over before its recovery (D-525)", function()

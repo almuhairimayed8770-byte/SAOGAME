@@ -4,6 +4,12 @@
 	rises on the Root joint, the head bobs), two tail swishes, a snort with the jaw at 2.2 s and
 	a weight shift at 2 s. Rig: Boar (rigs.luau). Head forward of the Neck joint: Neck X- lowers
 	the head. Legs hang from the hips: Hip X+ swings a leg forward. Tail: X- lifts it.
+	The weight shift (2.0-2.6 s) slides the body 0.08 onto its left legs and rolls it 1 degree,
+	the hips rolled back the same so the stiff legs hang straight, the body lifted 0.015 so the
+	low side's hooves stay on the field, and the front right leg drawn back: every hoof's lowest
+	corner within 0.02 of the field through it (D-601). Rolled 2 degrees with the front left leg
+	reaching 4 degrees forward, it put that hoof 0.067 into the field (the back left 0.057), which
+	showed under the Charge's crouch and in ClipLab's blend out of the Stagger.
 ]]
 
 local Types = require(script.Parent.Parent.Parent.Parent.types)
@@ -53,14 +59,16 @@ local clip: Types.ClipDef = {
 			},
 		},
 		{
-			-- weight shift onto the left legs
+			-- weight shift onto the left legs, the hips rolled back under the body's roll
 			time = 2,
 			easing = "SineInOut",
 			joints = {
-				Root = posRot(-0.08, 0, 0, 0, 0, 2),
+				Root = posRot(-0.08, 0.015, 0, 0, 0, 1),
 				Neck = rot(-5, -4, 0),
-				FrontLeftHip = rot(4, 0, 0),
-				FrontRightHip = rot(-6, 0, 0),
+				FrontLeftHip = rot(2, 0, -1),
+				FrontRightHip = rot(-6, 0, -1),
+				BackLeftHip = rot(-2, 0, -1),
+				BackRightHip = rot(2, 0, -1),
 				TailJoint = rot(6, -14, 0),
 			},
 		},
@@ -88,6 +96,8 @@ local clip: Types.ClipDef = {
 				Root = posRot(0, 0.04, 0, 1, 0, 0),
 				FrontLeftHip = rot(2, 0, 0),
 				FrontRightHip = rot(-2, 0, 0),
+				BackLeftHip = rot(-2, 0, 0),
+				BackRightHip = rot(2, 0, 0),
 				TailJoint = rot(2, 10, 0),
 			},
 		},

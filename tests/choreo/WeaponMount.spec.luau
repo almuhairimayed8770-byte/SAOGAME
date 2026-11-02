@@ -503,9 +503,10 @@ describe("WeaponMount: a move asked from the step lands with that step's pose (D
 	end)
 
 	it("lets the pin go (or sets it) before Part0 moves, so the blade lands from its new place's Transform", function()
-		-- A Part0 or C0 write puts the blade on its new part at once from the joint's Transform as it
-		-- stands: the hand takes the pose's Weapon key, the back rest. Before, the pin came after
-		-- Part0 (the hand landing read rest, the back landing the hand's key).
+		-- The pin first, then Part0 and C0, so the joint holds the Transform its new place wants (the
+		-- pose's Weapon key in the hand, rest on the back) when the move is placed and when the
+		-- physics after it solves it (D-590). Before, the pin came after Part0 (the hand landing
+		-- read rest, the back landing the hand's key).
 		local model = buildRig()
 		local animator: any = Choreo.get(model)
 		animator:play(IDLE_DRAWN, { blendIn = 0 })
@@ -631,6 +632,37 @@ describe("WeaponMount: a move asked from the step lands with that step's pose (D
 		now:set("Back", true)
 		expect(motor.Part0).toBe(back)
 		now:destroy()
+		Choreo.release(model)
+	end)
+
+	it("with atStepPoseSolve, the move waits for it, not atStepPose (D-590)", function()
+		-- Landed at atStepPose (the start of the frame that draws the pose), a Part0 and C0 write
+		-- places the blade from the Transform physics last solved: the back mount's rest, 0.0 to
+		-- 1.3 degrees in the grip on the PC (AQ 497(e)) against the stroke's 4 to 27. Before, the
+		-- mount took no atStepPoseSolve and waited for atStepPose.
+		local model = buildRig()
+		local animator = Choreo.get(model)
+		animator:play(IDLE_DRAWN, { blendIn = 0 })
+		local motor = motorOf(model)
+		local solve, frame = heldGate(), heldGate()
+		local mount =
+			WeaponMount.new(animator, model, { atStepPose = frame.atStepPose, atStepPoseSolve = solve.atStepPose })
+		mount:set("Back")
+		animator:step(FRAME)
+		mount:set("Hand", true)
+		expect(solve.asked).toBe(1)
+		expect(frame.asked).toBe(0)
+		frame.open()
+		expect(motor.Part0).toBe(model:FindFirstChild(ROW.part))
+		solve.open()
+		expect(motor.Part0).toBe(model:FindFirstChild("RightHand"))
+		expect(motor.Transform == CFrame.identity).toBe(false)
+		mount:set("Back", true)
+		expect(solve.asked).toBe(2)
+		solve.open()
+		expect(motor.Part0).toBe(model:FindFirstChild(ROW.part))
+		expect(motor.Transform == CFrame.identity).toBe(true)
+		mount:destroy()
 		Choreo.release(model)
 	end)
 end)

@@ -893,6 +893,135 @@ describe(
 	end
 )
 
+-- ------------------------------------------------------------------ the held stance (D-606)
+
+-- Item 498(b): an Art's start pose is held from the frame its clip reaches its ActivationHold (the
+-- first frame at or past it, CharacterController.freezeHold) through the hold and the release's
+-- wait (ActionLogic.syncPlan), while the kobold idles on. The PC's 30 fps Horizontal held it 7
+-- rows at clip 0.167 with the left hand 0.116-0.139 in the kobold's torso: no keep-out moved the
+-- body before the release, and the release's plan starts at the frozen clip time (keep 0 there).
+-- The stance's own plan (StandOffOptions.stance, asked at the press against the lock) steps the
+-- body back as the stance forms. Played here frame by frame at each rate, `held` seconds past the
+-- press, the kobold idling on from `phase` (drawn a frame late, D-342), the start pose sampled as
+-- the plan poses it (the clip's blend-in from the stance before only holds the hands nearer the
+-- body): the deepest hand or arm as posed and as drawn, with the stance's plan (`plan`) or with the
+-- body standing where it walked in (the code before D-606).
+-- The longest a start pose stands frozen after the press: the hold up to the cancel time, then
+-- the release's wait as long as the clip time it froze at (at most a frame past the hold pose).
+local STANCE_HELD = Combat.activationCancelTime + Combat.startPoseTime + 1 / 30
+local function stanceDepth(
+	swing: Swing,
+	rest: CFrame,
+	frame: CFrame,
+	dt: number,
+	phase: number,
+	plan: boolean
+): (number, string)
+	local model = placeAt("KoboldAxeman", frame, phase)
+	local idle = idleOf("KoboldAxeman") :: any
+	local hurt: { BasePart } = {}
+	for _, part in model:GetDescendants() do
+		if part:IsA("BasePart") and BladeContact.hurtbox(part) then
+			table.insert(hurt, part)
+		end
+	end
+	local holdAt = swing.from
+	local enemyMixer = Mixer.new()
+	enemyMixer:play(idle, { startTime = phase, blendIn = 0 })
+	avatar.root.CFrame = rest
+	local stance = if plan
+		then ContactPredictor.standOff(avatar.model, swing.clip, 0, rest, model, nil, {
+			keepOut = true,
+			step = false,
+			poseLag = Impact.poseLagFrames * dt,
+			target = ContactPredictor.targetMotion(enemyMixer:handles(), nil),
+			stance = holdAt,
+		})
+		else nil
+	local worst, where = -math.huge, ""
+	local clock, frozen = 0, nil :: number?
+	local lastTime: number? = nil
+	local elapsed = 0
+	while elapsed < STANCE_HELD do
+		elapsed += dt
+		local shownHurt = {}
+		for _, part in hurt do
+			table.insert(shownHurt, { Name = part.Name, CFrame = part.CFrame, Size = part.Size })
+		end
+		poseAt(model, frame, idle, phase + elapsed)
+		if frozen == nil then
+			clock = elapsed
+			if clock >= holdAt - 1e-9 then
+				frozen = clock
+			end
+		end
+		local root = rest
+		if stance ~= nil and stance.keep ~= nil then
+			root += stance.away * stance.keep(clock)
+		end
+		local depth, at = limbDepth(hurt, root, ClipSampler.sample(swing.clip, clock))
+		if depth > worst then
+			worst, where = depth, ("%s posed at clip %.3f, %.2f s"):format(at, clock, elapsed)
+		end
+		if lastTime ~= nil then
+			local drawn, drawnAt = limbDepth(shownHurt, root, ClipSampler.sample(swing.clip, lastTime :: number))
+			if drawn > worst then
+				worst, where = drawn, ("%s drawn at clip %.3f, %.2f s"):format(drawnAt, lastTime :: number, elapsed)
+			end
+		end
+		lastTime = clock
+	end
+	model:Destroy()
+	return worst, where
+end
+
+describe("the held start pose's hands stand out of an idling kobold through the hold (item 498(b), D-606)", function()
+	local frame = CFrame.new(0, rootHeightOf("KoboldAxeman"), -20) * CFrame.Angles(0, math.pi, 0)
+	-- Setup A's walk-ins rested 3.08 to 3.41 studs out; the PC's first moves stood at 3.08-3.18.
+	-- 30 fps, DevFrameCap's 0.0349 s row, 60 and 144.
+	for _, distance in { 3.08, 3.18 } do
+		it(
+			("at %.2f, every Art's stance at 30, 1 / 0.0349, 60 and 144 Hz, held to its cancel time"):format(distance),
+			function()
+				local start = Vector3.new(frame.Position.X, avatar.base.Position.Y, frame.Position.Z + distance)
+				local rest = CFrame.lookAt(start, Vector3.new(frame.Position.X, start.Y, frame.Position.Z))
+				local worst, worstAt = -math.huge, ""
+				local before, beforeAt = -math.huge, ""
+				for _, swing in SWINGS do
+					if swing.art == nil then
+						continue
+					end
+					for _, dt in { 1 / 30, 0.0349, 1 / 60, 1 / 144 } do
+						for _, phase in { 1.5, 2.5 } do
+							local depth, at = stanceDepth(swing, rest, frame, dt, phase, true)
+							if depth > worst then
+								worst, worstAt =
+									depth, ("%s %.0f Hz from %.1f s: %s"):format(swing.name, 1 / dt, phase, at)
+							end
+						end
+					end
+					local depth, at = stanceDepth(swing, rest, frame, 1 / 30, 2.0, false)
+					if depth > before then
+						before, beforeAt = depth, ("%s 30 Hz from 2.0 s: %s"):format(swing.name, at)
+					end
+				end
+				print(
+					("[498(b)] %.2f: the stance's deepest hand %.3f (%s); standing where it walked in %.3f (%s)"):format(
+						distance,
+						worst,
+						worstAt,
+						before,
+						beforeAt
+					)
+				)
+				expect(worst <= DEEPEST).toBe(true)
+				-- Without the stance's plan the hand stands in (the PC: 0.116-0.139 at 30 fps).
+				expect(before > STAND_OFF.wallGapStuds).toBe(true)
+			end
+		)
+	end
+end)
+
 -- ------------------------------------------------------------------ the gate shots (D-518)
 
 local Dev = Harness.load("src/shared/data/dev")

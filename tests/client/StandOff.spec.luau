@@ -95,6 +95,16 @@ local function holdTime(clip: any): number
 	return ActionLogic.holdClipTime(clip, HOLD_FALLBACK) :: number
 end
 
+-- The clip time an Art's activation hold ends (the tell): its first ActivationHold plus its hold.
+local function holdEnd(clip: any): number
+	for _, event in clip.events do
+		if event.kind == "ActivationHold" then
+			return event.time + event.data.hold
+		end
+	end
+	error(clip.id .. " has no ActivationHold")
+end
+
 -- The body's root at clip time `time`: standing at the matrix's base at `from`, carried by the
 -- clip's root motion, stepped `back` along `away`.
 local function rootAt(clip: any, from: number, time: number, away: Vector3, back: number): CFrame
@@ -139,7 +149,11 @@ describe("the Art stand-off picks its step (fix F1)", function()
 		expect(gap(model, clip, still, window.open) < STAND_OFF.clearStuds).toBe(true)
 		expect(plan).never.toBeNil()
 		expect(plan.distance > 0 and plan.distance <= STAND_OFF.maxStuds + 1e-9).toBe(true)
-		expect(plan.from).toBe(from)
+		-- The step waits for the activation hold (D-604): it starts where stepStart puts it, after
+		-- the release and by the hold's end (0.25), as late as the speed lets a step this long.
+		expect(plan.from).toBe(ContactPredictor.stepStart(clip, from, window.open, plan.distance))
+		expect(plan.from >= from and plan.from <= holdEnd(clip) + 1e-9).toBe(true)
+		expect(plan.still).toBeCloseTo(holdEnd(clip), 1e-9)
 		expect(plan.to).toBe(window.open)
 		-- Straight back from the boar ahead.
 		expect(plan.away:Dot(Vector3.new(0, 0, 1))).toBeCloseTo(1, 1e-6)
@@ -258,6 +272,8 @@ describe("the Art stand-off stays inside the anti-cheat's limits", function()
 			local record = { state = "Art", weaponId = Playground.loadout.weapon }
 			local allowed = Rules.allowedDistance(interval, record, Combat, art.rootMotion, 0)
 			local duration = clip.duration or clip.keys[#clip.keys].time
+			-- Where that step starts (D-604): it waits for the hold as far as the speed lets it.
+			from = ContactPredictor.stepStart(clip, from, open, STAND_OFF.maxStuds)
 			for k = 0, 40 do
 				local t0 = duration * k / 40
 				local t1 = t0 + interval
@@ -267,6 +283,126 @@ describe("the Art stand-off stays inside the anti-cheat's limits", function()
 					- AimLogic.standOffAt(STAND_OFF.maxStuds, from, open, t0, STAND_OFF.easing)
 				local travel = Vector3.new(b.X - a.X, 0, b.Z - a.Z).Magnitude + step
 				expect(travel <= allowed).toBe(true)
+			end
+		end
+	end)
+end)
+
+describe("the Art stand-off waits for the activation hold (D-604)", function()
+	local CAP: number = STAND_OFF.keepOut.maxSpeedStudsPerSecond
+	local PIECE: number = STAND_OFF.keepOut.sampleSeconds / STAND_OFF.keepOut.speedPieces
+	local FRAME_RATES = { 30, 60, 144 }
+
+	-- The fastest a step from `start` to `to` moves the body over any frame at `fps`, at every frame
+	-- phase of the hit matrix, and its first moving frame's speed (the most of the phases).
+	local function frameSpeeds(distance: number, start: number, to: number, fps: number): (number, number)
+		local frame = 1 / fps
+		local fastest, first = 0, 0
+		for _, phase in Dev.hitMatrix.framePhases do
+			local time, before, moved = start - phase * frame, 0, false
+			while time < to + frame do
+				time += frame
+				local after = AimLogic.standOffAt(distance, start, to, time, STAND_OFF.easing)
+				local speed = (after - before) / frame
+				fastest = math.max(fastest, speed)
+				if not moved and after > before then
+					first, moved = math.max(first, speed), true
+				end
+				before = after
+			end
+		end
+		return fastest, first
+	end
+
+	it("starts at the hold's end, or as late before it as the speed cap allows, and lands by the open", function()
+		for _, artId in Playground.loadout.artSlots do
+			local clip = artClip(artId)
+			local open = ClipSampler.hitWindows(clip)[1].open
+			local ends = holdEnd(clip)
+			expect(ends < open).toBe(true)
+			-- Released at the hold pose, a frame past it at 60 fps, and early (a tap).
+			for _, from in { holdTime(clip), holdTime(clip) + 1 / 60, holdTime(clip) / 2 } do
+				for k = 1, math.round(STAND_OFF.maxStuds / STAND_OFF.stepStuds) do
+					local distance = k * STAND_OFF.stepStuds
+					local start = ContactPredictor.stepStart(clip, from, open, distance)
+					expect(start >= from - 1e-9 and start <= ends + 1e-9).toBe(true)
+					expect(AimLogic.standOffAt(distance, start, open, open, STAND_OFF.easing)).toBe(distance)
+					local fastest = select(1, frameSpeeds(distance, start, open, 144))
+					if start > from + 1e-9 then
+						-- Waiting never takes it past the cap at any frame rate.
+						for _, fps in FRAME_RATES do
+							expect(select(1, frameSpeeds(distance, start, open, fps)) <= CAP + 1e-6).toBe(true)
+						end
+						-- And it waits as long as the cap lets it: the hold's end, or a piece later
+						-- would be too fast.
+						if start < ends - 1e-9 then
+							local later = select(1, frameSpeeds(distance, start + PIECE, open, 144))
+							expect(later > CAP - 1e-6).toBe(true)
+						end
+					else
+						-- A step even the release leaves too fast keeps the release's timing (the
+						-- longest it can take).
+						expect(start).toBeCloseTo(from, 1e-9)
+						expect(fastest > CAP - 0.5).toBe(true)
+					end
+				end
+			end
+		end
+	end)
+
+	it("keeps the release's timing for a basic (no hold) and an Art released past its hold", function()
+		local basic = Harness.load("src/shared/clips/player/OneHandedSword/Basic1")
+		local open = ClipSampler.hitWindows(basic)[1].open
+		expect(ContactPredictor.stepStart(basic, 0, open, 0.3)).toBe(0)
+		local vertical = artClip("OneHandedSword.Vertical")
+		local late = holdEnd(vertical) + 0.01
+		expect(ContactPredictor.stepStart(vertical, late, ClipSampler.hitWindows(vertical)[1].open, 0.3)).toBe(late)
+	end)
+
+	it("a hold that ends at or past the open steps as late before the open as the cap allows", function()
+		local vertical = table.clone(artClip("OneHandedSword.Vertical"))
+		local open = ClipSampler.hitWindows(vertical)[1].open
+		local events = {}
+		for _, event in vertical.events do
+			if event.kind == "ActivationHold" then
+				event = table.clone(event)
+				event.data = { hold = open - event.time + 0.05 }
+			end
+			table.insert(events, event)
+		end
+		vertical.events = events
+		local from = holdTime(vertical)
+		local start = ContactPredictor.stepStart(vertical, from, open, 0.3)
+		expect(start > from and start < open).toBe(true)
+		expect(select(1, frameSpeeds(0.3, start, open, 144)) <= CAP + 1e-6).toBe(true)
+		expect(select(1, frameSpeeds(0.3, start + PIECE, open, 144)) > CAP - 1e-6).toBe(true)
+	end)
+
+	it("prints the first frame's step at 30, 60 and 144 fps for the steps an Art asks for", function()
+		for _, artId in { "OneHandedSword.Vertical", "OneHandedSword.RisingArc" } do
+			local clip = artClip(artId)
+			local open = ClipSampler.hitWindows(clip)[1].open
+			local from = holdTime(clip) + 1 / 60
+			for _, distance in { 0.3, 0.6, 1.0, 1.5 } do
+				local start = ContactPredictor.stepStart(clip, from, open, distance)
+				local cells = {}
+				for _, fps in FRAME_RATES do
+					local fastest, first = frameSpeeds(distance, start, open, fps)
+					table.insert(
+						cells,
+						("%d fps first %.3f (%.1f/s) most %.1f/s"):format(fps, first / fps, first, fastest)
+					)
+				end
+				print(
+					("[H1 step] %s %.2f studs from %.4f (release %.4f, open %.4f): %s"):format(
+						artId,
+						distance,
+						start,
+						from,
+						open,
+						table.concat(cells, "; ")
+					)
+				)
 			end
 		end
 	end)

@@ -197,19 +197,23 @@ local Choreo = {
 		-- each joint listed here over these seconds (Mixer.handOff); the gait's phase and blend stand
 		-- where the dodge found them until it lets go (the root's dodge speed is not a run). A dodge
 		-- that cuts an action keeps the cancel's snap (handOver, D-408). Each blend is done by the
-		-- dodge's move end, combat.luau dodgeDuration (tools/validators/choreo.luau).
+		-- dodge's move end, combat.luau dodgeDuration (tools/validators/choreo.luau). The legs take
+		-- 0.13 s (D-610): over 0.12 s a dodge out of the drawn run at 16 crossed the held
+		-- stride's lower leg into the lean at up to 21.1 degrees on the fourth row after the press
+		-- at 2 of 24 points of the stride (21.3 over the four dodges); over 0.13 s every row from
+		-- the second to the let-go is at most 19.6 (tests/choreo/DodgeRun.spec.luau).
 		dodgeHandOff = {
 			clips = { "DodgeForward", "DodgeBack", "DodgeLeft", "DodgeRight" },
 			joints = {
 				Root = 0.12,
 				Waist = 0.12,
 				Neck = 0.12,
-				LeftHip = 0.12,
-				RightHip = 0.12,
-				LeftKnee = 0.12,
-				RightKnee = 0.12,
-				LeftAnkle = 0.12,
-				RightAnkle = 0.12,
+				LeftHip = 0.13,
+				RightHip = 0.13,
+				LeftKnee = 0.13,
+				RightKnee = 0.13,
+				LeftAnkle = 0.13,
+				RightAnkle = 0.13,
 				LeftShoulder = 0.18,
 				LeftElbow = 0.18,
 				LeftWrist = 0.18,
@@ -217,6 +221,23 @@ local Choreo = {
 				RightElbow = 0.18,
 				RightWrist = 0.18,
 			} :: { [string]: number },
+			-- The point of the stride (the shared gait phase, 0 at the left Footstep) a dodge that
+			-- played to its end hands the legs back to the gait at (D-609). Every dodge lands in
+			-- one pose, while the stride stood wherever the press found it: picked up there, the
+			-- 0.15 s blend out crossed a lower leg swinging away from the landing, up to 25.2
+			-- degrees a 60 Hz row out of the sheathed run at 16 (7 of 24 points of the stride over
+			-- max(20, the stride's own + 1)) and 21.9 out of the drawn run. From here (the left
+			-- foot down under the landing, the right swinging through) every part turns at most
+			-- 15.4 there from any point (tests/choreo/DodgeRun.spec.luau; 0.18 to 0.25 all hold).
+			resumePhase = 0.21,
+			-- Locomotion one-shots (locomotion.clips names) a dodge takes the body from over these
+			-- joints' blends, as from a stance, with the one-shot standing under it until they have
+			-- come in, instead of the cancel's snap a cut action gets (D-613). Cut as an action, a
+			-- turn in place took the arms and legs over handOver.seconds: a dodge pressed in the
+			-- first frames of a standing turn turned the left forearm 40.9 and the left hand up to
+			-- 48.9 degrees on its first 60 Hz row (the owner's PC on c78acd1, 515(b): the sheathed
+			-- standing dodge to the left, its right lower leg 33.6 on the second row).
+			takesFrom = { "TurnLeft", "TurnRight", "TurnLeftDrawn", "TurnRightDrawn" },
 		},
 		skidSpeedThreshold = 18, -- above run speed: stopping plays Skid
 		-- The two-step stop below the skid threshold: after the stick lets go the root slows down
@@ -230,7 +251,14 @@ local Choreo = {
 		-- foot over to Idle as it comes down (a skate to its Idle spot): the stop goes on to the
 		-- other foot's settle point half a cycle on instead (LocomotionState.settlePoints).
 		stopHandOverCycles = 0.15,
-		stopSpeedDrop = 6, -- speed lost in one update that counts as "stopping"
+		-- Speed lost within stopDropSeconds that counts as "stopping" (the Skid's drop): a fall
+		-- faster than stopSpeedDrop / stopDropSeconds (360 studs a second, each second) from above
+		-- skidSpeedThreshold, at any frame rate (D-612). Read once an update, a drop of 6 in one
+		-- 60 Hz update skidded where the same stop at 240 fps lost under 6 in each of its updates:
+		-- the owner's PC at 240 fps stopped from the sprint in about 0.03 s with no Skid on 7 of
+		-- 10 takes (512(b), c78acd1), at 60 fps on none.
+		stopSpeedDrop = 6,
+		stopDropSeconds = 1 / 60,
 		-- Foot plant. groundSpeed: studs per second a gait clip's planted foot moves back under the
 		-- root at rate 1, from each Footstep to lift-off, measured on the hit matrix's player at
 		-- measureHz (Stride.spec.luau re-measures every clip). Locomotion paces the gait clips to
@@ -457,6 +485,19 @@ local Choreo = {
 		-- back 34 degrees in 0.15 s) carried the raised blade at up to 137. Held through the brake,
 		-- at most 79 (tests/choreo/SheathSkid.spec.luau).
 		skidBrakeSeconds = 0.27,
+		-- A plain stop or slow-down out of the run or sprint (no Skid) while a Draw or Sheathe is
+		-- under way (D-611): while the base's gait falls faster than stopBrakeRate steps a second
+		-- (each of stopBrakeClips, sheathed and drawn, by its shown weight times its step over the
+		-- walk), the body straightening out of the run's lean, the sheath clip's clock stands, as
+		-- under a Skid's brake. Swung on over the stop's blend, the Sheathe's tip read up to 94.5
+		-- studs a second (the run eased off over 0.25 s, 240 Hz), 92.9 from the sprint eased off
+		-- over 0.1 s and 87.5 from the run let go at 16, the blade up to 1188 degrees a second;
+		-- braked, at most 79.7 and 1041 (tests/choreo/SheathStop.spec.luau). A run let go at once
+		-- falls at weightBlendRate (8 steps a second), a sprint to the idle at 16; at 2 a second the
+		-- brake let go mid-stop on a run eased off over 0.5 s and the swing read 84.0, at 1 it
+		-- holds through it (73.3). The brake stands the clip for 0.1 to 0.4 s.
+		stopBrakeClips = { Run = 1, Sprint = 2 },
+		stopBrakeRate = 1,
 	},
 
 	-- Enemy attacks on the server's beat. The server pauses an enemy's unresolved attack for the
@@ -472,6 +513,17 @@ local Choreo = {
 		-- change of pace later than its own crossfade does.
 		gait = {
 			travelSeconds = 0.05,
+			-- Where in its cycle (0 .. 1) a rig's walk steps off from standing (D-599): the walk
+			-- holds there while it shows no weight, so the Idle-to-Walk crossfade starts from that pose.
+			-- A walk that joins its idle at any point of its cycle pulled the planted foot from the
+			-- idle's spot toward the walk's over the crossfade (up to 1.25 studs on the kobold's
+			-- 2.5-stud step), 0.2 to 0.36 a 60 Hz row on rows 1 to 8, in the field to 0.087. The
+			-- kobold steps off at its left foot's mid-stance (0.125 s of 0.5): the planted sole under
+			-- the hip, 0.13 behind the idle's left foot, and the right sole lifted. A rig with none
+			-- joins at any point (the boar: its 144 Hz walk rows depend on the phase, see D-599).
+			startPhase = {
+				Kobold = 0.25,
+			} :: { [string]: number },
 		},
 		-- The attack clip ActionStarted plays keeps that beat up to its first HitWindowOpen (D-172):
 		-- the rig's hit-stop is the only freeze, and what it held beyond the server's pause (or
@@ -496,6 +548,14 @@ local Choreo = {
 			settleSeconds = 0.6,
 			handBackSeconds = 0.2,
 			handBackEasing = "QuadOut",
+			-- A late root within settleStuds of where the body stood that still comes nearer it faster
+			-- than this (studs a second) is still being landed by the server (D-525): the slide waits
+			-- for it (its clock held, at most settleSeconds), so the body never slides back toward a
+			-- root that then carries it forward again (D-602; AR 506(c): 0.024 to 0.064 back at 30
+			-- fps, then forward). Under the slowest a landing root moves before the server stops it
+			-- dead (ai.luau movement.landSlackStuds over landFrames 60 Hz frames: 0.6), so a root
+			-- still landing never reads at rest.
+			settleRestSpeed = 0.5,
 			-- A replicated root that moves more than this in one step, flat, other than forward down
 			-- the path, was put there (a placement, a teleport, D-553): the drawn rush is over at
 			-- once and the body is drawn on its root where it now stands, never slid there. A late

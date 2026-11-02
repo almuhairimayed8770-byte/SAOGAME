@@ -367,6 +367,208 @@ describe("dev.luau groundClearance.sheathCover (D-504)", function()
 	end)
 end)
 
+describe("dev.luau groundClearance.sheathSkid.stopSeconds (D-612)", function()
+	it("catches a stop too slow to skid, a negative one and none", function()
+		-- 24 over 0.1 s falls at 240 a second each second, under the Skid's drop (360).
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathSkid.stopSeconds = { 0, 0.1 }
+			end),
+			"sheathSkid.stopSeconds[2]"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathSkid.stopSeconds = { -0.03 }
+			end),
+			"sheathSkid.stopSeconds[1]"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathSkid.stopSeconds = {}
+			end),
+			"sheathSkid.stopSeconds"
+		)).toBe(true)
+		expect(hasProblem(runValidator(nil), "sheathSkid.stopSeconds")).toBe(false)
+	end)
+end)
+
+describe("dev.luau groundClearance.dodgeTurn (D-613)", function()
+	it("passes as written", function()
+		expect(hasProblem(runValidator(nil), "dodgeTurn")).toBe(false)
+	end)
+
+	it("catches a turn too small for the turn clip, a press outside the turn and a short read", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.dodgeTurn.degrees = 30
+			end),
+			"dodgeTurn.degrees"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.dodgeTurn.pressAfter = { 0.1, 0 }
+			end),
+			"dodgeTurn.pressAfter[2]"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.dodgeTurn.after = 0.4
+			end),
+			"dodgeTurn.after"
+		)).toBe(true)
+	end)
+end)
+
+describe("dev.luau groundClearance.skidRate (D-612)", function()
+	it("passes as written", function()
+		expect(hasProblem(runValidator(nil), "skidRate")).toBe(false)
+	end)
+
+	it("catches a sprint the Skid's threshold holds and step rates under 60", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.skidRate.sprint = 18
+			end),
+			"skidRate.sprint"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.skidRate.stepHz = { 60, 30 }
+			end),
+			"skidRate.stepHz[2]"
+		)).toBe(true)
+	end)
+
+	it("catches a stop too slow to skid and an ease fast enough to", function()
+		-- 24 over 0.1 s falls at 240 a second each second, under the Skid's drop (360): no Skid.
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.skidRate.skidStops = { 0, 0.1 }
+			end),
+			"skidRate.skidStops[2]"
+		)).toBe(true)
+		-- 24 over 0.05 s falls at 480: a Skid.
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.skidRate.easedStops = { 0.05 }
+			end),
+			"skidRate.easedStops[1]"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.skidRate.easedStops = { 0 }
+			end),
+			"skidRate.easedStops[1]"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.skidRate.skidStops = {}
+			end),
+			"skidRate.skidStops"
+		)).toBe(true)
+	end)
+end)
+
+describe("dev.luau groundClearance.sheathStop (D-611)", function()
+	it("passes as written", function()
+		expect(hasProblem(runValidator(nil), "sheathStop")).toBe(false)
+	end)
+
+	it("catches a sprint the Skid's threshold holds and a run the two-step stop does not carry", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathStop.sprint = 16
+			end),
+			"sheathStop.sprint"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathStop.run = 24
+			end),
+			"sheathStop.run"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathStop.run = 0
+			end),
+			"sheathStop.run"
+		)).toBe(true)
+	end)
+
+	it("catches an ease short enough to play the Skid, and step rates under 60", function()
+		-- 24 over 0.05 s falls at 480 studs a second each second, past the Skid's drop (6 / (1 / 60) = 360).
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathStop.eases = { 0.1, 0.05 }
+			end),
+			"sheathStop.eases[2]"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathStop.eases = {}
+			end),
+			"sheathStop.eases"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathStop.stepHz = { 30 }
+			end),
+			"sheathStop.stepHz[1]"
+		)).toBe(true)
+	end)
+
+	it("catches a let-go before the flip or after the case ends", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathStop.stopAfter = { -0.1 }
+			end),
+			"sheathStop.stopAfter[1]"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.sheathStop.stopAfter = { 0.5, 3 }
+			end),
+			"sheathStop.stopAfter[2]"
+		)).toBe(true)
+	end)
+end)
+
+describe("dev.luau groundClearance.dodgeRun (D-609, D-610)", function()
+	it("passes as written", function()
+		expect(hasProblem(runValidator(nil), "dodgeRun")).toBe(false)
+	end)
+
+	it("catches a sprint, no points and a slack past 2 degrees", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.dodgeRun.speed = 24
+			end),
+			"dodgeRun.speed"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.dodgeRun.points = 0
+			end),
+			"dodgeRun.points"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.dodgeRun.slack = 3
+			end),
+			"dodgeRun.slack"
+		)).toBe(true)
+	end)
+
+	it("catches a read that ends inside the dodge's blend out", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.dodgeRun.after = 0.4
+			end),
+			"dodgeRun.after"
+		)).toBe(true)
+	end)
+end)
+
 describe("dev.luau groundClearance.standHeight (D-506)", function()
 	it("passes as written", function()
 		expect(hasProblem(runValidator(nil), "standHeight")).toBe(false)
@@ -429,6 +631,27 @@ describe("dev.luau groundClearance.lockTurn (D-505, D-507)", function()
 				dev.groundClearance.lockTurn.degrees = { 90, 270 }
 			end),
 			"lockTurn.degrees[2]"
+		)).toBe(true)
+	end)
+
+	it("catches a row bar past the frame's and an idle start outside the drawn idle (AR 513, D-615)", function()
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.lockTurn.rowStuds = dev.groundClearance.lockTurn.slideStuds * 2
+			end),
+			"lockTurn.rowStuds"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.lockTurn.idleStarts = { 3, 40 }
+			end),
+			"lockTurn.idleStarts[2]"
+		)).toBe(true)
+		expect(hasProblem(
+			runValidator(function(dev: any)
+				dev.groundClearance.lockTurn.idleStarts = {}
+			end),
+			"lockTurn.idleStarts"
 		)).toBe(true)
 	end)
 end)

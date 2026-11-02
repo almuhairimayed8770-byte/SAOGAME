@@ -574,3 +574,171 @@ describe("FrameClock.atPose: a hit's cues on the first frame that draws the cont
 		assert(ok, err)
 	end)
 end)
+
+-- A joint write that belongs to a step's pose (the sword's Part0 and C0 between the back and the
+-- hand, D-590) lands right before the physics that first solves that pose: a Part0 or C0 write
+-- puts its Part1 on the new part at once from the Transform physics last solved, and only a
+-- physics step refreshes it (the PC's P4 L6b on f446653; AQ 497(e) on 82b82d4, the blade written
+-- at First drew its old place's rest turn). A frame here is its render steps (First, the rigs'
+-- step, the posed mark, Last), its draw, then `steps` physics steps, each run after a
+-- PreSimulation callback: PreSimulation runs once per 1/240 s step, several times between rows at
+-- 30 or 60 fps and on some 240 fps rows not at all (items 444 and 475).
+describe("FrameClock.atStepPoseSolve: right before the physics that solves the step's pose (D-590)", function()
+	local impactData = Harness.load("src/shared/data/impact")
+	type PhysicsDriver = {
+		-- One frame: `inStep` runs in the rigs' step, `between` after the given physics step
+		-- (0: after the draw, before any step).
+		frame: (inStep: (() -> ())?, steps: number?, between: { [number]: () -> () }?) -> (),
+		finish: () -> (),
+	}
+	-- `where` reads the stage the driver is in ("First 2", "step 1", "Last 1", "PreSimulation 1.2").
+	local function physicsDriver(withPreSimulation: boolean, stage: { where: string }): PhysicsDriver
+		local clock = 0
+		local count = 0
+		local startFn: ((dt: number) -> ())? = nil
+		local posedFn: ((dt: number) -> ())? = nil
+		local endFn: ((dt: number) -> ())? = nil
+		local preFn: ((dt: number) -> ())? = nil
+		local function slot(set: (fn: any) -> ()): (fn: any) -> () -> ()
+			return function(fn: any): () -> ()
+				set(fn)
+				return function()
+					set(nil)
+				end
+			end
+		end
+		FrameClock.bind({
+			now = function(): number
+				return clock
+			end,
+			onFrameStart = slot(function(fn)
+				startFn = fn
+			end),
+			onPosed = slot(function(fn)
+				posedFn = fn
+			end),
+			onFrameEnd = slot(function(fn)
+				endFn = fn
+			end),
+			onPreSimulation = if withPreSimulation
+				then slot(function(fn)
+					preFn = fn
+				end)
+				else function()
+					return nil
+				end,
+			onHeartbeat = function()
+				return function() end
+			end,
+		} :: any)
+		local function call(fn: ((dt: number) -> ())?, where: string)
+			stage.where = where
+			if fn ~= nil then
+				(fn :: (number) -> ())(1 / 60)
+			end
+		end
+		return {
+			frame = function(inStep: (() -> ())?, steps: number?, between: { [number]: () -> () }?)
+				count += 1
+				clock += 1 / 60
+				call(startFn, "First " .. count)
+				stage.where = "step " .. count
+				if inStep ~= nil then
+					inStep()
+				end
+				call(posedFn, "posed " .. count)
+				call(endFn, "Last " .. count)
+				stage.where = "drawn " .. count
+				local hook = if between ~= nil then between[0] else nil
+				if hook ~= nil then
+					hook()
+				end
+				for step = 1, steps or 1 do
+					call(preFn, ("PreSimulation %d.%d"):format(count, step))
+					stage.where = ("physics %d.%d"):format(count, step)
+					hook = if between ~= nil then between[step] else nil
+					if hook ~= nil then
+						hook()
+					end
+				end
+			end,
+			finish = function()
+				FrameClock.bind(nil)
+			end,
+		}
+	end
+
+	it("asked in a rig's step, it runs at the frame's first PreSimulation, after the draw", function()
+		local stage = { where = "" }
+		local ran: { string } = {}
+		local d = physicsDriver(true, stage)
+		local function ask()
+			FrameClock.atStepPoseSolve(function()
+				table.insert(ran, stage.where)
+			end)
+		end
+		-- 30 fps: eight 240 Hz steps between rows; it runs once, before the first.
+		d.frame(ask, 8)
+		expect(ran).toEqual({ "PreSimulation 1.1" })
+		d.frame(nil, 1)
+		expect(ran).toEqual({ "PreSimulation 1.1" })
+		-- Asked between physics steps (a rig stepped on Heartbeat): the next step's PreSimulation.
+		d.frame(nil, 2, { [1] = ask })
+		expect(ran).toEqual({ "PreSimulation 1.1", "PreSimulation 3.2" })
+		d.finish()
+	end)
+
+	it("waits through a frame with no physics step: not at the next First, at the next PreSimulation", function()
+		local stage = { where = "" }
+		local ran: { string } = {}
+		local d = physicsDriver(true, stage)
+		d.frame(function()
+			FrameClock.atStepPoseSolve(function()
+				table.insert(ran, stage.where)
+			end)
+		end, 0)
+		expect(ran).toEqual({})
+		d.frame(nil, 2)
+		expect(ran).toEqual({ "PreSimulation 2.1" })
+		-- Cancelled while it waits, it never runs.
+		local cancel = FrameClock.atStepPoseSolve(function()
+			table.insert(ran, stage.where)
+		end)
+		cancel()
+		d.frame(nil, 1)
+		expect(ran).toEqual({ "PreSimulation 2.1" })
+		d.finish()
+	end)
+
+	it("without a PreSimulation connection it runs where atStepPose does; with poseLagFrames 0, now", function()
+		local stage = { where = "" }
+		local ran: { string } = {}
+		local d = physicsDriver(false, stage)
+		d.frame(function()
+			FrameClock.atStepPoseSolve(function()
+				table.insert(ran, "solve " .. stage.where)
+			end)
+			FrameClock.atStepPose(function()
+				table.insert(ran, "pose " .. stage.where)
+			end)
+		end, 1)
+		expect(ran).toEqual({})
+		d.frame(nil, 1)
+		expect(ran).toEqual({ "solve First 2", "pose First 2" })
+		d.finish()
+		local lag = impactData.poseLagFrames
+		impactData.poseLagFrames = 0
+		local ok, err = pcall(function()
+			local e = physicsDriver(true, stage)
+			e.frame(function()
+				FrameClock.atStepPoseSolve(function()
+					table.insert(ran, "now " .. stage.where)
+				end)
+			end, 1)
+			e.finish()
+		end)
+		impactData.poseLagFrames = lag
+		assert(ok, err)
+		expect(ran[3]).toBe("now step 1")
+	end)
+end)

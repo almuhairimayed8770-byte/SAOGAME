@@ -22,7 +22,9 @@
 	priority.Basic (the attacks still draw-cut over it); sheath.handOverTime falls after the Draw's
 	WeaponDraw and before its end (the guard takes the arm with the sword in the hand); and
 	sheath.handOverBlend is a positive number of seconds. sheath.skidBrakeSeconds (D-579) is above
-	0 and at most the Skid clip's duration.
+	0 and at most the Skid clip's duration. sheath.stopBrakeClips (D-611) maps sheathed
+	locomotion.clips names to steps over the walk above 0, and sheath.stopBrakeRate is above 0 and
+	under locomotion.weightBlendRate times the smallest of them (a run let go at once brakes).
 
 	And the cancel hand-over (D-408): handOver.seconds is above 0 and at most dev.luau
 	review.audit.cancel.snapFrames 60 Hz frames (a cancel is a snap, section 10 beat 2),
@@ -38,10 +40,15 @@
 
 	And the dodge's hand-off (D-528): every locomotion.dodgeHandOff.clips name is a clip under
 	locomotion.clipPrefix that is not an attack; every joint it lists is a PlayerR15 joint whose
-	seconds are above 0 and at most combat.luau dodgeDuration.
+	seconds are above 0 and at most combat.luau dodgeDuration; and dodgeHandOff.resumePhase (the
+	point of the stride a dodge that played to its end hands the legs back at, D-609) is a gait
+	phase in [0, 1); every dodgeHandOff.takesFrom name (D-613) is a locomotion.clips one-shot
+	that is not an attack or a dodge. The Skid's drop (D-612): locomotion.stopSpeedDrop is above 0 and
+	stopDropSeconds above 0 and at most 0.1 s.
 
 	And an enemy rig's gait paced by its root's own travel (D-575): enemy.gait.travelSeconds is a
-	positive number of seconds, at most 1 / locomotion.weightBlendRate.
+	positive number of seconds, at most 1 / locomotion.weightBlendRate; each enemy.gait.startPhase
+	(D-599) names a rig with a walk clip and is a phase from 0 up to 1.
 ]]
 
 local TIERS = { "High", "Medium", "Low" }
@@ -209,6 +216,45 @@ return function(ctx: any): { string }
 				tostring(if okSkid and typeof(skid) == "table" then skid.duration else nil)
 			)
 		)
+		-- D-611: the stop brake reads sheathed gait clips by their step over the walk, and its
+		-- rate is one a run let go at once (weightBlendRate times the smallest step) passes.
+		local brakeClips = sheath.stopBrakeClips
+		local gaitClips = if typeof(choreo.locomotion) == "table" then choreo.locomotion.clips else nil
+		local smallest = math.huge
+		if typeof(brakeClips) ~= "table" or next(brakeClips) == nil then
+			check(false, "sheath.stopBrakeClips must map at least one gait clip to its step over the walk")
+		else
+			for name, steps in brakeClips do
+				check(
+					typeof(name) == "string"
+						and typeof(gaitClips) == "table"
+						and gaitClips[name] ~= nil
+						and name:sub(-5) ~= "Drawn",
+					("sheath.stopBrakeClips '%s' must be a sheathed clip of locomotion.clips (its drawn twin is read with it)"):format(
+						tostring(name)
+					)
+				)
+				check(
+					positive(steps),
+					("sheath.stopBrakeClips.%s (%s) must be a step over the walk above 0"):format(
+						tostring(name),
+						tostring(steps)
+					)
+				)
+				if positive(steps) then
+					smallest = math.min(smallest, steps)
+				end
+			end
+		end
+		local blendRate = if typeof(choreo.locomotion) == "table" then choreo.locomotion.weightBlendRate else nil
+		local stopRate = sheath.stopBrakeRate
+		check(
+			positive(stopRate) and positive(blendRate) and stopRate < blendRate * smallest,
+			("sheath.stopBrakeRate (%s) must be above 0 and under locomotion.weightBlendRate times the smallest stopBrakeClips step (%s): a run let go at once brakes"):format(
+				tostring(stopRate),
+				tostring(if positive(blendRate) then blendRate * smallest else nil)
+			)
+		)
 	end
 
 	-- The cancel hand-over (D-408): a snap of at most review.audit.cancel.snapFrames frames, eased
@@ -361,6 +407,57 @@ return function(ctx: any): { string }
 				)
 			)
 		end
+		-- D-613: the one-shots a dodge takes the body from as from a stance: locomotion.clips
+		-- names whose clips are not attacks or dodges (an action keeps the cancel's snap).
+		local takesFrom = dodgeHandOff.takesFrom
+		local gaitClips = choreo.locomotion.clips
+		if typeof(takesFrom) ~= "table" then
+			check(false, "locomotion.dodgeHandOff.takesFrom must list the one-shots a dodge takes the body from")
+		else
+			local dodgeNames: { [string]: boolean } = {}
+			for _, name in dodgeHandOff.clips do
+				dodgeNames[name] = true
+			end
+			for _, name in takesFrom do
+				local okName = typeof(name) == "string"
+					and typeof(gaitClips) == "table"
+					and gaitClips[name] ~= nil
+					and not dodgeNames[name]
+				local ok, clip = pcall(ctx.load, "src/shared/clips/" .. tostring(prefix) .. tostring(name))
+				check(
+					okName and ok and typeof(clip) == "table" and clip.attack ~= true,
+					("locomotion.dodgeHandOff.takesFrom '%s' must be a locomotion.clips one-shot under %s that is not an attack or a dodge"):format(
+						tostring(name),
+						tostring(prefix)
+					)
+				)
+			end
+		end
+		-- D-609: the point of the stride the gait picks up at after a dodge, a phase of the cycle.
+		local resume = dodgeHandOff.resumePhase
+		check(
+			typeof(resume) == "number" and resume == resume and resume >= 0 and resume < 1,
+			("locomotion.dodgeHandOff.resumePhase (%s) must be a gait phase in [0, 1): the point of the stride a dodge hands the legs back at"):format(
+				tostring(resume)
+			)
+		)
+	end
+
+	-- D-612: the Skid's drop, read as a fall rate: a positive speed over a window of at most
+	-- 0.1 s (a stop, not an eased slow-down).
+	do
+		local locomotion = if typeof(choreo.locomotion) == "table" then choreo.locomotion else {}
+		check(
+			positive(locomotion.stopSpeedDrop),
+			("locomotion.stopSpeedDrop (%s) must be a speed above 0"):format(tostring(locomotion.stopSpeedDrop))
+		)
+		local window = locomotion.stopDropSeconds
+		check(
+			positive(window) and window <= 0.1,
+			("locomotion.stopDropSeconds (%s) must be above 0 and at most 0.1 s: the Skid's drop is a stop's"):format(
+				tostring(window)
+			)
+		)
 	end
 
 	-- The turn plant (D-416): the hips come round between a turn clip's first two Footsteps, the
@@ -549,6 +646,24 @@ return function(ctx: any): { string }
 				1 / blendRate
 			)
 		)
+	end
+
+	-- An enemy rig's walk start (D-599): each start phase names a rig with a walk and is a point
+	-- of its cycle, 0 up to (not at) 1.
+	local starts = if typeof(gait) == "table" then gait.startPhase else nil
+	check(typeof(starts) == "table", "enemy.gait.startPhase must be a table of rig ids to phases")
+	if typeof(starts) == "table" then
+		for rigId, phase in starts do
+			local rigClips = if typeof(choreo.rigs) == "table" then choreo.rigs[rigId] else nil
+			check(
+				typeof(rigClips) == "table" and typeof(rigClips.walk) == "string",
+				("enemy.gait.startPhase.%s names no rig with a walk clip (choreo rigs)"):format(tostring(rigId))
+			)
+			check(
+				typeof(phase) == "number" and phase >= 0 and phase < 1,
+				("enemy.gait.startPhase.%s must be a phase of the walk's cycle, 0 up to 1"):format(tostring(rigId))
+			)
+		end
 	end
 
 	local settle = if typeof(camera.stall) == "table" then camera.stall.settleSeconds else nil

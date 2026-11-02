@@ -369,6 +369,75 @@ describe("RushDraw's timeline (D-171)", function()
 		expect(RushDraw.drawing(state)).toBe(false)
 	end)
 
+	it("the hand-back waits for a late root the server still lands under the body (D-602)", function()
+		-- AR 506(c): the body stood at the line's end while the late root, inside settleStuds of it,
+		-- was still being landed (each server frame half of what is left, D-525); a slide begun then
+		-- drew the body back toward the root and the root's landing carried it forward again.
+		local Easing = Harness.load("src/shared/util/Easing")
+		local rest = 0.0125
+		local state = RushDraw.new(line(0))
+		local now = 0
+		while now < RushDraw.finishSeconds(state.line) + FRAME do
+			now += FRAME
+			RushDraw.step(state, now, FRAME, at(0))
+		end
+		expect(state.phase).toBe("Settle")
+		expect(state.along).toBeCloseTo(LENGTH, EPSILON)
+		-- The root comes in: 0.4 short, then half of what is left a frame, to rest 0.0125 short.
+		local short = 0.4
+		local previous = LENGTH
+		local function stepAt(along: number): number
+			now += FRAME
+			local drawn = RushDraw.step(state, now, FRAME, at(along)) or at(along)
+			local drawnAlong = -drawn.Position.Z
+			local step = drawnAlong - previous
+			previous = drawnAlong
+			return step
+		end
+		while short >= rest - 1e-9 do
+			expect(stepAt(LENGTH - short)).toBeCloseTo(0, EPSILON)
+			short /= 2
+		end
+		expect(state.phase).toBe("HandBack")
+		-- Landed: it slides onto the root, each step back the ease's share of the rest, never forward.
+		local share = Easing.evaluate(TUNING.handBackEasing, FRAME / TUNING.handBackSeconds)
+		local first = stepAt(LENGTH - rest)
+		expect(first).toBeLessThan(0)
+		expect(-first).toBeLessThanOrEqual(share * rest + 1e-6)
+		while state.phase == "HandBack" do
+			local step = stepAt(LENGTH - rest)
+			expect(step).toBeLessThanOrEqual(1e-6)
+			expect(-step).toBeLessThanOrEqual(share * rest + 1e-6)
+		end
+		expect(state.phase).toBe("Done")
+
+		-- A root that keeps creeping in faster than settleRestSpeed is waited for settleSeconds at most.
+		state = RushDraw.new(line(0))
+		now = 0
+		while now < RushDraw.finishSeconds(state.line) + FRAME do
+			now += FRAME
+			RushDraw.step(state, now, FRAME, at(0))
+		end
+		local creep = 1.5 * TUNING.settleRestSpeed
+		local along = LENGTH - 0.49
+		now += FRAME
+		RushDraw.step(state, now, FRAME, at(along))
+		expect(state.phase).toBe("HandBack")
+		local began = now
+		local moved: number? = nil
+		while state.phase == "HandBack" and now < began + 2 do
+			along += creep * FRAME
+			now += FRAME
+			local drawn = RushDraw.step(state, now, FRAME, at(along))
+			if moved == nil and drawn ~= nil and -drawn.Position.Z < LENGTH - EPSILON then
+				moved = now
+			end
+		end
+		expect(moved).never.toBeNil()
+		expect((moved :: number) - began).toBeLessThanOrEqual(TUNING.settleSeconds + 2 * FRAME)
+		expect((moved :: number) - began).toBeGreaterThanOrEqual(TUNING.settleSeconds - FRAME)
+	end)
+
 	it("a root put somewhere else takes the drawn body with it at once, never slid there (D-553)", function()
 		-- The PC's P3 on f446653: a boar placed during its own charge stood 13 to 16 studs from its
 		-- drawn body, which held there 35 frames (Settle), then slid over about 70 (the hand-back at

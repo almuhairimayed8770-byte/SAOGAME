@@ -20,7 +20,9 @@
 	lasts long enough to land the fastest Charger rush from its lead (D-525), and its MoveTo aims
 	past its stop by more than the Humanoid's MoveTo tolerance plus that lead (D-548); a walk's
 	change of pace eases by a positive rate whose 60 Hz frame's change times the frame stays within
-	choreo stride.contact (D-574); a
+	choreo stride.contact (D-574); the Brute wheels round from under 180 degrees off at no more than
+	its pace, comes out of the wheel within footSlideStuds a 60 Hz frame and keeps its walk alone
+	while it wheels (D-598); a
 	blocked step tells running from blocked and is told before the jam lag (D-280). Every enemy
 	Humanoid keeps out of FallingDown and only ever out of fall states (upright.offStates, D-494);
 	each client's copy stands up to Running or GettingUp, retries a whole number of steps and logs
@@ -289,6 +291,70 @@ local function validate(ctx: Context): { string }
 	local brute = AI.archetypes.Brute
 	if brute ~= nil then
 		positiveNumber(brute.stopDistance, "archetypes.Brute.stopDistance")
+		-- The wheel (D-598): along the facing, slowed, while more than wheelAngle off the target.
+		local wheelAngle, wheelShare = brute.wheelAngle, brute.wheelSpeedMultiplier
+		positiveNumber(wheelAngle, "archetypes.Brute.wheelAngle")
+		positiveNumber(wheelShare, "archetypes.Brute.wheelSpeedMultiplier")
+		if typeof(wheelAngle) == "number" and wheelAngle >= 180 then
+			problem("archetypes.Brute.wheelAngle must be below 180")
+		end
+		if typeof(wheelShare) == "number" and wheelShare > 1 then
+			problem("archetypes.Brute.wheelSpeedMultiplier must be at most 1")
+		end
+		local Rigs = ctx.load("src/shared/data/rigs")
+		local Dev = ctx.load("src/shared/data/dev")
+		local choreo = ctx.load("src/shared/data/choreo")
+		local stride = if typeof(choreo.locomotion) == "table" then choreo.locomotion.stride else nil
+		local rateFloor = if typeof(stride) == "table" then stride.rateFloor else nil
+		local review = if typeof(Dev.review) == "table" then Dev.review.audit else nil
+		local slide = if typeof(review) == "table" then review.footSlideStuds else nil
+		local chase = brute.chaseSpeedMultiplier
+		if
+			typeof(wheelAngle) == "number"
+			and wheelAngle > 0
+			and wheelAngle < 180
+			and typeof(wheelShare) == "number"
+			and wheelShare > 0
+			and typeof(chase) == "number"
+		then
+			for _, def in Enemies.list() do
+				if def.archetype ~= "Brute" then
+					continue
+				end
+				local pace = def.moveSpeed * chase
+				-- Out of the wheel it walks straight at a target wheelAngle off its facing: the root
+				-- crosses the line its planted feet step back along by 2 sin(wheelAngle / 2) of its pace.
+				local crab = 2 * math.sin(math.rad(wheelAngle) / 2) * pace / 60
+				if typeof(slide) == "number" and crab > slide + 1e-9 then
+					problem(
+						("%s: walking straight at a target archetypes.Brute.wheelAngle %s off its facing slides its feet %.3f a 60 Hz frame, over review.audit.footSlideStuds %s"):format(
+							def.id,
+							tostring(wheelAngle),
+							crab,
+							tostring(slide)
+						)
+					)
+				end
+				-- The wheel's pace keeps the walk alone (D-541): at least stride.rateFloor of the
+				-- rig's walkSpeed, below which Idle takes weight and the planted feet slide.
+				local rig = Rigs[def.skin]
+				local walkSpeed = if typeof(rig) == "table" then rig.walkSpeed else nil
+				if
+					typeof(walkSpeed) == "number"
+					and typeof(rateFloor) == "number"
+					and pace * wheelShare < rateFloor * walkSpeed - 1e-9
+				then
+					problem(
+						("%s: wheeling at %.2f studs/s (archetypes.Brute.wheelSpeedMultiplier %s) is below stride.rateFloor of its rig's walkSpeed (%.2f), where Idle takes weight"):format(
+							def.id,
+							pace * wheelShare,
+							tostring(wheelShare),
+							rateFloor * walkSpeed
+						)
+					)
+				end
+			end
+		end
 	end
 
 	if typeof(AI.movement) == "table" and typeof(AI.movement.materialCosts) == "table" then
@@ -627,6 +693,9 @@ local function validate(ctx: Context): { string }
 			{
 				"riserStuds",
 				"probeStuds",
+				"probeBoxStuds",
+				"riserBeforeStuds",
+				"riserPastStuds",
 				"glanceDegrees",
 				"clipStuds",
 				"clipMarginStuds",
@@ -653,6 +722,19 @@ local function validate(ctx: Context): { string }
 				end
 			end
 			return true
+		end
+		-- The ground probe in front of a face never reaches the face (D-582): half its box short of
+		-- the spot it reads, or it finds the step's top there.
+		if
+			numbers(world.probeBoxStuds, world.riserBeforeStuds)
+			and world.probeBoxStuds / 2 >= world.riserBeforeStuds
+		then
+			problem(
+				("rushWorld.probeBoxStuds %s must be under twice riserBeforeStuds %s"):format(
+					tostring(world.probeBoxStuds),
+					tostring(world.riserBeforeStuds)
+				)
+			)
 		end
 		if numbers(world.glanceDegrees) and world.glanceDegrees >= 90 then
 			problem(("rushWorld.glanceDegrees must be below 90, got %s"):format(tostring(world.glanceDegrees)))
@@ -820,6 +902,11 @@ local function validate(ctx: Context): { string }
 		local checks = client.resumeChecks
 		if typeof(checks) ~= "number" or checks < 1 or checks % 1 ~= 0 then
 			problem("upright.client.resumeChecks must be a whole number of at least 1")
+		end
+		-- D-589: the turn-on's own fall is waited out on a whole number of steps.
+		local settle = client.resumeSettleSteps
+		if typeof(settle) ~= "number" or settle < 1 or settle % 1 ~= 0 then
+			problem("upright.client.resumeSettleSteps must be a whole number of at least 1")
 		end
 		local published = {
 			EntityId = true,

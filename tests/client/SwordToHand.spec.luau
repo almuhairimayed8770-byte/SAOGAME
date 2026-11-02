@@ -4,26 +4,33 @@
 
 	What the screen shows (measured on the owner's PC, AG 376(b) and the render check): a frame
 	draws BasePart.CFrame, the pose physics solved from the joints as the rigs' step of the frame
-	before wrote them; and a Motor6D whose Part0 or C0 is written during a frame's render steps puts
-	its Part1 on the new Part0 at once, from that part as physics last solved it and the joint's
-	Transform as it stands. The spec's screen is that model: each frame runs FrameClock's first
-	render step, the rig's step, FrameClock's posed mark, then logs the row item 397's logger reads
-	at Last+2 (the hand, the blade's guard and tip, the Weapon motor's Part0), then FrameClock's last
-	step, then "physics" solves every part from the joints. A Part0 or C0 change is put on its part
-	when it is seen: after the first render step, inside the rig's step (just before the mixer) and
-	after it.
+	before wrote them; and a Motor6D whose Part0 or C0 is written puts its Part1 on the new Part0 at
+	once, from that part as physics last solved it and the joint's Transform as physics last solved
+	it: only a physics step refreshes that Transform (the PC's P4 L6b on f446653; AQ 497(e) on
+	82b82d4, where the blade landed at First read 0.0 to 1.3 degrees in the grip, its old place's
+	rest turn, against the stroke's 4 to 27). The spec's screen is that model: each frame runs
+	FrameClock's first render step, the rig's step, FrameClock's posed mark, then logs the row item
+	397's logger reads at Last+2 (the hand, the blade's guard and tip, the Weapon motor's Part0),
+	then FrameClock's last step, then FrameClock's PreSimulation, then "physics" solves every part
+	from the joints. A Part0 or C0 change is put on its part when it is seen: after the first render
+	step, inside the rig's step (just before the mixer), after it and at PreSimulation. The swap
+	rows are also checked on D-555's model (the Transform as it stands), and both agree once the
+	move lands at PreSimulation (D-590).
 
 	Before, WeaponMount moved the Weapon motor inside the step that wrote the attack's first pose,
 	so for one row the sword hung in the hand of the pose before (the PC: the tip on 4.10 to 4.14
 	studs, the hand 0.000 to 0.003; Lune 5.99 and 0.0016 at 60 fps), and the grab showed a row
-	later. Now the move waits for FrameClock.atStepPose and lands on the row that draws that pose.
+	later. Now the move waits for its pose and lands on the row that draws that pose: at
+	FrameClock.atStepPose (D-555) it landed at First with its old place's rest turn on the PC, so
+	it lands through FrameClock.atStepPoseSolve, at the PreSimulation right before the physics that
+	solves the pose, and that physics puts the blade on the stroke's Weapon key (D-590).
 
 	The real path: a real Choreo animator on a RigBuilder player rig with its WeaponBuilder sword,
 	the real ClipLibrary clips, the real Locomotion (SheathState, WeaponMount), the real FrameClock
 	on fake render steps, and for a remote rig the real Replication's ActionStarted (its network
-	catch-up and the atStepPose it hands the rig's Locomotion). The caster's own rig gets the deps
-	CharacterController hands Locomotion.new (atStepPose; foot IK off, as Lune casts no rays) and
-	its clips as the controller plays them.
+	catch-up and the atStepPose and atStepPoseSolve it hands the rig's Locomotion). The caster's own
+	rig gets the deps CharacterController hands Locomotion.new (atStepPose and atStepPoseSolve; foot
+	IK off, as Lune casts no rays) and its clips as the controller plays them.
 ]]
 
 local function frameSignal(): any
@@ -50,6 +57,7 @@ local Trails = Harness.load("src/client/fx/Trails")
 local Engine = Harness.load("src/client/fx/Engine")
 local BladeContact = Harness.load("src/shared/choreo/BladeContact")
 local Joints = Harness.load("src/shared/choreo/Joints")
+local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
 local Accents = Harness.load("src/shared/data/accents")
 local ChoreoData = Harness.load("src/shared/data/choreo")
 local Rigs = Harness.load("src/shared/data/rigs")
@@ -141,9 +149,15 @@ local function build(drawn: boolean): (Model, any, BasePart)
 	return model, weaponMotor, parts.RightHand
 end
 
--- What the screen shows: each part's CFrame as physics last solved it, and the Weapon motor's
--- Part0 and C0 that solve (or the last at-once placement) used.
-type Screen = { parts: { [any]: CFrame }, part0: any, c0: CFrame? }
+-- What the screen shows: each part's CFrame as physics last solved it, the Weapon motor's Part0
+-- and C0 that solve (or the last at-once placement) used, and the Weapon joint's Transform that
+-- solve used (`solved`).
+type Screen = { parts: { [any]: CFrame }, part0: any, c0: CFrame?, solved: CFrame }
+
+-- Which Transform a Part0 or C0 write places the blade from: "solved", the joint's Transform as
+-- physics last solved it (the PC's P4 L6b, AQ 497(e)); "stands", the Transform as it stands at
+-- the write (D-555's model).
+local placeFrom: "solved" | "stands" = "solved"
 
 -- Physics: every part solved outward from the root part through the joints as they stand.
 local function solve(screen: Screen, model: Model, motor: any)
@@ -163,15 +177,17 @@ local function solve(screen: Screen, model: Model, motor: any)
 	screen.parts = parts
 	screen.part0 = motor.Part0
 	screen.c0 = motor.C0
+	screen.solved = motor.Transform
 end
 
 -- A Part0 or C0 write puts the blade on its new part at once, from that part as physics last
--- solved it and the joint's Transform as it stands.
+-- solved it and the joint's Transform `placeFrom` names.
 local function place(screen: Screen, motor: any)
 	if motor.Part0 ~= screen.part0 or motor.C0 ~= screen.c0 then
 		local base = screen.parts[motor.Part0]
 		if base ~= nil then
-			screen.parts[motor.Part1] = base * motor.C0 * motor.Transform * motor.C1:Inverse()
+			local transform = if placeFrom == "solved" then screen.solved else motor.Transform
+			screen.parts[motor.Part1] = base * motor.C0 * transform * motor.C1:Inverse()
 		end
 		screen.part0 = motor.Part0
 		screen.c0 = motor.C0
@@ -180,6 +196,8 @@ end
 
 -- One logged row: what the frame draws (`hand`, `guard`, `tip`, `inHand`: the Weapon motor's Part0
 -- is the hand), and the pose the frame's physics then solved from the step's joints (`posed*`).
+-- `turn` is the Transform the drawn blade sits on, (Part0 × C0):ToObjectSpace(Weapon × C1) as item
+-- 497 step 4 reads it; `key` the Weapon offset the row's step sampled (pinned or not).
 type Row = {
 	hand: Vector3,
 	guard: Vector3,
@@ -188,6 +206,8 @@ type Row = {
 	posedHand: Vector3,
 	posedGuard: Vector3,
 	posedTip: Vector3,
+	turn: CFrame,
+	key: CFrame,
 }
 
 type Rig = {
@@ -221,6 +241,7 @@ local function bindClock()
 		onFrameStart = hook("start"),
 		onPosed = hook("posed"),
 		onFrameEnd = hook("finish"),
+		onPreSimulation = hook("preSimulation"),
 		onHeartbeat = function(): () -> ()
 			return function() end
 		end,
@@ -236,7 +257,7 @@ local function prepare(model: Model, motor: any, hand: BasePart): Rig
 		start = model:FindFirstChild("TrailStart", true) :: Attachment,
 		tip = model:FindFirstChild("TrailEnd", true) :: Attachment,
 		animator = animator,
-		screen = { parts = {}, part0 = nil, c0 = nil },
+		screen = { parts = {}, part0 = nil, c0 = nil, solved = CFrame.identity },
 		update = nil,
 		readers = nil,
 	}
@@ -269,7 +290,15 @@ local function frame(rig: Rig, dt: number): Row
 	local guard = (blade * rig.start.CFrame).Position
 	local tip = (blade * rig.tip.CFrame).Position
 	local inHand = rig.motor.Part0 == rig.hand
+	local turn = (parts[rig.motor.Part0] * rig.motor.C0):ToObjectSpace(blade * rig.motor.C1)
+	local offset = rig.animator.mixer:lastOffsets()[WeaponModels.motorName]
+	local key = if offset ~= nil then ClipSampler.toCFrame(offset) else CFrame.identity
 	hooks.finish(dt)
+	-- After the draw, right before physics.
+	if hooks.preSimulation ~= nil then
+		hooks.preSimulation(dt)
+	end
+	place(rig.screen, rig.motor)
 	solve(rig.screen, rig.model, rig.motor)
 	local posed = rig.screen.parts
 	local posedBlade = posed[rig.motor.Part1]
@@ -281,6 +310,8 @@ local function frame(rig: Rig, dt: number): Row
 		posedHand = posed[rig.hand].Position,
 		posedGuard = (posedBlade * rig.start.CFrame).Position,
 		posedTip = (posedBlade * rig.tip.CFrame).Position,
+		turn = turn,
+		key = key,
 	}
 end
 
@@ -289,11 +320,11 @@ end
 type Take = { rows: { Row }, pressed: number, fps: number, off: number? }
 
 -- A remote rig's sheathed opener: Basic1's ActionStarted `late` seconds after the server's start,
--- through the real Replication. `gate` false binds Replication with no atStepPose (the sword moves
--- inside the step, as before). With `trails`, the real Trails samples the blade, and the take
--- reads its swing direction against the blade's own chord over the snap frames from the first row
--- in the hand (D-473; Lune derives no WorldPosition, so TrailEnd goes where the step posed it
--- before the readers run, as LateRemoteRibbon.spec has it).
+-- through the real Replication. `gate` false binds Replication with no atStepPose and no
+-- atStepPoseSolve (the sword moves inside the step, as before D-555). With `trails`, the real
+-- Trails samples the blade, and the take reads its swing direction against the blade's own chord
+-- over the snap frames from the first row in the hand (D-473; Lune derives no WorldPosition, so
+-- TrailEnd goes where the step posed it before the readers run, as LateRemoteRibbon.spec has it).
 local function remoteTake(late: number, fps: number, gate: boolean, trails: boolean?): Take
 	bindClock()
 	local model, motor, hand = build(false)
@@ -384,6 +415,7 @@ local function remoteTake(late: number, fps: number, gate: boolean, trails: bool
 			return clock
 		end,
 		atStepPose = if gate then FrameClock.atStepPose else nil,
+		atStepPoseSolve = if gate then FrameClock.atStepPoseSolve else nil,
 	} :: any)
 	Replication.watch(record)
 	local take: Take = { rows = {}, pressed = 0, fps = fps, off = nil }
@@ -432,9 +464,9 @@ local function remoteTake(late: number, fps: number, gate: boolean, trails: bool
 end
 
 -- The caster's own rig, as CharacterController drives it: Locomotion.new with the controller's
--- deps (atStepPose, or none with `gate` false), its update before the rig's step with the Drawn
--- target the controller predicts, and the press's clip played between frames. `drawn` is the
--- start state; `act` plays the press's clips, and the target becomes `to`.
+-- deps (atStepPose and atStepPoseSolve, or none with `gate` false), its update before the rig's
+-- step with the Drawn target the controller predicts, and the press's clip played between frames.
+-- `drawn` is the start state; `act` plays the press's clips, and the target becomes `to`.
 local function localTake(
 	fps: number,
 	drawn: boolean,
@@ -449,7 +481,11 @@ local function localTake(
 	local locomotion: any = Locomotion.new(
 		rig.animator,
 		model,
-		{ footIK = false, atStepPose = if gate then FrameClock.atStepPose else nil } :: any
+		{
+			footIK = false,
+			atStepPose = if gate then FrameClock.atStepPose else nil,
+			atStepPoseSolve = if gate then FrameClock.atStepPoseSolve else nil,
+		} :: any
 	)
 	local target = drawn
 	rig.update = function(dt: number)
@@ -601,10 +637,16 @@ describe("The sword reaches the hand on the frame that draws the grab (AG 376(b)
 		function()
 			-- The move held for its pose against the move made inside the step: every row draws what
 			-- the step before posed, as SheathTip, GroundClearance and the hit matrix read the pose
-			-- (the joints right after the step), so their pass lines hold on the screen too. Before,
-			-- the move's own row drew the sword placed on the pose before: 5.99 studs off for an
-			-- opener, 0.50 to 0.66 for a Draw (alone, over a guard or after a dodge), 0.52 to 0.53
-			-- for a Sheathe.
+			-- (the joints right after the step), so their pass lines hold on the screen too. Before
+			-- D-555, the move's own row drew the sword placed on the pose before: 5.99 studs off for
+			-- an opener, 0.50 to 0.66 for a Draw (alone, over a guard or after a dodge), 0.52 to 0.53
+			-- for a Sheathe. On both placement models: a write placed from the Transform physics
+			-- last solved (the PC's P4 L6b) and from the Transform as it stands (D-555's). Before
+			-- D-590, on the first, the swap row drew the blade on its old place's rest turn (or the
+			-- hand's key on the back), one row each: the caster's opener 1.572 / 0.681 / 0.241 studs
+			-- off at 30 / 60 / 144, a remote opener 0.967 / 0.279 / 0.063 at lag 0 and 1.746 /
+			-- 0.424 / 0.067 at 0.25, a Draw 0.078 / 0.078 / 0.150 (an 80-degree roll about the
+			-- blade), a dodge's Draw 0.175 / 0.179 / 0.234, a Sheathe 0.226 / 0.226 / 0.225.
 			local GUARD = PREFIX .. "Guard"
 			local DODGE = PREFIX .. "DodgeForward"
 			local cases: { { name: string, run: (fps: number, gate: boolean) -> Take } } = {
@@ -651,21 +693,77 @@ describe("The sword reaches the hand on the frame that draws the grab (AG 376(b)
 					end,
 				})
 			end
-			for _, case in cases do
-				for _, fps in RATES do
-					local label = ("%s, %d fps"):format(case.name, fps)
-					local held = case.run(fps, true)
-					local inStep = case.run(fps, false)
-					-- The sword changed place in the take (none in a dodge that keeps it sheathed).
-					local swapped = false
-					for index = held.pressed + 1, #held.rows do
-						if held.rows[index].inHand ~= held.rows[held.pressed].inHand then
-							swapped = true
+			local ok, err = pcall(function()
+				for _, model in { "solved", "stands" } do
+					placeFrom = model :: any
+					for _, case in cases do
+						for _, fps in RATES do
+							local label = ("%s, %d fps, placed from the Transform %s"):format(case.name, fps, model)
+							local held = case.run(fps, true)
+							local inStep = case.run(fps, false)
+							-- The sword changed place in the take (none in a dodge that keeps it sheathed).
+							local swapped = false
+							for index = held.pressed + 1, #held.rows do
+								if held.rows[index].inHand ~= held.rows[held.pressed].inHand then
+									swapped = true
+								end
+							end
+							expect({ label, swapped }).toEqual({ label, true })
+							expect({ label, lateByOne(held, inStep) }).toEqual({ label, {} })
 						end
 					end
-					expect({ label, swapped }).toEqual({ label, true })
-					expect({ label, lateByOne(held, inStep) }).toEqual({ label, {} })
 				end
+			end)
+			placeFrom = "solved"
+			if not ok then
+				error(err, 0)
+			end
+		end
+	)
+
+	it(
+		"row P draws the blade on the stroke's Weapon key, and a Sheathe lands on the back at rest (AQ 497(e))",
+		function()
+			-- θP, the turn the drawn blade sits on in the grip on row P (item 497 step 4), is the Weapon
+			-- offset row P−1's step sampled: the stroke's own key, a frame late with the rest of the pose.
+			-- Before D-590 the move landed at First and the blade took its old place's rest turn,
+			-- 0.00 degrees on every take (the PC on 82b82d4: 0.0 to 1.29), against the key's
+			-- 14.70 / 18.34 / 26.89 / 24.01 at 30 fps, 4.23 / 5.06 / 6.43 / 10.34 at 60 and
+			-- 0.95 / 1.00 / 1.02 / 3.65 at 144 (B at lag 0, at a 0.134 catch-up, at 0.25, and A), and
+			-- a Sheathe's landing row drew the blade on the back at the hand's 77.39-degree key.
+			local function degreesBetween(a: CFrame, b: CFrame): number
+				local _, angle = a:ToObjectSpace(b):ToAxisAngle()
+				return math.deg(math.abs(angle))
+			end
+			for _, fps in RATES do
+				local takes: { { string | Take } } = {
+					{ "B at lag 0", remoteTake(0, fps, true) },
+					{ "B at a 0.134 catch-up", remoteTake(0.134, fps, true) },
+					{ "B at lag 0.25", remoteTake(0.25, fps, true) },
+					{ "A", localOpener(fps, true) },
+				}
+				for _, entry in takes do
+					local take = entry[2] :: Take
+					local label = ("%s, %d fps"):format(entry[1] :: string, fps)
+					local p = rowP(take) :: number
+					local key = take.rows[p - 1].key
+					local turn = take.rows[p].turn
+					expect({ label, degreesBetween(CFrame.identity, key) > 0.5 }).toEqual({ label, true })
+					expect({ label, degreesBetween(turn, key) < 0.01 }).toEqual({ label, true })
+					expect({ label, (turn.Position - key.Position).Magnitude < 1e-4 }).toEqual({ label, true })
+				end
+				local sheathe = localTake(fps, true, false, nil, 2.0, true)
+				local landed: number? = nil
+				for index = sheathe.pressed + 1, #sheathe.rows do
+					if not sheathe.rows[index].inHand then
+						landed = index
+						break
+					end
+				end
+				local label = ("the Sheathe, %d fps"):format(fps)
+				expect({ label, landed ~= nil }).toEqual({ label, true })
+				local turn = sheathe.rows[landed :: number].turn
+				expect({ label, degreesBetween(CFrame.identity, turn) < 0.01 }).toEqual({ label, true })
 			end
 		end
 	)

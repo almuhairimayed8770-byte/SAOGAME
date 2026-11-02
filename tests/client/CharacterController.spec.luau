@@ -207,6 +207,9 @@ type Options = {
 		keepSide: ((number) -> number)?,
 		roomSide: ((CFrame, number) -> number)?,
 	}?,
+	-- What it answers for a held Art's stance (options.stance, D-606), asked at the press and
+	-- logged apart (contacts.stances); nil: none.
+	stancePlan: { distance: number, away: Vector3, to: number, keep: ((number) -> number)?, keepUntil: number? }?,
 }
 
 local IMPACT_CALLS = { "guardRaise", "dodge", "release", "cancelActivation", "activation" }
@@ -348,8 +351,17 @@ local function load(options: Options?): Rig
 	}
 	-- ContactPredictor (issue 4): a recording fake. Its steps note the clip time asked for, the root
 	-- at that moment and how many times the rig had stepped by then.
-	local contactLog: any =
-		{ begins = {}, steps = {}, stops = 0, queue = {}, active = false, deps = nil, standOffs = {}, worldCasts = {} }
+	local contactLog: any = {
+		begins = {},
+		steps = {},
+		stops = 0,
+		queue = {},
+		active = false,
+		deps = nil,
+		standOffs = {},
+		stances = {},
+		worldCasts = {},
+	}
 	local rigStepCount: () -> number = function(): number
 		return 0
 	end
@@ -382,7 +394,8 @@ local function load(options: Options?): Rig
 				cast: any,
 				options: any
 			): any
-				table.insert(contactLog.standOffs, {
+				local stance = typeof(options) == "table" and options.stance ~= nil
+				table.insert(if stance then contactLog.stances else contactLog.standOffs, {
 					model = model,
 					clip = clip,
 					from = from,
@@ -391,7 +404,7 @@ local function load(options: Options?): Rig
 					cast = cast,
 					options = options,
 				})
-				local plan = opts.standOff
+				local plan: any = if stance then opts.stancePlan else opts.standOff
 				if plan == nil then
 					return nil
 				end
@@ -1486,10 +1499,10 @@ describe("CharacterController: the Art stand-off (fix F1)", function()
 		wall = before:Dot(away) + 0.3
 		rig.controller.releaseArt(1, 12 * FRAME)
 		twin.controller.releaseArt(1, 12 * FRAME)
-		-- The plan is asked with the body's own world cast.
-		expect(#rig.contacts.worldCasts).toBe(1)
-		expect(rig.contacts.worldCasts[1].model).toBe(rig.model)
-		expect(rig.contacts.standOffs[1].cast).toBe(rig.contacts.worldCasts[1].cast)
+		-- The plan is asked with the body's own world cast (the stance's at the press first, D-606).
+		expect(#rig.contacts.worldCasts).toBe(2)
+		expect(rig.contacts.worldCasts[2].model).toBe(rig.model)
+		expect(rig.contacts.standOffs[1].cast).toBe(rig.contacts.worldCasts[2].cast)
 		local handle = rig.animator.mixer:find(rig.controller.slots()[1].clip)
 		local reached = -math.huge
 		for _ = 1, 60 do
@@ -1728,6 +1741,89 @@ describe("CharacterController: the Art stand-off (fix F1)", function()
 		expect(apart()).toBeCloseTo(stood, 1e-6)
 		expect(#rig.contacts.standOffs).toBe(1)
 	end)
+
+	it(
+		"a held Art at a lock steps back as its stance forms and stands still through the hold, at 30 fps, a 0.0349 s capped frame, 60 and 144 (item 498(b), D-606)",
+		function()
+			-- The PC's 30 fps Horizontal held its start pose 7 rows with the left hand 0.116-0.139 in
+			-- the kobold's torso: no plan moved the body before the release, and the release's plan
+			-- starts at the frozen clip time (keep 0 there) while the clip waits on.
+			local away = Vector3.new(0, 0, 1)
+			local function keep(t: number): number
+				return t * 2
+			end
+			local plan = { distance = 0, away = away, to = 0, keep = keep, keepUntil = 10 }
+			local Clips = Harness.load("src/client/choreo/ClipLibrary")
+			for _, dt in { 1 / 30, 0.0349, 1 / 60, 1 / 144 } do
+				local rig = load({ choreo = true, impact = true, stancePlan = plan })
+				local twin = load({ choreo = true, impact = true })
+				local function frame()
+					rig.frame(STILL, dt)
+					twin.frame(STILL, dt)
+				end
+				for _ = 1, 40 do
+					frame()
+				end
+				rig.setLock(Vector3.new(0, 0, -3.1))
+				twin.setLock(Vector3.new(0, 0, -3.1))
+				local art = rig.controller.slots()[1]
+				local holdAt = math.huge
+				for _, event in Clips.get(art.clip).events do
+					if event.kind == "ActivationHold" then
+						holdAt = math.min(holdAt, event.time)
+					end
+				end
+				local pressedAt = rig.now()
+				rig.controller.beginArt(1)
+				twin.controller.beginArt(1)
+				-- Asked at the press: the stance alone (no blade step, up to the hold pose), facing the lock.
+				expect(#rig.contacts.stances).toBe(1)
+				expect(#rig.contacts.standOffs).toBe(0)
+				local asked = rig.contacts.stances[1]
+				expect(asked.options.step).toBe(false)
+				expect(asked.options.keepOut).toBe(true)
+				expect(asked.options.stance).toBeCloseTo(holdAt, 1e-9)
+				expect(asked.from).toBeCloseTo(0, 1e-9)
+				expect(asked.root.LookVector:Dot(Vector3.new(0, 0, -1))).toBeCloseTo(1, 1e-6)
+				local handle = rig.animator.mixer:find(art.clip)
+				local function apart(): number
+					return (rig.root.Position - twin.root.Position):Dot(away)
+				end
+				-- The body carries the stance's keep while the clip forms it, and stands once it is frozen.
+				local frozenAt: number? = nil
+				local stood = 0
+				for _ = 1, math.ceil(0.4 / dt) do
+					frame()
+					expect(rig.controller.state()).toBe("Holding")
+					expect(apart()).toBeCloseTo(keep(handle.time), 1e-6)
+					if rig.timeScales[#rig.timeScales] == 0 then
+						frozenAt = frozenAt or handle.time
+						stood += 1
+						expect(handle.time).toBe(frozenAt)
+					end
+				end
+				expect(frozenAt ~= nil and (frozenAt :: number) >= holdAt - 1e-9).toBe(true)
+				expect(stood >= 3).toBe(true)
+				expect(apart()).toBeCloseTo(keep(frozenAt :: number), 1e-6)
+				-- The release plans the swing afresh from where the body stands, at the frozen clip time.
+				rig.controller.releaseArt(1, rig.now() - pressedAt)
+				expect(#rig.contacts.stances).toBe(1)
+				expect(#rig.contacts.standOffs).toBe(1)
+				local swing = rig.contacts.standOffs[1]
+				expect(swing.options.stance).toBe(nil)
+				expect(swing.options.step).toBe(true)
+				expect(swing.from).toBeCloseTo(frozenAt :: number, 1e-9)
+				expect((swing.root.Position - rig.root.Position).Magnitude < 1e-9).toBe(true)
+			end
+			-- No lock: nothing is asked at the press (the soft assist picks at the release).
+			local rig = load({ choreo = true, impact = true, stancePlan = plan })
+			for _ = 1, 40 do
+				rig.frame(STILL)
+			end
+			rig.controller.beginArt(1)
+			expect(#rig.contacts.stances).toBe(0)
+		end
+	)
 
 	it(
 		"holds the body aside off a held part's face as the plan says, through a freeze and up to the world (D-315)",
@@ -3885,5 +3981,19 @@ describe("CharacterController: the sword's move lands with its step's pose (AG 3
 		local none = plain.locomotionDeps()
 		expect(none == nil or none.atStepPose == nil).toBe(true)
 		expect(asked).toBe(0)
+	end)
+
+	it("hands Locomotion.new FrameClock.atStepPoseSolve too, and none when FrameClock has none (D-590)", function()
+		-- Before, only atStepPose went: the move landed at the start of the frame that draws the
+		-- pose, where the blade takes its old place's rest turn (AQ 497(e)).
+		local function gate(fn: () -> ()): () -> ()
+			fn()
+			return function() end
+		end
+		local frameClock = { atStepPose = gate, atStepPoseSolve = gate }
+		local deps = load({ frameClock = frameClock }).locomotionDeps()
+		expect(deps ~= nil and deps.atStepPoseSolve == frameClock.atStepPoseSolve).toBe(true)
+		local older = load({ frameClock = { atStepPose = gate } }).locomotionDeps()
+		expect(older ~= nil and older.atStepPose == gate and older.atStepPoseSolve == nil).toBe(true)
 	end)
 end)

@@ -1655,3 +1655,201 @@ describe("A rush's landing paced on every server frame at 60 and 144 Hz (AO 479(
 		end
 	)
 end)
+
+-- ------------------------------------------------------------------------------------------
+-- AR 501(a)(b) and 502(b): the row before the log's landed mark (the PC on c78acd1)
+-- ------------------------------------------------------------------------------------------
+
+-- A Heartbeat row of item 439's server log as the PC reads it on c78acd1 (items 501 and 502): the
+-- root's flat velocity read by a Heartbeat handler that runs before EnemyService's, and paced, the
+-- WalkSpeed at the next PreSimulation (after every Heartbeat handler: what the next physics walks
+-- with), beside what the service did on that Heartbeat.
+type LogRow = {
+	t: number, -- seconds from the launch
+	dt: number, -- the Heartbeat's own dt
+	along: number,
+	left: number, -- the told stop less along
+	velocity: number, -- the flat velocity the log reads, before the service's write
+	paced: number, -- WalkSpeed after the service (the next PreSimulation)
+	written: number, -- the flat velocity after the service (0 once halted)
+	lands: number, -- Engine.land calls on this Heartbeat
+	halts: number, -- Engine.halt calls on this Heartbeat
+	reset: boolean, -- the mover's own speed written on this Heartbeat (moverUpdate, the AI tick)
+}
+
+-- The entry of `list` logged on the server frame at `time`.
+local function loggedAt<T>(list: { { time: number, value: T } }, time: number): T?
+	for _, entry in list do
+		if math.abs(entry.time - time) < 1e-7 then
+			return entry.value
+		end
+	end
+	return nil
+end
+
+-- restRun with the PC's columns. Returns the rows from the launch's second row on, the land row's
+-- index and the landed row's (the first row after land whose logged velocity reads 0), and the run.
+local function logRun(wallZ: number?, settings: HumanoidSettings, speed: number): ({ LogRow }, number, number, Rest)
+	local velocities: { { time: number, value: number } } = {}
+	local halts: { { time: number, value: boolean } } = {}
+	local resets: { { time: number, value: boolean } } = {}
+	local realStep, realHalt, realSetWalkSpeed = EnemyService.step, engine.halt, engine.setWalkSpeed
+	EnemyService.step = function(dt: number)
+		for _, body in bodies do
+			table.insert(velocities, { time = clock.t, value = flat(body.velocity).Magnitude })
+		end
+		realStep(dt)
+	end
+	engine.halt = function(model: Model, position: Vector3?)
+		table.insert(halts, { time = clock.t, value = true })
+		realHalt(model, position)
+	end
+	engine.setWalkSpeed = function(model: Model, walkSpeed: number)
+		if walkSpeed == speed then
+			table.insert(resets, { time = clock.t, value = true })
+		end
+		realSetWalkSpeed(model, walkSpeed)
+	end
+	table.clear(lands)
+	local ok, result = pcall(restRun, wallZ, settings)
+	EnemyService.step, engine.halt, engine.setWalkSpeed = realStep, realHalt, realSetWalkSpeed
+	assert(ok, tostring(result))
+	local run = result :: Rest
+	local rows: { LogRow } = {}
+	for index = 2, #run.rows do
+		local row, before = run.rows[index], run.rows[index - 1]
+		local time = run.launch + row.t
+		local landCount, haltCount = 0, 0
+		for _, entry in lands do
+			if math.abs(entry.time - time) < 1e-7 then
+				landCount += 1
+			end
+		end
+		for _, entry in halts do
+			if math.abs(entry.time - time) < 1e-7 then
+				haltCount += 1
+			end
+		end
+		table.insert(rows, {
+			t = row.t,
+			dt = row.t - before.t,
+			along = row.along,
+			left = run.told - row.along,
+			velocity = loggedAt(velocities, time) :: number,
+			paced = row.walkSpeed,
+			written = row.speed,
+			lands = landCount,
+			halts = haltCount,
+			reset = loggedAt(resets, time) == true,
+		})
+	end
+	local landAt = landRows(run)
+	assert(landAt ~= nil, "no landing")
+	local landIndex: number? = nil
+	local landedIndex: number? = nil
+	for index, row in rows do
+		if landIndex == nil and math.abs(row.t - landAt) < 1e-9 then
+			landIndex = index
+		elseif landIndex ~= nil and landedIndex == nil and row.velocity < 1e-6 then
+			landedIndex = index
+		end
+	end
+	assert(landIndex ~= nil and landedIndex ~= nil, "no land or landed row")
+	return rows, landIndex, landedIndex, run
+end
+
+describe("A rush's landing ends on a halt row, a row before the log's landed mark (AR 501(a)(b), 502(b))", function()
+	it(
+		"lands every row with more than landSlackStuds left; the row before landed halts it and it stands from there",
+		function()
+			-- The PC on c78acd1, 9 slams and 12 open runs: every judged row matched min(28, left / (2 dt))
+			-- within 2 % but the last, landed - 1, with 0.007 to 0.014 left. There paced read 28 (60 fps
+			-- takes 1 and 2, lag 0.25) or the row before's value unchanged (0.721 / 0.766 / 0.670 at 60,
+			-- 1.77 / 2.64 / 1.89 at 144; the open runs 0.97 to 4.46). That row is the service's halt: with
+			-- landSlackStuds (0.02) or less left, landStep stops the body dead (Engine.halt: flat
+			-- velocity 0, MoveTo where it stands) and writes no pace (D-525). The log reads the velocity
+			-- before the service's Heartbeat handler, so it reads the halt's 0 a row later and marks
+			-- landed there. WalkSpeed on the halt row is the last landing pace, or 28 when the 20 Hz AI
+			-- tick ran on that Heartbeat: its moverUpdate, before the frame pass, sets the mover's own
+			-- speed back, and on a landing row the land overwrites it within the same Heartbeat. A halted
+			-- body walks to where it stands at either WalkSpeed, so it stands: the rest is the halt row's.
+			-- The tolerant Humanoid (the PC's P2 probe), Studio's frames at 60 and 144 fps (dt within 6 %,
+			-- physics in 1/240 s steps).
+			local speed = AI.rushSpeed(BOAR.attacks[1])
+			local slack = AI.movement.landSlackStuds
+			local report = {}
+			for _, fps in { 60, 144 } do
+				local worstPace, worstRatio, worstHold = 0, 0, 0
+				local leastLeft, mostLeft = math.huge, 0
+				local reads28, readsKept = 0, 0
+				for _, kind in { "slam", "open" } do
+					for seed = 0, 7 do
+						local rows, landIndex, landedIndex, run = logRun(
+							if kind == "slam" then WALL_Z else nil,
+							{ mode = "tolerant", fps = fps, jitter = if seed == 0 then 0 else 0.06, seed = seed },
+							speed
+						)
+						-- Land to landed - 2: one land each, at that row's own left and dt, never a halt.
+						local under: number? = nil
+						for index = landIndex, landedIndex - 2 do
+							local row = rows[index]
+							expect(row.lands).toBe(1)
+							expect(row.halts).toBe(0)
+							expect(row.left > slack).toBe(true)
+							local pace = math.min(speed, row.left / (AI.movement.landFrames * row.dt))
+							worstPace = math.max(worstPace, math.abs(row.paced - pace))
+							if under == nil and row.paced < speed - 1e-6 then
+								under = index
+							elseif under ~= nil then
+								worstRatio = math.max(worstRatio, row.paced / rows[index - 1].paced)
+							end
+						end
+						-- landed - 1: the halt row. No land, one halt, velocity 0, and no pace of its own.
+						local halt, last = rows[landedIndex - 1], rows[landedIndex - 2]
+						expect(halt.left <= slack).toBe(true)
+						expect(halt.left > 0).toBe(true)
+						expect(halt.lands).toBe(0)
+						expect(halt.halts).toBe(1)
+						expect(halt.written).toBe(0)
+						expect(halt.velocity > 0).toBe(true)
+						expect(halt.paced).toBe(if halt.reset then speed else last.paced)
+						if halt.reset then
+							reads28 += 1
+						else
+							readsKept += 1
+						end
+						leastLeft = math.min(leastLeft, halt.left)
+						mostLeft = math.max(mostLeft, halt.left)
+						-- The body stands from the halt row to 1 s after the stop: its rest is that row's.
+						for index = landedIndex - 1, #rows do
+							worstHold = math.max(worstHold, math.abs(rows[index].along - halt.along))
+						end
+						expect(math.abs(run.rest - halt.along)).toBeLessThanOrEqual(1e-6)
+						expect(run.farthest - run.told).toBeLessThanOrEqual(0)
+					end
+				end
+				expect(worstPace).toBeLessThanOrEqual(1e-4)
+				expect(worstHold).toBeLessThanOrEqual(1e-6)
+				if fps == 60 then
+					expect(worstRatio).toBeLessThanOrEqual(0.75)
+				end
+				-- Both of the PC's readings come up: 28 after an AI tick, the last pace otherwise.
+				expect(reads28 >= 1 and readsKept >= 1).toBe(true)
+				table.insert(
+					report,
+					("%d Hz: land rows at the pace within %.1e, then each <= %.3f of the row before; halt row left %.4f-%.4f, paced 28 on %d takes and the last pace on %d; stands within %.1e"):format(
+						fps,
+						worstPace,
+						worstRatio,
+						leastLeft,
+						mostLeft,
+						reads28,
+						readsKept,
+						worstHold
+					)
+				)
+			end
+			print("[501(a)(b)/502(b)] " .. table.concat(report, "; "))
+		end
+	)
+end)

@@ -80,11 +80,11 @@ RushWorld.SAME_STUDS = 1e-2
 
 local CORNERS = { -1, 1 }
 -- The ground probe: a small box dropped straight down (a ray falls through the seams between
--- parts; a wider box finds a step's top before the spot is over it), and how far in front of a face
--- the riser rule reads the ground.
-local PROBE_SIZE = Vector3.new(0.1, 0.1, 0.1)
-local PROBE_BEFORE = 0.25
-local PROBE_PAST = 0.5
+-- parts; a wider box finds a step's top before the spot is over it), how far in front of a face
+-- the riser rule reads the ground and how far past it the rail looks (ai.luau rushWorld, D-582).
+local PROBE_SIZE = Vector3.one * TUNING.probeBoxStuds
+local PROBE_BEFORE = TUNING.riserBeforeStuds
+local PROBE_PAST = TUNING.riserPastStuds
 local EPSILON = 1e-6
 
 local function flat(v: Vector3): Vector3

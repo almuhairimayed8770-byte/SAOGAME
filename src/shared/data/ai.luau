@@ -51,6 +51,8 @@ export type ChargerTuning = ArchetypeTuning & {
 
 export type BruteTuning = ArchetypeTuning & {
 	stopDistance: number, -- stops walking this far from the target
+	wheelAngle: number, -- degrees off the target beyond which the chase walks along the facing
+	wheelSpeedMultiplier: number, -- the chase speed while wheeling round to the target
 }
 
 -- How a rush meets the world (D-205 to D-210): the same rules on the server, which moves the body and
@@ -59,6 +61,9 @@ export type BruteTuning = ArchetypeTuning & {
 export type RushWorldTuning = {
 	riserStuds: number, -- a face whose top is at most this above the ground in front of it is a step
 	probeStuds: number, -- how far below the root's centre a ground probe looks
+	probeBoxStuds: number, -- the edge of the small box a ground probe drops (and the riser rail's thickness)
+	riserBeforeStuds: number, -- the riser rule reads the ground this far in front of a face
+	riserPastStuds: number, -- and looks this far past the face for anything over riserStuds
 	glanceDegrees: number, -- a wall meeting the line at less than this turns the rush along its face
 	clipStuds: number, -- a corner the root's box overlaps sideways by at most this is shouldered past
 	clipMarginStuds: number, -- the sidestep clears the corner by this much more
@@ -240,9 +245,22 @@ local AI = {
 			-- false: off for the copy's life (D-544).
 			resumeOnRelease = true,
 			-- After turning it back on, the copy's state is read on this many PreSimulation steps; one
-			-- in a fall state is stood up again with the state machine off for good (D-544). The P1
-			-- probe's 60 rows after each release (1 s at 60 Hz) all read Running.
+			-- in a fall state is stood up again with the state machine off for good (D-544), past
+			-- resumeSettleSteps' wait for its first upright read, and one still held only until its
+			-- release (D-589). The P1 probe's 60 rows after each release (1 s at 60 Hz) all read
+			-- Running.
 			resumeChecks = 60,
+			-- The turn-on's own fall (D-589): a copy whose state machine comes back on reads
+			-- FallingDown on its first step with it on, held or let go (the PC's 495(d) and (i) on
+			-- 82b82d4: one row on 3 of 3 turn-ons, the fall states off), and a let-go copy then reads
+			-- the server's Running (from R+1, the read-back between them reading it too). So from the
+			-- turn-on until its first upright read, a let-go copy's fall state is waited out on up to
+			-- this many PreSimulation steps before the read-back keeps the state machine off for good.
+			-- Assumed: the server's state can reach the copy a few frames late on a client drawing
+			-- faster than the server steps (a 60 Hz server: 3 frames on a 144 Hz client, 4 on 240);
+			-- 12 covers a 240 Hz client fed at 20 Hz. A copy in a fall state shows nothing meanwhile
+			-- (Choreo draws its joints; the server owns its root).
+			resumeSettleSteps = 12,
 			standUpState = "Running", -- the server's state on every held row the PC logged
 			maxTries = 240, -- 4 s of 60 Hz PreSimulation steps, then only an EntityKind change retries
 			-- A log aid on the enemy Model, client only (client attributes do not replicate), in the
@@ -396,6 +414,16 @@ local AI = {
 		riserStuds = 1.5,
 		-- A ground probe looks this far below the root's centre (the hip height plus a fall).
 		probeStuds = 8,
+		-- The probe is a box this wide dropped straight down (RushWorld.groundBelow): a ray falls
+		-- through the seams between parts, a wider box finds a step's top before the spot is over
+		-- it. The riser rule (RushWorld.climbable) reads the ground riserBeforeStuds in front of the
+		-- face the root's box met (more than half the probe's box, so the probe never touches that
+		-- face), then sweeps a rail as wide as the root's box and as thick as the probe, just over
+		-- riserStuds above that ground, from there to riserPastStuds past the face: anything it
+		-- meets stands higher than a step.
+		probeBoxStuds = 0.1,
+		riserBeforeStuds = 0.25,
+		riserPastStuds = 0.5,
 		-- A wall meeting the line at less than this many degrees turns the rush along its face (a
 		-- scrape that keeps the charge's speed); at this or more the body slams into it, stops with
 		-- its snout on the face and is dazed. 30 glances, 45, 60 and 75 slam.
@@ -498,6 +526,15 @@ local AI = {
 			engageFraction = 0.8,
 			engageAngle = 45,
 			stopDistance = 3.5,
+			-- Wheeling (D-598): more than wheelAngle off its target the Brute walks along its facing
+			-- at wheelSpeedMultiplier of its pace while it turns (a turning circle of moveSpeed * 0.5 /
+			-- turnRate, 1.8 studs for the kobold), so a walk whose feet step along the facing carries
+			-- it round. Within wheelAngle it walks straight at the target: its feet slide by
+			-- 2 sin(wheelAngle / 2) of its pace a frame as it comes out of the wheel, within
+			-- footSlideStuds a 60 Hz frame, and the wheel's pace keeps the walk alone (stride.rateFloor
+			-- of the rig's walkSpeed; tools/validators/ai.luau checks both).
+			wheelAngle = 20,
+			wheelSpeedMultiplier = 0.5,
 		} :: BruteTuning,
 		-- The other seven archetypes land in Phase 1; until then they borrow the Brute's numbers.
 		Default = {

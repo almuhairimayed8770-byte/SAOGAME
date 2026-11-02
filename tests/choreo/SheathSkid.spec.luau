@@ -18,7 +18,9 @@
 
 	Each case runs dev.luau groundClearance.sheathSkid.settle seconds at the sprint in the start
 	state, flips the Drawn target (the combat tag running out, or a draw), lets the stick go
-	`stopAfter` seconds after the flip with the root stopping at once, and runs `seconds` more. The
+	`stopAfter` seconds after the flip with the root stopping evenly over each of `stopSeconds`
+	(0: at once; the owner's PC on c78acd1 stopped in about 0.03 s, and at 240 fps played the Skid
+	on 3 of 10 takes, D-612), and runs `seconds` more. The
 	tip is read in the root part's space (the camera follows the root): the chain the screen shows a
 	row later with the sword's place (D-555), whose step over its own frame time is the screen speed
 	D-545 reads. No step may move the tip faster than sheath.sheatheTipSpeed (the Sheathe) or
@@ -102,7 +104,7 @@ type Result = {
 	place: string?, -- the Weapon motor's Part0 at the end
 }
 
-local function run(drawing: boolean, stopAfter: number, hz: number): Result
+local function run(drawing: boolean, stopAfter: number, hz: number, stopSeconds: number): Result
 	local avatar = HitMatrix.standing(Harness)
 	local model = avatar.model
 	model:SetAttribute("Rig", "PlayerR15")
@@ -137,7 +139,10 @@ local function run(drawing: boolean, stopAfter: number, hz: number): Result
 		t += dt
 		local flipped = t > flipAt + 1e-9
 		local running = t <= stopAt + 1e-9
-		local speed = if running then Cases.speed else 0
+		local speed = Cases.speed
+		if not running then
+			speed = if stopSeconds <= 0 then 0 else math.max(0, Cases.speed * (1 - (t - stopAt) / stopSeconds))
+		end
 		travelled += Vector3.new(0, 0, -speed * dt)
 		local rootFrame = base * CFrame.new(travelled)
 		primary.CFrame = rootFrame
@@ -187,53 +192,60 @@ local function check(drawing: boolean)
 	local fastest, fastestCase, sharpest = 0, "", 0
 	local cases = 0
 	for _, hz in Cases.stepHz do
-		for _, stopAfter in Cases.stopAfter do
-			local result = run(drawing, stopAfter, hz)
-			cases += 1
-			local case = ("%s, %g Hz, the stick let go %+.2f s after the flip"):format(name, hz, stopAfter)
-			if result.tip > fastest then
-				fastest, fastestCase = result.tip, case
-			end
-			sharpest = math.max(sharpest, result.turn)
-			if not result.skid then
-				table.insert(problems, ("%s: no Skid played"):format(case))
-			end
-			if result.tip > tipLimit then
-				table.insert(
-					problems,
-					("%s: the tip moves %.1f studs/s at +%.3f s (limit %g)"):format(
-						case,
-						result.tip,
-						result.tipAt,
-						tipLimit
-					)
+		for _, stopSeconds in Cases.stopSeconds do
+			for _, stopAfter in Cases.stopAfter do
+				local result = run(drawing, stopAfter, hz, stopSeconds)
+				cases += 1
+				local case = ("%s, %g Hz, the stick let go %+.2f s after the flip, stopping over %g s"):format(
+					name,
+					hz,
+					stopAfter,
+					stopSeconds
 				)
-			end
-			if result.turn > Sheath.bladeTurnRate then
-				table.insert(
-					problems,
-					("%s: the blade turns %.0f degrees/s at +%.3f s (limit %g)"):format(
-						case,
-						result.turn,
-						result.turnAt,
-						Sheath.bladeTurnRate
+				if result.tip > fastest then
+					fastest, fastestCase = result.tip, case
+				end
+				sharpest = math.max(sharpest, result.turn)
+				if not result.skid then
+					table.insert(problems, ("%s: no Skid played"):format(case))
+				end
+				if result.tip > tipLimit then
+					table.insert(
+						problems,
+						("%s: the tip moves %.1f studs/s at +%.3f s (limit %g)"):format(
+							case,
+							result.tip,
+							result.tipAt,
+							tipLimit
+						)
 					)
-				)
-			end
-			local onBack = result.place ~= "RightHand"
-			if (wanted == "RightHand") == onBack then
-				table.insert(
-					problems,
-					("%s: the sword ends on %s, not %s"):format(
-						case,
-						tostring(result.place),
-						if drawing then "the hand" else "the back"
+				end
+				if result.turn > Sheath.bladeTurnRate then
+					table.insert(
+						problems,
+						("%s: the blade turns %.0f degrees/s at +%.3f s (limit %g)"):format(
+							case,
+							result.turn,
+							result.turnAt,
+							Sheath.bladeTurnRate
+						)
 					)
-				)
+				end
+				local onBack = result.place ~= "RightHand"
+				if (wanted == "RightHand") == onBack then
+					table.insert(
+						problems,
+						("%s: the sword ends on %s, not %s"):format(
+							case,
+							tostring(result.place),
+							if drawing then "the hand" else "the back"
+						)
+					)
+				end
 			end
 		end
 	end
-	expect(cases).toBe(#Cases.stepHz * #Cases.stopAfter)
+	expect(cases).toBe(#Cases.stepHz * #Cases.stopSeconds * #Cases.stopAfter)
 	print(
 		("  %s at a Skid: %d cases, the tip at most %.1f studs/s (%s), the blade at most %.0f degrees/s"):format(
 			name,

@@ -103,6 +103,10 @@ export type Gait = {
 export type State = {
 	phase: Phase,
 	previousSpeed: number,
+	-- The speed the Skid's drop is read from (D-612): the highest speed of the last updates,
+	-- falling at stopSpeedDrop / stopDropSeconds.
+	dropFrom: number,
+	dropping: boolean, -- the last update read a Skid's drop (one Skid a drop)
 	stopTimer: number,
 	turnTimer: number,
 	turnAccumulated: number, -- degrees of yaw turned while standing since the last turn clip
@@ -574,6 +578,8 @@ function LocomotionState.new(): State
 	local self = setmetatable({
 		phase = "Idle",
 		previousSpeed = 0,
+		dropFrom = 0,
+		dropping = false,
 		stopTimer = 0,
 		turnTimer = 0,
 		turnAccumulated = 0,
@@ -610,6 +616,8 @@ function LocomotionState.update(self: any, dt: number, input: Input): Output
 		self.phase = "Air"
 		self.wasGrounded = false
 		self.previousSpeed = speed
+		self.dropFrom = speed
+		self.dropping = false
 		-- Keep the gait weights alive underneath so the landing blends back into motion.
 		if moving then
 			moveWeights(self, weights, speed, input, dt)
@@ -639,10 +647,19 @@ function LocomotionState.update(self: any, dt: number, input: Input): Output
 
 	-- Stop detection: a sharp drop in speed from above the skid threshold plays Skid (a skid is
 	-- meant to slide: the root stops under it). Below the threshold the root slows down by itself
-	-- (CharacterController's two-step stop), so the gait simply follows the speed.
-	local dropped = self.previousSpeed - speed
+	-- (CharacterController's two-step stop), so the gait simply follows the speed. The drop is
+	-- read against dropFrom, which falls at stopSpeedDrop / stopDropSeconds (D-612): at 60 Hz
+	-- that is a drop of more than stopSpeedDrop in one update, and at any rate a fall faster
+	-- than that, so a stop skids alike at 60 and 240 fps. A drop read over several updates plays
+	-- one Skid.
+	local from = self.dropFrom
+	local allowed = Config.stopSpeedDrop * dt / Config.stopDropSeconds
+	self.dropFrom = math.max(speed, from - allowed)
+	local dropping = moving and from - speed > allowed and from > Config.skidSpeedThreshold
+	local wasDropping = self.dropping
+	self.dropping = dropping
 	if moving then
-		if dropped > Config.stopSpeedDrop and self.previousSpeed > Config.skidSpeedThreshold then
+		if dropping and not wasDropping then
 			oneShot = oneShot or "Skid"
 		end
 		self.phase = "Move"

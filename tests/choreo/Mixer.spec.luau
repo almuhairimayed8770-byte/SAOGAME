@@ -571,6 +571,42 @@ describe("Mixer", function()
 		mixer:setProcedural("lean", nil)
 		expect(mixer:step(FRAME).offsets.Waist).toBeNil()
 	end)
+
+	-- AR 513 (D-615): the turn plant's lag yaws the root joint; the hips' own offset (a stance's
+	-- weight shift) must turn round the root's axis with it, or it rides the turning root.
+	it("a channel's yaw on the root joint turns the root joint's position with it, held through a hit-stop", function()
+		local stance = clip("stance", {
+			layer = "Base",
+			loop = true,
+			keys = {
+				{ time = 0, easing = "Hold", joints = { Root = { pos = { 0.08, -0.15, 0.06 }, rot = { 0, 0, 2 } } } },
+			},
+		})
+		local mixer = Mixer.new()
+		mixer:play(stance, { coexist = true })
+		mixer:setProcedural("turnPlant", { Root = { pos = { 0, 0, 0 }, rot = { 0, 90, 0 } } }, 1)
+		mixer:setProcedural("standHeight", { Root = { pos = { 0, 0.2, 0 }, rot = { 0, 0, 0 } } }, 1)
+		local root = mixer:step(FRAME).offsets.Root
+		-- Turned +90 about the vertical (left): x' = x cos + z sin, z' = z cos - x sin.
+		expect(root.pos[1]).toBeCloseTo(0.06)
+		expect(root.pos[2]).toBeCloseTo(0.05)
+		expect(root.pos[3]).toBeCloseTo(-0.08)
+		expect(root.rot[2]).toBeCloseTo(90)
+		expect(root.rot[3]).toBeCloseTo(2)
+		expect(stance.keys[1].joints.Root.pos[1]).toBe(0.08)
+		-- A hit-stop holds the channel as the last moving frame showed it, the turn with it.
+		mixer:hitStop(3)
+		mixer:setProcedural("turnPlant", nil)
+		local held = mixer:step(FRAME).offsets.Root
+		expect(held.pos[1]).toBeCloseTo(0.06)
+		expect(held.pos[3]).toBeCloseTo(-0.08)
+		-- A channel with no root yaw leaves the position where the layers put it.
+		mixer:step(FRAME * 4)
+		local plain = mixer:step(FRAME).offsets.Root
+		expect(plain.pos[1]).toBeCloseTo(0.08)
+		expect(plain.pos[3]).toBeCloseTo(0.06)
+		expect(plain.rot[2]).toBeCloseTo(0)
+	end)
 end)
 
 -- ------------------------------------------------------------------------------------------

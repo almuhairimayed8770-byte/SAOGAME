@@ -8,7 +8,9 @@
 	empty in Phase 0). Bottom-center: the equipped Arts with their keys, fading after 5 s idle.
 	A low-HP screen-edge tint ramps in below a quarter HP. The SWITCH prompt sits over the target
 	for the Switch window, over its drawn body (choreo/DrawnBody, D-193) when a rush draws it ahead
-	of its hidden root. `bindLocal(entityId)` reads the EntityTracker record and follows its
+	of its hidden root; it is put on the target's root part every frame once the rig has one, as
+	the nameplates are (D-571, D-583), so a window opened before the root part replicated never
+	leaves it on the Model. `bindLocal(entityId)` reads the EntityTracker record and follows its
 	attribute changes.
 
 	The HUD's ScreenGui sits inside the engine's safe area (ui.hud.screenInsets, D-148), so the
@@ -75,6 +77,7 @@ local flashStart: number? = nil
 local artIdleSince = 0
 local switchStart: number? = nil
 local switchDuration = 0
+local switchTarget: Instance? = nil -- the rig SWITCH is over, re-read for its root part each frame
 local colorblindMode = false
 local uiScale = UI.scale.default
 local telegraphLevel = UI.hud.telegraphIntensity.default
@@ -85,6 +88,15 @@ local started = false
 -- The SWITCH billboard's height over its target's root part.
 local function switchLift(): Vector3
 	return Vector3.new(0, UI.hud.switchPrompt.heightStuds, 0)
+end
+
+-- Where SWITCH is adorned over `target`: its rig's root part when the rig has one, else the target.
+local function switchAdornee(target: Instance): Instance
+	local root: Instance? = nil
+	pcall(function()
+		root = (target :: any).PrimaryPart
+	end)
+	return root or target
 end
 
 local function color(token: string): Color3
@@ -452,12 +464,17 @@ local function stepLoop(dt: number)
 		ui.switchCaller.TextTransparency = transparency
 		if transparency >= 1 then
 			switchStart = nil
+			switchTarget = nil
 			ui.switchBillboard.Enabled = false
 			DrawnBody.unfollow(ui.switchBillboard, switchLift())
 			pcall(function()
 				ui.switchBillboard.Adornee = nil
 			end)
 			ui.switchLabel.Parent = ui.gui
+		elseif switchTarget ~= nil then
+			-- A target shown before its root part replicated goes onto it (D-583), through DrawnBody
+			-- so SWITCH on a rush's Torso stays over the drawn body until the hand-back.
+			DrawnBody.adorn(ui.switchBillboard, switchAdornee(switchTarget))
 		end
 	end
 end
@@ -627,13 +644,8 @@ function Hud.showSwitchPrompt(duration: number?, target: Instance?, callerName: 
 	ui.switchCaller.Text = callerName or ""
 	ui.switchLabel.TextTransparency = 0
 	ui.switchCaller.TextTransparency = if callerName ~= nil then 0 else 1
-	local adornee: Instance? = nil
-	if target ~= nil then
-		pcall(function()
-			adornee = (target :: any).PrimaryPart
-		end)
-		adornee = adornee or target
-	end
+	local adornee: Instance? = if target ~= nil then switchAdornee(target) else nil
+	switchTarget = target
 	if adornee ~= nil then
 		ui.switchBillboard.Adornee = adornee
 		DrawnBody.follow(ui.switchBillboard, target, switchLift())

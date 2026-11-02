@@ -1,0 +1,797 @@
+--!strict
+--[[
+	Item 492(a) (D-604): the Art's activation hold is the tell, so the body holds still through it.
+	The PC's boar1 (Vertical at the boar held 3.8 studs ahead, 60 fps) stepped the root 0.051,
+	0.049, 0.044, 0.036, 0.029, 0.027 on rows L+21 to L+26, while the pose stood still in the
+	root's frame: the plan's step back ran on QuadOut from the release's clip time to the first
+	window's open, through the authored hold (0.15 to 0.25). Two parts of the plan do that:
+
+	- the Art's blade step (fix F1), when the start pose's blade does not clear the target;
+	- the reach's step for the first strike (D-424), when the blade would stand too deep at its key
+	  (the capture's kobold staged 3.5 ahead: 0.65 studs back on Vertical).
+
+	Both now wait for the hold's end (the clip's ActivationHold time plus its data.hold) and are
+	done by the open; a step too long to take there within keepOut.maxSpeedStudsPerSecond starts as
+	late before it as that speed allows (ContactPredictor.stepStart), and the blade step's first
+	move shows with the pose that leaves the hold (D-496's hold-back).
+
+	The path: a fresh copy of the real CharacterController (CharacterController.spec's harness,
+	trimmed to an Art) with a real Choreo playing the real Vertical clip on a real rig, on the spec's
+	clock at 30, 60 and 144 fps; its ContactPredictor.standOff answers with the real plan
+	(ContactPredictor.standOff with the options the controller asked) on the hit matrix's avatar and
+	a real kobold rig with its blocker. A row is what item 397's logger reads at Last+2: the root
+	after the frame's render step, and the clip the frame before stepped to (the pose drawn, D-342).
+
+	With a lock the press plans the held start pose's keep-out first (D-606): the body steps
+	back as the stance forms, and the release plans the swing from where it then stands. The kobold
+	stands still in the world, so each plan is the real one for where the root stands when it is
+	asked; the root starts on the map, not at the world's origin, as on any real place. A drawn
+	clock summed to the hold's end lands a hair past it (0.25 + 6e-17 at 144 fps): the hold-back
+	reads it as the hold within combat.contact.keyEpsilon (D-616).
+]]
+
+local fs = require("@lune/fs")
+local luau = require("@lune/luau")
+
+local Signal = Harness.load("src/shared/util/Signal")
+local Siblings = Harness.load("src/client/controllers/Siblings")
+local AimLogic = Harness.load("src/client/controllers/AimLogic")
+local Combat = Harness.load("src/shared/data/combat")
+local Enemies = Harness.load("src/shared/data/enemies")
+local Rigs = Harness.load("src/shared/data/rigs")
+local World = Harness.load("src/shared/data/world")
+local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
+local Pose = Harness.load("src/shared/choreo/Pose")
+local RigBuilder = Harness.load("src/server/world/RigBuilder")
+local PlaygroundLayout = Harness.load("src/server/world/PlaygroundLayout")
+local RealContactPredictor = Harness.load("src/client/controllers/ContactPredictor")
+
+local CONTROLLER_PATH = "src/client/controllers/CharacterController"
+local CHOREO_PATH = "src/client/choreo/Choreo"
+local MOVE_INPUT_PATH = "src/client/controllers/MoveInput"
+local PHYSICS = 1 / 60 -- the fake physics' step (the root never walks here)
+local SPEED: number = Combat.contact.standOff.keepOut.maxSpeedStudsPerSecond
+local VERTICAL = "player/OneHandedSword/Vertical"
+
+local root = Harness.repoRoot()
+-- Where the controller's root stands when the spec starts, facing -Z as the avatar's base: off the
+-- world's origin, as on any real place (a float position at the origin keeps a 1e-16 step that
+-- one anywhere else drops), and near it, so the rows' float positions still read to 1e-7.
+local START = CFrame.new(1.3, 0.6, -1.7)
+
+local function loadTool(path: string): any
+	local source = fs.readFile(root .. "/" .. path .. ".luau")
+	local env = {
+		require = function(target: string): any
+			assert(target:sub(1, 6) == "@lune/", "HitMatrix may require only Lune libraries")
+			return require(target)
+		end,
+	}
+	return luau.load(source, { debugName = path, environment = env :: any })()
+end
+
+local HitMatrix = loadTool("tools/hitmatrix/HitMatrix")
+local avatar = HitMatrix.standing(Harness)
+
+-- A kobold's rig in its rest pose with its blocker (D-198), `distance` studs from the hit matrix's
+-- avatar at `bearing` degrees off its facing (+ = to its right), turned `yaw` off facing it.
+local function kobold(bearing: number, yaw: number, distance: number): any
+	local def = Enemies.byId("KoboldAxeman")
+	local model = RigBuilder.build(def.skin)
+	local height =
+		PlaygroundLayout.rootHeight(Rigs[def.skin].hipHeight, model.PrimaryPart.Size.Y, World.spawn.groundEpsilon)
+	local turn = math.rad(bearing)
+	local frame = avatar.base
+		* CFrame.new(math.sin(turn) * distance, height - avatar.rootHeight, -math.cos(turn) * distance)
+		* CFrame.Angles(0, math.pi - turn + math.rad(yaw), 0)
+	for name, solved in Pose.solve(model, frame, {}) do
+		local part = model:FindFirstChild(name)
+		if part ~= nil and part:IsA("BasePart") then
+			part.CFrame = solved
+		end
+	end
+	assert(RigBuilder.addBlocker(model) ~= nil, "no blocker for the kobold")
+	return model
+end
+
+-- A fresh copy of Choreo (its own registry and frame loops) whose RunService is `runService`.
+local function freshChoreo(runService: any): any
+	local env = Harness.environment()
+	env.script = Harness.node(CHOREO_PATH)
+	env.require = function(target: any): any
+		return Harness.loadModule(target)
+	end
+	env.game = {
+		GetService = function(_self: any, name: string): any
+			if name == "RunService" then
+				return runService
+			end
+			return Harness.game():GetService(name)
+		end,
+	}
+	return luau.load(Harness.readFile(CHOREO_PATH .. ".luau"), { debugName = CHOREO_PATH, environment = env :: any })()
+end
+
+-- A fresh copy of MoveInput (its own bound control module).
+local function freshMoveInput(): any
+	local env = Harness.environment()
+	env.script = Harness.node(MOVE_INPUT_PATH)
+	env.require = function(target: any): any
+		return Harness.loadModule(target)
+	end
+	return luau.load(
+		Harness.readFile(MOVE_INPUT_PATH .. ".luau"),
+		{ debugName = MOVE_INPUT_PATH, environment = env :: any }
+	)()
+end
+
+-- A PlayerR15 rig model: one Part per rig part, one Motor6D per joint (as tests/choreo/Choreo.spec).
+local function buildPlayerRig(): any
+	local model = Instance.new("Model")
+	model.Name = "PlayerR15"
+	model:SetAttribute("Rig", "PlayerR15")
+	local parts: { [string]: any } = {}
+	local function part(name: string): any
+		local existing = parts[name]
+		if existing then
+			return existing
+		end
+		local created = Instance.new("Part")
+		created.Name = name
+		created.Position = Vector3.zero
+		created.Parent = model
+		parts[name] = created
+		return created
+	end
+	for _, joint in Rigs.PlayerR15.joints do
+		part(joint.part0)
+		local motor = Instance.new("Motor6D")
+		motor.Name = joint.name
+		motor.Parent = part(joint.part1)
+	end
+	model.PrimaryPart = parts.HumanoidRootPart
+	return model
+end
+
+type Rig = {
+	controller: any,
+	root: any,
+	animator: any,
+	-- One rendered frame `dt` long, the stick at rest.
+	frame: (dt: number) -> (),
+	-- Locks an enemy standing at `position`.
+	setLock: (position: Vector3) -> (),
+	-- With no lock, the soft assist's pick: an enemy standing at `position` (no stance plan, D-606).
+	setAssist: (position: Vector3) -> (),
+	-- What the controller asked ContactPredictor.standOff for a swing, and the plan it was handed.
+	asked: { { from: number, root: CFrame, options: any, plan: any } },
+	-- The held start pose's asks at the press (options.stance, D-606), kept apart from the swing's.
+	stances: { { from: number, root: CFrame, options: any, plan: any } },
+}
+
+-- The controller on a real Choreo; its ContactPredictor.standOff hands back the real plan against
+-- `target` for the hit matrix's avatar standing where the controller's root stands when it asks:
+-- the controller's world is the avatar's, START on the avatar's base (the kobold stands still in
+-- it, so a plan asked after the stance's step back sees that step).
+local function load(target: any): Rig
+	local clock = 0
+	local step: ((dt: number) -> ())? = nil
+	local props: { [string]: any } = {
+		WalkSpeed = 16,
+		JumpPower = 0,
+		JumpHeight = 0,
+		AutoRotate = true,
+		MoveDirection = Vector3.zero,
+		FloorMaterial = Enum.Material.Grass,
+	}
+	function props.Move(self: any, direction: Vector3)
+		self.MoveDirection = if direction.Magnitude > 0 then direction.Unit else Vector3.zero
+	end
+	local humanoid: any = setmetatable({}, {
+		__index = props,
+		__newindex = function(_self: any, key: string, value: any)
+			props[key] = value
+		end,
+	})
+	local rootState: { [string]: any } = { CFrame = START, AssemblyLinearVelocity = Vector3.zero }
+	local rootPart: any = setmetatable({}, {
+		__index = function(_self: any, key: string): any
+			if key == "Position" then
+				return rootState.CFrame.Position
+			end
+			return rootState[key]
+		end,
+		__newindex = function(_self: any, key: string, value: any)
+			if key == "Position" then
+				rootState.CFrame = rootState.CFrame.Rotation + value
+			else
+				rootState[key] = value
+			end
+		end,
+	})
+	local lockRecord: any = nil
+	local assistRecord: any = nil
+	local model = {
+		WaitForChild = function(_self: any, name: string): any
+			return if name == "Humanoid" then humanoid else rootPart
+		end,
+		GetAttribute = function(): any
+			return nil
+		end,
+		GetAttributeChangedSignal = function(): any
+			return Signal.new()
+		end,
+	}
+	local locomotion = {
+		new = function(): any
+			return {
+				serverDrawn = function(): boolean
+					return false
+				end,
+				update = function() end,
+			}
+		end,
+	}
+	local targetController = {
+		current = function(): any
+			return lockRecord
+		end,
+		assistCandidates = function(): { any }
+			-- The pick straight ahead, as the lock is: the request's facing does not turn.
+			return if assistRecord ~= nil
+				then {
+					{
+						id = assistRecord.id,
+						distance = (assistRecord.model.PrimaryPart.Position - START.Position).Magnitude,
+						bearing = 0,
+					},
+				}
+				else {}
+		end,
+	}
+	local asked: { { from: number, root: CFrame, options: any, plan: any } } = {}
+	local stances: { { from: number, root: CFrame, options: any, plan: any } } = {}
+	local moveInput = freshMoveInput()
+	moveInput.bind({
+		controls = function(): any
+			return {
+				GetMoveVector = function(_self: any): Vector3
+					return Vector3.zero
+				end,
+			}
+		end,
+		camera = function(): CFrame?
+			return CFrame.identity
+		end,
+	})
+	local fakes: { [string]: any } = {
+		MoveInput = moveInput,
+		ContactPredictor = {
+			standOff = function(
+				_model: any,
+				clip: any,
+				from: number,
+				rootCFrame: CFrame,
+				_target: any,
+				_cast: any,
+				options: any
+			): any
+				local real = RealContactPredictor.standOff(
+					avatar.model,
+					clip,
+					from,
+					avatar.base * START:ToObjectSpace(rootCFrame),
+					target,
+					nil,
+					{
+						keepOut = options.keepOut,
+						step = options.step,
+						poseLag = options.poseLag,
+						stance = options.stance,
+					}
+				)
+				local function turned(vector: Vector3?): Vector3?
+					return if vector ~= nil
+						then START:VectorToWorldSpace(avatar.base:VectorToObjectSpace(vector))
+						else nil
+				end
+				local plan = if real ~= nil
+					then {
+						distance = real.distance,
+						away = turned(real.away),
+						from = real.from,
+						to = real.to,
+						keep = real.keep,
+						keepUntil = real.keepUntil,
+						side = turned(real.side),
+						keepSide = real.keepSide,
+						still = real.still,
+					}
+					else nil
+				table.insert(
+					if options.stance ~= nil then stances else asked,
+					{ from = from, root = rootCFrame, options = options, plan = plan }
+				)
+				return plan
+			end,
+			targetMotion = RealContactPredictor.targetMotion,
+			worldCast = function(): any
+				return function(): number?
+					return nil
+				end
+			end,
+			new = function(): any
+				return {
+					begin = function(): boolean
+						return true
+					end,
+					stop = function() end,
+					active = function(): boolean
+						return false
+					end,
+					step = function(): { any }
+						return {}
+					end,
+				}
+			end,
+		},
+		Net = {
+			client = function(): any
+				return { fire = function() end, on = function() end }
+			end,
+		},
+		EntityTracker = {
+			localRecord = function(): any
+				return nil
+			end,
+			get = function(id: number): any
+				return if assistRecord ~= nil and assistRecord.id == id then assistRecord else nil
+			end,
+			peekLocalId = function(): any
+				return nil
+			end,
+			changed = Signal.new(),
+			localChanged = Signal.new(),
+		},
+		Replication = {
+			rejected = Signal.new(),
+			hit = Signal.new(),
+			clipEvent = Signal.new(),
+			contact = function(): boolean
+				return true
+			end,
+			confirmedAlready = function(): boolean
+				return false
+			end,
+		},
+		CameraController = {
+			fovKick = function() end,
+			lockMove = function(direction: Vector3): Vector3
+				return direction
+			end,
+		},
+	}
+	local choreo: any = nil
+	fakes.Siblings = {
+		load = function(_parent: any, path: string): (any, boolean)
+			if path == "choreo.Locomotion" then
+				return locomotion, true
+			end
+			if path == "choreo.Choreo" then
+				return choreo, true
+			end
+			if path == "controllers.TargetController" then
+				return targetController, true
+			end
+			if path == "choreo.DrawnBody" then
+				return Harness.load("src/client/choreo/DrawnBody"), true
+			end
+			return Siblings.stub(), false
+		end,
+		call = Siblings.call,
+		stub = Siblings.stub,
+	}
+	local heartbeat = Signal.new()
+	local renderStepped = Signal.new()
+	local preSimulation = Signal.new()
+	local localPlayer = { CharacterAdded = Signal.new(), CharacterRemoving = Signal.new(), Character = model }
+	local services: { [string]: any } = {
+		RunService = {
+			BindToRenderStep = function(_self: any, _name: string, _priority: number, fn: (dt: number) -> ())
+				step = fn
+			end,
+			Heartbeat = heartbeat,
+			RenderStepped = renderStepped,
+			PreSimulation = preSimulation,
+			IsStudio = function(): boolean
+				return true
+			end,
+		},
+		Players = { LocalPlayer = localPlayer },
+		ReplicatedStorage = Harness.game():GetService("ReplicatedStorage"),
+	}
+	-- task.delay on the spec's clock, resumed after Heartbeat as the engine does.
+	local timers: { { at: number, fn: () -> () } } = {}
+	local function runTimers()
+		while true do
+			local due: number? = nil
+			for index, timer in timers do
+				if timer.at <= clock and (due == nil or timer.at < timers[due :: number].at) then
+					due = index
+				end
+			end
+			if due == nil then
+				return
+			end
+			local timer = table.remove(timers, due :: number)
+			if timer ~= nil then
+				timer.fn()
+			end
+		end
+	end
+	local realChoreo = freshChoreo(services.RunService)
+	realChoreo.configure({
+		now = function(): number
+			return clock
+		end,
+		cameraPosition = function(): Vector3?
+			return Vector3.zero
+		end,
+	})
+	local rigModel = buildPlayerRig()
+	local rigAnimator = realChoreo.get(rigModel)
+	rigAnimator.events:Connect(function(clipId: string, event: any, jumped: boolean)
+		fakes.Replication.clipEvent:Fire({ model = model }, clipId, event, jumped)
+	end)
+	choreo = {
+		get = function(): any
+			return rigAnimator
+		end,
+		setLocalModel = function(targetModel: any, ...: any)
+			realChoreo.setLocalModel(if targetModel ~= nil then rigModel else nil, ...)
+		end,
+		find = function(): any
+			return nil
+		end,
+		stepLocal = realChoreo.stepLocal,
+	}
+	local env = Harness.environment()
+	env.script = Harness.node(CONTROLLER_PATH)
+	env.require = function(module: any): any
+		return fakes[module.Name] or Harness.loadModule(module)
+	end
+	env.game = {
+		GetService = function(_self: any, name: string): any
+			return services[name]
+		end,
+	}
+	env.workspace = {
+		GetServerTimeNow = function(): number
+			return clock
+		end,
+		GetAttribute = function(): any
+			return nil
+		end,
+	}
+	env.os = {
+		clock = function(): number
+			return clock
+		end,
+	}
+	env.task = {
+		delay = function(seconds: number, fn: () -> ())
+			table.insert(timers, { at = clock + seconds, fn = fn })
+		end,
+	}
+	local controller = luau.load(
+		Harness.readFile(CONTROLLER_PATH .. ".luau"),
+		{ debugName = CONTROLLER_PATH, environment = env :: any }
+	)()
+	controller.start()
+	assert(step ~= nil, "the controller bound no render step")
+	return {
+		controller = controller,
+		root = rootPart,
+		animator = rigAnimator,
+		frame = function(dt: number)
+			clock += dt
+			humanoid:Move(Vector3.zero)
+			local runStep = step :: (dt: number) -> ()
+			runStep(dt)
+			renderStepped:Fire(dt)
+			preSimulation:Fire(PHYSICS)
+			heartbeat:Fire(PHYSICS)
+			runTimers()
+		end,
+		setLock = function(position: Vector3)
+			lockRecord = { id = 1, kind = "Enemy", state = "Idle", model = { PrimaryPart = { Position = position } } }
+		end,
+		setAssist = function(position: Vector3)
+			assistRecord = { id = 1, kind = "Enemy", state = "Idle", model = { PrimaryPart = { Position = position } } }
+		end,
+		asked = asked,
+		stances = stances,
+	}
+end
+
+-- One row as item 397's logger reads it at Last+2: the clip the frame stepped to, and the root.
+type Row = { clip: number, root: Vector3 }
+
+-- One Vertical cast: the rows from the release on, the swing's plan and the clip time it was
+-- released at; and from the press to the release, the stance's ask (nil with no lock), the rows
+-- and what the release call itself moved the root.
+type Cast = {
+	rows: { Row },
+	plan: any,
+	released: number,
+	stance: any,
+	held: { Row },
+	releaseStep: Vector3,
+}
+
+-- The clip time an Art clip's hold pose stands at: its ActivationHold's time.
+local function holdAt(clip: any): number
+	for _, event in clip.events do
+		if event.kind == "ActivationHold" then
+			return event.time
+		end
+	end
+	error("no ActivationHold")
+end
+
+-- Vertical cast at `fps` against `target`, at an enemy `ahead` studs in front of the root (where
+-- the controller faces), locked or (`locked` false) the soft assist's pick, held 0.2 s at its hold
+-- pose and released.
+local function cast(target: any, ahead: number, fps: number, locked: boolean): Cast
+	local rig = load(target)
+	local dt = 1 / fps
+	for _ = 1, 40 do
+		rig.frame(dt)
+	end
+	local enemyAt = START.Position + Vector3.new(0, 0, -ahead)
+	if locked then
+		rig.setLock(enemyAt)
+	else
+		rig.setAssist(enemyAt)
+	end
+	local slot = 2
+	local art = rig.controller.slots()[slot]
+	assert(art ~= nil and art.clip == VERTICAL, "quick slot 2 is Vertical")
+	local held: { Row } = { { clip = 0, root = rig.root.Position } }
+	rig.controller.beginArt(slot)
+	local handle = rig.animator.mixer:find(VERTICAL)
+	-- A held lock plans the stance at the press (D-606): one ask, keep-out alone, to the hold pose.
+	if locked then
+		assert(#rig.stances == 1, "the press at a lock asks for one stance plan")
+		local options = rig.stances[1].options
+		assert(options.stance == holdAt(handle.clip), "the stance is planned to the hold pose")
+		assert(options.step == false, "the stance plans no blade step")
+	else
+		assert(#rig.stances == 0, "an unlocked press asks for no stance plan")
+	end
+	assert(#rig.asked == 0, "the press asks for no swing plan")
+	local holdFrames = math.ceil(0.2 * fps)
+	for _ = 1, holdFrames do
+		rig.frame(dt)
+		table.insert(held, { clip = handle.time, root = rig.root.Position })
+	end
+	local released = handle.time
+	local before = rig.root.Position
+	rig.controller.releaseArt(slot, holdFrames * dt)
+	local releaseStep = rig.root.Position - before
+	assert(#rig.stances == (if locked then 1 else 0), "the release asks for no stance plan")
+	assert(#rig.asked == 1, "the release asks for one swing plan")
+	local rows: { Row } = { { clip = handle.time, root = rig.root.Position } }
+	while handle.time < 0.45 do
+		rig.frame(dt)
+		table.insert(rows, { clip = handle.time, root = rig.root.Position })
+	end
+	return {
+		rows = rows,
+		plan = rig.asked[1].plan,
+		released = released,
+		stance = rig.stances[1],
+		held = held,
+		releaseStep = releaseStep,
+	}
+end
+
+-- The clip time an Art clip's activation hold ends: its ActivationHold's time plus its data.hold.
+local function holdEnd(clip: any): number
+	for _, event in clip.events do
+		if event.kind == "ActivationHold" then
+			return event.time + event.data.hold
+		end
+	end
+	error("no ActivationHold")
+end
+
+local vertical = Harness.load("src/shared/clips/" .. VERTICAL)
+local HOLD_END = holdEnd(vertical)
+local OPEN = ClipSampler.hitWindows(vertical)[1].open
+
+-- Checks the rows of one cast against the plan's own step back at a clip time (`shownAt`: the blade
+-- step and the keep-out together): on every row that draws the clip up to the hold's end the root
+-- moves no more than `inHold` (0 for the blade step), none of the rows from there to the first
+-- row that draws the open or past it (at 30 fps no row draws 0.35 itself) moves faster than
+-- keepOut.maxSpeedStudsPerSecond, and on that row the root stands where the plan puts the pose it
+-- draws, all of `whole` back. Prints the rows (the report's before and after).
+local function judge(
+	label: string,
+	fps: number,
+	rows: { Row },
+	away: Vector3,
+	shownAt: (number) -> number,
+	whole: number,
+	inHold: number
+)
+	local held, moved = {}, {}
+	local start = rows[1].root
+	for index = 2, #rows do
+		local drawn = rows[index - 1].clip
+		local stepped = (rows[index].root - rows[index - 1].root):Dot(away)
+		if drawn <= HOLD_END + 1e-6 then
+			table.insert(held, ("%.3f"):format(stepped))
+			if math.abs(stepped) > inHold + 1e-6 then
+				error(
+					("%s at %d fps: the row drawing clip %.4f (in the hold, to %.2f) steps the root %.4f"):format(
+						label,
+						fps,
+						drawn,
+						HOLD_END,
+						stepped
+					)
+				)
+			end
+		else
+			table.insert(moved, ("%.3f"):format(stepped))
+			expect(stepped <= SPEED / fps + 1e-6).toBe(true)
+			if drawn >= OPEN - 1e-6 then
+				-- The row that draws the open: the root stands with its pose, the whole step back.
+				local back = (rows[index].root - start):Dot(away)
+				expect(back).toBeCloseTo(shownAt(drawn), 1e-4)
+				expect(back).toBeCloseTo(whole, 1e-3)
+				print(
+					("[492a] %s at %d fps: rows drawing to %.2f %s | to the open %s"):format(
+						label,
+						fps,
+						HOLD_END,
+						table.concat(held, " "),
+						table.concat(moved, " ")
+					)
+				)
+				return
+			end
+		end
+	end
+	error(("%s at %d fps: no row drew the open"):format(label, fps))
+end
+
+-- Checks the rows from the press to the release of a locked cast against its stance plan
+-- (D-606): no row steps toward the kobold or faster than keepOut.maxSpeedStudsPerSecond; from
+-- the first row whose clip stands frozen the root stands still (item 498(b)'s line, on the root at
+-- Character+1: the stance's step is done as it forms, and a plan that waits for no hold shows its
+-- moves on their own frames, D-617); by the release it stands all of the stance's keep-out back
+-- at the frozen clip time, no more and no less; and the release itself moves nothing. Prints the
+-- rows and returns the stance's whole step back.
+local function judgeStance(label: string, fps: number, c: Cast): number
+	local stance = c.stance.plan
+	expect(stance).never.toBeNil()
+	expect(stance.distance).toBe(0)
+	-- It waits for no hold: done by the hold pose, with no step and no reach (D-617).
+	expect(stance.still).toBeNil()
+	local frozen = c.released
+	local steps = {}
+	for index = 2, #c.held do
+		local stepped = c.held[index].root - c.held[index - 1].root
+		local along = stepped:Dot(stance.away)
+		table.insert(steps, ("%.3f"):format(along))
+		expect(along >= -1e-6).toBe(true)
+		expect(stepped.Magnitude <= SPEED / fps + 1e-6).toBe(true)
+		if c.held[index].clip >= frozen - 1e-9 and stepped.Magnitude > 1e-6 then
+			error(
+				("%s at %d fps: a held row whose clip stands frozen at %.4f steps the root %.4f"):format(
+					label,
+					fps,
+					c.held[index].clip,
+					stepped.Magnitude
+				)
+			)
+		end
+	end
+	local whole = stance.away * stance.keep(frozen)
+		+ (
+			if stance.side ~= nil and stance.keepSide ~= nil
+				then stance.side * stance.keepSide(frozen)
+				else Vector3.zero
+		)
+	local shift = c.held[#c.held].root - c.held[1].root
+	expect((shift - whole).Magnitude <= 1e-4).toBe(true)
+	expect(c.releaseStep.Magnitude).toBe(0)
+	print(
+		("[498b] %s at %d fps: the press to the release (frozen at %.4f) %s, %.3f back"):format(
+			label,
+			fps,
+			frozen,
+			table.concat(steps, " "),
+			shift:Dot(stance.away)
+		)
+	)
+	return shift:Dot(stance.away)
+end
+
+-- The plan's own step back at a clip time: the blade step and the keep-out together.
+local function shownOf(plan: any): (number) -> number
+	return function(clipTime: number): number
+		return AimLogic.standOffAt(plan.distance, plan.from, plan.to, clipTime, Combat.contact.standOff.easing)
+			+ (if plan.keep ~= nil then plan.keep(clipTime) else 0)
+	end
+end
+
+describe("the Art stand-off waits for the activation hold (item 492(a), D-604)", function()
+	it("a blade step: the root stands still on every row that draws the hold, then steps to the open", function()
+		-- Lune's avatar meets an enemy with Vertical's start pose only behind its sword arm (the
+		-- raised blade over the right shoulder): a kobold there, 2.8 studs off, calls for a 0.30
+		-- step, the size the PC's boar1 rows add up to on the owner's larger avatar. Locked, the
+		-- stance's step back (0.43, D-606) already takes the blade clear of it, so this is the
+		-- soft assist's pick: no stance plan, and the release's plan steps 0.30.
+		local target = kobold(120, -30, 2.8)
+		for _, fps in { 30, 60, 144 } do
+			local c = cast(target, 2.8, fps, false)
+			local plan = c.plan
+			expect(plan).never.toBeNil()
+			expect(plan.distance).toBeCloseTo(0.3, 1e-6)
+			expect(plan.to).toBe(OPEN)
+			-- It waits for the hold's end: a 0.30 step from there to the open is under the speed.
+			expect(c.released < HOLD_END).toBe(true)
+			expect(plan.from).toBe(HOLD_END)
+			expect(plan.still).toBe(HOLD_END)
+			expect((c.held[#c.held].root - c.held[1].root).Magnitude).toBe(0)
+			expect(c.releaseStep.Magnitude).toBe(0)
+			judge("blade step 0.30", fps, c.rows, plan.away, shownOf(plan), plan.distance, 0)
+		end
+	end)
+
+	it("the reach (D-424) at the kobold the capture stages 3.5 ahead waits for the hold too", function()
+		local target = kobold(0, 0, 3.5)
+		for _, fps in { 30, 60, 144 } do
+			local c = cast(target, 3.5, fps, true)
+			-- The stance's hands clear the kobold 3.5 ahead: it plans no step back.
+			expect(judgeStance("reach 0.65", fps, c)).toBeCloseTo(0, 1e-6)
+			local plan = c.plan
+			expect(plan).never.toBeNil()
+			-- No blade step: the start pose clears the kobold; the reach holds the blade out at the key.
+			expect(plan.distance).toBe(0)
+			expect(plan.still).toBe(HOLD_END)
+			-- All of it by a plan sample past the open (the samples stand a 60 Hz frame apart from
+			-- the release).
+			local whole = plan.keep(OPEN + Combat.contact.standOff.keepOut.sampleSeconds)
+			expect(whole > 0.5).toBe(true)
+			-- Its 0.65 studs from the first 60 Hz sample past the hold's end to the snap need a hair
+			-- more than the speed covers in that sample at 144 fps (the plan's samples start at the
+			-- release, 0.1528 there), so the speed's lead starts it that hair sooner: under 0.002 a
+			-- row in the hold. 30 and 60 fps rows fall on the samples and read none of it.
+			judge("reach 0.65", fps, c.rows, plan.away, plan.keep, whole, if fps == 144 then 0.002 else 0)
+		end
+	end)
+
+	it("at a lock the stance steps back as it forms, the hold stands still, and the swing's step follows it", function()
+		-- D-606 with D-604: the blade step's kobold behind the sword arm, half a stud nearer
+		-- (2.3 off at 120 degrees, turned -30). The stance's hands reach it, so the body steps back as the stance forms and stands still from
+		-- the freeze; the release plans from where the root then stands (nothing of the stance's
+		-- step counted twice, nothing taken back), and the raised blade still meets the kobold from
+		-- there, so its 0.25 step waits for the hold's end like any other.
+		local target = kobold(120, -30, 2.3)
+		for _, fps in { 30, 60, 144 } do
+			local c = cast(target, 2.8, fps, true)
+			expect(judgeStance("stance, then blade step 0.25", fps, c) > 0.5).toBe(true)
+			local plan = c.plan
+			expect(plan).never.toBeNil()
+			expect(plan.distance).toBeCloseTo(0.25, 1e-6)
+			expect(plan.to).toBe(OPEN)
+			expect(plan.from).toBe(HOLD_END)
+			expect(plan.still).toBe(HOLD_END)
+			judge("stance, then blade step 0.25", fps, c.rows, plan.away, shownOf(plan), plan.distance, 0)
+		end
+	end)
+end)

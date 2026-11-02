@@ -509,7 +509,8 @@ local function checkSheathCover(ctx: Context, dev: any, problem: (message: strin
 end
 
 -- SheathSkid.spec.luau's cases (D-579): a sprint above the Skid's threshold, stopped at times
--- that reach past the Sheathe's start (sheath.sheatheDelay) into its swing.
+-- that reach past the Sheathe's start (sheath.sheatheDelay) into its swing, each stop fast enough
+-- to skid (D-612).
 local function checkSheathSkid(ctx: Context, dev: any, problem: (message: string) -> ())
 	local skid = dev.groundClearance and dev.groundClearance.sheathSkid
 	if typeof(skid) ~= "table" then
@@ -550,6 +551,229 @@ local function checkSheathSkid(ctx: Context, dev: any, problem: (message: string
 			if not isNumber(at) or (isNumber(skid.seconds) and at >= skid.seconds) then
 				problem(
 					("groundClearance.sheathSkid.stopAfter[%d] (%s) must be a number of seconds before the case ends"):format(
+						index,
+						tostring(at)
+					)
+				)
+			end
+		end
+	end
+	-- Each stop falls faster than the Skid's drop (D-612): its stop is the Skid's.
+	local skidFall = locomotion.stopSpeedDrop / locomotion.stopDropSeconds
+	if typeof(skid.stopSeconds) ~= "table" or #skid.stopSeconds == 0 then
+		problem("groundClearance.sheathSkid.stopSeconds must list at least one time")
+	else
+		for index, seconds in skid.stopSeconds do
+			local ok = isNumber(seconds)
+				and seconds >= 0
+				and (seconds == 0 or (isNumber(skid.speed) and skid.speed / seconds > skidFall))
+			if not ok then
+				problem(
+					("groundClearance.sheathSkid.stopSeconds[%d] (%s) must be 0 or seconds over which the sprint falls faster than the Skid's drop (%s studs a second each second)"):format(
+						index,
+						tostring(seconds),
+						tostring(skidFall)
+					)
+				)
+			end
+		end
+	end
+end
+
+-- DodgeTurn.spec.luau's cases (D-613): a turn far enough to play the turn clip
+-- (locomotion.turnInPlaceDegrees, at most half a turn), presses inside the turn, and a read that
+-- outlasts the longest dodge and its blend out.
+local function checkDodgeTurn(ctx: Context, dev: any, problem: (message: string) -> ())
+	local cases = dev.groundClearance and dev.groundClearance.dodgeTurn
+	if typeof(cases) ~= "table" then
+		problem("groundClearance.dodgeTurn must be a table (DodgeTurn.spec.luau's cases)")
+		return
+	end
+	local choreo = ctx.load("src/shared/data/choreo")
+	local locomotion = choreo.locomotion
+	if not isNumber(cases.settle) or cases.settle <= 0 then
+		problem("groundClearance.dodgeTurn.settle must be a number above 0")
+	end
+	if not isNumber(cases.degrees) or cases.degrees < locomotion.turnInPlaceDegrees or cases.degrees > 180 then
+		problem(
+			("groundClearance.dodgeTurn.degrees (%s) must be from locomotion.turnInPlaceDegrees (%s) to 180: a turn in place"):format(
+				tostring(cases.degrees),
+				tostring(locomotion.turnInPlaceDegrees)
+			)
+		)
+	end
+	if typeof(cases.pressAfter) ~= "table" or #cases.pressAfter == 0 then
+		problem("groundClearance.dodgeTurn.pressAfter must list at least one time")
+	else
+		for index, at in cases.pressAfter do
+			if not isNumber(at) or at <= 0 or at > 0.5 then
+				problem(
+					("groundClearance.dodgeTurn.pressAfter[%d] (%s) must be seconds above 0 and at most 0.5: inside the turn"):format(
+						index,
+						tostring(at)
+					)
+				)
+			end
+		end
+	end
+	local longest = 0
+	local prefix = locomotion.clipPrefix
+	for _, name in locomotion.dodgeHandOff.clips do
+		local ok, clip = pcall(ctx.load, "src/shared/clips/" .. tostring(prefix) .. tostring(name))
+		if ok and typeof(clip) == "table" and isNumber(clip.duration) then
+			longest = math.max(longest, clip.duration + (clip.blendOut or choreo.blendOut))
+		end
+	end
+	if not isNumber(cases.after) or cases.after <= longest then
+		problem(
+			("groundClearance.dodgeTurn.after (%s) must be longer than the longest dodge clip and its blend out (%s s)"):format(
+				tostring(cases.after),
+				tostring(longest)
+			)
+		)
+	end
+end
+
+-- SkidRate.spec.luau's cases (D-612): a sprint above the Skid's threshold, stops that fall
+-- faster than the Skid's drop (locomotion.stopSpeedDrop / stopDropSeconds; 0 is at once) and eased
+-- ones that fall slower, at step rates of 60 a second and up.
+local function checkSkidRate(ctx: Context, dev: any, problem: (message: string) -> ())
+	local cases = dev.groundClearance and dev.groundClearance.skidRate
+	if typeof(cases) ~= "table" then
+		problem("groundClearance.skidRate must be a table (SkidRate.spec.luau's cases)")
+		return
+	end
+	local locomotion = ctx.load("src/shared/data/choreo").locomotion
+	local skidFall = locomotion.stopSpeedDrop / locomotion.stopDropSeconds
+	if not isNumber(cases.settle) or cases.settle <= 0 then
+		problem("groundClearance.skidRate.settle must be a number above 0")
+	end
+	if not isNumber(cases.sprint) or cases.sprint <= locomotion.skidSpeedThreshold then
+		problem(
+			("groundClearance.skidRate.sprint (%s) must be above locomotion.skidSpeedThreshold (%s): a sprint"):format(
+				tostring(cases.sprint),
+				tostring(locomotion.skidSpeedThreshold)
+			)
+		)
+	end
+	if typeof(cases.stepHz) ~= "table" or #cases.stepHz == 0 then
+		problem("groundClearance.skidRate.stepHz must list at least one step rate")
+	else
+		for index, hz in cases.stepHz do
+			if not isWhole(hz) or hz < 60 then
+				problem(
+					("groundClearance.skidRate.stepHz[%d] must be a whole number of steps a second, at least 60"):format(
+						index
+					)
+				)
+			end
+		end
+	end
+	local sprint = if isNumber(cases.sprint) then cases.sprint else 0
+	for _, key in { "skidStops", "easedStops" } do
+		local list = cases[key]
+		if typeof(list) ~= "table" or #list == 0 then
+			problem(("groundClearance.skidRate.%s must list at least one time"):format(key))
+			continue
+		end
+		local skids = key == "skidStops"
+		for index, seconds in list do
+			local ok = isNumber(seconds) and seconds >= 0
+			if ok and skids then
+				ok = seconds == 0 or sprint / seconds > skidFall
+			elseif ok then
+				ok = seconds > 0 and sprint / seconds < skidFall
+			end
+			if not ok then
+				problem(
+					("groundClearance.skidRate.%s[%d] (%s) must be seconds over which the sprint falls %s than the Skid's drop (%s studs a second each second)"):format(
+						key,
+						index,
+						tostring(seconds),
+						if skids then "faster" else "slower",
+						tostring(skidFall)
+					)
+				)
+			end
+		end
+	end
+end
+
+-- SheathStop.spec.luau's cases (D-611): a sprint above the Skid's threshold eased off with no
+-- Skid (slower than the Skid's drop, locomotion.stopSpeedDrop / stopDropSeconds), and a run the
+-- two-step stop carries (above locomotion.idleSpeedThreshold, at most skidSpeedThreshold).
+local function checkSheathStop(ctx: Context, dev: any, problem: (message: string) -> ())
+	local cases = dev.groundClearance and dev.groundClearance.sheathStop
+	if typeof(cases) ~= "table" then
+		problem("groundClearance.sheathStop must be a table (SheathStop.spec.luau's cases)")
+		return
+	end
+	local locomotion = ctx.load("src/shared/data/choreo").locomotion
+	local skidFall = locomotion.stopSpeedDrop / locomotion.stopDropSeconds
+	for _, key in { "settle", "seconds" } do
+		if not isNumber(cases[key]) or cases[key] <= 0 then
+			problem(("groundClearance.sheathStop.%s must be a number above 0"):format(key))
+		end
+	end
+	if not isNumber(cases.sprint) or cases.sprint <= locomotion.skidSpeedThreshold then
+		problem(
+			("groundClearance.sheathStop.sprint (%s) must be above locomotion.skidSpeedThreshold (%s): a sprint"):format(
+				tostring(cases.sprint),
+				tostring(locomotion.skidSpeedThreshold)
+			)
+		)
+	end
+	if
+		not isNumber(cases.run)
+		or cases.run <= locomotion.idleSpeedThreshold
+		or cases.run > locomotion.skidSpeedThreshold
+	then
+		problem(
+			("groundClearance.sheathStop.run (%s) must be above locomotion.idleSpeedThreshold (%s) and at most skidSpeedThreshold (%s): the two-step stop carries it"):format(
+				tostring(cases.run),
+				tostring(locomotion.idleSpeedThreshold),
+				tostring(locomotion.skidSpeedThreshold)
+			)
+		)
+	end
+	if typeof(cases.stepHz) ~= "table" or #cases.stepHz == 0 then
+		problem("groundClearance.sheathStop.stepHz must list at least one step rate")
+	else
+		for index, hz in cases.stepHz do
+			if not isWhole(hz) or hz < 60 then
+				problem(
+					("groundClearance.sheathStop.stepHz[%d] must be a whole number of steps a second, at least 60"):format(
+						index
+					)
+				)
+			end
+		end
+	end
+	if typeof(cases.eases) ~= "table" or #cases.eases == 0 then
+		problem("groundClearance.sheathStop.eases must list at least one time")
+	else
+		for index, ease in cases.eases do
+			-- The sprint falls at sprint / ease studs a second, each second: slower than the
+			-- Skid's drop (D-612).
+			local fall = if isNumber(ease) and ease > 0 and isNumber(cases.sprint) then cases.sprint / ease else nil
+			if fall == nil or not (fall < skidFall) then
+				problem(
+					("groundClearance.sheathStop.eases[%d] (%s) must be seconds long enough that the sprint falls slower than the Skid's drop (locomotion.stopSpeedDrop / stopDropSeconds, %s studs a second each second): no Skid"):format(
+						index,
+						tostring(ease),
+						tostring(skidFall)
+					)
+				)
+			end
+		end
+	end
+	if typeof(cases.stopAfter) ~= "table" or #cases.stopAfter == 0 then
+		problem("groundClearance.sheathStop.stopAfter must list at least one time")
+	else
+		for index, at in cases.stopAfter do
+			if not isNumber(at) or at < 0 or (isNumber(cases.seconds) and at >= cases.seconds) then
+				problem(
+					("groundClearance.sheathStop.stopAfter[%d] (%s) must be seconds after the flip, before the case ends"):format(
 						index,
 						tostring(at)
 					)
@@ -619,6 +843,54 @@ local function checkDodgeSheath(ctx: Context, dev: any, problem: (message: strin
 				last = at
 			end
 		end
+	end
+end
+
+-- DodgeRun.spec.luau's cases (D-609, D-610): a run (not a sprint's Skid) held long enough to
+-- settle, whole points of the stride, a read that outlasts the dodge's blend out, and a slack of
+-- at most 2 degrees over the stride's own turn.
+local function checkDodgeRun(ctx: Context, dev: any, problem: (message: string) -> ())
+	local cases = dev.groundClearance and dev.groundClearance.dodgeRun
+	if typeof(cases) ~= "table" then
+		problem("groundClearance.dodgeRun must be a table (DodgeRun.spec.luau's cases)")
+		return
+	end
+	local choreo = ctx.load("src/shared/data/choreo")
+	if not isNumber(cases.settle) or cases.settle <= 0 then
+		problem("groundClearance.dodgeRun.settle must be a number above 0")
+	end
+	if not isNumber(cases.speed) or cases.speed <= 0 or cases.speed > choreo.locomotion.skidSpeedThreshold then
+		problem(
+			("groundClearance.dodgeRun.speed (%s) must be above 0 and at most locomotion.skidSpeedThreshold (%s): a run, not a sprint's Skid"):format(
+				tostring(cases.speed),
+				tostring(choreo.locomotion.skidSpeedThreshold)
+			)
+		)
+	end
+	if not isWhole(cases.points) or cases.points < 1 then
+		problem("groundClearance.dodgeRun.points must be a whole number of points of the stride, at least 1")
+	end
+	if not isNumber(cases.slack) or cases.slack < 0 or cases.slack > 2 then
+		problem("groundClearance.dodgeRun.slack must be a number of degrees from 0 to 2")
+	end
+	-- The read outlasts the longest dodge clip and its blend out.
+	local longest = 0
+	local prefix = choreo.locomotion.clipPrefix
+	for _, name in choreo.locomotion.dodgeHandOff.clips do
+		local ok, clip = pcall(ctx.load, "src/shared/clips/" .. tostring(prefix) .. tostring(name))
+		if ok and typeof(clip) == "table" and isNumber(clip.duration) then
+			longest = math.max(longest, clip.duration + (clip.blendOut or choreo.blendOut))
+		else
+			problem(("groundClearance.dodgeRun: the dodge clip %s could not be read"):format(tostring(name)))
+		end
+	end
+	if not isNumber(cases.after) or cases.after <= longest then
+		problem(
+			("groundClearance.dodgeRun.after (%s) must be longer than the longest dodge clip and its blend out (%s s)"):format(
+				tostring(cases.after),
+				tostring(longest)
+			)
+		)
 	end
 end
 
@@ -713,8 +985,10 @@ local function checkStandHeight(ctx: Context, dev: any, problem: (message: strin
 end
 
 -- LockTurnShown.spec.luau's bars (D-505, D-507): a planted foot's bars inside ClipAudit's own
--- (review.audit), the turns real lock turns, and a lead slack under a pop.
-local function checkLockTurn(dev: any, problem: (message: string) -> ())
+-- (review.audit), the turns real lock turns, and a lead slack under a pop. AR 513 (D-615): a
+-- row's bar inside the frame's, and the idle starts inside one cycle of the drawn idle.
+local IDLE_DRAWN_CLIP = "player/OneHandedSword/IdleDrawn"
+local function checkLockTurn(ctx: Context, dev: any, problem: (message: string) -> ())
 	local bar = dev.groundClearance and dev.groundClearance.lockTurn
 	if typeof(bar) ~= "table" then
 		problem("groundClearance.lockTurn must be a table (LockTurnShown.spec.luau's bars)")
@@ -744,6 +1018,32 @@ local function checkLockTurn(dev: any, problem: (message: string) -> ())
 		for index, degrees in bar.degrees do
 			if not isNumber(degrees) or degrees <= 0 or degrees > 180 then
 				problem(("groundClearance.lockTurn.degrees[%d] must be above 0 and at most 180"):format(index))
+			end
+		end
+	end
+	if
+		not isNumber(bar.rowStuds)
+		or bar.rowStuds <= 0
+		or (isNumber(bar.slideStuds) and bar.rowStuds > bar.slideStuds)
+	then
+		problem("groundClearance.lockTurn.rowStuds must be above 0 and at most slideStuds")
+	end
+	local loaded, idle = pcall(ctx.load, CLIPS .. IDLE_DRAWN_CLIP)
+	local cycle = if loaded and typeof(idle) == "table" and isNumber(idle.duration) then idle.duration else nil
+	if cycle == nil then
+		problem("groundClearance.lockTurn.idleStarts needs the clip " .. IDLE_DRAWN_CLIP)
+	elseif typeof(bar.idleStarts) ~= "table" or #bar.idleStarts == 0 then
+		problem("groundClearance.lockTurn.idleStarts must list at least one start")
+	else
+		for index, start in bar.idleStarts do
+			if not isNumber(start) or start < 0 or start > cycle then
+				problem(
+					("groundClearance.lockTurn.idleStarts[%d] must be 0 to %s seconds (one cycle of %s)"):format(
+						index,
+						tostring(cycle),
+						IDLE_DRAWN_CLIP
+					)
+				)
 			end
 		end
 	end
@@ -2485,8 +2785,12 @@ return function(ctx: Context): { string }
 	checkFrameCap(ctx, dev, problem)
 	checkSheathCover(ctx, dev, problem)
 	checkSheathSkid(ctx, dev, problem)
+	checkSheathStop(ctx, dev, problem)
+	checkSkidRate(ctx, dev, problem)
+	checkDodgeTurn(ctx, dev, problem)
 	checkDodgeSheath(ctx, dev, problem)
+	checkDodgeRun(ctx, dev, problem)
 	checkStandHeight(ctx, dev, problem)
-	checkLockTurn(dev, problem)
+	checkLockTurn(ctx, dev, problem)
 	return problems
 end

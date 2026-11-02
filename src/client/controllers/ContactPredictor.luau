@@ -132,21 +132,31 @@ type Sweep = {
 type Sample = { alpha: number, guard: Vector3, tip: Vector3 }
 
 --- The Art stand-off (fix F1, ContactPredictor.standOff): step the body `distance` studs along
---- `away` (flat, unit) between clip times `from` and `to` (AimLogic.standOffAt). `room`, when the
---- plan was made against the world: how far of a further `distance` the root at `rootCFrame` may
---- still step before the world (ContactPredictor.room), for the frames that take the step.
+--- `away` (flat, unit) between clip times `from` and `to` (AimLogic.standOffAt). `from` is where
+--- the step starts: the end of the clip's activation hold, or as much before it as the speed
+--- needs, never before the clip time the plan was made at (D-604); that clip time itself for a
+--- plan with no step. `room`, when the plan was made against the world: how far of a further
+--- `distance` the root at `rootCFrame` may still step before the world (ContactPredictor.room),
+--- for the frames that take the step.
 export type StandOff = {
 	distance: number,
 	away: Vector3,
 	from: number,
 	to: number,
-	-- With `clipTime` (the swing's clock as the step is taken; the plan's `from` when nil) the room
+	-- With `clipTime` (the swing's clock as the step is taken; the clip time the plan was made at when nil) the room
 	-- also keeps the gap for every pose the clip still has to show from then on (D-534).
 	room: ((rootCFrame: CFrame, distance: number, clipTime: number?) -> number)?,
 	-- The keep-out (D-314, StandOffOptions.keepOut): how much farther along `away` the body stands
 	-- at a clip time than the step above puts it, and the clip time past which that changes no more.
 	keep: ((clipTime: number) -> number)?,
 	keepUntil: number?,
+	-- The clip time the swing's activation hold ends when the plan was made before it (D-604): the
+	-- tell holds still, so the step and the reach's first step wait for it (as far as the speed
+	-- lets them), and a frame that still draws a pose at or before it shows the plan's move with the
+	-- pose that leaves it (CharacterController, D-496). Nil for a swing with no activation hold (a
+	-- basic) or one made past it, and for a held stance's plan (StandOffOptions.stance): it takes
+	-- no step and no reach and is done by the hold pose, so it waits for no hold (D-617).
+	still: number?,
 	-- And how far the keep-out holds the body aside at a clip time, along `side` (flat, unit, square
 	-- to `away`), off the face over a part the target holds (D-315); `roomSide` is `room` along it.
 	-- Nil when the target holds nothing the body stands beside.
@@ -171,6 +181,10 @@ export type StandOffOptions = {
 	-- keep-out holds the hands and arms, and the reach the blade, out of the body parts where the
 	-- target's clips carry them, not where they stood when the plan was made. Nil: as they stand.
 	target: TargetMotion?,
+	-- The held start pose of an Art (D-606): the keep-out only, up to this clip time (the pose
+	-- the hold freezes at), with no strike's reach and no blade: the body and its hands and arms
+	-- kept out of the target as the stance forms. Nil: the whole clip.
+	stance: number?,
 }
 
 --- A clip the target plays on through a swing, as its rig's mixer holds it when the plan is made:
@@ -227,10 +241,15 @@ local PROMISE: number = RADIUS - MAX_STEP / 2
 -- Samples of a damage window the stand-off checks the cut still reaches the body at.
 local REACH_SAMPLES: number = STAND_OFF.reachSamples
 local KEEP_OUT = STAND_OFF.keepOut
+-- The longest an Art's start pose stands frozen (the hold up to its cancel time, the release's
+-- wait inside it): how long a stance's plan keeps the hands out of a target that moves on (D-606).
+local HOLD_SECONDS: number = Combat.activationCancelTime
 -- How far the pose the screen draws runs behind the root, for a plan asked with no frame time: a
 -- root write shows on its own frame and a pose impact.luau poseLagFrames later (D-342), and the
 -- keep-out's samples stand a 60 Hz frame apart (D-535).
 local DEFAULT_POSE_LAG: number = KEEP_OUT.sampleSeconds * ImpactData.poseLagFrames
+-- The piece the body's speed is read over (item 285): a keep-out sample over keepOut.speedPieces.
+local SPEED_PIECE: number = KEEP_OUT.sampleSeconds / KEEP_OUT.speedPieces
 -- What the stand-off keeps between the root's box and the world (D-235 amended).
 local WALL_GAP: number = STAND_OFF.wallGapStuds
 local FIGHTER_FOLDERS: { string } = { World.playground.folders.enemies, World.playground.folders.entities }
@@ -792,6 +811,63 @@ local function swingChain(model: Model): BladeContact.Chain?
 	return { root = chain.root, links = links, start = chain.start, finish = chain.finish }
 end
 
+-- The Art's tell (section 7, Activation: the blade lit and a 0.1 s hold): the clip time a clip's
+-- first ActivationHold ends, its time plus its data.hold (combat.luau activationHold without one);
+-- nil for a clip with none (a basic swing).
+local function holdEndOf(clip: Types.ClipDef): number?
+	local first: Types.ClipEvent? = nil
+	for _, event in clip.events do
+		if event.kind == "ActivationHold" and (first == nil or event.time < (first :: Types.ClipEvent).time) then
+			first = event
+		end
+	end
+	if first == nil then
+		return nil
+	end
+	local data = first.data
+	local hold: number = if data ~= nil and typeof(data.hold) == "number" then data.hold else Combat.activationHold
+	return first.time + hold
+end
+
+-- The fastest the blade step `distance` moves the body when taken from clip time `start` to `to`
+-- on standOff.easing, read as the keep-out reads the body's speed (item 285): each SPEED_PIECE's
+-- move over its length.
+local function stepSpeed(distance: number, start: number, to: number): number
+	if to <= start then
+		return math.huge
+	end
+	local fastest, before, at = 0, 0, start
+	while at < to do
+		local after = AimLogic.standOffAt(distance, start, to, at + SPEED_PIECE, STAND_OFF.easing)
+		fastest = math.max(fastest, (after - before) / SPEED_PIECE)
+		before, at = after, at + SPEED_PIECE
+	end
+	return fastest
+end
+
+--- Where the Art's blade step of `distance` studs, due by clip time `to` (the first window's open),
+--- starts for a clip released at `from` (D-604; pure). The activation hold is the tell: the pose
+--- holds still with the blade lit, then the strike explodes out of it, so the step waits for the
+--- hold to end and the body moves with the strike's wind-up. A step too long to take from there
+--- within keepOut.maxSpeedStudsPerSecond starts as late before it as that speed allows (whole speed
+--- pieces back from the hold's end, or from `to` when the hold ends at or past it), never before
+--- `from`. `from` for a clip with no activation hold, one released past it, and a step that even
+--- `from` leaves faster than that (the longest it can take).
+function ContactPredictor.stepStart(clip: Types.ClipDef, from: number, to: number, distance: number): number
+	local holdEnd = holdEndOf(clip)
+	if holdEnd == nil or holdEnd <= from then
+		return from
+	end
+	local start = math.min(holdEnd, to)
+	while start > from do
+		if stepSpeed(distance, start, to) <= KEEP_OUT.maxSpeedStudsPerSecond then
+			return start
+		end
+		start -= SPEED_PIECE
+	end
+	return from
+end
+
 -- The Art's blade step (fix F1, ContactPredictor.standOff): the step along `away` that leaves the
 -- first cut's start pose clear of `parts`, nil for none (see standOff).
 local function bladeStep(
@@ -1204,7 +1280,7 @@ end
 type Strike = { key: number, start: number, ready: number, need: number?, aside: number }
 
 -- The keep-out (D-314) of a swing whose body stands at `rootCFrame` at clip time `from` and steps
--- `distance` along `away` by clip time `to` (the blade step): how much farther along `away` the
+-- `distance` along `away` from clip time `stepFrom` to `to` (the blade step, D-604): how much farther along `away` the
 -- body stands at each clip time, and how far aside, so that no colliding part goes deeper into the
 -- target's blocker (as its faces stood when the plan was made) than at `from`, and none deeper
 -- than depthEpsilon from the first cut's key on (item 286: a freeze holds no overlap). The body's face
@@ -1254,9 +1330,11 @@ local function keepOutOf(
 	away: Vector3,
 	distance: number,
 	to: number,
+	stepFrom: number,
 	hurt: { BasePart },
 	poseLag: number,
-	motion: TargetMotion?
+	motion: TargetMotion?,
+	stance: number?
 ): KeepOut?
 	-- The faces as they stand now: a frame, a size and whether it is over a held part, each.
 	local faceFrames: { CFrame } = {}
@@ -1321,9 +1399,11 @@ local function keepOutOf(
 	local bladeIndex = 0
 	local weaponIndex = 0
 	local strikes: { Strike } = {}
+	-- A stance (D-606) plans no strike: its clip ends at the hold pose.
+	local endTime = math.min(clip.duration, stance or math.huge)
 	if #hurtFrames > 0 then
 		reach = bodyParts(model, KEEP_OUT.limbs)
-		local blade = bladePart(model)
+		local blade = if stance == nil then bladePart(model) else nil
 		if blade ~= nil then
 			table.insert(reach, blade)
 			bladeIndex = #reach
@@ -1335,10 +1415,17 @@ local function keepOutOf(
 				weaponIndex = #reach
 			end
 		end
-		local last = from
+		-- An Art's first strike takes its step once the activation hold is over, as the blade step
+		-- does (D-604): from the first sample at or past the hold's end, so a frame between two
+		-- samples in the hold reads none of it (the speed's lead below starts a long one sooner).
+		local holdEnd = holdEndOf(clip)
+		local sample: number = KEEP_OUT.sampleSeconds
+		local last = if holdEnd ~= nil and holdEnd > from
+			then from + math.ceil((holdEnd - from) / sample - KEY_EPSILON) * sample
+			else from
 		for _, window in ClipSampler.hitWindows(clip) do
 			local key = ContactPredictor.strikeKey(clip, window)
-			if key > from + KEY_EPSILON then
+			if key > from + KEY_EPSILON and key <= endTime then
 				-- Where the strike's snap begins: the key before its own (the window's open for a
 				-- window with no snap); the step is taken before it, or through the snap when the
 				-- strike follows the one before with no anticipation between.
@@ -1491,7 +1578,7 @@ local function keepOutOf(
 	-- before (no earlier than `from`) on the root of `time`: what the screen draws then (D-535).
 	local function pose(time: number, into: { CFrame }?, reachInto: { CFrame }?, lag: number?)
 		local motion = ClipSampler.rootMotionAt(clip, time)
-		local stepped = AimLogic.standOffAt(distance, from, to, time, STAND_OFF.easing)
+		local stepped = AimLogic.standOffAt(distance, stepFrom, to, time, STAND_OFF.easing)
 		local rootFrame = rootCFrame * CFrame.new(motion[1] - start[1], motion[2] - start[2], motion[3] - start[3])
 			+ away * stepped
 		local offsets = ClipSampler.sample(clip, if lag ~= nil then math.max(time - lag, from) else time)
@@ -1790,7 +1877,7 @@ local function keepOutOf(
 		return best
 	end
 	local step: number = KEEP_OUT.sampleSeconds
-	local count = math.max(0, math.ceil((clip.duration - from) / step - 1e-6))
+	local count = math.max(0, math.ceil((endTime - from) / step - 1e-6))
 	-- back[k + 1], aside[k + 1]: the keep-out at sample k (clip time from + k * step); sample 0 is
 	-- the start.
 	local back: { number } = { 0 }
@@ -1904,8 +1991,8 @@ local function keepOutOf(
 				if drawn then
 					table.move(drawnNow, 1, #reach, 1, drawnBefore)
 				end
-				local time = math.min(from + k * step, clip.duration)
-				local previous = math.min(from + (k - 1) * step, clip.duration)
+				local time = math.min(from + k * step, endTime)
+				local previous = math.min(from + (k - 1) * step, endTime)
 				-- The sample whose sweep reaches the first key is the first held out.
 				allowed = if time >= firstKey - KEY_EPSILON then KEEP_OUT.depthEpsilon else startAllowed
 				pose(time, frames, if #reach > 0 then limbNow else nil)
@@ -2013,12 +2100,34 @@ local function keepOutOf(
 				-- so a frame shows it at its own clip time (the first frame never takes two samples
 				-- of it), and its sprint is counted from the sample before's.
 				if #strikes > 0 then
-					local span = previous - math.min(from + (k - 2) * step, clip.duration)
+					local span = previous - math.min(from + (k - 2) * step, endTime)
 					b = math.max(b, reachAt(previous, b, a, currentBack, span, math.max(a - currentAside, 0)))
 				end
 				-- And no hand or arm deeper in the body than it stood at the start, on any sample.
 				if #reach > 0 then
 					b = limbOut(b, if side ~= nil then side * a else Vector3.zero)
+				end
+				-- A stance stands still through its hold (D-606) while the target moves on: from
+				-- its last sample the hands are kept out of the target for as long as the pose can
+				-- stay frozen, the pose as that sample has it: the hold, up to
+				-- combat.activationCancelTime after the press, then the release's wait, as long as
+				-- the clip time it froze at (ActionLogic.syncPlan). The kobold's idle carried its
+				-- torso 0.009-0.015 studs onto a still Horizontal stance over a 0.4-1.0 s hold.
+				if stance ~= nil and k == count and moving and #reach > 0 then
+					local still: { { CFrame } } = { limbNow, limbNow }
+					local wasLimb, wasPieces, wasTarget = limbChain, pieces, targetChain
+					local wasDrawn, wasDrawnPieces, wasDrawnTarget = drawnChain, drawnPieces, drawnTargetChain
+					local stood = targetAt(time)
+					local holdStep: number = KEEP_OUT.stanceSampleSeconds
+					for j = 1, math.ceil((HOLD_SECONDS + time - from) / holdStep - 1e-6) do
+						local later = targetAt(time + j * holdStep)
+						limbChain, pieces, targetChain = still, 1, { stood, later }
+						drawnChain, drawnPieces, drawnTargetChain = still, 1, { stood, later }
+						b = limbOut(b, if side ~= nil then side * a else Vector3.zero)
+						stood = later
+					end
+					limbChain, pieces, targetChain = wasLimb, wasPieces, wasTarget
+					drawnChain, drawnPieces, drawnTargetChain = wasDrawn, wasDrawnPieces, wasDrawnTarget
 				end
 				-- Back and aside are square to each other: together with the step, one distance.
 				local backMost = math.sqrt(math.max(budget * budget - currentAside * currentAside, 0)) - distance
@@ -2054,7 +2163,7 @@ local function keepOutOf(
 		local motion = ClipSampler.rootMotionAt(clip, time)
 		local moved =
 			rootCFrame:VectorToWorldSpace(Vector3.new(motion[1] - start[1], motion[2] - start[2], motion[3] - start[3]))
-		local stepped = AimLogic.standOffAt(distance, from, to, time, STAND_OFF.easing)
+		local stepped = AimLogic.standOffAt(distance, stepFrom, to, time, STAND_OFF.easing)
 		return moved:Dot(away) + stepped, if side ~= nil then moved:Dot(side) else 0
 	end
 	local function roomOf(k: number): (number, number)
@@ -2062,8 +2171,8 @@ local function keepOutOf(
 		if known ~= nil then
 			return known, asideRoom[k]
 		end
-		local first = math.min(from + (k - 2) * step, clip.duration)
-		local last = math.min(from + (k - 1) * step, clip.duration)
+		local first = math.min(from + (k - 2) * step, endTime)
+		local last = math.min(from + (k - 1) * step, endTime)
 		-- The clip's fastest move back and aside over the stretch, in pieces.
 		local fastestBack, fastestAside = -math.huge, -math.huge
 		local wasBack, wasAside = carried(first)
@@ -2285,10 +2394,12 @@ end
 
 --- The Art stand-off (fix F1): a target already inside the blade's start pose for the first
 --- damage window would be cut before the swing moves (the review's "sword raised, pause, pop"), so
---- the body steps straight away from it over the anticipation, from clip time `from` (the hold
---- pose the Art is released from) to the window's open: the least multiple of standOff.stepStuds
+--- the body steps straight away from it over the anticipation, from the end of the clip's
+--- activation hold (D-604: the tell holds still; the plan's `from`, ContactPredictor.stepStart) to the
+--- window's open: the least multiple of standOff.stepStuds
 --- that leaves the start pose's blade standOff.clearStuds from every part of `target` it may
---- wound (BladeContact.hurtbox: not the weapon it holds), at most standOff.maxStuds. `rootCFrame` is the root at `from`, facing where the Art cuts; the
+--- wound (BladeContact.hurtbox: not the weapon it holds), at most standOff.maxStuds. `from` is the
+--- clip time the Art is released from (its hold pose) and `rootCFrame` the root then, facing where the Art cuts; the
 --- clip's own root motion carries it on to the open. Nil when the start pose already clears the
 --- body, when no step within maxStuds clears it, or when a window's cut that passed within the
 --- sweep's promise (the hit radius less half of sweepMaxTipStep) would then pass shallower: a
@@ -2306,7 +2417,8 @@ end
 --- it (posed lazily, a sample a frame as the clip gets there), and a plan comes back whenever the
 --- target has a blocker (`distance` 0 for a keep-out alone; `keep` may stay 0).
 --- `options.step` false plans no blade step (a basic swing). `options.target`: how the target
---- moves on through the swing (ContactPredictor.targetMotion, D-565).
+--- moves on through the swing (ContactPredictor.targetMotion, D-565). `options.stance`: an Art's
+--- held start pose up to that clip time, the keep-out alone (D-606).
 function ContactPredictor.standOff(
 	model: Model,
 	clip: Types.ClipDef,
@@ -2364,6 +2476,9 @@ function ContactPredictor.standOff(
 	local distance = if opts.step == false then nil else bladeStep(model, clip, from, rootCFrame, parts, away, room)
 	local window = ClipSampler.hitWindows(clip)[1]
 	local to = if distance ~= nil and window ~= nil then window.open else from
+	-- The step waits for the activation hold to end (D-604).
+	local stepFrom = if distance ~= nil then ContactPredictor.stepStart(clip, from, to, distance) else from
+	local holdEnd = holdEndOf(clip)
 	local keepOut = if opts.keepOut == true
 		then keepOutOf(
 			model,
@@ -2374,9 +2489,11 @@ function ContactPredictor.standOff(
 			away,
 			distance or 0,
 			to,
+			stepFrom,
 			parts,
 			math.max(opts.poseLag or DEFAULT_POSE_LAG, 0),
-			opts.target
+			opts.target,
+			opts.stance
 		)
 		else nil
 	if distance == nil and keepOut == nil then
@@ -2390,11 +2507,12 @@ function ContactPredictor.standOff(
 	return {
 		distance = distance or 0,
 		away = away,
-		from = from,
+		from = stepFrom,
 		to = to,
+		still = if holdEnd ~= nil and holdEnd > from and opts.stance == nil then holdEnd else nil,
 		room = room,
 		keep = if keepOut ~= nil then keepOut.keep else nil,
-		keepUntil = if keepOut ~= nil then clip.duration else nil,
+		keepUntil = if keepOut ~= nil then math.min(clip.duration, opts.stance or math.huge) else nil,
 		side = side,
 		keepSide = if keepOut ~= nil then keepOut.keepSide else nil,
 		roomSide = roomSide,

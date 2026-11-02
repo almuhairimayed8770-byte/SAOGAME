@@ -40,7 +40,23 @@
 	is (442, P1). Assumed: a state machine turned back on reads the floor again on its next step
 	(474(e) checks it). Also assumed, each for one case only: an engine that loses the first
 	SetStateEnabled made on a copy (never seen since 4b18b5c), and one whose state machine, turned
-	back on, lays the copy down on its next step (never seen).
+	back on, lays the copy down on its next step (seen since: 495 below).
+
+	The cases that take `Measured` run the engine the PC measured on 82b82d4 (item 495, the rescue
+	build: catchOnArrival false in a copy), where a frame starts with what the server's physics
+	replication brings, then PreSimulation, then physics:
+	- the hold's end lands before that frame's PreSimulation (495(b): EvaluateStateMachine reads
+	  true on R, the first row its root reads let go, on both takes);
+	- a state machine turned back on puts the copy in FallingDown on its first step with it on,
+	  held or let go, its fall states off (495(d): R on 2 of 2 takes; 495(i): the row the command
+	  bar turned it on, held), and a copy in a fall state reads FloorMaterial Air (R, 495(c));
+	- with it on and the root let go, the copy takes the server's state, Running, before the next
+	  PreSimulation (495(d): Running from R+1, and the read-back between never turned it off:
+	  EvaluateStateMachine true on 565 of 565 rows); with the root anchored nothing comes and the
+	  copy stays down (P1 L0 #8; 495(i): the read-back turned it off on the next row).
+	Assumed for one case each: that the server's state comes only on the frames a server step
+	lands (`packets`: a 60 Hz server on a 144 Hz client; Studio solo at 60 fps is every frame),
+	and an engine that keeps the copy down once turned back on (`staysDown`, never seen).
 ]]
 
 local EntityTracker = Harness.load("src/client/controllers/EntityTracker")
@@ -119,7 +135,21 @@ type Copy = {
 	reads: number, -- GetState calls
 	downOnResume: boolean, -- the other assumed engine (see the header)
 	layDown: boolean, -- that engine lays it down on its next step
+	measured: Measured?, -- the engine 495 measured (see the header)
+	turnedOn: boolean, -- that engine: turned back on, it falls on its next step
+	wasTurnedOn: boolean, -- it was turned back on at least once (for `staysDown`)
 }
+
+-- The engine the PC measured on 82b82d4 (header), and its two assumed variants.
+type Measured = {
+	packets: ((frame: number) -> boolean)?, -- frames the server's state lands on; nil: every frame
+	staysDown: boolean?, -- turned back on, the copy stays down whatever the server says
+}
+
+local FALLEN: { [string]: boolean } = {}
+for _, name in FALLS do
+	FALLEN[name] = true
+end
 
 type World = {
 	copies: { [Instance]: Copy },
@@ -132,7 +162,7 @@ type World = {
 	players: { [Instance]: boolean }, -- Players:GetPlayerFromCharacter
 }
 
-local function newCopy(loseFirstSet: boolean, root: BasePart, downOnResume: boolean?): Copy
+local function newCopy(loseFirstSet: boolean, root: BasePart, downOnResume: boolean?, measured: Measured?): Copy
 	local enabled: { [string]: boolean } = {}
 	for _, name in FALLS do
 		enabled[name] = true
@@ -157,6 +187,9 @@ local function newCopy(loseFirstSet: boolean, root: BasePart, downOnResume: bool
 		reads = 0,
 		downOnResume = downOnResume == true,
 		layDown = false,
+		measured = measured,
+		turnedOn = false,
+		wasTurnedOn = false,
 	}
 end
 
@@ -201,6 +234,10 @@ local function engineHumanoid(copy: Copy): any
 			table.insert(copy.machineWrites, value == true)
 			if value == true and not copy.evaluates and copy.downOnResume then
 				copy.layDown = true
+			end
+			if value == true and not copy.evaluates and copy.measured ~= nil then
+				copy.turnedOn = true -- 495(d), (i): its first step with it on falls
+				copy.wasTurnedOn = true
 			end
 			copy.evaluates = value == true
 		end,
@@ -259,7 +296,13 @@ local function enemy(
 	return model, humanoid
 end
 
-local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolean?, downOnResume: boolean?): World
+local function world(
+	withSeam: boolean,
+	onField: { Model },
+	loseFirstSet: boolean?,
+	downOnResume: boolean?,
+	measured: Measured?
+): World
 	EntityTracker.reset()
 	local copies: { [Instance]: Copy } = {}
 	local players: { [Instance]: boolean } = {}
@@ -272,7 +315,7 @@ local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolea
 	local function copyOf(humanoid: Instance): Copy
 		local copy = copies[humanoid]
 		if copy == nil then
-			copy = newCopy(loseFirstSet == true, rootOf(humanoid.Parent :: Model), downOnResume)
+			copy = newCopy(loseFirstSet == true, rootOf(humanoid.Parent :: Model), downOnResume, measured)
 			copies[humanoid] = copy
 		end
 		return copy
@@ -383,11 +426,11 @@ local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolea
 			end)
 		end
 		-- start()'s resume seam on the same copy: the real Replication.resumeModel (D-559).
-		deps.resumeUpright = function(model: Model): string?
+		deps.resumeUpright = function(model: Model, settling: boolean): string?
 			return Replication.resumeModel(model, function(body: Model): any
 				local humanoid = body:FindFirstChildOfClass("Humanoid")
 				return if humanoid ~= nil then engineHumanoid(copyOf(humanoid)) else nil
-			end)
+			end, settling)
 		end
 	end
 	Replication.bind(deps)
@@ -400,7 +443,16 @@ local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolea
 			local copy = copyOf(humanoid)
 			copy.stepped = true
 			-- P1 L1, L3: with its state machine off, physics leaves the copy's state where it is.
-			if copy.evaluates and copy.root.Anchored then
+			if copy.measured ~= nil then
+				if copy.evaluates and (copy.turnedOn or (copy.measured.staysDown and copy.wasTurnedOn)) then
+					-- 495(d), (i): the first step with the state machine back on falls, held or let go
+					copy.state = "FallingDown"
+					copy.turnedOn = false
+				elseif copy.evaluates and copy.root.Anchored and copy.state ~= "FallingDown" then
+					copy.state = if copy.enabled.FallingDown then "FallingDown" else "Running"
+				end
+				-- a let-go copy's state is the server's, which replication brings (frame)
+			elseif copy.evaluates and copy.root.Anchored then
 				-- An anchored copy falls on its step while FallingDown is on, and stays down: the
 				-- state machine never takes it out while the root stays anchored (P1 L4).
 				if copy.state ~= "FallingDown" then
@@ -413,8 +465,9 @@ local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolea
 				copy.state = "FallingDown" -- the assumed engine (header)
 				copy.layDown = false
 			end
-			-- 474(a): the state machine reads the field under it; 474(e): with it off, Air.
-			copy.floor = if copy.evaluates then FIELD else "Air"
+			-- 474(a): the state machine reads the field under it; 474(e): with it off, Air; 495(c):
+			-- Air on its fall row.
+			copy.floor = if copy.evaluates and not (copy.measured ~= nil and FALLEN[copy.state]) then FIELD else "Air"
 			(humanoid :: any).FloorMaterial = (Enum.Material :: any)[copy.floor]
 			if copy.root.Anchored then
 				copy.heldEvaluates = copy.evaluates
@@ -425,6 +478,20 @@ local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolea
 			end
 			if copy.state == "FallingDown" then
 				copy.fallingRows += 1
+			end
+		end
+	end
+	local frames = 0
+	-- 495: what the server's physics replication brings at a frame's start, before PreSimulation:
+	-- the server's state (Running) to a let-go copy whose state machine is on.
+	local function serverState()
+		frames += 1
+		if measured == nil or (measured.packets ~= nil and not measured.packets(frames)) then
+			return
+		end
+		for _, copy in copies do
+			if copy.evaluates and not copy.root.Anchored and not (measured.staysDown and copy.wasTurnedOn) then
+				copy.state = "Running"
 			end
 		end
 	end
@@ -444,6 +511,7 @@ local function world(withSeam: boolean, onField: { Model }, loseFirstSet: boolea
 			end
 		end,
 		frame = function(arriving: { () -> () }?)
+			serverState()
 			for _, fn in beforePhysics do
 				fn()
 			end
@@ -1134,20 +1202,21 @@ describe("A copy stood up with its state machine off gets it back at its release
 		expect(kobold:GetAttribute(NAMES.tries)).toBe(2)
 	end)
 
-	it("a copy the state machine lays down again is stood up with it off for good (D-544)", function()
-		-- The assumed engine (header): the step after the turn-on reads FallingDown; the next
-		-- PreSimulation reads it back, turns the state machine off and stands it up, and nothing
-		-- turns it on again. 318f0a3: never turned on (one write).
+	it("a copy the state machine lays down for the step after its turn-on rides it out (D-589)", function()
+		-- The once-assumed engine (header), since measured (495(d), (i) on 82b82d4): the step after
+		-- the turn-on reads FallingDown, the server's Running follows. The next PreSimulation's
+		-- read-back waits it out: the state machine stays on. 81b8fef: read back at once, the state
+		-- machine off for good (writes false, true, false) and Air with it on every row after.
 		withSwitches({ catchOnArrival = false }, function()
 			local w, kobold, rows = rescueWalk(true)
 			local copy = copyOf(w, kobold)
 			expect(rows[RELEASE + 1].state).toBe("FallingDown")
 			expect(rows[RELEASE + 1].evaluates).toBe(true)
 			expect(count(rows, RELEASE + 2, LAST, function(row)
-				return row.state == "Running" and not row.evaluates
+				return row.state == "Running" and row.evaluates and onField(row)
 			end)).toBe(WALK_ROWS - 2)
 			expect(copy.fallingRows).toBe(2)
-			expect(copy.machineWrites).toEqual({ false, true, false })
+			expect(copy.machineWrites).toEqual({ false, true })
 			expect(copy.state).toBe("Running")
 		end)
 	end)
@@ -1234,5 +1303,216 @@ describe("A copy stood up with its state machine off gets it back at its release
 			end
 			expect(copy.machineWrites).toEqual({ false })
 		end)
+	end)
+end)
+
+-- 495's take on this client (82b82d4's rescue build, catchOnArrival false), on the engine the PC
+-- measured there (`Measured`, header): rescueWalk's kobold held at spawn HELD_ROWS rows, `turnOnAt`
+-- (495(i)) the held row whose frame turns its state machine on from outside (the Client command
+-- bar, after that frame's PreSimulation), the hold's end landing before the next frame's
+-- PreSimulation (R = HELD_ROWS + 1), WALK_ROWS walking rows, then (`again`, actions 3) held
+-- HELD_ROWS rows more and let go for AFTER_ROWS.
+local function take495(measured: Measured, turnOnAt: number?, again: boolean?): (World, Model, { Row })
+	local w = world(true, {}, nil, nil, measured)
+	local kobold, humanoid = enemy(8, "Kobold", "KoboldAxeman", true, true, true)
+	local root = rootOf(kobold)
+	root.Position = root.CFrame.Position
+	root.AssemblyLinearVelocity = Vector3.zero;
+	(humanoid :: any).MoveDirection = Vector3.zero
+	local tracker = Locomotion.humanoidTracker(kobold)
+	local rows: { Row } = {}
+	local function log()
+		local copy = copyOf(w, kobold)
+		local state = tracker(1 / 60)
+		table.insert(rows, {
+			held = root.Anchored,
+			state = copy.state,
+			evaluates = copy.evaluates,
+			floor = copy.floor,
+			surface = SfxPool.surfaceOf(kobold),
+			grounded = state ~= nil and state.grounded == true,
+		})
+	end
+	w.frame({
+		function()
+			w.tag(kobold)
+		end,
+		function()
+			w.parent(humanoid, kobold)
+		end,
+	})
+	log()
+	for row = 2, HELD_ROWS do
+		w.frame(if row == turnOnAt
+			then {
+				function()
+					engineHumanoid(copyOf(w, kobold)).EvaluateStateMachine = true
+				end,
+			}
+			else nil)
+		log()
+	end
+	root.Anchored = false
+	for row = 1, WALK_ROWS do
+		if row > 1 then
+			root.CFrame += Vector3.new(0, 0, WALK_STEP)
+			root.Position = root.CFrame.Position
+			root.AssemblyLinearVelocity = Vector3.new(0, 0, WALK_STEP * 60)
+		end
+		w.frame()
+		log()
+	end
+	if again then
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.Anchored = true
+		for _ = 1, HELD_ROWS do
+			w.frame()
+			log()
+		end
+		root.Anchored = false
+		for _ = 1, AFTER_ROWS do
+			w.frame()
+			log()
+		end
+	end
+	return w, kobold, rows
+end
+
+-- A 60 Hz server's steps on a 144 Hz client: frame n brings the server's state when a step landed
+-- since frame n - 1 (60 of every 144 frames).
+local function serverAt144(n: number): boolean
+	return math.floor(n * 60 / 144) > math.floor((n - 1) * 60 / 144)
+end
+
+describe("The turn-on's own fall is waited out, held or let go (495 on 82b82d4, D-589)", function()
+	local R = HELD_ROWS + 1 -- the first row whose root reads let go
+	local LAST = HELD_ROWS + WALK_ROWS
+
+	it("the rescue build reads the PC's 495 rows on 82b82d4: one FallingDown row on R, then Running", function()
+		-- The fake against the PC (82b82d4, the rescue build at 60 fps): held rows Running with the
+		-- state machine off (204 of 204), R FallingDown with EvaluateStateMachine true, Anchored
+		-- false and Air, then Running, Grass and the state machine on every row (565 of 565) through
+		-- the walk, the second hold (204 of 204) and the rows after. Unchanged by D-589.
+		withSwitches({ catchOnArrival = false }, function()
+			local w, kobold, rows = take495({}, nil, true)
+			local copy = copyOf(w, kobold)
+			expect(count(rows, 2, HELD_ROWS, function(row)
+				return row.held and row.state == "Running" and not row.evaluates and row.floor == "Air"
+			end)).toBe(HELD_ROWS - 1)
+			expect(rows[R].held).toBe(false)
+			expect(rows[R].evaluates).toBe(true)
+			expect(rows[R].state).toBe("FallingDown")
+			expect(rows[R].floor).toBe("Air")
+			expect(count(rows, R + 1, #rows, function(row)
+				return row.evaluates and row.state == "Running" and onField(row)
+			end)).toBe(#rows - R)
+			expect(count(rows, LAST + 1, LAST + HELD_ROWS, function(row)
+				return row.held
+			end)).toBe(HELD_ROWS)
+			expect(copy.machineWrites).toEqual({ false, true })
+			expect(copy.fallingRows).toBe(2) -- the first held row (before the stand-up) and R
+			expect(kobold:GetAttribute(NAMES.state)).toBe(UPRIGHT.states.stoodUp)
+			expect(kobold:GetAttribute(NAMES.tries)).toBe(2)
+		end)
+	end)
+
+	it("a turn-on while held falls for its row, goes back off until the release, then comes back", function()
+		-- 495(i) on 82b82d4: the command bar's turn-on reads true with FallingDown on its row, then
+		-- false with Running and Air on every held row after (204 of 204). 81b8fef: that read-back
+		-- keeps it off for good, so after the release the walk reads Air, the stone footstep set
+		-- and the gait airborne on every row (0 of 299 on the field; machine writes false, true,
+		-- false); now 299 of 299, as a copy never turned on while held.
+		withSwitches({ catchOnArrival = false }, function()
+			local turnOnAt = 100
+			local w, kobold, rows = take495({}, turnOnAt)
+			local copy = copyOf(w, kobold)
+			expect(rows[turnOnAt].evaluates).toBe(true)
+			expect(rows[turnOnAt].state).toBe("FallingDown")
+			expect(count(rows, turnOnAt + 1, HELD_ROWS, function(row)
+				return row.held and row.state == "Running" and not row.evaluates and row.floor == "Air"
+			end)).toBe(HELD_ROWS - turnOnAt)
+			expect(rows[R].evaluates).toBe(true)
+			expect(count(rows, R + 1, LAST, function(row)
+				return row.evaluates and row.state == "Running" and onField(row)
+			end)).toBe(WALK_ROWS - 1)
+			-- the stand-up, the command bar, the read-back's turn-off while held, the release
+			expect(copy.machineWrites).toEqual({ false, true, false, true })
+		end)
+	end)
+
+	it("a let-go copy the server's state reaches a few frames late keeps its state machine (assumed engine)", function()
+		-- `packets`: a 60 Hz server on a 144 Hz client (header). The frames after R's bring no server
+		-- step, so the read-back meets the turn-on's fall: 81b8fef turned the state machine off for
+		-- good there (Air, stone footsteps and the gait airborne on every row after: 0 of 297 on
+		-- the field); now it waits for the copy's first Running (3 fall rows, then 297 of 297).
+		withSwitches({ catchOnArrival = false }, function()
+			expect(serverAt144(R + 1)).toBe(false)
+			expect(serverAt144(R + 2)).toBe(false)
+			expect(serverAt144(R + 3)).toBe(true)
+			local w, kobold, rows = take495({ packets = serverAt144 })
+			local copy = copyOf(w, kobold)
+			expect(count(rows, R, R + 2, function(row)
+				return row.state == "FallingDown" and row.evaluates
+			end)).toBe(3)
+			expect(count(rows, R + 3, LAST, function(row)
+				return row.evaluates and row.state == "Running" and onField(row)
+			end)).toBe(WALK_ROWS - 3)
+			expect(copy.machineWrites).toEqual({ false, true })
+		end)
+	end)
+
+	it("a copy kept down after its turn-on is stood up with it off for good after resumeSettleSteps (D-544)", function()
+		-- `staysDown` (assumed, never seen): every step with the state machine on lays it down
+		-- whatever the server says. The read-back waits resumeSettleSteps steps, then D-544's
+		-- stand-up for good. 81b8fef: the same end, one row after R.
+		withSwitches({ catchOnArrival = false }, function()
+			local settle = UPRIGHT.resumeSettleSteps
+			local w, kobold, rows = take495({ staysDown = true })
+			local copy = copyOf(w, kobold)
+			expect(count(rows, R, R + settle, function(row)
+				return row.state == "FallingDown" and row.evaluates
+			end)).toBe(settle + 1)
+			expect(count(rows, R + settle + 1, LAST, function(row)
+				return row.state == "Running" and not row.evaluates and row.floor == "Air"
+			end)).toBe(LAST - R - settle)
+			expect(copy.machineWrites).toEqual({ false, true, false })
+		end)
+	end)
+
+	it("resumeUpright waits out a let-go copy's fall while settling, and puts a held one back off", function()
+		local calls: { string } = {}
+		local copy = newCopy(false, Instance.new("Part"))
+		copy.state = "FallingDown"
+		local engine = engineHumanoid(copy)
+		local spy: any = setmetatable({}, {
+			__index = function(_, key: string): any
+				if key == "EvaluateStateMachine" then
+					return engine.EvaluateStateMachine
+				end
+				return function(_self: any, ...: any)
+					local args = { ... }
+					table.insert(calls, key .. (if args[1] ~= nil then " " .. args[1].Name else ""))
+					return engine[key](engine, ...)
+				end
+			end,
+			__newindex = function(_, property: string, value: any)
+				table.insert(calls, property .. " " .. tostring(value))
+				engine[property] = value
+			end,
+		})
+		local RESUME = Replication.RESUME
+		-- let go, the state machine on, in its turn-on's fall: read, nothing written
+		copy.root.Anchored = false
+		expect(Replication.resumeUpright(spy, copy.root, true)).toBe(RESUME.settling)
+		expect(table.concat(calls, ",")).toBe("GetState")
+		expect(copy.evaluates).toBe(true)
+		-- held, the state machine on, down (495(i)): D-544's stand-up, waiting for the release
+		copy.root.Anchored = true
+		expect(Replication.resumeUpright(spy, copy.root, true)).toBe(RESUME.heldOff)
+		expect(table.concat(calls, ",")).toBe(
+			"GetState,GetState,EvaluateStateMachine false,ChangeState " .. UPRIGHT.standUpState
+		)
+		expect(copy.evaluates).toBe(false)
+		expect(copy.state).toBe(UPRIGHT.standUpState)
 	end)
 end)

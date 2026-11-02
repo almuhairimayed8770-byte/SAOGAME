@@ -50,8 +50,10 @@
 	Sheathe that was stopped still runs through its fade, and its late event changes nothing. An
 	attack, Guard, GuardHit or Parry clip pulls the sword to the hand with its first posed frame
 	(a draw-cut). A move the step asks for shows with the pose that step writes: with
-	deps.atStepPose (FrameClock.atStepPose) WeaponMount lands it on the first frame that draws
-	that pose, so the sword never hangs for a frame in the hand of the pose before (D-555).
+	deps.atStepPoseSolve (FrameClock.atStepPoseSolve) WeaponMount lands it right before the physics
+	that solves that pose, so the sword never hangs for a frame in the hand of the pose before
+	(D-555) and is drawn on the pose's Weapon key, not its old place's rest turn (D-590); with
+	deps.atStepPose alone, at the start of the first frame that draws that pose.
 	The walk set follows the target at once; the Draw and Sheathe clips cover
 	the arms. A clip above them that keys the right arm (a turn, a landing, a dodge, a stagger)
 	hides the hand from the hilt, so the sword waits for it (SheathState "covered"), until it has
@@ -59,9 +61,10 @@
 	the sword's joint, and the clip's clock stands for the Skid's brake (sheath.skidBrakeSeconds,
 	D-579): the stop never takes the swing over in a frame or throws the raised blade with the
 	torso. A dodge does the same until it has gone (D-580): the arm stands where the clip had it
-	while the body dodges, and the clip plays on after. Nothing starts while the State attribute is
-	Dead. A rig that cannot sheathe keeps the
-	sword in the hand.
+	while the body dodges, and the clip plays on after. And so does a stop with no Skid while the
+	body brakes out of the run or sprint (sheath.stopBrakeClips and stopBrakeRate, D-611).
+	Nothing starts while the State attribute is Dead. A rig that cannot sheathe keeps the sword in
+	the hand.
 
 	The Drawn and State attributes are followed through their change signals, so no step reads
 	them (`serverDrawn()` gives the Drawn attribute to the character controller). An instance with
@@ -184,6 +187,9 @@ export type Dependencies = {
 	-- FrameClock.atStepPose (D-343), handed to WeaponMount: a move of the sword the step asks for
 	-- lands on the frame that draws that step's pose (D-555). Nil: it lands at once.
 	atStepPose: ((fn: () -> ()) -> () -> ())?,
+	-- FrameClock.atStepPoseSolve, handed to WeaponMount ahead of atStepPose: that move lands right
+	-- before the physics that solves the step's pose, so the blade is drawn on its key (D-590).
+	atStepPoseSolve: ((fn: () -> ()) -> () -> ())?,
 }
 
 export type Locomotion = {
@@ -250,12 +256,35 @@ end
 -- its first step its legs, root and arms get their own blend in (choreo.luau locomotion.handOff),
 -- and the gait's phase stands where the attack found it until the attack lets go, so the feet
 -- stay where they were and no stride is crossed into the attack's first pose in a frame. An
--- attack chained over one that held the gait holds it on. Runs before the mixer steps (a handle
--- played this frame has not stepped yet).
+-- attack chained over one that held the gait holds it on. A dodge that played to its end hands
+-- the legs back at locomotion.dodgeHandOff.resumePhase (D-609): every dodge lands in one pose,
+-- and a stride picked up where the press found it crossed a lower leg swinging away from that
+-- landing in the blend out (25.2 degrees a 60 Hz row out of the sheathed run at 16). The jump is
+-- under the dodge's whole pose: its last step showed every joint at full weight. Runs before the
+-- mixer steps (a handle played this frame has not stepped yet).
+-- True when every clip a fresh `dodge` cut this step (stopping, closing on the cut) is a one-shot
+-- it takes the body from as from a stance (GaitHandOff.dodgeTakesFrom, D-613), and it cut one.
+local function cutsOnlyStances(handles: { any }, dodge: any): boolean
+	local any = false
+	for _, other in handles do
+		if other ~= dodge and other.closes and other.stopping and not other.done then
+			local clip = other.clip
+			if typeof(clip) ~= "table" or not GaitHandOff.dodgeTakesFrom(clip) then
+				return false
+			end
+			any = true
+		end
+	end
+	return any
+end
+
 local function handOffAttacks(self: any, mixer: any, handles: { any })
 	local holder = self.gaitHeldBy
 	if holder ~= nil and (holder.stopping or holder.done) then
 		self.gaitHeldBy = nil
+		if holder.ended and typeof(holder.clip) == "table" and GaitHandOff.dodges(holder.clip) then
+			self.gaitPhase = Config.dodgeHandOff.resumePhase
+		end
 	end
 	for _, handle in handles do
 		local clip = handle.clip
@@ -280,9 +309,19 @@ local function handOffAttacks(self: any, mixer: any, handles: { any })
 			and GaitHandOff.dodges(clip)
 		then
 			-- A dodge (D-528) takes every stance and gait over its joints' own blends, unless it
-			-- cuts an action (the cancel's snap, D-408); a gait's phase stands under it.
-			if not handle.handOver then
+			-- cuts an action (the cancel's snap, D-408); a gait's phase stands under it. A turn in
+			-- place it cut is a stance (D-613): the turn, held where it was, fades out over the
+			-- dodge's longest joint blend, so no joint shows the stance it was turning from.
+			if not handle.handOver or cutsOnlyStances(handles, handle) then
 				mixer:handOff(handle, GaitHandOff.dodgeBlends())
+				if handle.handOver then
+					local seconds = GaitHandOff.dodgeBlendSeconds()
+					for _, other in handles do
+						if other ~= handle and other.closes and other.stopping and not other.done then
+							other.blendOut = math.max(other.blendOut, seconds)
+						end
+					end
+				end
 			end
 			if self.gaitShown > 0 or holder ~= nil then
 				self.gaitHeldBy = handle
@@ -762,28 +801,76 @@ local function sheathShownAfter(self: any, dt: number): number
 	return shown
 end
 
+-- The base clips the stop brake reads (sheath.stopBrakeClips, sheathed and drawn), each with its
+-- step of the gait over the walk.
+local STOP_BRAKE_NAMES: { string } = {}
+local STOP_BRAKE_STEPS: { number } = {}
+for name, steps in Sheath.stopBrakeClips do
+	table.insert(STOP_BRAKE_NAMES, name)
+	table.insert(STOP_BRAKE_STEPS, steps)
+	local drawn = LocomotionState.clipFor(name, true)
+	if drawn ~= name then
+		table.insert(STOP_BRAKE_NAMES, drawn)
+		table.insert(STOP_BRAKE_STEPS, steps)
+	end
+end
+
+-- Whether the body brakes out of the run or sprint this step (D-611): the base's gait, each of
+-- sheath.stopBrakeClips by its shown weight times its step, falls faster than
+-- sheath.stopBrakeRate steps a second over the step the mixer is about to run (shown now against
+-- Mixer.preview, so the rate is the same at any frame rate). A run let go at 16 crosses to the
+-- idle at the mixer's weightBlendRate (8 a second); a slow-down eased under the rate never brakes.
+local function stopBraking(self: any, dt: number): boolean
+	if dt <= 0 then
+		return false
+	end
+	local mixer = self.animator.mixer
+	local fall = 0
+	for index, name in STOP_BRAKE_NAMES do
+		local handle = self.handles[name]
+		if handle ~= nil and not handle.done then
+			local shown = Easing.evaluate(ChoreoData.blendEasing, handle.fade) * handle.weight
+			fall += (shown - mixer:preview(handle, dt)) * STOP_BRAKE_STEPS[index]
+		end
+	end
+	return fall > Sheath.stopBrakeRate * dt
+end
+
 -- The sheath clips' stand under the clip that left them the arm (leaveSheathArm): while a Skid is
 -- in its first sheath.skidBrakeSeconds (its brake, D-579), or a dodge has not gone yet (D-580,
--- its fade in standing too), every live sheath clip's clock stands (Mixer.hold); after it, the
--- clocks this stood run on. A sheath clip that was stopped meanwhile keeps the hold (a cut back
--- holds its own). Runs before the mixer steps.
-local function stepSkidBrake(self: any, handles: { any }?)
+-- its fade in standing too), every live sheath clip's clock stands (Mixer.hold); and so it does
+-- while the body brakes out of the run or sprint with no Skid (stopBraking, D-611: the stop's
+-- blend straightened the torso under the Sheathe's raised arm while the clip swung it on, the
+-- tip up to 94.5 studs a second from the run eased off over 0.25 s, 92.9 from a sprint eased off
+-- over 0.1 s and 87.5 from the run let go at 16, against the 84 cap;
+-- tests/choreo/SheathStop.spec.luau). After it, the clocks this stood run on. A sheath clip that
+-- was stopped meanwhile keeps the hold (a cut back holds its own). Runs before the mixer steps.
+local function stepSkidBrake(self: any, dt: number, handles: { any }?)
 	local taker = self.armTaker
-	local braking = taker ~= nil
+	local taken = taker ~= nil
 		and not taker.done
 		and (self.armTakerWhole or (not taker.stopping and taker.time < Sheath.skidBrakeSeconds))
-		and handles ~= nil
+	if not taken then
+		self.armTaker = nil
+	end
 	local mixer = self.animator.mixer
-	if braking then
-		for _, handle in handles :: { any } do
+	local sheathing = handles ~= nil and (mixer:isPlaying(DRAW_ID) or mixer:isPlaying(SHEATHE_ID))
+	if handles ~= nil and (taken or (sheathing and stopBraking(self, dt))) then
+		-- A dodge's hold stands the fade in too; a Skid's and a stop's leave it.
+		local whole = taken and self.armTakerWhole
+		for _, handle in handles do
 			if
 				(handle.clipId == DRAW_ID or handle.clipId == SHEATHE_ID)
 				and not handle.stopping
 				and not handle.done
-				and not handle.held
 			then
-				mixer:hold(handle, true, self.armTakerWhole)
-				table.insert(self.brakeHeld, handle)
+				local ours = table.find(self.brakeHeld, handle) ~= nil
+				if ours or not handle.held then
+					mixer:hold(handle, true, whole)
+					if not ours then
+						table.insert(self.brakeHeld, handle)
+					end
+				end
 			end
 		end
 		return
@@ -1070,7 +1157,11 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 	animator:setWeight(self.handles[LocomotionState.clipFor("Idle", self.drawn)], 1, true)
 
 	-- The sword starts where the target wants it, with no clip.
-	self.mount = WeaponMount.new(animator, character, { atStepPose = dependencies.atStepPose })
+	self.mount = WeaponMount.new(
+		animator,
+		character,
+		{ atStepPose = dependencies.atStepPose, atStepPoseSolve = dependencies.atStepPoseSolve }
+	)
 	self.sheath = SheathState.new(targetPlace(self), Sheath)
 	self.mountGeneration = self.mount:generation()
 	if self.mount:sheathable() then
@@ -1093,7 +1184,7 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 			if handles ~= nil then
 				dodgeLeavesSheath(self, handles)
 			end
-			stepSkidBrake(self, handles)
+			stepSkidBrake(self, dt, handles)
 			stepSheath(self, dt, handles)
 			stepGait(self, dt)
 			stepTurnPlant(self, dt, handles)
@@ -1645,19 +1736,31 @@ end
 -- and only below that slows to rateFloor and hands weight to Idle. A joint-angle blend of the
 -- walk and the idle shortens the planted leg's sweep but not the body's travel, so the old share
 -- (speed / walkSpeed) slid a boar wheeling at half speed 0.2 a frame on hooves 0.09 deep.
+-- A rig with a start phase (choreo enemy.gait.startPhase, D-599) holds its walk there while the
+-- walk shows no weight, so every walk from standing steps off from the same pose.
 RigDriver.__index = RigDriver
 
-local function newRigDriver(animator: any, idleId: string, walkId: string, walkSpeed: number, phase: number): any
+local function newRigDriver(
+	animator: any,
+	idleId: string,
+	walkId: string,
+	walkSpeed: number,
+	phase: number,
+	startPhase: number?
+): any
+	local walkDuration = ClipLibrary.get(walkId).duration
 	local self = setmetatable({
 		animator = animator,
 		handles = {} :: { [string]: any },
 		walkSpeed = math.max(walkSpeed, Config.idleSpeedThreshold),
-		walkDuration = ClipLibrary.get(walkId).duration,
+		walkDuration = walkDuration,
+		-- Where the walk steps off from standing (choreo enemy.gait.startPhase, D-599), or nil.
+		walkStartAt = if startPhase ~= nil then startPhase * walkDuration else nil,
 		unhook = nil :: (() -> ())?,
 		destroyed = false,
 	}, RigDriver)
 	local idleStart = phase * ClipLibrary.get(idleId).duration
-	local walkStart = phase * ClipLibrary.get(walkId).duration
+	local walkStart = self.walkStartAt or phase * walkDuration
 	self.handles.Idle = animator:play(idleId, { coexist = true, weight = 1, blendIn = 0, startTime = idleStart })
 	self.handles.Walk = animator:play(walkId, { coexist = true, weight = 0, blendIn = 0, startTime = walkStart })
 	return self
@@ -1676,7 +1779,14 @@ function RigDriver.update(self: any, _dt: number, state: State): LocomotionState
 	if speed > Config.idleSpeedThreshold then
 		walk = LocomotionState.gaitWeights(speed, self.walkSpeed, self.walkDuration)
 	end
-	self.animator:setWeight(self.handles.Walk, walk)
+	local walkHandle = self.handles.Walk
+	local startAt: number? = self.walkStartAt
+	if startAt ~= nil and walkHandle.weight <= 0 and (walkHandle.targetWeight or 0) <= 0 then
+		-- Standing, no walk shown or on its way in: every start steps off from the same point of
+		-- the walk's cycle, where its planted foot stands nearest the idle's (D-599).
+		walkHandle.time = startAt
+	end
+	self.animator:setWeight(walkHandle, walk)
 	self.animator:setWeight(self.handles.Idle, 1 - walk)
 	if walk > 0 then
 		self.animator:setSpeed(self.handles.Walk, math.max(speed / self.walkSpeed, Stride.rateFloor))
@@ -1751,7 +1861,8 @@ function Locomotion.attach(animator: any, character: Model, deps: Dependencies?)
 			rigClips.idle,
 			rigClips.walk,
 			(rig and rig.walkSpeed) or Config.walkSpeed,
-			dependencies.phase or 0
+			dependencies.phase or 0,
+			ChoreoData.enemy.gait.startPhase[rigId]
 		)
 		if tracker == nil then
 			tracker = Locomotion.travelTracker(character, Locomotion.humanoidTracker(character))

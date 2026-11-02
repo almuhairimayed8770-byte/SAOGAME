@@ -10,6 +10,11 @@
 	the path that a run can show (all of a long frame's travel sideways, the path not yet told
 	turned) never reads as a placement.
 
+	choreo.luau enemy.rush.settleRestSpeed (D-602) is positive studs a second under the slowest a
+	landing root moves before the server stops it dead (ai.luau movement.landSlackStuds over
+	landFrames 60 Hz server frames, 0.6): a late root the server still lands never reads at rest, so
+	the hand-back waits for it.
+
 	choreo.luau enemy.rush.pass (RushDraw's swing past a player's body in its path, D-167):
 	- leadStuds, fullStuds and returnStuds are positive studs; marginStuds and centreStuds are
 	  studs at least 0.
@@ -30,6 +35,8 @@
 -- The longest frame a run is judged on short of a stall (ai.luau's rushWorld rules name a throttled
 -- 0.1 s frame too).
 local THROTTLED_FRAME_SECONDS = 0.1
+-- The server's frame a landing is paced on (its Heartbeat at 60 Hz, EnemyService's landStep).
+local SERVER_FRAME_SECONDS = 1 / 60
 
 local function finite(value: any): boolean
 	return typeof(value) == "number" and value == value and value > -math.huge and value < math.huge
@@ -74,6 +81,26 @@ return function(ctx: any): { string }
 				THROTTLED_FRAME_SECONDS,
 				speed * THROTTLED_FRAME_SECONDS,
 				speed
+			)
+		)
+	end
+	local restSpeed = if typeof(rush) == "table" then rush.settleRestSpeed else nil
+	check(positive(restSpeed), "choreo enemy.rush.settleRestSpeed must be a positive number of studs a second")
+	local movement = ai.movement
+	if
+		positive(restSpeed)
+		and typeof(movement) == "table"
+		and positive(movement.landSlackStuds)
+		and positive(movement.landFrames)
+	then
+		local slowest = movement.landSlackStuds / (movement.landFrames * SERVER_FRAME_SECONDS)
+		check(
+			restSpeed < slowest,
+			("enemy.rush.settleRestSpeed %.2f must be under %.2f studs a second, the slowest a landing root moves (landSlackStuds %.3f over landFrames %g of a 60 Hz server frame): a root still landing would read at rest"):format(
+				restSpeed,
+				slowest,
+				movement.landSlackStuds,
+				movement.landFrames
 			)
 		)
 	end

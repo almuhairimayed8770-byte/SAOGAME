@@ -189,6 +189,9 @@ export type Deps = {
 	-- FrameClock.atStepPose: the same for a pose a rig's step writes now, asked from inside that
 	-- step (a rush's slam, D-343). Without it those cues play at once.
 	atStepPose: ((fn: () -> ()) -> () -> ())?,
+	-- FrameClock.atStepPoseSolve: right before the physics that solves such a pose, for a remote
+	-- player's sword move (D-590). Without it that move goes by atStepPose.
+	atStepPoseSolve: ((fn: () -> ()) -> () -> ())?,
 	-- FrameClock.pace: seconds a rendered frame takes on this screen (nil before any frame), the
 	-- pace the impact frames count their looks at; a word holds the rigs over its picture by it
 	-- (D-350). Without it the hold goes by the frame's own length.
@@ -251,11 +254,14 @@ export type Deps = {
 	-- One beforePhysics step of an enemy copy keepUpright stood up with its state machine off
 	-- (D-544; start() hands Replication.resumeModel): it answers "Held" while the copy's root is
 	-- anchored, "Resumed" on the step it turns Humanoid.EvaluateStateMachine back on (the first
-	-- with the root let go), then "On" while the copy reads upright, "KeptOff" when it found the
-	-- copy in a fall state and stood it up again with the state machine off for good, and nil when
-	-- the model has no Humanoid (D-559, ai.upright.client.resumeOnRelease). Without it: the
-	-- state machine stays off for the copy's life (D-544).
-	resumeUpright: ((model: Model) -> string?)?,
+	-- with the root let go), then "On" while the copy reads upright, "Settling" while `settling`
+	-- and the let-go copy reads the fall its turn-on gave it (D-589: nothing written), "HeldOff"
+	-- when a held copy read a fall state with it on and was stood up with it off again until its
+	-- release, "KeptOff" when it found the copy in a fall state and stood it up again with the
+	-- state machine off for good, and nil when the model has no Humanoid (D-559,
+	-- ai.upright.client.resumeOnRelease). Without it: the state machine stays off for the copy's
+	-- life (D-544).
+	resumeUpright: ((model: Model, settling: boolean) -> string?)?,
 }
 
 -- Sound names (family.Name in sfx.luau) the reactions play; Replication.spec checks each resolves.
@@ -317,8 +323,10 @@ local uprightTries: { [number]: number } = {}
 -- entity id -> the waiting copy's Humanoid arrival handler on its model (D-543).
 local uprightCatches: { [number]: { Disconnect: (self: any) -> () } } = {}
 -- entity id -> a copy stood up with its state machine off, until it has it back and read upright
--- ai.upright.client.resumeChecks steps after (D-559): its record and those steps so far.
-local uprightResumes: { [number]: { record: any, checks: number } } = {}
+-- ai.upright.client.resumeChecks steps after (D-559): its record, those steps so far, and the
+-- steps since its turn-on that read the turn-on's own fall before its first upright read
+-- (D-589; nil before the turn-on and once it read upright).
+local uprightResumes: { [number]: { record: any, checks: number, settle: number? } } = {}
 local kindConnection: { Disconnect: (self: any) -> () }? = nil -- entities.changed (EntityKind)
 local drivers: { [number]: any } = {} -- entity id -> locomotion driver on a rig this client does not own
 -- entity id -> the trail kind the playing clip's TrailOn named; HitWindowOpen / Close, TrailOff and
@@ -1275,7 +1283,9 @@ local function stepRush(id: number, rush: Rush, dt: number)
 	end)
 	local velocity: Vector3? = if ok and typeof(carried) == "Vector3" then carried else nil
 	local bodies = if RushDraw.seeking(rush.state) then bystanders() else nil
-	local drawn = RushDraw.step(rush.state, now, dt, rootFrame, rush.room, rush.ground, velocity, bodies)
+	-- Where the root stands now, before physics: a hand-back waits while it still lands (D-602).
+	local standing = root.CFrame
+	local drawn = RushDraw.step(rush.state, now, dt, rootFrame, rush.room, rush.ground, velocity, bodies, standing)
 	if drawn ~= nil then
 		-- Away from its root (run, settle, hand-back, a frozen death), the body is drawn off the
 		-- root's own move at physics, which the screen would otherwise carry it by: a row the
@@ -3430,9 +3440,10 @@ local function destroyDriver(id: number)
 end
 
 -- The driver options for a remote player's rig: the default Humanoid tracker, fed the driver's
--- Drawn attribute through a rise filter (sheath.remoteDrawDelay), and deps.atStepPose, so the
--- sword's move lands with the pose its step writes (D-555). `driverOf` gives the driver once
--- attach has returned it. Nil (the default tracker) when the locomotion package has none.
+-- Drawn attribute through a rise filter (sheath.remoteDrawDelay), and deps.atStepPoseSolve and
+-- atStepPose, so the sword's move lands with the pose its step writes (D-555, D-590).
+-- `driverOf` gives the driver once attach has returned it. Nil (the default tracker) when the
+-- locomotion package has none.
 local function remotePlayerOptions(locomotion: any, model: Instance, driverOf: () -> any): any
 	if not hasSheathState or typeof(locomotion.humanoidTracker) ~= "function" then
 		return nil
@@ -3450,6 +3461,7 @@ local function remotePlayerOptions(locomotion: any, model: Instance, driverOf: (
 			return source(dt)
 		end,
 		atStepPose = dependencies().atStepPose,
+		atStepPoseSolve = dependencies().atStepPoseSolve,
 	}
 end
 
@@ -3547,8 +3559,15 @@ function Replication.uprightModel(
 	return Replication.standUpright(humanoid)
 end
 
--- What one step of a rescued copy's resume answers (Deps.resumeUpright, D-559).
-local RESUME = { held = "Held", resumed = "Resumed", on = "On", keptOff = "KeptOff" }
+-- What one step of a rescued copy's resume answers (Deps.resumeUpright, D-559, D-589).
+local RESUME = {
+	held = "Held",
+	resumed = "Resumed",
+	on = "On",
+	settling = "Settling",
+	heldOff = "HeldOff",
+	keptOff = "KeptOff",
+}
 Replication.RESUME = RESUME
 
 --- One beforePhysics step of a copy standUpright stood up with its state machine off (D-544,
@@ -3556,16 +3575,24 @@ Replication.RESUME = RESUME
 --- every anchored row). On the first step its root is let go, Humanoid.EvaluateStateMachine goes
 --- back on ("Resumed"), its fall states still off: the main path's copy (D-543, P1 L2), whose
 --- Humanoid updates FloorMaterial again. On each step after, the copy's state is read back: upright
---- is "On"; one in a fall state goes back to D-544 (the state machine off, then
---- ChangeState(standUpState)) and stays there ("KeptOff").
-function Replication.resumeUpright(humanoid: any, root: any): string
+--- is "On". A let-go copy in a fall state while `settling` is the turn-on's own fall (D-589: the
+--- PC's 495(d) and (i), one row on 3 of 3 turn-ons, then Running once let go): nothing is written
+--- ("Settling"). A held copy in one, with the state machine on, is one the engine keeps down while
+--- its root is anchored (P1 L0, L4; 495(i)): back to D-544's stand-up (the state machine off, then
+--- ChangeState(standUpState)) until its release ("HeldOff"). Any other copy in a fall state goes
+--- back to D-544 and stays there ("KeptOff").
+function Replication.resumeUpright(humanoid: any, root: any, settling: boolean?): string
 	if humanoid.EvaluateStateMachine == true then
 		local state = humanoid:GetState()
 		for _, name in UPRIGHT.offStates do
 			if state == (Enum.HumanoidStateType :: any)[name] then
+				local held = root == nil or root.Anchored
+				if settling == true and not held then
+					return RESUME.settling
+				end
 				humanoid.EvaluateStateMachine = false
 				humanoid:ChangeState((Enum.HumanoidStateType :: any)[UPRIGHT.standUpState])
-				return RESUME.keptOff
+				return if held then RESUME.heldOff else RESUME.keptOff
 			end
 		end
 		return RESUME.on
@@ -3578,13 +3605,14 @@ function Replication.resumeUpright(humanoid: any, root: any): string
 end
 
 --- start()'s resumeUpright seam for one model (D-559): nil when `humanoidOf`
---- (FindFirstChildOfClass) finds no Humanoid, else resumeUpright on it with the model's root.
-function Replication.resumeModel(model: Model, humanoidOf: (model: Model) -> any): string?
+--- (FindFirstChildOfClass) finds no Humanoid, else resumeUpright on it with the model's root and
+--- `settling` (D-589).
+function Replication.resumeModel(model: Model, humanoidOf: (model: Model) -> any, settling: boolean?): string?
 	local humanoid = humanoidOf(model)
 	if humanoid == nil then
 		return nil
 	end
-	return Replication.resumeUpright(humanoid, model.PrimaryPart)
+	return Replication.resumeUpright(humanoid, model.PrimaryPart, settling)
 end
 
 -- The log aid (D-523): this client's upright state of the model, why it waits and how often it
@@ -3677,7 +3705,9 @@ end
 -- Every beforePhysics step, before the retries (so a copy stood up on this step keeps its state
 -- machine off through at least one physics step): each copy stood up with its state machine off is
 -- stepped through Deps.resumeUpright until it has it back and has read upright resumeChecks steps
--- after, or was kept off, or lost its Humanoid (D-559).
+-- after, or was kept off, or lost its Humanoid (D-559). From its turn-on until it first reads
+-- upright, up to resumeSettleSteps steps, a fall state is its turn-on's own and is waited out
+-- (D-589); a held copy found down with it on waits for its release again.
 local function resumeUprights()
 	local resume = dependencies().resumeUpright
 	if resume == nil then
@@ -3685,11 +3715,27 @@ local function resumeUprights()
 		return
 	end
 	for id, entry in uprightResumes do
-		local answer = resume(entry.record.model)
-		if answer == RESUME.held or answer == RESUME.resumed then
+		local settle = entry.settle
+		local answer = resume(entry.record.model, settle ~= nil and settle < UPRIGHT.resumeSettleSteps)
+		if answer == RESUME.held then
+			continue
+		end
+		if answer == RESUME.resumed then
+			entry.settle = 0
+			entry.checks = 0
+			continue
+		end
+		if answer == RESUME.settling then
+			entry.settle = (settle or 0) + 1
+			continue
+		end
+		if answer == RESUME.heldOff then
+			entry.settle = nil
+			entry.checks = 0
 			continue
 		end
 		if answer == RESUME.on then
+			entry.settle = nil
 			entry.checks += 1
 			if entry.checks < UPRIGHT.resumeChecks then
 				continue
@@ -4054,6 +4100,7 @@ function Replication.start()
 		-- A hit's cues on the first frame that shows its contact pose (D-342).
 		atPose = atPoseOf(frameClock),
 		atStepPose = frameClockFn(frameClock, "atStepPose"),
+		atStepPoseSolve = frameClockFn(frameClock, "atStepPoseSolve"),
 		pace = frameClockFn(frameClock, "pace"),
 		-- The waits for words right after the controller's contacts (D-347).
 		onFrame = afterContactsOf(controller),
@@ -4087,11 +4134,12 @@ function Replication.start()
 				end
 			end)
 		end,
-		-- A copy stood up with its state machine off gets it back at its release (D-559).
-		resumeUpright = function(model: Model): string?
+		-- A copy stood up with its state machine off gets it back at its release (D-559), the
+		-- turn-on's own fall waited out (D-589).
+		resumeUpright = function(model: Model, settling: boolean): string?
 			return Replication.resumeModel(model, function(body: Model): any
 				return body:FindFirstChildOfClass("Humanoid")
-			end)
+			end, settling)
 		end,
 	})
 	Replication.subscribe()

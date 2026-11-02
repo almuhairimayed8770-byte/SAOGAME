@@ -264,8 +264,13 @@ local Combat = {
 		walkShell = { halvings = 10 },
 		-- The Art stand-off (fix F1): an Art whose first cut would start with the blade already in
 		-- the target's body (the review's kobold at the hip or the shoulder) steps the body straight
-		-- away from the target over the anticipation, from the hold pose to the first window's
-		-- open, on `easing` (a push off that settles into the start pose). The step is the least
+		-- away from the target over the anticipation, from the end of the activation hold to the
+		-- first window's open, on `easing` (a push off that settles into the start pose). The hold
+		-- is the tell and stays still (D-604): a step too long to take from its end within
+		-- keepOut.maxSpeedStudsPerSecond starts as late before it as that speed allows, never
+		-- before the release (a 0.30 step from 0.25 to Vertical's 0.35 open: 0.092 on the first
+		-- 60 fps frame, 5.5 studs a second; Rising Arc's 0.60 from 0.2333, its 1.0 from the
+		-- release). The step is the least
 		-- multiple of stepStuds that leaves the start pose's blade clearStuds from every part of
 		-- the target a blade can hit, at most maxStuds; none when no such step clears it, or when a
 		-- window's cut that passed deeper than the sweep's promise (hitSphereRadius less half of
@@ -372,6 +377,12 @@ local Combat = {
 				-- cut, and still in at the clip's end (item 464). A body standing still is the clip's
 				-- own follow-through's to leave (D-493).
 				bladeOutSeconds = 0.1,
+				-- An Art's held start pose (D-606): planned at the press against the lock, the
+				-- body steps back as the stance forms so its hands stand out of the target, then
+				-- stands still through the hold while the target moves on; that hold is swept
+				-- against the target in steps this long (an idle moves slowly: the kobold's carried
+				-- its torso 0.015 studs onto a still Horizontal stance over a 1 s hold).
+				stanceSampleSeconds = 0.1,
 			},
 		},
 		-- A contact is predicted to kill only when the hit cannot do less than the enemy has left:

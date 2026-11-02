@@ -762,6 +762,13 @@ local function rootAt(ctx: Context, avatar: Avatar, clip: any, time: number, sta
 	return frame
 end
 
+-- The clip time a swing is released from: an Art's hold pose, a basic's first frame.
+local function releaseOf(ctx: Context, attack: Attack): number
+	return if attack.artId ~= nil
+		then ctx.ActionLogic.holdClipTime(attack.clip, ctx.Combat.startPoseTime + ctx.Combat.activationHold)
+		else 0
+end
+
 -- The stand-off the local client plans against this placement, as CharacterController does: only
 -- when the aim assist would pick the enemy (inside its cone and range; a lock turns the body square
 -- to it the same way), facing ahead. An Art's plans at the release, from the hold pose with the root
@@ -787,9 +794,7 @@ local function standOffOf(
 		return nil
 	end
 	local isArt = attack.artId ~= nil
-	local from = if isArt
-		then ctx.ActionLogic.holdClipTime(attack.clip, ctx.Combat.startPoseTime + ctx.Combat.activationHold)
-		else 0
+	local from = releaseOf(ctx, attack)
 	return ctx.ContactPredictor.standOff(
 		avatar.model,
 		attack.clip,
@@ -809,7 +814,8 @@ local function keepOutMost(ctx: Context, standOff: any?, attack: Attack): number
 	end
 	local most = 0
 	local step = ctx.Combat.contact.standOff.keepOut.sampleSeconds
-	local time = standOff.from
+	-- From the release, not the plan's `from` (where its blade step starts, D-604).
+	local time = releaseOf(ctx, attack)
 	while time <= attack.clip.duration + 1e-9 do
 		local back = standOff.keep(time)
 		local aside = if standOff.keepSide ~= nil then standOff.keepSide(time) else 0

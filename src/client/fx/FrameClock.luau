@@ -28,6 +28,19 @@
 	`atStepPose(fn)` is the same for a pose a rig's step writes now, from inside that step (a
 	rush's slam, found as the step draws the snout onto the wall, D-343): the next frame shows it.
 
+	`atStepPoseSolve(fn)` is for a joint write that belongs to that pose (the sword's Part0 and C0
+	between the back and the hand, D-590): it runs `fn` at the next PreSimulation, after the
+	frame's render steps and its draw and right before the physics that first solves the pose.
+	A Part0 or C0 write puts its Part1 on the new part at once from the joint's Transform as
+	physics last solved it, and only a physics step refreshes that (the PC's P4 L6b on f446653;
+	AQ 497(e) on 82b82d4: written at First, the blade showed its old place's rest turn, 0.0 to 1.3
+	degrees in the grip against the stroke's 4 to 27), so a write made there is solved with the
+	step's own Transforms before anything draws it. PreSimulation runs once per physics step
+	(1/240 s): several times between rows at 30 or 60 fps, and none on some rows at 240 (items 444
+	and 475), so the write waits for physics, not for a frame: a frame with no physics draws
+	neither the pose nor the move. Without a PreSimulation connection (an engine or a spec with
+	none) it runs at the start of the frame atStepPose names instead.
+
 	Render stalls (D-142, D-125): RenderStepped stops while the display sleeps and Heartbeat goes
 	on, and a frame can be presented after a stall before the first render step runs. So a
 	Heartbeat watchdog runs every pending callback once no render step has run for longer than
@@ -62,6 +75,9 @@ export type Deps = {
 	-- The render step just after the rigs' (fx.luau renderOrder.posed): this frame's poses are written.
 	onPosed: (fn: StepFn) -> (() -> ())?,
 	onHeartbeat: (fn: StepFn) -> (() -> ())?, -- the stall watchdog (runs while nothing renders)
+	-- RunService.PreSimulation: right before each physics step, after the frame's render steps and
+	-- its draw (atStepPoseSolve).
+	onPreSimulation: (fn: StepFn) -> (() -> ())?,
 }
 
 export type Overrides = {
@@ -70,9 +86,12 @@ export type Overrides = {
 	onFrameEnd: ((fn: StepFn) -> (() -> ())?)?,
 	onPosed: ((fn: StepFn) -> (() -> ())?)?,
 	onHeartbeat: ((fn: StepFn) -> (() -> ())?)?,
+	onPreSimulation: ((fn: StepFn) -> (() -> ())?)?,
 }
 
-type Pending = { due: number, fn: () -> (), cancelled: boolean }
+-- `due`: the frame at whose start it runs. `atSolve` (atStepPoseSolve): it runs at the next
+-- PreSimulation instead (its `due` is math.huge).
+type Pending = { due: number, fn: () -> (), cancelled: boolean, atSolve: boolean? }
 
 local FrameClock = {}
 
@@ -112,9 +131,10 @@ local function enginePosed(fn: StepFn): (() -> ())?
 	return bindRenderStep(POSED_NAME, row.base, fn, row.offset)
 end
 
-local function engineHeartbeat(fn: StepFn): (() -> ())?
+-- Connects `fn` to RunService's signal `name`; nil under Lune (no engine signal).
+local function connectSignal(name: string, fn: StepFn): (() -> ())?
 	local ok, signal = pcall(function()
-		return (RunService :: any).Heartbeat
+		return (RunService :: any)[name]
 	end)
 	if not ok or typeof(signal) ~= "RBXScriptSignal" then
 		return nil
@@ -125,6 +145,14 @@ local function engineHeartbeat(fn: StepFn): (() -> ())?
 	end
 end
 
+local function engineHeartbeat(fn: StepFn): (() -> ())?
+	return connectSignal("Heartbeat", fn)
+end
+
+local function enginePreSimulation(fn: StepFn): (() -> ())?
+	return connectSignal("PreSimulation", fn)
+end
+
 local function defaults(overrides: Overrides?): Deps
 	local deps: Deps = {
 		now = engineNow,
@@ -132,6 +160,7 @@ local function defaults(overrides: Overrides?): Deps
 		onFrameEnd = engineFrameEnd,
 		onPosed = enginePosed,
 		onHeartbeat = engineHeartbeat,
+		onPreSimulation = enginePreSimulation,
 	}
 	if overrides ~= nil then
 		deps.now = overrides.now or deps.now
@@ -139,6 +168,7 @@ local function defaults(overrides: Overrides?): Deps
 		deps.onFrameEnd = overrides.onFrameEnd or deps.onFrameEnd
 		deps.onPosed = overrides.onPosed or deps.onPosed
 		deps.onHeartbeat = overrides.onHeartbeat or deps.onHeartbeat
+		deps.onPreSimulation = overrides.onPreSimulation or deps.onPreSimulation
 	end
 	return deps
 end
@@ -153,6 +183,8 @@ local inRender = false
 -- it is bound: without it (a spec that binds none) every render step counts as after the rigs'.
 local posed = false
 local posedBound = false
+-- Whether a PreSimulation connection is bound (atStepPoseSolve waits for it).
+local preSimulationBound = false
 -- When the last render step began (deps.now); nil before the first.
 local renderedAt: number? = nil
 -- The last impact.hold.paceFrames render-step frame lengths, newest last (a stall left out): the
@@ -219,6 +251,17 @@ local function posedStep(_dt: number)
 	posed = true
 end
 
+-- PreSimulation, right before a physics step: the joint writes that step must solve
+-- (atStepPoseSolve).
+local function preSimulationStep(_dt: number)
+	if #pending == 0 then
+		return
+	end
+	runWhere(function(entry: Pending): boolean
+		return entry.atSolve == true
+	end)
+end
+
 -- Heartbeat: once no frame has rendered for longer than a jump, every flash is long over (D-142).
 local function watch(_dt: number)
 	if #pending == 0 then
@@ -242,6 +285,7 @@ local function unbindAll()
 	table.clear(unbinds)
 	bound = nil
 	posedBound = false
+	preSimulationBound = false
 end
 
 -- Binds the render steps and the watchdog the first time a callback needs them.
@@ -267,6 +311,11 @@ local function ensureBound(): boolean
 	local stopWatch = deps.onHeartbeat(watch)
 	if stopWatch ~= nil then
 		table.insert(unbinds, stopWatch)
+	end
+	local stopPreSimulation = deps.onPreSimulation(preSimulationStep)
+	if stopPreSimulation ~= nil then
+		table.insert(unbinds, stopPreSimulation)
+		preSimulationBound = true
 	end
 	bound = true
 	return true
@@ -347,6 +396,31 @@ function FrameClock.atStepPose(fn: () -> ()): Cancel
 		return function() end
 	end
 	return runOn(FrameClock.stepPoseShownOn(), fn)
+end
+
+--- Runs `fn` right before the physics that first solves the pose a rig's step writes now
+--- (D-590): at the next PreSimulation, so a Part0 or C0 write made there is drawn with the
+--- step's own Transforms. Without a PreSimulation connection, at the start of the frame
+--- `atStepPose` names, as it does; now when that frame is the one a change made now shows on
+--- (impact.poseLagFrames 0). Returns a cancel function; under Lune (no render step) `fn` runs now.
+function FrameClock.atStepPoseSolve(fn: () -> ()): Cancel
+	if not ensureBound() then
+		fn()
+		return function() end
+	end
+	local due = FrameClock.stepPoseShownOn()
+	if due <= FrameClock.shownFrom() then
+		fn()
+		return function() end
+	end
+	if not preSimulationBound then
+		return runOn(due, fn)
+	end
+	local entry: Pending = { due = math.huge, fn = fn, cancelled = false, atSolve = true }
+	table.insert(pending, entry)
+	return function()
+		entry.cancelled = true
+	end
 end
 
 --- Seconds a rendered frame takes on this screen (D-351): the mean of the last impact.hold

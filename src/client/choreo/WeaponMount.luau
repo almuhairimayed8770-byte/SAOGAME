@@ -2,7 +2,9 @@
 --[[
 	WeaponMount: moves one rig's sword between the hand and its back mount, on this client only.
 
-		local mount = WeaponMount.new(animator, character, { atStepPose = FrameClock.atStepPose })
+		local mount = WeaponMount.new(animator, character, {
+			atStepPose = FrameClock.atStepPose, atStepPoseSolve = FrameClock.atStepPoseSolve,
+		})
 		mount:set("Back")      -- the sword rides on its sheath; set("Hand") puts it back in the hand
 		mount:set("Hand", true) -- from a step: the move shows with the pose that step writes
 		mount:get()            -- the place last asked for
@@ -23,12 +25,19 @@
 	step (impact.poseLagFrames), while a Part0 or C0 write puts the blade on its new part at once,
 	from that part as physics last solved it (measured on the owner's PC, AG 376(b)): moved in the
 	step, the sword hung for one frame in the hand of the pose before (the tip 4.1 studs on, the
-	hand 0.003). So such a move waits for deps.atStepPose (FrameClock.atStepPose), the first frame
-	that draws its step's pose, and lands there, before that frame draws (D-555); until then the
-	sword stays where it is, the back pin included. The pin goes first, then Part0 and C0, so the
-	blade lands from the Transform its new place wants: the pose's Weapon key in the hand, rest on
-	the back. A move asked outside a step (a new mount, an equip), one with no deps.atStepPose, or
-	one onto a motor this mount has not placed yet lands at once.
+	hand 0.003). So such a move waits for the pose it belongs to (D-555); until then the sword
+	stays where it is, the back pin included. That placement also takes the joint's Transform as
+	physics last solved it, not as it stands (the PC's P4 L6b on f446653; AQ 497(e) on 82b82d4:
+	landed at the start of the frame that draws the pose, the blade showed its old place's rest
+	turn, 0.0 to 1.3 degrees in the grip against the stroke's 4 to 27, and a Sheathe would land on
+	the back at the hand's 77-degree key). So the move lands through deps.atStepPoseSolve
+	(FrameClock.atStepPoseSolve, D-590): at the next PreSimulation, once the frame that asked has
+	drawn and right before the physics that first solves the pose, so that physics solves the blade
+	on its new part with the step's own Transform and the next frame draws the two together. With
+	only deps.atStepPose it lands at the start of that frame, as before. The pin goes first, then
+	Part0 and C0, so the joint's Transform is the one its new place wants: the pose's Weapon key in
+	the hand, rest on the back. A move asked outside a step (a new mount, an equip), one with neither
+	gate, or one onto a motor this mount has not placed yet lands at once.
 
 	A step hook re-reads the joint before every animator step: a new motor (an equip, a respawn,
 	streaming) or a Part0 or C0 that moved since this mount wrote it gets its place again, in the
@@ -66,8 +75,11 @@ export type Place = "Hand" | "Back"
 
 export type Deps = {
 	-- FrameClock.atStepPose (D-343): runs `fn` on the first rendered frame that draws the pose a
-	-- rig's step writes now, and returns its cancel. Nil: every move lands at once.
+	-- rig's step writes now, and returns its cancel. Used when atStepPoseSolve is nil.
 	atStepPose: ((fn: () -> ()) -> () -> ())?,
+	-- FrameClock.atStepPoseSolve (D-590): runs `fn` right before the physics that solves the pose a
+	-- rig's step writes now, and returns its cancel. Nil with atStepPose nil: every move lands at once.
+	atStepPoseSolve: ((fn: () -> ()) -> () -> ())?,
 }
 
 export type WeaponMount = {
@@ -219,8 +231,9 @@ end
 
 -- Puts the motor where the sword is shown (the wish, once a move waiting for its pose's frame has
 -- landed). A rig that cannot sheathe keeps its sword in the hand as the server built it: nothing
--- is written, only the pin is let go. The pin goes before Part0 and C0: either write puts the
--- blade on its part at once from the joint's Transform as it stands (D-555).
+-- is written, only the pin is let go. The pin goes before Part0 and C0 (D-555), so the physics
+-- after a move that lands at PreSimulation (D-590) solves it with the Transform its new place
+-- wants.
 local function apply(self: any)
 	if not self.canSheathe then
 		self.animator:pin(MOTOR, false)
@@ -244,12 +257,14 @@ local function apply(self: any)
 end
 
 --- Creates the mount for an animator and its character model; the sword starts in the hand.
---- deps.atStepPose holds a move asked from a step until the frame that draws its pose (D-555).
+--- deps.atStepPoseSolve (else deps.atStepPose) holds a move asked from a step until the pose it
+--- belongs to is solved (D-590) or drawn (D-555).
 function WeaponMount.new(animator: any, model: Model, deps: Deps?): WeaponMount
 	local self = setmetatable({
 		animator = animator,
 		model = model,
-		atStepPose = if deps ~= nil then deps.atStepPose else nil,
+		-- The gate a move asked from a step waits on (D-590, D-555).
+		poseGate = if deps ~= nil then deps.atStepPoseSolve or deps.atStepPose else nil,
 		wish = "Hand" :: Place,
 		shown = "Hand" :: Place, -- where the motor is put: the wish, once a waiting move landed
 		waitToken = nil :: {}?, -- the move waiting for its pose's frame (D-555)
@@ -283,15 +298,16 @@ function WeaponMount.new(animator: any, model: Model, deps: Deps?): WeaponMount
 end
 
 --- Records where the sword should be and puts it there when this mount drives the rig: now, or,
---- `withPose` (asked from inside the animator's step), on the first frame that draws the pose
---- that step writes (deps.atStepPose, D-555). A wish that turns back before then moves nothing.
+--- `withPose` (asked from inside the animator's step), right before the physics that solves the
+--- pose that step writes (deps.atStepPoseSolve, D-590; else at the start of the first frame that
+--- draws it, deps.atStepPose, D-555). A wish that turns back before then moves nothing.
 function WeaponMount.set(self: any, place: Place, withPose: boolean?)
 	if self.destroyed then
 		self.wish = place
 		return
 	end
 	self.wish = place
-	local gate = self.atStepPose
+	local gate = self.poseGate
 	local waits = false
 	if withPose == true and gate ~= nil and place ~= self.shown and isTop(self) then
 		-- Only a motor this mount has placed (and can sheathe) has a place to keep until then.

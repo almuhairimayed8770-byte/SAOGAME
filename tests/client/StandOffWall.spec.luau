@@ -117,6 +117,8 @@ type Rig = {
 	wake: () -> (),
 	-- An engine hitch: the clock moves `seconds` and nothing runs (no Heartbeat, no timers).
 	hitch: (seconds: number) -> (),
+	-- How long each frame from now on lasts (its clock, render step and physics).
+	setFrameSeconds: (seconds: number) -> (),
 	-- With `choreo`: the real animator, its clip events in order, and how many steps it took.
 	animator: any,
 	clipEvents: { { clipId: string, kind: string, jumped: boolean, at: number } },
@@ -678,6 +680,9 @@ local function load(options: Options?): Rig
 		frame = function(stick: Vector3)
 			clock += frameSeconds
 			render(stick, frameSeconds)
+		end,
+		setFrameSeconds = function(seconds: number)
+			frameSeconds = seconds
 		end,
 		now = function(): number
 			return clock
@@ -1308,12 +1313,35 @@ local SUBSTEP_HZ = 240
 local PUSH_SHARE = 0.25
 local PUSH_PASSES = 4
 
+-- What the PC's take on the owner's avatar has that the bench's plain take leaves out (item 496),
+-- each an assumption fitted to the PC's rows, not a measurement of the engine:
+-- `hits`: each cut lands on its strike key and holds the rig there (a Normal 3 frames, Sharp
+-- Nail's last a Final 6), so after each freeze the root runs a step behind its pose (D-496);
+-- `jitter`: each frame lasts 1/fps times 1 plus up to this share either way (the PC's 144 rows ran
+-- 3.5 to 8.1 ms); `contact`: the engine leaves a pressed colliding part this deep in the face (the
+-- PC's walk-in rests the deepest colliding part 0.050-0.056 in; 0.04 rests the bench's at
+-- 0.055-0.058); `headDepth` and `headCollides`: the owner's Head, a MeshPart 1.27 deep that does
+-- not collide.
+local CombatData = Harness.load("src/shared/data/combat")
+local HIT_STOP_FRAMES = CombatData.hitStopFrames
+local STRIKE_EPSILON: number = CombatData.contact.keyEpsilon
+local ChoreoPose = Harness.load("src/shared/choreo/Pose")
+
+type Conditions = {
+	hits: boolean?,
+	jitter: number?,
+	contact: number?,
+	headDepth: number?,
+	headCollides: boolean?,
+}
+
 -- One take as the PC ran it: placed at z `start` facing the kobold (locked), still 0.3 s, S held
 -- 0.5 s, still 0.3 s, Basic1, still 0.4 s, then 3 times Sharp Nail (held 0.2 s, released) and
 -- still 0.4 s, at `fps`. The code's root (Character+1) is the root after the frame less what the
 -- body did in physics; the screen is the pose before on that root (D-535).
-local function take(b: any, shape: string, face: number, fps: number, start: number): any
+local function take(b: any, shape: string, face: number, fps: number, start: number, conditions: Conditions?): any
 	local ContactPredictor = Harness.load("src/client/controllers/ContactPredictor")
+	local pc: Conditions = conditions or {}
 	local avatar = b.avatar
 	local GAP: number = b.gap
 	local block = blockAt(shape, face)
@@ -1322,10 +1350,23 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		table.insert(obstacles, blocker)
 	end
 	local cast = blockcast({ block })
+	local headPart = avatar.model:FindFirstChild("Head") :: BasePart
+	local headSize = headPart.Size
+	if pc.headDepth ~= nil then
+		headPart.Size = Vector3.new(headSize.X, headSize.Y, pc.headDepth)
+	end
 	local sizes: { [string]: Vector3 } = {}
 	for _, name in b.column do
 		sizes[name] = (avatar.model:FindFirstChild(name) :: BasePart).Size
 	end
+	-- What the engine collides (and pushes out): the column, less a Head that does not collide.
+	local colliding: { string } = {}
+	for _, name in b.column do
+		if name ~= "Head" or pc.headCollides ~= false then
+			table.insert(colliding, name)
+		end
+	end
+	local contact: number = pc.contact or 0
 	local function pose(root: CFrame, transforms: { [string]: CFrame })
 		for name, solved in b.solve(root, transforms) do
 			local part = avatar.model:FindFirstChild(name)
@@ -1381,11 +1422,11 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 			for _ = 1, PUSH_PASSES do
 				local solved = b.solve(rig.root.CFrame, transforms)
 				local push = Vector3.zero
-				for _, name in b.column do
+				for _, name in colliding do
 					for _, obstacle in obstacles do
 						local apart, along = separation(solved[name], sizes[name], obstacle.CFrame, obstacle.Size)
-						if apart < 0 then
-							push += Vector3.new(along.X, 0, along.Z) * -apart
+						if apart < -contact then
+							push += Vector3.new(along.X, 0, along.Z) * (-apart - contact)
 						end
 					end
 				end
@@ -1419,8 +1460,34 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		[basicId] = Harness.load("src/shared/clips/" .. basicId),
 		[artId] = Harness.load("src/shared/clips/" .. artId),
 	}
+	-- Each cut's strike key and its hold (combat.luau hitStopFrames: an Art's last cut is its Final).
+	local strikes: { [string]: { { key: number, frames: number } } } = {}
+	for id, clip in clips do
+		local windows = ClipSampler.hitWindows(clip)
+		local list = {}
+		for index, window in windows do
+			local final = id == artId and index == #windows
+			table.insert(list, {
+				key = ContactPredictor.strikeKey(clip, window),
+				frames = if final then HIT_STOP_FRAMES.Final else HIT_STOP_FRAMES.Normal,
+			})
+		end
+		strikes[id] = list
+	end
+	-- A fixed sequence of frame times (a linear congruential generator), the same every run.
+	local seed = 7
+	local function nextShare(): number
+		seed = (seed * 1103515245 + 12345) % 2147483648
+		return 2 * seed / 2147483648 - 1
+	end
 	local rows: { any } = {}
+	local swingWas: { [number]: number } = {}
 	local function row(label: string)
+		local dt = 1 / fps
+		if pc.jitter ~= nil then
+			dt *= 1 + pc.jitter * nextShare()
+		end
+		rig.setFrameSeconds(dt)
 		local first = rig.root.CFrame
 		shown = table.clone(rig.animator.pose)
 		local drawn = shown
@@ -1446,16 +1513,40 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 				local a = ClipSampler.rootMotionAt(clip, was)
 				local c = ClipSampler.rootMotionAt(clip, handle.time)
 				carried += first:VectorToWorldSpace(Vector3.new(c[1] - a[1], 0, c[3] - a[3]))
+				if pc.hits then
+					for _, strike in strikes[id] do
+						if was < strike.key - STRIKE_EPSILON and handle.time >= strike.key - STRIKE_EPSILON then
+							rig.animator:hitStop(strike.frames)
+						end
+					end
+				end
+			end
+		end
+		-- The swing the rig plays (fading in or out included) and its clip time before and now.
+		local swing: any = nil
+		for _, handle in rig.animator:handles() do
+			local clip = clips[handle.clipId]
+			if clip ~= nil and not handle.done then
+				swing = {
+					id = handle.id,
+					clip = clip,
+					time = handle.time,
+					was = swingWas[handle.id] or handle.time,
+					alone = handle.fade >= 1 - 1e-6 and handle.weight >= 1 - 1e-6 and not handle.stopping,
+				}
+				swingWas[handle.id] = handle.time
 			end
 		end
 		local after = rig.root.CFrame
 		table.insert(rows, {
 			label = label,
+			dt = dt,
 			first = first,
 			code = after - pushed - walked,
 			after = after,
 			drawn = drawn,
 			carried = carried,
+			swing = swing,
 		})
 	end
 	local function hold(label: string, seconds: number)
@@ -1465,6 +1556,7 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 	end
 	hold("place", 0.3)
 	hold("S", 0.5)
+	local holdEnd = #rows
 	hold("rest", 0.3)
 	local chainStart = #rows + 1
 	rig.controller.basicAttack()
@@ -1488,7 +1580,6 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		hold("idle", 0.4)
 	end
 	-- The lines (462 and 431(c)/(e)) on this bench.
-	local dt = 1 / fps
 	local result = {
 		before = -math.huge, -- the column's deepest on the screen before the chain
 		codeShare = 0, -- (a) over Basic1, toward the kobold
@@ -1507,10 +1598,38 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		engineSlide = 0, -- (e) the engine's move along the face over the take
 		slide = 0, -- (e) the body's move along the face over the take
 		rows = #rows - chainStart + 1,
+		-- Item 496's readings:
+		pre = -math.huge, -- the pre-check: the colliding parts' deepest on the S hold's last row
+		preHead = 0, -- and the Head's
+		normal = 0, -- (b) the code's step along the inward normal of the face a touching part is nearest
+		stepLag = -math.huge, -- (d) past max(12 x the longer of this frame and the one before, m, m before)
+		alone = 0, -- (e) |uto - utoClip(tPrev)| on rows that draw the swing alone at full weight
+		aloneRows = 0,
+		blend = 0, -- (e) the same on rows that draw it fading in or out
+		blendRows = 0,
+		firstLag = 0, -- (f) First-to-First rows over (d)'s long-row bar
 	}
 	local rootSize: Vector3 = avatar.model.PrimaryPart.Size
 	local function depth(frame: CFrame, size: Vector3): number
 		return -separation(frame, size, block.CFrame, block.Size)
+	end
+	do
+		local r = rows[holdEnd]
+		local screen = b.solve(r.code, r.drawn)
+		for _, name in colliding do
+			result.pre = math.max(result.pre, depth(screen[name], sizes[name]))
+		end
+		result.preHead = depth(screen.Head, sizes.Head)
+	end
+	local dt = 1 / fps
+	local function ownMotion(r: any): Vector3
+		local swing = r.swing
+		if swing == nil then
+			return Vector3.zero
+		end
+		local a = ClipSampler.rootMotionAt(swing.clip, swing.was)
+		local c = ClipSampler.rootMotionAt(swing.clip, swing.time)
+		return Vector3.new(c[1] - a[1], 0, c[3] - a[3])
 	end
 	for index, r in rows do
 		local toward = Vector3.new(KOBOLD_AT.X - r.first.X, 0, KOBOLD_AT.Z - r.first.Z).Unit
@@ -1533,13 +1652,19 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		local stepped = b.solve(CFrame.new(r.code.Position) * r.first.Rotation, r.drawn)
 		local carriedOnly = b.solve(r.first + r.carried, r.drawn)
 		local near, worst = false, 0
-		for _, name in b.column do
-			local was = separation(fromFirst[name], sizes[name], block.CFrame, block.Size)
+		for _, name in colliding do
+			local was, along = separation(fromFirst[name], sizes[name], block.CFrame, block.Size)
 			if was < GAP then
 				near = true
 				local now = separation(stepped[name], sizes[name], block.CFrame, block.Size)
 				local clipOwn = separation(carriedOnly[name], sizes[name], block.CFrame, block.Size)
 				worst = math.max(worst, (was - now) - math.max(was - clipOwn, 0))
+				-- Item 496 (b): along the inward normal of the face it is nearest (`along` points out).
+				local inward = -Vector3.new(along.X, 0, along.Z)
+				if inward.Magnitude > 1e-6 then
+					inward = inward.Unit
+					result.normal = math.max(result.normal, code:Dot(inward) - math.max(r.carried:Dot(inward), 0))
+				end
 			end
 		end
 		if near then
@@ -1567,38 +1692,82 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		if flat > 12 * dt + 1e-4 then
 			result.rawOver += 1
 		end
+		-- Item 496 (d) on the PC's own columns: m from the handle's clip times, and after a freeze the
+		-- root shows the step before's share (D-496), so the frame before counts too (item 500).
+		local previous = rows[index - 1]
+		local m = ownMotion(r)
+		local mBefore = if previous.swing ~= nil
+				and r.swing ~= nil
+				and previous.swing.id == r.swing.id
+			then ownMotion(previous)
+			else Vector3.zero
+		local bar = math.max(12 * math.max(r.dt, previous.dt), m.Magnitude, mBefore.Magnitude)
+		result.stepLag = math.max(result.stepLag, flat - bar)
 		local nextFirst = if rows[index + 1] ~= nil then rows[index + 1].first else r.after
-		if Vector3.new(nextFirst.X - r.first.X, 0, nextFirst.Z - r.first.Z).Magnitude > 12 * dt + 1e-4 then
+		local firstStep = Vector3.new(nextFirst.X - r.first.X, 0, nextFirst.Z - r.first.Z).Magnitude
+		if firstStep > 12 * dt + 1e-4 then
 			result.firstOver += 1
+		end
+		if firstStep > bar + 1e-3 then
+			result.firstLag += 1
+		end
+		-- Item 496 (e): the UpperTorso in the root's frame as the screen draws it (the pose before)
+		-- against the clip's own at the clip time that pose was written at.
+		local swing, swingBefore = r.swing, previous.swing
+		if swing ~= nil and r.label ~= "hold" then
+			local uto = b.solve(CFrame.identity, r.drawn).UpperTorso.Position
+			local own =
+				ChoreoPose.solve(avatar.model, CFrame.identity, ClipSampler.sample(swing.clip, swing.was)).UpperTorso.Position
+			local off = (uto - own).Magnitude
+			if swingBefore ~= nil and swingBefore.id == swing.id and swingBefore.alone then
+				result.alone = math.max(result.alone, off)
+				result.aloneRows += 1
+			else
+				result.blend = math.max(result.blend, off)
+				result.blendRows += 1
+			end
 		end
 		result.engineSlide += engine.X
 	end
 	result.slide = rows[#rows].after.X - rows[1].first.X
-	print(
-		("[462] %s %d face %.2f: before the chain %.3f in | (a) code %.4f engine %.3f | (b) touching %d, into %.4f on %d, back %.4f | (c) root %.3f | (d) %.3f past the line (as written %.3f, %d over %.3f) | (e) UT %.3f LT %.3f Head %.3f; First-to-First over %d; slide %.2f (engine %.2f)"):format(
-			shape,
-			fps,
-			face,
-			result.before,
-			result.codeShare,
-			result.engineShare,
-			result.touching,
-			result.into,
-			result.intoRows,
-			result.back,
-			result.root,
-			result.step,
-			result.raw,
-			result.rawOver,
-			12 * dt,
-			result.torso.UpperTorso,
-			result.torso.LowerTorso,
-			result.torso.Head,
-			result.firstOver,
-			result.slide,
-			result.engineSlide
-		)
+	local line = ("[462] %s %d face %.2f: before the chain %.3f in | (a) code %.4f engine %.3f | (b) touching %d, into %.4f on %d, back %.4f | (c) root %.3f | (d) %.3f past the line (as written %.3f, %d over %.3f) | (e) UT %.3f LT %.3f Head %.3f; First-to-First over %d; slide %.2f (engine %.2f)"):format(
+		shape,
+		fps,
+		face,
+		result.before,
+		result.codeShare,
+		result.engineShare,
+		result.touching,
+		result.into,
+		result.intoRows,
+		result.back,
+		result.root,
+		result.step,
+		result.raw,
+		result.rawOver,
+		12 * dt,
+		result.torso.UpperTorso,
+		result.torso.LowerTorso,
+		result.torso.Head,
+		result.firstOver,
+		result.slide,
+		result.engineSlide
 	)
+	if conditions ~= nil then
+		line ..= (" || [496] pre-check colliding %.3f, Head %.3f | (b) along the face's normal %.4f | (d) past the long-row bar %.4f | (e) alone %.3f on %d, fading %.3f on %d | (f) First-to-First over the long-row bar %d"):format(
+			result.pre,
+			result.preHead,
+			result.normal,
+			result.stepLag,
+			result.alone,
+			result.aloneRows,
+			result.blend,
+			result.blendRows,
+			result.firstLag
+		)
+	end
+	print(line)
+	headPart.Size = headSize
 	block:Destroy()
 	return result
 end
@@ -1783,6 +1952,9 @@ describe("the stand-off against a Studio-like body at a wall or a pillar flush b
 			local result = take(b, "pillar", 27.15, fps, 27.625)
 			expect(result.touching > 100).toBe(true)
 			expect(result.into <= 1e-3).toBe(true)
+			-- Item 496 (h): nor along the inward normal of the face each touching part is nearest, the
+			-- front or a side; the UpperTorso's 0.49-0.51 and the rows over 12 x dt are the engine's.
+			expect(result.normal <= 1e-3).toBe(true)
 		end
 		b.kobold:Destroy()
 	end)
@@ -1810,6 +1982,50 @@ describe("the stand-off against a Studio-like body at a wall or a pillar flush b
 				if shape == "wall" then
 					expect(math.abs(result.engineSlide) <= 0.05).toBe(true)
 				end
+			end
+		end
+		b.kobold:Destroy()
+	end)
+end)
+
+describe("the stand-off at the kobold's own stand under the PC's conditions (item 496)", function()
+	it("never steps a body resting on the face into it, along the face's normal, at 30, 60 and 144", function()
+		-- The PC's take on the owner's avatar (82b82d4): each cut holds the rig on its key, so the
+		-- root runs a step behind its pose after each freeze (D-496); 144 Hz frames 3.8 to 10 ms; the
+		-- engine rests a pressed colliding part on the face (the PC's walk-in 0.050-0.056 in); the
+		-- Head is 1.27 deep and does not collide. (b) as written reads the step on the line to the
+		-- kobold, which turns 7 to 10 degrees off the face's normal once the body has slid 0.5 to 0.6
+		-- along it, so a step along the face reads as back (Lune up to 0.0017, the PC up to 0.016):
+		-- along the face's own normal, judged where the body stood at First, it is none.
+		local b = bench()
+		for _, shape in { "wall", "pillar" } do
+			for _, fps in { 30, 60, 144 } do
+				local result = take(b, shape, 25.7, fps, 26.6, {
+					hits = true,
+					jitter = if fps == 144 then 0.45 else nil,
+					contact = 0.04,
+					headDepth = 1.27,
+					headCollides = false,
+				})
+				-- The pre-check on the colliding parts: the engine's own contact, not a squeeze.
+				expect(result.pre > b.gap).toBe(true)
+				expect(result.pre <= 0.07).toBe(true)
+				-- (b) along the face's normal, and (b) as the separation reads it.
+				expect(result.touching > 30).toBe(true)
+				expect(result.normal <= 1e-3).toBe(true)
+				expect(result.into <= 1e-3).toBe(true)
+				-- (c) and (f): no colliding part deeper than the engine's contact holds it.
+				expect(result.root <= 0.07).toBe(true)
+				expect(result.torso.UpperTorso <= 0.07).toBe(true)
+				expect(result.torso.LowerTorso <= 0.07).toBe(true)
+				-- (d) with the long-row rule: a row after a freeze shows the step before's share.
+				expect(result.stepLag <= 1e-3).toBe(true)
+				-- (e) on the rows the screen draws the swing alone at full weight; the fade in from the
+				-- idle or the Art's hold and the fade out after the clip's end are the boundary rows.
+				expect(result.aloneRows > 100).toBe(true)
+				expect(result.alone <= 0.05).toBe(true)
+				expect(result.blendRows > 0).toBe(true)
+				expect(math.abs(result.slide) <= 1).toBe(true)
 			end
 		end
 		b.kobold:Destroy()

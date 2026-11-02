@@ -21,6 +21,14 @@
 	chest and the head lead the hips by at most choreo.luau turnPlant.twistDegrees (363(c)), within
 	lockTurn.leadSlack: on 7d112ef a drawn turn to the right led by 57.5, the drawn stance's own 12
 	degrees on top of the plant's 45 (D-507).
+
+	AR 513 (D-615): the same turns started at each of lockTurn.idleStarts seconds into the drawn
+	idle, where its weight shift holds the hips up to 0.1 stud off the root's axis (IdleDrawn's Root
+	at 0.08, 0.06 from 3 s). On 81b8fef the plant took the root's yaw back but left that offset on
+	the turning root, so both feet swung round with it: 0.029 a 60 Hz row at 3 s, 0.016 at 10 s
+	(the owner's PC 0.011 to 0.047 on four of six turns). Each 60 Hz row's least-moving corner
+	within the contact band of the field on both rows (513(a)'s read) moves at most
+	lockTurn.rowStuds.
 ]]
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
@@ -122,11 +130,22 @@ type Track = {
 	slideAt: number,
 	worstDrift: number,
 	driftAt: number,
+	worstRow: number, -- AR 513(a): the most the least-moving corner within the band moved in a row
+	rowAt: number,
 	last: { Vector3 }?,
 	down: { Vector3 }?,
 	grounded: { boolean }?,
 }
-local function run(degrees: number, side: number, hz: number, rate: number, drawn: boolean): { [string]: Track }
+local function run(
+	degrees: number,
+	side: number,
+	hz: number,
+	rate: number,
+	drawn: boolean,
+	start: number?
+): { [string]: Track }
+	-- The turn starts this many seconds into the idle (AR 513: the drawn idle's weight shift).
+	local from = start or 0.5
 	local model = buildRig()
 	local animator: any = Choreo.get(model)
 	local locomotion: any = Locomotion.new(animator, model, { footIK = false })
@@ -134,10 +153,10 @@ local function run(degrees: number, side: number, hz: number, rate: number, draw
 	local yaw, left = 0, degrees
 	local tracks: { [string]: Track } = {}
 	for _, name in FOOT do
-		tracks[name] = { worstSlide = 0, slideAt = 0, worstDrift = 0, driftAt = 0 }
+		tracks[name] = { worstSlide = 0, slideAt = 0, worstDrift = 0, driftAt = 0, worstRow = 0, rowAt = 0 }
 	end
 	leads.UpperTorso, leads.Head = 0, 0
-	local frames = math.floor(1.6 * hz)
+	local frames = math.floor((from + 1.1) * hz)
 	local per60 = hz / 60
 	local slideAcc: { [string]: { number } } = { LeftFoot = {}, RightFoot = {} }
 	for frame = 1, frames do
@@ -145,7 +164,7 @@ local function run(degrees: number, side: number, hz: number, rate: number, draw
 		-- The render step: the root still stands where the last frame left it; the lock's turn
 		-- this frame is handed to Locomotion ahead.
 		local ahead = 0
-		if t > 0.5 then
+		if t > from then
 			local step = math.min(left, rate * dt)
 			left -= step
 			ahead = step * side
@@ -175,7 +194,7 @@ local function run(degrees: number, side: number, hz: number, rate: number, draw
 				leads[part] = lead
 			end
 		end
-		if t < 0.5 - 1e-9 then
+		if t < from - 1e-9 then
 			continue
 		end
 		for _, name in FOOT do
@@ -186,6 +205,22 @@ local function run(degrees: number, side: number, hz: number, rate: number, draw
 				grounded[i] = now[i].Y - FIELD_TOP <= CONTACT
 			end
 			local last, wasDown = track.last, track.grounded
+			if last ~= nil then
+				-- AR 513(a): the least-moving corner within the band of the field on both rows.
+				local least = math.huge
+				for i = 1, 4 do
+					if
+						math.abs(now[i].Y - FIELD_TOP) <= CONTACT
+						and math.abs((last :: { Vector3 })[i].Y - FIELD_TOP) <= CONTACT
+					then
+						least = math.min(least, (flat(now[i]) - flat((last :: { Vector3 })[i])).Magnitude)
+					end
+				end
+				if least < math.huge and least > track.worstRow then
+					track.worstRow = least
+					track.rowAt = t - from
+				end
+			end
 			if last ~= nil and wasDown ~= nil then
 				-- slide: the least-moving corner grounded through the frame
 				local least = math.huge
@@ -203,7 +238,7 @@ local function run(degrees: number, side: number, hz: number, rate: number, draw
 					end
 					if sum > track.worstSlide then
 						track.worstSlide = sum
-						track.slideAt = t - 0.5
+						track.slideAt = t - from
 					end
 				else
 					slideAcc[name] = {}
@@ -231,7 +266,7 @@ local function run(degrees: number, side: number, hz: number, rate: number, draw
 						(track :: any).keep = table.clone(grounded)
 					elseif least > track.worstDrift then
 						track.worstDrift = least
-						track.driftAt = t - 0.5
+						track.driftAt = t - from
 					end
 				end
 			else
@@ -315,6 +350,66 @@ describe("the lock turn as the frame shows it (363(b), D-505)", function()
 						worst.drift,
 						worst.UpperTorso or 0,
 						worst.Head or 0
+					)
+				)
+				expect(table.concat(problems, "\n")).toBe("")
+			end
+		)
+	end
+end)
+
+describe("the lock turn from the drawn idle's weight shift (AR 513, D-615)", function()
+	for _, side in { -1, 1 } do
+		it(
+			("the lock turns the drawn body to the %s from every idle phase: the hips' offset turns with them"):format(
+				if side < 0 then "right" else "left"
+			),
+			function()
+				local problems = {}
+				local worst: { [string]: number } = { row = 0, slide = 0, drift = 0 }
+				for _, start in Bar.idleStarts do
+					for _, degrees in Bar.degrees do
+						local tracks = run(degrees, side, 60, Combat.aim.lockTurnRate, true, start)
+						for _, name in FOOT do
+							local track = tracks[name]
+							worst.row = math.max(worst.row, track.worstRow)
+							worst.slide = math.max(worst.slide, track.worstSlide)
+							worst.drift = math.max(worst.drift, track.worstDrift)
+							if track.worstRow > Bar.rowStuds + 1e-6 then
+								table.insert(
+									problems,
+									("%d deg from %.1f s into the idle: %s moves %.4f in a 60 Hz row on the field at +%.3f s (max %.3f)"):format(
+										degrees,
+										start,
+										name,
+										track.worstRow,
+										track.rowAt,
+										Bar.rowStuds
+									)
+								)
+							end
+							if track.worstDrift > Bar.driftStuds + 1e-6 then
+								table.insert(
+									problems,
+									("%d deg from %.1f s into the idle: %s drifts %.3f over one plant at +%.3f s (max %.2f)"):format(
+										degrees,
+										start,
+										name,
+										track.worstDrift,
+										track.driftAt,
+										Bar.driftStuds
+									)
+								)
+							end
+						end
+					end
+				end
+				print(
+					("LockTurnShown idle phases side %d: worst row %.4f, frame %.4f, drift %.3f"):format(
+						side,
+						worst.row,
+						worst.slide,
+						worst.drift
 					)
 				)
 				expect(table.concat(problems, "\n")).toBe("")

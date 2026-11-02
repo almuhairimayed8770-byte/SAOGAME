@@ -217,7 +217,13 @@ local standOffLost = 0
 local standOffClock: number? = nil
 -- True when the plan is a basic swing's: its clip plays on past its state (D-568).
 local standOffBasic = false
+-- True when the plan is a held Art's stance's (D-606): it runs while the stance is held.
+local standOffStance = false
 local STAND_OFF_EASING: string = Combat.contact.standOff.easing
+-- Clip seconds within which a clock counts as at a key (combat.luau contact.keyEpsilon): a drawn
+-- clock summed from frame steps to an activation hold's end lands a hair past it (0.25 + 6e-17
+-- after 36 steps of 1/144), and that pose is still the hold's (D-616).
+local KEY_EPSILON: number = Combat.contact.keyEpsilon
 -- The root's move a step held back to the next one (D-496): the root is written in the render
 -- step and shows on its own frame, the pose a frame later (impact.poseLagFrames), so a step taken
 -- while the frame still draws a held pose (a hit-stop's last still frame) would move the root
@@ -509,12 +515,14 @@ local standOffAsked: any = nil
 -- colliding parts into the enemy's blocker, so the engine never pushes it out through a freeze
 -- (and aside off the face over a part the enemy holds, D-315). None of it goes into the world
 -- behind or beside (the body's own world cast, D-235 amended). The root carries it in step().
-local function planStandOff(handle: any, facing: { number }, basic: boolean?)
+-- With `stance` (an Art's hold pose time), the held start pose's keep-out alone (D-606).
+local function planStandOff(handle: any, facing: { number }, basic: boolean?, stance: number?)
 	standOff, standOffHandle, standOffShown, standOffSideShown = nil, nil, 0, 0
 	standOffLost = 0
 	standOffClock = nil
 	standOffAsked = handle
 	standOffBasic = basic == true
+	standOffStance = stance ~= nil
 	local model, rootPart = character, root
 	if model == nil or rootPart == nil or typeof(handle) ~= "table" then
 		return
@@ -536,9 +544,10 @@ local function planStandOff(handle: any, facing: { number }, basic: boolean?)
 	local poseLag = if typeof(pace) == "number" then pace * ImpactData.poseLagFrames else nil
 	standOff = ContactPredictor.standOff(model :: Model, handle.clip, handle.time, rootCFrame, target :: Model, world, {
 		keepOut = true,
-		step = basic ~= true,
+		step = basic ~= true and stance == nil,
 		poseLag = poseLag,
 		target = targetMotionOf(target :: Model, record, position),
+		stance = stance,
 	})
 	standOffHandle = if standOff ~= nil then handle else nil
 end
@@ -558,8 +567,9 @@ end
 -- the step take the room the lunge had just opened and the hold take the same lunge again, past
 -- where the root stood (item 337, D-502: the root box 0.48 into a wall flush behind). A basic
 -- swing's plan is asked for here, on its first frame (the clip has taken one step, and the root
--- faces where the request turned it).
-local function stepStandOff(rootPart: BasePart, carried: Vector3)
+-- faces where the request turned it). True while the frame still draws the activation hold the
+-- plan waits for (D-604): a move this frame makes then shows with the pose that leaves it.
+local function stepStandOff(rootPart: BasePart, carried: Vector3): boolean
 	local current = predicted
 	if
 		current ~= nil
@@ -572,7 +582,7 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3)
 	end
 	local plan = standOff
 	if plan == nil then
-		return
+		return false
 	end
 	local handle = standOffHandle
 	-- A basic's clip plays on past its state (combat.basicHitDuration, fading or not) while the body
@@ -583,12 +593,16 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3)
 		and current == nil
 		and typeof(handle) == "table"
 		and handle.done ~= true
+	-- A held Art's stance plan runs while its stance is held (D-606).
+	local stance = standOffStance and state == "Holding" and hold ~= nil and (hold :: Hold).handle == handle
 	if
-		not tail and ((state ~= "Art" and state ~= "Basic") or current == nil or current.handle ~= handle)
+		not tail
+			and not stance
+			and ((state ~= "Art" and state ~= "Basic") or current == nil or current.handle ~= handle)
 		or typeof(handle.time) ~= "number"
 	then
 		standOff, standOffHandle = nil, nil
-		return
+		return false
 	end
 	local keep = plan.keep
 	local shown = AimLogic.standOffAt(plan.distance, plan.from, plan.to, handle.time, STAND_OFF_EASING)
@@ -597,6 +611,7 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3)
 	-- The room is kept for every pose from the one this frame still draws on (D-534).
 	local drawnClock = math.min(standOffClock or plan.from, handle.time)
 	standOffClock = handle.time
+	local leads = plan.still ~= nil and drawnClock <= plan.still + KEY_EPSILON
 	-- Back along the way this frame's root motion came, so never into the world: first what a wall
 	-- took off before, then this frame's share.
 	local toward = math.max(-carried:Dot(plan.away), 0)
@@ -635,6 +650,7 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3)
 	if handle.time >= math.max(plan.to, plan.keepUntil or plan.to) then
 		standOff, standOffHandle = nil, nil
 	end
+	return leads
 end
 
 -- GuardRequest goes through TrailingSend: never faster than its rate limit, and the last raise or
@@ -942,6 +958,14 @@ function CharacterController.beginArt(slot: number)
 	}
 	setState("Holding")
 	predictDraw()
+	-- At a held lock the body steps back as it takes the stance, so the start pose's hands stand
+	-- out of the target through the hold (D-606); the release plans the swing afresh.
+	local lockAt = lockPosition()
+	local holdAt = holdClipTime(hold :: Hold)
+	if lockAt ~= nil and root ~= nil and holdAt ~= nil then
+		local look = lockAt - (root :: BasePart).Position
+		planStandOff((hold :: Hold).handle, { look.X, 0, look.Z }, nil, holdAt)
+	end
 	Siblings.call(Hud, "noteArtUse")
 	-- If the clip carries no ActivationHold event the freeze still lands at the section 6 time.
 	task.delay(HOLD_FALLBACK, function()
@@ -1594,7 +1618,7 @@ local function step(dt: number)
 		end
 	end
 	-- The Art stand-off over the anticipation (fix F1), on the clip's clock like the root motion.
-	stepStandOff(rootPart, carried)
+	local stepLeads = stepStandOff(rootPart, carried)
 	local moved = rootPart.Position - movedFrom
 	-- The blade on the pose this frame shows: a touch plays its hit now (issue 4).
 	stepContacts()
@@ -1603,9 +1627,10 @@ local function step(dt: number)
 	recordYaw(rootPart, t)
 	-- This frame still draws a held pose (the step that wrote it was frozen), or the root is
 	-- already a step behind since one did: this step's move shows next frame, with its pose
-	-- (D-496). A step that moves nothing ends the run, and the root leads its pose again.
+	-- (D-496), as does a step the stand-off takes while the frame still draws the activation hold
+	-- (D-604). A step that moves nothing ends the run, and the root leads its pose again.
 	local drawsHeld = typeof(animator.heldShown) == "function" and animator:heldShown() == true
-	if moved.Magnitude > 0 and (drawsHeld or heldBack ~= Vector3.zero) and root == rootPart then
+	if moved.Magnitude > 0 and (drawsHeld or heldBack ~= Vector3.zero or stepLeads) and root == rootPart then
 		rootPart.CFrame = rootPart.CFrame - moved
 		rootHeldBack = moved
 	end
@@ -1674,11 +1699,15 @@ local function onCharacter(model: Model)
 	unhookRigStep = animator:onStep(beforeRigStep)
 	-- The local rig is always at full rate, and this controller's to step (stepLocal, D-139).
 	Siblings.call(Choreo, "setLocalModel", model, true)
-	-- The sword's move between the back and the hand lands on the frame that draws the pose of the
-	-- step that asked for it (FrameClock.atStepPose, D-555); with no FrameClock, at once.
+	-- The sword's move between the back and the hand lands with the pose of the step that asked for
+	-- it: right before the physics that solves it (FrameClock.atStepPoseSolve, D-590), else on the
+	-- frame that draws it (FrameClock.atStepPose, D-555); with no FrameClock, at once.
 	local stepPose = if typeof(FrameClock) == "table" then rawget(FrameClock, "atStepPose") else nil
-	locomotion =
-		Locomotion.new(animator, model, { atStepPose = if typeof(stepPose) == "function" then stepPose else nil })
+	local stepPoseSolve = if typeof(FrameClock) == "table" then rawget(FrameClock, "atStepPoseSolve") else nil
+	locomotion = Locomotion.new(animator, model, {
+		atStepPose = if typeof(stepPose) == "function" then stepPose else nil,
+		atStepPoseSolve = if typeof(stepPoseSolve) == "function" then stepPoseSolve else nil,
+	})
 	model:GetAttributeChangedSignal(ART_SLOTS_ATTRIBUTE):Connect(refreshSlots)
 	refreshSlots()
 end

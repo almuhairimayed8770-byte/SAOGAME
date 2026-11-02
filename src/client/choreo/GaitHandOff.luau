@@ -19,7 +19,10 @@
 
 	A dodge (D-528) takes the body the same way from any stance or gait it cuts nothing in, over
 	choreo.luau locomotion.dodgeHandOff's per-joint seconds, and the gait's phase and blend stand
-	under it until it lets go (Locomotion).
+	under it until it lets go (Locomotion). A dodge that played to its end hands the legs back at
+	dodgeHandOff.resumePhase, the point of the stride that fits its landing (D-609). A turn in
+	place it cuts (dodgeHandOff.takesFrom) is a stance too: the dodge takes the body from it over
+	the same blends, and the turn stands under it until they have come in (D-613).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -56,6 +59,29 @@ function GaitHandOff.dodgeLive(mixer: any): boolean
 		end
 	end
 	return false
+end
+
+-- The one-shots a dodge takes the body from over its joints' blends (dodgeHandOff.takesFrom), by
+-- clip id, and the longest of those blends.
+local TAKES_FROM: { [string]: boolean } = {}
+for _, name in ChoreoData.locomotion.dodgeHandOff.takesFrom do
+	TAKES_FROM[ChoreoData.locomotion.clipPrefix .. name] = true
+end
+local LONGEST_DODGE_BLEND = 0
+for _, seconds in ChoreoData.locomotion.dodgeHandOff.joints do
+	LONGEST_DODGE_BLEND = math.max(LONGEST_DODGE_BLEND, seconds)
+end
+
+--- True for a locomotion one-shot a dodge takes the body from as from a stance (D-613): a turn
+--- in place, not an action to cut.
+function GaitHandOff.dodgeTakesFrom(clip: Types.ClipDef): boolean
+	return TAKES_FROM[clip.id] == true
+end
+
+--- The longest of the dodge's joint blends (seconds): a one-shot it takes the body from stands
+--- under it this long.
+function GaitHandOff.dodgeBlendSeconds(): number
+	return LONGEST_DODGE_BLEND
 end
 
 --- Each listed joint's blend in (seconds) for a dodge taking the body (D-528): the data's own

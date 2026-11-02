@@ -2314,6 +2314,139 @@ describe("choreo validator: the cancel hand-over and the gait hand-off (D-408, D
 		)).toBe(true)
 	end)
 
+	it("hands the legs back after a dodge at a gait phase in [0, 1) (D-609)", function()
+		for _, bad in { -0.1, 1, 1.5, 0 / 0, "0.2" } :: { any } do
+			expect(hasProblem(
+				runWith(function(c)
+					c.locomotion.dodgeHandOff.resumePhase = bad
+				end),
+				"locomotion.dodgeHandOff.resumePhase"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.dodgeHandOff.resumePhase = nil
+			end),
+			"locomotion.dodgeHandOff.resumePhase (nil)"
+		)).toBe(true)
+		for _, good in { 0, 0.5, 0.99 } do
+			expect(runWith(function(c)
+				c.locomotion.dodgeHandOff.resumePhase = good
+			end)).toEqual({})
+		end
+	end)
+
+	it("takes the body from a turn in place as from a stance, never from an action (D-613)", function()
+		for _, bad in { { "Basic1" }, { "DodgeBack" }, { "Spin" }, { 3 } } :: { any } do
+			expect(hasProblem(
+				runWith(function(c)
+					c.locomotion.dodgeHandOff.takesFrom = bad
+				end),
+				"locomotion.dodgeHandOff.takesFrom"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.dodgeHandOff.takesFrom = nil
+			end),
+			"locomotion.dodgeHandOff.takesFrom must list"
+		)).toBe(true)
+		expect(runWith(function(c)
+			c.locomotion.dodgeHandOff.takesFrom = { "TurnLeft", "Land" }
+		end)).toEqual({})
+	end)
+
+	it("reads the Skid's drop over a stop's window (D-612)", function()
+		for _, bad in { 0, -6, 0 / 0, "6" } :: { any } do
+			expect(hasProblem(
+				runWith(function(c)
+					c.locomotion.stopSpeedDrop = bad
+				end),
+				"locomotion.stopSpeedDrop"
+			)).toBe(true)
+		end
+		for _, bad in { 0, -1 / 60, 0.2, 0 / 0 } do
+			expect(hasProblem(
+				runWith(function(c)
+					c.locomotion.stopDropSeconds = bad
+				end),
+				"locomotion.stopDropSeconds"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			runWith(function(c)
+				c.locomotion.stopDropSeconds = nil
+			end),
+			"locomotion.stopDropSeconds (nil)"
+		)).toBe(true)
+		for _, good in { 1 / 240, 1 / 60, 0.1 } do
+			expect(runWith(function(c)
+				c.locomotion.stopDropSeconds = good
+			end)).toEqual({})
+		end
+	end)
+
+	it("brakes the sheath clips on a stop by sheathed gait clips and a rate a run let go passes (D-611)", function()
+		-- runWith clones no sheath table: each edit clones it before it writes.
+		expect(hasProblem(
+			runWith(function(c)
+				c.sheath = table.clone(c.sheath)
+				c.sheath.stopBrakeClips = {}
+			end),
+			"sheath.stopBrakeClips must map at least one gait clip"
+		)).toBe(true)
+		expect(hasProblem(
+			runWith(function(c)
+				c.sheath = table.clone(c.sheath)
+				c.sheath.stopBrakeClips = { RunDrawn = 1 }
+			end),
+			"sheath.stopBrakeClips 'RunDrawn' must be a sheathed clip"
+		)).toBe(true)
+		expect(hasProblem(
+			runWith(function(c)
+				c.sheath = table.clone(c.sheath)
+				c.sheath.stopBrakeClips = { Gallop = 1 }
+			end),
+			"sheath.stopBrakeClips 'Gallop' must be a sheathed clip"
+		)).toBe(true)
+		for _, bad in { 0, -1, 0 / 0, "1" } :: { any } do
+			expect(hasProblem(
+				runWith(function(c)
+					c.sheath = table.clone(c.sheath)
+					c.sheath.stopBrakeClips = { Run = bad, Sprint = 2 }
+				end),
+				"sheath.stopBrakeClips.Run"
+			)).toBe(true)
+		end
+		-- weightBlendRate 8 times the smallest step 1: 8 never brakes, nor does 0.
+		for _, bad in { 0, -2, 8, 12, 0 / 0 } do
+			expect(hasProblem(
+				runWith(function(c)
+					c.sheath = table.clone(c.sheath)
+					c.sheath.stopBrakeRate = bad
+				end),
+				"sheath.stopBrakeRate"
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			runWith(function(c)
+				c.sheath = table.clone(c.sheath)
+				c.sheath.stopBrakeRate = nil
+			end),
+			"sheath.stopBrakeRate (nil)"
+		)).toBe(true)
+		for _, good in { 0.5, 2, 7.9 } do
+			expect(runWith(function(c)
+				c.sheath = table.clone(c.sheath)
+				c.sheath.stopBrakeRate = good
+			end)).toEqual({})
+		end
+		expect(runWith(function(c)
+			c.sheath = table.clone(c.sheath)
+			c.sheath.stopBrakeClips = { Run = 1 }
+		end)).toEqual({})
+	end)
+
 	it("ends every attack's hand-off by its first strike key, where the hit is drawn", function()
 		-- The basics' key is 0.15 s and their base 0.1 s: a factor of 1.5 ends on it, 2 is 0.05 s late.
 		local problems = runWith(function(c)
@@ -2562,6 +2695,29 @@ describe("rushDraw validator: the drawn rush's pass and its skid's dust (FB1, FB
 		choreo.enemy.rush.teleportStuds = 2.9
 		local problems = runRush()
 		choreo.enemy.rush.teleportStuds = original
+		expect(problems).toEqual({})
+	end)
+
+	it("wants enemy.rush.settleRestSpeed positive and under a landing root's slowest (D-602)", function()
+		local choreo = Harness.load("src/shared/data/choreo")
+		local original = choreo.enemy.rush.settleRestSpeed
+		for _, bad in { 0, -1, 0 / 0, math.huge, "0.5" :: any, nil } do
+			choreo.enemy.rush.settleRestSpeed = bad
+			local ok, problems = pcall(runRush)
+			choreo.enemy.rush.settleRestSpeed = original
+			expect(ok).toBe(true)
+			expect(hasProblem(problems, "enemy.rush.settleRestSpeed must be a positive")).toBe(true)
+		end
+		-- landSlackStuds 0.02 over landFrames 2 of a 60 Hz frame: a landing root moves at least 0.6 a second.
+		for _, bad in { 0.6, 1 } do
+			choreo.enemy.rush.settleRestSpeed = bad
+			local problems = runRush()
+			choreo.enemy.rush.settleRestSpeed = original
+			expect(hasProblem(problems, "the slowest a landing root moves")).toBe(true)
+		end
+		choreo.enemy.rush.settleRestSpeed = 0.59
+		local problems = runRush()
+		choreo.enemy.rush.settleRestSpeed = original
 		expect(problems).toEqual({})
 	end)
 
@@ -3033,6 +3189,30 @@ describe("ai validator: rush jam lag, hit-stop pause cap, collision groups", fun
 			end
 		end
 	)
+
+	it("a turned-on copy's own fall is waited out a whole number of steps (D-589)", function()
+		local function withClient(change: (client: any) -> ()): { string }
+			return runAi(function(copy)
+				local upright = table.clone(copy.upright)
+				local client = table.clone(upright.client)
+				change(client)
+				upright.client = client
+				copy.upright = upright
+			end)
+		end
+		expect(withClient(function(client)
+			client.resumeSettleSteps = 1
+		end)).toEqual({})
+		-- `false` stands for a missing field (a nil in the list would end it)
+		for _, bad in { 0, 2.5, -12, "12", false } do
+			expect(hasProblem(
+				withClient(function(client)
+					client.resumeSettleSteps = if bad == false then nil else bad
+				end),
+				"upright.client.resumeSettleSteps must be a whole number of at least 1"
+			)).toBe(true)
+		end
+	end)
 
 	it("a Charger needs a positive jamLagStuds", function()
 		expect(hasProblem(
@@ -4877,6 +5057,58 @@ describe("camera, dev capture and sfx shatter rules", function()
 			end),
 			"keepOut.bladeOutSeconds (inf) must be a finite 0 or more"
 		)).toBe(true)
+		-- D-606: the step a held stance is swept against its target in.
+		for _, bad in { 0, -0.1, 0.3, math.huge } do
+			expect(hasProblem(
+				contact("src/shared/data/combat", function(copy)
+					copy.contact.standOff.keepOut.stanceSampleSeconds = bad
+				end),
+				("keepOut.stanceSampleSeconds (%s) must be above 0 and at most 0.25"):format(tostring(bad))
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.stanceSampleSeconds = nil
+			end),
+			"keepOut.stanceSampleSeconds (nil) must be above 0 and at most 0.25"
+		)).toBe(true)
+	end)
+
+	it("contact: an Art's activation hold ends before its first window opens (D-604)", function()
+		local VERTICAL = "src/shared/clips/player/OneHandedSword/Vertical"
+		local function holdOf(clip: any): any
+			for _, event in clip.events do
+				if event.kind == "ActivationHold" then
+					return event
+				end
+			end
+			error("Vertical has no ActivationHold")
+		end
+		-- Held to the open (0.15 + 0.2 = 0.35): no time left for the step.
+		expect(
+			hasProblem(
+				contact(VERTICAL, function(copy)
+					holdOf(copy).data = { hold = 0.2 }
+				end),
+				"OneHandedSword/Vertical: its ActivationHold ends at 0.3500, not before its first window opens at 0.3500"
+			)
+		).toBe(true)
+		expect(hasProblem(
+			contact(VERTICAL, function(copy)
+				holdOf(copy).data = { hold = 0 }
+			end),
+			"OneHandedSword/Vertical: its ActivationHold's hold (0) must be a positive number of seconds"
+		)).toBe(true)
+		-- Without a data.hold the hold is combat.activationHold.
+		expect(contact(VERTICAL, function(copy)
+			holdOf(copy).data = nil
+		end)).toEqual({})
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.activationHold = 0.5
+			end),
+			"its ActivationHold ends"
+		)).toBe(false)
 	end)
 
 	it("contact: a rig's blocker poses its own rig's clips, every one there (D-315)", function()
@@ -6305,5 +6537,121 @@ describe("choreo validator: an enemy gait paced by its root's travel (D-575)", f
 				"enemy.gait.travelSeconds 0.050 is over 1 / locomotion.weightBlendRate (0.040 s)"
 			)
 		).toBe(true)
+	end)
+end)
+
+-- ------------------------------------------------------------------------------------------
+-- The Brute's wheel (D-598)
+-- ------------------------------------------------------------------------------------------
+
+describe("ai validator: the Brute wheels round on its walk (D-598)", function()
+	local function withWheel(angle: any, share: any, rateFloor: number?): { string }
+		local real = Harness.load("src/shared/data/ai")
+		local copy = table.clone(real)
+		copy.archetypes = table.clone(real.archetypes)
+		copy.archetypes.Brute = table.clone(real.archetypes.Brute)
+		copy.archetypes.Brute.wheelAngle = angle
+		copy.archetypes.Brute.wheelSpeedMultiplier = share
+		local choreo = Harness.load("src/shared/data/choreo")
+		if rateFloor ~= nil then
+			choreo = table.clone(choreo)
+			choreo.locomotion = table.clone(choreo.locomotion)
+			choreo.locomotion.stride = table.clone(choreo.locomotion.stride)
+			choreo.locomotion.stride.rateFloor = rateFloor
+		end
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/ai" then
+				return copy
+			elseif path == "src/shared/data/choreo" then
+				return choreo
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/ai")(context)
+	end
+	local brute = Harness.load("src/shared/data/ai").archetypes.Brute
+
+	it("passes the real tables", function()
+		expect(withWheel(brute.wheelAngle, brute.wheelSpeedMultiplier)).toEqual({})
+	end)
+
+	it("wants positive numbers, an angle under a half turn and a share of the pace", function()
+		expect(hasProblem(withWheel(nil, 0.5), "archetypes.Brute.wheelAngle must be a number")).toBe(true)
+		expect(hasProblem(withWheel(0, 0.5), "archetypes.Brute.wheelAngle must be positive")).toBe(true)
+		expect(hasProblem(withWheel(180, 0.5), "archetypes.Brute.wheelAngle must be below 180")).toBe(true)
+		expect(hasProblem(withWheel(20, nil), "archetypes.Brute.wheelSpeedMultiplier must be a number")).toBe(true)
+		expect(hasProblem(withWheel(20, -0.5), "archetypes.Brute.wheelSpeedMultiplier must be positive")).toBe(true)
+		expect(hasProblem(withWheel(20, 1.2), "archetypes.Brute.wheelSpeedMultiplier must be at most 1")).toBe(true)
+	end)
+
+	it("comes out of the wheel within footSlideStuds a 60 Hz frame", function()
+		-- The fastest Brute, the Owlbear at 11 studs/s: 2 sin(a / 2) x 11 / 60 <= 0.1 up to a = 31.6
+		-- degrees (the kobold at 10 up to 34.9).
+		expect(withWheel(31, 0.5)).toEqual({})
+		local problems = withWheel(32, 0.5)
+		expect(
+			hasProblem(
+				problems,
+				"Owlbear: walking straight at a target archetypes.Brute.wheelAngle 32 off its facing slides its feet 0.101"
+			)
+		).toBe(true)
+		expect(hasProblem(problems, "KoboldAxeman")).toBe(false)
+		expect(hasProblem(withWheel(36, 0.5), "KoboldAxeman: walking straight at a target")).toBe(true)
+	end)
+
+	it("keeps the walk alone while it wheels (stride.rateFloor of the rig's walkSpeed)", function()
+		-- The kobold's rig walks at 10: the walk shows alone from 2.5 studs/s, a share of 0.25.
+		expect(withWheel(20, 0.25)).toEqual({})
+		expect(
+			hasProblem(
+				withWheel(20, 0.2),
+				"KoboldAxeman: wheeling at 2.00 studs/s (archetypes.Brute.wheelSpeedMultiplier 0.2)"
+			)
+		).toBe(true)
+		expect(hasProblem(withWheel(20, 0.5, 0.6), "below stride.rateFloor of its rig's walkSpeed (6.00)")).toBe(true)
+	end)
+end)
+
+describe("choreo validator: an enemy walk's start phase (D-599)", function()
+	local function withStarts(value: any): { string }
+		local real = Harness.load("src/shared/data/choreo")
+		local copy = table.clone(real)
+		copy.enemy = table.clone(real.enemy)
+		copy.enemy.gait = table.clone(real.enemy.gait)
+		copy.enemy.gait.startPhase = value
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/choreo" then
+				return copy
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/choreo")(context)
+	end
+
+	it("passes the real tables", function()
+		expect(withStarts(Harness.load("src/shared/data/choreo").enemy.gait.startPhase)).toEqual({})
+		expect(withStarts({})).toEqual({})
+	end)
+
+	it("wants a table", function()
+		expect(hasProblem(withStarts(nil), "enemy.gait.startPhase must be a table")).toBe(true)
+	end)
+
+	it("wants a phase from 0 up to 1 of a rig that walks", function()
+		expect(withStarts({ Kobold = 0, Boar = 0.999 })).toEqual({})
+		for _, bad in { 1, -0.1, 0 / 0, "0.25" :: any } do
+			expect(hasProblem(withStarts({ Kobold = bad }), "enemy.gait.startPhase.Kobold must be a phase")).toBe(true)
+		end
+		expect(
+			hasProblem(
+				withStarts({ PlayerR15 = 0.25 }),
+				"enemy.gait.startPhase.PlayerR15 names no rig with a walk clip"
+			)
+		).toBe(true)
+		expect(hasProblem(withStarts({ Wolf = 0.25 }), "enemy.gait.startPhase.Wolf names no rig with a walk clip")).toBe(
+			true
+		)
 	end)
 end)

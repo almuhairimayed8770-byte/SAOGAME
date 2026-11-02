@@ -25,6 +25,12 @@
 	  keepOut.stepPerDepth (the studs of step a stud of depth is worth) is a finite 1 or more;
 	- the blade between the cuts (D-566): keepOut.bladeOutSeconds, how long after a strike's hold
 	  the blade is out of the body, is a finite 0 or more;
+	- the tell before the step (D-604): every player clip's first ActivationHold ends (its time
+	  plus data.hold, a positive number of seconds, or combat.activationHold without one) before
+	  the clip's first HitWindowOpen, so the Art stand-off's step, which waits for the hold, lands
+	  between the two;
+	- the held stance (D-606): keepOut.stanceSampleSeconds, the step its hold is swept against the
+	  target in, is above 0 and at most 0.25;
 	- every rig's `blocker` and `rush` (D-437: the poses a rush is judged against walls in) pose
 	  clips of its own rig (enemy/<Rig>/...) that exist, at least one, every sampleSeconds above 0;
 	- the walk shell (item 236, D-430): a blocker's heldSlices is a whole number of at least 1, and
@@ -227,6 +233,59 @@ return function(ctx: any): { string }
 			tostring(keepOut.bladeOutSeconds)
 		)
 	)
+	check(
+		isNumber(keepOut.stanceSampleSeconds)
+			and keepOut.stanceSampleSeconds > 0
+			and keepOut.stanceSampleSeconds <= 0.25,
+		("standOff.keepOut.stanceSampleSeconds (%s) must be above 0 and at most 0.25: the step a held stance is swept against its target in (D-606)"):format(
+			tostring(keepOut.stanceSampleSeconds)
+		)
+	)
+
+	-- D-604: the Art stand-off's step waits for the activation hold (the tell), so every player
+	-- clip's first ActivationHold ends before its first window opens, its data.hold (when it has
+	-- one) a positive number of seconds.
+	for _, file in ctx.listFiles("src/shared/clips/player", "%.luau$") do
+		local ok, clip = pcall(ctx.load, (file:gsub("%.luau$", "")))
+		if not ok or typeof(clip) ~= "table" or typeof(clip.events) ~= "table" then
+			continue -- the clips validator reports a clip that does not load
+		end
+		local hold, open = nil, math.huge
+		for _, event in clip.events do
+			if typeof(event) ~= "table" or not isNumber(event.time) then
+				continue
+			end
+			if event.kind == "ActivationHold" and (hold == nil or event.time < hold.time) then
+				hold = event
+			elseif event.kind == "HitWindowOpen" then
+				open = math.min(open, event.time)
+			end
+		end
+		if hold == nil then
+			continue
+		end
+		local data = if typeof(hold.data) == "table" then hold.data else {}
+		local seconds = if data.hold ~= nil then data.hold else combat.activationHold
+		local where = file:match("^src/shared/clips/(.-)%.luau$") or file
+		if not isNumber(seconds) or seconds <= 0 then
+			check(
+				false,
+				("%s: its ActivationHold's hold (%s) must be a positive number of seconds"):format(
+					where,
+					tostring(seconds)
+				)
+			)
+		elseif hold.time + seconds >= open - 1e-9 then
+			check(
+				false,
+				("%s: its ActivationHold ends at %.4f, not before its first window opens at %.4f: the stand-off's step waits for the hold and lands by the open (D-604)"):format(
+					where,
+					hold.time + seconds,
+					open
+				)
+			)
+		end
+	end
 
 	-- D-315: each rig's blocker is posed over its own rig's clips.
 	local rigNames: { string } = {}

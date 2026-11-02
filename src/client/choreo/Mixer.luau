@@ -56,6 +56,11 @@
 
 	A play's `mask` scales an Additive clip per joint (a joint not listed keeps its full weight):
 	an enemy's flinch during its attack leaves the weapon arm on the attack (D-173).
+
+	A procedural channel's yaw on the root joint (the turn plant's lag, D-416) turns the whole body
+	about the root part's vertical axis: the position the layers give the root joint (a stance's
+	weight shift) turns round with it, so the hips stand where they stood while the root yaws
+	under them (D-615).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -727,6 +732,29 @@ function Mixer.clear(self: any)
 	self._heldNext = 1
 end
 
+-- D-615: the procedural channels' yaw on the root joint turns the position the layers gave it
+-- with it, about the root part's vertical axis (the root joint's C0 stands on that axis), so a
+-- turn plant's lag carries the hips' own offset (the drawn idle's weight shift, up to 0.1 stud)
+-- round with their facing instead of leaving it on the turning root. No other channel keys the
+-- root joint's yaw.
+local ROOT_JOINT = "Root"
+local function rootYaw(offsets: Offsets, weight: number): number
+	local offset = offsets[ROOT_JOINT]
+	return if offset ~= nil then offset.rot[2] * weight else 0
+end
+-- In place: a channel that yaws the root joint keys it, so addInto gave `result` a fresh entry.
+local function turnRootPosition(result: Offsets, degrees: number)
+	local root = result[ROOT_JOINT]
+	if degrees == 0 or root == nil then
+		return
+	end
+	local radians = math.rad(degrees)
+	local cos, sin = math.cos(radians), math.sin(radians)
+	local pos = root.pos
+	local x, z = pos[1], pos[3]
+	pos[1], pos[3] = x * cos + z * sin, z * cos - x * sin
+end
+
 -- Copies a procedural channel into slot `index` of `held` (D-314), reusing the slot's tables: the
 -- channel's owner may change its offsets table in place while a pause holds the copy.
 local function holdChannel(
@@ -1394,20 +1422,26 @@ function Mixer.step(self: any, dt: number): StepResult
 	if paused and self._heldCount >= 0 then
 		-- A hit-stop holds the procedural channels too (D-314): what the last moving frame showed.
 		local held = self._heldChannels
+		local turn = 0
 		for index = 1, self._heldCount do
 			local channel = held[index]
 			addInto(result, channel.offsets, channel.weight)
+			turn += rootYaw(channel.offsets, channel.weight)
 		end
+		turnRootPosition(result, turn)
 	else
 		local count = 0
+		local turn = 0
 		for _, channel in self._procedural do
 			if channel.weight > 0 then
 				addInto(result, channel.offsets, channel.weight)
+				turn += rootYaw(channel.offsets, channel.weight)
 				count += 1
 				holdChannel(self._heldChannels, count, channel.offsets, channel.weight)
 			end
 		end
 		self._heldCount = count
+		turnRootPosition(result, turn)
 	end
 
 	-- Drop finished handles

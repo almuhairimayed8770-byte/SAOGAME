@@ -374,6 +374,66 @@ describe("Hud SWITCH prompt (instances)", function()
 		expect(label.TextTransparency).toBe(1)
 	end)
 
+	-- The prompt's target is the EntityTracker record's model, tracked from its tag, which can come
+	-- before its PrimaryPart reference replicates (D-571): a window opened on it then (a partner's
+	-- Art connecting with a boar as it spawns) put SWITCH on the Model, which the engine draws at
+	-- the bounding box's centre, for the whole window. It goes onto the root part when it arrives.
+	it("moves SWITCH shown over a rig with no root part yet onto that root part when it arrives (D-583)", function()
+		local DrawnBody = Harness.load("src/client/choreo/DrawnBody")
+		local target = rig("Enemy", false, true)
+		local root = target:FindFirstChild("HumanoidRootPart") :: BasePart
+		EntityTracker.track(target)
+		task.wait()
+		Hud.showSwitchPrompt(Combat.switchWindow, target, nil)
+		local billboard = Hud.gui():FindFirstChild("SwitchBillboard") :: BillboardGui
+		local lift = Vector3.new(0, UI.hud.switchPrompt.heightStuds, 0)
+		expect(billboard.Enabled).toBe(true)
+		expect(billboard.Adornee).toBe(target)
+		target.PrimaryPart = root
+		Hud.step(1 / 60)
+		-- 81b8fef kept the Model it read when the prompt showed.
+		expect(billboard.Adornee).toBe(root)
+		expect((billboard.StudsOffsetWorldSpace - lift).Magnitude).toBeLessThan(1e-4)
+		Hud.step(1 / 60)
+		expect(billboard.Adornee).toBe(root)
+
+		-- A second window over a rig a rush draws on its Torso: the root arriving leaves SWITCH on the
+		-- drawn body, and the hand-back puts it on the root part, not the Model.
+		local rushing = rig("Enemy", false, true)
+		local rushingRoot = rushing:FindFirstChild("HumanoidRootPart") :: BasePart
+		local torso = Instance.new("Part")
+		torso.Name = "Torso"
+		torso.Parent = rushing
+		rushingRoot.CFrame = CFrame.new(10, 3, 20)
+		rushingRoot.Position = rushingRoot.CFrame.Position
+		torso.CFrame = CFrame.new(10, 3.4, 14)
+		torso.Position = torso.CFrame.Position
+		EntityTracker.track(rushing)
+		task.wait()
+		local at = CFrame.new(10, 3, 14)
+		DrawnBody.publish(rushing, CFrame.new(0, 0, -6), torso, at)
+		Hud.showSwitchPrompt(Combat.switchWindow, rushing, nil)
+		expect(billboard.Adornee).toBe(torso)
+		rushing.PrimaryPart = rushingRoot
+		Hud.step(1 / 60)
+		expect(billboard.Adornee).toBe(torso)
+		local place = torso.Position + billboard.StudsOffsetWorldSpace
+		expect((place - (at.Position + lift)).Magnitude).toBeLessThan(1e-4)
+		DrawnBody.publish(rushing, nil)
+		-- 81b8fef gave SWITCH back to the Model at the hand-back.
+		expect(billboard.Adornee).toBe(rushingRoot)
+		expect((billboard.StudsOffsetWorldSpace - lift).Magnitude).toBeLessThan(1e-4)
+
+		-- The window closes as before, the label back on the HUD (Lune cannot write a nil Adornee).
+		clock += Combat.switchWindow * 2
+		Hud.step(1 / 60)
+		expect(billboard.Enabled).toBe(false)
+		expect(Hud.gui():FindFirstChild("SwitchPrompt")).never.toBeNil()
+		EntityTracker.untrack(target)
+		EntityTracker.untrack(rushing)
+		task.wait()
+	end)
+
 	it("shows SWITCH on screen when no target is known and fades inside the window", function()
 		Hud.showSwitchPrompt(Combat.switchWindow, nil, nil)
 		local gui = Hud.gui()

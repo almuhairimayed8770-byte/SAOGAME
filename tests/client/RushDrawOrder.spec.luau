@@ -379,6 +379,9 @@ type Options = {
 	studioOrder: boolean?,
 	-- Where the replicated root stands at client time `t` (default: the server's body `lag` late).
 	rootAt: ((t: number) -> CFrame)?,
+	-- The velocity the replicated root carries at client time `t` (default: the server's run, `lag`
+	-- late; velocityScale still applies).
+	rootVelocity: ((t: number) -> Vector3)?,
 	fps: number?, -- the loop's frame rate (default 60)
 	-- The share of the server body's velocity the replicated root reports on the loop's frame n
 	-- (default all of it). Studio's under-reads the move physics gives the root: (velocity x dt)
@@ -581,8 +584,10 @@ local function rush(options: Options): Run
 		root.CFrame = turned
 		root.Position = frame.Position -- Lune keeps the two apart; the engine does not
 		local scale = options.velocityScale
-		root.AssemblyLinearVelocity = velocityAt(clock - options.lag, options.stopAt)
-			* (if scale ~= nil then scale(frameNow) else 1)
+		local carried = if options.rootVelocity ~= nil
+			then options.rootVelocity(clock)
+			else velocityAt(clock - options.lag, options.stopAt)
+		root.AssemblyLinearVelocity = carried * (if scale ~= nil then scale(frameNow) else 1)
 	end
 	if options.gait then
 		local humanoid = model:FindFirstChildOfClass("Humanoid") :: any
@@ -2247,3 +2252,126 @@ describe(
 		end
 	end
 )
+
+describe("the hand-back onto a late root the server still lands (AR 506(c), D-602)", function()
+	-- The PC on c78acd1, item 506(c): on 458(c)'s first launches at 30 fps (DevFrameCap) the drawn
+	-- root stepped back 0.038 / 0.064 / 0.024 on the 2nd row after the stop, against s × g + 0.005
+	-- = 0.009 / 0.009 / 0.010 (g, how far the root rests short of the line end, 0.012 to 0.017; s the
+	-- hand-back's first-row share). The hand-back began as soon as the late root came within
+	-- settleStuds of the line end while the server was still landing it (D-525: each server frame
+	-- covers half of what is left), so its first rows slid the body back toward a root 0.08 to 0.2
+	-- short and the root's landing then carried it forward again. With the root 0.3 to 0.4 s late at
+	-- the run's end (a first launch's late root), Lune on 81b8fef: 0.026 to 0.058 back at 30 fps on
+	-- 0.0349 s rows, then forward 0.012 to 0.034; 0.021 to 0.042 at 60, 0.020 to 0.031 at 144. The
+	-- slide now waits for the root to land: each back step is the ease's row share of g.
+	local RUSH = ChoreoData.enemy.rush
+	local MOVE = AI.movement
+	local Easing = Harness.load("src/shared/util/Easing")
+	local SERVER_FRAME = 1 / 60
+	-- The server's body down the line on its 60 Hz Heartbeat, as EnemyService runs and lands it: the
+	-- rush speed each frame, then, once within speed × haltLeadSeconds of the line end, landed on it
+	-- each frame at the pace that covers what is left over landFrames frames (Engine.land), and
+	-- stopped dead within landSlackStuds of it (Engine.halt). Rows of {seconds after the launch, along}.
+	local track: { { number } } = { { 0, 0 } }
+	do
+		local along, t, landing = 0, 0, false
+		while t < 3 do
+			local left = LENGTH - along
+			landing = landing or left <= SPEED * MOVE.haltLeadSeconds
+			local move = if not landing
+				then math.min(SPEED * SERVER_FRAME, left)
+				elseif left > MOVE.landSlackStuds then left / MOVE.landFrames
+				else 0
+			along += move
+			t += SERVER_FRAME
+			table.insert(track, { t, along })
+		end
+	end
+	-- Where the server's body is `t` seconds after the launch, and the velocity it carries then.
+	local function serverAt(t: number): (number, number)
+		if t <= 0 then
+			return 0, 0
+		end
+		for index = 2, #track do
+			local a, b = track[index - 1], track[index]
+			if t <= b[1] then
+				local speed = (b[2] - a[2]) / (b[1] - a[1])
+				return a[2] + speed * (t - a[1]), speed
+			end
+		end
+		return track[#track][2], 0
+	end
+	local function alongOf(position: Vector3): number
+		return (position - ORIGIN):Dot(DIRECTION)
+	end
+	-- DevFrameCap 30's rows: 1/30 s and the PC's 0.0349 s in turn.
+	local function capped(frame: number): number
+		return if frame % 2 == 0 then 0.0349 else 1 / 30
+	end
+	for _, fps in { 30, 60, 144 } do
+		it(
+			("waits for the late root to land, then slides back by the ease's row share only, %d fps"):format(fps),
+			function()
+				local worst = 0
+				for _, lag in { 0.3, 0.4 } do
+					-- The velocity it carries: the server's run (28 until its run's time, then 0), or the
+					-- landing's own pace.
+					for _, carried in { "run", "landing" } do
+						local run = rush({
+							latency = lag,
+							lag = lag,
+							fps = fps,
+							frames = math.ceil((0.2 + CHARGE.windUp + 1.9) * fps),
+							studioOrder = true,
+							frameTime = if fps == 30 then capped else nil,
+							rootAt = function(t: number): CFrame
+								local position = ORIGIN + DIRECTION * (serverAt(t - lag - LAUNCH))
+								return CFrame.lookAt(position, position + DIRECTION)
+							end,
+							rootVelocity = if carried == "landing"
+								then function(t: number): Vector3
+									local _, speed = serverAt(t - lag - LAUNCH)
+									return DIRECTION * speed
+								end
+								else nil,
+						})
+						local frames = run.frames
+						-- The stop: the skid's last row forward, before the first row that stands.
+						local stop: number? = nil
+						for index = 2, #frames do
+							local step = alongOf(frames[index].drawnBody) - alongOf(frames[index - 1].drawnBody)
+							if alongOf(frames[index].drawnBody) > LENGTH - 1 and step <= 1e-3 then
+								stop = index - 1
+								break
+							end
+						end
+						expect(stop).never.toBeNil()
+						local rest = LENGTH - alongOf(frames[#frames].root)
+						expect(rest).toBeGreaterThan(0)
+						expect(rest).toBeLessThanOrEqual(MOVE.landSlackStuds)
+						for index = (stop :: number) + 1, #frames do
+							local frame, before = frames[index], frames[index - 1]
+							local step = alongOf(frame.drawnBody) - alongOf(before.drawnBody)
+							local share =
+								Easing.evaluate(RUSH.handBackEasing, math.min(1, frame.dt / RUSH.handBackSeconds))
+							-- Back only by the ease's share of the root's rest, never forward again.
+							expect(-step).toBeLessThanOrEqual(share * rest + 1e-3)
+							expect(step).toBeLessThanOrEqual(1e-3)
+							worst = math.max(worst, -step)
+						end
+						-- Handed back: the body is on its root again.
+						local last = frames[#frames]
+						expect(last.offset).toBe(false)
+						expect((last.drawnBody - last.root).Magnitude).toBeLessThanOrEqual(1e-3)
+					end
+				end
+				print(
+					("[506(c)] %d fps, the root 0.3 / 0.4 s late and landing: largest back step %.4f"):format(
+						fps,
+						worst
+					)
+				)
+			end
+		)
+	end
+end)

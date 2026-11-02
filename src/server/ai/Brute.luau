@@ -2,7 +2,11 @@
 --[[
 	Brute (section 9): the Kobold Axeman. Slow heavy swings, a big Guard Gauge.
 
-	Chase: walks straight at the target and stops at stopDistance. When the target is inside
+	Chase: walks straight at the target and stops at stopDistance. Well off its target (more than
+	wheelAngle) it wheels instead: it walks along its facing at wheelSpeedMultiplier of its pace while
+	it turns, so it turns round on its feet. Walked straight at a target behind it, the body went
+	sideways and back under a walk whose feet step along the facing, and they slid (the kobold from
+	behind, 0.161 / 0.280 a 60 Hz row at 135 / 180 degrees, D-598). When the target is inside
 	reach * engageFraction and roughly ahead, it begins the attack: the 1.0 s overhead wind-up with
 	the yellow (GuardBreak) edge from the attack def. During the wind-up it keeps facing the target,
 	but only at the Brute's slow wind-up turn rate, so a late sidestep or a dodge leaves the cone.
@@ -30,11 +34,16 @@ local Brute: Brain.Archetype = {
 --- Nothing to remember between chases.
 function Brute.onChaseStart(_brain: Brain.Brain) end
 
---- Turns toward the target and walks up to stopDistance.
+--- Turns toward the target and walks up to stopDistance: along its facing, slowed, while it wheels
+--- round from more than wheelAngle off (D-598), then straight at the target.
 function Brute.chase(brain: Brain.Brain, dt: number, target: Brain.Target): Types.EnemyAttackDef?
 	brain:turnToward(target.direction, tuning.turnRate, dt)
 	if target.distance > tuning.stopDistance then
-		brain:moveToward(target.position, brain:speed())
+		if brain:angleTo(target.direction) > tuning.wheelAngle then
+			brain:moveForward(brain:speed() * tuning.wheelSpeedMultiplier)
+		else
+			brain:moveToward(target.position, brain:speed())
+		end
 	else
 		brain.context.stop()
 	end

@@ -82,7 +82,8 @@ local Locomotion = Harness.load("src/client/choreo/Locomotion")
 local FRAME = 1 / 60
 local PHYSICS_STEP = 1 / 240
 local GAP = 1e-9
-local CONTACT = ChoreoData.locomotion.stride.contact
+local Stride = ChoreoData.locomotion.stride
+local CONTACT = Stride.contact
 local SLIDE = Dev.review.audit.footSlideStuds
 local FROM, TO = 0.15, 0.5
 
@@ -354,6 +355,11 @@ type Take = {
 	lowest: number, -- the lowest foot corner over the window
 	wheelWalk: number?, -- the least walk weight the driver gives while the body wheels at half speed
 	paces: { number }, -- the server body's WalkSpeed after each server frame from the release on
+	crab: number, -- the most the server body walked off its facing (degrees), over the whole take
+	startSlide: number, -- the worst one-row slide of a grounded foot from row 1 up to the window
+	startSlideAt: number,
+	startLowest: number, -- the lowest foot corner from row 1 up to the window
+	standLowest: number, -- the lowest foot corner on the row the root first moves (the idle's stand)
 }
 
 -- How the client sees the server's root. `hz`: client rows a second. `interpolated`: the root is
@@ -453,7 +459,18 @@ local function take(rig: string, off: number, view: View?): Take
 	local rest = clientRoot.CFrame.Position
 	local started: number? = nil
 	local previous: { [string]: { Vector3 } }? = nil
-	local result: Take = { slide = 0, slideAt = 0, lowest = math.huge, wheelWalk = nil, paces = {} }
+	local result: Take = {
+		slide = 0,
+		slideAt = 0,
+		lowest = math.huge,
+		wheelWalk = nil,
+		paces = {},
+		crab = 0,
+		startSlide = 0,
+		startSlideAt = 0,
+		startLowest = math.huge,
+		standLowest = math.huge,
+	}
 	local walkSpeed = Rigs[rig].walkSpeed
 	local dt = 1 / seen.hz
 	local clientT = clock.t
@@ -468,6 +485,13 @@ local function take(rig: string, off: number, view: View?): Take
 			serverFrame()
 			table.insert(history, { t = clock.t, cframe = serverRoot.CFrame, velocity = bodies[server].velocity })
 			table.insert(result.paces, bodies[server].walkSpeed)
+			-- The way the body walks against the way it faces (a walk's feet step along the facing).
+			local moving = Vector3.new(bodies[server].velocity.X, 0, bodies[server].velocity.Z)
+			if moving.Magnitude > walkSpeed * Stride.rateFloor then
+				local facing = yawOf(server)
+				local off = math.deg(math.acos(math.clamp(facing:Dot(moving.Unit), -1, 1)))
+				result.crab = math.max(result.crab, off)
+			end
 		end
 		local cframe, velocity
 		if seen.interpolated then
@@ -488,6 +512,10 @@ local function take(rig: string, off: number, view: View?): Take
 		end
 		local rowT = if started ~= nil then (row - (started :: number)) * dt else -1
 		local inWindow = rowT > FROM + 1e-9 and rowT <= TO + 1e-9
+		-- Row 0 is drawn on the step before the root moved (the gait cannot know yet); the start's
+		-- rows are 1 up to the window.
+		local inStart = rowT > GAP and rowT <= FROM + 1e-9
+		local standing = started ~= nil and math.abs(rowT) < GAP
 		local points: { [string]: { Vector3 } } = {}
 		for _, foot in feet do
 			points[foot] = {}
@@ -497,9 +525,15 @@ local function take(rig: string, off: number, view: View?): Take
 				if inWindow then
 					result.lowest = math.min(result.lowest, point.Y)
 				end
+				if inStart then
+					result.startLowest = math.min(result.startLowest, point.Y)
+				end
+				if standing then
+					result.standLowest = math.min(result.standLowest, point.Y)
+				end
 			end
 			local before = if previous ~= nil then previous[foot] else nil
-			if inWindow and before ~= nil then
+			if (inWindow or inStart) and before ~= nil then
 				local least = math.huge
 				for index, point in points[foot] do
 					local was = before[index]
@@ -507,8 +541,11 @@ local function take(rig: string, off: number, view: View?): Take
 						least = math.min(least, Vector3.new(point.X - was.X, 0, point.Z - was.Z).Magnitude)
 					end
 				end
-				if least < math.huge and least > result.slide then
+				if least < math.huge and inWindow and least > result.slide then
 					result.slide, result.slideAt = least, rowT
+				end
+				if least < math.huge and inStart and least > result.startSlide then
+					result.startSlide, result.startSlideAt = least, rowT
 				end
 			end
 		end
@@ -560,13 +597,14 @@ local function check(rig: string, off: number, result: Take, hz: number, pending
 end
 
 -- What the walk start does not meet yet, by rig and off angle: how far its worst slide is past
--- footSlideStuds (rounded up to the hundredth). The kobold's Brute chases straight at its target
--- while it turns, so from behind it crab-walks (0.16 and 0.28: unchanged by D-541 and D-575).
--- The boar at 135 and 180 came within the bound with D-574 to D-576 (0.077 and 0.076; were
--- 0.100 and 0.113). An entry never grows.
+-- footSlideStuds (rounded up to the hundredth). An entry never grows. The boar at 135 and 180 came
+-- within the bound with D-574 to D-576 (0.077 and 0.076; were 0.100 and 0.113). The kobold's
+-- Brute chased straight at its target while it turned, so from behind it crab-walked (0.161 and
+-- 0.280 at 135 and 180, PENDING 0.07 and 0.19 on 81b8fef); it wheels round on its walk now
+-- (D-598).
 local PENDING: { [string]: { [number]: number } } = {
 	Boar = {},
-	Kobold = { [135] = 0.07, [180] = 0.19 },
+	Kobold = {},
 }
 
 describe("EnemyWalkStart: an enemy sets off on its feet (AG 392(b), D-541)", function()
@@ -588,15 +626,16 @@ end)
 -- to 14 at once slid its hooves 0.126 on that 60 Hz row (the gait a frame behind the root). Now the
 -- gait follows the root's travel (D-575) and the walk's pace eases (D-574). At 144 the bound
 -- is footSlideStuds over a 144 Hz row (0.042, the PC's bar); the window is the same 0.15-0.5 s (rows
--- 22-72). The boar at 135 and 180 and the kobold at 135 and 180 are the PC's report-only takes: the
--- boar's within the bound, the kobold's crab-walk PENDING.
+-- 22-72). The boar at 135 and 180 and the kobold at 135 and 180 are the PC's report-only takes,
+-- all within the bound: the kobold's crab-walk (0.070 and 0.123, PENDING 0.03 and 0.09 on 81b8fef)
+-- is gone with its wheel (D-598).
 local PENDING144: { [string]: { [number]: number } } = {
 	Boar = {},
-	Kobold = { [135] = 0.03, [180] = 0.09 },
+	Kobold = {},
 }
 
 describe("EnemyWalkStart: the walk start as the PC sees it (AO 473(a), (e); D-574 to D-576)", function()
-	for _, case in { { rig = "Boar", offs = { 90 } }, { rig = "Kobold", offs = { 0, 60, 90 } } } do
+	for _, case in { { rig = "Boar", offs = { 90 } }, { rig = "Kobold", offs = { 0, 60, 90, 135, 180 } } } do
 		for _, off in case.offs do
 			it(("%s set off %d deg on a velocity that under-reads the root, 60 Hz"):format(case.rig, off), function()
 				check(case.rig, off, take(case.rig, off, PC60), 60, nil, false)
@@ -650,4 +689,111 @@ describe("EnemyWalkStart: the boar's chase eases out of its wheel (D-574)", func
 		local frames = (reachedAt :: number) - (leftAt :: number) + 1
 		expect(frames).toBe(math.ceil((full - wheel) / (rate * FRAME) - 1e-9))
 	end)
+end)
+
+-- The kobold's Brute walked straight at a target behind it while it turned (160 degrees a second
+-- after the 0.25 s alert turn): its root went 138 degrees off its facing at 180, under a walk whose
+-- planted feet step back along the facing, and they slid 0.280 a 60 Hz row (0.161 at 135). Now it
+-- wheels: more than wheelAngle off its target it walks along its facing at wheelSpeedMultiplier of
+-- its pace and turns on its feet, and from within wheelAngle walks straight at it (D-598). Its
+-- walk is at most wheelAngle off its facing, plus the turn of one AI tick (the walk's goal is set
+-- each tick, the turn spread over the frames).
+describe("EnemyWalkStart: the kobold wheels round on its feet (D-598)", function()
+	for _, off in { 90, 135, 180 } do
+		it(("walks at most wheelAngle off its facing from %d deg off its target"):format(off), function()
+			local brute = AI.archetypes.Brute
+			local most = brute.wheelAngle + brute.turnRate * AI.tickSeconds()
+			local result = take("Kobold", off)
+			print(("Kobold off %d: walked at most %.1f deg off its facing (most %.1f)"):format(off, result.crab, most))
+			expect(result.crab <= most + 1e-6).toBe(true)
+		end)
+	end
+end)
+
+-- The start's own rows, from row 1 up to the window (AO 511: 0.2-0.32 a row, the boar's hooves
+-- -0.069 and -0.074 in the field). Row 0 is drawn before the root moved. Two things slid them on
+-- 81b8fef. The walk joined at the idle's phase of its cycle, which for the kobold was mid-swing:
+-- the crossfade pulled its feet up to 1.25 studs, 0.2-0.36 a 60 Hz row on rows 1-8 and 0.068 into
+-- the field; the walk now joins at enemy.gait.startPhase, the kobold's left mid-stance (D-599).
+-- The boar's idle weight shift stood a hoof 0.067 into the field under the walk's first key (now
+-- re-keyed, D-601). What is left is the server's pace: the Humanoid takes its full WalkSpeed on
+-- the first frame (the root 0.167 a 60 Hz row for the kobold), while the Idle-Walk crossfade takes
+-- locomotion.weightBlendRate (0.125 s), and the idle's feet ride the root until the walk has the
+-- weight. The bar is the window's (footSlideStuds a 60 Hz frame); no foot lower than the idle stood
+-- on row 0 or stride.contact, whichever is deeper. START_PENDING: how far the worst slide is past
+-- that bar, by view, rig and off angle (rounded up to the hundredth); START_LOW: how far the lowest
+-- corner is past its bar. Neither grows.
+local START_PENDING: { [string]: { [string]: { [number]: number } } } = {
+	["60"] = {
+		Boar = { [90] = 0.13, [135] = 0.13, [180] = 0.07 },
+		Kobold = { [0] = 0.08, [60] = 0.01, [90] = 0.01, [135] = 0.01 },
+	},
+	["144"] = {
+		Boar = { [90] = 0.10, [135] = 0.10, [180] = 0.07 },
+		Kobold = { [0] = 0.07, [60] = 0.03, [90] = 0.03, [135] = 0.03, [180] = 0.04 },
+	},
+}
+local START_LOW: { [string]: { [string]: { [number]: number } } } = {
+	["60"] = { Boar = { [90] = 0.01, [135] = 0.01, [180] = 0.01 }, Kobold = {} },
+	["144"] = { Boar = { [90] = 0.02, [135] = 0.02, [180] = 0.02 }, Kobold = {} },
+}
+
+local function startCheck(rig: string, off: number, result: Take, hz: number)
+	local key = tostring(hz)
+	local pending = START_PENDING[key][rig][off]
+	local lowPending = START_LOW[key][rig][off]
+	print(
+		("%s off %d @%d Hz from row 1: slide %.4f at %.3f s, lowest %.4f (stood %.4f)"):format(
+			rig,
+			off,
+			hz,
+			result.startSlide,
+			result.startSlideAt,
+			result.startLowest,
+			result.standLowest
+		)
+	)
+	local bound = SLIDE * 60 / hz
+	if result.startSlide > bound + (pending or 0) then
+		error(
+			("a planted foot slides %.3f in a row at %.3f s (max %.3f)"):format(
+				result.startSlide,
+				result.startSlideAt,
+				bound + (pending or 0)
+			)
+		)
+	end
+	if pending ~= nil and result.startSlide <= bound then
+		error(
+			("slides %.3f from row 1, within the bound %.3f: take it off START_PENDING"):format(
+				result.startSlide,
+				bound
+			)
+		)
+	end
+	local floor = math.min(result.standLowest, -CONTACT)
+	if result.startLowest < floor - (lowPending or 0) - 1e-6 then
+		error(
+			("a foot corner %.3f under the field from row 1 (max %.3f)"):format(
+				-result.startLowest,
+				-(floor - (lowPending or 0))
+			)
+		)
+	end
+	if lowPending ~= nil and result.startLowest >= floor - 1e-6 then
+		error(("lowest %.3f from row 1, within %.3f: take it off START_LOW"):format(result.startLowest, floor))
+	end
+end
+
+describe("EnemyWalkStart: the start's first rows, from row 1 (AO 511; D-599, D-601)", function()
+	for _, case in { { rig = "Boar", offs = { 90, 135, 180 } }, { rig = "Kobold", offs = { 0, 60, 90, 135, 180 } } } do
+		for _, off in case.offs do
+			it(("%s set off %d deg, 60 Hz"):format(case.rig, off), function()
+				startCheck(case.rig, off, take(case.rig, off), 60)
+			end)
+			it(("%s set off %d deg on a 144 Hz client over the interpolated root"):format(case.rig, off), function()
+				startCheck(case.rig, off, take(case.rig, off, PC144), 144)
+			end)
+		end
+	end
 end)

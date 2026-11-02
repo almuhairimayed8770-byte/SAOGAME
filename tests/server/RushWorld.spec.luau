@@ -286,6 +286,44 @@ describe("RushWorld: what the world is to a rushing body (D-209)", function()
 		expect(RushWorld.groundBelow(castIn({}), Vector3.new(0, 5, 0), WORLD.probeStuds)).toBeNil()
 	end)
 
+	-- The probe's box and the riser rail's reach are ai.luau's (D-582), not numbers in the module.
+	it("drops the ground probe and sweeps the riser rail with rushWorld's box and reach", function()
+		expect(typeof(WORLD.probeBoxStuds)).toBe("number")
+		expect(typeof(WORLD.riserBeforeStuds)).toBe("number")
+		expect(typeof(WORLD.riserPastStuds)).toBe("number")
+		local box = WORLD.probeBoxStuds
+		local calls: { { start: CFrame, size: Vector3, vector: Vector3 } } = {}
+		-- The floor 2 under every probe; the rail meets nothing (no riser stands past the face).
+		local function spy(start: CFrame, size: Vector3, vector: Vector3): (number?, Vector3?)
+			table.insert(calls, { start = start, size = size, vector = vector })
+			if vector.Y < 0 then
+				return 2 - box / 2, Vector3.yAxis
+			end
+			return nil, nil
+		end
+		local ground = RushWorld.groundBelow(spy, Vector3.new(1, 5, 3), WORLD.probeStuds)
+		expect(ground).toBeCloseTo(3, 1e-6)
+		expect(#calls).toBe(1)
+		expect((calls[1].size - Vector3.one * box).Magnitude).toBeLessThan(1e-9)
+		expect((calls[1].vector - Vector3.new(0, -WORLD.probeStuds, 0)).Magnitude).toBeLessThan(1e-9)
+
+		table.clear(calls)
+		local free = 4
+		expect(RushWorld.climbable(spy, START, BODY.size, FORWARD, free)).toBe(true)
+		expect(#calls).toBe(2)
+		local reach = boxReach(START, BODY.size, FORWARD)
+		local before = START.Position + FORWARD * (free + reach - WORLD.riserBeforeStuds)
+		expect((calls[1].start.Position - before).Magnitude).toBeLessThan(1e-6)
+		expect((calls[1].size - Vector3.one * box).Magnitude).toBeLessThan(1e-9)
+		local rail = calls[2]
+		local width = 2 * boxReach(START, BODY.size, Vector3.new(-FORWARD.Z, 0, FORWARD.X))
+		expect((rail.size - Vector3.new(width, box, box)).Magnitude).toBeLessThan(1e-6)
+		local top = Vector3.new(before.X, before.Y - 2 + WORLD.riserStuds + box, before.Z)
+		expect((rail.start.Position - top).Magnitude).toBeLessThan(1e-6)
+		local sweep = FORWARD * (WORLD.riserBeforeStuds + WORLD.riserPastStuds)
+		expect((rail.vector - sweep).Magnitude).toBeLessThan(1e-9)
+	end)
+
 	it("a stair's riser the box meets two treads ahead is climbed; a wall is not; a ramp is ground", function()
 		-- Treads 3 studs deep, risers 1 high: the root's box (its bottom 1.6 up) meets the second.
 		local stairs = { FLOOR }
@@ -801,4 +839,38 @@ describe("the ai validator checks rushWorld (D-205 to D-209)", function()
 			"rushWorld.riserStuds 1.6 must be below rig"
 		)).toBe(true)
 	end)
+
+	it(
+		"the ground probe's box and the riser rail's reach are positive; the box never reaches the face (D-582)",
+		function()
+			expect(names(
+				validate(function(world)
+					world.probeBoxStuds = 0
+				end),
+				"rushWorld.probeBoxStuds must be positive"
+			)).toBe(true)
+			expect(names(
+				validate(function(world)
+					world.riserBeforeStuds = nil
+				end),
+				"rushWorld.riserBeforeStuds must be a number"
+			)).toBe(true)
+			expect(names(
+				validate(function(world)
+					world.riserPastStuds = -0.5
+				end),
+				"rushWorld.riserPastStuds must be positive"
+			)).toBe(true)
+			-- Half the box as far as the spot it reads in front of a face: the probe meets the step.
+			expect(names(
+				validate(function(world)
+					world.probeBoxStuds = 2 * world.riserBeforeStuds
+				end),
+				"rushWorld.probeBoxStuds"
+			)).toBe(true)
+			expect(validate(function(world)
+				world.probeBoxStuds = 1.9 * world.riserBeforeStuds
+			end)).toEqual({})
+		end
+	)
 end)
