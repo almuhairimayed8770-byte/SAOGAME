@@ -63,7 +63,10 @@ local Shared = ReplicatedStorage.Shared
 
 local Combat = require(Shared.data.combat)
 local Enemies = require(Shared.data.enemies)
+local ImpactData = require(Shared.data.impact)
 local World = require(Shared.data.world)
+local Rigs = require(Shared.data.rigs)
+local WeaponModels = require(Shared.data.weaponModels)
 local Types = require(Shared.types)
 local BladeContact = require(Shared.choreo.BladeContact)
 local ClipSampler = require(Shared.choreo.ClipSampler)
@@ -137,7 +140,9 @@ export type StandOff = {
 	away: Vector3,
 	from: number,
 	to: number,
-	room: ((rootCFrame: CFrame, distance: number) -> number)?,
+	-- With `clipTime` (the swing's clock as the step is taken; the plan's `from` when nil) the room
+	-- also keeps the gap for every pose the clip still has to show from then on (D-534).
+	room: ((rootCFrame: CFrame, distance: number, clipTime: number?) -> number)?,
 	-- The keep-out (D-314, StandOffOptions.keepOut): how much farther along `away` the body stands
 	-- at a clip time than the step above puts it, and the clip time past which that changes no more.
 	keep: ((clipTime: number) -> number)?,
@@ -147,7 +152,7 @@ export type StandOff = {
 	-- Nil when the target holds nothing the body stands beside.
 	side: Vector3?,
 	keepSide: ((clipTime: number) -> number)?,
-	roomSide: ((rootCFrame: CFrame, distance: number) -> number)?,
+	roomSide: ((rootCFrame: CFrame, distance: number, clipTime: number?) -> number)?,
 }
 
 --- What a stand-off plan covers (ContactPredictor.standOff). With neither field it is the Art's
@@ -157,6 +162,11 @@ export type StandOffOptions = {
 	keepOut: boolean?,
 	-- false: no blade step (a basic swing; its first cut is the key rule's alone).
 	step: boolean?,
+	-- Seconds of clip time the pose the screen draws runs behind the root (D-535): a frame's
+	-- length times impact.luau poseLagFrames (a root write shows on its own frame, a pose that many
+	-- frames later, D-342). The keep-out holds the hands and arms out of the target as drawn too.
+	-- Nil: a 60 Hz frame's (keepOut.sampleSeconds); 0: as posed alone.
+	poseLag: number?,
 }
 
 --- A box cast for the stand-off: how far the box `size` at `start` moves along `vector` before it
@@ -203,6 +213,10 @@ local PROMISE: number = RADIUS - MAX_STEP / 2
 -- Samples of a damage window the stand-off checks the cut still reaches the body at.
 local REACH_SAMPLES: number = STAND_OFF.reachSamples
 local KEEP_OUT = STAND_OFF.keepOut
+-- How far the pose the screen draws runs behind the root, for a plan asked with no frame time: a
+-- root write shows on its own frame and a pose impact.luau poseLagFrames later (D-342), and the
+-- keep-out's samples stand a 60 Hz frame apart (D-535).
+local DEFAULT_POSE_LAG: number = KEEP_OUT.sampleSeconds * ImpactData.poseLagFrames
 -- What the stand-off keeps between the root's box and the world (D-235 amended).
 local WALL_GAP: number = STAND_OFF.wallGapStuds
 local FIGHTER_FOLDERS: { string } = { World.playground.folders.enemies, World.playground.folders.entities }
@@ -703,6 +717,65 @@ local function columnRoom(
 	return most
 end
 
+-- The rigs.luau PlayerR15 joint the sword hangs from in the hand (RightHand -> Weapon) and its C0.
+local GRIP: any = nil
+for _, joint in Rigs.PlayerR15.joints do
+	if joint.name == WeaponModels.motorName then
+		GRIP = joint
+	end
+end
+local GRIP_C0: CFrame? = if GRIP ~= nil then ClipSampler.toCFrame(GRIP.c0) else nil
+
+-- The blade as the swing holds it (D-537): BladeContact.chain, with the Weapon motor on the hand
+-- at its rigs.luau C0 even while this client hangs the sword on its back mount (WeaponMount
+-- rewrites that motor's Part0 and C0 here only; the server and the hit matrix keep it in the
+-- hand). A plan made on a frame that still drew the sword on the back read the blade off it: the
+-- PC's plan probe gave the third basic no keep-out at 3.2 to 3.75 studs from a held kobold, and
+-- the first none at 3.5 (1.30 to 0.75 and 1.05 with the sword in the hand). C1 is the motor's own.
+local function swingChain(model: Model): BladeContact.Chain?
+	local chain = BladeContact.chain(model)
+	if chain == nil or GRIP == nil or #chain.links == 0 then
+		return chain
+	end
+	local last = chain.links[#chain.links]
+	local motor = last.joint
+	if motor.Name ~= WeaponModels.motorName or not motor:IsA("Motor6D") then
+		return chain
+	end
+	local part0 = (motor :: Motor6D).Part0
+	if part0 ~= nil and part0.Name == GRIP.part0 then
+		return chain
+	end
+	local hand = model:FindFirstChild(GRIP.part0)
+	if hand == nil or not hand:IsA("BasePart") then
+		return chain
+	end
+	local joints = Joints.collect(model)
+	local placing: { [BasePart]: Joints.Resolved } = {}
+	for _, resolved in joints do
+		if placing[resolved.part1] == nil then
+			placing[resolved.part1] = resolved
+		end
+	end
+	local reversed: { BladeContact.Link } = {}
+	local at: BasePart = hand :: BasePart
+	while at ~= chain.root do
+		local resolved = placing[at]
+		-- A path longer than the rig has joints is a loop: keep the chain as read.
+		if resolved == nil or resolved.joint == motor or #reversed >= #joints then
+			return chain
+		end
+		table.insert(reversed, { joint = resolved.joint, c0 = resolved.c0, c1Inverse = resolved.c1:Inverse() })
+		at = resolved.part0
+	end
+	local links: { BladeContact.Link } = table.create(#reversed + 1)
+	for index = #reversed, 1, -1 do
+		table.insert(links, reversed[index])
+	end
+	table.insert(links, { joint = motor, c0 = GRIP_C0 :: CFrame, c1Inverse = last.c1Inverse })
+	return { root = chain.root, links = links, start = chain.start, finish = chain.finish }
+end
+
 -- The Art's blade step (fix F1, ContactPredictor.standOff): the step along `away` that leaves the
 -- first cut's start pose clear of `parts`, nil for none (see standOff).
 local function bladeStep(
@@ -712,10 +785,10 @@ local function bladeStep(
 	rootCFrame: CFrame,
 	parts: { BasePart },
 	away: Vector3,
-	room: ((at: CFrame, distance: number) -> number)?
+	room: ((at: CFrame, distance: number, clipTime: number?) -> number)?
 ): number?
 	local window = ClipSampler.hitWindows(clip)[1]
-	local chain = BladeContact.chain(model)
+	local chain = swingChain(model)
 	if window == nil or chain == nil or window.open <= from or #parts == 0 then
 		return nil
 	end
@@ -950,9 +1023,10 @@ local function bodyParts(model: Model, names: { string }): { BodyPart }
 end
 
 -- The blade the trails draw (BladeContact.chain: TrailStart, the guard, to TrailEnd, the tip) as a
--- box with no width along it, on its part's joint path; nil when the model holds none.
+-- box with no width along it, on its part's joint path as the swing holds it (swingChain, D-537);
+-- nil when the model holds none.
 local function bladePart(model: Model): BodyPart?
-	local blade = BladeContact.chain(model)
+	local blade = swingChain(model)
 	if blade == nil then
 		return nil
 	end
@@ -1051,7 +1125,8 @@ local function keepOutOf(
 	away: Vector3,
 	distance: number,
 	to: number,
-	hurt: { BasePart }
+	hurt: { BasePart },
+	poseLag: number
 ): KeepOut?
 	-- The faces as they stand now: a frame, a size and whether it is over a held part, each.
 	local faceFrames: { CFrame } = {}
@@ -1138,13 +1213,14 @@ local function keepOutOf(
 		end
 	end
 	-- Poses the colliding parts at clip time `time` (the clip's root motion and the blade step)
-	-- into `into`, and the reach into `reachInto`.
-	local function pose(time: number, into: { CFrame }?, reachInto: { CFrame }?)
+	-- into `into`, and the reach into `reachInto`; with `lag`, the joints as they stood that long
+	-- before (no earlier than `from`) on the root of `time`: what the screen draws then (D-535).
+	local function pose(time: number, into: { CFrame }?, reachInto: { CFrame }?, lag: number?)
 		local motion = ClipSampler.rootMotionAt(clip, time)
 		local stepped = AimLogic.standOffAt(distance, from, to, time, STAND_OFF.easing)
 		local rootFrame = rootCFrame * CFrame.new(motion[1] - start[1], motion[2] - start[2], motion[3] - start[3])
 			+ away * stepped
-		local offsets = ClipSampler.sample(clip, time)
+		local offsets = ClipSampler.sample(clip, if lag ~= nil then math.max(time - lag, from) else time)
 		if into ~= nil then
 			placeParts(parts, rootFrame, offsets, into)
 		end
@@ -1218,6 +1294,16 @@ local function keepOutOf(
 	local limbBefore: { CFrame } = table.clone(reachFrames)
 	local limbChain: { { CFrame } } = { limbBefore }
 	local limbNow: { CFrame } = table.clone(reachFrames)
+	-- And as the screen draws them (D-535): a frame draws the pose of `poseLag` before on the root
+	-- of now (a root write shows on its own frame, a pose a frame later, D-342), so through a lunge
+	-- the root carries the hands that far past where the pose has them: Horizontal's right arm at
+	-- the kobold's walk-in rest stood 0.001 studs in as posed and 0.065 in as drawn at 60 Hz (0.103
+	-- turned 10.35 degrees; the PC read 0.090). Its own pieces (`drawnPieces`), as `pieces` are.
+	local drawn = #reach > 0 and poseLag > 0
+	local drawnBefore: { CFrame } = table.clone(reachFrames)
+	local drawnChain: { { CFrame } } = { drawnBefore }
+	local drawnNow: { CFrame } = table.clone(reachFrames)
+	local drawnPieces = 1
 	-- The least step back at or past `at` (with the body `shift` aside) that leaves every hand and
 	-- arm, through all it sweeps from the sample before, at most depthEpsilon deep in any of the
 	-- target's body parts: a follow-through or a snap between two strike keys carries a hand as
@@ -1229,38 +1315,46 @@ local function keepOutOf(
 	local function limbOut(at: number, shift: Vector3): number
 		local need = at
 		local moved = away * at + shift
+		-- One sweep (`links`, `count` pieces) of one hand or arm past one body part.
+		local function sweepOut(links: { { CFrame } }, count: number, index: number, piece: BodyPart, part: number)
+			local hurtFrame = hurtFrames[part]
+			local reachOf = reachRadii[index] + hurtRadii[part]
+			local near = false
+			for each = 1, count + 1 do
+				if (links[each][index].Position + moved - hurtFrame.Position).Magnitude <= reachOf then
+					near = true
+					break
+				end
+			end
+			if not near then
+				return
+			end
+			local deep: number = KEEP_OUT.depthEpsilon
+			for each = 1, count do
+				need = math.max(
+					need,
+					stepOut(
+						links[each][index],
+						links[each + 1][index],
+						piece.size,
+						hurtFrame,
+						hurtSizes[part],
+						away,
+						at,
+						deep,
+						shift
+					)
+				)
+			end
+		end
 		for index, piece in reach do
 			if index == bladeIndex then
 				continue
 			end
-			for part, hurtFrame in hurtFrames do
-				local reachOf = reachRadii[index] + hurtRadii[part]
-				local near = false
-				for each = 1, pieces + 1 do
-					if (limbChain[each][index].Position + moved - hurtFrame.Position).Magnitude <= reachOf then
-						near = true
-						break
-					end
-				end
-				if not near then
-					continue
-				end
-				local deep: number = KEEP_OUT.depthEpsilon
-				for each = 1, pieces do
-					need = math.max(
-						need,
-						stepOut(
-							limbChain[each][index],
-							limbChain[each + 1][index],
-							piece.size,
-							hurtFrame,
-							hurtSizes[part],
-							away,
-							at,
-							deep,
-							shift
-						)
-					)
+			for part in hurtFrames do
+				sweepOut(limbChain, pieces, index, piece, part)
+				if drawn then
+					sweepOut(drawnChain, drawnPieces, index, piece, part)
 				end
 			end
 		end
@@ -1453,6 +1547,9 @@ local function keepOutOf(
 			if not done then
 				table.move(frames, 1, #parts, 1, before)
 				table.move(limbNow, 1, #reach, 1, limbBefore)
+				if drawn then
+					table.move(drawnNow, 1, #reach, 1, drawnBefore)
+				end
 				local time = math.min(from + k * step, clip.duration)
 				local previous = math.min(from + (k - 1) * step, clip.duration)
 				-- The sample whose sweep reaches the first key is the first held out.
@@ -1481,6 +1578,21 @@ local function keepOutOf(
 				end
 				chain[pieces + 1] = frames
 				limbChain[pieces + 1] = limbNow
+				-- The hands and arms as the screen draws them over the same stretch (D-535).
+				if drawn then
+					pose(time, nil, drawnNow, poseLag)
+					local drawnTurn = turnOf(drawnBefore, drawnNow, if bladeIndex > 0 then bladeIndex - 1 else #reach)
+					drawnPieces = math.clamp(math.ceil(drawnTurn / KEEP_OUT.maxTurnDegrees), 1, KEEP_OUT.maxPieces)
+					for piece = 1, drawnPieces - 1 do
+						local into = drawnChain[piece + 1]
+						if into == nil or into == drawnNow then
+							into = table.create(#reach)
+							drawnChain[piece + 1] = into
+						end
+						pose(previous + (time - previous) * piece / drawnPieces, nil, into, poseLag)
+					end
+					drawnChain[drawnPieces + 1] = drawnNow
+				end
 				local b, a = currentBack, currentAside
 				-- Out of the body's face first, then the held ones, then the body's again for what an
 				-- aside step changed: a few rounds settle it.
@@ -1666,6 +1778,104 @@ local function keepOutOf(
 	}
 end
 
+-- The column's own poses over the rest of a swing (D-534): each colliding part (keepOut.parts)
+-- as the clip poses it relative to the root, every keepOut.sampleSeconds from `from` to the clip's
+-- end, and for a direction the sample from each one on that carries each part farthest along it.
+-- A step back stays taken for the rest of the swing, so the room it may take is the least any of
+-- those poses leaves: the clips lean the torso and the head back and forth (Basic1 leans forward
+-- at clip 0.117, back at 0.133), and a 0.125 step into the room the forward lean opened put the
+-- body up to 0.165 into a wall flush behind one frame later, for the engine to push it back out
+-- toward the target (item 431). Posed on the first ask (a swing with no world behind it pays
+-- nothing).
+type Ahead = {
+	parts: { BodyPart },
+	times: { number },
+	frames: { { CFrame } },
+	-- direction key -> best[k][i]: the sample from k on that carries part i farthest along it
+	best: { [string]: { { number } } },
+}
+
+local function aheadOf(model: Model, clip: Types.ClipDef, from: number): Ahead
+	local list = bodyParts(model, KEEP_OUT.parts)
+	local times: { number } = {}
+	local frames: { { CFrame } } = {}
+	local sample: number = KEEP_OUT.sampleSeconds
+	local time = math.min(from, clip.duration)
+	while true do
+		local poses: { CFrame } = {}
+		placeParts(list, CFrame.identity, ClipSampler.sample(clip, time), poses)
+		table.insert(times, time)
+		table.insert(frames, poses)
+		if time >= clip.duration then
+			break
+		end
+		time = math.min(time + sample, clip.duration)
+	end
+	return { parts = list, times = times, frames = frames, best = {} }
+end
+
+-- How far a box `size` at `frame` (in the root's space) reaches along `along` (root space, unit).
+local function reachAlong(frame: CFrame, size: Vector3, along: Vector3): number
+	return frame.Position:Dot(along)
+		+ size.X / 2 * math.abs(frame.RightVector:Dot(along))
+		+ size.Y / 2 * math.abs(frame.UpVector:Dot(along))
+		+ size.Z / 2 * math.abs(frame.LookVector:Dot(along))
+end
+
+-- The room `columnRoom` leaves, cast again with each part at the farthest the clip carries it
+-- along `along` (world, flat, unit; `local` the same in the root's space) from `clipTime` on.
+local function aheadRoom(
+	ahead: Ahead,
+	key: string,
+	along: Vector3,
+	localAlong: Vector3,
+	at: CFrame,
+	distance: number,
+	clipTime: number,
+	cast: BoxCast
+): number
+	local times, frames, parts = ahead.times, ahead.frames, ahead.parts
+	local best = ahead.best[key]
+	if best == nil then
+		local built: { { number } } = {}
+		local count = #times
+		for k = count, 1, -1 do
+			local row: { number } = {}
+			for index, body in ahead.parts do
+				local farthest = k
+				if k < count then
+					local later = built[k + 1][index]
+					if
+						reachAlong(frames[later][index], body.size, localAlong)
+						> reachAlong(frames[k][index], body.size, localAlong)
+					then
+						farthest = later
+					end
+				end
+				row[index] = farthest
+			end
+			built[k] = row
+		end
+		ahead.best[key] = built
+		best = built
+	end
+	-- The sample at or before the clip time, so the pose now is in.
+	local k = 1
+	while k < #times and times[k + 1] <= clipTime + KEY_EPSILON do
+		k += 1
+	end
+	local most = distance
+	for index, body in parts do
+		if most <= 0 then
+			return 0
+		end
+		if #body.links > 0 then
+			most = boxRoom(at * frames[best[k][index]][index], body.size, along, most, cast, true)
+		end
+	end
+	return most
+end
+
 --- The Art stand-off (fix F1): a target already inside the blade's start pose for the first
 --- damage window would be cut before the swing moves (the review's "sword raised, pause, pop"), so
 --- the body steps straight away from it over the anticipation, from clip time `from` (the hold
@@ -1719,31 +1929,54 @@ function ContactPredictor.standOff(
 	-- torsos and the head) cast back along the step from where it stands as the step is taken
 	-- (D-517). The root's box alone let a step carry the drawn idle's UpperTorso, 0.26 behind it,
 	-- into a wall flush behind, and the engine then pushed the body along the wall.
-	local room: ((at: CFrame, distance: number) -> number)? = nil
+	-- And with a clip time, each of them again as the clip poses it from then to the swing's end
+	-- (D-534): a step back stays, so it never takes room a lean still to come needs.
+	local room: ((at: CFrame, distance: number, clipTime: number?) -> number)? = nil
 	local rootPart = model.PrimaryPart
 	local column = columnOf(model)
-	if cast ~= nil and rootPart ~= nil then
-		room = function(at: CFrame, distance: number): number
-			return columnRoom(rootPart, column, at, away, distance, cast)
+	local ahead: Ahead? = nil
+	local function roomAlong(key: string, along: Vector3): (at: CFrame, distance: number, clipTime: number?) -> number
+		local localAlong = rootCFrame:VectorToObjectSpace(along)
+		return function(at: CFrame, distance: number, clipTime: number?): number
+			local world = cast :: BoxCast
+			local most = columnRoom(rootPart :: BasePart, column, at, along, distance, world)
+			if most <= 0 then
+				return 0
+			end
+			if ahead == nil then
+				ahead = aheadOf(model, clip, from)
+			end
+			return aheadRoom(ahead :: Ahead, key, along, localAlong, at, most, clipTime or from, world)
 		end
+	end
+	if cast ~= nil and rootPart ~= nil then
+		room = roomAlong("away", away)
 	end
 	local opts: StandOffOptions = options or {}
 	local distance = if opts.step == false then nil else bladeStep(model, clip, from, rootCFrame, parts, away, room)
 	local window = ClipSampler.hitWindows(clip)[1]
 	local to = if distance ~= nil and window ~= nil then window.open else from
 	local keepOut = if opts.keepOut == true
-		then keepOutOf(model, clip, from, rootCFrame, target, away, distance or 0, to, parts)
+		then keepOutOf(
+			model,
+			clip,
+			from,
+			rootCFrame,
+			target,
+			away,
+			distance or 0,
+			to,
+			parts,
+			math.max(opts.poseLag or DEFAULT_POSE_LAG, 0)
+		)
 		else nil
 	if distance == nil and keepOut == nil then
 		return nil
 	end
 	local side = if keepOut ~= nil then keepOut.side else nil
-	local roomSide: ((at: CFrame, distance: number) -> number)? = nil
+	local roomSide: ((at: CFrame, distance: number, clipTime: number?) -> number)? = nil
 	if side ~= nil and cast ~= nil and rootPart ~= nil then
-		local along: Vector3 = side
-		roomSide = function(at: CFrame, distance: number): number
-			return columnRoom(rootPart, column, at, along, distance, cast)
-		end
+		roomSide = roomAlong("side", side)
 	end
 	return {
 		distance = distance or 0,

@@ -929,18 +929,39 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - Studio: section AL (items 453 to 458), run after section AK; 453 checks the engine behaviour D-531 assumes (the client-local joint and anchor writes stick and never replicate). Section AI marks each line they replace "Superseded by item …".
 - Merge: E2's patches went on 4e60f11 with no conflicts; its specs pass with every earlier part's; no existing bound or data value changed (RushDrawOrder's existing cases now read the screen with the same numbers).
 
+## Section AK on the PC (2026-11-01, 4e60f11)
+
+- Passed: the drawn idle's feet (447), the landing at walk speed 24 (449), the drawn sprint into an attack (450; arms 18–21°), the drawn guard raise (451), and 15 of 17 dodges (452).
+- Failed: the sheathed guard's and the Draw's tip speed at 240 fps (444(a), 445(a)): every row over 84 studs/s is a 2.4–3.9 ms frame right after a 4.5–6.2 ms one, a frame with no physics in between reads 0, and over the pair the tip reads 49–86.5. The lock turn's pivot foot moves 0.012–0.094 (446(a), ≤ 0.01 asked). The locked drawn walk's feet are planted 34% of rows at 60 fps (27% at 144) with a p90 step of 0.065 on the screen against 0.019 on the joint chain (448). Two dodges turn the legs 21.6° and 20.2° on the press row (452(a)), and parts still move until 0.30–0.32 s. Being fixed.
+
+## Section AL on the PC (2026-11-02, f446653, in progress)
+
+- 453(a) passed: the client's joint and anchor writes hold for the whole detached stretch and never reach the server, so D-531 stands.
+- 453(b) failed on 4 of 4 charges: on the row the Torso goes back on its joint it shows 0.63–0.64 off its joint, about 0.19 low and 0.6 ahead along the run, and lands back the next row. Being fixed. The client also detached the Torso for 7–8 rows while Idle right after a placement, before the charge (being checked with the fix).
+- 453(c): the Head and Snout follow the drawn Torso on the same row.
+
+## Section AI fixes, fourth part (2026-11-02, D-534 to D-537)
+
+- At a wall or pillar flush behind, the stand-off no longer steps back into room a later lean needs (D-534): the code's step back on touching rows 0.125 (Basic1) / 0.149 (Sharp Nail) → 0.000 at 30, 60 and 144; rows over 12·dt 1 → 0. Left: the clip's own lean, which the engine pushes out (about 0.32 over Basic1).
+- The keep-out also keeps the hands out of the kobold as the screen draws them, one frame behind the root (D-535): Horizontal's drawn hand at the walk-in rests 0.065–0.103 inside → ≤ 0.006 (the PC read 0.090) at 30, 60, 144 and 240 Hz, with every cut landing; the body stands up to 0.20 further back at Rising Arc's first key.
+- A sword on the back no longer zeroes the keep-out (D-537): that was the PC probe's Basic3 0 at 3.2–3.75 and Basic1 0 at 3.5.
+- 430(c) and (d) were logger reads, not code fails: every hit shows its number (the 30 fps 3rd number reused the 1st's freed anchor; now the oldest-freed digit is taken, D-536), and every row over 12·dt is the clip's own forward lunge.
+- Studio: section AM (items 459 to 464), run after section AL. Section AI marks each line they replace "Superseded by item …".
+- Merge: F1's patches went on f446653; its specs pass with every earlier part's; the hit-matrix tool now runs 73 s (was 55).
+
 ## Next three tasks
 
-1. Run section AK (items 444 to 452, in progress on the PC) and then section AL (items 453 to 458) of
+1. Run the rest of section AL (items 454 to 458, in progress on the PC) and then section AM (items 459 to 464) of
    `docs/STUDIO_TASKS.md` on the owner's PC on the build with these fixes, every item with item 397's frame names, at
    the frame rates and lags each names, judged on the BasePart read. Report every pass line with its numbers. Section
    AI's and AJ's lines not superseded stand as written.
 2. Fix section AJ's fails (the client's enemy copies falling, 442 and 443; the server landing short at 60 fps and the
-   client's slide back, 440(e), 441(b) and (d); in progress, with the PC's engine probes), the remaining section AI
-   fails (430, 431 and 437: the body against the kobold and walls, in progress), and the AG fails the PC found on
-   4b18b5c (376(a), no remote ribbon under lag; 383 and 384, ribbon segments after the stroke; 391(c), the boar
-   Stagger's rear; 392(b), the boar's walk start; in progress); their re-tests follow as later Studio sections. The
-   owner's calls (below, and in AI) go to the owner.
+   client's slide back, 440(e), 441(b) and (d)), section AK's (the tip on short frames, 444 and 445; the pivot foot,
+   446; the locked walk's planted feet, 448; the dodge's legs on the press row, 452), section AL's (the Torso's pop
+   when it goes back on its joint, 453(b)), and the AG fails the PC found on 4b18b5c (376(a), no remote ribbon under
+   lag; 383 and 384, ribbon segments after the stroke; 391(c), the boar Stagger's rear; 392(b), the boar's walk start);
+   all in progress, with the PC's engine probes. Their re-tests follow as later Studio sections. The owner's calls
+   (below, and in AI) go to the owner.
 3. The rehearsal and the recording (item 438), once every line passes: rehearse the 11 shots in dev.luau order with the
    frame-tick square on and log any take that fails its own pass lines; if all pass, record each with Game Bar at 60
    fps, High quality, with **View > Stats** open during the fight for the fps reading, and hand the files over (here in
@@ -948,7 +969,21 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
    of `docs/ANIMATION_REVIEW.md` are filled (with AG item 391(f)'s enemy cells), and anything that reads wrong is fixed
    with the PoseEditor and recorded again. The section 16 numbers and the merge into `main` follow (Open items).
 
-### Open items (after the section AI fixes, third part, not in the three above)
+### Open items (after the section AI fixes, fourth part, not in the three above)
+
+- **Owner calls from the section AI fixes, fourth part (the default is chosen; say if not).**
+  - The drawn hands stay fully out of the enemy (D-535), so Rising Arc's first key stands up to 0.20 further back at
+    60 Hz (0.30 at 30 fps) and every cut still lands; the other way is to allow a hair of drawn overlap (≤ 0.05) for a
+    closer cut.
+  - At a flush wall the body slides about 0.3 toward the enemy over a basic, the engine pushing the clip's own lean
+    out of the wall (accepted); taking the lean up smoothly in code would need the keep-out against the enemy in front.
+  - A clip's forward lunge moves the root up to 0.40 in one 60 Hz frame (Horizontal at 0.367, Sharp Nail at 0.867),
+    kept as authored (item 460(b) reports it).
+- **From the section AI fixes, fourth part.** The PC's held kobold asks for little or no aside (0 for Basic1, 0.0287
+  for Basic3, against Lune's square-on 0.166 / 0.228); item 463(d) logs its facing and its HeldBlocker to find why.
+  The hit-matrix tool runs 18 s longer (a plan per client rate); if that matters, the 30 and 144 Hz plans could be
+  made only for cells within reach.
+
 
 - **From the section AI fixes, third part.** The lock camera, its framing and target distances still read
   DrawnBody.position (root·offset), so during a charge they trail the drawn body by the root's predicted move, as on

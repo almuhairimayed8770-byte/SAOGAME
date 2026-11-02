@@ -103,6 +103,7 @@ local Client = script.Parent.Parent
 
 local Combat = require(Shared.data.combat)
 local ChoreoData = require(Shared.data.choreo)
+local ImpactData = require(Shared.data.impact)
 local InputData = require(Shared.data.input)
 local Playground = require(Shared.data.playground)
 local World = require(Shared.data.world)
@@ -132,6 +133,7 @@ local ClipLibrary, hasClipLibrary = Siblings.load(Client, "choreo.ClipLibrary")
 local Trails = Siblings.load(Client, "fx.Trails")
 local Hud = Siblings.load(Client, "ui.Hud")
 local Impact = Siblings.load(Client, "fx.Impact")
+local FrameClock = Siblings.load(Client, "fx.FrameClock")
 -- The lock (D-112). Through Siblings and Siblings.call, so a harness that loads this controller
 -- without the lock-on (or a build where it fails to load) simply has no lock and no assist.
 local TargetController = Siblings.load(Client, "controllers.TargetController")
@@ -209,6 +211,10 @@ local standOffSideShown = 0
 -- How much of the stand-off's step back the world behind has taken off so far (item 287): held
 -- off the clip's own motion toward the target instead.
 local standOffLost = 0
+-- The clip time the last stand-off step stood at: the pose the frame that shows this step's root
+-- still draws (a root shows on its own frame, a pose one frame later), so the room it takes keeps
+-- the gap for that pose too (D-534).
+local standOffClock: number? = nil
 local STAND_OFF_EASING: string = Combat.contact.standOff.easing
 -- The root's move a step held back to the next one (D-496): the root is written in the render
 -- step and shows on its own frame, the pose a frame later (impact.poseLagFrames), so a step taken
@@ -464,6 +470,7 @@ local standOffAsked: any = nil
 local function planStandOff(handle: any, facing: { number }, basic: boolean?)
 	standOff, standOffHandle, standOffShown, standOffSideShown = nil, nil, 0, 0
 	standOffLost = 0
+	standOffClock = nil
 	standOffAsked = handle
 	local model, rootPart = character, root
 	if model == nil or rootPart == nil or typeof(handle) ~= "table" then
@@ -480,6 +487,10 @@ local function planStandOff(handle: any, facing: { number }, basic: boolean?)
 	local position = rootPart.Position
 	local rootCFrame = CFrame.lookAt(position, position + look.Unit)
 	local world = ContactPredictor.worldCast(model :: Model)
+	-- The screen draws the pose this screen's frame (FrameClock.pace, hitches left out) times
+	-- impact.poseLagFrames behind the root (D-535); before any frame, the plan's own default.
+	local pace = Siblings.call(FrameClock, "pace")
+	local poseLag = if typeof(pace) == "number" then pace * ImpactData.poseLagFrames else nil
 	standOff = ContactPredictor.standOff(
 		model :: Model,
 		handle.clip,
@@ -487,7 +498,7 @@ local function planStandOff(handle: any, facing: { number }, basic: boolean?)
 		rootCFrame,
 		target :: Model,
 		world,
-		{ keepOut = true, step = basic ~= true }
+		{ keepOut = true, step = basic ~= true, poseLag = poseLag }
 	)
 	standOffHandle = if standOff ~= nil then handle else nil
 end
@@ -537,6 +548,9 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3)
 	local shown = AimLogic.standOffAt(plan.distance, plan.from, plan.to, handle.time, STAND_OFF_EASING)
 		+ (if keep ~= nil then keep(handle.time) else 0)
 	local by = shown - standOffShown
+	-- The room is kept for every pose from the one this frame still draws on (D-534).
+	local drawnClock = math.min(standOffClock or plan.from, handle.time)
+	standOffClock = handle.time
 	-- Back along the way this frame's root motion came, so never into the world: first what a wall
 	-- took off before, then this frame's share.
 	local toward = math.max(-carried:Dot(plan.away), 0)
@@ -550,7 +564,9 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3)
 		local free = if by > 0 then math.min(by, toward) else by
 		local rest = by - free
 		local room = plan.room
-		local move = if rest > 0 and room ~= nil then room(rootPart.CFrame + plan.away * free, rest) else rest
+		local move = if rest > 0 and room ~= nil
+			then room(rootPart.CFrame + plan.away * free, rest, drawnClock)
+			else rest
 		rootPart.CFrame = rootPart.CFrame + plan.away * (free + move)
 		standOffShown = shown
 		if rest > 0 and move < rest then
@@ -563,7 +579,9 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3)
 		local sideBy = aside - standOffSideShown
 		if sideBy ~= 0 then
 			local roomSide = plan.roomSide
-			local move = if sideBy > 0 and roomSide ~= nil then roomSide(rootPart.CFrame, sideBy) else sideBy
+			local move = if sideBy > 0 and roomSide ~= nil
+				then roomSide(rootPart.CFrame, sideBy, drawnClock)
+				else sideBy
 			rootPart.CFrame = rootPart.CFrame + side * move
 			standOffSideShown = aside
 		end
@@ -1577,6 +1595,7 @@ local function clearCharacter()
 	snap = nil
 	standOff, standOffHandle, standOffShown, standOffSideShown, standOffAsked = nil, nil, 0, 0, nil
 	standOffLost = 0
+	standOffClock = nil
 	rootHeldBack = Vector3.zero
 	assistTargetId = nil
 	lastPredictAt = nil

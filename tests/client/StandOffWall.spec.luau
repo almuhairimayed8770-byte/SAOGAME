@@ -827,3 +827,285 @@ describe("the keep-out with the world flush behind (item 287, D-276, D-314)", fu
 		end
 	)
 end)
+
+-- Item 431 (D-534): at a wall flush behind, the PC's code step still moved the root back on rows
+-- the body touched the face (up to 0.095 a row at the wall) and the root moved toward the kobold
+-- over Basic1 (+0.090; the engine pushing the body out of the wall). The room was cast with the
+-- column as it stands as the step is taken: a frame whose pose leans forward (Basic1 at clip
+-- 0.117, Sharp Nail's lunge at 0.350) opened room the next pose leans back into, and the frame
+-- that shows the stepped root still draws the pose before (a root shows on its own frame, a pose
+-- one frame later), so the drawn body went that far into the wall. Through the real plan
+-- (ContactPredictor.standOff with the keep-out at a touching kobold, cast against a wall or a
+-- pillar flush behind) and the real controller and clips at 60 Hz, the parts posed where Lune
+-- reads them (this step's pose), with the engine pushing a part the clip leans into the world back
+-- out after each frame: on every frame the code steps the root back, the column as drawn (the clip
+-- time before) and as stepped (this one) stands the gap short of the world.
+describe("the stand-off at a wall or a pillar flush behind (item 431, D-534)", function()
+	it("never steps the root back while the drawn or the stepped body touches the face", function()
+		local fs = require("@lune/fs")
+		local Combat = Harness.load("src/shared/data/combat")
+		local Enemies = Harness.load("src/shared/data/enemies")
+		local World = Harness.load("src/shared/data/world")
+		local Pose = Harness.load("src/shared/choreo/Pose")
+		local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
+		local RigBuilder = Harness.load("src/server/world/RigBuilder")
+		local PlaygroundLayout = Harness.load("src/server/world/PlaygroundLayout")
+		local ContactPredictor = Harness.load("src/client/controllers/ContactPredictor")
+		local STAND_OFF = Combat.contact.standOff
+		local GAP: number = STAND_OFF.wallGapStuds
+		local source = fs.readFile(Harness.repoRoot() .. "/tools/hitmatrix/HitMatrix.luau")
+		local HitMatrix = luau.load(source, {
+			debugName = "tools/hitmatrix/HitMatrix",
+			environment = { require = require } :: any,
+		})()
+		local avatar = HitMatrix.standing(Harness)
+		local clip = Harness.load("src/shared/clips/player/OneHandedSword/Basic1")
+		local clipId = "player/OneHandedSword/Basic1"
+		local away = Vector3.new(0, 0, 1)
+		-- A kobold touching in front of the matrix body (its root 2.3 studs ahead), blocker on.
+		local def = Enemies.byId("KoboldAxeman")
+		local kobold = RigBuilder.build(def.skin)
+		local height =
+			PlaygroundLayout.rootHeight(Rigs[def.skin].hipHeight, kobold.PrimaryPart.Size.Y, World.spawn.groundEpsilon)
+		local koboldAt = avatar.base * CFrame.new(0, height - avatar.rootHeight, -2.3) * CFrame.Angles(0, math.pi, 0)
+		for name, solved in Pose.solve(kobold, koboldAt, {}) do
+			local part = kobold:FindFirstChild(name)
+			if part ~= nil and part:IsA("BasePart") then
+				part.CFrame = solved
+			end
+		end
+		RigBuilder.addBlocker(kobold)
+		for _, child in kobold:GetChildren() do
+			if child:IsA("BasePart") and child.Name == STAND_OFF.keepOut.bodyFace then
+				child.CanCollide = true
+			end
+		end
+		-- The column posed by the clip at `time` with the root at `root`: how far its backmost
+		-- corner stands past the plane `face` along `away` (negative: short of it), within `span`
+		-- of the line when given (a pillar).
+		local column = STAND_OFF.keepOut.parts
+		local function depthPast(root: CFrame, time: number, face: number, span: number?): number
+			local solved = Pose.solve(avatar.model, root, ClipSampler.sample(clip, math.min(time, clip.duration)))
+			local most = -math.huge
+			for _, name in column do
+				local part = avatar.model:FindFirstChild(name) :: BasePart
+				local half = part.Size / 2
+				for _, x in { -1, 1 } do
+					for _, y in { -1, 1 } do
+						for _, z in { -1, 1 } do
+							local corner = solved[name] * Vector3.new(x * half.X, y * half.Y, z * half.Z)
+							if span == nil or math.abs(corner.X) <= span then
+								most = math.max(most, corner:Dot(away) - face)
+							end
+						end
+					end
+				end
+			end
+			return most
+		end
+		-- The engine's Blockcast against one box (to 1e-6), never a box it starts in.
+		local function boxCast(world: { BasePart }): (CFrame, Vector3, Vector3) -> number?
+			local function inside(at: CFrame, size: Vector3, part: BasePart): boolean
+				local corners = {}
+				for _, x in { -1, 1 } do
+					for _, y in { -1, 1 } do
+						for _, z in { -1, 1 } do
+							table.insert(corners, at * Vector3.new(x * size.X / 2, y * size.Y / 2, z * size.Z / 2))
+						end
+					end
+				end
+				-- separating axes of two boxes
+				local axes = {
+					at.RightVector,
+					at.UpVector,
+					at.LookVector,
+					part.CFrame.RightVector,
+					part.CFrame.UpVector,
+					part.CFrame.LookVector,
+				}
+				for _, axis in axes do
+					local lo, hi = math.huge, -math.huge
+					for _, corner in corners do
+						local d = corner:Dot(axis)
+						lo, hi = math.min(lo, d), math.max(hi, d)
+					end
+					local c = part.CFrame.Position:Dot(axis)
+					local r = part.Size.X / 2 * math.abs(part.CFrame.RightVector:Dot(axis))
+						+ part.Size.Y / 2 * math.abs(part.CFrame.UpVector:Dot(axis))
+						+ part.Size.Z / 2 * math.abs(part.CFrame.LookVector:Dot(axis))
+					if hi < c - r - 1e-9 or lo > c + r + 1e-9 then
+						return false
+					end
+				end
+				return true
+			end
+			return function(start: CFrame, size: Vector3, vector: Vector3): number?
+				local length = vector.Magnitude
+				if length < 1e-9 then
+					return nil
+				end
+				local best: number? = nil
+				for _, part in world do
+					if inside(start, size, part) then
+						continue
+					end
+					if not inside(start + vector, size, part) then
+						local hit = false
+						for k = 1, 200 do
+							if inside(start + vector * (k / 200), size, part) then
+								hit = true
+								break
+							end
+						end
+						if not hit then
+							continue
+						end
+					end
+					local lo, hi = 0, length
+					for _ = 1, 40 do
+						local mid = (lo + hi) / 2
+						if inside(start + vector.Unit * mid, size, part) then
+							hi = mid
+						else
+							lo = mid
+						end
+					end
+					if best == nil or hi < (best :: number) then
+						best = hi
+					end
+				end
+				return best
+			end
+		end
+		local checked = 0
+		for _, shape in { "wall", "pillar" } do
+			local from = FRAME
+			-- The world flush behind the column as the swing starts (the root at the origin, the
+			-- controller's), a wall across the line or a 1-stud pillar on it.
+			local start = CFrame.new()
+			local face = depthPast(start, 0, 0)
+			local size = if shape == "wall" then Vector3.new(30, 30, 1) else Vector3.new(1, 30, 1)
+			local block = Instance.new("Part")
+			block.Size = size
+			block.CFrame = CFrame.new(away * (face + 0.5))
+			block.Anchored = true
+			local cast = boxCast({ block })
+			-- Parts at the clip's pose the controller's step has just written (Lune's read): the live
+			-- swing's clock as the room is asked.
+			local handleTime = 0
+			local live: any = nil
+			local function poseLive()
+				local time = if live ~= nil then live.time else handleTime
+				for name, solved in Pose.solve(avatar.model, avatar.base, ClipSampler.sample(clip, time)) do
+					local part = avatar.model:FindFirstChild(name)
+					if part ~= nil and part:IsA("BasePart") then
+						part.CFrame = solved
+					end
+				end
+			end
+			handleTime = from
+			poseLive()
+			local real = ContactPredictor.standOff(
+				avatar.model,
+				clip,
+				from,
+				avatar.base,
+				kobold,
+				cast,
+				{ keepOut = true, step = false }
+			)
+			assert(real ~= nil and real.room ~= nil, "no plan against the touching kobold")
+			local plan = {
+				distance = real.distance,
+				away = real.away,
+				to = real.to,
+				keep = real.keep,
+				keepUntil = real.keepUntil,
+				side = real.side,
+				keepSide = real.keepSide,
+				room = function(at: CFrame, distance: number, clipTime: number?): number
+					poseLive()
+					return (real.room :: any)(at, distance, clipTime)
+				end,
+				roomSide = if real.roomSide ~= nil
+					then function(at: CFrame, distance: number, clipTime: number?): number
+						poseLive()
+						return (real.roomSide :: any)(at, distance, clipTime)
+					end
+					else nil,
+			}
+			local rig = load({ choreo = true, impact = true, standOff = plan })
+			for _ = 1, 40 do
+				rig.frame(STILL)
+			end
+			rig.root.CFrame = start
+			rig.setLock(Vector3.new(0, 0, -2.3))
+			rig.controller.basicAttack()
+			local handle: any = rig.animator.mixer:find(clipId)
+			live = handle
+			local drawn = 0
+			local steps, toward, keepMost, codeNet, pushed = 0, 0, 0, 0, 0
+			for _ = 1, 40 do
+				local before = rig.root.CFrame
+				rig.frame(STILL)
+				keepMost = math.max(keepMost, if real.keep ~= nil then real.keep(handle.time) else 0)
+				-- The root's step back, less any the clip's own root motion took back (Basic1's root
+				-- settles 0.004 back after its lunge), read apart; a lunge held is no step.
+				local motionBefore = ClipSampler.rootMotionAt(clip, drawn)
+				local motionNow = ClipSampler.rootMotionAt(clip, handle.time)
+				local carried = Vector3.new(motionNow[1] - motionBefore[1], 0, motionNow[3] - motionBefore[3])
+				local back = (rig.root.Position - before.Position):Dot(away) - math.max(carried:Dot(away), 0)
+				codeNet += (rig.root.Position - before.Position):Dot(away)
+				toward = math.max(toward, -codeNet)
+				local span = if shape == "pillar" then size.X / 2 else nil
+				if back > 1e-4 then
+					steps += 1
+					local drawnDepth = depthPast(rig.root.CFrame, drawn, face, span)
+					local stepped = depthPast(rig.root.CFrame, handle.time, face, span)
+					if math.max(drawnDepth, stepped) > -GAP + 0.003 then
+						error(
+							("%s: at clip %.3f the code stepped the root %.3f back with the body drawn %.3f and stepped %.3f past the face"):format(
+								shape,
+								handle.time,
+								back,
+								drawnDepth,
+								stepped
+							)
+						)
+					end
+				end
+				-- The engine: physics with this step's pose pushes a part the clip leant into the world
+				-- back out, toward the kobold (Studio's push, up to 0.6 a row).
+				local into = depthPast(rig.root.CFrame, handle.time, face, span)
+				if into > 0 then
+					rig.root.CFrame = rig.root.CFrame - away * into
+					pushed += into
+				end
+				drawn = handle.time
+				checked += 1
+				if handle.time >= clip.duration - 1e-6 or rig.controller.state() ~= "Basic" then
+					break
+				end
+			end
+			-- The keep-out wanted the body back and the clip leant into the world (else this proves
+			-- nothing), and the code never took the root toward the kobold (the hold takes the lunge
+			-- the wall left no room to step from, D-502); the engine's push is apart.
+			expect(keepMost > 0.5).toBe(true)
+			expect(pushed > 0).toBe(true)
+			expect(toward <= 1e-3).toBe(true)
+			print(
+				("[431] %s: %d frames, %d steps back, keep up to %.3f, code toward %.4f, engine push %.3f"):format(
+					shape,
+					checked,
+					steps,
+					keepMost,
+					toward,
+					pushed
+				)
+			)
+			block:Destroy()
+		end
+		expect(checked > 20).toBe(true)
+		kobold:Destroy()
+	end)
+end)

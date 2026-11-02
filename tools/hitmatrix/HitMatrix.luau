@@ -185,6 +185,7 @@ type Context = {
 	Mixer: any,
 	Joints: any,
 	ContactPredictor: any,
+	ImpactData: any,
 	ActionLogic: any,
 	AimLogic: any,
 	AI: any,
@@ -255,6 +256,7 @@ local function load(Harness: any): Context
 		ActionLogic = Harness.load("src/client/controllers/ActionLogic"),
 		AimLogic = Harness.load("src/client/controllers/AimLogic"),
 		AI = Harness.load("src/shared/data/ai"),
+		ImpactData = Harness.load("src/shared/data/impact"),
 	}
 end
 
@@ -765,14 +767,16 @@ end
 -- to it the same way), facing ahead. An Art's plans at the release, from the hold pose with the root
 -- where the clip has carried it: the blade step (fix F1) and the keep-out (D-314, D-315); a basic's
 -- from its first frame, the keep-out alone. Nil for the point-blank shoulders (outside the
--- assist) and a swing that needs neither.
+-- assist) and a swing that needs neither. `poseLag`: how far the screen's pose runs behind the
+-- root for the client it plans for (one frame at its rate, D-535); nil, a 60 Hz client's.
 local function standOffOf(
 	ctx: Context,
 	avatar: Avatar,
 	attack: Attack,
 	setup: Setup,
 	distance: number,
-	enemyModel: any
+	enemyModel: any,
+	poseLag: number?
 ): any?
 	local aim = ctx.Combat.aim
 	if
@@ -793,7 +797,7 @@ local function standOffOf(
 		rootAt(ctx, avatar, attack.clip, from),
 		enemyModel,
 		nil,
-		{ keepOut = true, step = isArt }
+		{ keepOut = true, step = isArt, poseLag = poseLag }
 	)
 end
 
@@ -1276,6 +1280,19 @@ function HitMatrix.run(Harness: any, options: Options?): Report
 						continue
 					end
 					local standOff = standOffOf(ctx, avatar, attack, setup, distance, enemyModel)
+					-- Each client rate draws the swing on the plan its own frame makes (D-535); the
+					-- server's is a 60 Hz client's (the plan's own default lag).
+					local drawnPlans = {}
+					if not opts.skipClient then
+						local defaultLag = ctx.Combat.contact.standOff.keepOut.sampleSeconds
+							* ctx.ImpactData.poseLagFrames
+						for _, fps in config.clientFps do
+							local lag = ctx.ImpactData.poseLagFrames / fps
+							drawnPlans[fps] = if math.abs(lag - defaultLag) < 1e-12
+								then standOff
+								else standOffOf(ctx, avatar, attack, setup, distance, enemyModel, lag)
+						end
+					end
 					local byPhase, landedByPhase, drawnByPhase = {}, {}, {}
 					for _, phase in phases do
 						byPhase[phase], landedByPhase[phase] = swing(
@@ -1292,7 +1309,8 @@ function HitMatrix.run(Harness: any, options: Options?): Report
 						if not opts.skipClient then
 							local byFps = {}
 							for _, fps in config.clientFps do
-								byFps[fps] = drawSwing(ctx, avatar, attack, enemyModel, enemyDef, fps, phase, standOff)
+								byFps[fps] =
+									drawSwing(ctx, avatar, attack, enemyModel, enemyDef, fps, phase, drawnPlans[fps])
 							end
 							drawnByPhase[phase] = byFps
 						end

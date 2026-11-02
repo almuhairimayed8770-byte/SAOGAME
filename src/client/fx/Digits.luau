@@ -25,6 +25,8 @@ type Digit = {
 	start: number,
 	baseSize: number,
 	busy: boolean,
+	-- When it last faded out (Engine.now); never shown: -math.huge.
+	freed: number,
 }
 
 local Digits = {}
@@ -75,14 +77,30 @@ local function newDigit(): Digit
 	}, { label }) :: BillboardGui
 	gui.Parent = part
 	part.Parent = ensureFolder()
-	return { part = part, gui = gui, label = label, start = 0, baseSize = config.textSize.Normal, busy = false }
+	return {
+		part = part,
+		gui = gui,
+		label = label,
+		start = 0,
+		baseSize = config.textSize.Normal,
+		busy = false,
+		freed = -math.huge,
+	}
 end
 
+-- The free digit that faded out longest ago (D-536): a number that just faded hands its anchor to
+-- no new one, so a hit landing right after an earlier number's fade (Sharp Nail's third at the 30
+-- fps cap, 0.600-0.637 s after its first) rises from an anchor of its own, not from the spot and
+-- the part the faded one left a frame before (the PC counted 2 numbers for 3 hits).
 local function acquire(): Digit
+	local oldest: Digit? = nil
 	for _, digit in pool do
-		if not digit.busy then
-			return digit
+		if not digit.busy and (oldest == nil or digit.freed < oldest.freed) then
+			oldest = digit
 		end
+	end
+	if oldest ~= nil then
+		return oldest
 	end
 	local digit = newDigit()
 	table.insert(pool, digit)
@@ -101,6 +119,7 @@ local function step()
 		local t = elapsed / config.fadeTime
 		if t >= 1 then
 			digit.busy = false
+			digit.freed = now
 			digit.gui.Enabled = false
 			digit.label.TextTransparency = 1
 			continue

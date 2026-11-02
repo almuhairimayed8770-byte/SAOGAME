@@ -21,6 +21,15 @@
 	the swing, carrying its axe up to 0.5 studs on. The PC's hand in the axe came from the gate
 	shots' 3.5-stud staging, nearer than the shell lets a walk stand (see docs, item 409).
 
+	Item 430(e), D-535: every frame is read twice, as posed (this step's pose on this step's root)
+	and as the screen draws it. A root write shows on its own frame and a pose one frame later
+	(D-342), so a frame draws the pose the step before wrote on the root this step put it at, or,
+	once a frame has drawn a held pose and while the root goes on moving, on the root a step behind
+	with it (D-496). Through a lunge the root carries the hands that far past the pose's own: at the
+	kobold's walk-in rest Horizontal's right arm read 0.003-0.009 studs in as posed and 0.10-0.11 as
+	drawn at 60 Hz (the PC 0.090), 0.04-0.07 at 144 (the PC 0.057). Both reads stand within the
+	same depth.
+
 	D-518: the gate shots' kobold (shots 2 to 5 and 9) is staged where DevStage puts it
 	(DevStageLogic.placeStaged on the shot's own data), the body locked on it (turned to its root),
 	the kobold idling from any phase of its loop: from the take's start through its swing at 60 Hz,
@@ -35,6 +44,7 @@ local Combat = Harness.load("src/shared/data/combat")
 local Enemies = Harness.load("src/shared/data/enemies")
 local Arts = Harness.load("src/shared/data/arts")
 local Rigs = Harness.load("src/shared/data/rigs")
+local Impact = Harness.load("src/shared/data/impact")
 local World = Harness.load("src/shared/data/world")
 local Weapons = Harness.load("src/shared/data/weapons")
 local Playground = Harness.load("src/shared/data/playground")
@@ -210,6 +220,9 @@ end
 type Result = {
 	depth: number,
 	where: string,
+	-- The deepest as the screen draws it (item 430(e)).
+	screen: number,
+	screenWhere: string,
 	hits: number,
 	heldDepth: number,
 	heldWhere: string,
@@ -246,7 +259,7 @@ local function swingAt(
 		rest,
 		model,
 		nil,
-		{ keepOut = true, step = swing.art ~= nil }
+		{ keepOut = true, step = swing.art ~= nil, poseLag = Impact.poseLagFrames / fps }
 	)
 	local records = {
 		{ id = 1, model = avatar.model, kind = "Player", state = "Art", weaponId = WEAPON.id },
@@ -272,8 +285,20 @@ local function swingAt(
 		weaponAttack = WEAPON.attack,
 	}))
 	local carried = rest
-	local result: Result =
-		{ depth = -math.huge, where = "", hits = 0, heldDepth = -math.huge, heldWhere = "", contacts = {} }
+	local result: Result = {
+		depth = -math.huge,
+		where = "",
+		screen = -math.huge,
+		screenWhere = "",
+		hits = 0,
+		heldDepth = -math.huge,
+		heldWhere = "",
+		contacts = {},
+	}
+	-- The step before's pose and root, and whether the root runs a step behind its pose (D-496).
+	local lastOffsets: any = nil
+	local lastFrame: CFrame? = nil
+	local behind = false
 	for _ = 1, math.ceil(swing.clip.duration * fps) + 120 do
 		local stepped = mixer:step(1 / fps)
 		elapsed += 1 / fps
@@ -307,6 +332,17 @@ local function swingAt(
 		if depth > result.depth then
 			result.depth, result.where = depth, ("%s at %.3f s"):format(where, time)
 		end
+		-- As drawn: the step before's pose, on this root or (a step behind, D-496) on the last one.
+		local moved = lastFrame ~= nil and (frame.Position - (lastFrame :: CFrame).Position).Magnitude > 0
+		behind = moved and (mixer:heldShown() or behind)
+		if lastOffsets ~= nil then
+			local shownRoot = if behind then lastFrame :: CFrame else frame
+			local drawn, drawnWhere = limbDepth(hurt, shownRoot, lastOffsets)
+			if drawn > result.screen then
+				result.screen, result.screenWhere = drawn, ("%s at %.3f s"):format(drawnWhere, time)
+			end
+		end
+		lastOffsets, lastFrame = stepped.offsets, frame
 		if idleTime ~= nil and #held > 0 then
 			local inHeld, whereHeld = limbDepth(held, frame, stepped.offsets)
 			if inHeld > result.heldDepth then
@@ -329,18 +365,34 @@ local function rootHeightOf(enemyId: string): number
 	return PlaygroundLayout.rootHeight(rig.hipHeight, rootSize, World.spawn.groundEpsilon)
 end
 
-local function check(label: string, enemyId: string, enemyFrame: CFrame, lateral: number, idleTime: number?)
-	local probe = placeAt(enemyId, enemyFrame, idleTime)
-	local rest = restOf(probe, enemyFrame.Position, lateral)
-	probe:Destroy()
+local function check(
+	label: string,
+	enemyId: string,
+	enemyFrame: CFrame,
+	lateral: number,
+	idleTime: number?,
+	restAt: CFrame?,
+	rates: { number }?
+)
+	local rest = restAt
+	if rest == nil then
+		local probe = placeAt(enemyId, enemyFrame, idleTime)
+		rest = restOf(probe, enemyFrame.Position, lateral)
+		probe:Destroy()
+	end
+	local rest = rest :: CFrame
 	local worst, worstAt = -math.huge, ""
+	local worstScreen, worstScreenAt = -math.huge, ""
 	local worstHeld, worstHeldAt = -math.huge, ""
 	for _, swing in SWINGS do
 		local windows = #ClipSampler.hitWindows(swing.clip)
-		for _, fps in RATES do
+		for _, fps in rates or RATES do
 			local result = swingAt(enemyId, enemyFrame, rest, fps, swing, idleTime)
 			if result.depth > worst then
 				worst, worstAt = result.depth, ("%s %d Hz: %s"):format(swing.name, fps, result.where)
+			end
+			if result.screen > worstScreen then
+				worstScreen, worstScreenAt = result.screen, ("%s %d Hz: %s"):format(swing.name, fps, result.screenWhere)
 			end
 			if result.heldDepth > worstHeld then
 				worstHeld, worstHeldAt = result.heldDepth, ("%s %d Hz: %s"):format(swing.name, fps, result.heldWhere)
@@ -371,6 +423,17 @@ local function check(label: string, enemyId: string, enemyFrame: CFrame, lateral
 					)
 				)
 			end
+			if result.screen > DEEPEST then
+				error(
+					("%s, %s at %d Hz: a limb %.3f studs deep as the screen draws it (%s)"):format(
+						label,
+						swing.name,
+						fps,
+						result.screen,
+						result.screenWhere
+					)
+				)
+			end
 		end
 	end
 	print(
@@ -384,6 +447,7 @@ local function check(label: string, enemyId: string, enemyFrame: CFrame, lateral
 			worst,
 			worstAt
 		)
+			.. ("; as drawn %.3f (%s)"):format(worstScreen, worstScreenAt)
 			.. (if worstHeld > -math.huge then ("; in what it holds %.3f (%s)"):format(worstHeld, worstHeldAt) else "")
 	)
 end
@@ -400,6 +464,32 @@ describe("no hand or arm goes into an enemy's body on any frame (items 331(a), 3
 		-- hangs still: -0.044 at its deepest).
 		check("kobold square on, idling from 2.3 s", "KoboldAxeman", frame, 0, 2.3)
 	end)
+
+	it(
+		"at a kobold where the PC's walk-ins rested, square on and turned, as posed and as drawn (item 430(e))",
+		function()
+			-- Setup A's held kobold stopped the body 3.15 to 3.60 studs from its root (the blocker's
+			-- push, not the drawn shell's hold); the gate's 10.35 degree turn too.
+			local frame = CFrame.new(0, rootHeightOf("KoboldAxeman"), -20) * CFrame.Angles(0, math.pi, 0)
+			for _, distance in { 3.15, 3.6 } do
+				for _, yaw in { 0, 10.35 } do
+					local at = frame.Position
+						+ Vector3.new(math.sin(math.rad(yaw)) * distance, 0, math.cos(math.rad(yaw)) * distance)
+					local start = Vector3.new(at.X, avatar.base.Position.Y, at.Z)
+					local rest = CFrame.lookAt(start, Vector3.new(frame.Position.X, start.Y, frame.Position.Z))
+					check(
+						("kobold %.2f out, %.2f degrees round"):format(distance, yaw),
+						"KoboldAxeman",
+						frame,
+						0,
+						nil,
+						rest,
+						{ 60, 144 }
+					)
+				end
+			end
+		end
+	)
 
 	it("at a side-on boar, from where the drawn shell walks in to, square on its middle and a stud off", function()
 		local frame = CFrame.new(0, rootHeightOf("FrenzyBoar"), -20) * CFrame.Angles(0, math.rad(90), 0)
@@ -514,6 +604,9 @@ local function take(shot: any, phase: number): Take
 	local swung = swingAt(enemyId, enemyFrame, rest, TAKE_HZ, swing, phase + release)
 	if swung.depth > result.body then
 		result.body, result.bodyAt = swung.depth, ("%s in %s"):format(swung.where, swing.name)
+	end
+	if swung.screen > result.body then
+		result.body, result.bodyAt = swung.screen, ("%s in %s as drawn"):format(swung.screenWhere, swing.name)
 	end
 	if swung.heldDepth > result.held then
 		result.held, result.heldAt = swung.heldDepth, ("%s in %s"):format(swung.heldWhere, swing.name)

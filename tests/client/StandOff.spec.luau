@@ -480,26 +480,55 @@ describe("the Art stand-off never steps into the world (D-235 amended)", functio
 		expect(far.room(avatar.base, 0.2)).toBeCloseTo(0.2, 1e-9)
 		-- A wall nearer than the step: the longest whole step that keeps the gap, from whichever
 		-- colliding part stands farthest back (D-517: the matrix avatar's Head, 0.055 behind the
-		-- root's box; the root's box alone let the step take that 0.055 too).
-		local behind = 0
-		local rootFrame = avatar.model.PrimaryPart.CFrame
-		for _, name in STAND_OFF.keepOut.parts do
-			local part = avatar.model:FindFirstChild(name)
-			if part ~= nil and part:IsA("BasePart") then
-				local frame = rootFrame:ToObjectSpace(part.CFrame)
-				local half = part.Size / 2
-				for _, x in { -1, 1 } do
-					for _, y in { -1, 1 } do
-						for _, z in { -1, 1 } do
-							local corner = frame * Vector3.new(x * half.X, y * half.Y, z * half.Z)
-							behind = math.max(behind, corner.Z - rootSize.Z / 2)
+		-- root's box; the root's box alone let the step take that 0.055 too), as it stands now or
+		-- as the clip poses it anywhere from the step on (D-534: the step stays, and Rising Arc's
+		-- later lean carries the head and torsos past where they stood).
+		local widest = 0
+		local function backmost(rootFrame: CFrame, frames: { [string]: CFrame }): number
+			local most = 0
+			for _, name in STAND_OFF.keepOut.parts do
+				local part = avatar.model:FindFirstChild(name)
+				if part ~= nil and part:IsA("BasePart") and frames[name] ~= nil then
+					local frame = rootFrame:ToObjectSpace(frames[name])
+					local half = part.Size / 2
+					for _, x in { -1, 1 } do
+						for _, y in { -1, 1 } do
+							for _, z in { -1, 1 } do
+								local corner = frame * Vector3.new(x * half.X, y * half.Y, z * half.Z)
+								most = math.max(most, corner.Z - rootSize.Z / 2)
+								widest = math.max(widest, math.abs(corner.X) - rootSize.X / 2)
+							end
 						end
 					end
 				end
 			end
+			return most
 		end
-		expect(behind > 0.05).toBe(true)
-		for _, wall in { 0.3, 0.17, need - 0.01 } do
+		local live: { [string]: CFrame } = {}
+		for _, name in STAND_OFF.keepOut.parts do
+			local part = avatar.model:FindFirstChild(name)
+			if part ~= nil and part:IsA("BasePart") then
+				live[name] = part.CFrame
+			end
+		end
+		local standing = backmost(avatar.model.PrimaryPart.CFrame, live)
+		expect(standing > 0.05).toBe(true)
+		local behind = standing
+		local time = from
+		while true do
+			behind = math.max(
+				behind,
+				backmost(CFrame.identity, Pose.solve(avatar.model, CFrame.identity, ClipSampler.sample(clip, time)))
+			)
+			if time >= clip.duration then
+				break
+			end
+			time = math.min(time + STAND_OFF.keepOut.sampleSeconds, clip.duration)
+		end
+		-- The clip's lean past the standing column is what the old walls (0.3 and 0.17 behind the
+		-- root's box) gave the step: it is now the clip's own, so the walls stand that far back.
+		expect(behind > standing).toBe(true)
+		for _, wall in { behind + 0.3 - standing, behind + 0.17 - standing, behind + GAP + need - 0.01 } do
 			local plan = planWith({ wallBehind(wall) })
 			local fits = math.floor((wall - behind - GAP) / STAND_OFF.stepStuds + 1e-6) * STAND_OFF.stepStuds
 			expect(plan).never.toBeNil()
@@ -526,8 +555,8 @@ describe("the Art stand-off never steps into the world (D-235 amended)", functio
 		expect(planWith({ wallBehind(0) })).toBeNil()
 		expect(planWith({ wallBehind(GAP / 2) })).toBeNil()
 		expect(planWith({ pillarBehind(0.02, 0) })).toBeNil()
-		-- A pillar beside the line leaves the step whole.
-		local beside = planWith({ pillarBehind(0.1, rootSize.X / 2 + 0.6) })
+		-- A pillar beside the line leaves the step whole (beside what the clip's poses sweep too).
+		local beside = planWith({ pillarBehind(0.1, rootSize.X / 2 + widest + 0.6) })
 		expect(beside.distance).toBeCloseTo(need, 1e-9)
 		model:Destroy()
 	end)
@@ -647,5 +676,80 @@ describe("the Art stand-off steps back from the body, not from the weapon it hol
 		expect(gap(model, clip, still, window.open) < STAND_OFF.clearStuds).toBe(true)
 		expect(gap(model, clip, still, window.open, held) >= STAND_OFF.clearStuds).toBe(true)
 		model:Destroy()
+	end)
+end)
+
+-- ------------------------------------------------------------------ the sword on the back (D-537)
+
+-- The plan poses the blade as the swing holds it: in the hand. This client alone hangs the sword on
+-- its back mount between fights (WeaponMount: the Weapon motor's Part0 and C0 rewritten, the server
+-- and the hit matrix keep it in the hand), and a plan made on a frame that still drew it there read
+-- the blade off the back: the PC's plan probe (the sword on the back after a timed-out draw) gave
+-- the third basic no keep-out at all at 3.2 to 3.75 studs from a held kobold and the first basic
+-- none at 3.5 (Lune 1.30 to 0.75 and 1.05 with it in the hand), so the cut went 0.47 into the body.
+describe("a sword this client hangs on its back is planned in the hand (item 437(e), D-537)", function()
+	it("plans the keep-out and the blade step exactly as with the sword in the hand", function()
+		local WeaponModels = Harness.load("src/shared/data/weaponModels")
+		local motor: Motor6D? = nil
+		for _, each in avatar.model:GetDescendants() do
+			if each:IsA("Motor6D") and each.Name == WeaponModels.motorName then
+				motor = each :: Motor6D
+			end
+		end
+		assert(motor ~= nil, "the matrix body holds its sword on a Weapon motor")
+		local hand, handC0 = motor.Part0, motor.C0
+		local row = WeaponModels.sheaths.OneHandedSword
+		local back = avatar.model:FindFirstChild(row.part) :: BasePart
+		local setup = setupOf("Kobold")
+		local swings = {
+			{ clip = Harness.load("src/shared/clips/player/OneHandedSword/Basic1"), from = 0, step = false },
+			{ clip = Harness.load("src/shared/clips/player/OneHandedSword/Basic3"), from = 0, step = false },
+		}
+		for _, artId in { "OneHandedSword.SharpNail", "OneHandedSword.RisingArc" } do
+			local clip = artClip(artId)
+			table.insert(swings, { clip = clip, from = holdTime(clip), step = true })
+		end
+		local function planned(swing: any, distance: number): any
+			local model = place(setup, distance)
+			RigBuilder.addBlocker(model)
+			local plan = ContactPredictor.standOff(
+				avatar.model,
+				swing.clip,
+				swing.from,
+				avatar.base,
+				model,
+				nil,
+				{ keepOut = true, step = swing.step }
+			)
+			model:Destroy()
+			return plan
+		end
+		local moved = 0
+		for _, swing in swings do
+			for _, distance in { 2.3, 3.2, 3.5, 3.75 } do
+				motor.Part0, motor.C0 = hand, handC0
+				local held = planned(swing, distance)
+				motor.Part0, motor.C0 = back, ClipSampler.toCFrame(row.mount)
+				local sheathed = planned(swing, distance)
+				motor.Part0, motor.C0 = hand, handC0
+				expect(held ~= nil).toBe(sheathed ~= nil)
+				if held == nil then
+					continue
+				end
+				expect(sheathed.distance).toBeCloseTo(held.distance, 1e-9)
+				local time = swing.from
+				while time <= swing.clip.duration do
+					local keep = if held.keep ~= nil then held.keep(time) else 0
+					expect(if sheathed.keep ~= nil then sheathed.keep(time) else 0).toBeCloseTo(keep, 1e-9)
+					if held.keepSide ~= nil then
+						expect(sheathed.keepSide(time)).toBeCloseTo(held.keepSide(time), 1e-9)
+					end
+					moved = math.max(moved, keep + held.distance)
+					time += STAND_OFF.keepOut.sampleSeconds
+				end
+			end
+		end
+		-- The cases above step the body: a plan that read nothing would pass them with zeros.
+		expect(moved > 1).toBe(true)
 	end)
 end)
