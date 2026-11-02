@@ -369,6 +369,69 @@ describe("RushDraw's timeline (D-171)", function()
 		expect(RushDraw.drawing(state)).toBe(false)
 	end)
 
+	it("a root put somewhere else takes the drawn body with it at once, never slid there (D-553)", function()
+		-- The PC's P3 on f446653: a boar placed during its own charge stood 13 to 16 studs from its
+		-- drawn body, which held there 35 frames (Settle), then slid over about 70 (the hand-back at
+		-- the catch-up pace) and only then went back on its root.
+		local placed = CFrame.lookAt(Vector3.new(9, 3, 4), Vector3.new(9, 3, 3))
+		local function running(): (any, number)
+			local state = RushDraw.new(line(0))
+			local now = 0
+			while now < 0.4 do
+				now += FRAME
+				expect(RushDraw.step(state, now, FRAME, at(0))).never.toBeNil()
+			end
+			return state, now
+		end
+		-- Mid-run.
+		local state, now = running()
+		expect(state.phase).toBe("Run")
+		now += FRAME
+		expect(RushDraw.step(state, now, FRAME, placed)).toBeNil()
+		expect(state.phase).toBe("Done")
+		expect(RushDraw.drawing(state)).toBe(false)
+		-- Held where the server's body stopped (the hold's RushEnded "Stopped"), then placed.
+		state, now = running()
+		RushDraw.stop(state, state.along, now)
+		now += FRAME
+		RushDraw.step(state, now, FRAME, at(0))
+		expect(state.phase).toBe("Settle")
+		now += FRAME
+		expect(RushDraw.step(state, now, FRAME, placed)).toBeNil()
+		expect(state.phase).toBe("Done")
+		-- Placed while it slides back.
+		state, now = running()
+		RushDraw.jam(state, 6)
+		for _, along in { 3, 5, 6, 6 } do
+			now += FRAME
+			RushDraw.step(state, now, FRAME, at(along))
+		end
+		expect(state.phase).toBe("HandBack")
+		now += FRAME
+		expect(RushDraw.step(state, now, FRAME, placed)).toBeNil()
+		expect(state.phase).toBe("Done")
+		-- Put somewhere else in the crouch, on the launch's own step: the run starts from the root.
+		state = RushDraw.new(line(0.19))
+		now = 0
+		while now < 0.19 - FRAME do
+			now += FRAME
+			RushDraw.step(state, now, FRAME, at(0))
+		end
+		expect(state.phase).toBe("Armed")
+		now += FRAME
+		local launched = RushDraw.step(state, now, FRAME, placed) :: CFrame
+		expect(state.phase).toBe("Run")
+		expect((launched.Position - placed.Position).Magnitude).toBeLessThanOrEqual(FRAME_TRAVEL + EPSILON)
+		-- A late root catching up runs down the path, however far in a step; a step aside short of
+		-- teleportStuds is a root's own move. Neither ends the run.
+		state, now = running()
+		now += FRAME
+		expect(RushDraw.step(state, now, FRAME, at(7))).never.toBeNil()
+		now += FRAME
+		expect(RushDraw.step(state, now, FRAME, at(7) + Vector3.new(TUNING.teleportStuds - 0.5, 0, 0))).never.toBeNil()
+		expect(state.phase).toBe("Run")
+	end)
+
 	it("a death keeps the body where it was drawn; nothing drawn yet has nothing to keep", function()
 		local state = RushDraw.new(line(0))
 		local now = 0
@@ -730,11 +793,18 @@ describe("the drawn body meets the world as the server's does (D-205 to D-210)",
 			RushDraw.step(state, now, FRAME, at(math.min(SPEED * now, LENGTH)), room)
 			expect(state.phase == "HandBack").toBe(false)
 		end
-		-- The server's slam says the same stop: once its root is there, the body slides onto it.
+		-- The server's slam says the same stop: once its root is there, the body slides onto it. The
+		-- root comes back to it 2 studs a frame (one put back 7 studs in a single step is a placement,
+		-- which ends the drawn rush at once, D-553).
 		RushDraw.wall(state, stop, Vector3.new(0, 3, -face), Vector3.zAxis)
 		RushDraw.rest(state, stop)
-		now += FRAME
-		RushDraw.step(state, now, FRAME, at(stop), room)
+		local along = math.min(SPEED * now, LENGTH)
+		repeat
+			along = math.max(stop, along - 2)
+			now += FRAME
+			RushDraw.step(state, now, FRAME, at(along), room)
+			expect(state.phase == "Done").toBe(false)
+		until along <= stop
 		expect(state.phase).toBe("HandBack")
 	end)
 

@@ -53,6 +53,10 @@
 	            way at the catch-up pace, on handBackEasing; then it is Done and drawn on its root.
 	  Frozen    a death: the body stays where it was drawn (the death freeze and the shatter play
 	            there); it never goes back.
+	A root put somewhere else while the body is drawn away from it (a placement, a teleport: it
+	moves more than teleportStuds in one step other than forward down the path) takes the body with
+	it: the run, its settle or its hand-back is Done at once and the body drawn on its root where
+	it now stands, never slid there (D-553).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -163,6 +167,7 @@ export type State = {
 	pass: Pass?, -- the swing past a player's body in the path
 	passed: boolean, -- a pass was planned (one a rush)
 	dustAt: number?, -- how far down the path the skid's next puff rises (nil: from the strike beat)
+	rootSeen: Vector3?, -- where the root stood on the last step (RushDraw.step's `root`)
 }
 
 local RushDraw = {}
@@ -346,6 +351,7 @@ function RushDraw.new(line: Line, shown: Vector3?): State
 		pass = nil,
 		passed = false,
 		dustAt = nil,
+		rootSeen = nil,
 	}
 end
 
@@ -1017,6 +1023,24 @@ local function noticeRest(state: State, now: number, root: CFrame, velocity: Vec
 	RushDraw.rest(state, along)
 end
 
+-- D-553: whether the root was put somewhere else since the last step (a placement, a teleport):
+-- it moved more than teleportStuds, flat, other than forward down the path. A late root's catch-up
+-- (AI 423(b): 1.7 studs in one row) runs down the path; a placement lands anywhere.
+local function teleported(state: State, root: CFrame): boolean
+	local position = root.Position
+	local seen = state.rootSeen
+	state.rootSeen = position
+	if seen == nil then
+		return false
+	end
+	local jump = flat(position - seen).Magnitude
+	if jump <= TUNING.teleportStuds then
+		return false
+	end
+	local forward = RushWorld.project(state.legs, position) - RushWorld.project(state.legs, seen)
+	return jump - math.max(0, forward) > TUNING.teleportStuds
+end
+
 --- One frame: where to draw the root part at server time `now` (`dt` the frame's length) given
 --- where its replicated root stands (and the velocity it carries, nil: unknown), or nil when the
 --- body is drawn on its root (once Done; a crouch stands on it, turned). `room` asks the world how
@@ -1040,7 +1064,20 @@ function RushDraw.step(
 		return nil
 	elseif phase == "Frozen" then
 		return state.drawn
-	elseif phase == "Armed" then
+	end
+	if teleported(state, root) then
+		if phase ~= "Armed" then
+			state.phase = "Done"
+			state.drawn = nil
+			return nil
+		end
+		-- A crouch put somewhere else crouches there: a launch on this step starts from the root.
+		state.shown = root.Position
+		if state.drawn ~= nil then
+			state.drawn = CFrame.lookAt(root.Position, root.Position + state.facing)
+		end
+	end
+	if phase == "Armed" then
 		if now < line.startedAt or state.released then
 			return armed(state, now, dt, root)
 		end

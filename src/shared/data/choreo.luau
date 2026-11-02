@@ -478,6 +478,12 @@ local Choreo = {
 			settleSeconds = 0.6,
 			handBackSeconds = 0.2,
 			handBackEasing = "QuadOut",
+			-- A replicated root that moves more than this in one step, flat, other than forward down
+			-- the path, was put there (a placement, a teleport, D-553): the drawn rush is over at
+			-- once and the body is drawn on its root where it now stands, never slid there. A late
+			-- root catching up runs down the path (AI 423(b): 1.7 studs in one row); a placement
+			-- during a charge moved it 13 to 16 studs (the PC's P3).
+			teleportStuds = 4,
 			-- The root part the body is drawn away from hides meanwhile (LocalTransparencyModifier).
 			hiddenRootTransparency = 1,
 			-- While the run, its settle, its hand-back or a frozen death draws the body away from its

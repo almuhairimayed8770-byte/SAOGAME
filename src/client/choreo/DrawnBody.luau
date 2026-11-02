@@ -22,10 +22,13 @@
 	publishes that part and where the body is drawn: a following billboard is adorned to that part
 	instead, its offset keeping it over the drawn body, so the root part's own move never carries
 	it off the body; it goes back to its owner's adornee once the body is back on its root
-	(D-533).
+	(D-533). `position` and `cframe` then answer where the step drew the body too, not the root
+	part moved by the offset: the root part moves at physics and the drawn Torso does not, so that
+	answer sat off the drawn body by the root's move of the frame (D-552).
 
-		DrawnBody.position(model)            -- Vector3?: the root part's position moved by the offset
-		DrawnBody.cframe(model)              -- CFrame?: the root part's CFrame moved by the offset
+		DrawnBody.position(model)            -- Vector3?: where the body is drawn (the carrier's, else
+		                                     -- the root part's position moved by the offset)
+		DrawnBody.cframe(model)              -- CFrame?: the same as a CFrame
 		DrawnBody.offset(model)              -- CFrame? in the root part's space; nil on its root
 		DrawnBody.follow(gui, model, base)   -- a billboard adorned to the root shows over the body
 		DrawnBody.unfollow(gui)              -- back to `base` and no longer moved
@@ -103,23 +106,31 @@ function DrawnBody.offset(model: any): CFrame?
 	return offsets[model]
 end
 
---- Where a rig's body is drawn: its root part's CFrame moved by the offset (the root part's own
---- while the body is on it), or nil without a root part.
+--- Where a rig's body is drawn: while Choreo draws it on a carrier part, off the root part's move
+--- at physics, where the step drew it (D-552); otherwise its root part's CFrame moved by the
+--- offset (the root part's own while the body is on it). Nil without a root part.
 function DrawnBody.cframe(model: any): CFrame?
 	local root = rootOf(model)
 	if root == nil then
 		return nil
 	end
+	local carrier = carriers[model]
+	if carrier ~= nil then
+		return carrier.at
+	end
 	local offset = offsets[model]
 	return if offset ~= nil then (root.CFrame :: CFrame) * offset else root.CFrame
 end
 
---- Where a rig's body is drawn: its root part's position moved by the offset (the root part's own
---- while the body is on it), or nil without a root part.
+--- Where a rig's body is drawn: DrawnBody.cframe's position, or nil without a root part.
 function DrawnBody.position(model: any): Vector3?
 	local root = rootOf(model)
 	if root == nil then
 		return nil
+	end
+	local carrier = carriers[model]
+	if carrier ~= nil then
+		return carrier.at.Position
 	end
 	local offset = offsets[model]
 	if offset == nil then

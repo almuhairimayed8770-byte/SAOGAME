@@ -83,7 +83,10 @@
 	root joint's Part1 itself instead: on this client only the joint is turned off and Part1
 	anchored where the joint would put it on a root standing at `at`, until the offset is nil
 	again (D-531). The joint's Transform is still written, so a read through the chain from the
-	root part sees the offset as before.
+	root part sees the offset as before. The step the offset ends on keeps Part1 anchored, where
+	the joint is about to put it on the root as it stands, and the joint goes back on at
+	PreSimulation (D-551): a joint turned on draws its Part1 where its last solve before it was
+	turned off had it until that frame's physics.
 
 	The engine surface (clocks, camera, frame signals) is one small table that tests replace with
 	Choreo.configure; the logic underneath is the Lune-tested Mixer.
@@ -187,6 +190,8 @@ local localModel: Model? = nil
 -- The local model's owner steps it (Choreo.stepLocal); RenderStepped leaves it alone (D-139).
 local localDriven = false
 local started = false
+-- True once start() hooked PreSimulation: a body goes back on its root joint there (reattachBody).
+local attachOnPreSimulation = false
 local rankTimer = 0
 
 --- The render step the rigs step in, bound before every reader of a pose (Choreo.renderPriority).
@@ -308,6 +313,7 @@ end
 -- Puts the body back on its root joint (detachBody undone): Part1 unanchored before the joint is
 -- turned on, so the joint never joins an anchored part to the root's assembly.
 local function attachBody(self: any)
+	self.attachDue = false
 	local held = self.detached
 	if held == nil then
 		return
@@ -324,6 +330,7 @@ end
 local function detachBody(self: any, motor: any): BasePart?
 	local held = self.detached
 	if held ~= nil and held.motor == motor then
+		self.attachDue = false
 		return held.part
 	end
 	attachBody(self)
@@ -340,6 +347,29 @@ local function detachBody(self: any, motor: any): BasePart?
 	return part
 end
 
+-- The body goes back on its root joint (D-551). A Motor6D turned on draws its Part1 where its
+-- last physics solve had it before it was turned off (the crouch's key, 0.5 behind and 0.1 down)
+-- at every render point until that frame's physics solves it with the Transform written since
+-- (the PC's P3 probe on f446653: a 0.63 pop for one row). So the step keeps Part1 anchored where
+-- the joint is about to put it, on the root part as it stands with this step's Transform, and the
+-- joint goes back on at PreSimulation, after the frame is drawn and right before the physics that
+-- solves it. Without a PreSimulation hook (a configured engine without one) it goes back on now.
+local function reattachBody(self: any)
+	local held = self.detached
+	if held == nil then
+		return
+	end
+	local motor = held.motor
+	local part0 = if attachOnPreSimulation then motor.Part0 else nil
+	if part0 == nil then
+		attachBody(self)
+		return
+	end
+	local c0, c1 = Joints.frames(motor)
+	held.part.CFrame = part0.CFrame * c0 * motor.Transform * c1:Inverse()
+	self.attachDue = true
+end
+
 -- Writes the blended offsets to the joints' Transform; joints that stopped being keyed return to
 -- rest. A pinned joint is skipped, so it returns to rest too and stays there. Every written
 -- Transform is kept in `pose` for the PreSimulation rewrite (reapplyPose). The two touched sets
@@ -348,7 +378,7 @@ end
 -- C0^-1 * offset * C0 in front of the clip's own Transform draws the body as if the root part
 -- stood at root * offset. The offset drawn (nil when none is) is published to DrawnBody (D-193).
 -- With the root part's CFrame it is drawn from (`bodyAt`), Part1 is drawn there itself, off the
--- joint (detachBody); otherwise the body hangs on the joint again.
+-- joint (detachBody); otherwise the body goes back on the joint (reattachBody, at PreSimulation).
 local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 	local motors = self.motors
 	local pinned: { [string]: boolean } = self.pinned
@@ -392,9 +422,6 @@ local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 			end
 		end
 	end
-	if held == nil then
-		attachBody(self)
-	end
 	if drawnAt ~= nil or self.drawnPublished then
 		self.drawnPublished = drawnAt ~= nil
 		DrawnBody.publish(self.model, drawnAt, held, heldAt)
@@ -410,6 +437,9 @@ local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 	end
 	self.touchedScratch = self.touched
 	self.touched = touched
+	if held == nil then
+		reattachBody(self)
+	end
 end
 
 local function rbxHost(model: Model): Instance
@@ -992,6 +1022,7 @@ local function newAnimator(model: Model): any
 		drawnPublished = false, -- the last step published a body offset to DrawnBody
 		bodyAt = nil :: CFrame?, -- the root part's CFrame the offset is drawn from (setBodyOffset)
 		detached = nil :: { motor: Motor6D, part: BasePart }?, -- Part1 drawn off the joint (detachBody)
+		attachDue = false, -- Part1 goes back on its joint at the next PreSimulation (reattachBody)
 		stepHooks = {} :: { (dt: number) -> () },
 		rootDelta = Vector3.zero,
 		rootDeltaAt = engine.now(), -- engine.now() of the last step (the one that wrote rootDelta)
@@ -1127,10 +1158,14 @@ local function start()
 	end)
 	local preSimulation = engine.preSimulation
 	if preSimulation ~= nil then
+		attachOnPreSimulation = true
 		preSimulation:Connect(function()
 			for index = 1, #ordered do
 				local animator = ordered[index]
 				if animator ~= nil then
+					if animator.attachDue then
+						attachBody(animator)
+					end
 					reapplyPose(animator)
 				end
 			end

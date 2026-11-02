@@ -123,6 +123,8 @@ type Rig = {
 	setEnemies: (enemies: { { id: number, position: Vector3 } }) -> (),
 	-- The last input the controller handed Locomotion.update.
 	locomotionInput: () -> any,
+	-- The deps the controller handed Locomotion.new last (nil when it handed none).
+	locomotionDeps: () -> any,
 	-- The root's yaw (degrees, + = left) when the controller last called Locomotion.update.
 	locomotionYaw: () -> number?,
 	-- What the fake CameraController.lockMove does to the stick it is handed (D-238): nil hands
@@ -168,6 +170,8 @@ type Options = {
 	impact: boolean?,
 	-- Hand the controller a recording fx.Trails sibling (its activationLight) instead of a stub.
 	trails: boolean?,
+	-- Hand the controller this fx.FrameClock sibling instead of a stub.
+	frameClock: any?,
 	-- Hand the controller a Choreo whose animator records setTimeScale and hands out root motion.
 	animator: boolean?,
 	-- The place is a capture place (workspace DevCapture attribute, dev.luau attributes.capture).
@@ -258,8 +262,10 @@ local function load(options: Options?): Rig
 		end,
 	}
 	local gaitPhase = 0.1 - (opts.stopGait or 0)
+	local locomotionDeps: any = nil
 	local locomotion = {
-		new = function(): any
+		new = function(_animator: any, _model: any, deps: any): any
+			locomotionDeps = deps
 			return {
 				serverDrawn = function(): boolean
 					return false
@@ -479,6 +485,9 @@ local function load(options: Options?): Rig
 				if path == "fx.Impact" and opts.impact then
 					return impact, true
 				end
+				if path == "fx.FrameClock" and opts.frameClock ~= nil then
+					return opts.frameClock, true
+				end
 				if path == "fx.Trails" and opts.trails then
 					return {
 						activationLight = function(...: any)
@@ -680,6 +689,9 @@ local function load(options: Options?): Rig
 		end,
 		locomotionInput = function(): any
 			return lastInput
+		end,
+		locomotionDeps = function(): any
+			return locomotionDeps
 		end,
 		locomotionYaw = function(): number?
 			return lastInputYaw
@@ -3706,5 +3718,27 @@ describe("CharacterController: a guard held through a blow's stagger comes back 
 		rig.frame(STILL)
 		expect(rig.controller.state()).toBe("Guard")
 		expect(guardSends(rig)).toBe("held,released,held")
+	end)
+end)
+
+describe("CharacterController: the sword's move lands with its step's pose (AG 376(b), D-555)", function()
+	it("hands Locomotion.new FrameClock.atStepPose, and none when FrameClock is missing", function()
+		-- Before, Locomotion.new got no deps: the local rig's WeaponMount moved the sword inside the
+		-- step, a frame before the screen drew the hand that holds it.
+		local asked = 0
+		local frameClock = {
+			atStepPose = function(fn: () -> ()): () -> ()
+				asked += 1
+				fn()
+				return function() end
+			end,
+		}
+		local rig = load({ frameClock = frameClock })
+		local deps = rig.locomotionDeps()
+		expect(deps ~= nil and deps.atStepPose == frameClock.atStepPose).toBe(true)
+		local plain = load()
+		local none = plain.locomotionDeps()
+		expect(none == nil or none.atStepPose == nil).toBe(true)
+		expect(asked).toBe(0)
 	end)
 end)

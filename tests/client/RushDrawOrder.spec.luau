@@ -20,6 +20,11 @@
 	(the BasePart.CFrame the frame shows). A write after physics never shows.
 ]]
 
+-- Fresh modules, as when this spec runs alone: Choreo connects PreSimulation once, on its first
+-- animator, and the frame loop below fires this spec's own PreSimulation, where the body goes back
+-- on its root joint (D-551). A Choreo an earlier spec started would answer that spec's signal.
+Harness.reset()
+
 local function frameSignal()
 	return {
 		Connect = function()
@@ -62,6 +67,9 @@ local FRAME_TRAVEL = SPEED * FRAME
 local clock = 0
 -- The rendered frame the measured half's loop is on (its recorders note it with each call).
 local frameNow = 0
+-- RunService.PreSimulation as Choreo connects it: the loop fires it after the frame is drawn and
+-- before physics moves the root.
+local preSimulationFns: { () -> () } = {}
 Choreo.configure({
 	now = function()
 		return clock
@@ -69,6 +77,12 @@ Choreo.configure({
 	cameraPosition = function()
 		return Vector3.zero
 	end,
+	preSimulation = {
+		Connect = function(_self: any, fn: () -> ())
+			table.insert(preSimulationFns, fn)
+			return { Disconnect = function() end }
+		end,
+	},
 })
 
 local function recorder(calls: { any }, name: string): any
@@ -145,6 +159,134 @@ local function hungFrom(model: Model, solved: { [string]: CFrame }, shot: Shot):
 	return solved[chain.rootName]
 end
 
+-- The engine's BasePart.CFrame of the rig's parts, as the render check and PC 453 found them:
+-- - physics solves every part on its joint from the root part where physics leaves it, with the
+--   Transform the last writer before physics left (R1 to R5);
+-- - a part anchored with its joint off stays where it was written, and a write moves it and what
+--   hangs from it at once (453(c): the Head and Snout follow the drawn Torso on the same row);
+-- - a Motor6D that starts solving again (turned on with its Part1 unanchored, or its Part1
+--   unanchored while it is on) puts its Part1, and what hangs from it, at Part0 * C0 * T * C1^-1
+--   at once, T the Transform its last physics solve used before it stopped (the frame before the
+--   detach), the Transform written since left out until the next physics solves it (the PC's P3
+--   and P4 on f446653: on the row the root joint turned on before the render, the Torso drawn
+--   0.63 to 0.69 off its chain, behind it down the run and lower, where the crouch's key had it;
+--   back on its chain after that frame's physics; turned on at PreSimulation with Part1
+--   unanchored in the same write, the render drew the anchored Torso and physics solved the
+--   joint with the current Transform; Part1 left anchored at PreSimulation and unanchored on the
+--   next frame, that frame drew the stale pose instead, an anchored Part1 being no joint physics
+--   solves).
+-- A frame draws the parts as they stand after its render steps (`settle`), before its physics
+-- (`solve`). Only parts hanging from the root part are kept.
+type World = {
+	shown: { [string]: CFrame },
+	on: { [string]: boolean },
+	solvedWith: { [string]: CFrame },
+	chain: any,
+	motors: { [string]: any },
+	parts: { [string]: BasePart },
+	below: { [string]: { string } },
+}
+
+-- A joint's Transform (identity before any write: Lune's Motor6D has no default for it).
+local function transformOf(motor: any): CFrame
+	if motor == nil then
+		return CFrame.identity
+	end
+	local ok, transform = pcall(function(): any
+		return motor.Transform
+	end)
+	return if ok and typeof(transform) == "CFrame" then transform else CFrame.identity
+end
+
+local function worldOf(model: Model): World
+	local chain = Pose.chain(model)
+	local below: { [string]: { string } } = {}
+	for index = #chain.links, 1, -1 do
+		local link = chain.links[index]
+		local list = { link.part1 }
+		for _, name in below[link.part1] or {} do
+			table.insert(list, name)
+		end
+		below[link.part1] = list
+	end
+	local parts: { [string]: BasePart } = {}
+	for _, part in model:GetDescendants() do
+		if part:IsA("BasePart") then
+			parts[part.Name] = part
+		end
+	end
+	return {
+		shown = {},
+		on = {},
+		solvedWith = {},
+		chain = chain,
+		motors = Joints.map(model) :: any,
+		parts = parts,
+		below = below,
+	}
+end
+
+-- Every part through the joint chain from the root part at `rootFrame`, with the Transforms as
+-- they stand (a read of the chain, whatever the joints' Enabled and the parts' Anchored).
+local function chainOf(world: World, rootFrame: CFrame): { [string]: CFrame }
+	local solved: { [string]: CFrame } = { [world.chain.rootName] = rootFrame }
+	for _, link in world.chain.links do
+		solved[link.part1] = solved[link.part0] * link.c0 * transformOf(world.motors[link.name]) * link.c1Inverse
+	end
+	return solved
+end
+
+-- Physics: every part on its joint from the root part at `rootFrame`; an anchored one where it is.
+-- `on` keeps whether physics solved each joint (on, its Part1 unanchored).
+local function worldSolve(world: World, rootFrame: CFrame)
+	local shown = world.shown
+	shown[world.chain.rootName] = rootFrame
+	for _, link in world.chain.links do
+		local motor = world.motors[link.name]
+		local part1 = world.parts[link.part1]
+		local on = motor == nil or motor.Enabled
+		local anchored = part1 ~= nil and part1.Anchored
+		if anchored then
+			shown[link.part1] = (part1 :: BasePart).CFrame
+		else
+			local transform = transformOf(motor)
+			shown[link.part1] = shown[link.part0] * link.c0 * transform * link.c1Inverse
+			if on then
+				world.solvedWith[link.name] = transform
+			end
+		end
+		world.on[link.name] = on and not anchored
+	end
+end
+
+-- The engine's answer to the writes since it last looked (a render step's, PreSimulation's): an
+-- anchored part written moves with what hangs from it; a joint that starts solving again puts its
+-- Part1 at Part0 * C0 * (its last solve's Transform) * C1^-1, with what hangs from it.
+local function worldSettle(world: World, rootFrame: CFrame)
+	local shown = world.shown
+	shown[world.chain.rootName] = rootFrame
+	for _, link in world.chain.links do
+		local motor = world.motors[link.name]
+		local part1 = world.parts[link.part1]
+		local anchored = part1 ~= nil and part1.Anchored
+		local solving = (motor == nil or motor.Enabled) and not anchored
+		local target: CFrame? = nil
+		if anchored then
+			target = (part1 :: BasePart).CFrame
+		elseif solving and world.on[link.name] == false then
+			target = shown[link.part0] * link.c0 * (world.solvedWith[link.name] or CFrame.identity) * link.c1Inverse
+		end
+		local from = shown[link.part1]
+		if target ~= nil and from ~= nil then
+			local move = target * from:Inverse()
+			for _, name in world.below[link.part1] do
+				shown[name] = move * shown[name]
+			end
+		end
+		world.on[link.name] = solving
+	end
+end
+
 -- How far down the line (from `origin` along `direction`) the drawn body reaches: the farthest
 -- corner of any part but the root part (hidden while the body is drawn away from it).
 local function reachOf(model: Model, solved: { [string]: CFrame }, origin: Vector3, direction: Vector3): number
@@ -194,6 +336,14 @@ type Frame = {
 	-- the step drew the Torso itself, off the root joint (D-531).
 	plate: Vector3?,
 	detached: boolean,
+	-- The engine's world (World) as the frame draws it, the Torso's BasePart.CFrame, and the Torso
+	-- through the joint chain from the root part with the Transforms the rig's step wrote (the PC's
+	-- chain read at Last+2).
+	shownTorso: Vector3,
+	chainTorso: Vector3,
+	-- Where DrawnBody says the body is drawn (DrawnBody.position), read after the frame's render
+	-- steps as the lock camera, the target keys and the PC's logger at Last+2 read it.
+	drawnBody: Vector3,
 }
 
 -- The following billboard's own offset above the root part (a plate's lift).
@@ -320,6 +470,8 @@ local function rush(options: Options): Run
 	local replay = options.replay
 	-- The replay's row the loop's frame plays (0 before RushStarted is heard).
 	-- The rig's plate: adorned to the root part and following the drawn body, as Nameplates.adorn does.
+	local world = worldOf(model)
+	worldSolve(world, root.CFrame)
 	local plate = Instance.new("BillboardGui")
 	plate.Adornee = root
 	DrawnBody.follow(plate, model, PLATE_LIFT)
@@ -584,9 +736,19 @@ local function rush(options: Options): Run
 		end
 		-- The pose the frame draws: what the step wrote, before physics.
 		local shot = shoot(model, animator, plate)
+		local drawnBody = DrawnBody.position(model) :: Vector3
+		worldSettle(world, root.CFrame)
+		local shownTorso = world.shown.Torso.Position
+		local chainTorso = chainOf(world, root.CFrame).Torso.Position
+		-- PreSimulation, then physics.
+		for _, fn in preSimulationFns do
+			fn()
+		end
+		worldSettle(world, root.CFrame)
 		if options.studioOrder then
 			place(bodyAt(clock - options.lag, options.stopAt))
 		end
+		worldSolve(world, root.CFrame)
 		local offset = shot.offset
 		local solved = screenOf(model, root.CFrame, shot)
 		local drawn = hungFrom(model, solved, shot) * (offset or CFrame.identity)
@@ -623,6 +785,9 @@ local function rush(options: Options): Run
 			dt = frameLength,
 			plate = shot.plate,
 			detached = next(shot.held) ~= nil,
+			shownTorso = shownTorso,
+			chainTorso = chainTorso,
+			drawnBody = drawnBody,
 		})
 	end
 	if options.gait then
@@ -1433,6 +1598,29 @@ describe("the PC's wall runs drawn on the screen (AI 423, x423 on 4b18b5c)", fun
 				expect(off).toBeLessThanOrEqual(1e-3)
 			end
 		)
+
+		it(
+			("answers DrawnBody.position where the frame draws the body on every row, %s (PC AL 457(b))"):format(
+				take.name
+			),
+			function()
+				local run = runPc(take, 12)
+				local rows, off = 0, 0
+				for _, frame in run.frames do
+					if frame.detached then
+						rows += 1
+					end
+					off = math.max(off, (frame.drawnBody - frame.drawn).Magnitude)
+				end
+				-- f446653: the root part moved by the offset, where the root stands before physics,
+				-- while the frame draws the body off the root it foretold: off by the root's move of
+				-- the frame (its velocity x dt), 0.467 at 60 fps; at 0.25 s late 0.45 back on the
+				-- late RushStarted's row; 0.215 to 0.274 at 144 (the PC: 0.459 to 0.521, 0.45 and
+				-- 0.215 to 0.274 off the plate on the screen Torso).
+				expect(rows).toBeGreaterThan(20)
+				expect(off).toBeLessThanOrEqual(1e-3)
+			end
+		)
 	end
 end)
 
@@ -1552,5 +1740,150 @@ describe("the boar's Torso over a drawn rush (AI 422(a), D-530)", function()
 				end
 			)
 		end
+	end
+end)
+
+describe("the boar's Torso back on its root joint (PC AL 453(b) and 456, D-551)", function()
+	-- The PC on f446653 at 60 fps, every take: on the row Torso.Root.Enabled turned true the Torso
+	-- BasePart stood 0.627 to 0.641 off its chain, behind it down the run and lower, and back on it
+	-- the next row (steps 0.640 to 0.699 against 28 x dt + 0.05 = 0.50 to 0.56, then 0.599 to
+	-- 0.661); 0.649 to 0.672 at 144 fps against 0.22 to 0.28; 0.749 to 0.811 at 30 fps, under its
+	-- 0.98 only because a 30 fps row is long. The joint turned on in the render step put the Torso
+	-- where its last physics solve before the detach (the crouch's, the frame before it) had it,
+	-- and the frame drew that before physics solved the joint again (P3). f446653 in Lune (World):
+	-- 0.642 / 0.629 at 60 fps, 0.671 / 0.659 at 144 and 0.660 / 0.661 at 30 (in the open / at the
+	-- wall), the same on the next row. The hand-back's last step now keeps the Torso anchored on
+	-- its chain and the joint goes back on at PreSimulation, after the render (P4's L1).
+	for _, fps in { 30, 60, 144 } do
+		for _, wall in { false, true } do
+			it(
+				("draws the row it goes back on its chain and steps no more than the root's move, %d fps, %s"):format(
+					fps,
+					if wall then "at the wall" else "in the open"
+				),
+				function()
+					local face = 12
+					local stop = stopFor(face)
+					for _, lag in { 0, 0.1 } do
+						local run = rush({
+							latency = 0,
+							lag = lag,
+							events = if wall then slam(face) else nil,
+							stopAt = if wall then stop else nil,
+							wall = if wall then face else nil,
+							frames = math.ceil(3.2 * fps),
+							fps = fps,
+							studioOrder = true,
+						})
+						local frames = run.frames
+						-- The row the hand-back ends on (the first with no body offset after it).
+						local ends: number? = nil
+						for index = 2, #frames do
+							if frames[index - 1].offset and not frames[index].offset then
+								ends = index
+							end
+						end
+						expect(ends).never.toBeNil()
+						local last = ends :: number
+						expect(last + 6).toBeLessThanOrEqual(#frames)
+						-- That row draws the Torso on the joint chain from the root part where it stands.
+						expect((frames[last].shownTorso - frames[last].chainTorso).Magnitude).toBeLessThanOrEqual(0.05)
+						-- No step around it over the root's own move (none at all by then) + 0.05.
+						local worst = -math.huge
+						for index = last - 3, last + 6 do
+							local frame, before = frames[index], frames[index - 1]
+							worst = math.max(worst, (frame.shownTorso - before.shownTorso).Magnitude - SPEED * frame.dt)
+						end
+						expect(worst).toBeLessThanOrEqual(0.05)
+						-- From the next row on the body hangs on its joint again.
+						for index = last + 1, #frames do
+							expect(frames[index].detached).toBe(false)
+						end
+					end
+				end
+			)
+		end
+	end
+end)
+
+describe("a boar placed while its rush is drawn away from its root (PC P3, D-553)", function()
+	-- The PC's P3 on f446653: S("enemy", …) placed the boar during its own charge; the server held
+	-- it (RushEnded "Stopped" where its body stood) and pivoted it 13 to 16 studs away. The anchored
+	-- Torso stayed drawn where it was, settled there 35 frames, slid onto the root over about 70
+	-- (the hand-back at the catch-up pace, 1.8 s in all) and went back on its joint with the stale
+	-- pop; AL's takes drew 18 to 19 such rows, the placement's own jump among them. f446653 in Lune
+	-- (60 fps, placed 17.8 studs off): a root already at the stop when it was put there had begun
+	-- its hand-back, which then chased it, 11 and 10 rows with steps up to 2.840 and 5.433 (root 0
+	-- and 0.25 s late); one put there short of the stop held the body there (Settle) and slid it
+	-- after, 106 rows (P3: about 35 + 70).
+	local HOLD = 0.4
+	local PLACED = CFrame.lookAt(Vector3.new(10, 3, 28), Vector3.new(10, 3, 28) + DIRECTION)
+	-- The root's lag and how long after the server's hold it shows the placement.
+	for _, case in { { lag = 0, after = 0 }, { lag = 0.25, after = 0.25 }, { lag = 0.25, after = 0.1 } } do
+		local lag = case.lag
+		it(
+			("draws the body on its root where it was put from the first step that sees it there, root %.2f s late, put there %.2f s after the hold"):format(
+				lag,
+				case.after
+			),
+			function()
+				local stop = SPEED * HOLD
+				local run = rush({
+					latency = 0,
+					lag = lag,
+					stopAt = stop,
+					events = {
+						{
+							at = HOLD,
+							name = "RushEnded",
+							payload = {
+								entityId = 5,
+								launchedAt = LAUNCH,
+								serverTime = LAUNCH + HOLD,
+								distance = stop,
+								reason = "Stopped",
+							},
+						},
+					},
+					rootAt = function(t: number): CFrame
+						return if t < LAUNCH + HOLD + case.after - 1e-9 then bodyAt(t - lag, stop) else PLACED
+					end,
+					frames = math.ceil((0.2 + CHARGE.windUp + HOLD + case.after + 2.4) * 60),
+					studioOrder = true,
+				})
+				local frames = run.frames
+				-- The frame whose physics put the root there; the next frame's step sees it.
+				local placedAt: number? = nil
+				for index, frame in frames do
+					if placedAt == nil and (frame.root - PLACED.Position).Magnitude < 1e-3 then
+						placedAt = index
+					end
+				end
+				expect(placedAt).never.toBeNil()
+				local first = (placedAt :: number) + 1
+				-- Drawn away from the root up to the placement (the run, its stop).
+				expect(frames[first - 1].offset).toBe(true)
+				local away, hidden, off, drawnOff = 0, 0, 0, 0
+				for index = first, #frames do
+					local frame = frames[index]
+					if frame.offset then
+						away += 1
+					end
+					if frame.hidden ~= 0 then
+						hidden += 1
+					end
+					off = math.max(off, (frame.shownTorso - frame.chainTorso).Magnitude)
+					drawnOff = math.max(drawnOff, (frame.drawnBody - frame.root).Magnitude)
+				end
+				expect(away).toBe(0)
+				expect(hidden).toBe(0)
+				expect(drawnOff).toBeLessThanOrEqual(1e-3)
+				-- On its chain from the root where it stands on every row (the idle's own move a row).
+				expect(off).toBeLessThanOrEqual(0.05)
+				for index = first + 1, #frames do
+					expect(frames[index].detached).toBe(false)
+				end
+			end
+		)
 	end
 end)

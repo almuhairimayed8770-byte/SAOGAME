@@ -5,6 +5,11 @@
 	choreo.luau enemy.rush.detachBody (D-531) is a boolean: whether a drawn rush draws the body's
 	Torso itself, off the replicated root's physics move, or through the root joint.
 
+	choreo.luau enemy.rush.teleportStuds (D-553) is positive studs over the Charger's whole rush
+	travel (ai.luau chargeSpeed) in a throttled 0.1 s frame: a root's move other than forward down
+	the path that a run can show (all of a long frame's travel sideways, the path not yet told
+	turned) never reads as a placement.
+
 	choreo.luau enemy.rush.pass (RushDraw's swing past a player's body in its path, D-167):
 	- leadStuds, fullStuds and returnStuds are positive studs; marginStuds and centreStuds are
 	  studs at least 0.
@@ -21,6 +26,10 @@
 	  transparency within [0, 1]; spreadAngle within [0, 180] degrees; drag, gravity, rotation and
 	  rotSpeed at least 0; emitterSize positive; folderName a name of its own (not the slam's).
 ]]
+
+-- The longest frame a run is judged on short of a stall (ai.luau's rushWorld rules name a throttled
+-- 0.1 s frame too).
+local THROTTLED_FRAME_SECONDS = 0.1
 
 local function finite(value: any): boolean
 	return typeof(value) == "number" and value == value and value > -math.huge and value < math.huge
@@ -52,6 +61,22 @@ return function(ctx: any): { string }
 		typeof(rush) == "table" and typeof(rush.detachBody) == "boolean",
 		"choreo enemy.rush.detachBody must be a boolean (whether a drawn rush draws the Torso off the root's physics)"
 	)
+	local ai = ctx.load("src/shared/data/ai")
+	local teleport = if typeof(rush) == "table" then rush.teleportStuds else nil
+	check(positive(teleport), "choreo enemy.rush.teleportStuds must be a positive number of studs")
+	local charger = if typeof(ai.archetypes) == "table" then ai.archetypes.Charger else nil
+	local speed = if typeof(charger) == "table" then charger.chargeSpeed else nil
+	if positive(teleport) and positive(speed) then
+		check(
+			teleport > speed * THROTTLED_FRAME_SECONDS,
+			("enemy.rush.teleportStuds %.2f must be over a throttled %.1f s frame of the rush (%.2f studs at chargeSpeed %g): a run's own move would read as a placement"):format(
+				teleport,
+				THROTTLED_FRAME_SECONDS,
+				speed * THROTTLED_FRAME_SECONDS,
+				speed
+			)
+		)
+	end
 	local pass = if typeof(rush) == "table" then rush.pass else nil
 	if typeof(pass) ~= "table" then
 		check(false, "choreo enemy.rush.pass is missing (the drawn rush's swing past a player's body)")

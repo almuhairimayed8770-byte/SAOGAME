@@ -119,9 +119,16 @@ describe("DrawnBody", function()
 		DrawnBody.publish(model, OFFSET, torso, drawnAt)
 		expect(gui.Adornee).toBe(torso)
 		near(torso.CFrame.Position + gui.StudsOffsetWorldSpace, drawnAt.Position + LIFT)
-		-- The root part's move after the step carries nothing of it.
+		-- The root part's move after the step carries nothing of it, nor of the answer to where the
+		-- body is drawn (D-552; f446653 answered the root moved by the offset, 1.7 off here).
 		root.CFrame = ROOT + Vector3.new(0, 0, 1.7)
+		root.Position = root.CFrame.Position
 		near(torso.CFrame.Position + gui.StudsOffsetWorldSpace, drawnAt.Position + LIFT)
+		near(DrawnBody.position(model), drawnAt.Position)
+		near((DrawnBody.cframe(model) :: CFrame).Position, drawnAt.Position)
+		near((DrawnBody.cframe(model) :: CFrame).LookVector, drawnAt.LookVector)
+		root.CFrame = ROOT
+		root.Position = ROOT.Position
 		-- Drawn on the joint again (no carrier), then back on its root: the owner's adornee.
 		DrawnBody.publish(model, OFFSET)
 		expect(gui.Adornee).toBe(root)
@@ -129,6 +136,7 @@ describe("DrawnBody", function()
 		DrawnBody.publish(model, nil)
 		expect(gui.Adornee).toBe(root)
 		near(gui.StudsOffsetWorldSpace, LIFT)
+		near(DrawnBody.position(model), ROOT.Position)
 		-- An owner that adorns it anew meanwhile keeps its own adornee; unfollow gives the owner's back.
 		DrawnBody.publish(model, OFFSET, torso, drawnAt)
 		local other = Instance.new("Part")

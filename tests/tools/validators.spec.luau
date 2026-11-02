@@ -2542,6 +2542,29 @@ describe("rushDraw validator: the drawn rush's pass and its skid's dust (FB1, FB
 		end
 	end)
 
+	it("wants enemy.rush.teleportStuds positive studs over a throttled frame of the rush (D-553)", function()
+		local choreo = Harness.load("src/shared/data/choreo")
+		local original = choreo.enemy.rush.teleportStuds
+		for _, bad in { 0, -1, 0 / 0, math.huge, "4" :: any, nil } do
+			choreo.enemy.rush.teleportStuds = bad
+			local ok, problems = pcall(runRush)
+			choreo.enemy.rush.teleportStuds = original
+			expect(ok).toBe(true)
+			expect(hasProblem(problems, "enemy.rush.teleportStuds must be a positive")).toBe(true)
+		end
+		-- 28 studs a second for 0.1 s is 2.8 studs: at or under it a run's own move reads as a jump.
+		for _, bad in { 1, 2.8 } do
+			choreo.enemy.rush.teleportStuds = bad
+			local problems = runRush()
+			choreo.enemy.rush.teleportStuds = original
+			expect(hasProblem(problems, "must be over a throttled 0.1 s frame of the rush")).toBe(true)
+		end
+		choreo.enemy.rush.teleportStuds = 2.9
+		local problems = runRush()
+		choreo.enemy.rush.teleportStuds = original
+		expect(problems).toEqual({})
+	end)
+
 	it("wants the pass block with positive studs, lead under full and the centre band inside the line", function()
 		expect(hasProblem(runRush(nil, nil, true), "enemy.rush.pass is missing")).toBe(true)
 		for _, key in { "leadStuds", "fullStuds", "returnStuds" } do

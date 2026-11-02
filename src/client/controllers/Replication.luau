@@ -3361,8 +3361,9 @@ local function destroyDriver(id: number)
 end
 
 -- The driver options for a remote player's rig: the default Humanoid tracker, fed the driver's
--- Drawn attribute through a rise filter (sheath.remoteDrawDelay). `driverOf` gives the driver
--- once attach has returned it. Nil (the default tracker) when the locomotion package has none.
+-- Drawn attribute through a rise filter (sheath.remoteDrawDelay), and deps.atStepPose, so the
+-- sword's move lands with the pose its step writes (D-555). `driverOf` gives the driver once
+-- attach has returned it. Nil (the default tracker) when the locomotion package has none.
 local function remotePlayerOptions(locomotion: any, model: Instance, driverOf: () -> any): any
 	if not hasSheathState or typeof(locomotion.humanoidTracker) ~= "function" then
 		return nil
@@ -3379,6 +3380,7 @@ local function remotePlayerOptions(locomotion: any, model: Instance, driverOf: (
 			end
 			return source(dt)
 		end,
+		atStepPose = dependencies().atStepPose,
 	}
 end
 

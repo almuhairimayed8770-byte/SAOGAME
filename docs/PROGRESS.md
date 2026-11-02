@@ -976,18 +976,34 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
 - A late remote basic now draws its whole slash (D-550): 5.36–5.40 studs at every catch-up from 0.10 to 0.149, against 0.06–3.6 under D-538, from the clip's own blade, and nothing on a frozen frame.
 - Studio: section AO (items 470 to 481), run after section AN. Section AG marks each line they replace "Superseded by item …".
 
+## Section AN on the PC (2026-11-02, 006f057)
+
+- Passed: a late remote basic at lag 0.25 draws no ribbon (465(c), 8 of 8), and at lag 0.1 every ribbon that is drawn meets its bars (465(b)); on the swinger's own screen no ribbon segment comes after the end pose at 30, 60 and 144 fps (467(a), 27 of 27), and the light, flash and ribbon head read as 382 asks (467(b) on 26 of 27 takes, 468(b) on 12 of 12); on the watcher no segment comes after the end pose at lag 0.1 at every rate, or at lag 0 at 30 fps (468(a)); one of the two 1.3-speed takes is late by the predicted amount (469(b), +0.0628 against +0.0627).
+- Failed: on the watcher at lag 0, at 60 and 144 fps, the hit-stop freezes the remote rig at clip 0.383–0.391, before the stroke's end (0.401–0.404 on the swinger's screen); its blade still drifts 0.02–0.07 a row over the 13–14 frozen rows and lays a segment on 2–4 of them, and after the release the stroke finishes and lays 4 + 3 + 1 more (468(a), 4 of 4). At lag 0.1, the 4 takes whose first row showed clip 0.160–0.164 drew no ribbon (465(b), on D-538's rule, which D-550 since replaced). At lag 0 the ribbon lit 4 rows after P, not 5 (465(a)). One air take kept the light one row past the ribbon's first segment (382(c), 26 of 27). The other 1.3-speed take was 0.020 off, outside its 0.017 tolerance (469(b)). At 30 fps the remote ribbon's head reads 0.14–0.28 from the tip, and at lag 0.1 the light shows while the remote wind-up still moves 0.95–3.2 a row (468(b)). Being fixed.
+- 466 (measurement): the tip jumps 6.13–6.22 studs on row P while the hand moves 0.000–0.009, and the hand moves on row P+1, on every take, remote and local; fixed below (D-555).
+
+## Boar rush hand-over and sword-to-hand fixes (2026-11-02, D-551 to D-555)
+
+- The boar's Torso goes back on its joint at PreSimulation, in the order the PC's P4 probe found (D-551): on the hand-back's last row it showed 0.63–0.64 off its chain and stepped 0.64–0.70 at 60 fps (AL 453(b), 456); Lune now reads 0.000 on that row and steps ≤ 0.034 at 60 fps, ≤ 0.011 at 144 and ≤ 0.052 at 30.
+- The nameplate, the lock camera and the target keys follow the body where it is drawn, not the root part moved by the offset (D-552): the plate sat 0.46–0.52 off on stagger rows at 60 fps (AL 457(b)); Lune ≤ 0.001.
+- A boar placed during its charge is drawn on its new place from the next row (D-553); AL saw its Torso held off its joint for 18–19 Idle rows. A placement under 4 studs still slides back over the hand-back's 0.2 s.
+- Section AL's launch, back-step and slope fails are re-read on their own bars (D-554, no code): the Torso's launch rows carry the Charge clip's own snap off the haunches, the back steps after a slam are the daze clip's recoil on a drawn root that stands still, and the slope's late rows are hand-back rows.
+- AG 376(b): the sword lands in the hand on the row that draws the grab (D-555), local and remote. The hand's move on row P at 60 fps goes from 0.0016 to 0.038–0.106 remote and 0.089 local. Every row now draws the step's pose a frame late with the sword's place included; the swap row was off by 5.99 studs for an opener, 0.50–0.66 for a Draw and 0.52–0.53 for a Sheathe. A remote sheathed opener's ribbon, read in the hand in the game's frame order, was 15.6° off at 85 ms and is now 0.02° (D-473).
+- New specs: SwordToHand (4 tests), WeaponMount (+6), CharacterController (+1), RushDrawOrder (the re-attach and the placement), and DrawnBody, RushDraw and validators cases.
+- Studio: section AP (items 482 to 490), run after section AO. Sections AL, AN and AH mark each line they replace "Superseded by item …".
+
 ## Next three tasks
 
-1. Run section AN (items 465 to 469) of `docs/STUDIO_TASKS.md`, in progress on the owner's PC on 006f057, and then
-   section AO (items 470 to 481) on the build with these fixes, every item with item 397's frame names, at the frame
+1. Run section AO (items 470 to 481) of `docs/STUDIO_TASKS.md`, in progress on the owner's PC on 209875b, and then
+   section AP (items 482 to 490) on the build with these fixes, every item with item 397's frame names, at the frame
    rates and lags each names, judged on the BasePart read. Report every pass line with its numbers. Earlier sections'
    lines not superseded stand as written.
-2. Fix what is still open: section AL's boar rush lines (the pop when the Torso goes back on its joint, 453(b) and 456;
-   the launch, back-step, skid-turn, nameplate and slope rows of 454 to 458; the detached Idle rows after a placement),
-   section AM's (the hands and blade inside the kobold, 461 and 464; the body in the wall behind, 462; one 144 fps
-   step, 460(a)), 376(b), the sword in the idle hand for one frame (item 466 measures it until then), and whatever
-   sections AN and AO find; all in progress. 448's planted feet wait on item 477 and the owner's call below. Their
-   re-tests follow as later Studio sections. The owner's calls (below, and in AI) go to the owner.
+2. Fix what is still open: section AM's lines (the hands and blade inside the kobold, 461 and 464; the body in the wall
+   behind, 462; one 144 fps step, 460(a)), section AN's (the watcher's ribbon through a hit freeze, 468(a); the light
+   over a wind-up compressed by the catch-up and the 30 fps ribbon head, 468(b); 465(a)'s row count; 469(b)'s second
+   take), section AL's slope settle (458(b), diagnosed; item 487 reads its height), and whatever sections AO and AP
+   find; all in progress. 448's planted feet wait on item 477 and the owner's call below. Their re-tests follow as
+   later Studio sections. The owner's calls (below, and in AI) go to the owner.
 3. The rehearsal and the recording (item 438), once every line passes: rehearse the 11 shots in dev.luau order with the
    frame-tick square on and log any take that fails its own pass lines; if all pass, record each with Game Bar at 60
    fps, High quality, with **View > Stats** open during the fight for the fps reading, and hand the files over (here in
@@ -995,8 +1011,30 @@ sparks, the kill shatters, and the server registered every hit; 60 fps in Studio
    of `docs/ANIMATION_REVIEW.md` are filled (with AG item 391(f)'s enemy cells), and anything that reads wrong is fixed
    with the PoseEditor and recorded again. The section 16 numbers and the merge into `main` follow (Open items).
 
-### Open items (after the enemy clip, upright, landing, ribbon and measure fixes, not in the three above)
+### Open items (after the boar rush hand-over and sword-to-hand fixes, not in the three above)
 
+- **Owner calls from the boar rush and sword fixes (the default is chosen; say if not).**
+  - A replicated root that jumps more than 4 studs off its path in one step ends a drawn rush at once (D-553): that is
+    over a late root's sideways move (never above 1.7 studs a row in the PC's logs) and under the P3 probe's 13–16-stud
+    placements. A shorter placement keeps the hand-back's 0.2 s slide.
+  - At 30 fps the boar's launch rows may lead the drawn root by 0.55, against 0.42 at 60 and 144 fps (D-554): it is the
+    Charge clip's own snap off the haunches (0.771 in 0.05 s), and a slower frame holds more of it. Slowing the clip's
+    launch snap is the other way (a clip change, with the review and audit to redo).
+  - The sword's move waits for its pose on the Draw and Sheathe as well as on an attack's draw-cut (D-555), because
+    they had the same one-frame mismatch (0.50–0.66 studs off on the swap row). Keeping it for draw-cuts only is a
+    one-line change.
+- **From the boar rush and sword fixes.** The slope settle (458(b)) is diagnosed, not fixed: its rows are hand-back
+  rows whose vertical part is the gap between the drawn height (the ground probe plus the hover at the drawn spot) and
+  the root's height while the root still climbs; once item 487 reads that split, the hand-back can close the height
+  first or the settle can follow the root's height. The nameplate is adorned to the boar Model, because Nameplates
+  found no PrimaryPart when it attached (item 489 reports where it draws); re-adorning when PrimaryPart changes is a
+  small follow-up. The PC saw no back steps after the stop at lag 0.25, while Lune shows the daze recoil at every lag.
+  RushDrawOrder spec's engine model encodes the P3 and P4 probes' readings and does not model C0 writes; 482(d) checks
+  the hand-over row's PostSimulation read. The sword fix assumes the deferred Part0 write places the blade from the
+  Transform the pin's release has just written; if the engine uses the last solved one, row P draws the blade at the
+  hand's rest key for one row (490(e) reports it). SheathTip at 144 Hz (it runs at 60 and 240) flags two Draw cut-backs
+  at 8 studs/s turning the blade 1083–1089°/s against bladeTurnRate 1080: the existing cut-back fade, unchanged here,
+  left until 144 Hz is a SheathTip rate.
 - **Owner calls from the enemy clip fixes (the default is chosen; say if not).**
   - The boar's parry stagger keeps its rear-up, front hooves about 1.0 high, up in 0.1 s and down by 0.4 s (D-540); it
     reads from the gameplay camera and the spec only says a parry staggers for 1.0 s. A low recoil (6–8° of pitch,

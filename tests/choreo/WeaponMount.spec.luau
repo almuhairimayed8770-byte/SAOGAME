@@ -441,3 +441,196 @@ describe("WeaponMount", function()
 		Choreo.release(model)
 	end)
 end)
+
+-- A stand-in for FrameClock.atStepPose: holds what it is handed until `open` (the frame that draws
+-- the step's pose) runs it; `cancels` counts the cancels that dropped one still held.
+local function heldGate(): any
+	local gate = { waiting = {} :: { any }, cancels = 0, asked = 0 }
+	function gate.atStepPose(fn: () -> ()): () -> ()
+		gate.asked += 1
+		local entry = { fn = fn, cancelled = false }
+		table.insert(gate.waiting, entry)
+		return function()
+			if not entry.cancelled then
+				entry.cancelled = true
+				gate.cancels += 1
+			end
+		end
+	end
+	function gate.open()
+		local due = gate.waiting
+		gate.waiting = {}
+		for _, entry in due do
+			if not entry.cancelled then
+				entry.fn()
+			end
+		end
+	end
+	return gate
+end
+
+describe("WeaponMount: a move asked from the step lands with that step's pose (D-555)", function()
+	it("waits for the frame that draws its pose; until then the sword stays on the back, pinned", function()
+		-- Before, set("Hand", true) moved the motor at once, in the step: the screen put the blade on
+		-- the hand of the pose before for one frame (AG 376(b)).
+		local model = buildRig()
+		local animator = Choreo.get(model)
+		animator:play(IDLE_DRAWN, { blendIn = 0 })
+		local motor = motorOf(model)
+		local gate = heldGate()
+		local mount = WeaponMount.new(animator, model, { atStepPose = gate.atStepPose })
+		mount:set("Back")
+		animator:step(FRAME)
+		local back = model:FindFirstChild(ROW.part)
+		mount:set("Hand", true)
+		expect(mount:get()).toBe("Hand")
+		expect(motor.Part0).toBe(back)
+		expect(motor.Transform == CFrame.identity).toBe(true)
+		expect(model:GetAttribute(WeaponModels.attributes.mount)).toBe("Back")
+		-- The step itself (its hook re-reads the joint) keeps it there.
+		animator:step(FRAME)
+		expect(motor.Part0).toBe(back)
+		expect(motor.Transform == CFrame.identity).toBe(true)
+		expect(gate.asked).toBe(1)
+		gate.open()
+		expect(motor.Part0).toBe(model:FindFirstChild("RightHand"))
+		expect(sameFrame(motor.C0, WeaponMount.handFrame(), STORED)).toBe(true)
+		-- Unpinned with the step's own Weapon key.
+		expect(motor.Transform == CFrame.identity).toBe(false)
+		expect(model:GetAttribute(WeaponModels.attributes.mount)).toBe("Hand")
+		mount:destroy()
+		Choreo.release(model)
+	end)
+
+	it("lets the pin go (or sets it) before Part0 moves, so the blade lands from its new place's Transform", function()
+		-- A Part0 or C0 write puts the blade on its new part at once from the joint's Transform as it
+		-- stands: the hand takes the pose's Weapon key, the back rest. Before, the pin came after
+		-- Part0 (the hand landing read rest, the back landing the hand's key).
+		local model = buildRig()
+		local animator: any = Choreo.get(model)
+		animator:play(IDLE_DRAWN, { blendIn = 0 })
+		local motor = motorOf(model)
+		local seen: { { pinned: boolean, part0: any } } = {}
+		local realPin = animator.pin
+		animator.pin = function(self: any, name: string, pinned: boolean)
+			if name == WeaponModels.motorName then
+				table.insert(seen, { pinned = pinned, part0 = motor.Part0 })
+			end
+			return realPin(self, name, pinned)
+		end
+		local gate = heldGate()
+		local mount = WeaponMount.new(animator, model, { atStepPose = gate.atStepPose })
+		local hand, back = model:FindFirstChild("RightHand"), model:FindFirstChild(ROW.part)
+		table.clear(seen)
+		mount:set("Back")
+		expect(seen[1].pinned).toBe(true)
+		expect(seen[1].part0).toBe(hand)
+		animator:step(FRAME)
+		table.clear(seen)
+		mount:set("Hand", true)
+		gate.open()
+		expect(seen[1].pinned).toBe(false)
+		expect(seen[1].part0).toBe(back)
+		expect(motor.Part0).toBe(hand)
+		mount:destroy()
+		Choreo.release(model)
+	end)
+
+	it("a new motor (a respawn's re-equip, streaming) takes the wished place at once and drops the wait", function()
+		local fire, restore = recordConnections()
+		local model = buildRig()
+		local animator = Choreo.get(model)
+		local gate = heldGate()
+		local mount = WeaponMount.new(animator, model, { atStepPose = gate.atStepPose })
+		local hand = model:FindFirstChild("RightHand")
+		-- Drawn, and the step asks for the back (a Sheathe's WeaponSheathe): the sword waits in the hand.
+		mount:set("Back", true)
+		expect(motorOf(model).Part0).toBe(hand)
+		local old = motorOf(model)
+		fire(model, "DescendantRemoving", old)
+		WeaponBuilder.equip(model, SWORD)
+		local new = motorOf(model)
+		fire(model, "DescendantAdded", new)
+		animator:step(FRAME)
+		expect(new.Part0).toBe(model:FindFirstChild(ROW.part))
+		expect(gate.cancels).toBe(1)
+		gate.open()
+		expect(new.Part0).toBe(model:FindFirstChild(ROW.part))
+		mount:destroy()
+		Choreo.release(model)
+		restore()
+	end)
+
+	it("a wish that turns back before its frame moves nothing", function()
+		local model = buildRig()
+		local animator = Choreo.get(model)
+		local motor = motorOf(model)
+		local gate = heldGate()
+		local mount = WeaponMount.new(animator, model, { atStepPose = gate.atStepPose })
+		local back = model:FindFirstChild(ROW.part)
+		mount:set("Back")
+		mount:set("Hand", true)
+		mount:set("Hand", true)
+		expect(gate.asked).toBe(1)
+		mount:set("Back", true)
+		expect(gate.cancels).toBe(1)
+		gate.open()
+		expect(motor.Part0).toBe(back)
+		expect(motor.Transform == CFrame.identity).toBe(true)
+		expect(mount:get()).toBe("Back")
+		mount:destroy()
+		Choreo.release(model)
+	end)
+
+	it("destroy drops a move still waiting and writes nothing after", function()
+		local model = buildRig()
+		local animator = Choreo.get(model)
+		local motor = motorOf(model)
+		local gate = heldGate()
+		local mount = WeaponMount.new(animator, model, { atStepPose = gate.atStepPose })
+		mount:set("Back")
+		mount:set("Hand", true)
+		model.Parent = nil
+		mount:destroy()
+		expect(gate.cancels).toBe(1)
+		gate.open()
+		expect(motor.Part0).toBe(model:FindFirstChild(ROW.part))
+		Choreo.release(model)
+	end)
+
+	it("lands at once when asked outside a step, with no atStepPose, or through a gate that runs at once", function()
+		local model = buildRig()
+		local animator = Choreo.get(model)
+		local motor = motorOf(model)
+		local hand, back = model:FindFirstChild("RightHand"), model:FindFirstChild(ROW.part)
+		local gate = heldGate()
+		local mount = WeaponMount.new(animator, model, { atStepPose = gate.atStepPose })
+		mount:set("Back")
+		expect(motor.Part0).toBe(back)
+		mount:set("Hand")
+		expect(motor.Part0).toBe(hand)
+		expect(gate.asked).toBe(0)
+		mount:destroy()
+
+		local plain = WeaponMount.new(animator, model)
+		plain:set("Back", true)
+		plain:set("Hand", true)
+		expect(motor.Part0).toBe(hand)
+		plain:destroy()
+
+		-- FrameClock with no render step runs the callback inside the call: nothing is left waiting.
+		local now = WeaponMount.new(animator, model, {
+			atStepPose = function(fn: () -> ()): () -> ()
+				fn()
+				return function() end
+			end,
+		})
+		now:set("Back")
+		now:set("Hand", true)
+		expect(motor.Part0).toBe(hand)
+		now:set("Back", true)
+		expect(motor.Part0).toBe(back)
+		now:destroy()
+		Choreo.release(model)
+	end)
+end)

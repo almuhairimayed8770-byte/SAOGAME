@@ -48,8 +48,11 @@
 	stops the Draw and Sheathe clips, and tells WeaponMount where the sword goes; the WeaponDraw and
 	WeaponSheathe clip events move it mid-clip. Only the live clip's own event counts: a Draw or
 	Sheathe that was stopped still runs through its fade, and its late event changes nothing. An
-	attack, Guard, GuardHit or Parry clip pulls the sword to the hand before its first frame is
-	posed (a draw-cut). The walk set follows the target at once; the Draw and Sheathe clips cover
+	attack, Guard, GuardHit or Parry clip pulls the sword to the hand with its first posed frame
+	(a draw-cut). A move the step asks for shows with the pose that step writes: with
+	deps.atStepPose (FrameClock.atStepPose) WeaponMount lands it on the first frame that draws
+	that pose, so the sword never hangs for a frame in the hand of the pose before (D-555).
+	The walk set follows the target at once; the Draw and Sheathe clips cover
 	the arms. A clip above them that keys the right arm (a turn, a landing, a dodge, a stagger)
 	hides the hand from the hilt, so the sword waits for it (SheathState "covered"). Nothing starts
 	while the State attribute is Dead. A rig that cannot sheathe keeps the sword in the hand.
@@ -172,6 +175,9 @@ export type Dependencies = {
 	phase: number?,
 	-- The change signal of an attribute on the character (default GetAttributeChangedSignal).
 	attributeSignal: ((instance: Instance, name: string) -> any)?,
+	-- FrameClock.atStepPose (D-343), handed to WeaponMount: a move of the sword the step asks for
+	-- lands on the frame that draws that step's pose (D-555). Nil: it lands at once.
+	atStepPose: ((fn: () -> ()) -> () -> ())?,
 }
 
 export type Locomotion = {
@@ -664,8 +670,9 @@ local function sheathShownAfter(self: any, dt: number): number
 	return shown
 end
 
--- The sheath step: runs before the mixer, so the sword's move and the clip pose land together.
--- The mount's own step hook runs right after this one and puts the sword where it is wished.
+-- The sheath step: runs before the mixer, and the sword's move shows with the pose this step
+-- writes (WeaponMount's set with the pose, D-555). The mount's own step hook runs right after
+-- this one and keeps the sword where it is shown.
 local function stepSheath(self: any, dt: number, handles: { any }?)
 	if self.pollAttributes then
 		readAttributes(self)
@@ -700,7 +707,7 @@ local function stepSheath(self: any, dt: number, handles: { any }?)
 		playSheathClip(self, out.play, out.over, out.from)
 	end
 	if mount:get() ~= self.sheath.place then
-		mount:set(self.sheath.place)
+		mount:set(self.sheath.place, true)
 	end
 	-- The drawn sprint pose gives way to the clips by what they show after this step, with this
 	-- step's play or stop in it: a long frame moves a fade a long way in one step, and a pose that
@@ -718,7 +725,7 @@ local function stepSheath(self: any, dt: number, handles: { any }?)
 end
 
 -- A WeaponDraw or WeaponSheathe event from the live clip moves the sword mid-clip, when it still
--- fits the target.
+-- fits the target, with the pose of the step that fired it (D-555).
 local function onClipEvent(self: any, clipId: string, event: Types.ClipEvent)
 	local kind = event.kind :: string
 	if self.destroyed or (kind ~= DRAW_EVENT and kind ~= SHEATHE_EVENT) or not self.mount:sheathable() then
@@ -729,7 +736,7 @@ local function onClipEvent(self: any, clipId: string, event: Types.ClipEvent)
 	end
 	local place = self.sheath:onEvent(kind, sheathInput(self))
 	if place ~= nil then
-		self.mount:set(place)
+		self.mount:set(place, true)
 	end
 end
 
@@ -930,7 +937,7 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 	animator:setWeight(self.handles[LocomotionState.clipFor("Idle", self.drawn)], 1, true)
 
 	-- The sword starts where the target wants it, with no clip.
-	self.mount = WeaponMount.new(animator, character)
+	self.mount = WeaponMount.new(animator, character, { atStepPose = dependencies.atStepPose })
 	self.sheath = SheathState.new(targetPlace(self), Sheath)
 	self.mountGeneration = self.mount:generation()
 	if self.mount:sheathable() then

@@ -1628,7 +1628,11 @@ local function onCharacter(model: Model)
 	unhookRigStep = animator:onStep(beforeRigStep)
 	-- The local rig is always at full rate, and this controller's to step (stepLocal, D-139).
 	Siblings.call(Choreo, "setLocalModel", model, true)
-	locomotion = Locomotion.new(animator, model)
+	-- The sword's move between the back and the hand lands on the frame that draws the pose of the
+	-- step that asked for it (FrameClock.atStepPose, D-555); with no FrameClock, at once.
+	local stepPose = if typeof(FrameClock) == "table" then rawget(FrameClock, "atStepPose") else nil
+	locomotion =
+		Locomotion.new(animator, model, { atStepPose = if typeof(stepPose) == "function" then stepPose else nil })
 	model:GetAttributeChangedSignal(ART_SLOTS_ATTRIBUTE):Connect(refreshSlots)
 	refreshSlots()
 end
