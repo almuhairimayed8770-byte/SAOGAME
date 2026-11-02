@@ -445,7 +445,7 @@ function WalkStopPlant.stepUnder(
 		local follow = state.follows[index]
 		if follow ~= nil then
 			local left = 1 - Easing.SineInOut(math.clamp(state.clock / config.stepSeconds, 0, 1))
-			frame = lands * CFrame.identity:Lerp(follow, left)
+			frame = lands * CFrame.new():Lerp(follow, left)
 		else
 			local held = unroot * state.field[index]
 			local progress = (state.clock - state.starts[leg.group]) / config.stepSeconds
