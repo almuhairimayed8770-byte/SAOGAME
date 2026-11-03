@@ -94,7 +94,7 @@ local function swingRoom(): (number, string)
 end
 local ROOM, DEEPEST = swingRoom()
 
-local FRAME = 1 / 60
+local FRAME = 1 / 60 -- a server frame's seconds (a take's `frame` sets it, D-660)
 local PHYSICS_STEP = 1 / 240
 local GAP = 1e-9
 local FACE_Z = 25.7
@@ -468,9 +468,18 @@ type Take = {
 	telegraphs: number,
 	behind: number?, -- the world behind the fighter's root along the line, as a Blockcast reads it
 	angle: number, -- the line's angle off the face's normal at the stop (degrees)
+	rise: number, -- the most the kobold's flat speed rose on one server frame between its wind-ups
 }
 
-local function take(shape: string, angle: number): Take
+-- How the fighter stands for a take (item 548, D-659): `off`, its root this far off the face along
+-- the line it is attacked from (the PC's 1.01-1.36 once the kobold's blows had pushed it out; nil:
+-- resting CONTACT in the face at its deepest corner); `square`, its root box turned square to the
+-- face (facing +Z) instead of along that line. `frame`, the server frame's seconds (1/60 when nil),
+-- and `start`, how far off the kobold is let loose (START when nil): where the walk's ticks fall
+-- (D-660).
+type Stand = { off: number?, square: boolean?, frame: number?, start: number? }
+
+local function take(shape: string, angle: number, stand: Stand?): Take
 	fresh()
 	addBox(shape)
 	local def = KOBOLD
@@ -480,8 +489,13 @@ local function take(shape: string, angle: number): Take
 	local look = CFrame.lookAt(Vector3.zero, along)
 	local off = reachAlong(look, ROOT_SIZE, Vector3.zAxis) - CONTACT
 	local playerAt = Vector3.new(30, 3, FACE_Z + off)
-	local spot = playerAt + along * START
-	local playerId, playerRoot = spawnPlayer(playerAt, spot)
+	if stand ~= nil and stand.off ~= nil then
+		playerAt = Vector3.new(30, 3, FACE_Z) + along * stand.off
+	end
+	FRAME = if stand ~= nil and stand.frame ~= nil then stand.frame else 1 / 60
+	local spot = playerAt + along * (if stand ~= nil and stand.start ~= nil then stand.start else START)
+	local square = stand ~= nil and stand.square == true
+	local playerId, playerRoot = spawnPlayer(playerAt, if square then playerAt + Vector3.zAxis * START else spot)
 	local rig = Rigs[def.skin]
 	local height = PlaygroundLayout.rootHeight(rig.hipHeight, 2, World.spawn.groundEpsilon)
 	local koboldAt = Vector3.new(spot.X, height, spot.Z)
@@ -500,7 +514,9 @@ local function take(shape: string, angle: number): Take
 		telegraphs = 0,
 		behind = nil,
 		angle = 0,
+		rise = 0,
 	}
+	local speed = 0
 	local seen = 0
 	local hp = hpBefore
 	for _ = 1, math.floor(9 / FRAME) do
@@ -510,6 +526,12 @@ local function take(shape: string, angle: number): Take
 			result.blows += 1
 		end
 		hp = now
+		local velocity = bodies[model].velocity
+		local flatSpeed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+		if seen == 1 then
+			result.rise = math.max(result.rise, flatSpeed - speed)
+		end
+		speed = flatSpeed
 		local telegraphs = 0
 		for _, entry2 in sent do
 			if entry2.remote == "Telegraph" and entry2.payload.entityId == id then
@@ -590,14 +612,82 @@ describe("a Brute at a fighter backed to a wall or a pillar (D-627)", function()
 		end
 	end)
 
+	it("leaves that room whichever way the fighter's root is turned (item 548(b), D-659)", function()
+		-- Item 548(b) on aa27e35: the gap on the line read 3.737-3.780 on 4 of 8 takes at the wall
+		-- 10 degrees, the line 7.1-8.1 off the face's normal, against 3.87-4.01 on the rest. The stop
+		-- reads the world behind the fighter with its root's box cast back along the line, and the
+		-- box as the fighter had turned it, square to the face, read the face 0.25 farther than the
+		-- nearest point across the root's width: the kobold stood that much closer (Lune on the line
+		-- 3.80 at 10, 3.72 at 20 and 3.65 at 30 degrees; across the width 3.69 / 3.50 / 3.32). The box
+		-- is now cast turned along the line. The PC's root stood 1.01-1.36 off the face at the stop.
+		for _, angle in { 10, 20, 30 } do
+			for _, off in { 1.01, 1.36 } do
+				for _, square in { false, true } do
+					local result = take("wall", angle, { off = off, square = square })
+					print(
+						("[F1i] wall at %d deg, root %.2f off, %s: stopped at %.3f (%.1f deg off the normal); gap %.3f across the root's width, %.3f on the line; %d blows"):format(
+							angle,
+							off,
+							if square then "square to the face" else "along the line",
+							result.stand,
+							result.angle,
+							result.gap,
+							result.centre,
+							result.blows
+						)
+					)
+					expect(result.gap >= ROOM - 1e-3).toBe(true)
+					expect(result.blows >= 2).toBe(true)
+				end
+			end
+		end
+	end)
+
 	it("keeps its stopDistance with no world behind the fighter", function()
-		-- The open field: the stop is stopDistance's 3.0-3.5 band, as before.
+		-- The open field: the walk lands on stopDistance, resting up to landSlackStuds short of it
+		-- (D-660; it stopped in a 3.0-3.5 band before).
 		local open = take("none", 0)
 		print(("[G6b] open field: engaged at %.3f, stopped at %.3f"):format(open.first, open.stand))
 		local tuning = AI.archetypes.Brute
-		local walk = KOBOLD.moveSpeed * tuning.chaseSpeedMultiplier * AI.tickSeconds()
-		expect(open.stand <= tuning.stopDistance + 1e-6).toBe(true)
-		expect(open.stand > tuning.stopDistance - walk - 0.15).toBe(true)
+		expect(open.stand >= tuning.stopDistance - 1e-6).toBe(true)
+		expect(open.stand <= tuning.stopDistance + AI.movement.landSlackStuds + 1e-6).toBe(true)
 		expect(open.blows >= 2).toBe(true)
+	end)
+
+	it("stops the open field's walk on the same spot at 60 and 144 server frames (561(e), D-660)", function()
+		-- In Studio solo the server's Heartbeat runs at the client's rate. The PC on 3eee415: the
+		-- open field's stop 3.230 at 60 and 2.897 at 144, the kobold's walk peaking at 7.50 and 8.94.
+		-- The chase found its stop on an AI tick (20 Hz), and the walk's start, eased on every server
+		-- frame (D-574, D-618), ran a few milliseconds later at 144: a walk crossing 3.5 near a tick was
+		-- found inside one tick at 60 and the next at 144, a tick's walk and a brake further in. Lune
+		-- on d310ca7, the kobold let loose 9.00 / 9.05 / 9.30 off: 3.434 / 3.046 / 3.234 at 60 and
+		-- 3.186 / 3.236 / 3.073 at 144 (3.05-3.43 and 3.07-3.41 over the walk's phase). The walk now
+		-- lands on its stop from within a tick's walk and a brake of it (D-643's landing, at the pace
+		-- the walk has eased to), so the frame rate and the tick's phase no longer move it.
+		local tuning = AI.archetypes.Brute
+		for _, start in { 9, 9.05, 9.3 } do
+			local stops = {}
+			for _, hz in { 60, 144 } do
+				local open = take("none", 0, { frame = 1 / hz, start = start })
+				print(
+					("[F1i] open field at %d server frames, let loose %.2f off: engaged at %.3f, stopped at %.3f; its speed rose at most %.3f a frame; %d blows"):format(
+						hz,
+						start,
+						open.first,
+						open.stand,
+						open.rise,
+						open.blows
+					)
+				)
+				expect(open.stand >= tuning.stopDistance - 1e-6).toBe(true)
+				expect(open.stand <= tuning.stopDistance + AI.movement.landSlackStuds + 1e-6).toBe(true)
+				-- The landing takes the walk's pace as it is: its speed rises no faster than the ease's.
+				expect(open.rise <= AI.movement.paceChangeRate / hz + 1e-3).toBe(true)
+				expect(open.blows >= 2).toBe(true)
+				table.insert(stops, open.stand)
+			end
+			expect(math.abs(stops[1] - stops[2]) <= AI.movement.landSlackStuds).toBe(true)
+		end
+		FRAME = 1 / 60
 	end)
 end)

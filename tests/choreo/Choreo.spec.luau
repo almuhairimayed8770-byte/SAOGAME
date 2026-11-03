@@ -897,6 +897,68 @@ describe("Choreo", function()
 		Choreo.release(model)
 	end)
 
+	it(
+		"setBodyOn draws the body on its root after the frame's physics: offset from the root as it stands, again on PreSimulation from the root moved on by its velocity over that deltaTime (D-675)",
+		function()
+			camera = Vector3.zero
+			local DrawnBody = Harness.load("src/client/choreo/DrawnBody")
+			local model = buildUpgradedCharacter(true)
+			local animatorInstance = Instance.new("Animator")
+			animatorInstance.Parent = model:FindFirstChildOfClass("Humanoid")
+			local animator = Choreo.get(model)
+			Choreo.setLocalModel(model)
+			local root = model.PrimaryPart :: BasePart
+			local rootJoint = jointOf(model, "Root")
+			root.CFrame = CFrame.new(3, 1, 2)
+			root.AssemblyLinearVelocity = Vector3.new(0, 0, -8)
+			-- Released whatever the checks find, so a failure here leaves no rig behind.
+			local ok, problem = pcall(function()
+				local function near(a: Vector3?, b: Vector3): boolean
+					return a ~= nil and (a - b).Magnitude < 1e-4
+				end
+				-- The root joint's flat shift (its height is the pose's own key there).
+				local function shift(): Vector3
+					local at = rootJoint.Transform.Position
+					return Vector3.new(at.X, 0, at.Z)
+				end
+				-- The step: drawn on `drawn`'s flat place from the root as it stands.
+				local drawn = CFrame.new(3, 5, 1.9)
+				animator:setBodyOn(drawn, 0.15)
+				renderStepped:Fire(FRAME)
+				expect(near(DrawnBody.position(model), Vector3.new(3, 1, 1.9))).toBe(true)
+				expect(near(shift(), Vector3.new(0, 0, -0.1))).toBe(true)
+				-- PreSimulation, the engine's Animator having reset the joint: from the root 4 steps on.
+				engineReset(model)
+				preSimulation:Fire(4 / 240)
+				expect(near(shift(), Vector3.new(0, 0, -0.1 + 8 * 4 / 240))).toBe(true)
+				-- The physics moves the root those 4 steps: the body is where the step drew it.
+				root.CFrame = CFrame.new(3, 1, 2 - 8 * 4 / 240)
+				expect(near(DrawnBody.position(model), Vector3.new(3, 1, 1.9))).toBe(true)
+				-- A step it was not asked for again (its caller skipped the frame) draws it on its root.
+				renderStepped:Fire(FRAME)
+				expect(near(shift(), Vector3.zero)).toBe(true)
+				expect(DrawnBody.offset(model)).toBe(nil)
+				preSimulation:Fire(4 / 240)
+				expect(near(shift(), Vector3.zero)).toBe(true)
+				-- Past `most` the body is drawn on its root, and nil puts it back there to stay.
+				animator:setBodyOn(CFrame.new(3, 1, 1), 0.15)
+				renderStepped:Fire(FRAME)
+				expect(near(shift(), Vector3.zero)).toBe(true)
+				expect(DrawnBody.offset(model)).toBe(nil)
+				animator:setBodyOn(nil)
+				renderStepped:Fire(FRAME)
+				preSimulation:Fire(4 / 240)
+				expect(near(shift(), Vector3.zero)).toBe(true)
+				expect(DrawnBody.offset(model)).toBe(nil)
+			end)
+			Choreo.setLocalModel(nil)
+			Choreo.release(model)
+			if not ok then
+				error(problem, 0)
+			end
+		end
+	)
+
 	it("an Animator that arrives after the animator attached turns the rewrite on", function()
 		local fire, restore = recordConnections()
 		camera = Vector3.zero

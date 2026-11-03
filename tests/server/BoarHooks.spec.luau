@@ -1953,5 +1953,94 @@ describe(
 			end
 			print("[525(g)/526(g)] " .. table.concat(report, "\n  "))
 		end)
+		it(
+			"paces each judged row on its own left and halts on the first at landSlackStuds, as a log reads them to 5 decimals (AU 553(b), 552(g), D-668, D-669)",
+			function()
+				-- The PC on aa27e35, Q553_144_1: the row before the halt row paced 1.8684 against
+				-- left / (2 x dt) = 1.829 (+2.2 %) for left 0.022 and dt 6.015 ms. The service paces on
+				-- the Heartbeat's own dt and the root's flat distance to its stop, as the log reads them
+				-- (Lune within 1e-7); 1.8684 x 2 x 6.015 ms is a left of 0.02248, which reads 0.022 at
+				-- 3 decimals. A left read to 3 decimals is +-0.0005, +-2.3 % at 0.022, past the 2 % bar.
+				-- The PC on d310ca7, 552 take 1 at 60 (log before the service): along 6.149 on the row it
+				-- took for the halt row, velocity 0.628 there, then 6.159. A row with left just over 0.02
+				-- reads 0.020 at 3 decimals: it is a landing row, the body lands 0.010 on and halts on the
+				-- next row, and stands from there.
+				local speed = AI.rushSpeed(BOAR.attacks[1])
+				local slack = AI.movement.landSlackStuds
+				local function read(left: number, decimals: number): number
+					local scale = 10 ^ decimals
+					return math.floor(left * scale + 0.5) / scale
+				end
+				local report = {}
+				for _, fps in { 60, 144 } do
+					local worst5, worst3, least, rows = 0, 0, math.huge, 0
+					local misread, misreadAt = 0, ""
+					for _, kind in { "slam", "open" } do
+						for seed = 0, 15 do
+							local logged, landIndex = logRun(
+								if kind == "slam" then WALL_Z else nil,
+								{ mode = "tolerant", fps = fps, jitter = if seed == 0 then 0 else 0.06, seed = seed },
+								speed
+							)
+							local halt: number? = nil
+							local halt3: number? = nil
+							local halt5: number? = nil
+							for index = landIndex, #logged do
+								local row = logged[index]
+								halt3 = halt3 or (if read(row.left, 3) <= slack then index else nil)
+								halt5 = halt5 or (if read(row.left, 5) <= slack then index else nil)
+								if row.left <= slack then
+									halt = index -- the halt row (item 552 step 4)
+									break
+								end
+								rows += 1
+								least = math.min(least, row.left)
+								local function off(left: number): number
+									return math.abs(
+										row.paced / math.min(speed, left / (AI.movement.landFrames * row.dt)) - 1
+									)
+								end
+								worst5 = math.max(worst5, off(read(row.left, 5)))
+								worst3 = math.max(worst3, off(read(row.left, 3)))
+							end
+							expect(halt5).toBe(halt)
+							local h = halt :: number
+							if halt3 ~= halt then
+								-- Read to 3 decimals, a landing row passes for the halt row: the body lands
+								-- on to the halt row and stands from there.
+								local early = logged[halt3 :: number]
+								expect(halt3).toBe(h - 1)
+								expect(early.lands).toBe(1)
+								expect(logged[h].halts).toBe(1)
+								misread += 1
+								misreadAt = ("%s seed %d: along %.5f (left %.5f, velocity %.3f, paced %.3f) to %.5f"):format(
+									kind,
+									seed,
+									early.along,
+									early.left,
+									early.velocity,
+									early.paced,
+									logged[h].along
+								)
+							end
+						end
+					end
+					expect(worst5).toBeLessThanOrEqual(0.001)
+					table.insert(
+						report,
+						("%d Hz: %d judged rows, least left %.5f; read at 5 decimals within %.3f %% and the halt row found on every take, at 3 decimals %.2f %% and the halt row a row early on %d (%s)"):format(
+							fps,
+							rows,
+							least,
+							worst5 * 100,
+							worst3 * 100,
+							misread,
+							misreadAt
+						)
+					)
+				end
+				print("[553(b)/552(g)] " .. table.concat(report, "; "))
+			end
+		)
 	end
 )

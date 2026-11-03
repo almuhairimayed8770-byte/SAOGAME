@@ -1393,9 +1393,16 @@ end
 
 -- The stroke clip's own blade at clip time `time`, at its full weight (D-550): each link the clip
 -- keys posed as the clip has it then, the others (and the root) as the frames show them `alpha` of
--- the way from the frame before's pose to this one.
+-- the way from the frame before's pose to this one. The body's procedural channels go on top of the
+-- clip's links as the rig's last step added them (Mixer.withChannels: the stand height, the foot IK,
+-- the lean, the turn plant's yaw), as on every frame the rig draws, so a late copy's stroke starts
+-- where the swinger's own screen starts it (D-670): the PC's late copies stood 0.125 above it.
 local function clipBladeAt(entry: Entry, chain: BladeContact.Chain, time: number, alpha: number): (Vector3, Vector3)
 	local sampled = ClipSampler.sample(entry.source.clip, time)
+	local mixer = entry.sourceMixer
+	if typeof(mixer) == "table" and typeof(mixer.withChannels) == "function" then
+		sampled = mixer:withChannels(sampled)
+	end
 	local pose, lastPose, between = entry.pose, entry.lastPose, entry.between
 	between.root = lastPose.root:Lerp(pose.root, alpha)
 	local transforms = between.transforms

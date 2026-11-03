@@ -965,6 +965,44 @@ describe(
 				)
 			end
 		)
+		it(
+			"straight back with no aside, as the PC's plan asks at the held kobold, at 60 and 144 (AU 551(a), D-667)",
+			function()
+				-- The PC on aa27e35, C551_144_D1: the root stood on the line (X 0.0000, yaw 0.000 on
+				-- all 92 rows) and only stepped back, 25.000 to 27.125 by drawn clip 0.363, at the
+				-- speed cap from the cut's hold; Basic1's Weapon BasePart stood 0.061 / 0.065 in the
+				-- flinching kobold's LeftArm at drawn 0.363 / 0.367. Its plan asks no aside at the held
+				-- kobold (463(d)): the plan with no HeldBlocker beside the line steps back on the PC's
+				-- track (0.30 at 0.146, 1.14 at 0.249, 2.62 from 0.374, plus the clip's 0.40 lunge).
+				-- The arm's need grew 2.3 studs in 0.13 s, and with a 0.15 s lead the body stood 0.12
+				-- short at 0.363: 0.053 / 0.050 in at 60 / 144. With the lead over the keep-out's whole
+				-- budget it starts before the cut's hold: 0.005 at both, the hit landing.
+				local drawn, drawnAt = -math.huge, ""
+				for _, fps in { 60, 144 } do
+					for _, phase in { 1.5, 2, 2.5, 3 } do
+						for _, eighth in { 0, 4 } do
+							local result = swingAt(
+								"KoboldAxeman",
+								frame,
+								rest,
+								fps,
+								basic1,
+								phase,
+								{ played = true, bare = true, lead = if eighth > 0 then eighth / 8 / fps else nil }
+							)
+							local tag = ("%d Hz lead %d/8, from %.1f s"):format(fps, eighth, phase)
+							expect({ tag, result.hits }).toEqual({ tag, 1 })
+							if math.max(result.bladeScreen, result.blade) > drawn then
+								drawn, drawnAt =
+									math.max(result.bladeScreen, result.blade), tag .. ": " .. result.bladeScreenWhere
+							end
+						end
+					end
+				end
+				print(("[551(a)] no aside: the blade after the cut %.3f (%s)"):format(drawn, drawnAt))
+				expect(drawn <= DEEPEST).toBe(true)
+			end
+		)
 	end
 )
 

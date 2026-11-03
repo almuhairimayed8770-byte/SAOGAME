@@ -104,6 +104,7 @@ local ClipSampler = require(Shared.choreo.ClipSampler)
 local Pose = require(Shared.choreo.Pose)
 local Easing = require(Shared.util.Easing)
 local ClipLibrary = require(script.Parent.ClipLibrary)
+local EvenRoot = require(script.Parent.EvenRoot)
 local GaitHandOff = require(script.Parent.GaitHandOff)
 local LocomotionState = require(script.Parent.LocomotionState)
 local SheathState = require(script.Parent.SheathState)
@@ -182,6 +183,9 @@ export type State = {
 	-- while a dodge's pose hides the gait, whose weights are then aimed at the stick's gait. Nil:
 	-- they stand under the dodge (D-646).
 	stickSpeed: number?,
+	-- D-675: no clip moves the root this frame (CharacterController: no root motion), so with
+	-- deps.evenRoot the body may be drawn on the even root. Nil or false: on its root.
+	evenRoot: boolean?,
 }
 
 export type Raycast = (origin: Vector3, direction: Vector3) -> Vector3?
@@ -205,6 +209,11 @@ export type Dependencies = {
 	-- local character's render step, D-343): the take-up also takes up the steps it guesses that
 	-- physics will make (StepTakeUp, D-651). Nil or false: the root as it stands (D-334 alone).
 	stepsAhead: boolean?,
+	-- The local fighter (D-675): while State.evenRoot holds on the ground, the body is drawn on
+	-- an even root (EvenRoot with stride.evenRoot's numbers, Animator.setBodyOn) and the gait is
+	-- paced by its travel, so no guess of the steps is needed. Nil or false, or stride.evenRoot
+	-- drawBody false: on its root, with stepsAhead's take-up.
+	evenRoot: boolean?,
 }
 
 export type Locomotion = {
@@ -1158,6 +1167,9 @@ function Locomotion.new(animator: any, character: Model, deps: Dependencies?): L
 		travelExtra = 0,
 		-- With deps.stepsAhead (D-651): the fit of the steps the root's travel came in.
 		takeUp = if dependencies.stepsAhead == true then StepTakeUp.new(TakeUp) else nil,
+		-- With deps.evenRoot (D-675): the root the body is drawn on, and whether it is.
+		evenRoot = if dependencies.evenRoot == true then EvenRoot.new() else nil,
+		evenDrawn = false,
 		shownNow = {} :: { [string]: number }, -- each Base clip's shown weight at this step's start
 		shownLast = {} :: { [string]: number }, -- and at the last step's
 		-- The body is held off its stick (stride.blocked, D-144): the gait follows the velocity.
@@ -1583,6 +1595,44 @@ local function stepBlocked(
 	return x, z
 end
 
+-- The local fighter's body on an even root (deps.evenRoot, D-675). While State.evenRoot says no
+-- clip moves the root and the body is on the ground, EvenRoot evens the root where this frame's
+-- physics is expected to take it (the root as it stands, on by its flat velocity over dt) with
+-- stride.evenRoot's numbers, and Choreo draws the body there (Animator.setBodyOn), offset again
+-- on PreSimulation from the steps that frame's physics makes. Returns where the last frame drew the
+-- body (nil on the first such frame) and where this one draws it; nil, nil on its root.
+local function stepEvenRoot(self: any, root: BasePart, state: State, dt: number): (Vector3?, Vector3?)
+	local even = self.evenRoot
+	local animator = self.animator
+	if even == nil or typeof(animator.setBodyOn) ~= "function" then
+		return nil, nil
+	end
+	local tuning = Stride.evenRoot
+	if not (tuning.drawBody and state.evenRoot == true and state.grounded and dt > 0) then
+		if self.evenDrawn then
+			-- Back on its root: the take-up starts over from the root's own travel.
+			self.evenDrawn = false
+			EvenRoot.reset(even)
+			animator:setBodyOn(nil)
+			if self.takeUp ~= nil then
+				self.takeUp:reset()
+			end
+		end
+		return nil, nil
+	end
+	local frame = root.CFrame
+	local from: Vector3? = nil
+	if self.evenDrawn then
+		local offset = animator:getBodyOffset()
+		from = if offset ~= nil then (frame * offset).Position else frame.Position
+	end
+	local velocity = state.velocity or root.AssemblyLinearVelocity
+	local drawn = EvenRoot.step(even, frame + Vector3.new(velocity.X, 0, velocity.Z) * dt, dt, nil, tuning)
+	animator:setBodyOn(drawn, tuning.maxDrawnStuds)
+	self.evenDrawn = true
+	return from, drawn.Position
+end
+
 -- Keeps the root's own travel this update against what its speed carries in the frame
 -- (stepTravel, D-334). The engine moves the root in whole physics steps, so a rendered frame's
 -- travel runs a step long or short while the velocity reads steady; stepGait moves the phase on by
@@ -1622,9 +1672,21 @@ local function stepAhead(takeUp: StepTakeUp.TakeUp, along: number?, speed: numbe
 	return (guess - taken) * studsPerStep
 end
 
-local function stepTravel(self: any, root: BasePart, state: State, dt: number, followX: number?, followZ: number?)
-	local position = root.CFrame.Position
-	local from = self.travelFrom
+-- stepTravel: on the local fighter's even root (stepEvenRoot, D-675) the travel is the drawn
+-- root's, from where the last frame drew the body to where this one draws it, and there is nothing
+-- to guess.
+local function stepTravel(
+	self: any,
+	root: BasePart,
+	state: State,
+	dt: number,
+	followX: number?,
+	followZ: number?,
+	drawnFrom: Vector3?,
+	drawnAt: Vector3?
+)
+	local position = if drawnAt ~= nil then drawnAt else root.CFrame.Position
+	local from = if drawnAt ~= nil then drawnFrom else self.travelFrom
 	self.travelFrom = position
 	local extra = 0
 	local speed = self.speed
@@ -1643,7 +1705,7 @@ local function stepTravel(self: any, root: BasePart, state: State, dt: number, f
 		local bound = Stride.travelSlipSeconds * speed
 		local step = along - speed * dt
 		local kept = self.travelSlip * (1 - math.min(1, dt / Stride.travelSlipDecaySeconds))
-		local takeUp = self.takeUp
+		local takeUp = if drawnAt ~= nil then nil else self.takeUp
 		if math.abs(kept + step) <= bound then
 			-- Inside the bound the frame's step is taken up whole and the memory forgets itself.
 			extra = step
@@ -1729,7 +1791,10 @@ function Locomotion.update(self: any, dt: number, state: State): LocomotionState
 				blendSpeed = 0
 			end
 		end
-		stepTravel(self, root, state, dt, travelX, travelZ)
+		-- The local fighter's even root (D-675): where the last frame drew the body and where
+		-- this one draws it pace the gait in place of the root's own travel.
+		local drawnFrom, drawnAt = stepEvenRoot(self, root, state, dt)
+		stepTravel(self, root, state, dt, travelX, travelZ, drawnFrom, drawnAt)
 	end
 	if forward ~= 0 or right ~= 0 then
 		self.travelForward, self.travelRight = forward, right
@@ -1936,6 +2001,10 @@ function Locomotion.destroy(self: any)
 		return
 	end
 	self.destroyed = true
+	if self.evenDrawn then
+		self.evenDrawn = false
+		self.animator:setBodyOn(nil)
+	end
 	dropJumpHandoff(self)
 	if self.unhook ~= nil then
 		self.unhook()
@@ -1991,12 +2060,23 @@ end
 -- holds each foot on the field point it stood on when an attack clip comes in, out of a walk, a
 -- stop or a stand, and digs in onto the clip's spots one group at a time, lifted; each leg hangs
 -- from the body the step draws (a Mixer pose hook), until the steps are done and the clip is in.
+-- With choreo enemy.gait.evenRoot.drawBody (D-664, EvenRoot) the rig draws its body itself, off
+-- the replicated root's move at physics (Choreo's setBodyOffset with `at`, D-531's detach), on a
+-- root the step knows: EvenRoot's, rebuilt from the replicated root at its pace and yaw rate. The
+-- gait is then paced by that root's own move over the row, the plants take back its own turn and
+-- the stop holds its feet on the field, so a planted foot stays put whatever the replicated root
+-- does on the row the screen draws. A rush that draws the body away from its root has it (the rig
+-- yields); a rush's crouch, turned on its root, is drawn on this one's place.
+-- A rig with a stand turn (choreo enemy.gait.standTurn, D-665) holds its idle's feet on the
+-- field while that root turns on the spot, a group stepping home past the hip's twist, and steps
+-- them onto the walk when the walk takes the rig.
 RigDriver.__index = RigDriver
 
 -- RigDriver's walking-turn plant channel (D-619) and stop plant channel (D-623), and its attack
 -- plant's pose hook (D-632).
 local WALK_PLANT_CHANNEL = "walkTurnPlant"
 local STOP_PLANT_CHANNEL = "walkStopPlant"
+local STAND_TURN_CHANNEL = "standTurn"
 local ATTACK_PLANT_HOOK = "attackPlant"
 local TRAVEL_TIME_SLACK = 1e-9 -- unit: seconds, float noise in a sum of frame times
 
@@ -2010,7 +2090,9 @@ local function newRigDriver(
 	character: Model?,
 	plantConfig: WalkTurnPlant.Config?,
 	stopConfig: WalkStopPlant.Config?,
-	attackConfig: WalkStopPlant.Config?
+	attackConfig: WalkStopPlant.Config?,
+	standConfig: WalkStopPlant.Config?,
+	standTwist: number?
 ): any
 	local walkDuration = ClipLibrary.get(walkId).duration
 	local plan = if character ~= nil and plantConfig ~= nil
@@ -2021,6 +2103,9 @@ local function newRigDriver(
 		else nil
 	local attackPlan = if character ~= nil and attackConfig ~= nil
 		then WalkStopPlant.plan(character, ClipLibrary.get(walkId).rig, attackConfig)
+		else nil
+	local standPlan = if character ~= nil and standConfig ~= nil
+		then WalkStopPlant.plan(character, ClipLibrary.get(walkId).rig, standConfig)
 		else nil
 	local self = setmetatable({
 		animator = animator,
@@ -2061,6 +2146,22 @@ local function newRigDriver(
 		-- Where the server's body began its latest wind-up (RigDriver.windUpAt), and the seconds since.
 		windUpOrigin = nil :: Vector3?,
 		windUpAge = 0,
+		-- The root the body is drawn on (D-664): EvenRoot's state, the root this step's row and the
+		-- last row were drawn on (nil while the rig does not draw it), the body offset it wrote, and
+		-- where a rush drew the body away from its root on the last row (it takes the body from there).
+		even = if character ~= nil and ChoreoData.enemy.gait.evenRoot.drawBody then EvenRoot.new() else nil,
+		drawnRoot = nil :: CFrame?,
+		lastDrawn = nil :: CFrame?,
+		bodyWritten = nil :: CFrame?,
+		handedBody = nil :: CFrame?,
+		-- Whether the gait is paced by the drawn root (Locomotion.attach's default tracker) rather
+		-- than by the state a tracker passed in hands it.
+		pacesDrawnRoot = false,
+		-- The stand turn (D-665), the hip twist past which a group steps, and whether a walk took
+		-- the rig from it (its legs step onto the walk).
+		standTurn = if standPlan ~= nil then WalkStopPlant.new(standPlan) else nil,
+		standTwist = standTwist or 0,
+		standLetGo = false,
 		unhook = nil :: (() -> ())?,
 		destroyed = false,
 	}, RigDriver)
@@ -2078,6 +2179,60 @@ function Locomotion.idlePhase(entityId: number): number
 	return (entityId * ChoreoData.enemyIdlePhaseStep) % 1
 end
 
+-- The root this step's row is drawn on (D-664), before every plant reads it. The rig draws its
+-- body itself on EvenRoot's root, standing too: a body left on its joint is drawn where physics
+-- leaves the root, so the first row of every move or turn was drawn on a root the step never read
+-- (a standing boar's first turning row swept its hooves 0.038 to 0.057). A body offset someone else
+-- wrote this step has the body: a rush drawn away from its root (Choreo's `at`, or an offset that
+-- moves the body more than evenRoot.settleStuds) is left alone, and the rig draws nothing; a crouch
+-- turned on its root (no `at`, D-255) is drawn on this root's place, turned as the rush turns it,
+-- so the body never jumps between the two. When a rush hands the body
+-- back, this root starts where the rush drew it last and closes on the root part from there, and
+-- the last row's drawn root is the rush's: the gait reads the body's own move (D-200).
+local function stepDrawnRoot(self: any, dt: number)
+	local even = self.even
+	local root: BasePart? = if self.character ~= nil then self.character.PrimaryPart else nil
+	local handed: CFrame? = self.handedBody
+	self.handedBody = nil
+	self.lastDrawn = self.drawnRoot
+	self.drawnRoot = nil
+	if even == nil or root == nil then
+		return
+	end
+	local animator = self.animator
+	local frame = root.CFrame
+	local offset: CFrame? = animator:getBodyOffset()
+	local foreign = offset ~= nil and offset ~= self.bodyWritten
+	local at: CFrame? = animator:getBodyAt()
+	if
+		foreign and (at ~= nil or (offset :: CFrame).Position.Magnitude > ChoreoData.enemy.gait.evenRoot.settleStuds)
+	then
+		EvenRoot.reset(even)
+		self.bodyWritten = nil
+		self.handedBody = (at or frame) * (offset :: CFrame)
+		return
+	end
+	if self.lastDrawn == nil then
+		self.lastDrawn = handed
+	end
+	local drawn = EvenRoot.step(even, frame, dt, handed)
+	if foreign then
+		local turned = frame * (offset :: CFrame)
+		EvenRoot.turnTo(even, turned)
+		drawn = CFrame.new(drawn.Position) * turned.Rotation
+	end
+	local written = frame:Inverse() * drawn
+	animator:setBodyOffset(written, frame)
+	self.bodyWritten = written
+	self.drawnRoot = drawn
+end
+
+-- The root the last row was drawn on, as a plant reads it: the rig's own (D-664), else the root
+-- part as the last physics left it.
+local function drawnOf(self: any, root: BasePart): CFrame
+	return self.drawnRoot or root.CFrame
+end
+
 -- The walking-turn plant's step (D-619): the turn the root will make over the row this step's pose
 -- is drawn on, each planted foot's hip taking back its share, while the walk shows and no
 -- full-body clip has the body. The turn is read as the root's turning speed over the gait's own
@@ -2091,8 +2246,9 @@ local function stepWalkPlant(self: any, dt: number)
 		return
 	end
 	local gait = ChoreoData.enemy.gait
-	local rotation = root.CFrame.Rotation
-	local at = root.CFrame.Position
+	local reads = drawnOf(self, root)
+	local rotation = reads.Rotation
+	local at = reads.Position
 	local last: CFrame? = self.plantYaw
 	local lastAt: Vector3? = self.plantAt
 	self.plantYaw = rotation
@@ -2125,6 +2281,12 @@ local function stepWalkPlant(self: any, dt: number)
 	end
 	local span = self.plantClock - times[1]
 	local ahead = if span > 0 then (self.plantHeading - headings[1]) / span * dt else 0
+	local drawn, lastDrawn = self.drawnRoot, self.lastDrawn
+	if drawn ~= nil and lastDrawn ~= nil then
+		-- The row is drawn on the rig's own root (D-664): its turn over the row is known.
+		local look = (lastDrawn.Rotation:Inverse() * drawn.Rotation).LookVector
+		ahead = math.atan2(-look.X, -look.Z)
+	end
 	local walkHandle = self.handles.Walk
 	local mixer = self.animator.mixer
 	local weight = if walkHandle ~= nil and not walkHandle.done then walkHandle.targetWeight or walkHandle.weight else 0
@@ -2217,14 +2379,16 @@ end
 -- gait alone). A full-body clip ends it at once (it has the body). The root moving off again (more
 -- than twice its last row's move and more than locomotion.idleSpeedThreshold) hands the rig back to
 -- the gait ("letGo"): the stop's legs fade out over the gait's weightBlendRate, so a foot caught
--- mid-step never jumps back onto the walk.
+-- mid-step never jumps back onto the walk. A rig drawn on its own root (D-664) reads the brake
+-- on the replicated root all the same (its own comes to a stand a few rows later, by the lag it
+-- keeps), and the stop holds each leg's place on the field, read on the root each row is drawn on.
 local function stepWalkStop(self: any, dt: number): string?
 	local stop = self.walkStop
 	local root: BasePart? = if self.character ~= nil then self.character.PrimaryPart else nil
 	if stop == nil or root == nil then
 		return nil
 	end
-	local at = root.CFrame.Position
+	local at = root.Position
 	local last: Vector3? = self.stopAt
 	local lastMoved: number = self.stopMoved
 	local moved = if last ~= nil then Vector3.new(at.X - last.X, 0, at.Z - last.Z).Magnitude else 0
@@ -2233,7 +2397,8 @@ local function stepWalkStop(self: any, dt: number): string?
 	local walkHandle = self.handles.Walk
 	local idleHandle = self.handles.Idle
 	local mixer = self.animator.mixer
-	local full = fullBodyShows(mixer, self.attackWait)
+	-- An attack plant begun this step has the legs from the stop's (the field points it held).
+	local full = fullBodyShows(mixer, self.attackWait) or self.attackHandle ~= nil
 	if stop.active then
 		if full or self.stopFade <= 0 then
 			endWalkStop(self)
@@ -2261,7 +2426,8 @@ local function stepWalkStop(self: any, dt: number): string?
 		WalkStopPlant.begin(
 			stop,
 			mixer:lastOffsets(),
-			ClipSampler.sample(idleHandle.clip, timeAfter(mixer, idleHandle, dt))
+			ClipSampler.sample(idleHandle.clip, timeAfter(mixer, idleHandle, dt)),
+			if self.drawnRoot ~= nil then self.lastDrawn else nil
 		)
 		mixer:hold(walkHandle, true)
 		self.walked = false
@@ -2278,7 +2444,11 @@ local function stepWalkStop(self: any, dt: number): string?
 	self.animator:setWeight(idleHandle, 1 - walk, true)
 	local idlePose = ClipSampler.sample(idleHandle.clip, timeAfter(mixer, idleHandle, dt))
 	local base = stopBase(ClipSampler.sample(walkHandle.clip, walkHandle.time), walk, idlePose, 1 - walk)
-	self.animator:setProcedural(STOP_PLANT_CHANNEL, WalkStopPlant.step(stop, clockDt, base, idlePose), 1)
+	self.animator:setProcedural(
+		STOP_PLANT_CHANNEL,
+		WalkStopPlant.step(stop, clockDt, base, idlePose, drawnOf(self, root)),
+		1
+	)
 	if WalkStopPlant.done(stop) then
 		-- Its last foot is down on the idle's spot and the walk shows none: the idle has the rig.
 		WalkStopPlant.cancel(stop)
@@ -2299,7 +2469,13 @@ local function letGoWalkStop(self: any, dt: number)
 	local base = stopBase(walkPose, mixer:preview(walkHandle, dt), idlePose, mixer:preview(idleHandle, dt))
 	local clockDt = if mixer:pauseRemaining() <= ChoreoData.pauseEpsilon then dt * mixer:timeScale() else 0
 	self.stopFade = math.max(0, self.stopFade - clockDt * ChoreoData.locomotion.weightBlendRate)
-	self.animator:setProcedural(STOP_PLANT_CHANNEL, WalkStopPlant.step(stop, clockDt, base, idlePose), self.stopFade)
+	local root: BasePart? = if self.character ~= nil then self.character.PrimaryPart else nil
+	local drawnOn = if root ~= nil then drawnOf(self, root) else nil
+	self.animator:setProcedural(
+		STOP_PLANT_CHANNEL,
+		WalkStopPlant.step(stop, clockDt, base, idlePose, drawnOn),
+		self.stopFade
+	)
 end
 
 -- Ends an attack plant: its hook comes off and the clip has the legs.
@@ -2328,15 +2504,22 @@ end
 -- and the attack takes it on the row after, the brake row the plant was built for (the server's body
 -- brakes from where it began the wind-up).
 -- It waits at most attackWaitSeconds and never past what the beat can still even by its mark
--- (enemy.beat.maxRate). A root that braked before it got there (or an attack with no origin) has
--- its first row carried on as a braking root keeps, the brake already seen.
+-- (enemy.beat.maxRate). A root that braked before it got there has its first row carried on as a
+-- braking root keeps, the brake already seen.
+-- The Telegraph and the ActionStarted are both unreliable remotes: neither the order they arrive in
+-- nor their arrival is sure (on the owner's PC the clip never waited, 556(f) on d310ca7). An
+-- attack whose origin is not named yet waits while its drawn body walks on (the server stopped
+-- the body as the wind-up began), and an origin heard on a later row takes over the wait from
+-- there (D-663).
 local function stepAttackPlant(self: any, dt: number)
 	local plant = self.attackPlant
 	local root: BasePart? = if self.character ~= nil then self.character.PrimaryPart else nil
 	if plant == nil or root == nil then
 		return
 	end
-	local now = root.CFrame
+	local now = drawnOf(self, root)
+	-- A row drawn on the rig's own root (D-664) is drawn where it reads: nothing is carried on.
+	local exact = self.drawnRoot ~= nil
 	local last: CFrame? = self.attackRoot
 	local lastDt: number = self.attackRootDt
 	self.attackRoot, self.attackRootDt = now, dt
@@ -2359,6 +2542,10 @@ local function stepAttackPlant(self: any, dt: number)
 	local origin: Vector3? = if gaitAge <= ChoreoData.enemy.gait.attackWaitSeconds then self.windUpOrigin else nil
 	local gait = ChoreoData.enemy.gait
 	local function carry(share: number, turnShare: number)
+		if exact then
+			self.attackDrawn = now
+			return
+		end
 		self.attackDrawn = CFrame.new(now.Position + moved * share)
 			* CFrame.Angles(0, turn * turnShare, 0)
 			* now.Rotation
@@ -2378,7 +2565,12 @@ local function stepAttackPlant(self: any, dt: number)
 	-- of the last row's move, along the way it moves; of a walking row's, to a root that stands): the
 	-- row coming still walks there, and the server's body braked only once it stood there.
 	local function short(): boolean
-		if origin == nil or lastMove == nil then
+		if origin == nil then
+			-- No origin named (its Telegraph not heard yet, or lost): the server stopped the body as
+			-- the wind-up began, so a drawn body still walking is short of it (D-663).
+			return walksOn()
+		end
+		if lastMove == nil then
 			return false
 		end
 		local way = Vector3.new(origin.X - now.Position.X, 0, origin.Z - now.Position.Z)
@@ -2408,8 +2600,10 @@ local function stepAttackPlant(self: any, dt: number)
 		if not braked then
 			carry(gait.attackBrakeShare, gait.attackBrakeShare)
 		end
-		-- The clip starts where the network catch-up put its clock.
-		WalkStopPlant.beginUnder(plant, mixer:lastOffsets(), ClipSampler.sample(attack.clip, attack.time), now)
+		-- The clip starts where the network catch-up put its clock. The legs stood as the last row
+		-- drew them, on the root that row was drawn on: the rig's own (D-664), else the one read.
+		local stoodOn = if exact then self.lastDrawn or now else now
+		WalkStopPlant.beginUnder(plant, mixer:lastOffsets(), ClipSampler.sample(attack.clip, attack.time), stoodOn)
 		self.attackHandle = attack
 		mixer:setPoseHook(ATTACK_PLANT_HOOK, function(pose: ClipSampler.Offsets)
 			local shown = self.attackHandle
@@ -2480,7 +2674,71 @@ local function stepAttackPlant(self: any, dt: number)
 	end
 end
 
+-- Ends a stand turn: its channel goes and the idle has the legs.
+local function endStandTurn(self: any)
+	WalkStopPlant.cancel(self.standTurn)
+	self.animator:setProcedural(STAND_TURN_CHANNEL, nil)
+	self.standLetGo = false
+end
+
+-- The stand turn's step (D-665), once the gait has set this step's weights (`walk`: the walk's).
+-- The root this row is drawn on turns on the spot (more than standTurnDegrees from the last row's,
+-- moving under idleSpeedThreshold) with the idle alone showing: each leg holds its place on the
+-- field and a group steps home past the hip's twist; once the root stands, the legs step home and
+-- the idle has them again. A walk taking the rig has each group step onto where the walk has it,
+-- the one it lifts first, so no planted foot is swept onto the walk. An attack (its plant holds the
+-- legs as they were drawn), a stop or any other full-body clip ends it at once.
+local function stepStandTurn(self: any, dt: number, walk: number)
+	local stand = self.standTurn
+	local root: BasePart? = if self.character ~= nil then self.character.PrimaryPart else nil
+	if stand == nil or root == nil then
+		return
+	end
+	local mixer = self.animator.mixer
+	local walkHandle = self.handles.Walk
+	local idleHandle = self.handles.Idle
+	local drawn, lastDrawn = self.drawnRoot, self.lastDrawn
+	local turning = false
+	if drawn ~= nil and lastDrawn ~= nil then
+		local look = (lastDrawn.Rotation:Inverse() * drawn.Rotation).LookVector
+		local step = drawn.Position - lastDrawn.Position
+		turning = math.abs(math.atan2(-look.X, -look.Z)) > math.rad(ChoreoData.enemy.gait.standTurnDegrees)
+			and Vector3.new(step.X, 0, step.Z).Magnitude <= Config.idleSpeedThreshold * math.max(dt, 0)
+	end
+	local taken = fullBodyShows(mixer, nil)
+		or self.attackHandle ~= nil
+		or self.attackWait ~= nil
+		or (self.walkStop ~= nil and self.walkStop.active)
+	local walking = walk > 0 or walkHandle.weight > 0
+	if not stand.active then
+		if taken or walking or not turning or lastDrawn == nil then
+			return
+		end
+		WalkStopPlant.beginStand(stand, mixer:lastOffsets(), lastDrawn)
+	elseif taken then
+		endStandTurn(self)
+		return
+	end
+	self.standLetGo = self.standLetGo or walking
+	local clockDt = if mixer:pauseRemaining() <= ChoreoData.pauseEpsilon then dt * mixer:timeScale() else 0
+	local idlePose = ClipSampler.sample(idleHandle.clip, timeAfter(mixer, idleHandle, dt))
+	local walkPose = ClipSampler.sample(walkHandle.clip, timeAfter(mixer, walkHandle, dt))
+	local base = stopBase(walkPose, mixer:preview(walkHandle, dt), idlePose, mixer:preview(idleHandle, dt))
+	local limit = if turning then self.standTwist else 0
+	local offsets = WalkStopPlant.stepStand(stand, clockDt, base, idlePose, drawnOf(self, root), limit, self.standLetGo)
+	if
+		(self.standLetGo and WalkStopPlant.standDone(stand))
+		or (not self.standLetGo and not turning and WalkStopPlant.standHome(stand))
+	then
+		-- Every leg is down where the idle (or the walk) has it: that has the legs.
+		endStandTurn(self)
+		return
+	end
+	self.animator:setProcedural(STAND_TURN_CHANNEL, offsets, 1)
+end
+
 function RigDriver.update(self: any, dt: number, state: State): LocomotionState.Output
+	stepDrawnRoot(self, dt)
 	stepAttackPlant(self, dt)
 	if self.stopEnds then
 		-- The stop's last step drew every leg on the idle: its channel goes.
@@ -2501,6 +2759,13 @@ function RigDriver.update(self: any, dt: number, state: State): LocomotionState.
 		}
 	end
 	local speed = math.max(0, state.speed)
+	local drawn, lastDrawn = self.drawnRoot, self.lastDrawn
+	if self.pacesDrawnRoot and drawn ~= nil and lastDrawn ~= nil and dt > 0 then
+		-- The default gait is paced by the root's own travel (D-575): with the body drawn on the
+		-- rig's own root, that root's move over the row it is drawn on (D-664).
+		local moved = drawn.Position - lastDrawn.Position
+		speed = Vector3.new(moved.X, 0, moved.Z).Magnitude / dt
+	end
 	local walk = 0
 	if speed > Config.idleSpeedThreshold then
 		walk = LocomotionState.gaitWeights(speed, self.walkSpeed, self.walkDuration)
@@ -2521,6 +2786,7 @@ function RigDriver.update(self: any, dt: number, state: State): LocomotionState.
 	if stopping == "letGo" then
 		letGoWalkStop(self, dt)
 	end
+	stepStandTurn(self, dt, walk)
 	return {
 		weights = { Idle = 1 - walk, Walk = walk },
 		oneShot = nil,
@@ -2578,6 +2844,11 @@ function RigDriver.destroy(self: any)
 		self.attackWait = nil
 		self.animator.mixer:hold(waiting, false)
 	end
+	if self.bodyWritten ~= nil and self.animator:getBodyOffset() == self.bodyWritten then
+		-- The body goes back on its root (D-664).
+		self.animator:setBodyOffset(nil)
+	end
+	self.bodyWritten = nil
 end
 
 --- Drives a rig the local controller does not own from the animator's own step. The state comes
@@ -2585,6 +2856,22 @@ end
 --- root's own travel, Locomotion.travelTracker); a frame with no state (the Humanoid or root is
 --- gone) is skipped. A player rig runs the full blend space; an enemy rig its
 --- data Idle / Walk pair. Destroy it when the rig leaves (the animator's own destroy drops the hook).
+-- A rig's stand turn (choreo enemy.gait.standTurn, D-665): its legs' plant config and the hip
+-- twist past which a group steps, or nil.
+local function standConfigOf(rigId: string): (WalkStopPlant.Config?, number?)
+	local stand = ChoreoData.enemy.gait.standTurn[rigId]
+	if stand == nil then
+		return nil, nil
+	end
+	return {
+		groups = stand.groups,
+		stepSeconds = stand.stepSeconds,
+		liftStuds = stand.liftStuds,
+		settleStuds = stand.settleStuds,
+	},
+		stand.twistStuds
+end
+
 function Locomotion.attach(animator: any, character: Model, deps: Dependencies?): Locomotion
 	local dependencies: Dependencies = deps or {}
 	local tracker = dependencies.tracker
@@ -2618,14 +2905,18 @@ function Locomotion.attach(animator: any, character: Model, deps: Dependencies?)
 			character,
 			ChoreoData.enemy.gait.turnPlant[rigId],
 			ChoreoData.enemy.gait.stopPlant[rigId],
-			ChoreoData.enemy.gait.attackPlant[rigId]
+			ChoreoData.enemy.gait.attackPlant[rigId],
+			standConfigOf(rigId)
 		)
 		if tracker == nil then
 			tracker = Locomotion.travelTracker(character, Locomotion.humanoidTracker(character))
+			driver.pacesDrawnRoot = true
 		end
 	end
 	local source: (dt: number) -> State? = tracker or Locomotion.humanoidTracker(character)
-	local follow = Locomotion.drawnTracker(animator, character)
+	local follow = Locomotion.drawnTracker(animator, character, function(): CFrame?
+		return driver.bodyWritten
+	end)
 	driver.unhook = animator:onStep(function(dt: number)
 		if driver.destroyed then
 			return
@@ -2643,7 +2934,13 @@ end
 --- body's own over the frame, so the legs stop when it stops and run when it runs, whatever the
 --- late root does. Otherwise `state` is handed back untouched. Read after the hook that sets the
 --- offset (Choreo runs the newest hook first, and a rush's hook is armed after the rig is watched).
-function Locomotion.drawnTracker(animator: any, character: Model): (dt: number, state: State) -> State
+--- `own` names the offset the rig's own driver draws the body at near its root (EvenRoot, D-664):
+--- that one is no body drawn away, and is read as the body on its root.
+function Locomotion.drawnTracker(
+	animator: any,
+	character: Model,
+	own: (() -> CFrame?)?
+): (dt: number, state: State) -> State
 	local last: Vector3? = nil
 	return function(dt: number, state: State): State
 		local root = character.PrimaryPart
@@ -2653,6 +2950,9 @@ function Locomotion.drawnTracker(animator: any, character: Model): (dt: number, 
 		end
 		local get = animator.getBodyOffset
 		local offset: CFrame? = if typeof(get) == "function" then get(animator) else nil
+		if offset ~= nil and own ~= nil and offset == own() then
+			offset = nil
+		end
 		local drawn = (if offset ~= nil then root.CFrame * offset else root.CFrame).Position
 		local previous = last
 		last = drawn

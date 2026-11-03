@@ -351,7 +351,10 @@ local function closenessOf(at: Vector3, model: Model, targetRoot: BasePart): num
 end
 
 local function pivotOf(root: BasePart): Vector3
-	return root.Position + Vector3.yAxis * CameraData.follow.focusHeight
+	-- On the subject's drawn body (DrawnBody, D-193): the local fighter's even root while it walks
+	-- (D-675), else its root.
+	local drawn = if subject ~= nil and subject.PrimaryPart == root then DrawnBody.position(subject) else nil
+	return (drawn or root.Position) + Vector3.yAxis * CameraData.follow.focusHeight
 end
 
 -- Back to the subject alone on the probe's exclude list.

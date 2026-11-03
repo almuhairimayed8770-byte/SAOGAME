@@ -36,6 +36,8 @@ type Fixture = {
 	clock: () -> number,
 	-- The render steps the controller bound, in priority order.
 	steps: { Step },
+	-- The subject (its PrimaryPart the still root).
+	character: any,
 }
 
 -- Where the frame's steps run (data rows: an Enum.RenderPriority name and an offset).
@@ -55,6 +57,7 @@ local function load(options: { withoutLate: boolean? }?): Fixture
 	}
 	local root = {
 		Position = SUBJECT,
+		CFrame = CFrame.new(SUBJECT),
 		IsA = function(_self: any, name: string): boolean
 			return name == "BasePart"
 		end,
@@ -150,6 +153,7 @@ local function load(options: { withoutLate: boolean? }?): Fixture
 			return state.clock
 		end,
 		steps = state.steps,
+		character = character,
 	}
 	return fixture
 end
@@ -401,5 +405,18 @@ describe("CameraController on the contact frame (D-180, D-211)", function()
 				expect((fixture.camera.CFrame.Position - spot).Magnitude).toBeLessThan(1e-3)
 			end
 		end
+	end)
+end)
+
+describe("CameraController on the drawn body (D-675)", function()
+	it("follows the local body where the frame draws it: an even root's offset moves the shot with it", function()
+		local DrawnBody = Harness.load("src/client/choreo/DrawnBody")
+		local fixture, before = settled()
+		local offset = Vector3.new(0.07, 0, -0.05)
+		DrawnBody.publish(fixture.character, CFrame.new(offset))
+		fixture.frames(240)
+		local moved = fixture.camera.CFrame.Position - before
+		DrawnBody.publish(fixture.character, nil)
+		expect((moved - offset).Magnitude).toBeCloseTo(0, 1e-4)
 	end)
 end)

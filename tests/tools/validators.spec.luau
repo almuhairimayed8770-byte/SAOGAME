@@ -7262,6 +7262,108 @@ describe("choreo validator: an attack's wait for its walking body (D-652)", func
 	end)
 end)
 
+describe("choreo validator: the even root and the stand turn (D-664, D-665)", function()
+	local function withGait(change: (gait: any) -> ()): { string }
+		local real = Harness.load("src/shared/data/choreo")
+		local copy = table.clone(real)
+		copy.enemy = table.clone(real.enemy)
+		copy.enemy.gait = table.clone(real.enemy.gait)
+		local gait = copy.enemy.gait
+		if typeof(gait.evenRoot) == "table" then
+			gait.evenRoot = table.clone(gait.evenRoot)
+		end
+		if typeof(gait.standTurn) == "table" then
+			gait.standTurn = table.clone(gait.standTurn)
+			for rigId, stand in gait.standTurn do
+				gait.standTurn[rigId] = table.clone(stand)
+			end
+		end
+		change(gait)
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/choreo" then
+				return copy
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/choreo")(context)
+	end
+
+	it("passes the real table", function()
+		expect(withGait(function() end)).toEqual({})
+	end)
+
+	it("wants each of the even root's numbers in range", function()
+		-- The window is at most two of the gait's crossfades (0.25 s at weightBlendRate 8); the pull
+		-- and the lag inside it (0.15 s); the lag short of a placement (teleportStuds 4); the snap
+		-- inside the contact band (stride.contact 0.02) and below maxLagDegrees (10).
+		local bad: { [string]: { any } } = {
+			drawBody = { "yes", 1 },
+			rateSeconds = { 0, -0.1, 0.26, 0 / 0, "0.15" },
+			followSeconds = { 0, 0.2 },
+			lagSeconds = { -0.01, 0.2 },
+			maxLagStuds = { 0, 4.5 },
+			maxLagDegrees = { 0, 91 },
+			settleStuds = { -0.001, 0.03 },
+			settleDegrees = { -1, 10 },
+		}
+		for field, values in bad do
+			for _, value in values do
+				expect(hasProblem(
+					withGait(function(gait: any)
+						gait.evenRoot[field] = value
+					end),
+					"enemy.gait.evenRoot." .. field
+				)).toBe(true)
+			end
+		end
+		expect(hasProblem(
+			withGait(function(gait: any)
+				gait.evenRoot = nil
+			end),
+			"enemy.gait.evenRoot must be a table"
+		)).toBe(true)
+	end)
+
+	it("keeps a stand turn's steps a stop plant's, stepping only past its twist", function()
+		expect(hasProblem(
+			withGait(function(gait: any)
+				gait.standTurn.Boar.twistStuds = gait.standTurn.Boar.settleStuds
+			end),
+			"enemy.gait.standTurn.Boar.twistStuds"
+		)).toBe(true)
+		expect(hasProblem(
+			withGait(function(gait: any)
+				gait.standTurn.Boar.stepSeconds = 0.1
+			end),
+			"enemy.gait.standTurn.Boar.stepSeconds"
+		)).toBe(true)
+		expect(hasProblem(
+			withGait(function(gait: any)
+				gait.standTurn.Boar.groups = { { "FrontLeftLeg", "BackRightLeg" } }
+			end),
+			"enemy.gait.standTurn.Boar.groups"
+		)).toBe(true)
+		expect(hasProblem(
+			withGait(function(gait: any)
+				gait.standTurn = nil
+			end),
+			"enemy.gait.standTurn must be a table"
+		)).toBe(true)
+	end)
+
+	it("reads a drawn root snapping onto its root as no turn", function()
+		for _, value in { 0, -1, 0.01, "0.05" } :: { any } do
+			expect(hasProblem(
+				withGait(function(gait: any)
+					gait.standTurnDegrees = value
+				end),
+				"enemy.gait.standTurnDegrees"
+			)).toBe(true)
+		end
+	end)
+end)
+
 describe("choreo validator: an attack's plant (D-632)", function()
 	local function withAttacks(value: any, brake: any?, seconds: any?): { string }
 		local real = Harness.load("src/shared/data/choreo")

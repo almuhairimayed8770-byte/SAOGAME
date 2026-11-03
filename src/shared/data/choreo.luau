@@ -358,7 +358,17 @@ local Choreo = {
 			-- the last extraSeconds (about 7 of them at 1.5%). A guess is used while the last
 			-- gateRows guesses were right on gateShare of them (59 of 60: at 0.9 a 60 fps clock
 			-- whose steps drift off a jittered frame opened it on lucky runs and its misses took
-			-- the walk's p90 from 0.0236 to 0.0301), after minRows frames. stepHz is the engine's
+			-- the walk's p90 from 0.0236 to 0.0301), after minRows frames. Or (D-661), with
+			-- the planned phase sure, while over the last leadRows frames (4 s at 60 fps) the
+			-- guesses missed at least gateLead fewer frames than the last frame's steps would
+			-- have (D-334 alone) and at most leadShare of theirs, and over gateRows no more: on
+			-- the PC's own clocks (item 555, d310ca7) a flip (5 then 3 about every 45th frame at
+			-- 60 fps) misses twice, so 59 of 60 never held and the walk stayed D-334's (0.035 at
+			-- 60 on the PC's rows, 0.051 at 144), while the guesses missed 8% of frames against
+			-- D-334's 18% at 60 and 31% against 66% at 144. 10 frames ahead over 4 s, at half
+			-- the misses, keeps every modelled clock as it was and the caught-up 60 fps clock at
+			-- no more than 2 misses in any 60 frames (6 let 5 by; 14 gave the guesses on only 83%
+			-- of the PC's 60 fps frames from 2 s). stepHz is the engine's
 			-- physics steps a second. A frame whose travel is wholeSteps or more off a whole
 			-- number of steps at the speed (the root speeding up, slowing or held) starts the fit
 			-- over. p90Bar: on the PC's step clocks in the screen order (StrideScreenSteps.spec),
@@ -374,10 +384,44 @@ local Choreo = {
 				extraSeconds = 2,
 				gateRows = 60,
 				gateShare = 0.98,
+				gateLead = 10,
+				leadRows = 240,
+				leadShare = 0.5,
 				minRows = 30,
 				stepHz = 240,
 				wholeSteps = 0.25,
 				p90Bar = 0.025,
+			},
+			-- The local fighter's body drawn on an even root (D-675, EvenRoot with these numbers
+			-- in place of enemy.gait.evenRoot's): the steps a frame's physics makes are no guess's,
+			-- so the walk's body is drawn where an even root stands, not where they leave the root.
+			-- Each render step, while no clip moves the root, EvenRoot evens the root where this
+			-- frame's physics is expected to take it (the root as it stands, on by its velocity
+			-- over the frame's dt): on at its pace over rateSeconds, pulled onto it (lagSeconds 0:
+			-- 0.004 drew the body 0.050 off its root on nine frames in ten, 0 draws it 0.022 to
+			-- 0.044 off, at most 0.060 to 0.079) with followSeconds, never past it, never more than
+			-- maxLagStuds off (two physics steps at walkSpeed); the yaw is the root's own
+			-- (maxLagDegrees 0). The gait is paced by that
+			-- root's travel from where the last frame drew the body, and Choreo draws the body
+			-- there through the root joint, offset again on PreSimulation from the root moved on
+			-- by its velocity over that PreSimulation's deltaTime, the steps physics is about to
+			-- make (Animator.setBodyOn); an offset over maxDrawnStuds draws the body on its root.
+			-- On the PC's own walk of item 555 (d310ca7) PreSimulation's deltaTime held the frame's
+			-- steps on 94% of frames at 60 fps and 97.4% at 144 (the rest one more), so the foot
+			-- moves only on those: its step p90 0.0208 at 60 and 0.0202 at 144 with the held rows
+			-- left out (the take-up 0.0218 and 0.0441, D-334 alone 0.0340 and 0.0510), and on item
+			-- 530's clocks 0.0196-0.0208 at 60 and 0.0191-0.0197 at 144. drawBody false draws the
+			-- body on its root and the take-up paces the walk as before.
+			evenRoot = {
+				drawBody = true,
+				rateSeconds = 0.15,
+				followSeconds = 0.05,
+				lagSeconds = 0,
+				maxLagStuds = 0.07,
+				maxLagDegrees = 0,
+				settleStuds = 0.001,
+				settleDegrees = 0,
+				maxDrawnStuds = 0.15,
 			},
 			-- A body held off its stick (D-144): walking into an enemy or a wall, or slid along its
 			-- flank. Once the stick has stayed within `degrees` of one direction for
@@ -708,6 +752,60 @@ local Choreo = {
 			-- at 144), the kobold's Overhead 0.083 (0.064). At most (1 - 1 / maxRate) of each attack
 			-- clip's first HitWindowOpen (tools/validators/choreo.luau): the Charge's 0.6 s evens 0.3.
 			attackWaitSeconds = 0.25,
+			-- The root an enemy's body is drawn on while it walks or turns (D-664, EvenRoot;
+			-- tools/validators/choreo.luau). The PC draws a replicated root unevenly row to row (532(g)
+			-- on 3eee415: yaw steps 0.02 to 2.89 degrees a 60 Hz row where the server's are 1.67 to
+			-- 1.90), and the joints are written before that row's root lands, so every planted foot
+			-- moved by the row's deviation: Lune with the PC's yaw cycle, 0.078 to 0.110 a 60 Hz row
+			-- on the boar's turning walk and 0.114 on its turn in place. With drawBody, RigDriver draws
+			-- the body itself (Choreo's setBodyOffset with `at`, D-531's detach) on a root the step
+			-- knows: the replicated root's place and yaw as the last row left them, carried on at
+			-- their pace and yaw rate over the last rateSeconds (the PC's 8-row yaw cycle at 60 fps
+			-- is 0.133 s), pulled with a time constant of followSeconds toward lagSeconds of that pace
+			-- behind the replicated root (the cycle's deepest stall is 1.53 rows behind its mean, at
+			-- 60 fps 0.0255 s, and 0.014 s of it lies past the mean), never past it, never back along
+			-- the way, never more than maxLagStuds or maxLagDegrees off it. Standing, it snaps onto
+			-- the root within settleStuds and settleDegrees, and RigDriver still draws the body on it.
+			evenRoot = {
+				drawBody = true,
+				rateSeconds = 0.15,
+				followSeconds = 0.05,
+				lagSeconds = 0.02,
+				maxLagStuds = 0.75,
+				maxLagDegrees = 10,
+				settleStuds = 0.001,
+				settleDegrees = 0.05,
+			},
+			-- A rig's stand turn (D-665, WalkStopPlant.beginStand; tools/validators/choreo.luau):
+			-- its drawn root turns on the spot (more than standTurnDegrees a row, moving under
+			-- locomotion.idleSpeedThreshold) with the idle showing, and each leg of `groups` holds
+			-- its place on the field, hung from its hip; while no group steps, the group standing
+			-- furthest from the idle's spots steps there (stepSeconds, its sole liftStuds clear of
+			-- its straight path at the step's middle) once it is twistStuds off, and once the root
+			-- stands, every group off by more than settleStuds steps home before the idle has the
+			-- legs again. A walk taking the rig has each group step onto where the walk has it. The
+			-- boar turning on the spot at the Charger's 110 degrees a second swept its idle's hooves
+			-- 0.057 a 60 Hz row (0.035 at 144), 0.114 under the PC's yaw (0.041). Its hooves stand
+			-- 1.6 to 1.8 studs off the turn's axis, 3 studs a second at that rate: while the other
+			-- pair's 0.125 s step lasts, a pair twists 0.38 more.
+			standTurn = {
+				Boar = {
+					groups = { { "FrontLeftLeg", "BackRightLeg" }, { "FrontRightLeg", "BackLeftLeg" } },
+					stepSeconds = 0.125,
+					liftStuds = 0.1,
+					settleStuds = 0.01,
+					twistStuds = 0.2,
+				},
+			} :: {
+				[string]: {
+					groups: { { string } },
+					stepSeconds: number,
+					liftStuds: number,
+					settleStuds: number,
+					twistStuds: number,
+				},
+			},
+			standTurnDegrees = 0.05,
 		},
 		-- The attack clip ActionStarted plays keeps that beat up to its first HitWindowOpen (D-172):
 		-- the rig's hit-stop is the only freeze, and what it held beyond the server's pause (or

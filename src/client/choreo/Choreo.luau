@@ -87,6 +87,11 @@
 	the joint is about to put it on the root as it stands, and the joint goes back on at
 	PreSimulation (D-551): a joint turned on draws its Part1 where its last solve before it was
 	turned off had it until that frame's physics.
+	`setBodyOn` draws the body on a root the caller evens (the local fighter's walk, D-675),
+	through the joint: the step offsets it from the root part as it stands, and PreSimulation offsets
+	it again from the root part moved on by its velocity over that PreSimulation's deltaTime, where
+	the frame's physics is about to leave it, so the body is drawn there whatever steps physics
+	makes (the PC's deltaTime held them on 94% of 60 fps frames, 97.4% at 144).
 
 	The engine surface (clocks, camera, frame signals) is one small table that tests replace with
 	Choreo.configure; the logic underneath is the Lune-tested Mixer.
@@ -150,6 +155,8 @@ export type Animator = {
 	keepBeat: (self: Animator, handle: Handle, serverTime: number?) -> (),
 	shiftBeat: (self: Animator, handle: Handle, seconds: number) -> (),
 	setBodyOffset: (self: Animator, offset: CFrame?, at: CFrame?) -> (),
+	getBodyAt: (self: Animator) -> CFrame?,
+	setBodyOn: (self: Animator, drawn: CFrame?, most: number?) -> (),
 	getBodyOffset: (self: Animator) -> CFrame?,
 	setWeight: (self: Animator, handle: Handle, weight: number, immediate: boolean?) -> (),
 	setSpeed: (self: Animator, handle: Handle, speed: number) -> (),
@@ -371,6 +378,18 @@ local function reattachBody(self: any)
 	self.attachDue = true
 end
 
+-- The offset in `root`'s space that draws the body on `drawn`'s flat place, at the root's own
+-- height and facing (setBodyOn, D-675: a lock's turn written on PreSimulation, D-505, still turns
+-- it); nil when that is more than `most` studs off the root.
+local function offsetOn(root: CFrame, drawn: CFrame, most: number): CFrame?
+	local shift = drawn.Position - root.Position
+	shift = Vector3.new(shift.X, 0, shift.Z)
+	if shift.Magnitude > most then
+		return nil
+	end
+	return CFrame.new(root:VectorToObjectSpace(shift))
+end
+
 -- Writes the blended offsets to the joints' Transform; joints that stopped being keyed return to
 -- rest. A pinned joint is skipped, so it returns to rest too and stays there. Every written
 -- Transform is kept in `pose` for the PreSimulation rewrite (reapplyPose). The two touched sets
@@ -398,6 +417,21 @@ local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 				pose[name] = transform
 				touched[name] = true
 			end
+		end
+		local on: CFrame? = self.bodyOn
+		if on ~= nil and not self.bodyOnFresh then
+			-- Not asked again since the last step (its caller skipped this frame): on its root.
+			self.bodyOn = nil
+			self.bodyOffset = nil
+			on = nil
+		end
+		self.bodyOnFresh = false
+		if on ~= nil then
+			-- setBodyOn (D-675): offset from the root part as it stands, over the clip's own key.
+			local name = rootJointName(self)
+			local primary = self.model.PrimaryPart
+			self.bodyKeyed = if name ~= nil and touched[name] then pose[name] else CFrame.identity
+			self.bodyOffset = if primary ~= nil then offsetOn(primary.CFrame, on, self.bodyOnMost) else nil
 		end
 		local body: CFrame? = self.bodyOffset
 		if body ~= nil then
@@ -934,6 +968,30 @@ end
 function AnimatorClass.setBodyOffset(self: any, offset: CFrame?, at: CFrame?)
 	self.bodyOffset = offset
 	self.bodyAt = if offset ~= nil then at else nil
+	self.bodyOn = nil
+end
+
+--- Draws the body on `drawn` (world: its flat place, at the root part's height and facing) from this
+--- step on, through the root joint, or back on its root with nil (D-675). The step offsets it
+--- from the root part as it stands; PreSimulation offsets it again from the root part moved on by
+--- its velocity over that PreSimulation's deltaTime, so the frame draws the body on `drawn` after
+--- the physics that moves the root. An offset more than `most` studs (default: none) draws the
+--- body on its root. Replaces a setBodyOffset. It holds for the next step and its PreSimulation:
+--- a step it was not asked for again before draws the body on its root.
+function AnimatorClass.setBodyOn(self: any, drawn: CFrame?, most: number?)
+	self.bodyOn = drawn
+	self.bodyOnFresh = drawn ~= nil
+	self.bodyOnMost = if most ~= nil then most else math.huge
+	self.bodyAt = nil
+	if drawn == nil then
+		self.bodyOffset = nil
+	end
+end
+
+--- The root part's CFrame a body offset is drawn from off the joint (setBodyOffset's `at`, D-531),
+--- nil while the body is drawn through its root joint or is on its root.
+function AnimatorClass.getBodyAt(self: any): CFrame?
+	return self.bodyAt
 end
 
 --- The offset the body is drawn at from its root part (setBodyOffset), nil while it is on its root.
@@ -1028,6 +1086,10 @@ local function newAnimator(model: Model): any
 		bodyOffset = nil :: CFrame?, -- where the body is drawn from its root part (setBodyOffset)
 		drawnPublished = false, -- the last step published a body offset to DrawnBody
 		bodyAt = nil :: CFrame?, -- the root part's CFrame the offset is drawn from (setBodyOffset)
+		bodyOn = nil :: CFrame?, -- the root the body is drawn on after physics (setBodyOn, D-675)
+		bodyOnMost = math.huge, -- the most setBodyOn's offset may be, in studs
+		bodyOnFresh = false, -- setBodyOn was asked since the last step
+		bodyKeyed = CFrame.identity, -- the clip's own root joint key under setBodyOn's offset
 		detached = nil :: { motor: Motor6D, part: BasePart }?, -- Part1 drawn off the joint (detachBody)
 		attachDue = false, -- Part1 goes back on its joint at the next PreSimulation (reattachBody)
 		stepHooks = {} :: { (dt: number) -> () },
@@ -1102,6 +1164,39 @@ local function reapplyPose(self: any)
 	end
 end
 
+-- Draws the body on setBodyOn's root again (D-675), offset from where this frame's physics is
+-- about to take the root part: on by its flat velocity over this PreSimulation's deltaTime. The
+-- offset goes into the root joint's Transform over the clip's own key, and is published, so a
+-- reader after physics finds the body where the frame draws it.
+local function reapplyBodyOn(self: any, deltaTime: number)
+	local drawn: CFrame? = self.bodyOn
+	if drawn == nil or self.destroyed or self.rbxActive then
+		return
+	end
+	local name = rootJointName(self)
+	local motor = if name ~= nil then self.motors[name] else nil
+	local root = self.model.PrimaryPart
+	if name == nil or motor == nil or root == nil or self.pinned[name] then
+		return
+	end
+	local velocity = root.AssemblyLinearVelocity
+	local ahead = root.CFrame + Vector3.new(velocity.X, 0, velocity.Z) * math.max(0, deltaTime)
+	local body = offsetOn(ahead, drawn, self.bodyOnMost)
+	local keyed: CFrame = self.bodyKeyed
+	local transform = keyed
+	if body ~= nil then
+		local c0 = Joints.frames(motor)
+		transform = c0:Inverse() * body * c0 * keyed
+	end
+	motor.Transform = transform
+	self.pose[name] = transform
+	self.bodyOffset = body
+	if body ~= nil or self.drawnPublished then
+		self.drawnPublished = body ~= nil
+		DrawnBody.publish(self.model, body)
+	end
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- Scheduling
 -- ---------------------------------------------------------------------------------------------
@@ -1166,7 +1261,7 @@ local function start()
 	local preSimulation = engine.preSimulation
 	if preSimulation ~= nil then
 		attachOnPreSimulation = true
-		preSimulation:Connect(function()
+		preSimulation:Connect(function(deltaTime: number?)
 			for index = 1, #ordered do
 				local animator = ordered[index]
 				if animator ~= nil then
@@ -1174,6 +1269,7 @@ local function start()
 						attachBody(animator)
 					end
 					reapplyPose(animator)
+					reapplyBodyOn(animator, deltaTime or 0)
 				end
 			end
 		end)

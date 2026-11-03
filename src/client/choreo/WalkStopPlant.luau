@@ -20,6 +20,10 @@
 	first step instead. The walk's share of the body (torso, head, arms, tail) falls evenly to 0
 	over the steps, so the idle owns the whole rig the moment the last foot is down.
 
+	A stop begun on the root its last row was drawn on (begin's `root`, D-664) holds each leg's
+	place on the field instead, read on the root each row is drawn on: a drawn root still coming to
+	a stand carries the body over planted feet.
+
 		local plan = WalkStopPlant.plan(character, rigId, config)
 		local state = WalkStopPlant.new(plan)
 		WalkStopPlant.begin(state, shownLastFrame, idlePose)
@@ -52,6 +56,18 @@
 			WalkStopPlant.stepUnder(state, clipAdvance, pose, clipPoseNow, rootThisRow)
 		end)
 		if WalkStopPlant.done(state) and not mixer:blendingIn(handle) then -- take the hook off
+
+	And through a turn on the spot (D-665; Studio item 558): a boar turning with its idle showing
+	swept its planted hooves round the root's axis, 0.057 a 60 Hz row and 0.114 under the PC's
+	uneven yaw. In the anime a beast turning on the spot shuffles round on planted feet. So each
+	leg holds its place on the field, hung from its hip, and the group standing furthest from the
+	idle's spots steps there (one group at a time, as a stop's step) once the hip's twist passes a
+	limit; once the root stands, the legs step home. A walk taking the rig has each group step onto
+	where the walk has it, the one the walk has down first.
+
+		WalkStopPlant.beginStand(state, shownLastFrame, rootLastFrame)
+		local offsets = WalkStopPlant.stepStand(state, dt, basePose, idlePose, rootThisRow, limit, walking)
+		if WalkStopPlant.standHome(state) (standing) or WalkStopPlant.standDone(state) (walking) then ... end
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -103,6 +119,16 @@ export type State = {
 	-- offset from there (it follows the clip, gliding the offset off over stepSeconds).
 	field: { CFrame },
 	follows: { [number]: CFrame },
+	-- A stop begun on the root its last row was drawn on (D-664): each leg holds `field`, its
+	-- place on the field, not its place in the root's space, while that root comes to a stand.
+	onField: boolean,
+	-- A stand turn (beginStand, D-665): the group stepping (0: none), per leg where its step left
+	-- the field, whether every leg stood on the idle's spot (within settleStuds) last step, and per
+	-- group whether it has stepped onto the pose that took the rig (it is that pose's from then).
+	stepping: number,
+	from: { CFrame },
+	home: boolean,
+	released: { boolean },
 }
 
 local WalkStopPlant = {}
@@ -182,6 +208,11 @@ function WalkStopPlant.new(plan: Plan): State
 		offsets = offsets,
 		field = {},
 		follows = {},
+		onField = false,
+		stepping = 0,
+		from = {},
+		home = true,
+		released = {},
 	}
 end
 
@@ -209,10 +240,50 @@ local function lowest(plan: Plan, leg: Leg, frame: CFrame): number
 	return plan.height + low
 end
 
+-- A point turned about an axis through the origin (Rodrigues), for a leg turned about a corner.
+local function turnAbout(pivot: Vector3, from: Vector3, to: Vector3): CFrame
+	local axis = from:Cross(to)
+	if axis.Magnitude <= SPACE_NOISE then
+		return CFrame.identity
+	end
+	local angle = math.atan2(axis.Magnitude, from:Dot(to))
+	return CFrame.new(pivot) * CFrame.fromAxisAngle(axis.Unit, angle) * CFrame.new(-pivot)
+end
+
+-- The leg at `frame` (root space) hung from its hip at `socket` (root space): turned about the
+-- corner of its sole it stands on so the point its hip holds lies on the line from that corner to
+-- the socket, as a rigid leg follows a body moving over its planted foot (the gap left along that
+-- line is the joint's). The corner it stands on is the one no other comes lower than once it is
+-- turned; where every turn sinks another, the leg is raised by the least sink.
+local function hang(leg: Leg, frame: CFrame, socket: Vector3): CFrame
+	local attach = frame * leg.attach
+	local best = frame
+	local bestSink = -math.huge
+	for _, corner in leg.corners do
+		local pivot = frame * corner
+		local turned = turnAbout(pivot, attach - pivot, socket - pivot) * frame
+		local low = math.huge
+		for _, other in leg.corners do
+			low = math.min(low, (turned * other).Y)
+		end
+		local sink = low - pivot.Y
+		if sink > bestSink + SPACE_NOISE then
+			best, bestSink = turned, sink
+		end
+	end
+	if bestSink < 0 then
+		best = CFrame.new(0, -bestSink, 0) * best
+	end
+	return best
+end
+
 --- Starts a stop: `shown` is the pose the rig showed on the last frame (every joint from the root
 --- to the feet), `idle` the idle's pose now. Each leg holds where `shown` stood it; the groups'
 --- steps are set in order (every group but the lowest, the highest first, then the lowest).
-function WalkStopPlant.begin(state: State, shown: ClipSampler.Offsets, idle: ClipSampler.Offsets)
+--- `root`, when given, is the root's CFrame the last frame was drawn on: each leg then holds its
+--- place on the field (step reads it on the root each row is drawn on), so a drawn root still
+--- coming to a stand carries the body over planted feet (D-664).
+function WalkStopPlant.begin(state: State, shown: ClipSampler.Offsets, idle: ClipSampler.Offsets, root: CFrame?)
 	local plan = state.plan
 	local config = plan.config
 	local height: { number } = {}
@@ -221,9 +292,13 @@ function WalkStopPlant.begin(state: State, shown: ClipSampler.Offsets, idle: Cli
 		height[group] = -math.huge
 		settled[group] = true
 	end
+	state.onField = root ~= nil
 	for index, leg in plan.legs do
 		local held = legFrame(leg, shown)
 		state.held[index] = held
+		if root ~= nil then
+			state.field[index] = root * held
+		end
 		height[leg.group] = math.max(height[leg.group], lowest(plan, leg, held))
 		local away = (held * leg.sole) - (legFrame(leg, idle) * leg.sole)
 		if away.Magnitude > config.settleStuds then
@@ -275,12 +350,15 @@ end
 --- One step of `dt` seconds. `base`: the pose the rig's base layer composes on this step, every
 --- joint from the root down; `idle`: the idle's pose on this step. Returns each hip's offset over
 --- `base` that draws its leg where the stop has it (a leg whose step is done stands where the idle
---- stands it), or nil when no stop is under way.
+--- stands it), or nil when no stop is under way. A stop begun on a root (begin's `root`) reads its
+--- held legs on `root`, the root's CFrame this step is drawn on, each hung from its hip as `base`
+--- draws the body.
 function WalkStopPlant.step(
 	state: State,
 	dt: number,
 	base: ClipSampler.Offsets,
-	idle: ClipSampler.Offsets
+	idle: ClipSampler.Offsets,
+	root: CFrame?
 ): ClipSampler.Offsets?
 	if not state.active then
 		return nil
@@ -288,8 +366,9 @@ function WalkStopPlant.step(
 	state.clock += math.max(dt, 0)
 	local plan = state.plan
 	local config = plan.config
+	local unroot = if state.onField and root ~= nil then root:Inverse() else nil
 	for index, leg in plan.legs do
-		local held = state.held[index]
+		local held = if unroot ~= nil then unroot * state.field[index] else state.held[index]
 		local lands = legFrame(leg, idle)
 		local progress = (state.clock - state.starts[leg.group]) / config.stepSeconds
 		local frame: CFrame
@@ -316,6 +395,9 @@ function WalkStopPlant.step(
 		-- The hip's transform that hangs the leg there from its parent as the base draws it.
 		local hip = leg.path[#leg.path]
 		local parent = frameOf(leg, base, #leg.path - 1)
+		if unroot ~= nil and progress < 1 - NOISE then
+			frame = hang(leg, frame, parent * hip.c0.Position)
+		end
 		local transform = hip.c0:Inverse() * parent:Inverse() * frame * hip.c1Inverse:Inverse()
 		local rx, ry, rz = transform:ToEulerAnglesXYZ()
 		local under = base[leg.joint] or REST
@@ -382,43 +464,6 @@ function WalkStopPlant.beginUnder(state: State, shown: ClipSampler.Offsets, firs
 	state.active = true
 end
 
--- A point turned about an axis through the origin (Rodrigues), for a leg turned about a corner.
-local function turnAbout(pivot: Vector3, from: Vector3, to: Vector3): CFrame
-	local axis = from:Cross(to)
-	if axis.Magnitude <= SPACE_NOISE then
-		return CFrame.identity
-	end
-	local angle = math.atan2(axis.Magnitude, from:Dot(to))
-	return CFrame.new(pivot) * CFrame.fromAxisAngle(axis.Unit, angle) * CFrame.new(-pivot)
-end
-
--- The leg at `frame` (root space) hung from its hip at `socket` (root space): turned about the
--- corner of its sole it stands on so the point its hip holds lies on the line from that corner to
--- the socket, as a rigid leg follows a body moving over its planted foot (the gap left along that
--- line is the joint's). The corner it stands on is the one no other comes lower than once it is
--- turned; where every turn sinks another, the leg is raised by the least sink.
-local function hang(leg: Leg, frame: CFrame, socket: Vector3): CFrame
-	local attach = frame * leg.attach
-	local best = frame
-	local bestSink = -math.huge
-	for _, corner in leg.corners do
-		local pivot = frame * corner
-		local turned = turnAbout(pivot, attach - pivot, socket - pivot) * frame
-		local low = math.huge
-		for _, other in leg.corners do
-			low = math.min(low, (turned * other).Y)
-		end
-		local sink = low - pivot.Y
-		if sink > bestSink + SPACE_NOISE then
-			best, bestSink = turned, sink
-		end
-	end
-	if bestSink < 0 then
-		best = CFrame.new(0, -bestSink, 0) * best
-	end
-	return best
-end
-
 --- One step of `dt` seconds of the clip's clock under the attack (D-632). `pose`: the pose the
 --- layers composed this step (Mixer.setPoseHook's), whose hips it sets; `clip`: the clip's own pose
 --- now; `root`: the root part's CFrame this step is drawn on. A leg holds its field point until its group's step,
@@ -472,6 +517,141 @@ function WalkStopPlant.stepUnder(
 		local at = transform.Position
 		pose[leg.joint] = { pos = { at.X, at.Y, at.Z }, rot = { math.deg(rx), math.deg(ry), math.deg(rz) } }
 	end
+end
+
+--- Starts a stand turn (D-665): the root turns on the spot with the idle showing. `shown` is
+--- the pose the rig showed on the last frame, `root` the root's CFrame it was drawn on: every leg
+--- holds its place on the field.
+function WalkStopPlant.beginStand(state: State, shown: ClipSampler.Offsets, root: CFrame)
+	for index, leg in state.plan.legs do
+		state.field[index] = root * legFrame(leg, shown)
+	end
+	state.stepping = 0
+	state.clock = 0
+	state.home = false
+	table.clear(state.released)
+	state.active = true
+end
+
+--- One step of a stand turn of `dt` seconds. `base`: the pose the layers compose this step, whose
+--- hips it sets; `idle`: the idle's pose now; `root`: the root's CFrame this step is drawn on. Each
+--- leg holds its field point, hung from its hip; while no group steps, the group standing furthest
+--- from where the idle has it steps there (lifted, as a stop's step) once that is past `limit` (the
+--- hip's twist while the root turns, settleStuds once it stands). `release`: a walk took the rig, so
+--- the groups step onto where `base` has them instead, the one `base` stands lowest first, each
+--- following `base` once down (standDone then). Returns each hip's offset over `base`, or nil when
+--- no stand turn is under way.
+function WalkStopPlant.stepStand(
+	state: State,
+	dt: number,
+	base: ClipSampler.Offsets,
+	idle: ClipSampler.Offsets,
+	root: CFrame,
+	limit: number,
+	release: boolean
+): ClipSampler.Offsets?
+	if not state.active then
+		return nil
+	end
+	local plan = state.plan
+	local config = plan.config
+	local unroot = root:Inverse()
+	local target = if release then base else idle
+	if state.stepping ~= 0 then
+		state.clock += math.max(dt, 0)
+		if state.clock >= config.stepSeconds - NOISE then
+			-- Down where it stepped to: on the idle's spot it holds the field there; on the pose
+			-- that took the rig it is that pose's.
+			for index, leg in plan.legs do
+				if leg.group == state.stepping then
+					state.field[index] = root * legFrame(leg, target)
+				end
+			end
+			if release then
+				state.released[state.stepping] = true
+			end
+			state.stepping = 0
+		end
+	end
+	local worst, worstGroup = 0, 0
+	local lowestOn, lowestGroup = -math.huge, 0
+	for index, leg in plan.legs do
+		if state.released[leg.group] then
+			continue
+		end
+		local off = ((unroot * state.field[index]) * leg.sole - legFrame(leg, idle) * leg.sole).Magnitude
+		if off > worst then
+			worst, worstGroup = off, leg.group
+		end
+		local down = -lowest(plan, leg, legFrame(leg, base))
+		if down > lowestOn then
+			lowestOn, lowestGroup = down, leg.group
+		end
+	end
+	state.home = state.stepping == 0 and worst <= config.settleStuds
+	local stepper = if release
+		then lowestGroup
+		else (if worst > math.max(limit, config.settleStuds) then worstGroup else 0)
+	if state.stepping == 0 and stepper ~= 0 then
+		state.stepping = stepper
+		state.clock = 0
+		for index, leg in plan.legs do
+			if leg.group == stepper then
+				state.from[index] = state.field[index]
+			end
+		end
+	end
+	for index, leg in plan.legs do
+		local frame = unroot * state.field[index]
+		local stepping = leg.group == state.stepping
+		local released = state.released[leg.group] == true
+		if released then
+			frame = legFrame(leg, base)
+		elseif stepping then
+			local held = unroot * state.from[index]
+			local lands = legFrame(leg, target)
+			local progress = math.clamp(state.clock / config.stepSeconds, 0, 1)
+			local eased = Easing.SineInOut(progress)
+			frame = held:Lerp(lands, eased)
+			local from, to = lowest(plan, leg, held), lowest(plan, leg, lands)
+			local path = math.max(
+				from + (to - from) * eased,
+				math.min(from, to) + config.liftStuds * math.sin(math.pi * progress)
+			)
+			frame = CFrame.new(0, math.max(0, path - lowest(plan, leg, frame)), 0) * frame
+		end
+		local hip = leg.path[#leg.path]
+		local parent = frameOf(leg, base, #leg.path - 1)
+		if not stepping and not released then
+			frame = hang(leg, frame, parent * hip.c0.Position)
+		end
+		local transform = hip.c0:Inverse() * parent:Inverse() * frame * hip.c1Inverse:Inverse()
+		local rx, ry, rz = transform:ToEulerAnglesXYZ()
+		local under = base[leg.joint] or REST
+		local offset = state.offsets[leg.joint]
+		local at = transform.Position
+		offset.pos[1], offset.pos[2], offset.pos[3] = at.X - under.pos[1], at.Y - under.pos[2], at.Z - under.pos[3]
+		offset.rot[1] = math.deg(rx) - under.rot[1]
+		offset.rot[2] = math.deg(ry) - under.rot[2]
+		offset.rot[3] = math.deg(rz) - under.rot[3]
+	end
+	return state.offsets
+end
+
+--- True once a released stand turn's every group has stepped onto the pose that took the rig.
+function WalkStopPlant.standDone(state: State): boolean
+	for group = 1, state.plan.groups do
+		if not state.released[group] then
+			return false
+		end
+	end
+	return true
+end
+
+--- True when a stand turn's legs all stood on the idle's spots (within settleStuds) with none
+--- stepping on its last step.
+function WalkStopPlant.standHome(state: State): boolean
+	return state.home
 end
 
 return WalkStopPlant

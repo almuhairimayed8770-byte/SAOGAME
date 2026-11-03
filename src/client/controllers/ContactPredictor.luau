@@ -1993,6 +1993,97 @@ local function keepOutOf(
 		)
 		return math.clamp(count, 1, KEEP_OUT.maxPieces)
 	end
+	-- Out of the body's face first, then the held ones, then the body's again for what an aside step
+	-- changed: a few rounds settle it. From back `b` and aside `a`, over the sweep `chain` holds.
+	local function facesOut(b: number, a: number): (number, number)
+		for _ = 1, KEEP_OUT.rounds do
+			local wasBack, wasAside = b, a
+			for face in faceFrames do
+				local sideways = if side ~= nil then side * a else Vector3.zero
+				local backward = stepOf(face, away, b, sideways)
+				if faceHeld[face] and side ~= nil then
+					local sideStep = stepOf(face, side, a, away * b)
+					if sideStep - a < backward - b then
+						a = sideStep
+						continue
+					end
+				end
+				b = backward
+			end
+			if b == wasBack and a == wasAside then
+				break
+			end
+		end
+		return b, a
+	end
+	-- The poses an Art's activation hold plays after its hold pose, up to the hold's end (D-671):
+	-- the release runs the clip on through them inside the tell, and a swing planned there takes
+	-- only a hold sample's own need out on the hold rows (D-631), so a stance (D-606), planned to
+	-- the hold pose, keeps them out as well: the hold pose's step back takes their need with it.
+	-- Horizontal's hold opens the free hand on toward the target: at item 522's rests it went from
+	-- 0.005 to 0.0105 into the kobold's torso, and the release stepped that out on the hold rows at
+	-- the clip's pace (the PC: 0.8-1.3 studs/s, 0.05-0.09 in all, item 539(a)). Each piece of the
+	-- way is swept as fill sweeps a sample, against the target where it stands and, while it moves
+	-- on (D-565), where its clips carry it over the hold window the stance's sweep below covers,
+	-- the hold's own poses added.
+	local holdPosesEnd: number = if stance ~= nil then holdEndOf(clip) or 0 else 0
+	local function holdPosesOut(time: number, b: number, a: number): (number, number)
+		local wasChain, wasPieces = chain, pieces
+		local wasLimb, wasTarget = limbChain, targetChain
+		local wasDrawn, wasDrawnPieces, wasDrawnTarget = drawnChain, drawnPieces, drawnTargetChain
+		local stoods: { { CFrame } } = {}
+		if moving and #reach > 0 then
+			local holdStep: number = KEEP_OUT.stanceSampleSeconds
+			for j = 0, math.ceil((HOLD_SECONDS + holdPosesEnd - from) / holdStep - 1e-6) do
+				table.insert(stoods, targetAt(time + j * holdStep))
+			end
+		end
+		local partsBefore, limbsBefore = frames, limbNow
+		local at = time
+		while at < holdPosesEnd - KEY_EPSILON do
+			local upTo = math.min(at + step, holdPosesEnd)
+			local partsAt: { CFrame } = table.create(#parts)
+			local limbsAt: { CFrame } = table.create(#reach)
+			pose(upTo, partsAt, if #reach > 0 then limbsAt else nil)
+			local turn = turnOf(partsBefore, partsAt, #parts)
+			if #reach > 0 then
+				turn = math.max(turn, turnOf(limbsBefore, limbsAt, #reach))
+			end
+			local ways = math.clamp(math.ceil(turn / KEEP_OUT.maxTurnDegrees), 1, KEEP_OUT.maxPieces)
+			local partsWay: { { CFrame } } = { partsBefore }
+			local limbsWay: { { CFrame } } = { limbsBefore }
+			for piece = 1, ways - 1 do
+				local partsPiece: { CFrame } = table.create(#parts)
+				local limbsPiece: { CFrame } = table.create(#reach)
+				pose(at + (upTo - at) * piece / ways, partsPiece, if #reach > 0 then limbsPiece else nil)
+				table.insert(partsWay, partsPiece)
+				table.insert(limbsWay, limbsPiece)
+			end
+			table.insert(partsWay, partsAt)
+			table.insert(limbsWay, limbsAt)
+			chain, pieces = partsWay, ways
+			b, a = facesOut(b, a)
+			if #reach > 0 then
+				limbChain, drawnChain, drawnPieces = limbsWay, limbsWay, ways
+				local shift = if side ~= nil then side * a else Vector3.zero
+				if #stoods == 0 then
+					targetChain, drawnTargetChain = nil, nil
+					b = limbOut(b, shift)
+				else
+					for _, stood in stoods do
+						local still: { { CFrame } } = table.create(ways + 1, stood)
+						targetChain, drawnTargetChain = still, still
+						b = limbOut(b, shift)
+					end
+				end
+			end
+			partsBefore, limbsBefore, at = partsAt, limbsAt, upTo
+		end
+		chain, pieces = wasChain, wasPieces
+		limbChain, targetChain = wasLimb, wasTarget
+		drawnChain, drawnPieces, drawnTargetChain = wasDrawn, wasDrawnPieces, wasDrawnTarget
+		return b, a
+	end
 	local function fill(last: number)
 		for k = #back, math.min(last, count) do
 			if not done then
@@ -2083,27 +2174,7 @@ local function keepOutOf(
 						drawnTargetChain = times
 					end
 				end
-				local b, a = currentBack, currentAside
-				-- Out of the body's face first, then the held ones, then the body's again for what an
-				-- aside step changed: a few rounds settle it.
-				for _ = 1, KEEP_OUT.rounds do
-					local wasBack, wasAside = b, a
-					for face in faceFrames do
-						local sideways = if side ~= nil then side * a else Vector3.zero
-						local backward = stepOf(face, away, b, sideways)
-						if faceHeld[face] and side ~= nil then
-							local sideStep = stepOf(face, side, a, away * b)
-							if sideStep - a < backward - b then
-								a = sideStep
-								continue
-							end
-						end
-						b = backward
-					end
-					if b == wasBack and a == wasAside then
-						break
-					end
-				end
+				local b, a = facesOut(currentBack, currentAside)
 				-- Then the reach, no nearer than the strikes call for (a step back only parts the
 				-- colliding parts from the faces more), as it stands a sample before: the series is
 				-- read a sample ahead, and the reach is a ramp of its own that needs no head start,
@@ -2116,6 +2187,10 @@ local function keepOutOf(
 				-- And no hand or arm deeper in the body than it stood at the start, on any sample.
 				if #reach > 0 then
 					b = limbOut(b, if side ~= nil then side * a else Vector3.zero)
+				end
+				-- And a stance keeps out the poses its hold plays too (D-671).
+				if stance ~= nil and k == count and holdPosesEnd > time + KEY_EPSILON then
+					b, a = holdPosesOut(time, b, a)
 				end
 				-- A stance stands still through its hold (D-606) while the target moves on: from
 				-- its last sample the hands are kept out of the target for as long as the pose can

@@ -336,9 +336,13 @@ local Combat = {
 				-- second); Studio read 0.44-0.64 studs a frame as a snap. Without it a basic beside
 				-- the kobold's axe stepped back 0.40 studs a frame for its first three frames and
 				-- Sharp Nail 0.26; the lead covers a whole stand-off step (standOff.maxStuds) at
-				-- that speed.
+				-- that speed, and the keep-out's whole budget (maxStuds, 3.5 at 12 is 0.29 s), so a
+				-- need that comes late and fast is met on time (D-667): a flinching kobold's arm
+				-- coming in on the first basic's settle called for 2.3 studs more back in 0.13 s, and
+				-- with a 0.15 s lead the body, at this speed from the cut's hold, stood 0.12 short at
+				-- clip 0.363 and the blade 0.050-0.053 in that arm (the PC's 0.061 / 0.065, AU 551(a)).
 				maxSpeedStudsPerSecond = 12,
-				leadSeconds = 0.15,
+				leadSeconds = 0.3,
 				speedPieces = 4,
 				-- The reach (D-424): at each strike's key (the pose its hit-stop holds) the plan
 				-- holds the body back so that the blade (guard to tip) stands no deeper in any of

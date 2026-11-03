@@ -41,8 +41,10 @@ local Brute: BruteModule = {
 	name = "Brute",
 } :: any
 
---- Nothing to remember between chases.
-function Brute.onChaseStart(_brain: Brain.Brain) end
+--- A chase sets off from standing: no walk under way yet to land (chase).
+function Brute.onChaseStart(brain: Brain.Brain)
+	brain.memory.walking = false
+end
 
 --- Where the chase stops (D-627): stopDistance, grown when the world stands close behind the
 --- target along the line from the body, so that at least backRoom.leanStuds stand between that
@@ -68,31 +70,38 @@ function Brute.stopDistanceFor(brain: Brain.Brain, target: Brain.Target): number
 end
 
 --- Turns toward the target and walks up to its stop (stopDistanceFor): along its facing, slowed,
---- while it wheels round from more than wheelAngle off (D-598), then straight at the target. A stop
---- grown for a fighter backed to the world is landed on (D-643): from within the walk's last tick
---- and its brake of it (the pace times AI.tickSeconds() + backRoom.brakeSeconds), the body goes
---- straight onto the stop and rests there (EnemyService's landing, D-525). Between the swing's room
+--- while it wheels round from more than wheelAngle off (D-598), then straight at the target. The
+--- stop is landed on (D-643): from within the walk's last tick and its brake of it (the pace times
+--- AI.tickSeconds() + backRoom.brakeSeconds), the body goes straight onto the stop and rests there
+--- (EnemyService's landing, D-525), at the pace its walk has eased to. Between the swing's room
 --- (leanStuds) and the attacks' engage range a flush wall leaves a band narrower than a tick's walk
 --- (0.2 against the kobold's 0.5): a walk that stops where a tick finds it inside its stop, and
---- then brakes, would stand anywhere across it.
+--- then brakes, would stand anywhere across it. In the open field that band (3.05-3.43) moved with
+--- the server's frame rate: a few milliseconds of the walk's start decided which tick found it
+--- inside (the PC's 3.230 at 60 and 2.897 at 144, D-660). The open field's stop is landed from a
+--- walk under way, which sets off eased from standing (D-618).
 function Brute.chase(brain: Brain.Brain, dt: number, target: Brain.Target): Types.EnemyAttackDef?
 	brain:turnToward(target.direction, tuning.turnRate, dt)
 	local stop = Brute.stopDistanceFor(brain, target)
+	local memory = brain.memory
 	if target.distance > stop then
 		local pace = brain:speed()
 		if brain:angleTo(target.direction) > tuning.wheelAngle then
 			brain:moveForward(pace * tuning.wheelSpeedMultiplier)
+			memory.walking = true
 		elseif
-			stop > tuning.stopDistance
+			(stop > tuning.stopDistance or memory.walking == true)
 			and target.distance - stop <= pace * (AI.tickSeconds() + tuning.backRoom.brakeSeconds)
 		then
 			local at = target.position - target.direction * stop
 			brain:moveDirect(Vector3.new(at.X, brain:position().Y, at.Z), pace, true)
 		else
 			brain:moveToward(target.position, pace)
+			memory.walking = true
 		end
 	else
 		brain.context.stop()
+		memory.walking = false
 	end
 	return brain:pickAttack(target)
 end

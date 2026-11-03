@@ -253,6 +253,8 @@ type Mover = {
 	stoppedAt: number,
 	starting: boolean,
 	startFrom: Vector3?,
+	-- An exact goal took over a walk under way at the pace it had eased to (moverRequest, D-660).
+	keptPace: boolean,
 }
 
 export type Entry = {
@@ -439,6 +441,7 @@ local function newMover(model: Model, speed: number, body: RushWorld.Body?): Mov
 		stoppedAt = -math.huge,
 		starting = false,
 		startFrom = nil,
+		keptPace = false,
 	}
 end
 
@@ -463,11 +466,24 @@ local function dropPath(mover: Mover)
 end
 
 -- `direct`: a strike's own movement, straight at the goal and never along a path (D-183). `exact`
--- (direct only): the goal is where the body stops, and it stops dead on it (arrive).
+-- (direct only): the goal is where the body stops, and it stops dead on it (arrive). An exact goal
+-- that takes over a walk under way (a Brute landing on its stop, D-643) is reached at the pace the
+-- walk has eased to and keeps it while it lands (D-660): taken whole at once, the walk's speed
+-- stepped up by as much as 7 studs/s in one frame (D-574) a few ticks into a walk from standing.
 local function moverRequest(mover: Mover, goal: Vector3, speed: number, direct: boolean?, exact: boolean?)
 	mover.stopAfter = false
 	local isDirect = direct == true
-	mover.exact = isDirect and exact == true
+	local isExact = isDirect and exact == true
+	local walked = mover.walkSpeed
+	if isExact and mover.moving and mover.paced and not mover.direct and walked ~= nil then
+		speed = math.min(speed, walked)
+		mover.keptPace = true
+	elseif isExact and mover.keptPace and mover.moving and mover.exact then
+		speed = math.min(speed, mover.speed)
+	else
+		mover.keptPace = false
+	end
+	mover.exact = isExact
 	if isDirect ~= mover.direct then
 		-- A different kind of movement is a new movement: its own clock, and no path from the old one.
 		mover.direct = isDirect
@@ -498,6 +514,7 @@ local function moverStop(mover: Mover, dead: boolean?)
 		return
 	end
 	mover.stopAfter = false
+	mover.keptPace = false
 	mover.landingUntil = nil
 	mover.landWay = nil
 	mover.cutStop = nil
@@ -2614,18 +2631,22 @@ end
 
 --- How far past the centre of a player's `root` the world stands along `direction` (flattened),
 --- within `distance` studs, or nil when nothing does (D-627: a Brute's stop at a fighter backed to
---- the world). The root's own box is cast in the rushing group (the world alone: never a character,
---- an enemy or a blocker) from where its leading face stands at the root's centre, so a root the
---- engine rests a hair inside a wall still finds it (a cast never sees what its box starts in), and
---- never its own character. Ground it would climb (a slope, D-204) is no wall. `cast` stands in for
---- workspace:Blockcast.
+--- the world). The root's own box, turned to face along the line (its width across it, D-659), is
+--- cast in the rushing group (the world alone: never a character, an enemy or a blocker) from where
+--- its leading face stands at the root's centre, so a root the engine rests a hair inside a wall
+--- still finds it (a cast never sees what its box starts in), and never its own character: the
+--- nearest the world stands behind any point across the root's width. The box as the fighter has
+--- turned it read a face square to its look 0.25 farther than that on a line 7 degrees off it, and
+--- the stop came that much closer. Ground it would climb (a slope, D-204) is no wall. `cast` stands
+--- in for workspace:Blockcast.
 function EnemyService.worldBehind(root: BasePart, direction: Vector3, distance: number, cast: WorldCast?): number?
 	local flat = Brain.horizontal(direction)
 	if flat == nil or not (distance > 0) then
 		return nil
 	end
 	local engineCast: WorldCast = cast or defaultWorldCast
-	local frame = root.CFrame
+	local centre = root.CFrame.Position
+	local frame = CFrame.lookAt(centre, centre + flat)
 	local reach = boxReach(frame, root.Size, flat)
 	local ok, travelled, normal =
 		pcall(engineCast, frame - flat * reach, root.Size, flat * distance, AI.collision.rushing, root.Parent or root)

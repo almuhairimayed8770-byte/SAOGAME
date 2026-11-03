@@ -25,25 +25,33 @@
 	  over a span). Their phase is fitted to the last planRows frames' counts on a grid of
 	  `phases` points (the middle of the run of points that holds the most frames, a drift step
 	  allowed), then carried on frame by frame; it is fitted again after refitRows frames or as
-	  soon as a frame breaks it.
+	  soon as a frame breaks it. A flip does not break it (D-661): the engine's own frame
+	  jitter moving one step across a frame boundary, a frame a step over its plan next to one a
+	  step under it (item 555 on d310ca7: 5 then 3 about every 45th frame at 60 fps; at 144 the
+	  2, 2, 1 cycle's 1 swapped with a 2 on a fifth of the frames). A flip is no drift step either.
 	- The drift's steps (the frames that stepped once more, or once less, than planned) run on the
 	  planned steps' own clock. Their rate and phase are fitted every frame to the corners of their
 	  staircase over the last extraSeconds of frames whose planned phase was sure (each corner
 	  bounds the rate; the middle of what all allow, and the middle of the phase band it leaves).
 
-	A guess is given only while the last gateRows guesses were right on at least gateShare of
-	gateRows (and after minRows frames); otherwise nil, and the take-up is D-334's alone. With a
-	guess, Locomotion moves the gait's phase on by the guess less the steps the root just took, so
-	the planted foot moves on screen only by a guess's miss, and the gate opening or closing moves
-	it by nothing. Clocks the fit cannot follow (item 282's 2-6 pattern, steps caught up on the
-	render dt itself) keep the gate shut.
+	A guess is given while the last gateRows guesses were right on at least gateShare of gateRows,
+	or (D-661), with the planned phase sure, while over the last leadRows frames the guesses
+	missed at least gateLead fewer frames than the last frame's steps would have (D-334 alone's
+	take-up, which moves the foot on screen by every change of steps) and at most leadShare of
+	theirs, and over gateRows no more (all after minRows frames); otherwise nil, and the take-up is
+	D-334's alone. A flip misses twice, so on the PC's clocks (item 555) the share gate alone never
+	opened. With a guess, Locomotion moves the gait's phase on by the guess less the steps the root
+	just took, so the planted foot moves on screen only by a guess's miss, and the gate opening or
+	closing moves it by nothing. Clocks the fit cannot follow (item 282's 2-6 pattern, steps caught
+	up on the render dt itself) keep the gate shut.
 
 		local takeUp = StepTakeUp.new(ChoreoData.locomotion.stride.takeUp)
 		takeUp:observe(steps) -- the whole steps the last frame given to guess() took
 		local guess, mean = takeUp:guess(dt) -- this frame's steps (nil: not sure), the mean a frame
 		takeUp:reset()
 
-	Pure: no engine reads. StepTakeUp.spec checks it on clocks drawn to item 530's counts.
+	Pure: no engine reads. StepTakeUp.spec checks it on clocks drawn to item 530's counts and on
+	the PC's own rows of item 555 (tests/fixtures/PcSteps555.luau).
 ]]
 
 local StepTakeUp = {}
@@ -57,6 +65,12 @@ export type Config = {
 	extraSeconds: number, -- seconds of frames the drift's steps are fitted to
 	gateRows: number, -- frames the guesses' own hit share is read over
 	gateShare: number, -- the share of gateRows that must have been right for a guess to be used
+	-- Or, with the planned phase sure (D-661): over the last leadRows frames a guess was made
+	-- for, the guesses missed at least gateLead fewer frames than the last frame's steps would
+	-- have (D-334 alone's take-up) and at most leadShare of theirs, and over gateRows no more.
+	gateLead: number,
+	leadRows: number,
+	leadShare: number,
 	minRows: number, -- frames read before the first guess
 	stepHz: number, -- physics steps a second (1/240 s steps)
 }
@@ -74,12 +88,22 @@ export type TakeUp = typeof(setmetatable(
 		extra: { number }, -- steps less the planned guess (read only where sure)
 		sure: { boolean }, -- the planned guess's phase held over a whole window
 		hit: { boolean }, -- the whole guess was right
+		same: { boolean }, -- the steps were the frame before's (D-334 alone moved the foot by none)
 		sumDt: number,
 		sumSteps: number,
 		plannedTotal: number,
 		rows: number, -- frames read since the last reset
 		sureRun: number, -- sure frames up to the newest
 		hits: number, -- right guesses over the last gateRows frames
+		sames: number, -- frames over the last gateRows whose steps were the frame before's
+		guessed: { boolean }, -- a guess was made for the frame (given or not)
+		leadGuessed: number, -- frames over the last leadRows a guess was made for
+		leadHits: number, -- right guesses over the last leadRows frames
+		leadSames: number, -- frames over the last leadRows whose steps were the frame before's
+		-- The last frame's steps over its plan (nil: none, or used by a flip), and whether a frame
+		-- one step off the plan against the drift waits for the next to pair with it (D-661).
+		lastOver: number?,
+		breakDue: boolean,
 		-- The frames whose steps were not the planned guess (a drift step, or a miss), oldest
 		-- first in a ring: the frame's number, the planned steps up to its end, its planned
 		-- steps and its steps over them.
@@ -105,6 +129,7 @@ export type TakeUp = typeof(setmetatable(
 		planFall: { number },
 		planWant: { number },
 		planScores: { number },
+		planOver: { number },
 		pendingDt: number?,
 		pendingPlanned: number?,
 		pendingSteps: number?,
@@ -129,6 +154,12 @@ local function blank(self: any)
 	self.rows = 0
 	self.sureRun = 0
 	self.hits = 0
+	self.sames = 0
+	self.leadGuessed = 0
+	self.leadHits = 0
+	self.leadSames = 0
+	self.lastOver = nil
+	self.breakDue = false
 	self.offHead = 1
 	self.offCount = 0
 	self.phase = nil
@@ -153,6 +184,8 @@ function StepTakeUp.new(config: Config): TakeUp
 		extra = {},
 		sure = {},
 		hit = {},
+		same = {},
+		guessed = {},
 		offRow = {},
 		offTo = {},
 		offPlanned = {},
@@ -165,6 +198,7 @@ function StepTakeUp.new(config: Config): TakeUp
 		planFall = {},
 		planWant = {},
 		planScores = {},
+		planOver = {},
 	}
 	blank(self)
 	return setmetatable(self :: any, StepTakeUp)
@@ -192,9 +226,29 @@ function StepTakeUp.observe(self: TakeUp, stepsTaken: number)
 	end
 	self.pendingDt = nil
 	local gate = gateRows(self)
-	if self.count >= gate and self.hit[at(self, self.count - gate + 1)] then
-		self.hits -= 1
+	if self.count >= gate then
+		local leaving = at(self, self.count - gate + 1)
+		if self.hit[leaving] then
+			self.hits -= 1
+		end
+		if self.same[leaving] then
+			self.sames -= 1
+		end
 	end
+	local lead = math.min(self.capacity, math.max(1, math.floor(self.config.leadRows)))
+	if self.count >= lead then
+		local leaving = at(self, self.count - lead + 1)
+		if self.guessed[leaving] then
+			self.leadGuessed -= 1
+		end
+		if self.hit[leaving] then
+			self.leadHits -= 1
+		end
+		if self.same[leaving] then
+			self.leadSames -= 1
+		end
+	end
+	local before = if self.count > 0 then self.steps[at(self, self.count)] else nil
 	local index
 	if self.count < self.capacity then
 		self.count += 1
@@ -221,9 +275,37 @@ function StepTakeUp.observe(self: TakeUp, stepsTaken: number)
 	self.hit[index] = hit
 	if hit then
 		self.hits += 1
+		self.leadHits += 1
+	end
+	-- Read on the frames a guess was made for, as `hit` is, so the gate weighs both on the same
+	-- frames.
+	local guessed = self.pendingSteps ~= nil
+	self.guessed[index] = guessed
+	if guessed then
+		self.leadGuessed += 1
+	end
+	local same = guessed and before == stepsTaken
+	self.same[index] = same
+	if same then
+		self.sames += 1
+		self.leadSames += 1
 	end
 	self.rows += 1
-	if planned ~= nil and stepsTaken ~= planned then
+	-- A flip (D-661): one step the engine's own frame jitter moved across a frame boundary, a
+	-- frame one step over its plan next to one a step under it (the PC's 5 then 3 at 60 fps, 3
+	-- then 0 or 1 then 2 at 144, item 555). It is no drift step, and the plan holds through it.
+	local over = if planned ~= nil then stepsTaken - planned else nil
+	local flip = over ~= nil and math.abs(over) == 1 and self.lastOver == -over
+	if flip then
+		self.extra[index] = 0
+		self.extra[at(self, self.count - 1)] = 0
+		if self.offCount > 0 then
+			local newest = (self.offHead + self.offCount - 2) % self.capacity + 1
+			if self.offRow[newest] == self.rows - 1 then
+				self.offCount -= 1
+			end
+		end
+	elseif planned ~= nil and stepsTaken ~= planned then
 		local slot
 		if self.offCount < self.capacity then
 			self.offCount += 1
@@ -237,18 +319,36 @@ function StepTakeUp.observe(self: TakeUp, stepsTaken: number)
 		self.offPlanned[slot] = planned
 		self.offOver[slot] = stepsTaken - planned
 	end
-	if planned ~= nil then
-		local over = stepsTaken - planned
+	if over ~= nil then
 		local sign = if self.sumSteps / self.count >= self.config.stepHz * self.sumDt / self.count then 1 else -1
-		if over == 0 or over == sign then
+		if flip then
 			self.held += 1
+			self.lastOver = nil
+			self.breakDue = false
 		else
-			self.held = 0
-			self.phase = nil
+			-- A frame a step off against the drift breaks the plan a frame late, unless the next
+			-- one pairs with it.
+			if self.breakDue then
+				self.held = 0
+				self.phase = nil
+			end
+			self.breakDue = false
+			if over == 0 or over == sign then
+				self.held += 1
+			elseif math.abs(over) == 1 then
+				self.held += 1
+				self.breakDue = true
+			else
+				self.held = 0
+				self.phase = nil
+			end
+			self.lastOver = over
 		end
 	else
 		self.held = 0
 		self.phase = nil
+		self.lastOver = nil
+		self.breakDue = false
 	end
 	self.sincePlanFit += 1
 	self.pendingPlanned = nil
@@ -263,7 +363,8 @@ local function plannedAt(rate: number, phase: number, quantum: number, j: number
 end
 
 -- The planned steps' phase over the last planRows frames, on the grid: the middle of the run of
--- points whose plan holds the most of them (a drift step of `sign` allowed).
+-- points whose plan holds the most of them (a drift step of `sign` allowed). Sure when that plan
+-- holds every frame, a flip allowed.
 local function fitPlan(self: TakeUp, rate: number, sign: number)
 	local config = self.config
 	local count = self.count
@@ -289,7 +390,7 @@ local function fitPlan(self: TakeUp, rate: number, sign: number)
 		before = after
 	end
 	local drift = sign / quantum
-	local scores = self.planScores
+	local scores, overs = self.planScores, self.planOver
 	local top = 0
 	for p = 1, phases do
 		local phase = (p - 0.5) / phases
@@ -326,9 +427,40 @@ local function fitPlan(self: TakeUp, rate: number, sign: number)
 	if runLength == 0 then
 		runLength, runStart = phases, 1
 	end
-	self.phase = ((runStart - 1 + runLength / 2) % phases) / phases * quantum
+	local phase = ((runStart - 1 + runLength / 2) % phases) / phases
+	self.phase = phase * quantum
 	self.quantum = quantum
-	self.held = if top == window then window else 0
+	-- Sure when the fitted plan holds every frame, a flip allowed (D-661), as is the newest
+	-- frame a step off, which waits for the next to pair with it (observe).
+	for i = 1, window do
+		local plan = base[i]
+		if phase >= rises[i] then
+			plan += 1
+		end
+		if phase >= falls[i] then
+			plan -= 1
+		end
+		overs[i] = wants[i] - plan
+	end
+	local step = 1 / quantum
+	local held = true
+	for i = 1, window do
+		local over = overs[i]
+		if
+			not (
+				over == 0
+				or over == drift
+				or (
+					math.abs(over) == step
+					and (i == window or overs[i + 1] == -over or (i > 1 and overs[i - 1] == -over))
+				)
+			)
+		then
+			held = false
+			break
+		end
+	end
+	self.held = if held then window else 0
 	self.sincePlanFit = 0
 end
 
@@ -451,7 +583,16 @@ function StepTakeUp.guess(self: TakeUp, dt: number): (number?, number)
 	self.pendingPlanned = planned
 	self.pendingSteps = guess
 	self.pendingSure = sure
-	if self.hits < config.gateShare * gateRows(self) then
+	-- The gate: the guesses right on gateShare of the last gateRows frames, or, with the plan
+	-- sure, clearly ahead of the last frame's steps (D-661): over leadRows they missed gateLead
+	-- fewer frames and at most leadShare as many, and over gateRows no more.
+	local guessMisses = self.leadGuessed - self.leadHits
+	local lastMisses = self.leadGuessed - self.leadSames
+	local ahead = sure
+		and lastMisses - guessMisses >= config.gateLead
+		and guessMisses <= config.leadShare * lastMisses
+		and self.hits >= self.sames
+	if self.hits < config.gateShare * gateRows(self) and not ahead then
 		return nil, mean
 	end
 	return guess, mean

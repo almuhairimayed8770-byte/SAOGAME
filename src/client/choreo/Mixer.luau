@@ -1125,6 +1125,28 @@ local function addInto(result: Offsets, offsets: Offsets, weight: number, mask: 
 	end
 end
 
+--- `offsets` (a clip's own sample) with the procedural channels on top as the last step added them
+--- (the stand height, the foot IK, the lean, the turn plant's yaw), on the joints `offsets` keys
+--- only: the pose that clip would show at its full weight on this body (D-670: a late stroke's
+--- back-fill, Trails clipBladeAt). A new table; `offsets` is never written.
+function Mixer.withChannels(self: any, offsets: Offsets): Offsets
+	local result: Offsets = table.clone(offsets)
+	local turn = 0
+	for index = 1, self._heldCount do
+		local channel = self._heldChannels[index]
+		local keyed: Offsets = {}
+		for name, offset in channel.offsets do
+			if offsets[name] ~= nil then
+				keyed[name] = offset
+			end
+		end
+		addInto(result, keyed, channel.weight)
+		turn += rootYaw(keyed, channel.weight)
+	end
+	turnRootPosition(result, turn)
+	return result
+end
+
 -- What the limbs see of one joint of a handle: a hand-off joint's own eased envelope (no more than
 -- the handle's while it fades out) times the external weight, else the handle's (D-404).
 local function jointWeight(handle: Handle, name: string, whole: number): number

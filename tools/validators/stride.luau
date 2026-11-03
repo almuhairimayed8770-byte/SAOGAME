@@ -19,9 +19,15 @@
 	least three frames (144 fps plans 2, 2, 1) and a span that holds it, the gate's window and the
 	first guess's frames; the planned phase fitted again within its own window; a grid of at least
 	two phases; a drift window that holds two drift steps
-	at item 530's 1.5% drift and fits in the span at 60 fps; a gate share from a half to all; a
-	whole-step tolerance under half a step; and a p90 bar above 0 and under one physics step's
-	travel at walkSpeed (the slide one missed step shows).
+	at item 530's 1.5% drift and fits in the span at 60 fps; a gate share from a half to all; the
+	lead gate's window (D-661) from the share gate's to the span, its lead a whole number of
+	frames within it and its share of D-334's misses above 0 and under 1; a whole-step tolerance
+	under half a step; and a p90 bar above 0 and under one physics step's
+	travel at walkSpeed (the slide one missed step shows). stride.evenRoot (the local fighter's
+	even root, D-675) keeps EvenRoot's rules (D-664): drawBody a boolean; a pace window of at
+	most two of the gait's crossfades; a pull and a lag inside it; a lag in studs at most
+	maxDrawnStuds, which is under enemy.rush.teleportStuds (further off is a placement); a yaw lag
+	from 0 (the root's own) to 90 degrees; a snap onto the root inside the contact band.
 	tests/choreo/Stride.spec.luau re-measures the ground speeds and touchdowns from the clips.
 ]]
 
@@ -36,6 +42,9 @@ local MIN_SLIP_DECAY_FRAMES = 4
 -- frames at least; item 530's engine ran 1.5% ahead of every clock the code reads, and a drift
 -- fit needs two of its steps; the span holds the drift window at 60 fps.
 local MIN_PLAN_ROWS = 3
+-- The longest window the even root (D-675, as D-664's) reads its root's pace over, in the
+-- gait's crossfades.
+local EVEN_RATE_MOST_CROSSFADES = 2
 local MIN_PHASES = 2
 local ITEM_530_DRIFT = 0.015
 local MIN_DRIFT_STEPS = 2
@@ -142,6 +151,29 @@ return function(ctx: any): { string }
 			number(takeUp.gateShare) and takeUp.gateShare >= 0.5 and takeUp.gateShare <= 1,
 			"takeUp.gateShare must be from 0.5 to 1 (a guess wrong on half its frames is no guess)"
 		)
+		-- The lead gate (D-661): read over a window the take-up's span holds, at least the share
+		-- gate's own; ahead by at least a frame and within the window; at most a share under all
+		-- of D-334's misses, so a guess no better than the last frame's steps is never used.
+		check(
+			whole(takeUp.leadRows, 1)
+				and number(takeUp.gateRows)
+				and number(takeUp.spanRows)
+				and takeUp.leadRows >= takeUp.gateRows
+				and takeUp.leadRows <= takeUp.spanRows,
+			("takeUp.leadRows (%s) must be a whole number of frames from gateRows to spanRows"):format(
+				tostring(takeUp.leadRows)
+			)
+		)
+		check(
+			whole(takeUp.gateLead, 1) and number(takeUp.leadRows) and takeUp.gateLead <= takeUp.leadRows,
+			("takeUp.gateLead (%s) must be a whole number of frames from 1 to leadRows"):format(
+				tostring(takeUp.gateLead)
+			)
+		)
+		check(
+			number(takeUp.leadShare) and takeUp.leadShare > 0 and takeUp.leadShare < 1,
+			"takeUp.leadShare must be above 0 and under 1 (the guesses must miss fewer frames than the last frame's steps)"
+		)
 		check(
 			number(takeUp.wholeSteps) and takeUp.wholeSteps > 0 and takeUp.wholeSteps < 0.5,
 			"takeUp.wholeSteps must be above 0 and under half a step"
@@ -153,6 +185,73 @@ return function(ctx: any): { string }
 				tostring(takeUp.p90Bar),
 				oneStep
 			)
+		)
+	end
+
+	-- The local fighter's even root (D-675): EvenRoot's own rules (D-664) with a yaw left to
+	-- the root (maxLagDegrees from 0), a lag inside maxDrawnStuds, and a drawn body never as far
+	-- off its root as a placement.
+	local even = stride.evenRoot
+	if typeof(even) ~= "table" then
+		check(false, "evenRoot must hold the local fighter's even root (D-675)")
+	else
+		local function number(value: any): boolean
+			return typeof(value) == "number" and value == value and value > -math.huge and value < math.huge
+		end
+		local function positive(value: any): boolean
+			return number(value) and value > 0
+		end
+		check(typeof(even.drawBody) == "boolean", "evenRoot.drawBody must be true or false")
+		local blendRate = locomotion.weightBlendRate
+		local window = if positive(blendRate) then EVEN_RATE_MOST_CROSSFADES / blendRate else 0
+		check(
+			positive(even.rateSeconds) and even.rateSeconds <= window + 1e-9,
+			("evenRoot.rateSeconds (%s) must be a positive number of seconds, at most two of the gait's crossfades (%.3f s)"):format(
+				tostring(even.rateSeconds),
+				window
+			)
+		)
+		local rate = if positive(even.rateSeconds) then even.rateSeconds else math.huge
+		check(
+			positive(even.followSeconds) and even.followSeconds <= rate + 1e-9,
+			"evenRoot.followSeconds must be a positive number of seconds, at most rateSeconds"
+		)
+		check(
+			number(even.lagSeconds) and even.lagSeconds >= 0 and even.lagSeconds <= rate + 1e-9,
+			"evenRoot.lagSeconds must be 0 or more seconds, at most rateSeconds"
+		)
+		local rush = if typeof(choreo.enemy) == "table" then choreo.enemy.rush else nil
+		local teleport = if typeof(rush) == "table" and positive(rush.teleportStuds) then rush.teleportStuds else 0
+		check(
+			positive(even.maxDrawnStuds) and even.maxDrawnStuds < teleport,
+			("evenRoot.maxDrawnStuds (%s) must be a positive number of studs under enemy.rush.teleportStuds (%s): further off is a placement"):format(
+				tostring(even.maxDrawnStuds),
+				tostring(teleport)
+			)
+		)
+		check(
+			positive(even.maxLagStuds) and number(even.maxDrawnStuds) and even.maxLagStuds <= even.maxDrawnStuds,
+			"evenRoot.maxLagStuds must be a positive number of studs, at most maxDrawnStuds"
+		)
+		check(
+			number(even.maxLagDegrees) and even.maxLagDegrees >= 0 and even.maxLagDegrees <= 90,
+			"evenRoot.maxLagDegrees must be from 0 (the root's own yaw) to 90"
+		)
+		check(
+			number(even.settleStuds) and even.settleStuds >= 0 and even.settleStuds <= stride.contact,
+			("evenRoot.settleStuds must be from 0 to stride.contact (%s): the snap onto the root is inside the contact band"):format(
+				tostring(stride.contact)
+			)
+		)
+		check(
+			number(even.settleDegrees)
+				and even.settleDegrees >= 0
+				and (
+					even.settleDegrees == 0
+					or not number(even.maxLagDegrees)
+					or even.settleDegrees < even.maxLagDegrees
+				),
+			"evenRoot.settleDegrees must be 0 or more, below maxLagDegrees"
 		)
 	end
 

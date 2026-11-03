@@ -12,7 +12,15 @@
 	60 Hz clock whose steps are caught up on a jittered dt with no plan of their own (F2d's model)
 	are clocks it must leave to D-334: no guess on the first, and on the second no more misses in
 	any gateRows frames than the gate lets by before it shuts.
+
+	The owner's PC rows of item 555 (d310ca7, tests/fixtures/PcSteps555.luau) hold flips too, a
+	step the engine's frame jitter moved across a frame boundary (5 then 3 about every 45th frame
+	at 60 fps, the 2, 2, 1 cycle's 1 swapped with a 2 on a fifth of the frames at 144). Each misses
+	twice, so 59 of 60 right never held there and no guess was given; the lead gate (D-661)
+	gives the guesses once they clearly miss fewer frames than the last frame's steps.
 ]]
+
+local luau = require("@lune/luau")
 
 local StepTakeUp = Harness.load("src/client/choreo/StepTakeUp")
 local ChoreoData = Harness.load("src/shared/data/choreo")
@@ -20,6 +28,23 @@ local ChoreoData = Harness.load("src/shared/data/choreo")
 local TakeUp = ChoreoData.locomotion.stride.takeUp
 
 type Clock = { dt: { number }, steps: { number } }
+
+-- The owner's PC rows of item 555 at `fps`: each render step's dt with the steps of the physics
+-- that ran after it, which the PC logged on the next row.
+local function pc555(fps: number): Clock
+	local fixture = luau.load(Harness.readFile("tests/fixtures/PcSteps555.luau"), { debugName = "PcSteps555" })()
+	local dts, steps = {}, {}
+	for dt, count in (fixture[fps].rows :: string):gmatch("([%d%.]+) (%d+)") do
+		table.insert(dts, (tonumber(dt) :: number) / 1000)
+		table.insert(steps, tonumber(count) :: number)
+	end
+	local clock: Clock = { dt = {}, steps = {} }
+	for k = 1, #dts - 1 do
+		clock.dt[k] = dts[k]
+		clock.steps[k] = steps[k + 1]
+	end
+	return clock
+end
 
 -- Item 530's engine: `fps` frames whose length jitters by up to frameJitMs (telescoping), whole
 -- steps planned on that frame clock in `pair`s, one more every `extraEvery` planned (0: none),
@@ -368,6 +393,53 @@ describe("StepTakeUp on the PC's step clocks (item 530, D-651)", function()
 							result.worstWindow,
 							TakeUp.gateRows,
 							letBy
+						)
+					)
+				end
+			end
+			expect(table.concat(problems, "; ")).toBe("")
+		end
+	)
+
+	it(
+		"on the owner's PC rows of item 555 (d310ca7): from 2 s, a guess on most frames, and misses on at most half (60 fps) or three quarters (144) of the frames the last frame's steps miss",
+		function()
+			local problems = {}
+			for _, case in { { fps = 60, given = 0.9, share = 0.5 }, { fps = 144, given = 0.5, share = 0.75 } } do
+				local clock = pc555(case.fps)
+				local takeUp = StepTakeUp.new(TakeUp)
+				local t, judged, given, lastMisses, misses = 0, 0, 0, 0, 0
+				for i = 1, #clock.dt do
+					if i > 1 then
+						takeUp:observe(clock.steps[i - 1])
+					end
+					local guess = takeUp:guess(clock.dt[i])
+					t += clock.dt[i]
+					if t >= 2 then
+						judged += 1
+						-- D-334 alone moves the foot on screen by every change of steps; with a guess, by
+						-- its miss.
+						local lastMiss = clock.steps[i] ~= clock.steps[i - 1]
+						if lastMiss then
+							lastMisses += 1
+						end
+						if guess ~= nil then
+							given += 1
+						end
+						if (guess ~= nil and guess ~= clock.steps[i]) or (guess == nil and lastMiss) then
+							misses += 1
+						end
+					end
+				end
+				if given < case.given * judged or misses > case.share * lastMisses then
+					table.insert(
+						problems,
+						("%d fps: guessed %d of %d frames, %d missed against D-334's %d"):format(
+							case.fps,
+							given,
+							judged,
+							misses,
+							lastMisses
 						)
 					)
 				end

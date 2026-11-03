@@ -207,6 +207,92 @@ describe("stride validator", function()
 		)).toBe("")
 	end)
 
+	it("flags lead-gate numbers that are missing or out of range (D-661)", function()
+		local cases: { { field: string, value: any } } = {
+			{ field = "leadRows", value = nil },
+			{ field = "leadRows", value = 59 },
+			{ field = "leadRows", value = 601 },
+			{ field = "leadRows", value = 240.5 },
+			{ field = "gateLead", value = nil },
+			{ field = "gateLead", value = 0 },
+			{ field = "gateLead", value = 241 },
+			{ field = "gateLead", value = 10.5 },
+			{ field = "leadShare", value = nil },
+			{ field = "leadShare", value = 0 },
+			{ field = "leadShare", value = 1 },
+		}
+		for _, case in cases do
+			local problems = run(function(choreo: any)
+				choreo.locomotion.stride.takeUp[case.field] = case.value
+			end)
+			expect(hasProblem(problems, "takeUp." .. case.field)).toBe(true)
+		end
+		-- The window at the share gate's own and at the whole span, a lead of one frame and a
+		-- share just under all are fine.
+		for _, change in
+			{ { leadRows = 60, gateLead = 1 }, { leadRows = 600, gateLead = 600, leadShare = 0.99 } } :: { { [string]: number } }
+		do
+			expect(table.concat(
+				run(function(choreo: any)
+					for field, value in change do
+						choreo.locomotion.stride.takeUp[field] = value
+					end
+				end),
+				"; "
+			)).toBe("")
+		end
+	end)
+
+	it("flags the local fighter's even-root numbers that are missing or out of range (D-675)", function()
+		expect(hasProblem(
+			run(function(choreo: any)
+				choreo.locomotion.stride.evenRoot = nil
+			end),
+			"evenRoot"
+		)).toBe(true)
+		local cases: { { field: string, value: any } } = {
+			{ field = "drawBody", value = "yes" },
+			{ field = "rateSeconds", value = 0 },
+			{ field = "rateSeconds", value = 0.26 },
+			{ field = "followSeconds", value = 0 },
+			{ field = "followSeconds", value = 0.2 },
+			{ field = "lagSeconds", value = -0.01 },
+			{ field = "lagSeconds", value = 0.2 },
+			{ field = "maxDrawnStuds", value = 0 },
+			{ field = "maxDrawnStuds", value = 4 },
+			{ field = "maxLagStuds", value = 0 },
+			{ field = "maxLagStuds", value = 0.2 },
+			{ field = "maxLagDegrees", value = -1 },
+			{ field = "maxLagDegrees", value = 91 },
+			{ field = "settleStuds", value = -0.001 },
+			{ field = "settleStuds", value = 0.03 },
+			{ field = "settleDegrees", value = -1 },
+		}
+		for _, case in cases do
+			local problems = run(function(choreo: any)
+				choreo.locomotion.stride.evenRoot[case.field] = case.value
+			end)
+			expect(hasProblem(problems, "evenRoot." .. case.field)).toBe(true)
+		end
+		-- An evened yaw, no lag at the whole drawn bound, and the body on its root are fine.
+		for _, change in
+			{
+				{ maxLagDegrees = 10, settleDegrees = 0.05 },
+				{ lagSeconds = 0, maxLagStuds = 0.15 },
+				{ drawBody = false },
+			} :: { { [string]: any } }
+		do
+			expect(table.concat(
+				run(function(choreo: any)
+					for field, value in change do
+						choreo.locomotion.stride.evenRoot[field] = value
+					end
+				end),
+				"; "
+			)).toBe("")
+		end
+	end)
+
 	it("flags a stop hand-over margin that is missing or leaves no settle point in a half cycle", function()
 		for _, value in { nil :: number?, 0, 0.5, -0.1 } do
 			local problems = run(function(choreo: any)

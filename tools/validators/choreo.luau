@@ -70,9 +70,21 @@
 	enemy.gait.attackWaitSeconds (D-652) is a positive number of seconds, at most (1 - 1 /
 	enemy.beat.maxRate) of the first HitWindowOpen of each of those attack clips: a clip that waited
 	that long for its walking body to brake can still even the beat by its mark.
+	enemy.gait.evenRoot (D-664): drawBody is a boolean; rateSeconds a positive number of seconds,
+	at most two of the gait's crossfades (2 / locomotion.weightBlendRate: the drawn root's pace is
+	never a mean over longer than the gait takes to answer a change of pace twice); followSeconds positive and lagSeconds 0 or more, each at most rateSeconds;
+	maxLagStuds positive and at most enemy.rush.teleportStuds (further off is a placement);
+	maxLagDegrees above 0 and at most 90; settleStuds 0 up to locomotion.stride.contact (the snap
+	onto the root is inside the contact band); settleDegrees 0 or more, below maxLagDegrees. Each
+	enemy.gait.standTurn (D-665) keeps the stop plant's rules but the walk's cycle, and its
+	twistStuds is above its settleStuds (a turning stance steps only past its twist);
+	enemy.gait.standTurnDegrees is a positive number of degrees, at least evenRoot.settleDegrees (a
+	drawn root snapping onto its root reads as no turn).
 ]]
 
 local TIERS = { "High", "Medium", "Low" }
+-- The longest window the even root (D-664) reads its root's pace over, in the gait's crossfades.
+local EVEN_RATE_MOST_CROSSFADES = 2
 -- The longest a gait hand-off may stretch a joint's blend, in times its base.
 local MAX_HAND_OFF_FACTOR = 3
 local RATES = { "distantHz", "farHz" }
@@ -984,6 +996,102 @@ return function(ctx: any): { string }
 	check(
 		positive(attackBrakeSeconds),
 		("enemy.gait.attackBrakeSeconds %s must be a positive number of seconds"):format(tostring(attackBrakeSeconds))
+	)
+
+	-- The root an enemy's body is drawn on (D-664): a window that answers a change of pace no
+	-- later than the gait's crossfade, a pull and a lag inside it, a lag never as far as a
+	-- placement, and a snap onto the root inside the contact band.
+	local even = if typeof(gait) == "table" then gait.evenRoot else nil
+	check(
+		typeof(even) == "table",
+		"enemy.gait.evenRoot must be a table (drawBody, rateSeconds, followSeconds, lagSeconds, maxLagStuds, maxLagDegrees, settleStuds, settleDegrees)"
+	)
+	local settleDegrees: number? = nil
+	if typeof(even) == "table" then
+		check(
+			typeof(even.drawBody) == "boolean",
+			("enemy.gait.evenRoot.drawBody %s must be true or false"):format(tostring(even.drawBody))
+		)
+		local rate = even.rateSeconds
+		local blendRate = locomotion.weightBlendRate
+		check(
+			positive(rate) and positive(blendRate) and rate <= EVEN_RATE_MOST_CROSSFADES / blendRate + 1e-9,
+			("enemy.gait.evenRoot.rateSeconds %s must be a positive number of seconds, at most two of the gait's crossfades (%s s): the drawn root's pace is a mean over no longer"):format(
+				tostring(rate),
+				if positive(blendRate) then ("%.3f"):format(EVEN_RATE_MOST_CROSSFADES / blendRate) else "?"
+			)
+		)
+		local follow = even.followSeconds
+		check(
+			positive(follow) and (not positive(rate) or follow <= rate + 1e-9),
+			("enemy.gait.evenRoot.followSeconds %s must be a positive number of seconds, at most rateSeconds"):format(
+				tostring(follow)
+			)
+		)
+		local lag = even.lagSeconds
+		check(
+			typeof(lag) == "number" and lag >= 0 and (not positive(rate) or lag <= rate + 1e-9),
+			("enemy.gait.evenRoot.lagSeconds %s must be 0 or more seconds, at most rateSeconds"):format(tostring(lag))
+		)
+		local rush = if typeof(choreo.enemy) == "table" then choreo.enemy.rush else nil
+		local teleport = if typeof(rush) == "table" then rush.teleportStuds else nil
+		local most = even.maxLagStuds
+		check(
+			positive(most) and positive(teleport) and most <= teleport,
+			("enemy.gait.evenRoot.maxLagStuds %s must be a positive number of studs, at most enemy.rush.teleportStuds (%s): further off is a placement"):format(
+				tostring(most),
+				tostring(teleport)
+			)
+		)
+		local mostDegrees = even.maxLagDegrees
+		check(
+			positive(mostDegrees) and mostDegrees <= 90,
+			("enemy.gait.evenRoot.maxLagDegrees %s must be above 0 and at most 90"):format(tostring(mostDegrees))
+		)
+		local settleStuds = even.settleStuds
+		check(
+			typeof(settleStuds) == "number" and settleStuds >= 0 and positive(contact) and settleStuds <= contact,
+			("enemy.gait.evenRoot.settleStuds %s must be 0 up to locomotion.stride.contact (%s): the snap onto the root is inside the contact band"):format(
+				tostring(settleStuds),
+				tostring(contact)
+			)
+		)
+		local snap = even.settleDegrees
+		local snapOk = typeof(snap) == "number" and snap >= 0 and positive(mostDegrees) and snap < mostDegrees
+		check(
+			snapOk,
+			("enemy.gait.evenRoot.settleDegrees %s must be 0 or more, below maxLagDegrees"):format(tostring(snap))
+		)
+		settleDegrees = if snapOk then snap else nil
+	end
+
+	-- The stand turn (D-665) keeps the stop plant's rules but the walk's cycle; a turning stance
+	-- steps only past its twist, and a drawn root snapping onto its root reads as no turn.
+	local stands = if typeof(gait) == "table" then gait.standTurn else nil
+	check(typeof(stands) == "table", "enemy.gait.standTurn must be a table of rig ids to stand turns")
+	if typeof(stands) == "table" then
+		for rigId, stand in stands do
+			local where = ("enemy.gait.standTurn.%s"):format(tostring(rigId))
+			checkPlant(where, rigId, stand)
+			local twist = if typeof(stand) == "table" then stand.twistStuds else nil
+			local standSettle = if typeof(stand) == "table" then stand.settleStuds else nil
+			check(
+				positive(twist) and typeof(standSettle) == "number" and twist > standSettle,
+				("%s.twistStuds %s must be above its settleStuds (%s): a turning stance steps only past its twist"):format(
+					where,
+					tostring(twist),
+					tostring(standSettle)
+				)
+			)
+		end
+	end
+	local standDegrees = if typeof(gait) == "table" then gait.standTurnDegrees else nil
+	check(
+		positive(standDegrees) and (settleDegrees == nil or standDegrees >= settleDegrees - 1e-9),
+		("enemy.gait.standTurnDegrees %s must be a positive number of degrees, at least evenRoot.settleDegrees (%s): a drawn root snapping onto its root reads as no turn"):format(
+			tostring(standDegrees),
+			tostring(settleDegrees)
+		)
 	)
 
 	local settle = if typeof(camera.stall) == "table" then camera.stall.settleSeconds else nil

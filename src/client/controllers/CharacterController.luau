@@ -199,7 +199,8 @@ local snap: AimLogic.Snap? = nil
 local heldYaw: number? = nil
 -- The facing the last ArtRequest or BasicAttackRequest carried (DevAim reports it).
 local lastFacing: { number }? = nil
--- The enemy the soft assist turned the last request to (nil with a lock or no pick).
+-- The enemy the soft assist turned the last request to (nil with a lock or no pick), or, while an
+-- unlocked Art's key is held, the one its press picked for the stance (D-673).
 local assistTargetId: number? = nil
 -- The Art stand-off the body is stepping (fix F1), the clip handle it follows and how much of it
 -- the root already shows; nil when none is under way.
@@ -208,6 +209,9 @@ local standOffHandle: any = nil
 local standOffShown = 0
 -- How much of the keep-out's aside (D-315) the root already shows; planStandOff starts it at 0.
 local standOffSideShown = 0
+-- How much of a lunge the root held back past the plan's back, so that the aside could share the
+-- lunge's frame (D-672): the plan's next growth back is taken from it first, never given back.
+local standOffYielded = 0
 -- How much of the stand-off's step back the world behind has taken off so far (item 287): held
 -- off the clip's own motion toward the target instead.
 local standOffLost = 0
@@ -220,6 +224,8 @@ local standOffBasic = false
 -- True when the plan is a held Art's stance's (D-606): it runs while the stance is held.
 local standOffStance = false
 local STAND_OFF_EASING: string = Combat.contact.standOff.easing
+-- The fastest the keep-out moves the body, back or aside, on the clip's clock (item 285).
+local KEEP_OUT_SPEED: number = Combat.contact.standOff.keepOut.maxSpeedStudsPerSecond
 -- Clip seconds within which a clock counts as at a key (combat.luau contact.keyEpsilon): a drawn
 -- clock summed from frame steps to an activation hold's end lands a hair past it (0.25 + 6e-17
 -- after 36 steps of 1/144), and that pose is still the hold's (D-616).
@@ -517,7 +523,7 @@ local standOffAsked: any = nil
 -- behind or beside (the body's own world cast, D-235 amended). The root carries it in step().
 -- With `stance` (an Art's hold pose time), the held start pose's keep-out alone (D-606).
 local function planStandOff(handle: any, facing: { number }, basic: boolean?, stance: number?)
-	standOff, standOffHandle, standOffShown, standOffSideShown = nil, nil, 0, 0
+	standOff, standOffHandle, standOffShown, standOffSideShown, standOffYielded = nil, nil, 0, 0, 0
 	standOffLost = 0
 	standOffClock = nil
 	standOffAsked = handle
@@ -550,6 +556,60 @@ local function planStandOff(handle: any, facing: { number }, basic: boolean?, st
 		stance = stance,
 	})
 	standOffHandle = if standOff ~= nil then handle else nil
+end
+
+-- How much of an aside `wanted` a frame takes, and how much more of the clip's lunge it holds back
+-- for it (D-672). On a frame the clip's own root motion (`carried`) moves the root, the frame's
+-- flat move (`moved`: that motion with the keep-out's back so far) and the aside together stay
+-- within the farther of the keep-out's speed over the frame's clip time (`clipStep`) and the clip's
+-- own motion: the lunge yields first, the body held back along `away` within the way this frame's
+-- motion came (`free`, so never into the world behind), so the thrust bends round what the aside
+-- steps off at the lunge's own speed; an aside that still does not fit takes what is left and the
+-- rest on the next frames. With no root motion the aside takes no more than that speed or what its
+-- own series grew this frame (`grew`), so a share carried on never doubles a frame's step. Sharp
+-- Nail's first lunge frame at a turned kobold took the clip's 0.285 and the aside's 0.200
+-- together: 0.348 flat against 0.286 at 60 fps. A held Art's stance (`stance`, D-606) holds its
+-- back and its aside to that speed together, flat, as the body takes the start pose under the held
+-- key (D-674), the rest of the aside on the next frames of the wind-up: Rising Arc's stance off a
+-- kobold's axe 2.65 ahead took 0.200 back and 0.103 aside on one 60 fps frame, 0.225 flat.
+local function asideShare(
+	carried: Vector3,
+	moved: Vector3,
+	wanted: number,
+	side: Vector3,
+	away: Vector3,
+	clipStep: number,
+	grew: number,
+	free: number,
+	stance: boolean
+): (number, number)
+	if wanted <= 0 then
+		return wanted, 0
+	end
+	local lunge = Vector3.new(carried.X, 0, carried.Z).Magnitude
+	local budget = math.max(KEEP_OUT_SPEED * clipStep, lunge)
+	if lunge <= 1e-6 and not stance then
+		return math.min(wanted, math.max(budget, grew)), 0
+	end
+	local flat = Vector3.new(moved.X, 0, moved.Z)
+	local whole = flat + side * wanted
+	if whole.Magnitude <= budget then
+		return wanted, 0
+	end
+	local yielded = 0
+	local along = whole:Dot(away)
+	if along < 0 and lunge > 1e-6 then
+		local across = whole - away * along
+		local fits = math.sqrt(math.max(budget * budget - across:Dot(across), 0))
+		yielded = math.clamp(-along - fits, 0, math.min(-along, math.max(free, 0)))
+		flat += away * yielded
+		if (flat + side * wanted).Magnitude <= budget + 1e-6 then
+			return wanted, yielded
+		end
+	end
+	local onSide = flat:Dot(side)
+	local left = onSide * onSide - flat:Dot(flat) + budget * budget
+	return math.clamp(-onSide + math.sqrt(math.max(left, 0)), 0, wanted), yielded
 end
 
 -- Moves the root on along a planned stand-off to where the clip's clock puts it (AimLogic.
@@ -612,6 +672,7 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3): boolean
 	local drawnClock = math.min(standOffClock or plan.from, handle.time)
 	standOffClock = handle.time
 	local leads = plan.still ~= nil and drawnClock <= plan.still + KEY_EPSILON
+	local movedFrom = rootPart.Position
 	-- Back along the way this frame's root motion came, so never into the world: first what a wall
 	-- took off before, then this frame's share.
 	local toward = math.max(-carried:Dot(plan.away), 0)
@@ -621,8 +682,16 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3): boolean
 		standOffLost -= held
 		toward -= held
 	end
+	-- What a lunge already held back for an aside (D-672) is the plan's next growth back.
+	if by > 0 and standOffYielded > 0 then
+		local taken = math.min(by, standOffYielded)
+		standOffYielded -= taken
+		standOffShown += taken
+		by -= taken
+	end
 	if by ~= 0 then
 		local free = if by > 0 then math.min(by, toward) else by
+		toward -= math.max(free, 0)
 		local rest = by - free
 		local room = plan.room
 		local move = if rest > 0 and room ~= nil
@@ -637,14 +706,30 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3): boolean
 	local side, keepSide = plan.side, plan.keepSide
 	if side ~= nil and keepSide ~= nil then
 		local aside = keepSide(handle.time)
-		local sideBy = aside - standOffSideShown
+		-- Shared with a lunge's frame, the rest carried on (D-672).
+		local wanted = aside - standOffSideShown
+		local sideBy, yielded = asideShare(
+			carried,
+			carried + (rootPart.Position - movedFrom),
+			wanted,
+			side,
+			plan.away,
+			handle.time - drawnClock,
+			aside - keepSide(drawnClock),
+			toward,
+			stance
+		)
+		if yielded > 0 then
+			rootPart.CFrame = rootPart.CFrame + plan.away * yielded
+			standOffYielded += yielded
+		end
 		if sideBy ~= 0 then
 			local roomSide = plan.roomSide
 			local move = if sideBy > 0 and roomSide ~= nil
 				then roomSide(rootPart.CFrame, sideBy, drawnClock)
 				else sideBy
 			rootPart.CFrame = rootPart.CFrame + side * move
-			standOffSideShown = aside
+			standOffSideShown = if sideBy == wanted then aside else standOffSideShown + sideBy
 		end
 	end
 	if handle.time >= math.max(plan.to, plan.keepUntil or plan.to) then
@@ -959,12 +1044,27 @@ function CharacterController.beginArt(slot: number)
 	setState("Holding")
 	predictDraw()
 	-- At a held lock the body steps back as it takes the stance, so the start pose's hands stand
-	-- out of the target through the hold (D-606); the release plans the swing afresh.
+	-- out of the target through the hold (D-606); the release plans the swing afresh. With no lock
+	-- the same off the enemy the soft assist picks from where the body faces (D-673): a fighter
+	-- winding up beside a kobold steps off its axe as the start pose forms instead of being shoved
+	-- off it while the key is held (item 539(b): Rising Arc's colliding Head 0.29 into the
+	-- HeldBlocker). No pick, no stance; the release picks again for its snap.
 	local lockAt = lockPosition()
 	local holdAt = holdClipTime(hold :: Hold)
-	if lockAt ~= nil and root ~= nil and holdAt ~= nil then
-		local look = lockAt - (root :: BasePart).Position
-		planStandOff((hold :: Hold).handle, { look.X, 0, look.Z }, nil, holdAt)
+	local rootPart = root
+	if rootPart ~= nil and holdAt ~= nil then
+		if lockAt ~= nil then
+			local look = lockAt - rootPart.Position
+			planStandOff((hold :: Hold).handle, { look.X, 0, look.Z }, nil, holdAt)
+		else
+			local look = aimRotation(rootPart).LookVector
+			local candidates = Siblings.call(TargetController, "assistCandidates", rootPart.Position, look)
+			local pick = if candidates ~= nil then AimLogic.assistPick(candidates, AIM) else nil
+			if pick ~= nil then
+				assistTargetId = pick.id
+				planStandOff((hold :: Hold).handle, { look.X, 0, look.Z }, nil, holdAt)
+			end
+		end
 	end
 	Siblings.call(Hud, "noteArtUse")
 	-- If the clip carries no ActivationHold event the freeze still lands at the section 6 time.
@@ -1581,6 +1681,7 @@ local function step(dt: number)
 			-- The reading `speed` came from: a velocity off the stick blocks the body (D-144).
 			velocity = velocity,
 			yawAhead = pendingLockYaw, -- D-505
+			evenRoot = not ActionLogic.rootMotionActive(state), -- D-675: no clip moves the root
 			-- D-657: the stick's walk speed once the action lets go (a dodge ends in Idle): a
 			-- dodge aims the gait it hides at the stick's gait.
 			stickSpeed = if stickNow.Magnitude > 0
@@ -1714,11 +1815,13 @@ local function onCharacter(model: Model)
 	local stepPose = if typeof(FrameClock) == "table" then rawget(FrameClock, "atStepPose") else nil
 	local stepPoseSolve = if typeof(FrameClock) == "table" then rawget(FrameClock, "atStepPoseSolve") else nil
 	-- This controller's render step writes the pose the frame's physics then moves the root under
-	-- (D-343), so the gait also takes up the steps that physics is about to make (D-651).
+	-- (D-343), so the gait also takes up the steps that physics is about to make (D-651). While no
+	-- clip moves the root, the body is drawn on an even root instead (D-675).
 	locomotion = Locomotion.new(animator, model, {
 		atStepPose = if typeof(stepPose) == "function" then stepPose else nil,
 		atStepPoseSolve = if typeof(stepPoseSolve) == "function" then stepPoseSolve else nil,
 		stepsAhead = true,
+		evenRoot = true,
 	})
 	model:GetAttributeChangedSignal(ART_SLOTS_ATTRIBUTE):Connect(refreshSlots)
 	refreshSlots()

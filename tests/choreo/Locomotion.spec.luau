@@ -313,6 +313,55 @@ describe("Locomotion.attach", function()
 		Choreo.release(model)
 	end)
 
+	it("takes the body back from a rush where the rush last drew it, never jumping (D-664)", function()
+		local model = buildRig("Boar")
+		local root = model.PrimaryPart :: BasePart
+		root.CFrame = CFrame.new()
+		local animator = Choreo.get(model)
+		local driver = Locomotion.attach(animator, model, { tracker = trackerOf(still()) })
+		-- A rush's drawing, armed after the rig was watched, off the root's move (D-531); it puts
+		-- the body back on its root once, as Replication's rush does when it ends.
+		local drawnAt: Vector3? = nil
+		local handBack = false
+		local unhook = animator:onStep(function()
+			local at = drawnAt
+			if at ~= nil then
+				animator:setBodyOffset(root.CFrame:Inverse() * CFrame.new(at), root.CFrame)
+			elseif handBack then
+				handBack = false
+				animator:setBodyOffset(nil)
+			end
+		end)
+		-- Where the body is drawn: Choreo's `at` times the offset, through the joint without one.
+		local function body(): Vector3
+			local offset: CFrame? = (animator :: any).bodyOffset
+			local from: CFrame = (animator :: any).bodyAt or root.CFrame
+			return (if offset ~= nil then from * offset else root.CFrame).Position
+		end
+		animator:step(FRAME) -- the rig stands on its root first
+		local away = 0.3 -- studs ahead of the standing root
+		drawnAt = Vector3.new(0, 0, -away)
+		for _ = 1, 3 do
+			animator:step(FRAME)
+		end
+		local last = body()
+		expect((last - (drawnAt :: Vector3)).Magnitude).toBeLessThanOrEqual(1e-6)
+		drawnAt = nil
+		handBack = true
+		animator:step(FRAME)
+		-- The first row back moves the body by followSeconds' share of the way to its root at most.
+		local follow = 1 - math.exp(-FRAME / ChoreoData.enemy.gait.evenRoot.followSeconds)
+		expect((body() - last).Magnitude).toBeLessThanOrEqual(away * follow + 1e-6)
+		expect((body() - last).Magnitude > 0).toBe(true)
+		for _ = 1, 60 do
+			animator:step(FRAME)
+		end
+		expect((body() - root.Position).Magnitude).toBeLessThanOrEqual(1e-6)
+		unhook()
+		driver:destroy()
+		Choreo.release(model)
+	end)
+
 	it("hands the tracker's state back untouched while no body is drawn away from its root", function()
 		local model = buildRig("Boar")
 		local follow = Locomotion.drawnTracker(Choreo.get(model), model)

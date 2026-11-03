@@ -549,8 +549,9 @@ end
 
 -- Vertical cast at `fps` against `target`, at an enemy `ahead` studs in front of the root (where
 -- the controller faces), locked or (`locked` false) the soft assist's pick, held 0.2 s at its hold
--- pose and released.
-local function cast(target: any, ahead: number, fps: number, locked: boolean): Cast
+-- pose and released. `late`: the soft assist has no pick at the press (the enemy comes into its
+-- cone while the key is held), so only the release picks it.
+local function cast(target: any, ahead: number, fps: number, locked: boolean, late: boolean?): Cast
 	local rig = load(target)
 	local dt = 1 / fps
 	for _ = 1, 40 do
@@ -559,7 +560,7 @@ local function cast(target: any, ahead: number, fps: number, locked: boolean): C
 	local enemyAt = START.Position + Vector3.new(0, 0, -ahead)
 	if locked then
 		rig.setLock(enemyAt)
-	else
+	elseif not late then
 		rig.setAssist(enemyAt)
 	end
 	local slot = 2
@@ -568,14 +569,17 @@ local function cast(target: any, ahead: number, fps: number, locked: boolean): C
 	local held: { Row } = { { clip = 0, root = rig.root.Position, frame = rig.root.CFrame } }
 	rig.controller.beginArt(slot)
 	local handle = rig.animator.mixer:find(VERTICAL)
-	-- A held lock plans the stance at the press (D-606): one ask, keep-out alone, to the hold pose.
-	if locked then
-		assert(#rig.stances == 1, "the press at a lock asks for one stance plan")
+	-- A held lock, or with none the soft assist's pick, plans the stance at the press (D-606,
+	-- D-673): one ask, keep-out alone, to the hold pose. No pick, no stance.
+	local stanced = locked or not late
+	if stanced then
+		assert(#rig.stances == 1, "the press at a lock or an assist pick asks for one stance plan")
 		local options = rig.stances[1].options
 		assert(options.stance == holdAt(handle.clip), "the stance is planned to the hold pose")
 		assert(options.step == false, "the stance plans no blade step")
 	else
-		assert(#rig.stances == 0, "an unlocked press asks for no stance plan")
+		assert(#rig.stances == 0, "a press with no lock and no pick asks for no stance plan")
+		rig.setAssist(enemyAt)
 	end
 	assert(#rig.asked == 0, "the press asks for no swing plan")
 	local holdFrames = math.ceil(0.2 * fps)
@@ -587,7 +591,7 @@ local function cast(target: any, ahead: number, fps: number, locked: boolean): C
 	local before = rig.root.Position
 	rig.controller.releaseArt(slot, holdFrames * dt)
 	local releaseStep = rig.root.Position - before
-	assert(#rig.stances == (if locked then 1 else 0), "the release asks for no stance plan")
+	assert(#rig.stances == (if stanced then 1 else 0), "the release asks for no stance plan")
 	assert(#rig.asked == 1, "the release asks for one swing plan")
 	local rows: { Row } = { { clip = handle.time, root = rig.root.Position, frame = rig.root.CFrame } }
 	while handle.time < 0.45 do
@@ -740,12 +744,16 @@ describe("the Art stand-off waits for the activation hold (item 492(a), D-604)",
 	it("a blade step: the root stands still on every row that draws the hold, then steps to the open", function()
 		-- Lune's avatar meets an enemy with Vertical's start pose only behind its sword arm (the
 		-- raised blade over the right shoulder): a kobold there, 2.8 studs off, calls for a 0.30
-		-- step, the size the PC's boar1 rows add up to on the owner's larger avatar. Locked, the
-		-- stance's step back (0.43, D-606) already takes the blade clear of it, so this is the
-		-- soft assist's pick: no stance plan, and the release's plan steps 0.30.
+		-- step, the size the PC's boar1 rows add up to on the owner's larger avatar. Locked, or
+		-- picked by the soft assist at the press (D-673), the stance's step back (0.43, D-606)
+		-- already takes the blade clear of it, so here the soft assist picks it only at the
+		-- release: no stance plan, and the release's plan steps 0.30.
 		local target = kobold(120, -30, 2.8)
 		for _, fps in { 30, 60, 144 } do
-			local c = cast(target, 2.8, fps, false)
+			local picked = cast(target, 2.8, fps, false)
+			expect(judgeStance("blade step 0.30, picked at the press", fps, picked) > 0.4).toBe(true)
+			expect(picked.plan.distance).toBe(0)
+			local c = cast(target, 2.8, fps, false, true)
 			local plan = c.plan
 			expect(plan).never.toBeNil()
 			expect(plan.distance).toBeCloseTo(0.3, 1e-6)
@@ -918,15 +926,17 @@ describe("the hold rows stand still in every direction (M12s, D-604, D-631)", fu
 	it("at a kobold 2.7 off at 130 degrees turned 30, locked and not, at 30, 60 and 144", function()
 		-- The placement M12s read the step-aside at. The keep-out's lead (back and aside) starts with
 		-- the hold's end, under keepOut.maxSpeedStudsPerSecond from there, as the blade step does.
-		-- Locked, the stance took the held pose's hands out before the hold (D-606), and no hold row
-		-- moves. Unlocked nothing plans before the release (D-606), and the frozen pose stands with
-		-- its right hand in the kobold from the press on, so the release takes the hand out on its
-		-- first rows (HandsOut's line) and does nothing more inside the hold.
+		-- Locked, or picked by the soft assist at the press (D-673), the stance took the held
+		-- pose's hands out before the hold (D-606), and no hold row moves. Picked only at the
+		-- release, nothing plans before it, and the frozen pose stands with its right hand in the
+		-- kobold from the press on, so the release takes the hand out on its first rows (HandsOut's
+		-- line) and does nothing more inside the hold.
 		local target = kobold(130, 30, 2.7)
-		for _, locked in { true, false } do
+		for _, kind in { "locked", "unlocked", "picked late" } do
+			local locked = kind == "locked"
 			for _, fps in { 30, 60, 144 } do
-				local c = cast(target, 2.8, fps, locked)
-				local label = ("130/30/2.7 %s"):format(if locked then "locked" else "unlocked")
+				local c = cast(target, 2.8, fps, locked, kind == "picked late")
+				local label = ("130/30/2.7 %s"):format(kind)
 				local plan = c.plan
 				expect(plan).never.toBeNil()
 				expect(plan.still).toBe(HOLD_END)
@@ -938,7 +948,7 @@ describe("the hold rows stand still in every direction (M12s, D-604, D-631)", fu
 				end
 				expect(count > 0).toBe(true)
 				expect(blade).toBe(0)
-				if locked then
+				if kind ~= "picked late" then
 					expect(hands).toBe(0)
 				else
 					-- What moves is the frozen pose's own need, the hand out (and the aside that step
@@ -973,8 +983,9 @@ describe("the hold rows stand still in every direction (M12s, D-604, D-631)", fu
 	end)
 
 	it("over a sweep of bearings, a hold row moves only to take a hand out of the kobold", function()
-		-- Locked, the stance takes the held pose's hands out before the hold (D-606); unlocked, nothing
-		-- plans before the release, so where the frozen pose already stands with a hand in the
+		-- Locked, or picked by the soft assist at the press (D-673), the stance takes the held pose's
+		-- hands out before the hold (D-606); picked only at the release, nothing plans before the
+		-- release, so where the frozen pose already stands with a hand in the
 		-- kobold, or the hold's own poses bring one in (Vertical's hold key moves the arms on toward
 		-- the anticipation), the release's plan takes it out on the hold rows (HandsOut's line),
 		-- and nothing more: no step toward a sample past the hold. Here the lock is a point 2.8
@@ -986,10 +997,10 @@ describe("the hold rows stand still in every direction (M12s, D-604, D-631)", fu
 		for _, bearing in { 0, 30, 60, 90, 120, 130, 150, 180, -30, -60, -90, -120, -150 } do
 			for _, yaw in { -30, 30 } do
 				local target = kobold(bearing, yaw, 2.7)
-				for _, locked in { true, false } do
+				for _, kind in { "locked", "unlocked", "picked late" } do
 					casts += 1
-					local c = cast(target, 2.8, fps, locked)
-					local label = ("%d/%d/2.7 %s"):format(bearing, yaw, if locked then "locked" else "unlocked")
+					local c = cast(target, 2.8, fps, kind == "locked", kind == "picked late")
+					local label = ("%d/%d/2.7 %s"):format(bearing, yaw, kind)
 					local _, depth, hands, steps = judgeHold(label, fps, c, target)
 					if hands + steps == 0 then
 						still += 1
@@ -1053,14 +1064,18 @@ describe("a stand-off step longer than the hold leaves the open (item 516(e)(f),
 		local key = RealContactPredictor.strikeKey(vertical, ClipSampler.hitWindows(vertical)[1])
 		local target = boar(4.225, 180)
 		local far = boar(5.88, 180)
-		for _, locked in { false, true } do
+		for _, kind in { "picked late", "unlocked", "locked" } do
+			local locked = kind == "locked"
+			local late = kind == "picked late"
 			for _, fps in { 30, 60, 144 } do
-				local label = ("boar 4.225 %s"):format(if locked then "locked" else "unlocked")
-				local c = cast(target, 4.225, fps, locked)
+				local label = ("boar 4.225 %s"):format(kind)
+				local c = cast(target, 4.225, fps, locked, late)
 				local plan = c.plan
 				expect(plan).never.toBeNil()
 				expect(plan.still).toBe(HOLD_END)
-				if locked then
+				-- Locked, or picked by the soft assist at the press, the stance steps back as it forms
+				-- (D-606, D-673); picked only at the release, nothing moves before it.
+				if not late then
 					judgeStance(label, fps, c)
 				else
 					expect((c.held[#c.held].root - c.held[1].root).Magnitude).toBe(0)
@@ -1121,11 +1136,318 @@ describe("a stand-off step longer than the hold leaves the open (item 516(e)(f),
 					)
 				)
 				-- 5.88 off the boar: no step at all, as the PC's other takes.
-				local still = cast(far, 5.88, fps, locked)
+				local still = cast(far, 5.88, fps, locked, late)
 				expect((still.rows[#still.rows].root - still.rows[1].root).Magnitude <= 1e-6).toBe(true)
 			end
 		end
 		target:Destroy()
 		far:Destroy()
+	end)
+end)
+
+-- Item 539(a) (D-671): the locked Horizontal's hold rows moved on the PC at 522's rests (3.08 to
+-- 3.18 off a kobold square on), 0.005-0.006 a row at 144 (drawn clip 0.159-0.216), 0.021-0.023 at
+-- 60 and 0.030-0.031 at 30, about 1 stud/s whatever the rate. The stance (D-606) kept the hold
+-- pose's parts out, but Horizontal's hold breathes (the left hand goes 0.005 to 0.0105 into the
+-- kobold's torso from 0.15 to 0.25), and the release's plan took that breath out on the hold rows.
+-- The stance now keeps out every pose its hold plays, to the hold's end. One Art cast at `fps`,
+-- locked on a kobold `ahead` square in front, held 0.2 s and released: every hold row (the frozen
+-- rows, the release itself, and the release's rows that draw the clip up to the hold's end) and
+-- the most any of them moves the root, flat.
+local function lockedHold(target: any, ahead: number, fps: number, slot: number): (number, number, number, number)
+	local rig = load(target)
+	local dt = 1 / fps
+	for _ = 1, 40 do
+		rig.frame(dt)
+	end
+	rig.setLock(START.Position + Vector3.new(0, 0, -ahead))
+	local art = rig.controller.slots()[slot]
+	rig.controller.beginArt(slot)
+	local handle = rig.animator.mixer:find(art.clip)
+	local ends = holdEnd(handle.clip)
+	local held: { Row } = { { clip = handle.time, root = rig.root.Position, frame = rig.root.CFrame } }
+	local holdFrames = math.ceil(0.2 * fps)
+	for _ = 1, holdFrames do
+		rig.frame(dt)
+		table.insert(held, { clip = handle.time, root = rig.root.Position, frame = rig.root.CFrame })
+	end
+	local released = handle.time
+	local before = rig.root.Position
+	rig.controller.releaseArt(slot, holdFrames * dt)
+	local rows: { Row } = { { clip = handle.time, root = rig.root.Position, frame = rig.root.CFrame } }
+	local releaseStep = rig.root.Position - before
+	while handle.time < ends + 0.05 do
+		rig.frame(dt)
+		table.insert(rows, { clip = handle.time, root = rig.root.Position, frame = rig.root.CFrame })
+	end
+	local count, moved, most = 0, 0, 0
+	local function judge(step: Vector3)
+		count += 1
+		local flat = Vector3.new(step.X, 0, step.Z).Magnitude
+		if flat > 1e-6 then
+			moved += 1
+		end
+		most = math.max(most, flat)
+	end
+	for index = 2, #held do
+		if held[index - 1].clip >= released - 1e-9 then
+			judge(held[index].root - held[index - 1].root)
+		end
+	end
+	judge(releaseStep)
+	for index = 2, #rows do
+		if rows[index - 1].clip <= ends + 1e-6 then
+			judge(rows[index].root - rows[index - 1].root)
+		end
+	end
+	local stance = rig.stances[1]
+	local keep = if stance ~= nil and stance.plan ~= nil then stance.plan.keep(holdAt(handle.clip)) else 0
+	return count, moved, most, keep
+end
+
+describe("a locked Art's hold rows stand still at 522's rests (item 539(a), D-671)", function()
+	it("every Art, locked on a kobold 3.08 and 3.18 square ahead, at 30, 60 and 144", function()
+		-- d310ca7: the locked Horizontal's release rows moved 0.0029 / 0.0019 / 0.0007 at 60 and 7 rows
+		-- of 0.0014 falling to 0.0002 at 144, straight back (the release's plan taking the hold's
+		-- breath out); the stance kept 0.2254 / 0.1255 back. Now the stance keeps 0.2310 / 0.1310 and
+		-- no hold row moves; Vertical, Rising Arc and Sharp Nail stood still before and do now.
+		for _, distance in { 3.08, 3.18 } do
+			local target = kobold(0, 0, distance)
+			for slot = 1, 4 do
+				for _, fps in { 30, 60, 144 } do
+					local count, moved, most, keep = lockedHold(target, distance, fps, slot)
+					print(
+						("[539a] slot %d at %.2f, %d fps: %d hold rows, %d moved (most %.4f); the stance keeps %.4f back"):format(
+							slot,
+							distance,
+							fps,
+							count,
+							moved,
+							most,
+							keep
+						)
+					)
+					expect(count > 0).toBe(true)
+					expect(moved).toBe(0)
+				end
+			end
+			target:Destroy()
+		end
+	end)
+end)
+
+-- F1h's openIssue 1 (item 561(c)(f), D-672): at a tilted stop the keep-out's aside (D-315, off the
+-- axe's face) came on Sharp Nail's first lunge row with the clip's own lunge, over the row's long-row
+-- bar max(12 x dt, |m N|, |m N-1|) + 0.001 (Lune at 60 0.296-0.315 against 0.285). The aside now
+-- shares the row's budget, max(12 x the clip's advance, |m|), with the lunge: the lunge gives up what
+-- the aside needs on the row (only its free part, never into the room the cast left), the stand-off
+-- takes that back as its own step, and what still does not fit is carried to the next rows.
+describe("the keep-out's aside shares a lunge row's budget at a turned face (F1h, D-672)", function()
+	it("Sharp Nail locked on a kobold turned 15 and 30 degrees, 2.9 to 3.5 ahead, at 60 and 144", function()
+		-- d310ca7 at 60: every cast's first lunge row read 0.3252-0.3484 flat against 0.2863. Now
+		-- every row with root motion stays within its bar, every other row within 12 x the clip's
+		-- advance along and across the line, and the hands stay off the kobold (its axe included) at
+		-- the strike's key.
+		local sharpNail = Harness.load("src/shared/clips/player/OneHandedSword/SharpNail")
+		local key = RealContactPredictor.strikeKey(sharpNail, ClipSampler.hitWindows(sharpNail)[1])
+		local function motionAt(t: number): number
+			local m = ClipSampler.rootMotionAt(sharpNail, t)
+			return math.sqrt(m[1] * m[1] + m[3] * m[3])
+		end
+		local function handsAt(target: any, frame: CFrame, clipTime: number): number
+			local rootFrame = avatar.base * START:ToObjectSpace(frame)
+			local solved = Pose.solve(avatar.model, rootFrame, ClipSampler.sample(sharpNail, clipTime))
+			local deepest = -math.huge
+			for _, name in KEEP_OUT.limbs do
+				local limb = avatar.model:FindFirstChild(name)
+				for _, part in target:GetDescendants() do
+					if
+						limb ~= nil
+						and solved[name] ~= nil
+						and part:IsA("BasePart")
+						and part.Name ~= KEEP_OUT.bodyFace
+						and part.Name ~= KEEP_OUT.heldFace
+					then
+						deepest = math.max(deepest, (BodyShell.depth(solved[name], limb.Size, part.CFrame, part.Size)))
+					end
+				end
+			end
+			return deepest
+		end
+		for _, fps in { 60, 144 } do
+			local dt = 1 / fps
+			local lungeRows, lungeMost, otherMost, handMost = 0, -math.huge, -math.huge, -math.huge
+			for _, yaw in { 15, 30 } do
+				for _, distance in { 2.9, 3.2, 3.5 } do
+					local target = kobold(0, yaw, distance)
+					local rig = load(target)
+					for _ = 1, 40 do
+						rig.frame(dt)
+					end
+					rig.setLock(START.Position + Vector3.new(0, 0, -distance))
+					local art = rig.controller.slots()[4]
+					assert(art ~= nil and art.clip == "player/OneHandedSword/SharpNail", "quick slot 4 is Sharp Nail")
+					rig.controller.beginArt(4)
+					local handle = rig.animator.mixer:find(art.clip)
+					local holdFrames = math.ceil(0.2 * fps)
+					for _ = 1, holdFrames do
+						rig.frame(dt)
+					end
+					rig.controller.releaseArt(4, holdFrames * dt)
+					local rows: { Row } = { { clip = handle.time, root = rig.root.Position, frame = rig.root.CFrame } }
+					while handle.time < 0.5 do
+						rig.frame(dt)
+						table.insert(rows, { clip = handle.time, root = rig.root.Position, frame = rig.root.CFrame })
+					end
+					local away = rig.asked[1].plan.away
+					for index = 3, #rows do
+						local step = rows[index].root - rows[index - 1].root
+						local flat = Vector3.new(step.X, 0, step.Z)
+						local m = math.abs(motionAt(rows[index].clip) - motionAt(rows[index - 1].clip))
+						local mBefore = math.abs(motionAt(rows[index - 1].clip) - motionAt(rows[index - 2].clip))
+						if math.max(m, mBefore) > 12 * dt then
+							lungeRows += 1
+							local bar = math.max(12 * dt, m, mBefore) + 0.001
+							lungeMost = math.max(lungeMost, flat.Magnitude - bar)
+							expect(flat.Magnitude <= bar).toBe(true)
+						else
+							local advance = math.max(
+								rows[index].clip - rows[index - 1].clip,
+								rows[index - 1].clip - rows[index - 2].clip,
+								0
+							)
+							local back = math.abs(flat:Dot(away))
+							local across = (flat - away * flat:Dot(away)).Magnitude
+							local bar = 12 * advance + 0.001
+							otherMost = math.max(otherMost, math.max(back, across) - bar)
+							expect(math.max(back, across) <= bar).toBe(true)
+						end
+						local drawn = rows[index - 1].clip
+						if drawn >= key - 1e-6 and drawn <= key + 0.04 then
+							local hand = handsAt(target, rows[index].frame, drawn)
+							handMost = math.max(handMost, hand)
+							expect(hand <= KEEP_OUT.depthEpsilon).toBe(true)
+						end
+					end
+					target:Destroy()
+				end
+			end
+			print(
+				("[F1h aside] %d fps: %d lunge rows, the most past the bar %+.4f; other rows %+.4f past 12 x c + 0.001; the hands at the key %+.3f"):format(
+					fps,
+					lungeRows,
+					lungeMost,
+					otherMost,
+					handMost
+				)
+			)
+			expect(lungeRows > 0).toBe(true)
+		end
+	end)
+end)
+
+-- Item 539(b) (D-673): the PC cleared the lock and pressed 2.65-2.94 from the kobold, and the root
+-- moved while Q was held: Rising Arc 0.091 / 0.100 a row at 144 / 60, Horizontal up to 0.039 /
+-- 0.036. The code moved nothing (an unlocked press planned no stance, D-606); Rising Arc's wind-up
+-- leans the colliding Head (D-630) 0.17 to 0.29 into the kobold's HeldBlocker from clip 0.05, and
+-- the engine pushed it out. An unlocked press now plans its stance off the soft assist's pick as a
+-- locked press does, so the body steps off the axe as the start pose forms. One unlocked Art cast
+-- at `fps`, the soft assist's pick `ahead` in front at the press (`picked` false: no pick at all),
+-- held 0.2 s and released: a Cast (judgeStance's reading) and the deepest any colliding part
+-- (keepOut.parts) stands in the kobold's Blocker or HeldBlocker on a row while the key is held, the
+-- pose drawn there (the clip the row before stepped to) at the root the row ends on.
+local function unlockedHold(target: any, ahead: number, fps: number, slot: number, picked: boolean): (Cast, number)
+	local rig = load(target)
+	local dt = 1 / fps
+	for _ = 1, 40 do
+		rig.frame(dt)
+	end
+	if picked then
+		rig.setAssist(START.Position + Vector3.new(0, 0, -ahead))
+	end
+	local art = rig.controller.slots()[slot]
+	local held: { Row } = { { clip = 0, root = rig.root.Position, frame = rig.root.CFrame } }
+	rig.controller.beginArt(slot)
+	local handle = rig.animator.mixer:find(art.clip)
+	local holdFrames = math.ceil(0.2 * fps)
+	for _ = 1, holdFrames do
+		rig.frame(dt)
+		table.insert(held, { clip = handle.time, root = rig.root.Position, frame = rig.root.CFrame })
+	end
+	local released = handle.time
+	local before = rig.root.Position
+	rig.controller.releaseArt(slot, holdFrames * dt)
+	local deepest = -math.huge
+	for index = 2, #held do
+		local rootFrame = avatar.base * START:ToObjectSpace(held[index].frame)
+		local solved = Pose.solve(avatar.model, rootFrame, ClipSampler.sample(handle.clip, held[index - 1].clip))
+		for _, name in KEEP_OUT.parts do
+			local part = avatar.model:FindFirstChild(name)
+			for _, face in target:GetChildren() do
+				if
+					part ~= nil
+					and solved[name] ~= nil
+					and face:IsA("BasePart")
+					and (face.Name == KEEP_OUT.bodyFace or face.Name == KEEP_OUT.heldFace)
+				then
+					deepest = math.max(deepest, (BodyShell.depth(solved[name], part.Size, face.CFrame, face.Size)))
+				end
+			end
+		end
+	end
+	local c: Cast = {
+		rows = {},
+		plan = rig.asked[1] and rig.asked[1].plan,
+		released = released,
+		stance = rig.stances[1],
+		held = held,
+		releaseStep = rig.root.Position - before,
+	}
+	return c, deepest
+end
+
+describe("an unlocked Art's press steps off the kobold as its stance forms (item 539(b), D-673)", function()
+	it("Rising Arc and Horizontal at the soft assist's pick 2.65 to 3.18 ahead, at 60 and 144", function()
+		-- 9249281: no stance; the root held still while the key was held, with Rising Arc's Head
+		-- 0.290 in the HeldBlocker for the engine to push out. Now the stance steps the body off as
+		-- the start pose forms, within 12 x dt a row and never toward the kobold, whole by the first
+		-- frozen row; the frozen rows stand still; and no colliding part stands in the kobold's
+		-- blockers deeper than keepOut.depthEpsilon on any row while the key is held, so the engine
+		-- has nothing to push and the whole step is the code's.
+		for _, distance in { 2.65, 2.8, 2.94, 3.08, 3.18 } do
+			local target = kobold(0, 0, distance)
+			for _, slot in { 3, 1 } do
+				for _, fps in { 60, 144 } do
+					local label = ("slot %d unlocked at %.2f"):format(slot, distance)
+					local c, deepest = unlockedHold(target, distance, fps, slot, true)
+					expect(c.stance).never.toBeNil()
+					local back = judgeStance(label, fps, c)
+					local stance = c.stance.plan
+					local aside = if stance.keepSide ~= nil then stance.keepSide(c.released) else 0
+					print(
+						("[539b] %s at %d fps: the stance %.3f back, %.3f aside; the colliding parts at most %+.3f in the kobold's blockers while the key is held"):format(
+							label,
+							fps,
+							back,
+							aside,
+							deepest
+						)
+					)
+					expect(deepest <= KEEP_OUT.depthEpsilon).toBe(true)
+				end
+			end
+			target:Destroy()
+		end
+	end)
+
+	it("with no pick an unlocked press plans nothing and the root stands still while the key is held", function()
+		local target = kobold(0, 0, 2.8)
+		for _, fps in { 60, 144 } do
+			local c = unlockedHold(target, 2.8, fps, 3, false)
+			expect(c.stance).toBeNil()
+			expect((c.held[#c.held].root - c.held[1].root).Magnitude).toBe(0)
+			expect(c.releaseStep.Magnitude).toBe(0)
+		end
+		target:Destroy()
 	end)
 end)

@@ -1289,16 +1289,18 @@ local function bench(): any
 	}
 end
 
--- The world flush behind: a {10, 8, 1} wall or a 2x8x2 pillar on the line, its face at z `face`.
-local function blockAt(shape: string, face: number): Part
+-- The world flush behind: a {10, 8, 1} wall or a 2x8x2 pillar on the line, its face at z `face`,
+-- turned `tilt` degrees about the point where the line meets that face (item 548's tilted stops).
+local function blockAt(shape: string, face: number, tilt: number?): Part
 	local block = Instance.new("Part")
 	block.Anchored = true
+	local turn = CFrame.new(30, 4, face) * CFrame.Angles(0, math.rad(tilt or 0), 0)
 	if shape == "wall" then
 		block.Size = Vector3.new(10, 8, 1)
-		block.CFrame = CFrame.new(30, 4, face - 0.5)
+		block.CFrame = turn * CFrame.new(0, 0, -0.5)
 	else
 		block.Size = Vector3.new(2, 8, 2)
-		block.CFrame = CFrame.new(30, 4, face - 1)
+		block.CFrame = turn * CFrame.new(0, 0, -1)
 	end
 	return block
 end
@@ -1352,7 +1354,128 @@ type Conditions = {
 	-- Item 535(d)'s long rows at 144: every `stall`-th frame lasts 2.25 frames (the PC's 15-16 ms
 	-- rows among 5-7 ms ones).
 	stall: number?,
+	-- Items 538 and 548 (D-658): the owner's Head collides by its mesh's hull, not its box: the
+	-- box `inset` smaller on every side, its four upright edges rounded by `radius` (OWNER_HULL,
+	-- fitted to the PC's reads, an assumption). The box is still what GetPartBoundsInBox and the
+	-- PC's box depth read.
+	hull: { inset: number, radius: number }?,
+	-- Item 548's tilted stops: the wall or the pillar turned this many degrees about the point
+	-- where the line meets its face.
+	tilt: number?,
 }
+
+-- The owner's Head's hull as the engine collides it, an assumption fitted to the PC's reads
+-- (D-658): the box less `inset` on every side, its four upright edges rounded by `radius` (a head
+-- is oval seen from above and flat-backed in profile). Square on, the box stands 0.08 past it (item
+-- 538's pre-check: the box 0.078-0.102 in where a ray found the collision surface 0.0006-0.017 in;
+-- Vertical's lean, the Head pitched back, 0.161 against 0.047); at a face turned 10 / 20 / 30
+-- degrees about the upright, 0.15 / 0.21 / 0.25 (item 548(d): the box 0.08 in at the pillar square
+-- on and up to 0.30 at the 30 degree stops).
+local OWNER_HULL = { inset = 0.08, radius = 0.4 }
+
+-- The hull's inner box (the box less `inset`, and less `radius` across the upright edges).
+local function hullCore(size: Vector3, hull: { inset: number, radius: number }): Vector3
+	local flat = 2 * (hull.inset + hull.radius)
+	return Vector3.new(
+		math.max(size.X - flat, 1e-3),
+		math.max(size.Y - 2 * hull.inset, 1e-3),
+		math.max(size.Z - flat, 1e-3)
+	)
+end
+
+-- How far the hull of a part at `frame` reaches along `axis` from its centre.
+local function hullReach(frame: CFrame, size: Vector3, hull: { inset: number, radius: number }, axis: Vector3): number
+	local core = hullCore(size, hull)
+	local x, z = frame.RightVector:Dot(axis), frame.LookVector:Dot(axis)
+	return core.X / 2 * math.abs(x)
+		+ core.Y / 2 * math.abs(frame.UpVector:Dot(axis))
+		+ core.Z / 2 * math.abs(z)
+		+ hull.radius * math.sqrt(x * x + z * z)
+end
+
+-- `separation` for the hull against a box: the box's and the hull's core's 15 axes.
+local function hullSeparation(
+	frame: CFrame,
+	size: Vector3,
+	hull: { inset: number, radius: number },
+	bFrame: CFrame,
+	bSize: Vector3
+): (number, Vector3)
+	local offset = frame.Position - bFrame.Position
+	local most, along = -math.huge, Vector3.zero
+	for _, axis in boxAxes(frame, bFrame) do
+		local d = offset:Dot(axis)
+		local apart = math.abs(d) - hullReach(frame, size, hull, axis) - halfAlong(bFrame, bSize, axis)
+		if apart > most then
+			most = apart
+			along = if d >= 0 then axis else -axis
+		end
+	end
+	return most, along
+end
+
+-- How deep a point stands inside a box (its least way out through a face); negative outside.
+local function pointDepth(frame: CFrame, size: Vector3, point: Vector3): number
+	local p = frame:PointToObjectSpace(point)
+	return math.min(size.X / 2 - math.abs(p.X), size.Y / 2 - math.abs(p.Y), size.Z / 2 - math.abs(p.Z))
+end
+
+-- The hull's signed distance at `p` (its own space), negative inside (a bound outside its corners).
+local function hullDistance(p: Vector3, core: Vector3, radius: number): number
+	local qx, qy, qz = math.abs(p.X) - core.X / 2, math.abs(p.Y) - core.Y / 2, math.abs(p.Z) - core.Z / 2
+	local flat = math.sqrt(math.max(qx, 0) ^ 2 + math.max(qz, 0) ^ 2) + math.min(math.max(qx, qz), 0) - radius
+	return math.max(flat, qy)
+end
+
+-- The hull's reads against a box `block` it is pressed into: how deep it overlaps the block (the
+-- separating axis, as the engine pushes it), its deepest point past the block's face (its support
+-- along the face's inward normal), and the read item 538 asks the PC to make (D-658): a 9 x 9
+-- grid of rays 0.15 apart across the Head's centre, each cast from 3 studs inside the face along its
+-- outward normal (Raycast with the Head alone included), the deepest hit past the face. The face is
+-- the one the hull is nearest (the separating axis).
+local function hullReads(
+	frame: CFrame,
+	size: Vector3,
+	hull: { inset: number, radius: number },
+	blockFrame: CFrame,
+	blockSize: Vector3
+): (number, number, number)
+	local core = hullCore(size, hull)
+	local apart, out = hullSeparation(frame, size, hull, blockFrame, blockSize)
+	local inward = frame:VectorToObjectSpace(-out)
+	local level = Vector3.new(inward.X, 0, inward.Z)
+	local tip = Vector3.new(
+		core.X / 2 * math.sign(inward.X),
+		core.Y / 2 * math.sign(inward.Y),
+		core.Z / 2 * math.sign(inward.Z)
+	) + (if level.Magnitude > 1e-9 then level.Unit * hull.radius else Vector3.zero)
+	local support = pointDepth(blockFrame, blockSize, frame:PointToWorldSpace(tip))
+	local across = out:Cross(Vector3.yAxis)
+	if across.Magnitude < 1e-3 then
+		across = out:Cross(Vector3.xAxis)
+	end
+	across = across.Unit
+	local up = across:Cross(out).Unit
+	local grid = -math.huge
+	for i = -4, 4 do
+		for j = -4, 4 do
+			local origin = frame.Position + across * (0.15 * i) + up * (0.15 * j) - out * 3
+			local t = 0
+			for _ = 1, 64 do
+				local d = hullDistance(frame:PointToObjectSpace(origin + out * t), core, hull.radius)
+				if d < 1e-5 then
+					grid = math.max(grid, pointDepth(blockFrame, blockSize, origin + out * t))
+					break
+				end
+				t += d
+				if t > 6 then
+					break
+				end
+			end
+		end
+	end
+	return -apart, support, grid
+end
 
 -- One take as the PC ran it: placed at z `start` facing the kobold (locked), still 0.3 s, S held
 -- 0.5 s, still 0.3 s, Basic1, still 0.4 s, then 3 times Sharp Nail (held 0.2 s, released) and
@@ -1363,7 +1486,7 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 	local pc: Conditions = conditions or {}
 	local avatar = b.avatar
 	local GAP: number = b.gap
-	local block = blockAt(shape, face)
+	local block = blockAt(shape, face, pc.tilt)
 	local obstacles: { BasePart } = { block }
 	for _, blocker in b.blockers do
 		table.insert(obstacles, blocker)
@@ -1390,6 +1513,15 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		end
 	end
 	local contact: number = pc.contact or 0
+	-- How far a colliding part stands apart from an obstacle as the engine collides it (the owner's
+	-- Head by its hull with `hull`), and the way out.
+	local hull = pc.hull
+	local function apartOf(name: string, frame: CFrame, obstacle: BasePart): (number, Vector3)
+		if hull ~= nil and name == "Head" then
+			return hullSeparation(frame, sizes[name], hull, obstacle.CFrame, obstacle.Size)
+		end
+		return separation(frame, sizes[name], obstacle.CFrame, obstacle.Size)
+	end
 	local function pose(root: CFrame, transforms: { [string]: CFrame })
 		for name, solved in b.solve(root, transforms) do
 			local part = avatar.model:FindFirstChild(name)
@@ -1446,6 +1578,8 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 	end
 	-- `byKobold`: the share of the push out of the kobold's blockers alone (D-627).
 	local pushed, walked, byKobold = Vector3.zero, Vector3.zero, Vector3.zero
+	-- Over the take, the kobold's push by the part and blocker it pushed (D-658).
+	local koboldBy: { [string]: number } = {}
 	local function physics(dt: number)
 		local count = math.max(1, math.floor(dt * SUBSTEP_HZ + 0.5))
 		local h = dt / count
@@ -1461,12 +1595,14 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 				local push, fromKobold = Vector3.zero, Vector3.zero
 				for _, name in colliding do
 					for _, obstacle in obstacles do
-						local apart, along = separation(solved[name], sizes[name], obstacle.CFrame, obstacle.Size)
+						local apart, along = apartOf(name, solved[name], obstacle)
 						if apart < -contact then
 							local out = Vector3.new(along.X, 0, along.Z) * (-apart - contact)
 							push += out
 							if obstacle ~= block then
 								fromKobold += out
+								local key = name .. " in " .. obstacle.Name
+								koboldBy[key] = (koboldBy[key] or 0) + out.Magnitude * PUSH_SHARE
 							end
 						end
 					end
@@ -1729,6 +1865,8 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		-- Of it, the share out of the kobold's blockers: the most on one row and the path in all.
 		koboldPush = 0,
 		koboldPath = 0,
+		-- Its path by the part and the blocker it pushed, the most first.
+		koboldParts = "",
 		-- (f) each First-to-First step over the long-row bar: its row, the swing and its clip time,
 		-- the step, the bar, and its code share (C1 - First) and engine share (First of N+1 - C1).
 		over = {} :: { any },
@@ -1748,6 +1886,18 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		-- Item 535(e): the most the engine pushed the root toward the kobold on a row whose code
 		-- stepped it back (a code step into the wall reads here).
 		intoWall = 0,
+		-- With `hull` (D-658): the Head's hull past the face on the screen, its deepest point and
+		-- the rays' read (hullReads); the same on the S hold's last row; and the hull in a kobold
+		-- blocker, the deepest, on how many rows, and where.
+		hull = -math.huge,
+		headRay = -math.huge,
+		preHull = 0,
+		preRay = 0,
+		hullBlocker = 0,
+		hullBlockerRows = 0,
+		hullBlockerWhere = "",
+		-- (b) with the hull: on rows a colliding part touches at First as the engine collides it.
+		normalHull = 0,
 	}
 	local rootSize: Vector3 = avatar.model.PrimaryPart.Size
 	local function depth(frame: CFrame, size: Vector3): number
@@ -1760,6 +1910,10 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 			result.pre = math.max(result.pre, depth(screen[name], sizes[name]))
 		end
 		result.preHead = depth(screen.Head, sizes.Head)
+		if hull ~= nil then
+			local _, support, ray = hullReads(screen.Head, sizes.Head, hull, block.CFrame, block.Size)
+			result.preHull, result.preRay = support, ray
+		end
 	end
 	local dt = 1 / fps
 	local function ownMotion(r: any): Vector3
@@ -1785,6 +1939,27 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		if r.label == "Basic1" then
 			result.codeShare += code:Dot(toward)
 			result.engineShare += engine:Dot(toward)
+		end
+		if hull ~= nil then
+			local _, support, ray = hullReads(screen.Head, sizes.Head, hull, block.CFrame, block.Size)
+			local hullIn = 0
+			result.hull = math.max(result.hull, support)
+			result.headRay = math.max(result.headRay, ray)
+			for _, blocker in b.blockers do
+				local apart = apartOf("Head", screen.Head, blocker)
+				if -apart > hullIn then
+					hullIn = -apart
+				end
+				if -apart > result.hullBlocker then
+					result.hullBlocker = -apart
+					result.hullBlockerWhere = ("Head in %s, %s at %.3f"):format(
+						blocker.Name,
+						r.label,
+						if r.swing ~= nil then r.swing.time else -1
+					)
+				end
+			end
+			result.hullBlockerRows += if hullIn > 0 then 1 else 0
 		end
 		do
 			local exact, bounds = false, false
@@ -1850,16 +2025,25 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		local near, worst = false, 0
 		for _, name in colliding do
 			local was, along = separation(fromFirst[name], sizes[name], block.CFrame, block.Size)
-			if was < GAP then
-				near = true
-				local now = separation(stepped[name], sizes[name], block.CFrame, block.Size)
-				local clipOwn = separation(carriedOnly[name], sizes[name], block.CFrame, block.Size)
-				worst = math.max(worst, (was - now) - math.max(was - clipOwn, 0))
+			-- Item 538(b) on the hull (D-658): touching as the engine collides the part.
+			local touches = hull ~= nil and apartOf(name, fromFirst[name], block) < GAP
+			if was < GAP or touches then
 				-- Item 496 (b): along the inward normal of the face it is nearest (`along` points out).
 				local inward = -Vector3.new(along.X, 0, along.Z)
+				local into = 0
 				if inward.Magnitude > 1e-6 then
 					inward = inward.Unit
-					result.normal = math.max(result.normal, code:Dot(inward) - math.max(r.carried:Dot(inward), 0))
+					into = code:Dot(inward) - math.max(r.carried:Dot(inward), 0)
+				end
+				if touches then
+					result.normalHull = math.max(result.normalHull, into)
+				end
+				if was < GAP then
+					near = true
+					local now = separation(stepped[name], sizes[name], block.CFrame, block.Size)
+					local clipOwn = separation(carriedOnly[name], sizes[name], block.CFrame, block.Size)
+					worst = math.max(worst, (was - now) - math.max(was - clipOwn, 0))
+					result.normal = math.max(result.normal, into)
 				end
 			end
 		end
@@ -1983,6 +2167,20 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		)
 	end
 	print(line)
+	do
+		local parts = {}
+		for key, path in koboldBy do
+			table.insert(parts, { key = key, path = path })
+		end
+		table.sort(parts, function(a, b)
+			return a.path > b.path
+		end)
+		local named = {}
+		for _, part in parts do
+			table.insert(named, ("%s %.3f"):format(part.key, part.path))
+		end
+		result.koboldParts = table.concat(named, "; ")
+	end
 	headPart.Size = headSize
 	block:Destroy()
 	if enemyMixer ~= nil then
@@ -2649,6 +2847,63 @@ describe("item 535 under the PC's conditions (D-655, D-656)", function()
 				expect(result.torso.UpperTorso <= 0.07).toBe(true)
 				expect(result.torso.LowerTorso <= 0.07).toBe(true)
 				expect(result.torso.Head <= 0.07).toBe(true)
+			end
+			b.kobold:Destroy()
+		end
+	)
+
+	it(
+		"the owner's Head by its hull at a tilted stop: within the face's contact, out of the blockers (D-658)",
+		function()
+			-- Items 538, 548(d) and 561(a)(b) on aa27e35 and d310ca7: the owner's Head is a MeshPart the
+			-- engine collides by its hull (CollisionFidelity Default), and its box sits 0.08-0.10 in front
+			-- of the hull square on. The PC read the box 0.083-0.307 into the face through Vertical,
+			-- growing with the angle, and 0.046-0.110 into the HeldBlocker at the tilted pillars, while
+			-- its ray read of the hull was at most 0.050 at 60 and 0.068 at 144. Here the bench's engine
+			-- collides the Head by a hull fitted to those reads (OWNER_HULL), at the PC's deepest case:
+			-- the pillar at 30 degrees (the line 32.7 off its normal), the gap 3.89, the root 1.01 off
+			-- the face. The hull stays within the engine's contact of the face; it never enters the
+			-- kobold's blockers, where the box reads past 0.04; the kobold's push there is UpperTorso's
+			-- in the HeldBlocker (openIssue: the hold's lean pushed off a turned face).
+			local CollisionGroups = Harness.load("src/server/world/CollisionGroups")
+			local b = bench()
+			ownerHead(b)
+			CollisionGroups.joinPlayers(b.avatar.model)
+			local angle = 32.7
+			local face = blockerFaceOf(b) - (3.89 + math.min(math.tan(math.rad(angle)), 1))
+			for _, fps in { 60, 144 } do
+				local result = take(
+					b,
+					"pillar",
+					face,
+					fps,
+					face + 1.01,
+					conditions(fps, { off = 1.01, hull = OWNER_HULL, tilt = angle })
+				)
+				line(("hull pillar %.1f %d"):format(angle, fps), result)
+				print(
+					("[F1i hull pillar %.1f %d] the Head's box %.3f, its hull %.3f (rays %.3f) in the face; pre-check box %.3f, hull %.3f; (b) with the hull %.4f | in the blockers: the box %.3f, the hull %.3f on %d rows | the kobold's push %.3f a row (%s)"):format(
+						angle,
+						fps,
+						result.torso.Head,
+						result.hull,
+						result.headRay,
+						result.preHead,
+						result.preHull,
+						result.normalHull,
+						result.blockerDeep,
+						result.hullBlocker,
+						result.hullBlockerRows,
+						result.koboldPush,
+						result.koboldParts
+					)
+				)
+				expect(result.hull <= 0.07).toBe(true)
+				expect(result.headRay <= result.hull + 1e-3).toBe(true)
+				expect(result.hullBlocker <= 0.04).toBe(true)
+				-- The box, as GetPartBoundsInBox and a box's depth read it, is not what the engine stops.
+				expect(result.torso.Head > 0.07).toBe(true)
+				expect(result.blockerDeep > 0.04).toBe(true)
 			end
 			b.kobold:Destroy()
 		end

@@ -335,7 +335,9 @@ local function corners(size: Vector3): { Vector3 }
 end
 
 -- Every part's CFrame from the root through the Motor6Ds as Choreo wrote them (Part0 * C0 *
--- Transform = Part1 * C1).
+-- Transform = Part1 * C1). A joint the step turned off whose Part1 it anchored (D-531's detach:
+-- the body drawn on a root the step chose, D-664) draws that part where the step put it, and
+-- the parts hanging from it on it.
 local function solve(model: Model, root: CFrame): { [string]: CFrame }
 	local out = { [(model.PrimaryPart :: BasePart).Name] = root }
 	local motors = {}
@@ -348,9 +350,14 @@ local function solve(model: Model, root: CFrame): { [string]: CFrame }
 	while progressed do
 		progressed = false
 		for _, motor in motors do
-			local p0, p1 = (motor.Part0 :: BasePart).Name, (motor.Part1 :: BasePart).Name
+			local part1 = motor.Part1 :: BasePart
+			local p0, p1 = (motor.Part0 :: BasePart).Name, part1.Name
 			if out[p0] ~= nil and out[p1] == nil then
-				out[p1] = out[p0] * motor.C0 * motor.Transform * motor.C1:Inverse()
+				if motor.Enabled == false and part1.Anchored then
+					out[p1] = part1.CFrame
+				else
+					out[p1] = out[p0] * motor.C0 * motor.Transform * motor.C1:Inverse()
+				end
 				progressed = true
 			end
 		end
@@ -387,7 +394,7 @@ type Take = {
 	stopChannel: boolean?,
 	stopHighest: number?,
 	-- Clips the take's ActionStarted played on the client, and whether the stop plant's channel was
-	-- on the rig on a row a full-body clip showed.
+	-- on the rig on a row a full-body clip showed (not one waiting hidden, D-652).
 	played: { string },
 	channelUnderFullBody: boolean,
 	-- The first attack clip ActionStarted played (D-632), when the take draws actions: its id, its
@@ -432,6 +439,9 @@ type View = {
 	lag: number?,
 	arrival: boolean?,
 	yawLead: ((row: number) -> number)?,
+	-- Rows each Telegraph reaches the driver after the ActionStarted it went out with (math.huge:
+	-- it is lost). Both are unreliable remotes: neither their order nor their arrival is sure.
+	telegraphRows: number?,
 }
 
 local SERVER: View = { hz = 60, interpolated = false }
@@ -567,6 +577,7 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 		end
 	end
 	local windUpAt = (Locomotion :: any).windUpAt
+	local lateTelegraphs: { { row: number, origin: Vector3 } } = {}
 	local lag = seen.lag or FRAME
 	local mixer = animator.mixer :: any
 	local lastAt: Vector3? = nil
@@ -586,12 +597,26 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 		local playBy = if seen.arrival == true then clock.t else drawnT
 		local walkShown = walkHandle()
 		walkBefore = if walkShown ~= nil then walkShown.weight else 0
+		for index = #lateTelegraphs, 1, -1 do
+			local late = lateTelegraphs[index]
+			if late.row <= row then
+				table.remove(lateTelegraphs, index)
+				if windUpAt ~= nil then
+					windUpAt(driver, late.origin)
+				end
+			end
+		end
 		while #sent > 0 and sent[1].payload.serverTime <= playBy + GAP do
 			local entry = table.remove(sent, 1)
 			local payload = entry.payload
 			if entry.name == "Telegraph" then
 				if windUpAt ~= nil and payload.origin ~= nil then
-					windUpAt(driver, Vector3.new(table.unpack(payload.origin)))
+					local origin = Vector3.new(table.unpack(payload.origin))
+					if seen.telegraphRows ~= nil then
+						table.insert(lateTelegraphs, { row = row + seen.telegraphRows, origin = origin })
+					else
+						windUpAt(driver, origin)
+					end
 				end
 				continue
 			end
@@ -621,7 +646,9 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 		end
 		local fullBody = false
 		for _, handle in mixer:handles() do
-			if handle.layer == "FullBody" and not handle.done and handle.weight > 0 then
+			-- A clip waiting hidden for the drawn body (D-652: its fade held at 0) shows nothing.
+			local hidden = handle.fadeHeld == true and handle.fade <= 0
+			if handle.layer == "FullBody" and not handle.done and handle.weight > 0 and not hidden then
 				fullBody = true
 			end
 		end
@@ -1037,13 +1064,15 @@ end)
 -- start's (footSlideStuds a 60 Hz row, the window's; no corner under the idle's stand or
 -- stride.contact, whichever is deeper), and once the stop is over the walk shows none, the plant's
 -- channel is gone and every foot is down. STOP_PENDING: how far the worst slide is past the bar
--- (rounded up to the hundredth), by view, rig and off angle. Only the brake row is past it: the
--- row the server's brake lands on is drawn before the client can see the brake, so its walk ran a
--- whole row's pace over a root that moved only part of it (the kobold at 90: 0.1006 at 60 and
--- 0.0459 at 144; the boar at 60: 0.0423 at 144). An entry never grows.
+-- (rounded up to the hundredth), by view, rig and off angle. On d310ca7 only the brake row was
+-- past it: the row the server's brake lands on was drawn before the client could see the brake,
+-- so its walk ran a whole row's pace over a root that moved only part of it (the kobold at 90:
+-- 0.1006 at 60 and 0.0459 at 144; the boar at 60: 0.0423 at 144). Drawn on the rig's own root
+-- (D-664), each row is drawn where the step reads it and the stop holds its feet on the field:
+-- 0.001 and 0.005, and 0.016, so every entry is gone. An entry never grows.
 local STOP_PENDING: { [string]: { [string]: { [number]: number } } } = {
-	["60"] = { Boar = {}, Kobold = { [90] = 0.01 } },
-	["144"] = { Boar = { [60] = 0.01 }, Kobold = { [90] = 0.01 } },
+	["60"] = { Boar = {}, Kobold = {} },
+	["144"] = { Boar = {}, Kobold = {} },
 }
 
 describe("EnemyWalkStart: an enemy's stop keeps its feet planted (AO 511(k); D-623)", function()
@@ -1260,6 +1289,396 @@ describe("EnemyWalkStart: an attack waits for the body the PC draws behind the s
 	end
 end)
 
+-- The PC's uneven drawn yaw (AV 557 and 558 on d310ca7; D-664, D-665). The PC draws a
+-- replicated root's yaw unevenly row to row: its client rows' yaw steps read 0.02 to 2.89 degrees
+-- at 60 fps where the server's read 1.67 to 1.90 (532(g) on 3eee415), the shares of the even step
+-- over an 8-row cycle in PC_YAW_60, and over a 5-row cycle at 144 in PC_YAW_144. Here the lag
+-- views with the drawn yaw led by that cycle (its place even). The joints were written before the
+-- row's root landed, so every planted foot moved by the row's deviation: on d310ca7 the boar's
+-- window at 90, 135 and 180 read 0.107, 0.078 and 0.110 a 60 Hz row and its start rows (its turn
+-- on the spot) 0.114. Drawn on the rig's own even root (D-664) with its idle's hooves held
+-- through a turn on the spot (D-665): the window's and the start's bars, no pending.
+local PC_YAW_60 = { 0.994, 0.912, 0.727, 0.336, 0.500, 1.775, 1.981, 0.775 }
+local PC_YAW_144 = { 0.2, 1.68, 0.5, 1.4, 1.22 }
+
+-- The seconds a cycle of yaw-step shares leads the drawn yaw by on each row (its mean step even).
+local function yawCycle(shares: { number }, hz: number): (row: number) -> number
+	local leads: { number } = {}
+	local sum = 0
+	for index, share in shares do
+		sum += share
+		leads[index] = (sum - index) / hz
+	end
+	return function(row: number): number
+		return leads[(row - 1) % #leads + 1]
+	end
+end
+
+local PC60_YAW: View =
+	{ hz = 60, interpolated = true, lag = FRAME + LAG_60, arrival = true, yawLead = yawCycle(PC_YAW_60, 60) }
+local PC144_YAW: View = {
+	hz = 144,
+	interpolated = true,
+	lag = FRAME + LAG_144,
+	arrival = true,
+	share = underRead(0.5, 0.95),
+	yawLead = yawCycle(PC_YAW_144, 144),
+}
+
+-- The PC's own drawn yaw row by row (AV 557 and 558, part 2 on d310ca7): the replicated root's
+-- logged yaw in degrees on the boar's 90, 135 and 180 degree takes' windows, rows 10 to 30 at 60 Hz
+-- and 22 to 72 at 144. Its steps run about a 5-row cycle at 60 (0.27 to 1.71 of the even step) and
+-- a 9 to 10-row one at 144 (0.12 to 1.74), where PC_YAW_60 and PC_YAW_144 run 8 and 5 rows. Each
+-- window's steps lead the drawn yaw as they did on the PC, over and over, under the same bars.
+local PC_YAW_ROWS: { { off: number, hz: number, yaw: { number } } } = {
+	{
+		off = 90,
+		hz = 60,
+		yaw = {
+			-136.017,
+			-138.619,
+			-139.523,
+			-140.962,
+			-143.929,
+			-146.157,
+			-146.86,
+			-148.341,
+			-150.693,
+			-153.242,
+			-155.443,
+			-156.025,
+			-157.214,
+			-159.644,
+			-162.332,
+			-164.523,
+			-165.179,
+			-166.44,
+			-168.58,
+			-171.142,
+			-173.304,
+		},
+	},
+	{
+		off = 135,
+		hz = 60,
+		yaw = {
+			-90.941,
+			-92.569,
+			-94.968,
+			-97.267,
+			-98.18,
+			-99.318,
+			-101.927,
+			-105.097,
+			-107.024,
+			-107.618,
+			-109.443,
+			-112.17,
+			-114.728,
+			-116.251,
+			-116.744,
+			-118.57,
+			-121.233,
+			-123.683,
+			-125.362,
+			-126.001,
+			-128.026,
+		},
+	},
+	{
+		off = 180,
+		hz = 60,
+		yaw = {
+			47.519,
+			49.197,
+			49.813,
+			51.948,
+			54.921,
+			57.493,
+			58.667,
+			59.7,
+			61.932,
+			64.709,
+			67.011,
+			67.79,
+			69.109,
+			71.595,
+			74.16,
+			75.218,
+			76.223,
+			78.391,
+			81.128,
+			83.424,
+			84.372,
+		},
+	},
+	{
+		off = 90,
+		hz = 144,
+		yaw = {
+			-135.193,
+			-136.029,
+			-136.744,
+			-137.118,
+			-137.209,
+			-137.752,
+			-138.6,
+			-139.677,
+			-140.876,
+			-141.921,
+			-143.25,
+			-144.081,
+			-144.81,
+			-144.998,
+			-145.221,
+			-145.829,
+			-146.689,
+			-147.907,
+			-149.053,
+			-150.016,
+			-151.051,
+			-151.861,
+			-152.349,
+			-152.457,
+			-152.862,
+			-153.608,
+			-154.609,
+			-155.761,
+			-156.793,
+			-158.111,
+			-159.282,
+			-159.991,
+			-160.275,
+			-160.46,
+			-160.902,
+			-161.681,
+			-162.806,
+			-163.749,
+			-164.865,
+			-165.924,
+			-167.168,
+			-167.54,
+			-167.855,
+			-168.046,
+			-168.517,
+			-169.241,
+			-170.282,
+			-171.289,
+			-172.663,
+			-173.63,
+			-174.611,
+		},
+	},
+	{
+		off = 135,
+		hz = 144,
+		yaw = {
+			-87.216,
+			-88.199,
+			-89.503,
+			-90.103,
+			-90.656,
+			-90.813,
+			-91.107,
+			-91.749,
+			-92.646,
+			-93.702,
+			-94.666,
+			-95.77,
+			-96.9,
+			-97.687,
+			-98.174,
+			-98.265,
+			-98.698,
+			-99.627,
+			-100.538,
+			-101.726,
+			-102.948,
+			-104.101,
+			-105.097,
+			-105.8,
+			-106.102,
+			-106.284,
+			-107.149,
+			-107.979,
+			-109.104,
+			-110.297,
+			-111.45,
+			-112.326,
+			-113.22,
+			-113.584,
+			-113.742,
+			-114.14,
+			-114.907,
+			-115.905,
+			-117.037,
+			-118.205,
+			-119.314,
+			-119.906,
+			-120.722,
+			-121.181,
+			-121.369,
+			-121.608,
+			-122.203,
+			-123.186,
+			-124.066,
+			-125.314,
+			-126.392,
+		},
+	},
+	{
+		off = 180,
+		hz = 144,
+		yaw = {
+			45.633,
+			46.299,
+			46.451,
+			46.631,
+			47.181,
+			48.008,
+			49.174,
+			50.128,
+			51.241,
+			52.186,
+			53.178,
+			53.755,
+			53.961,
+			54.14,
+			54.823,
+			55.591,
+			56.664,
+			57.833,
+			58.999,
+			60.062,
+			60.837,
+			61.503,
+			61.664,
+			62.007,
+			62.693,
+			63.63,
+			64.72,
+			65.868,
+			66.827,
+			67.957,
+			68.633,
+			69.116,
+			69.242,
+			69.694,
+			70.451,
+			71.293,
+			72.406,
+			73.571,
+			74.418,
+			75.435,
+			76.337,
+			76.796,
+			76.912,
+			77.192,
+			77.833,
+			78.728,
+			79.789,
+			81.091,
+			82.209,
+			83.079,
+			84.014,
+		},
+	},
+}
+
+-- A logged yaw's row-to-row steps as shares of their mean step.
+local function yawShares(yaw: { number }): { number }
+	local steps: { number } = {}
+	local sum = 0
+	for index = 2, #yaw do
+		local step = math.abs((yaw[index] - yaw[index - 1] + 180) % 360 - 180)
+		steps[index - 1] = step
+		sum += step
+	end
+	local mean = sum / #steps
+	for index, step in steps do
+		steps[index] = step / mean
+	end
+	return steps
+end
+
+describe("EnemyWalkStart: the PC's uneven drawn yaw (AV 557, 558; D-664, D-665)", function()
+	for _, case in { { rig = "Boar", offs = { 90, 135, 180 } }, { rig = "Kobold", offs = { 0, 60, 90, 135, 180 } } } do
+		for _, off in case.offs do
+			local function keepsItsFeet(view: View): () -> ()
+				return function()
+					local result = take(case.rig, off, view, 1.5 + (view.lag :: number))
+					startCheck(case.rig, off, result, view.hz)
+					check(case.rig, off, result, view.hz, nil, false)
+				end
+			end
+			for _, view in { PC60_YAW, PC144_YAW } do
+				it(
+					("%s set off %d deg keeps its feet from the release through the window, its yaw drawn unevenly at %d Hz"):format(
+						case.rig,
+						off,
+						view.hz
+					),
+					keepsItsFeet(view)
+				)
+			end
+			for _, rows in PC_YAW_ROWS do
+				local view = table.clone(if rows.hz == 60 then PC60_YAW else PC144_YAW)
+				view.yawLead = yawCycle(yawShares(rows.yaw), rows.hz)
+				it(
+					("%s set off %d deg keeps its feet from the release through the window, its yaw drawn as the PC drew the boar's %d deg take at %d Hz"):format(
+						case.rig,
+						off,
+						rows.off,
+						rows.hz
+					),
+					keepsItsFeet(view)
+				)
+			end
+		end
+	end
+end)
+
+-- The attack's wait when its Telegraph does not come first (AV 556(f) on d310ca7; D-663). The
+-- Telegraph (with the wind-up's origin) and the ActionStarted (with the clip) are both unreliable
+-- remotes, sent on the same server frame: on the owner's PC no attack ever waited (every clip
+-- showed on the row after its ActionStarted, its drawn body still 0.8 to 2.7 short of the origin)
+-- and the attacks slid 0.09 to 0.41 a row. Here the PC's lag views with the Telegraph a row late or
+-- lost. On d310ca7 the clip never waited, late or lost alike: the boar's Charge at 90 and 180
+-- slid 0.255 and 0.259 a 60 Hz row (0.106 and 0.130 at 144), the kobold's Overhead at 0 and 90
+-- 0.083 and 0.083 (0.064 and 0.061). An attack with no origin named waits while its drawn body
+-- walks on (the server stopped the body as the wind-up began); an origin heard later takes over
+-- the wait. Bars: the crouch's, and it waits.
+local LATE_TAKES: { { rig: string, off: number, seconds: number } } = {
+	{ rig = "Boar", off = 90, seconds = 1.5 },
+	{ rig = "Boar", off = 180, seconds = 2.6 },
+	{ rig = "Kobold", off = 0, seconds = 2.1 },
+	{ rig = "Kobold", off = 90, seconds = 2.2 },
+}
+
+describe("EnemyWalkStart: an attack waits when its Telegraph comes late or is lost (AV 556(f); D-663)", function()
+	for _, case in LATE_TAKES do
+		for _, base in { PC60_LAG, PC144_LAG } do
+			for _, rows in { 1, math.huge } do
+				local view = table.clone(base)
+				view.telegraphRows = rows
+				it(
+					("%s attacking after it set off %d deg at %d Hz, its Telegraph %s"):format(
+						case.rig,
+						case.off,
+						view.hz,
+						if rows == math.huge then "lost" else "a row late"
+					),
+					function()
+						local result = take(case.rig, case.off, view, case.seconds + (view.lag :: number), true)
+						crouchCheck(case, view, result)
+						expect((result.crouchWaited :: number) > 0).toBe(true)
+					end
+				)
+			end
+		end
+	end
+end)
+
 -- A stop the root walks off from mid-step (D-623): the client copy alone, its root carried at
 -- the kobold's walkSpeed along its facing for a second, standing for 0.1 s (a foot in its step),
 -- then walking on. The stop plant takes the legs on the row after the root stood and lets them go
@@ -1360,12 +1779,18 @@ end)
 -- on 4c725c9 at its full walk speed. RigDriver's walking-turn plant (WalkTurnPlant) takes the turn
 -- back at each planted hoof's hip. Drawn here on the client alone: the root carried at the rig's
 -- walkSpeed along its facing and turned at the turn rate each row, Locomotion's own tracker pacing
--- the gait, the walk's planted hooves read after its first second (the gait settled).
+-- the gait, the walk's planted hooves read after its first second (the gait settled). The rig
+-- without the plant is drawn on its root part as d310ca7 drew it: the even root (D-664) takes
+-- back part of the wheel's slide on its own at 144 Hz (0.0336 against 0.0413), and the plant is
+-- judged against the wheel as it was.
 local function wheelSlide(hz: number, plant: boolean): number
 	local plants = ChoreoData.enemy.gait.turnPlant
 	local config = plants.Boar
+	local even = ChoreoData.enemy.gait.evenRoot
+	local drew = even.drawBody
 	if not plant then
 		plants.Boar = nil
+		even.drawBody = false
 	end
 	local client = RigBuilder.build("Boar")
 	local root = client.PrimaryPart :: BasePart
@@ -1379,6 +1804,7 @@ local function wheelSlide(hz: number, plant: boolean): number
 	local animator = Choreo.get(client)
 	local driver = Locomotion.attach(animator, client, { phase = 0 })
 	plants.Boar = config
+	even.drawBody = drew
 	local spin = math.rad(AI.archetypes.Charger.turnRate)
 	local speed = Rigs.Boar.walkSpeed
 	local dt = 1 / hz
