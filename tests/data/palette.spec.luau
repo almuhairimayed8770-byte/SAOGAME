@@ -1,3 +1,4 @@
+--!strict
 local Palette = Harness.load("src/shared/data/palette")
 
 describe("palette", function()

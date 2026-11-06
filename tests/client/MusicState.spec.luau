@@ -1,0 +1,128 @@
+--!strict
+local MusicState = Harness.load("src/client/audio/MusicState")
+local Sfx = Harness.load("src/shared/data/sfx")
+local Combat = Harness.load("src/shared/data/combat")
+
+local CROSSFADE = Sfx.music.crossfadeSeconds
+
+-- Steps the machine in small increments up to `until_` and returns the last levels.
+local function run(state, from, until_, step)
+	local levels
+	local now = from
+	while now < until_ do
+		now = math.min(until_, now + (step or 0.1))
+		levels = MusicState.update(state, now)
+	end
+	return levels
+end
+
+describe("MusicState", function()
+	it("starts on the ambient stem at full gain with no duck", function()
+		local state = MusicState.new(0)
+		local levels = MusicState.update(state, 0)
+		expect(levels.stems.ambient).toBeCloseTo(1)
+		expect(levels.stems.explore).toBe(0)
+		expect(levels.stems.combat).toBe(0)
+		expect(levels.stems.boss).toBe(0)
+		expect(levels.duckGain).toBe(1)
+		expect(levels.heartbeat).toBe(0)
+		expect(levels.silence).toBe(false)
+	end)
+
+	it("crossfades to a new state over the data's 2 s with equal power", function()
+		local state = MusicState.new(0)
+		MusicState.setState(state, "Explore", 0)
+		local mid = run(state, 0, CROSSFADE * 0.5, 0.05)
+		expect(mid.stems.ambient).toBeGreaterThan(0)
+		expect(mid.stems.ambient).toBeLessThan(1)
+		expect(mid.stems.explore).toBeGreaterThan(0)
+		-- Equal power: the squares sum to one at the midpoint.
+		expect(mid.stems.ambient ^ 2 + mid.stems.explore ^ 2).toBeCloseTo(1, 1e-6)
+		local done = run(state, CROSSFADE * 0.5, CROSSFADE + 0.01, 0.05)
+		expect(done.stems.explore).toBeCloseTo(1)
+		expect(done.stems.ambient).toBeCloseTo(0)
+	end)
+
+	it("combat starts on the first telegraph and ends 6 s after the last shatter", function()
+		local state = MusicState.new(0, "Explore")
+		MusicState.noteTelegraph(state, 1)
+		expect(state.state).toBe("Combat")
+		local fighting = run(state, 1, 1 + CROSSFADE + 0.01)
+		expect(fighting.stems.combat).toBeCloseTo(1)
+
+		MusicState.noteShatter(state, 5)
+		MusicState.noteShatter(state, 7) -- a second kill restarts the countdown
+		run(state, 7, 7 + Sfx.music.combatEndDelaySeconds - 0.2)
+		expect(state.state).toBe("Combat")
+		run(state, 7 + Sfx.music.combatEndDelaySeconds - 0.2, 7 + Sfx.music.combatEndDelaySeconds + 0.1)
+		expect(state.state).toBe("Explore")
+		local calm = run(state, 13.1, 13.1 + CROSSFADE + 0.1)
+		expect(calm.stems.explore).toBeCloseTo(1)
+		expect(calm.stems.combat).toBeCloseTo(0)
+	end)
+
+	it("a telegraph during the countdown keeps combat going", function()
+		local state = MusicState.new(0, "Ambient")
+		MusicState.noteTelegraph(state, 0)
+		MusicState.noteShatter(state, 2)
+		MusicState.noteTelegraph(state, 4) -- a new enemy winds up
+		run(state, 4, 4 + Sfx.music.combatEndDelaySeconds + 1)
+		expect(state.state).toBe("Combat")
+		MusicState.noteShatter(state, 12)
+		run(state, 12, 12 + Sfx.music.combatEndDelaySeconds + 0.1)
+		expect(state.state).toBe("Ambient") -- back to the rest state it came from
+	end)
+
+	it("a boss entrance cuts to silence for 1 s, then the boss stem rises", function()
+		local state = MusicState.new(0, "Explore")
+		MusicState.setState(state, "Boss", 10)
+		local silent = MusicState.update(state, 10.1)
+		expect(silent.silence).toBe(true)
+		expect(silent.stems.explore).toBe(0)
+		expect(silent.stems.boss).toBe(0)
+		local after = run(state, 10.1, 10 + Sfx.music.bossEntranceSilenceSeconds + 0.1, 0.05)
+		expect(after.silence).toBe(false)
+		expect(state.state).toBe("Boss")
+		expect(after.stems.boss).toBeGreaterThan(0)
+		local full = run(state, 11.1, 11.1 + CROSSFADE + 0.1, 0.05)
+		expect(full.stems.boss).toBeCloseTo(1)
+		-- A telegraph during a boss fight does not drop it to the combat stem.
+		MusicState.noteTelegraph(state, 14)
+		expect(state.state).toBe("Boss")
+	end)
+
+	it("low HP ducks the music by 6 dB and raises the heartbeat; release ramps it back down", function()
+		local state = MusicState.new(0)
+		MusicState.setLowHp(state, true)
+		local levels = run(state, 0, 3, 0.1)
+		expect(levels.duckGain).toBeCloseTo(MusicState.dbToGain(Combat.lowHpMusicDuck), 1e-6)
+		expect(levels.duckGain).toBeCloseTo(0.5012, 1e-3)
+		expect(levels.heartbeat).toBeCloseTo(1)
+		MusicState.setLowHp(state, false)
+		local partial = MusicState.update(state, 3.2)
+		expect(partial.heartbeat).toBeLessThan(1)
+		expect(partial.heartbeat).toBeGreaterThan(0)
+		expect(partial.duckGain).toBe(1)
+		local released = run(state, 3.2, 8, 0.1)
+		expect(released.heartbeat).toBe(0)
+	end)
+
+	it("an explicit duck lowers everything for its seconds, then releases; the deepest duck wins", function()
+		local state = MusicState.new(0)
+		MusicState.duck(state, Sfx.mix.systemVoiceDuckDb, 2, 0)
+		MusicState.duck(state, 3, 1, 0)
+		local deep = MusicState.update(state, 0.5)
+		expect(deep.duckGain).toBeCloseTo(MusicState.dbToGain(Sfx.mix.systemVoiceDuckDb), 1e-6)
+		local still = MusicState.update(state, 1.5)
+		expect(still.duckGain).toBeCloseTo(MusicState.dbToGain(Sfx.mix.systemVoiceDuckDb), 1e-6)
+		local released = MusicState.update(state, 2.5)
+		expect(released.duckGain).toBe(1)
+		expect(#state.ducks).toBe(0)
+	end)
+
+	it("dB to gain: 0 dB is unity, 20 dB is a tenth", function()
+		expect(MusicState.dbToGain(0)).toBe(1)
+		expect(MusicState.dbToGain(20)).toBeCloseTo(0.1, 1e-9)
+		expect(MusicState.stemFor("Combat")).toBe("combat")
+	end)
+end)

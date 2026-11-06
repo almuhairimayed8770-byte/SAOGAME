@@ -1,0 +1,1308 @@
+# Architecture (Phase 0)
+
+The module map and the contracts between packages. `docs/GAME_SPEC.md` says what the game is;
+this file says where each piece lives and how the pieces talk. Keep it current when a contract
+changes. Decisions behind it are in `docs/DECISIONS.md`.
+
+## Module map
+
+```
+src/shared/
+  types.luau                   all shared types (ArtDef, EnemyDef, ClipDef, RigDef, HitResult...)
+  data/                        every number in the game (see "Data tables")
+  clips/                       Choreo clip data: player/<Weapon>/<Clip>.luau, enemy/<Rig>/<Clip>.luau
+  choreo/ClipSampler.luau      pure clip sampling (offsets at time t, events, hit windows, root motion)
+  choreo/Joints.luau           one view of a rig joint: Motor6D or AnimationConstraint (D-041)
+  choreo/Pose.luau             forward kinematics over the rig's joints with offsets (server hit sweep);
+                               Pose.chain reads the joints once for many solves
+  net/Remotes.luau             remote definitions: kind, direction, schema, rate limit (from world.luau)
+  net/Net.luau                 typed wrapper; server validates and rate-limits every payload
+  net/TrailingSend.luau        paces a state request (lock-on target, held guard) to its rate limit with a client token bucket; the last state always goes out (D-056)
+  util/                        Signal, Easing, Spring, Verlet, Rng, Check
+src/server/
+  Main.server.luau             starts services in order
+  services/EntityService       entity registry, HP, Guard Gauge, states, death, regen, attributes
+  services/CombatService       Art/basic/guard/dodge requests, timelines, hit sweep, damage, parry
+  services/EnemyService        spawning, 20 Hz AI tick, threat, telegraphs, enemy strikes
+  services/PlaygroundService   Playground spawn tables, player loadout, respawns
+  services/AntiCheatService    speed/teleport/timing checks (sprint cap x speedMargin, D-052), Net abuse policy, shadow flag
+  combat/DamageMath.luau       pure damage, crit, gauge and guard math (Lune-tested)
+  combat/HitSweep.luau         overlap-tests the blade and casts along its arc per damage window (D-042, D-044);
+                               never across a jumped root (D-048); only damageable targets count (D-049)
+  ai/Brain.luau                archetype base: perception, threat target, decision loop
+  ai/Charger.luau  ai/Brute.luau
+  world/RigBuilder.luau        part-built placeholder rigs from rigs.luau (Motor6Ds, attachments)
+  world/WeaponBuilder.luau     placeholder weapons with WeaponGrip / TrailStart / TrailEnd
+  world/PlaygroundBuilder.luau rim, pillars, clouds, kill volume from playground.luau
+  world/CharacterReady.luau    waits until the engine has parented, dressed and built a character (D-046)
+src/client/
+  Main.client.luau             starts controllers in order
+  controllers/InputController  ContextActionService bindings (PC, gamepad, mobile), Art hold/release
+  controllers/CharacterController  locomotion state, root motion, the two-step stop carry (D-059), dodge, requests to the server;
+                               calls Impact.guardRaise / dodge / release / cancelActivation for the local fighter
+  controllers/TargetController lock-on
+  controllers/EntityTracker    client-side entity registry from CollectionService tags + attributes
+  controllers/Replication      remote events -> Choreo, FX, HUD, camera
+  choreo/Choreo.luau           per-rig animator: layers, clock, blend, root motion, events
+  choreo/ClipLibrary.luau      loads clip modules by id
+  choreo/Locomotion.luau       8-direction blend space paced to the root on one gait phase (D-054), turn-in-place, skid, landing squash, foot IK, the sheath
+  choreo/LocomotionState.luau  pure blend-space weights: sheathed and drawn sets, gaits, turns, stops
+  choreo/WeaponMount.luau      moves the client's copy of the sword between hand and back (D-050)
+  choreo/SheathState.luau      pure: when Draw and Sheathe play, stop and move the sword (D-050)
+  camera/CameraController      spring follow, FOV, nudge, shake, the FOV punch (D-072), lock-on framing, orbit presets
+  fx/Trails, Smear, Shatter, Sparks, Telegraphs, OutlineManager, SwitchRing, Digits, Quality
+                               (Trails also keeps each rig's swing direction, D-068)
+  fx/Impact.luau               the impact director: one call per combat moment fires what moments.luau names (D-069)
+  fx/ImpactFrames.luau         impact-frame overlay: pooled ScreenGui, ViewportFrame silhouettes, ink strokes, the soft dim (D-060)
+  fx/ImpactSequence.luau       pure: look timing, per-region flash cost, the dim curve (D-061, D-064)
+  fx/FlashBudget.luau          the 3-per-second full-screen flash budget and the Reduce flashing setting (D-061, D-062)
+  fx/Glint, SlashArc, SpeedLines  flat reel accents: four-point glint, crescent and slash line, screen-edge speed lines (D-067)
+  fx/AccentStep.luau           the accents' shared clock, render step and viewport seam
+  ui/lib/                      el(), state cells
+  ui/Hud, Nameplates, SystemLine
+  audio/SfxPool                pooled voices: layered cues, EQ and reverb contours, trims, fades, playEndingAt, playLate, loops, preload (D-075 to D-094)
+  audio/Ambience.luau          the island bed and the rim wind (D-095)
+  audio/MusicDirector
+  dev/Capture.client.luau      on-screen prompts for gate clips (Playground / ClipLab only)
+  dev/ClipLab.client.luau      clip review scene at 0.25x / 0.5x / 1x with a frame counter
+tests/                         Lune specs (*.spec.luau) and run-in-roblox smoke scripts (smoke/)
+tests/project/                 project-file guards (empty Animate everywhere, HttpEnabled in dev places only)
+tests/choreo/GroundClearance   every player clip at 240 Hz on the hit matrix's body: the sword stays above the field (D-047) and off the body, on the back or in the hand (D-050, D-055)
+tests/choreo/TurnClearance    drawn turns through the real Locomotion at 240 Hz: the scabbard keeps the off-body margin (D-058)
+tests/choreo/Stride           re-measures each gait clip's ground speed and feet against choreo.luau stride, and the pacing, starts and stops (D-054, D-059)
+tools/validate.luau            runs tools/validators/*.luau
+tools/smoke.sh                 runs the smoke scripts in Studio through tools/smoke-wrap.luau + smoke/SmokeRunner
+tools/hit-matrix.luau          prints the server hit matrix (tools/hitmatrix/HitMatrix.luau, dev.luau hitMatrix, D-045);
+                               HitMatrix.standing() lends its posed body and field to other specs
+tools/gaitgen.luau             regenerates the OneHandedSword gait loops from tools/gaitgen/ (GaitGen, Gaits, Ik, Emit,
+                               Rig, sources/); --check exits 1 on drift; Run and Sprint are GaitGen.DRIFTED (D-140)
+tools/PoseEditor/              Studio plugin (Rojo project) + tools/pose-server.luau (Lune, writes clips)
+```
+
+## Rules every module follows
+
+- `--!strict` at the top. One module per responsibility. No `wait()`; `task.*` only.
+- Every tunable comes from `src/shared/data/`. A numeric literal in a gameplay script other than
+  0, 1, -1, 2 or a unit conversion (60 fps, 180 degrees, 100 percent) fails `tools/validate.luau`.
+- Requires use Instance paths (`script.Parent.x`, `game:GetService("ReplicatedStorage").Shared.x`),
+  never string paths (D-002). Shared modules must load in Lune: no Roblox datatypes at module load,
+  no `game:GetService` at module load in `src/shared/data/` or `src/shared/clips/`.
+- Services expose a small API and talk through `Signal`s. A service never reads another's state table.
+- Errors are caught at service boundaries and logged with the player id; the server never crashes
+  on a bad client message.
+- Public functions have a one-line doc comment (`--- ...`).
+- Every full-screen flash (anything that changes the whole picture's brightness: the impact frames and the soft dim
+  today; later the finisher's fade to white and the teleport and login white-outs) asks
+  `FlashBudget.request(Engine.now(), cost, seconds)` first, with its own per-region cost (`ImpactSequence.costOfLooks`)
+  and the seconds its picture lasts, and falls back to a slow fade when refused. Never more than 3 in any second
+  (D-061). Accents that cover a small part of the screen (glints, crescents, speed lines) are not full-screen flashes.
+- ImpactFrames binds the render step `impact.overlay.renderStepName` (`SkyspireImpactFrames`) at
+  `RenderPriority.Camera + 1`, after the camera's step; no other module reuses that name.
+
+## Entities
+
+Every fighter, player or enemy, is an entity. The server creates it, gives it an integer id, and
+publishes its state as attributes on its Model (D-006):
+
+| Attribute | Type | Meaning |
+| --- | --- | --- |
+| `EntityId` | number | integer id, unique per server |
+| `EntityKind` | string | `"Player"` or `"Enemy"` |
+| `DefId` | string | enemy def id from `enemies.luau`, or `"Player"` |
+| `Rig` | string | rig id from `rigs.luau` (`PlayerR15`, `Boar`, `Kobold`) |
+| `DisplayName` | string | name for nameplates |
+| `HP`, `MaxHP` | number | server-owned hit points |
+| `Gauge`, `MaxGauge` | number | Guard Gauge |
+| `State` | string | `Types.EntityState` |
+| `Cursor` | string | `"Green"`, `"Orange"`, `"Red"` (players only) |
+| `Level` | number | |
+| `ArtSlots` | string | players only: the quick-slot Art ids joined with commas, in slot order |
+| `Drawn` | boolean | players only (nil means false): true while the combat tag holds; clients move the sword between hand and back from it (D-050) |
+| `Elite` | boolean | enemies only: true on a spawn-time Elite variant (`EntityService.publish`, when `record.enemyDef.elite`), never set otherwise; `EntityTracker` reads it into `record.elite` (default false) and Replication picks the heavy shatter from it (D-079) |
+
+A hit dealt or taken marks `lastCombatAt` and `combatUntil`; an Art, a basic swing, a guard or a
+lock-on refreshes `combatUntil` only, and Art, PostMotion, Guard and a lock-on on a live target keep
+it fresh. `EntityService.inCombat` and `Drawn` follow `combatUntil`; a new record (a respawn)
+starts with `Drawn` false.
+
+Tags (CollectionService): `SkyspireEntity` on every entity model, plus `SkyspirePlayer` or
+`SkyspireEnemy`. Clients discover entities by tag and read attributes; remotes carry events only.
+
+The model's `PrimaryPart` is the rig's root part (`HumanoidRootPart`). Enemy models have a
+`Humanoid` for `MoveTo` only; its `Health` is pinned and ignored (D-012).
+
+## Rigs, weapons and joints
+
+- Rig definitions: `src/shared/data/rigs.luau`. Joint names are the rig's joint names and are the
+  keys in every clip. Player: the 15 R15 joints (the root joint is `Root`, its live R15 name, D-016)
+  plus `Weapon` (RightHand -> Weapon). On current Studio builds a player character carries the 15
+  body joints as `AnimationConstraint`s (Avatar Joint Upgrade) and only `Weapon` as a Motor6D; the
+  part-built enemy rigs are all Motor6Ds. Every reader goes through `choreo/Joints.luau`, which takes
+  both classes, reads part and offset frames from either, and writes only `Transform` (D-041).
+  The character's engine `Animator` puts every joint back to rest after RenderStepped, so Choreo
+  writes the pose again on PreSimulation for any rig that has one (D-053). Boar and Kobold: see the file. `RigBuilder.build(rigId, name)` returns a Model with Motor6Ds whose `C0`/`C1` come from
+  the rest pose, with a `WeaponGrip` attachment on the grip part and `TrailStart`/`TrailEnd`
+  attachments on the weapon part.
+- Weapons: `WeaponBuilder.build(weaponDef)` returns a Model named `Weapon` with a `Handle`/blade
+  part named `Weapon`, `TrailStart` at the guard and `TrailEnd` at the tip; the server attaches it to
+  the player's `RightHand` with a Motor6D named `Weapon` (C0 from `rigs.luau`). The player's
+  equipped weapon def id is the attribute `WeaponId` on the character.
+- Sheaths (D-050): when the weapon's category has a `weaponModels.luau` `sheaths` row and the
+  character has that part, `WeaponBuilder.equip` also parents a Model `Sheath` (tagged Placeholder)
+  next to `Weapon`. It holds one `Scabbard` part welded by a Weld `ScabbardWeld` at the back mount
+  (UpperTorso for the one-handed sword), with CanCollide, CanTouch and CanQuery off and no
+  attachments. A Weld is not a joint, so Joints, Pose and the rigs smoke never see it. The server's
+  `Weapon` Motor6D always stays on RightHand (hits and the hit matrix never see the back); clients
+  move their copy. `unequip` removes the sheath. Helpers: `WeaponBuilder.sheathOf(character)` and
+  `WeaponBuilder.scabbardC0(category)`.
+
+## Sheathed weapon (client, D-050)
+
+- `Locomotion` (local and remote players) owns a `WeaponMount` and a `SheathState`. A step hook runs
+  before the mixer: Locomotion scans the live handles (drawing, sheathing, cut, covered), SheathState
+  plays or stops Draw and Sheathe, then WeaponMount sets the Weapon motor's Part0 and C0.
+- The target is the `Drawn` attribute; the local player predicts `true` for `choreo.luau`
+  `sheath.predictSeconds` after an attack, guard, parry or lock-on (`ActionLogic.drawnTarget`,
+  `CharacterController.predictDraw()`, which `Main.client` calls when `TargetController.targetChanged`
+  gets a target). Locomotion follows `Drawn` and `State` through `GetAttributeChangedSignal` (the
+  `attributeSignal` dependency replaces it in tests; an instance with no signals falls back to one
+  read per step); `locomotion:serverDrawn()` gives Drawn to CharacterController, and remote rigs feed
+  `humanoidTracker` from the driver (`drawnOf`). No attribute is read per frame.
+- Every attack clip and the clips in `sheath.drawCutClips` (Guard, GuardHit, Parry) are draw-cuts:
+  the sword is in the hand on their first posed frame and a playing Draw stops. A lock-on or a hit taken plays Draw; Sheathe
+  starts `sheath.sheatheDelay` after the target turns false. Dodges do not draw.
+- The `WeaponDraw` and `WeaponSheathe` events move the sword mid-clip, only when they come from the
+  live handle of that clip (not stopping, not done, its clock past the event) and the arm is not
+  covered. Covered: a live FullBody clip, or an UpperBody clip above `priority.Sheath`, keys a joint
+  Draw or Sheathe keys (Weapon excluded). While covered no Draw or Sheathe starts, one that has not
+  moved the sword stops and plays again once the arm is free; a draw-cut still takes the sword at
+  once. A clip that ends before its event, or a build without the clip, lands the sword where the
+  target wants it.
+- The drawn sprint additive follows SprintDrawn's live weight, scaled by 1 minus the visible weight of
+  Draw or Sheathe after this step (sheathShownAfter: the mixer's blend rule, read before it runs), and
+  is 0 while the sword is on the back. The sheath step hook sets it before the mixer step; update sets
+  it for a weapon with no sheath (D-225).
+- `WeaponMount`: `new(animator, model)`, `:set("Hand"|"Back")`, `:get()`, `:sheathable()`,
+  `:refresh()`, `:generation()`, `:destroy()`, `WeaponMount.handFrame()`,
+  `WeaponMount.backFrame(category)`. It writes only the client copy's Part0 and C0 (never C1), looks
+  the hand and back parts up once per new Weapon motor, and pins the Weapon joint at rest while the
+  sword is on the back. Mounts on one animator form a stack and the newest drives the sword; a new
+  motor bumps `generation()`, which snaps the sword to the target with no clip.
+- `SheathState` (pure, no Instances): `new(place, config?)`,
+  `:step(dt, { target, cut, covered, drawing, sheathing, hold }) -> { place?, play?, stop? }`,
+  `:onEvent(kind, input) -> place?`.
+- Choreo: `animator:joint(name)` returns the joint Choreo writes for a name (or the new one after a
+  replace); `animator:pin(name, on)` holds a joint at rest whatever any clip, additive or procedural
+  key says, acts at once, and survives a joint rebuild.
+- Footsteps (D-051): the Base layer runs every walk clip and its drawn twin at once. Only the Base
+  clip with Footstep events that the limbs show most (eased fade times weight; the first wins a tie;
+  nothing at weight 0) passes its Footstep on, so a rig standing still is silent. All gait clips run on
+  one shared phase (D-054). FullBody clips add up per priority group as the Mixer blends them; while they
+  cover more than half of the limbs (a dodge, a landing, a jump, a fall, an Art, a stagger), the walk is
+  silent and only their own steps sound, so nothing steps in the air. FullBody and Additive clips with
+  Footstep events (Land, a dodge, Stagger) fire their own. A step plays `footsteps.<Surface>Light` from
+  `fx.audio.materialSurface` (D-089).
+- The back mount (D-055): `weaponModels.luau` `sheaths.OneHandedSword.mount` puts the grip behind the right
+  shoulder blade and the scabbard 0.2 stud off the back. `dev.luau` `groundClearance.offBody` holds the sword on
+  the back, the scabbard and the sword in the hand off every body part (head 0.01, arms 0.03, legs 0.04, hips
+  0.01 stud) in every pose GroundClearance and TurnClearance check.
+- A remote player's driver reads `Drawn` through `SheathState.riseFilter(delay, initial)`: a rise counts only after
+  `choreo.luau` `sheath.remoteDrawDelay` (0.06 s), a fall at once (D-057). `riseFilter(...):step(dt, raw)` returns
+  the filtered value; Replication feeds it.
+
+## Gait pacing and the stop (client, D-054, D-058, D-059)
+
+- `choreo.luau` `locomotion.stride` holds each gait clip's measured `groundSpeed` (how fast its planted foot
+  moves back at rate 1) and `touchdown` (where each foot is at its Footstep), with the pacing bounds
+  (`rateFloor` 0.25, `rateCeiling` 3, `startPhase` 0.5, `turnYawRate` 300) and the check bars (`slideBar`,
+  `transientBar`, `contact`). `tests/choreo/Stride.spec.luau` re-measures them on the hit matrix's player and
+  prints the drift after a re-key.
+- Locomotion keeps one gait phase (0 at every gait clip's left Footstep, 0.5 at its right) on the mixer's clock.
+  Before each animator step it blends the shown clips' stride and duration by their shown weights, sets every
+  gait clip that shows (or is about to) to the phase and plays it at stride over the root's speed, clamped to the
+  rate bounds. `LocomotionState.gaitWeights` / `walkGait` / `walkWeights` give the cadence shares; `plantedAlong`
+  and `settlePoints` read the feet. `walkSpeed`, `runSpeed` and `sprintSpeed` are movement speeds only.
+- The lean (`locomotion.lean.upright`, today `WalkLeftDrawn = 1`): before `LocomotionState.leanOffsets` poses a lean
+  toward a listed clip's side, Locomotion scales it by one minus that clip's shown weight (D-058).
+- The two-step stop: `locomotion:stopGait(into)` writes the phase and where each foot of the last move's walk is
+  over its Idle spot into a `StopGait` (no allocation). `ActionLogic.stopCarryStep(carry, moveX, moveZ, speed,
+  walkSpeed, grounded, state, dt, config, gait)` returns this frame's carry speed along `(carry.x, carry.z)`,
+  from `ActionLogic.newStopCarry()`; CharacterController feeds the result to the Humanoid while the stick is
+  let go, and the dodge reads the stick, not the carry (`stopStepsSeconds`, `stopMinCycles`, `stopEndSpeed`).
+
+## Clips
+
+- Clip ids: players `player/<WeaponCategory>/<ClipName>` (for Arts the ClipName is the Art name
+  without spaces: `player/OneHandedSword/SharpNail`); enemies `enemy/<RigId>/<ClipName>`.
+- Files: `src/shared/clips/player/OneHandedSword/SharpNail.luau` returns one `Types.ClipDef`.
+  `ClipLibrary.get(id)` maps the id to the module path.
+- Required player clips (OneHandedSword, Phase 0): `Idle`, `IdleDrawn`, `WalkForward`,
+  `WalkBack`, `WalkLeft`, `WalkRight`, `Run`, `Sprint`, `WalkForwardDrawn`, `WalkBackDrawn`,
+  `WalkLeftDrawn`, `WalkRightDrawn`, `RunDrawn`, `SprintDrawn`, `Draw`, `Sheathe`, `Jump`, `Fall`, `Land`, `TurnLeft`,
+  `TurnRight`, `Skid`, `Guard`, `GuardHit`, `GuardBreak`, `Parry`, `DodgeForward`, `DodgeBack`,
+  `DodgeLeft`, `DodgeRight`, `FlinchFront`, `FlinchBack`, `FlinchLeft`, `FlinchRight`, `Stagger`,
+  `DeathFreeze`, `Basic1`, `Basic2`, `Basic3`, `Horizontal`, `Vertical`, `RisingArc`, `SharpNail`.
+  The plain `Idle`, walk, `Run` and `Sprint` names are the sheathed set (`sheathed = true`, sword on
+  the back, empty hands); the `…Drawn` names are the drawn set. `LocomotionState.clipFor(name, drawn)`
+  maps a plain name to its twin. The clips validator checks that every name in
+  `choreo.locomotion.clips`, `sheath.clips` and `sheath.drawCutClips` has a file, that each sheathed
+  clip matches its drawn twin (duration, loop, Footstep times and feet), and that Draw and Sheathe are
+  UpperBody at `priority.Sheath` with one `WeaponDraw` or `WeaponSheathe` each.
+- Sheath events: `WeaponDraw` (the hand takes the sword from its sheath) and `WeaponSheathe` (the
+  sword goes back into it) carry no data. At the event the clip's Weapon key lines the blade up with
+  the back mount. `ReviewMarkers.mountAt(clip, time)` ("Hand" or "Back") is the one source for where
+  the sword is; `ReviewMarkers.mountProblems(clip)` lists the sheath rules. The clips validator,
+  GroundClearance, the review and the ClipLab use them. GroundClearance also checks the handoff
+  (`dev.luau` `groundClearance.handoff`), the sword and scabbard against the body in every checked pose
+  (`offBody`, D-055) and the slide along the sheath from the event until the blade is clear, with Breathe and
+  the flinches (`sheathSlide`).
+  `src/shared/data/scope.luau` lists the Arts, enemies, bosses and rigs whose clips the current
+  phase must ship; the clips validator fails on those and folds the later-phase backlog into one
+  summary warning (D-015). Boss attack clips (`bosses.luau` phase attacks, id
+  `enemy/<skin>/<clip>`) are cross-checked the same way as enemy attacks: `attack = true` and an
+  `Anticipation` beat that holds for the attack's `windUp`.
+- Required enemy clips: `enemy/Boar/{Idle,Walk,Charge,FlinchFront,FlinchBack,FlinchLeft,FlinchRight,Stagger,Break,DeathFreeze}`,
+  `enemy/Kobold/{Idle,Walk,Overhead,FlinchFront,FlinchBack,FlinchLeft,FlinchRight,Stagger,Break,DeathFreeze}`.
+  An enemy attack's `clip` in `enemies.luau` names one of these (`Charge`, `Overhead`).
+- Attack clips set `attack = true`, define all six `beats`, carry `HitWindowOpen`/`HitWindowClose`
+  pairs (one pair per hit), `TrailOn`/`TrailOff`, `SmearOn`/`SmearOff`, `ActivationHold` and
+  `PostMotionStart` events, and `hitStop`. The clip validator enforces this and rejects `Linear` on
+  any joint key (root keys may be Linear). The runtime blend is eased too: `Mixer` shapes every fade
+  with `choreo.luau` `blendEasing` before it weights a limb, and blend-space weight ramps on one
+  layer share one fraction so their sum stays 1 (D-032, D-033).
+- Trail kinds: a `TrailOn`'s `data.kind` (`"Art"` or `"Basic"`) picks the trail kind, and the client
+  remembers it for the rest of that clip's trail events (`HitWindowOpen`/`Close`, `TrailOff` and
+  `PostMotionStart` carry no kind); without one, a clip id containing `/Basic` means Basic.
+  `SmearOn`/`SmearOff` also turn the full-width `Smear` trail kind on and off. The width follows the
+  kind that is on; the color follows the swing (Art over Basic), so a Basic swing's smear frames widen
+  the trail but keep its whiter color, and the fading tail keeps the look of the swing that drew it.
+- Sounds: a `Sfx` or `Voice` event carries `data.name = "family.Name"` from `sfx.luau`; the client
+  plays it through `SfxPool.play` at the rig, and the clips validator rejects a name `Sfx.get`
+  cannot resolve. Sounds a server remote already triggers (hits, parry, block, guard break) are not
+  repeated as clip events (D-036); the impact director plays them (D-069). A whoosh sits at
+  max(0, HitWindowOpen - `Sfx.peakLead(entry)`), no sound sits less than 0.05 s after an Art's
+  ActivationHold before its first HitWindowOpen, and an enemy's strike vocal is a Voice event on its
+  HitWindowOpen (D-082; `tests/data/sfx.spec.luau` holds all three). A remote clip started late replays
+  the Sfx and Voice events it jumped over through `SfxPool.playLate` (D-101).
+- Enemy attack clips: the wind-up pose must be held for the attack's `windUp` (the validator
+  compares the clip's `Anticipation` beat to `enemies.luau`).
+- Hit windows sit on the strike (D-043): the n-th `HitWindowOpen` is at or before the n-th snap's
+  start and its `HitWindowClose` at or after that snap's end, within `dev.luau`
+  `review.windowSnapToleranceFrames`. Snaps come from `ReviewMarkers.strikeSnaps`: the beats table's
+  `Snap`, then each later ExpoOut key that moves a joint 2 to 4 frames after the key before it; the
+  snap count must equal the window count. A `TrailOn` that names a trail kind is listed before the
+  clip's first `HitWindowOpen` (they share the snap's first frame, and the client keeps the kind
+  from the first event that names one). The clips validator and `ReviewMarkers.problems` both apply
+  these rules.
+
+## Combat flow (server authority)
+
+1. Client `InputController` -> `CharacterController` sends `ArtRequest {artId, facing, clientTime}`
+   and immediately starts the local clip (prediction).
+2. `CombatService` validates: entity alive and in `Idle`/`Moving`, Art unlocked (proficiency from
+   the entity record), Art in the fighter's quick slots (`artSlots` on the entity record, copied
+   from the loadout; a record without slots, such as an enemy with Arts or a stand-in, skips this
+   check), not inside a lock (`artRequestTolerance`), facing within tolerance, weapon category
+   matches, clip exists. The `ActionRejected` reasons are `NoEntity`, `Dead`, `UnknownArt`,
+   `NoWeapon`, `WeaponMismatch`, `Proficiency`, `NotSlotted`, `Locked`, `Busy:<state>`, `Facing`,
+   `Stance` and `NoClip`. On failure it fires `ActionRejected` to that client (which cancels its
+   prediction). On success it sets `State = "Art"`, fires `ActionStarted` to everyone (including the
+   requester, who ignores its own), and schedules the timeline from the clip. The timeline starts at
+   the request's `clientTime` clamped into `[max(now - lagAllowance, min(freeAt, now)), now]`, where
+   `freeAt` is the fighter's `lockUntil` before the new action (`CombatService.runStartOf`, the 150 ms
+   lag allowance, D-010), so a rewound action never overlaps the lock before it; a basic swing's chain
+   index uses the same start, and `ActionStarted.serverTime` carries it: for each hit window it
+   samples the clip at `hitSampleHz` through `ClipSampler` + `Pose`, adds arc sub-samples where the
+   blade moves more than `sweepMaxTipStep` between two (at most `sweepMaxSubdivisions` per fighter
+   per frame, `HitSweep.followArc`), and runs `HitSweep` over them: the whole blade is overlap-tested
+   at every sample, the midpoint is cast between samples, plus the tip's or the guard's chord on a
+   step the cap left longer than `sweepMaxTipStep`; in a hitch frame the samples' roots are spread
+   between the two frames' roots (D-042, D-044). Each frame reads the fighter's joints once
+   (`Pose.chain`) and every solve of that frame uses that list; a root that jumped farther than an
+   honest body can travel starts a new chain at the live root instead of being swept across (D-048);
+   only fighters `mayDamage` allows become hits or count toward the target cap (D-049). Every hit goes through `DamageMath` and `EntityService.applyHit`, then `HitConfirmed` is
+   fired to all clients. After the last hit the entity enters `PostMotion` for `postMotion` seconds
+   (zero if the target was in `Break`), then `Idle`.
+3. Enemy attacks: `EnemyService` picks an attack, fires `Telegraph` (with `windUp` and the ground
+   shape) and `StateChanged`, holds the wind-up, then calls `CombatService.enemyStrike(enemyId,
+   attackDef, origin, facing)`, which checks each player in the cone/line: dodge invulnerability,
+   parry (guard pressed within `parryWindow` before the hit lands: the guard timestamp is the
+   server's receipt time of `GuardRequest {held = true}`), guard cone (judged against the player's
+   root on the server at strike time; the request's `facing` is not read) and reduction, then damage.
+   `HitConfirmed` carries the hit's `staggerDirection` (Front, Back, Left, Right in the target's frame).
+   A parry staggers the enemy (`parryStagger`) and (Phase 1) opens a Switch window.
+4. Death: `EntityService` sets `Dead`, fires `EntityDied {shatter}` to all; the client freezes the
+   rig, waits out the kill's hit-stop, ducks the Music, SFX and UI groups by `deathDuckDb` for `deathFreeze`,
+   plays `Shatter`, then shows the system line (D-035, D-073).
+
+Hit-stop, trails, camera, digits, highlight flashes, impact frames, accents and hit sounds are client
+reactions to `HitConfirmed`; nothing about animation runs on the server except the pose sampling used by
+the sweep.
+
+## Hit feel and sound (client, D-060 to D-102)
+
+- **Start order.** `Main.client` loads its sibling packages in `SIBLING_ORDER` and starts each that exists:
+  fx.Quality, audio.SfxPool, audio.Ambience, audio.MusicDirector, fx.OutlineManager, fx.Trails, fx.Shatter,
+  fx.ImpactFrames, fx.Glint, fx.SlashArc, fx.SpeedLines, fx.Impact, fx.Sparks, fx.Digits, fx.SwitchRing,
+  fx.Telegraphs, ui.Hud, ui.Nameplates, ui.SystemLine, then choreo.Choreo (not started there). Ambience comes
+  right after SfxPool, and Impact after everything it fires; `tests/client/Impact.spec.luau` checks the order.
+- **`fx/Impact`** (the director). `Impact.hit(info: HitInfo): string` picks the moment
+  (`Impact.select`, moments.luau `select`) and fires its row: cue and extra sound, impact frames, glint,
+  crescent, slash line, Highlight, trail flash, contour and punch, each for the audience `moments.audience`
+  allows (D-070), once per sweep (D-098); the 3D accents wait `Impact.hiddenSeconds()` (D-071). HitInfo:
+  `tier`, `position`, `attacker?`, `target?`, `involved`, `localAttacker`, `trailToken`, `parried`,
+  `guarded`, `crit`, `isSwitch`, `killed`, `art?` (true an Art, false a player's basic, nil otherwise),
+  `partner?`. Also: `activation(model, clipId, token, isLocal, speed?, lateBy?)`, `release(model, clipId,
+  clipTime, frozenSeconds, speed?)`, `cancelActivation(model?)` (D-074); `dodge(model, isLocal)` (D-100);
+  `guardBreak(model?, isLocal)`, `guardRaise(model?, isLocal)` (D-097); `shatterCue(boss, heavy?)` and
+  `death(model?, position, boss, heavy?)` (D-079); `ownsHighlight(info)`; the pure helpers `swingTangent`,
+  `planeNormal(tangent, radial?, toCamera?)` (D-096), `holdTime`, `windowAfter`, `riserLead`; `bind(deps)`
+  and `start()` (loads its siblings through `Siblings`).
+- **`fx/ImpactFrames`.** `play(sequence, models, opts?) -> seconds` (opts: `slashDirection?`, `now?`,
+  `position?`) asks FlashBudget itself and shows the dim instead when refused or when Reduce flashing is on;
+  `isShowing()`, `look()`, `remaining()`, `hiddenSeconds()` (seconds the opaque frames still hide the world,
+  0 while idle or dimming), `cancel()`, `screenDirection(position, direction)`, `start()`, `bind(deps?)`.
+  `ImpactSequence` is pure (`flashCost`, `costOfLooks`, `framesOf`, `capSeconds`, `dimOpacity`, `dimDip`,
+  `luminanceOf`, `regionsOf`, ...), so the impact validator scores a table that is not the live one.
+- **`fx/FlashBudget`.** `request(now, cost, seconds?) -> boolean` and `claim(...) -> Claim?` record a cost only
+  when it fits; `hold(claim, at)` pushes a claim's finish while its picture shows; `raise(claim, now, cost)`
+  charges a takeover's difference; `used(now)`; `reduced()` and `set(value)` for the Reduce flashing setting
+  (the player attribute `impact.reduceFlashingAttribute`, watched after `start()`); `reset()`. Every caller
+  passes times from `Engine.now()`.
+- **Accents.** `Glint.play(position, size, token?)`, `SlashArc.play(position, tangent, normal, token, size)`,
+  `SlashArc.line(position, tangent, size)`, `SpeedLines.play(kind)`; each has `step`, `bind(overrides?)`,
+  `reset` and `start`, pools its instances and caps what plays at once by quality tier. `AccentStep` is their
+  shared seam: `renderStepped(fn)`, `viewport()`, `deps(overrides?)` (clock, per-frame step, screen size).
+- **`Trails.swingDirection(model): Vector3?`**: the strike's snap chord for `accents.swing.memorySeconds` after
+  it was sampled, then the live ring while a trail kind is on, then the last good direction sampled while one
+  was on (within memorySeconds), then the ring now. `setActive(model, true, kind)` with kind Art or Basic starts
+  a new snap; Smear does not. `Trails.sample()` runs on Heartbeat (D-068).
+- **`CameraController.punch(kind)`** (`"Final"` or `"Kill"`): the FOV push in, on top of the FOV spring (D-072).
+- **`audio/SfxPool`.** `play(name, position?) -> Sound?`; `cue(name, position?)` (sub-frame layers play inside
+  the call, D-084); `contour(name)`; `playEndingAt(name, seconds, position?) -> Sound?` (D-078);
+  `playLate(name, lateBy, position?) -> Sound?` (a sound started as if `lateBy` seconds ago: speed first, then
+  TimePosition = startAt + lateBy x speed; nil when deduped, a placeholder or already over, D-101);
+  `loop(name, gain)` (D-087); `shatter(position?, weight?)` and `shatterCue(weight?) -> string` (weight
+  `normal`, `heavy`, `boss`, a shatterCues cue name, or the old boolean; D-079, D-102); `footstep(model?,
+  surface?, weight?)`, `surfaceOf`; `duck(db, seconds)`, `setGroupVolume`, `group`, `mixState(group)`;
+  `cueNames`, `contourNames`; `preloadNames()` and `preload()` (D-093); `timeLength(sound)`; `stats()` ->
+  { requested, played, deduped, placeholders, unloaded, lateStarts }; `reset()`, `start()`. `hit`, `parry`
+  and `hitStopTick` stay as spec-tested helpers with no game caller. Engine seam, `bind(overrides?)`: `now`,
+  `delay`, `onStep` (contours and fades), `play`, `stop`, `isPlaying`, `timeLength` (0 while unloaded),
+  `preload`, `onEnded(sound, fn) -> disconnect?`. Play rule: Volume = entry volume x 10^(gainDb/20) (plus the
+  heartbeat lift) clamped under `limits.maxPlayVolume` (D-086); PlaybackSpeed = the layer's pitch, else random
+  in pitchRange, clamped to `engine.playbackSpeed` (D-085); a trimmed entry gets PlaybackRegion from
+  `Sfx.region` and TimePosition on every play (D-088); fades and voice release follow D-090 to D-092.
+- **`audio/Ambience`.** `start()` (idempotent), `stop()` (silences both beds, then disconnects),
+  `bind(overrides?)` (stops first; nil restores the engine seams), `state()`, `edgeDistance(position)`,
+  `rimGainAt(edge)`. Seams: `onStep` (Heartbeat), `position` (the local character's root) and `loop`
+  (`SfxPool.loop`). It reads `fx.audio.ambience` and `playground.luau` fieldRadius and allocates nothing per
+  frame (D-095).
+- **`fx/Shatter.play(model, kind, weight?)`** plays `SfxPool.shatter` with the weight; a `Boss` kind always plays
+  the boss shatter, and the two-argument call keeps the old behaviour.
+
+### After the merge (D-103 to D-111)
+
+- Choreo's Engine seam gains defer(fn) (default task.defer). It is used to destroy the default Animate after
+  disabling it and stopping the animator tracks Choreo did not start (silenceAnimate, at attach and from
+  DescendantAdded).
+- Locomotion keeps one jumpHandoff connection on animator.finished. Only the jump clip's own end hands over to Fall
+  (if still in Air); Land, a new Jump and destroy drop it.
+- Smear.restSize(part) returns the weapon size stored before a stretch (nil when untouched or reset), and
+  ImpactFrames draws a stretched sword at that size (Smear.restSize(part) or part.Size).
+- Trails.sample is gated by swinging or by distance (accents.swing.sampleDistance from Engine.viewerPosition()) and
+  reads tip.WorldPosition; Trails.reset() detaches every rig (only specs call it today).
+- SlashArc prebuilds its wipe Transparency sequences (wipeSteps + 1 per layer and half) and its two line fades on
+  start(); SlashArc.wipeStep(front) returns the snapped step and that step's front.
+- **Audio.** SfxPool.cue(name, position?, lateBy?) and Impact.dodge(model, isLocal, lateBy?). Replication's
+  ActionStarted passes lateOf(handle) = handle.time / handle.speed (nil when the clip started on time or is an
+  engine Animation) for remote dodges. Timed plays (playEndingAt) correct for task.delay frame slip; cue layers keep
+  their onset.
+- **Client input.** Main.client gates Tab (SwitchCallRequest) with ActionLogic.basicReady at
+  TrailingSend.gapOf("SwitchCallRequest") = 1/perSecond, so one-off presses are limited on the client to the server
+  bucket's refill rate, like BasicAttackRequest.
+- **Validators.** tools/validators/accents.luau also checks swing.memorySeconds (above the sample ring, below 1 s),
+  swing.snapFrames (a whole number ≥ 1, inside memorySeconds), slashArc.tilt (0 < maxDegrees, 0 < faceDegrees < 90,
+  90 - maxDegrees ≥ faceDegrees, 0 < minPlaneSine < 1), slashArc.wipeSteps (whole, ≥ 4 × the longest wipeFrames) and
+  swing.sampleDistance (> 0, reaching moments.accentRange and every row's range). tools/validators/impact.luau also
+  checks reduced.maxPerWindow (a whole number ≥ 1, costing fewer flashes than flash.maxPerWindow).
+
+### After the play-test (D-112 to D-116)
+
+- Aim (client, D-112): `controllers/AimLogic` (pure, tested) holds the lock-facing, snap, soft-assist and yaw-history
+  rules. CharacterController applies them on its render step and before each BasicAttackRequest and ArtRequest, and
+  samples the root's yaw on Heartbeat too. It reads the lock and the assist candidates from TargetController through
+  Siblings. `TargetController.lockOn(entityId)` locks a named enemy through the F key's path; nil clears it.
+- Sweep facing (server, D-113): a player's run carries its validated flat facing, and every blade sample is solved
+  from `CFrame.lookAt(root position, root position + run.facing)`. Enemy strikes still read the server root.
+- `CombatService.traceSink` (diagnostics, nil in play) receives a TraceEvent per closed window of a player's run:
+  facing, root look, hits, and the nearest enemy's distance, bearing and blade clearance.
+- Dev hooks (D-114): `client/dev/DevAim.client` (+ pure `DevAimLogic`) and `server/dev/DevCombat.server` (+ pure
+  `DevTrace`) are Studio-only BindableFunctions (`SkyspireDevAim` under the LocalPlayer, `SkyspireDevCombat` under
+  ServerScriptService), on only with Workspace `DevCapture`.
+- Content (D-115): MusicDirector makes a stem Sound only for a real id; no code writes a placeholder id into a content
+  property. `tools/validators/content.luau` checks asset-id safety and engine parent rules across source, project
+  files and data.
+- Sky (D-116): `PlaygroundBuilder.buildSkyClouds` puts the Clouds under `workspace.Terrain` at start; no place
+  project sets a Clouds or any content property.
+- Tests: `tests/_harness/SoundEngine.luau` (Harness.SoundEngine) is a frame-stepped model of the Sound facts measured
+  in Studio: Ended at the region end, Play refused at or past the float32 region end, a loop's first pass starting at
+  TimePosition, PlaybackLoudness 0 for two frames after Play. `tests/server/PlayerSwing.spec.luau` drives a real AJU
+  player from the remote to the boar's HP.
+- Data: `combat.luau` aim; `dev.luau` aim and trace; `sfx.luau` music.stemIds; `world.luau` clouds.textureAsset.
+
+### After the render-stall test (D-117 to D-119)
+
+- Render stalls: RenderStepped can stop while Heartbeat runs (display asleep, a minimised window, a long hitch).
+  Anything that must end on time or free instances rides on Heartbeat or Engine.now, never on the render step alone.
+- ImpactFrames (D-117): each picture has `requestedAt` and `drawn`. A Heartbeat watchdog ends stale or overdue
+  pictures; only the render step finishes one as rendered. Any other finish of a picture on screen pins its flash
+  claim and keeps the render step bound until the next rendered frame settles it. Spec seam: `Deps.onHeartbeat`.
+- FlashBudget: `hold(claim, math.huge)` pins a claim and `settle(claim, at)` sets its end. A pinned claim is never
+  pruned, so it counts in every request and in Reduce flashing's dim count.
+- CameraController (D-118): steps by real time in pieces of at most 1/30 s and snaps past 2 s; punch, kick and shake
+  are timed from the request.
+- TargetController (D-119): tracks the local id (`ownerId`) and the local record's death; uses EntityTracker
+  `peekLocalId`, `isLocal` and `localRecord`.
+- Glint, SlashArc, SpeedLines and Smear are timed from deps.now() at play, so the first render step after a stall
+  hides them. FrameClock, Trails, OutlineManager, SwitchRing, Shatter, Digits, Telegraphs, Hud, Nameplates,
+  SystemLine and SfxPool run on Heartbeat, Engine.now or the wall clock. Choreo steps rigs on RenderStepped, except the local character, which CharacterController steps from its render step (Choreo.stepLocal, D-139); a render stall's gap is handled as a jump (D-132).
+
+### Controlled fights and idle phase (D-120 to D-124)
+
+- **EnemyService hold (D-120):**
+  - API: `setHeld(id, on)`, `isHeld`, `heldIds`, `setHoldNew(on)`, `holdsNew`.
+  - hold(entry) sets Entry.held, puts the brain to sleep, stops the mover and calls EntityService.setHpRegenHeld(id, true), when the bound EntityService has it.
+  - refreshSleep skips held entries.
+  - A release calls setHpRegenHeld(id, false) and makes the next sleep check run on the next tick. forget() does the same for a held entry (death, despawn, Unregistered, reset).
+  - Hold-new is checked in spawn, after the entry is registered and before Spawned fires.
+  - It is the cinematic hold and the Studio dev hook's tool.
+- **EntityService (D-120, D-121):**
+  - setHp is dev and GM only. It clamps to [1, maxHp], publishes, restarts the regen wait (lastCombatAt), and never kills, revives or draws.
+  - setHpRegenHeld(id, held) sets record.hpRegenHeld (types.luau EntityRecord). stepAlive skips HP regen while it is set; Guard Gauge regen is unchanged. It returns false for an unknown or dead id. Only EnemyService's hold calls it.
+- **DevCombat** (server hook, Studio and DevCapture only):
+  - Commands: help, trace, events, basic, art, hp (now with `held`), hold, sethp, heal.
+  - hold, sethp and heal only set a fight up; every hit and kill still comes from a real swing through CombatService.
+- **ImpactFrames (D-122):**
+  - `staleSeconds(current)` is the sequence's cap (its hit-stop) or the dim's own length. The watchdog, stepDim and stepSequence all use it.
+  - `syncWhileFrozen(current, at)` copies the CurrentCamera and every rig part into the viewport only while `at - requestedAt < cap`. stepSequence (first drawn frame and each frame) and join use it; showSequence still syncs once at play. A sequence first drawn late therefore holds its last frozen frame past the hit-stop.
+  - impact.overlay has no staleFrames; the impact validator requires every sequence's hit-stop to be at least 2 frames.
+- **Idle phase (D-123):**
+  - `Locomotion.idlePhase(id)` = (id x choreo.enemyIdlePhaseStep) % 1.
+  - Locomotion.attach's `phase` option starts the enemy RigDriver's Idle and Walk at phase x their clip durations (Mixer wraps a loop's startTime).
+  - Replication.attachDriver passes `{ phase = locomotion.idlePhase(record.id) }` for non-player records when the package has idlePhase.
+- **Mixer:** a fallback handle whose targetWeight is 0 (another Base clip active) advances into a scratch list cleared every step, so its crossed events never reach Choreo's events signal. Root motion and the clock are unchanged.
+- **Clips validator:** its choreo cross-check also owns the idle-phase spread (validator constants PHASE_RUN 8 and PHASE_SHARE 3) and the rule that every choreo.rigs entry with a walk has a looping idle and walk.
+
+### After the controlled fight (D-125 to D-131)
+
+- src/client/fx/AccentStep.luau: `deps.onWatch` (Heartbeat) sits beside `deps.onStep` (render), and `AccentStep.connect(deps, render, watch)` binds both. Glint, SlashArc and SpeedLines draw and fade on the render step and end what has run its length on the watch, so no accent outlives a render stall (D-125, D-117).
+- src/client/fx/Bursts.luau (new): one-shot ParticleEmitter bursts. `Bursts.emit(emitter, count, lifetime)` emits and Clear()s on Heartbeat once the longest particle is gone. `pending`, `step`, `reset` and `bind(overrides)` are seams for specs. Used by Sparks.parry and Shatter's flash (D-125).
+- src/client/controllers/AimLogic.luau: snap turn helpers `snapShown`, `newSnap`, `snapStep`, `snapLeft` and `snapSeconds`. `Config` gains `snapTurnSeconds` and `snapTurnEasing` (D-126).
+- src/client/controllers/CharacterController.luau: a swing or release faces the whole snap at once, and the body shows it over aim.snapTurnSeconds (render step and Heartbeat). `aimRotation` (the root plus the rest of the turn) is what requests, dodges, guard facing and root motion read. New `lastFacing()` and `setCaptureTimeScale(scale): boolean` (Studio capture places only). It passes Locomotion `clockScale` = the capture scale (D-126, D-127). Replace the D-112 wording "a swing turns the rest of the way at once" with "faces the rest of the way at once; the body whips round over aim.snapTurnSeconds".
+- src/client/choreo/Locomotion.luau: State gains `clockScale: number?`, the clock the root itself moves on (the local body in a slowed capture; nil = real time). The blend reads speed and yaw rate at 1x (divided by clockScale); the pace still divides the real speed by the mixer's scale. In stepGait, walks advance by axis·move, and Run and Sprint by self.runAlong, set each update from LocomotionState.runAlong (D-127, D-129).
+- src/client/choreo/LocomotionState.luau: moveWeights computes the cadence shares, then a held-facing pass (D-129) that gives Run's facing-push share to the side walk while the body is held off its move. Exposes LocomotionState.runAlong(input).
+- src/client/dev/Capture.client.luau: the local character's time scale goes through CharacterController.setCaptureTimeScale, which in Studio also moves the body at that scale (D-127).
+- src/client/dev/DevAim.client.luau: swing reports yawAtSend from the facing the request carried (CharacterController.lastFacing); the body's turn shows after the send (D-126).
+- tools/validators/combat.luau: the snap whip rules (D-126). tools/validators/stride.luau: the gait pacing data rules (D-131).
+- tests/choreo/GroundClearance.spec.luau also caps Sheathe's tip speed at choreo.sheath.sheatheTipSpeed (D-130).
+
+### After the wake and feet round (D-132 to D-137)
+
+- src/client/choreo/Mixer.luau: the `step(dt)` result carries `jumped` (dt > choreo.stall.jumpSeconds), and each FiredEvent carries `jumped`. A jump advances the clocks by the gap (minus a shorter pending pause), zeroes the root delta, and still collects the crossed events. PlayOptions.sinceStep (seconds between the mixer's last step and the play) makes a clip played inside the gap move only by its own age on the jump step; it is ignored on any other step (D-132).
+- src/client/choreo/Choreo.luau: `animator.events` fires (clipId, event, jumped); rbx markers and ordinary steps pass false. When either dt or the clock's time since the rig's last step is longer than stall.jumpSeconds, `step(dt)` uses the clock's time (engine.now). `play` passes sinceStep from the same clock. `currentRootMotionDelta()` returns Vector3.zero when the last step is older than stall.jumpSeconds (D-132).
+- src/client/controllers/Replication.luau: `routeClipEvent(record, clipId, event, jumped?)`. A jumped event only closes (trail/smear off, activation light off, post-motion) and starts no sound, voice, footstep, chime, FOV kick, impact activation, trail or smear; `Replication.clipEvent` fires (record, clipId, event, jumped) (D-132).
+- src/client/choreo/LocomotionState.luau: settlePoints reroutes a late settle point (within locomotion.stopHandOverCycles of the other foot's Footstep) to the other foot's point half a cycle later, so StopGait leftAfter/rightAfter may exceed 0.5; ActionLogic.stopCarryStep sums them with the cycles to each Footstep (D-136).
+- The drawn forward gait clips (WalkForwardDrawn, RunDrawn, SprintDrawn) are leg twins of the sheathed ones (same plans, key times and Footsteps); a change to one set's legs is a change to both (D-134, D-135).
+- tests/choreo/Stride.spec.luau guards each clip's authored slide: every walk under slideBar, every gait clip under transientBar, and a lock-on forward walk at walkSpeed (the walk/Run cadence blend) within transientBar (D-133).
+- The capture path: setCaptureTimeScale → WalkSpeed × scale + animator:setTimeScale (mixer:timeScale, which Locomotion.stepGait divides the root speed by) + Locomotion clockScale. Locomotion paces from |AssemblyLinearVelocity| with the direction from MoveDirection (D-127, D-137).
+- tools/validators/choreo.luau (new): stall.jumpSeconds is at least 2/rate for every tier's distantHz and farHz and at most camera.stall.settleSeconds. tools/validators/stride.luau keeps locomotion.stopHandOverCycles inside (0, 0.5). The validator count is now 32.
+
+### After the controller round (D-138 to D-140)
+
+- src/client/choreo/Mixer.luau: `seek(handle, clipTime) -> { FiredEvent }` moves one handle's clock forward now, ignoring pause and time scale. It returns the crossed events unmarked and sets lastRoot, so the skipped span adds no root delta. It does nothing for a time at or before the handle's own, for a done handle, or for a looping clip at or past its end. A one-shot's end is reported by the next step (D-138).
+- src/client/choreo/Choreo.luau:
+  - `animator:seek(handle, clipTime)` fires the seek's events on `animator.events`, with the same footstep-source filter as step. It leaves engine Animation handles and destroyed animators alone.
+  - `Choreo.setLocalModel(model, driven?)` marks the local rig; `Choreo.stepLocal(dt)` steps the driven local rig once and does nothing otherwise.
+  - RenderStepped skips a driven local rig. `Choreo.stepAll` (ClipLab and tests) still steps every rig (D-138, D-139).
+- src/client/controllers/ActionLogic.luau: `holdClipTime(clip, fallback) -> number?` and `freezeAt(pressedAt, now, holdAt?, steppedAt?) -> (clipTime, seek)` (D-138).
+- src/client/controllers/CharacterController.luau:
+  - It hooks `animator:onStep(beforeRigStep)`. Before each step of the local rig, a hold freezes at its hold pose when the step is a jump or would carry the clip past hold time + combat activationHold. This applies to a hold that is at least its hold time old, not yet frozen, and younger than combat activationCancelTime. The hook then records rigSteppedAt.
+  - freezeHold seeks the clip when freezeAt says so.
+  - step() calls Choreo.stepLocal between Locomotion:update and the root-motion read.
+  - On spawn it calls setLocalModel(model, true), and clearCharacter unhooks the step hook.
+  - The clipEvent listener takes `jumped` (D-138, D-139).
+- tools/gaitgen.luau and tools/gaitgen/: the gait clip generator for the OneHandedSword locomotion loops (WalkForward, Back, Left and Right, Run, Sprint and their Drawn twins; D-054, D-128, D-134, D-135, D-140).
+  - GaitGen holds the names, the DRIFTED list, and generate, write, check and compare.
+  - Gaits.luau holds each gait's foot plans, key times and sheathed upper body.
+  - Ik.luau is a damped least-squares leg solver.
+  - Emit.luau writes the clip text already in StyLua format.
+  - Rig.luau poses HitMatrix.standing's PlayerR15 rig through Pose.solve.
+  - sources/ holds pinned copies of the drawn upper bodies and WalkForward's arm swing from git 927dbed.
+  - `lune run tools/gaitgen.luau --check` regenerates in memory and exits 1 on drift. tests/tools/gaitgen.spec.luau runs the same check plus the ownership, hand-edit and Run/Sprint root-and-legs tests.
+- Tests:
+  - New spec files: tests/choreo/MixerSeek.spec.luau, tests/choreo/ChoreoLocalStep.spec.luau (a fresh Choreo copy on fake frame signals), tests/client/ActionLogicHold.spec.luau and tests/tools/gaitgen.spec.luau.
+  - tests/client/CharacterController.spec.luau has a `choreo` option: a fresh real Choreo animating a real PlayerR15 rig on the spec clock, with task.delay on that clock, `renderOrder` ("bound" or "connections"), and `heartbeat()`, `wake()` and `hitch(seconds)` for render stalls and engine hitches. Its hold specs cover sleeps, jump and shorter hitches, hitches past the cancel time, 10, 20 and 30 fps holds and a slowed capture.
+
+### After the wake round and the blocked feet (D-141 to D-144)
+
+- ActionLogic.rigAsleep(heartbeatsSinceStep) is true when more than one Heartbeat ran with no rig step. ActionLogic.wokenDodge(pressedAt, now, jumpSeconds) returns "Show" or "Drop".
+- CharacterController counts Heartbeats since the last rig step (beforeRigStep and clearCharacter reset the count).
+  - dodge() always sends DodgeRequest at the press. While asleep, it plays no clip, leaves actionEndsAt nil, and parks the dodge in sleptDodge {pressedAt, token}.
+  - wakeSleptDodge(t) runs in step() after the root-motion read and before recordYaw. It plays the clip, starts actionEndsAt and calls showDodge() (CameraController.fovKick("Dash") plus Impact.dodge), or ends the action on "Drop".
+- Trails.bind(overrides?) is the seam for now, onRender, onWatch and clear (defaults: Engine.now, AccentStep.renderStepped, Engine.onHeartbeat, a pcall'd Trail:Clear()). The Heartbeat watchdog runs before sample and rebalance, and the stalled flag gates Enabled.
+- AntiCheatService.serverMoved(player, settleSeconds): boolean (server code only; a spec pins its callers). It calls resetSample and extends settleUntil. sample() resets and judges nothing until settleUntil passes; the first sample after that only records.
+- DevCombat "place" goes through the server BindableFunction only. help returns one usage line per command. src/shared/data/dev.luau gains place = { settleSeconds, maxCoordinate }.
+- `Locomotion.State` has an optional `velocity: Vector3?`, and `Locomotion.humanoidTracker` fills it.
+  - When it is nil (the local CharacterController passes none), Locomotion reads `root.AssemblyLinearVelocity` through a pcall and caches a root it cannot read.
+  - The velocity is used only when its horizontal size matches `state.speed` within `blocked.matchSpeed`.
+- The blocked latch (D-144, `stepBlocked`) runs right after `self.speed` is set in `update`.
+  - While blocked, forward, right and speed come from the smoothed real velocity, or the body stands when that velocity is under the idle threshold.
+  - Otherwise the stick drives the gait exactly as before.
+- `LocomotionState.wholeWalkSpeed(forward, right, drawn)` is rateFloor × the walk gait speed for a stick: the slowest speed that paces a whole walk. It is the blocked latch's release bar.
+
+### Hit on contact, camera and names (D-145 to D-164)
+
+- CameraController: each frame builds two rigs on the subject's pivot (root + focusHeight). The free rig uses orbitOffset and shoulderLook; the lock rig uses twoShotCamera and twoShotLook. A blend spring lerps between them. The rig rides a lagged pivot leashed along the view (CameraMath.leash). Collision is a repeated spherecast that skips characters, accessories and see-through parts (CameraMath.blocksView); one reach fraction scales the camera and aim offsets together.
+- CameraMath: adds shoulderLook, splitAngle, twoShot (with the TwoShotParams and TwoShot types), twoShotCamera, twoShotLook, lockSide, leash and blocksView. lockFrame, LockParams and LockFrame are removed.
+- Nameplates: hide(model) is the shatter's hook. A Dead rig's plate also expires at deathDuckDelay + deathFreeze.
+- Hud: the main gui sits in the safe area (ScreenInsets from ui.hud). The vignette has its own ScreenGui, exposed by Hud.vignetteGui().
+- RigBuilder: every rig's Humanoid has DisplayDistanceType None.
+- src/shared/choreo/BladeContact.luau: a pure blade solver.
+  - chain(model): the joint path to the TrailStart/TrailEnd part.
+  - read/copy: a pose (the root CFrame plus joint Transforms).
+  - blade(chain, pose, from?, alpha?): forward kinematics, following the arc between two frames.
+  - segmentBoxDistance: identical to HitSweep's.
+  - touch, steps, queryable.
+- src/client/controllers/ContactPredictor.luau: predicts the local swing's contacts.
+  - begin({clip, handle, artId, finalHit, multiplier}), then step(clipTime, jumped?) once per rendered frame. A jumped step re-baselines the sweep and returns no contacts (D-164).
+  - Gives at most one contact per target per window.
+  - tierFor, leastDamage, provesKill.
+  - It never decides damage.
+- Frame order:
+  - Camera at render step 200, ImpactFrames at 201, CharacterController at 301.
+  - At 301: Choreo.stepLocal → root motion → stepContacts → Replication.contact.
+  - The contact frame shows the contact pose, sound and flash. The hit-stop freezes the next steps, and the camera nudge and shake show on the frame after contact.
+- CharacterController: rigJumped is set in beforeRigStep (dt > stall.jumpSeconds), then read and cleared by stepContacts.
+- Replication.contact(contact) → boolean plays the local hit and records a prediction.
+  - HitConfirmed matches predictions by (target, hitIndex, artId), oldest first, within combat.contact.confirmSeconds of play time.
+  - An upgrade extends the running hold, using Animator:pauseRemaining(), but only when the contact's own hold run is the running one.
+  - Replication.confirmedAlready(targetId, window, artId) handles a confirm that arrived before the local contact.
+  - Every local-rig hold goes through holdLocal(animator, frames), which tracks holdRun and holdEnds: a hold joins the running one or starts a new run.
+  - playClock() and tickPlay() keep a play clock on Deps.onHeartbeat, where a step counts at most stall.jumpSeconds; start() binds RunService.Heartbeat.
+  - Prediction rows carry `at` (wall), `seen` (play) and `run`.
+- Impact.hit(info, previous?) plays only what the moment adds over `previous`, by rank in the moments rows.
+- Mixer: handles carry absorbKey and absorbSeconds; hitStop absorbs a strike's authored Hold (D-154). Choreo's Animator gains pauseRemaining().
+- ClipSampler: snapEase, isStrikeSnap, strikeHoldAfter. The server samples the eased snaps too.
+- FrameClock: render steps at First and Last priority, a Heartbeat watchdog, pace(), and bind() for specs.
+- OutlineManager.tint/untint (used by Telegraphs on weaponless rigs). Trails: the weapon-only activation flash and the cancel fade. SfxPool.asOwn and the OwnSFX group. ImpactFrames.whenVisible and drawn-frame quotas.
+
+### Enemy attacks on the server's beat (D-165 to D-182)
+
+- **server/world/CollisionGroups** (D-167):
+  - `register(physics?)`: Main calls it before any service starts; idempotent; warns on failure.
+  - `assign(model, group)`.
+  - `joinPlayers(character)`: CharacterReady's default collide.
+  - `playerPartAdded`.
+  - `clear(model, overlap?)`: the rejoin test.
+  - Group names come from ai.luau `collision`.
+- **EnemyService**:
+  - `alignOf` looks the yaw aligner up by class (D-165).
+  - `bodyExtents(model)` returns front and back in studs from the root, computed at spawn.
+  - The engine seam gains optional `setCollisionGroup(model, group)` and `bodyClear(model)`.
+  - Enemies spawn in the Enemies group, switch to Rushing at RushStarted, and rejoin when clear.
+  - `pauseForHit(id, seconds)` returns the seconds added, or nil. bind installs it through `CombatService.setEnemyHitStop`.
+  - The Brain context gains `bodyExtents`, `rushStarted`, `rushEnded` and `extendState`.
+- **Brain**:
+  - New: `strikeStretch(origin, facing, from, to, resolved)`, `pauseAttack(seconds)`, `frozen()`, `cancelAttack(reason)`.
+  - Archetype hooks `contactStrike` and `onCancel`.
+  - When the wind-up ends, the strike phase starts at phaseStart + windUp, the attack's own beat, not the tick (D-182).
+  - Exported type `Rush`: startedAt is the launch beat (RushStarted.serverTime); bodyStartedAt is the AI tick the body started running.
+- **Charger**: the line resolves on startedAt's clock. The body's jam check and its end use bodyStartedAt's clock.
+- **CombatService**:
+  - `enemyStrike(enemyId, attack, origin, facing, options?)` takes `Types.EnemyStrikeOptions` {span, resolved}.
+  - `setEnemyHitStop(hook)`.
+  - HitConfirmed gains `attackPause` and echoes `swing`. swingOf validates the request's swing number.
+- **HitSweep**: `lineTargets(..., span?)` limits a line to [from, to] studs along it.
+- **EntityService**: `extendState(id, seconds)` pushes a timed state's end (and its lock) without StateChanged.
+- **CharacterReady**:
+  - `join(character)`; Engine.collide puts a finished character in the Players group.
+  - `unlabel(character)` turns off the engine's name and health display on each Humanoid; wait() calls it on the first frame and when ready (D-178).
+- **Remotes**:
+  - `RushStarted`, `RushEnded` and `RushTurned`: reliable RemoteEvents, server to client (D-221).
+  - `HitConfirmed.attackPause`.
+  - ArtRequest, BasicAttackRequest and HitConfirmed carry an optional `swing` (integer, 1 .. combat.contact.swingSequenceMax).
+- **PlaygroundLayout / PlaygroundService**:
+  - `spacedScatter(cx, cz, radius, spacing, occupied, random)` returns x, z and clear.
+  - `PlaygroundService.occupied()`.
+  - spawnCFrame keeps the spacing (D-170).
+- **client/choreo/RushDraw** (pure): a Charger rush's drawn timeline on the server clock.
+  - Functions: predict (from the Telegraph), start (RushStarted), delay, jam, stop, halt, freeze and step.
+  - Replication steps it from the animator's onStep hook and draws the body with Animator.setBodyOffset (offset composed on the root joint, or, while drawn away from the root, the Torso drawn off the joint from `at`, D-531), hiding the root part.
+- **Mixer**: keepBeat(handle, untilTime, owed), shiftBeat(handle, seconds), beatOwed(handle).
+- **Animator**: keepBeat(handle, serverTime), shiftBeat, setBodyOffset(offset?, at?) (D-531).
+- **Telegraphs**: show(..., lateBy) shortens the telegraph by the time already gone; delay(model, seconds) moves a showing telegraph's end.
+- **Replication**:
+  - drawnAway(part) feeds ContactPredictor deps.hidden.
+  - ContactPredictor deps.targets is EntityTracker.live. Contacts and confirmedAlready carry `swing`.
+  - Replication requires Shared.choreo.ClipSampler for the strike-hold credit (D-176).
+- **EntityTracker.live()**: one frozen, id-sorted list, replaced only when a record comes or goes (D-175).
+- **client/fx/Shatter**: hideRig hides the rig's parts, suspends its outline, detaches trails, hides telegraphs and now hides the nameplate (Nameplates.hide).
+- **client/ui/Nameplates**:
+  - keepFolder() runs on attach, update and Heartbeat; it puts back or rebuilds the PlayerGui folder after a respawn reset.
+  - Seams: Nameplates.step(dt) (one Heartbeat), Nameplates.folder(), Nameplates.setGuiParent(source).
+- **client/camera/CameraController**: two render steps, SkyspireCamera at Camera (200) and SkyspireCameraLate at Last. The late pass redraws only when nudge() or shake() was called after this frame's main step.
+- **client/camera/CameraMath.leash(focus, trailing, forward, closer, further, side?)**: clamps the lag along the view to [-further, closer] and, when side is given, across it to ±side.
+- **shared/data/camera.luau**: follow.leash = { closer 0.75, further 2.5, side 1.0 }.
+
+### Strikes on the frame, smooth turns and the ceiling shadow (D-183 to D-192)
+
+- **server/services/EnemyService**:
+  - `step(dt)` runs the whole 20 Hz ticks (at most maxTicksPerFrame), then the frame pass. For each awake entry it calls `Brain.frame()`, and the mover takes any goal handed over in that frame (D-184).
+  - Mover fields: `direct` (the current move kind) and `pending` (a goal handed over since the last mover update).
+  - The stuck clock restarts per movement: on a start from standing, or on a switch between direct and path-aware, which also drops a path in flight.
+  - A late path skips a first waypoint within waypointReach of where the body asked from (D-183).
+  - Entry gains `clearSince`. `rushEnded` starts the rejoin wait for every reason, a jam included.
+  - `rejoin(entry, now)` runs on each tick. It sets the Enemies group once `bodyClear` has held for ai.collision.rejoinClearSeconds in a row; an overlap restarts the count (D-190).
+- **server/ai/Brain**:
+  - `frame()` runs on every server frame: the timed attack edges (`beat`) and the body turn (`advanceTurn`). `tick` keeps perception and decisions.
+  - `beat(now, dt)`: the wind-up's end becomes the strike, then the strike's resolve. The tick and the frame both call it, so an edge resolves exactly once (D-184).
+  - `advanceTurn(at)`: the per-frame yaw toward `turnGoal` at the phase's rate, capped after a hitch. `turnToward` only records the goal (D-185).
+  - `moveDirect(position, speed)`: a strike's own move, straight and never pathfound. `moveToward` stays path-aware (D-183).
+- **server/ai/Charger**:
+  - `bodyStartedAt` is the server frame the body launched on.
+  - A jam reports `rushEnded("Jammed")` and stops the body with `context.stop()`. The line keeps resolving on the clock to the run's end (D-190).
+- **shared/data/ai.luau** `collision`: `clientDrawLagSeconds` (engine fact, 0.3) and `rejoinClearSeconds` (0.5). tools/validators/ai.luau checks rejoinClearSeconds > clientDrawLagSeconds, and every Charger rush's recovery > rejoinClearSeconds.
+- **client/fx/Shatter.expect(model, seconds)** and **client/ui/Nameplates.expect(model, seconds)**:
+  - Replication's EntityDied calls Shatter.expect where it schedules the shatter. The plate's fallback then waits ui.nameplates.shatterGraceSeconds past the shatter's time.
+  - Shatter's hideRig, through Nameplates.hide, takes the plate on the body's frame (D-187).
+  - An overdue plate goes on the Heartbeat after the first one that saw it overdue (`Plate.overdueBeat`, D-191).
+- **client/choreo/Mixer.beatStep**: a kept beat's last step evens the whole balance: maxRate when the clip is behind, minRate when it is ahead (D-188).
+- **places/Playground.project.json**: the Ceiling has CastShadow false. tests/project fails any part at or above 100 studs that casts a shadow (D-186).
+
+### Rush followers, jam line and late paths (D-193 to D-198)
+
+- **client/choreo/DrawnBody**: where a rig's body is drawn, meaning its root part moved by Choreo's body offset (a rush, D-171). Readers use DrawnBody.position and DrawnBody.cframe. DrawnBody.follow and unfollow keep a root-adorned BillboardGui over the body (D-193). Also add it to the client layout list.
+- **client/choreo/Choreo**: applyOffsets publishes each offset from the same step that writes it into the root joint, which moves the following billboards. It publishes nil when the offset ends and on destroy.
+- **Client readers of an enemy's position**, all through DrawnBody:
+  - Nameplates (plate, fade, hover), Hud (SWITCH), CameraController (lock point);
+  - Engine.modelPosition, which also feeds SfxPool, Trails, OutlineManager, ImpactFrames, Impact and Shatter;
+  - the Replication sound position, Choreo.rerank and DevAim.
+  - Digits, Sparks, SwitchRing and the telegraph decal stay on server points.
+- **client/controllers/TargetController** `positionOf` and **CharacterController** `lockPosition`: the lock range, break distance, assist and lock turn are measured on the drawn body (D-194). Extend the TargetController line accordingly.
+- **server/ai/Charger.sweep**:
+  - Each stretch is capped at progressOf + front + speed × late start + keepUpStuds (D-195).
+  - memory.rushResolved holds the furthest point resolved and starts the next stretch when that is behind the clock's back.
+  - Nothing resolves after rushJammed.
+  - The cap is also rootAt + brain:worldAhead(direction, to − rootAt) (D-197). A wall right at the crouch resolves nothing yet.
+  - This replaces "The line keeps resolving on the clock to the run's end (D-190)" in the D-183 to D-192 section.
+- **server/ai/Brain**: `worldAhead(direction, distance): number?` asks Context.worldAhead and returns nil when there is no hook or distance ≤ 0.
+- **server/services/EnemyService**:
+  - Mover gains pathFrom (where the body asked) and pathFresh (a path landed since the last update). firstAhead skips leading waypoints already passed on the first update after a path lands (D-196).
+  - `worldAhead(model, direction, distance, cast?)` flattens the direction, starts the root's box with its front face at the root's centre, and returns the distance travelled or nil.
+  - `WorldCast` type; `defaultWorldCast` is workspace:Blockcast with RaycastParams set to Exclude the model, RespectCanCollide on, and CollisionGroup set to the root's group.
+  - The engine seam gains `worldAhead`, and makeContext wires it.
+  - spawn calls rigBuilder.addBlocker before setting the enemies group (D-198).
+- **server/world/RigBuilder**: `addBlocker(model): Part?` builds the invisible blocker: the root's footprint from the floor to blockerHeight, welded to the root, in the blockers group, named `RigBuilder.BLOCKER_NAME` ("Blocker"). It returns nil when there is no root or the rig is unknown.
+- **server/world/CollisionGroups**:
+  - names() returns four groups: players, enemies, rushing, blockers.
+  - isBlocker(part) is new.
+  - assign keeps a blocker in its group, with CanCollide on only for the enemies group.
+  - clear checks the root against players and enemies, and each blocker against players.
+- **shared/choreo/BladeContact.queryable**: (CanQuery or CanCollide) and not in a group kept apart from Default. HitSweep.isQueryable delegates to it, and ContactPredictor already uses it.
+- **shared/data/ai.luau**: archetypes.Charger.keepUpStuds (1). collision.blockers ("SkyspireBlockers"), collision.blockerHeight (7), and new apart pairs: Enemies–Players, and Blockers–Default, Enemies, Rushing and Blockers.
+- **tools/validators/ai.luau** requires:
+  - keepUpStuds positive and below jamLagStuds;
+  - four distinct groups;
+  - apart pairs that name a fighter group or Default;
+  - blockers kept from Default, enemies, rushing and blockers, but not from players;
+  - enemies kept from players;
+  - blockerHeight above every enemy rig's hipHeight + root height.
+
+### The end of a charge (D-199 to D-204)
+
+- **Client frame order:** FrameClock (First) → SkyspireRigs 199 (Choreo rig step, D-201) → SkyspireCamera 200 → ImpactFrames 201 → CharacterController/contact 301 (Character+1) → SkyspireCameraLate 2000 → FrameClock (Last).
+- **client/choreo/Choreo**:
+  - `RENDER_STEP` ("SkyspireRigs") and `renderPriority()` (Camera − 1).
+  - Full-rate rigs step in that bound step; Engine.renderStepped defaults to it. The local driven rig is still stepped only by stepLocal at 301 (D-139).
+- **client/choreo/RushDraw**:
+  - `room(from, size, direction, distance, cast, exclude): number?` is the server's worldAhead cast made from the drawn body, in AI.collision.rushing. It returns the free distance, or nil for nothing in the way, a failed cast, or ground (D-199, D-204).
+  - `isGround(normal)` applies ai.luau collision.groundSlopeDegrees.
+  - `WorldCast` returns (distance?, normal?); `Room` type.
+  - `step(state, now, dt, root, room?)` cuts a step the world stops and jams the limit there.
+  - `retime` keeps the limit's world point.
+- **client/controllers/Replication**:
+  - The `worldCast` dependency defaults to workspace:Blockcast (cached RaycastParams: Exclude, RespectCanCollide, the given group) and returns Distance and Normal.
+  - armRush builds `rush.room` from the root's size and its own model; stepRush passes it to RushDraw.step.
+- **client/choreo/Locomotion**: `drawnTracker(animator, character)` feeds the gait from the drawn body's movement while a body offset is drawn (D-200).
+- **server/ai/Charger**:
+  - `stopAtWall(brain, rush, face)` (D-202) marks rushJammed, sends rushEnded("Jammed", clamp(face − rootReach, progress, length)), then moveDirects there or calls context.stop(). It does nothing unless the rush is rushing, not yet jammed, and in Strike.
+  - `sweep` caps each stretch at any face worldAhead finds, and calls stopAtWall only when that face is not ground (D-204).
+  - Past the strike beat, `sweep` casts once per pass (memory.rushLooked, reset in onStrikeStart) to min(speed × elapsed + front, reached, length + rootReach).
+  - `onStrike`'s jamLagStuds check now covers only stops the cast misses.
+- **server/ai/Brain**:
+  - `rootReach(direction): number` asks Context.rootReach (0 with no hook, never negative).
+  - `worldAhead(direction, distance): (number?, boolean)` returns the face and whether it is ground, or nil and false. This replaces "worldAhead(direction, distance): number?" in the D-193 to D-198 section.
+  - Context gains `rootReach`; Context.worldAhead returns (number?, boolean?).
+- **server/services/EnemyService**:
+  - `rootReach(model, direction)`: half the root box's extent along the flattened direction; 0 with no root or a vertical direction.
+  - `worldAhead(model, direction, distance, cast?)` starts the cast from rootReach and returns (distance?, isGround?).
+  - `isGround(normal)`.
+  - `WorldCast` returns (number?, Vector3?); defaultWorldCast returns Distance and Normal.
+  - engine.worldAhead returns (number?, boolean?).
+  - makeContext wires rootReach and passes both worldAhead values.
+- **shared/data/ai**: `collision.groundSlopeDegrees` (45); the comment on archetypes.Charger.jamLagStuds is rewritten (the value stays 4).
+- **tools/validators/ai**: groundSlopeDegrees must be a number below 90 and at least each Charger rig's atan(hipHeight / half its root's length).
+
+### Wall slams and frame order (D-205 to D-218)
+
+- **Module list.**
+  - Under src/shared/, add `choreo/RushWorld.luau        pure rules for a rush meeting the world: path legs, body outline, ground, Slam / Glance / Clip contact (D-205 to D-209)`.
+  - After line 60 (fx/AccentStep), add `fx/FrameOrder.luau           the client's render order: named bound steps that pose readers join (D-211)` and `fx/WallSlam.luau             the pooled dust a rush's slam throws off a wall (D-217)`.
+- **src/shared/choreo/RushWorld.luau:** pure shared rules for a rush meeting the world. Covers:
+  - path legs: line, legIndex, pointAt, timeAt, sameLegs, SAME_STUDS;
+  - the body outline: profileOf, front;
+  - ground: isGround, groundBelow, climbable, runsOver;
+  - contact: Slam / Glance / Clip, lookLimit.
+  - Used by Charger, EnemyService, RushDraw and Replication.
+- **Remotes:** new RushTurned (reliable since D-221, ServerToClient: kind, at, legs up to ai.rushWorld.maxLegs, contact, normal). RushEnded gains reason "Wall" and optional contact and normal. After a Jammed or Wall, the interrupt that ends the rush is sent once more as RushEnded (D-210).
+- **server/ai/Brain:** Context gains bodyProfile, rushTurned and daze. worldAhead gains an offset and returns the face normal. Brain.frame() runs the rush's look every server frame.
+- **client/choreo/RushDraw:**
+  - setBody(state, body, hover), ground(spot, cast, model), wall(state, distance, contact, normal), rest(state, distance), takeCues(state).
+  - step(state, now, dt, root, room?, ground?).
+  - halt(state, now) is ignored once a stop is told. With no stop told, it goes onto a face the own cast found and the timeline reached (D-218).
+- **client/controllers/Replication:**
+  - rushContact is a Signal fired as (record, kind "Slam", "Glance" or "Clip", point, normal) on the frame the drawn body reaches the contact. It fires in stepRush, inside Choreo's rig step (199).
+  - A Slam also runs slamCue: WallSlam dust, sfx cue fx.wallSlam.cue at the point, and camera.shake(shakeTier) when the local body is within shakeRadius (D-217).
+  - Deps gains wallSlam.
+- **client/fx/WallSlam:** one anchored, invisible, non-colliding part with a world-space ParticleEmitter in workspace folder WallSlamDust.
+  - start() builds it.
+  - slam(point, normal) moves it to the point, faces it along the flat normal, and emits count(particleScale) puffs through Bursts.
+  - count(scale) and emitter() are seams for specs.
+  - No FlashBudget charge (lightEmission 0).
+- **client/fx/FrameOrder:**
+  - join(name, row, fn) returns leave, or nil under Lune. prepare(name, row) returns a boolean.
+  - priority(row) returns the Enum.RenderPriority value of base plus offset.
+  - Steps are bound once and stay bound. Callbacks run in join order, each in its own pcall. No per-frame allocation.
+- **Start order (line 344):** add fx.WallSlam after fx.Sparks.
+- **Lines 99–100:** replace with "ImpactFrames runs in the render step `impact.overlay.renderStepName` (`SkyspireImpactFrames`) at fx.luau renderOrder.impactFrames (Character+3, 303). It is joined through FrameOrder and bound from ImpactFrames.start. No other module reuses that name."
+- **Line 467:** Trails' Heartbeat now runs only the watchdog, the fades and the re-rank; blade samples run in SkyspirePoseReaders (304). Choreo steps its full-rate rigs in SkyspireRigs (D-201), not on RenderStepped.
+- **Lines 580–582 (Frame order):** replace with:
+  - "SkyspireRigs 199 → CharacterController 301 (Choreo.stepLocal → root motion → stepContacts → Replication.contact) → SkyspireCamera 302 → SkyspireImpactFrames 303 → SkyspirePoseReaders 304 → SkyspireCameraLate and FrameClock's end at 2000, tied (D-211)."
+  - "The contact frame shows the contact pose, the sound, the flash, the impact picture's first frame and the camera's nudge, shake and kick. The hit-stop freezes the steps after it."
+- **Line 652:** "two render steps: SkyspireCamera at camera.luau renderOrder.main (Character+2, 302) and SkyspireCameraLate at renderOrder.late (Last)".
+- **Line 722 (Client frame order):** "FrameClock (First) → SkyspireRigs 199 → SkyspireCharacter 301 (controller, contact) → SkyspireCamera 302 → SkyspireImpactFrames 303 → SkyspirePoseReaders 304 (Trails) → SkyspireCameraLate and FrameClock (Last), tied at 2000. The priorities are data rows in choreo, camera and fx .luau renderOrder (D-211)."
+- **Line 724:** "`renderPriority()` reads choreo.luau renderOrder.rigs (Camera − 1)."
+
+### Draw, sheathe and lost rush messages (D-219 to D-226)
+
+- **tests/choreo/SheathTip.spec.luau:** Draw and Sheathe through the client's own path (Locomotion, SheathState, the Choreo mixer, WeaponMount) on the hit matrix's player.
+  - It runs at 0/8/16/24 studs/s, stepped at 60 and 240 Hz, plus one 0.1 s frame after each of the clip's first 3 steps at 60 Hz.
+  - The tip stays under sheath.drawTipSpeed and sheatheTipSpeed, and the blade under sheath.bladeTurnRate (D-219, D-225).
+- **choreo.luau sheath:** drawTipSpeed, sheatheTipSpeed and bladeTurnRate are the speed caps (D-219).
+- **dev.luau groundClearance.sheathTip:** the SheathTip cases (settle, after, speeds, stepHz, hitch).
+- **Locomotion:**
+  - While the target is sheathed and the sword is still in the hand, the base shows the drawn set until a live Sheathe has faded in (showsDrawn), then the sheathed set (D-220).
+- **Remotes:**
+  - RushStarted, RushEnded and RushTurned are reliable server-to-client RemoteEvents (kind "Event"). ActionStarted, Telegraph and SwitchWindow are UnreliableRemoteEvents (D-221).
+- **Replication:** `launches[enemyId]` holds the serverTime of the last RushStarted heard. A Telegraph older than it is dropped before it shows a glow or arms a predicted rush. It is cleared on unwatch and bind (D-222).
+- **ImpactFrames:**
+  - The ScreenGui is turned on by stepSequence's first counted frame, or by run() when there is no render step (D-223).
+  - showSequence turns it on at play only when taking over a picture already on screen: it holds that sequence's look (D-223), or the soft dim frozen at its drawn opacity (D-226), until the new sequence's first counted frame.
+  - playDim still turns on at once.
+
+### Gate shot fixes (D-227 to D-270)
+
+- **ContactPredictor:**
+  - step sweeps the clip's own arc between rendered frames (the clip pose times the drawn pose's interpolated residual, split adaptively within combat.contact.maxSubdivisions). It holds a touch predicted before its strike's key until the key frame (D-227, D-234).
+  - standOff(model, clip, from, rootCFrame, target) is pure and plans the Art stand-off (D-235).
+  - awaitsKey(self, windowIndex, artId?, swing?) → boolean: true while that hit's strike key (window.key) has not shown on the predicted clip (time < key − keyEpsilon, or not stepped yet). False with no swing, another Art, another swing number, or no such window (D-267).
+- **CharacterController:**
+  - planStandOff runs at ArtRequest. stepStandOff moves the root each frame after root motion and before stepContacts. AimLogic.standOffAt is the eased curve on the clip clock (D-235).
+  - takeArtAway lets go of an Art the server took away and fades its light and glow (D-231). The heldYaw block holds the root's yaw under root motion (AimLogic.holdTurn, D-232).
+  - awaitsKey(windowIndex, artId?, swing?) gives the predictor's answer for the swing being predicted, false with none (D-267).
+- **Replication:**
+  - heldFrames applies combat.hitStopShaveFrames to every animator hold (D-228). takenAway makes routeClipEvent close-only on a clip taken away (D-231).
+  - Deps.keyAhead (optional) is bound in start() to CharacterController.awaitsKey through keyAheadOf (nil for a stub); the CharacterController module is loaded once and shared with localDefence.
+  - heldWords holds the server's words for their key. Replication.contact plays a matching one right after the contact it predicted. stepWords() runs on the Heartbeat after stepStrikes and plays any whose key has passed, whose swing ended, or that waited combat.contact.wordWaitSeconds. Words are held only on a client with onHeartbeat; bind() clears the list (D-267).
+  - stepStrikes runs on the Heartbeat beside tickPlay. It predicts the reaction to enemy blows on the local fighter (ai.strikePrediction; localDefence comes from CharacterController.state and stateChanged). HitConfirmed confirms the HP or takes the reaction back (D-258).
+  - A parried HitConfirmed puts no hold on either rig (D-257). RushEnded "Dropped" drops the drawn attack, hides the telegraph and releases a swing clip (D-254). An ActionStarted heard after its own RushStarted starts no Charge clip (D-260).
+- **tools/hitmatrix:** the server swing plus a client draw (Mixer and ContactPredictor) at dev.hitMatrix.clientFps × framePhases. It reports drawnNotCounted and countedNotDrawn, and models the Art stand-off for setups inside the assist cone and range (D-234, D-235).
+- **Camera:**
+  - CameraController.setStage(view?, target?, side?) and staged(): the capture's staged view. It anchors on the player, the target or their middle, and references the player-to-target line, the target's facing or the world, at side × degrees, at a distance and height. It uses the lock's turn cap and aim depth, takes priority over the lock and free cameras but not a scripted camera, and blends on lock.blendLag. The pure helpers are CameraMath.stageAnchor and stageReference (D-251).
+  - holdLock(seconds), lockLive() and lockMove(direction) (D-238, D-239). camera.lock gains closeGap, openGap, closeSwingDegrees, closeHeight, maxTurnDegreesPerSecond, aimDepthFraction and footprintPart; CameraMath gains closeness, capTurn and holdAimDepth (D-236, D-240).
+  - TargetController ends the lock at once when the target dies and calls holdLock for the death freeze (D-239).
+- **Dev capture (module map, next to dev/Capture.client.luau):**
+  - client/dev/CaptureLogic: pure rules for the counter text, K decisions, prompt lines and auto-perform presses (D-248 to D-250).
+  - Capture.client: P stages, frames and counts 3-2-1; U toggles auto-perform; J gives the field back through giveBack(token), which asks again at the stage request rate, up to stageTimeoutSeconds, and drops out when stageToken changes. Only the server's agreement sets "Field given back" (D-268).
+  - server/dev/DevStage.server: the Studio and DevCapture-only RemoteFunction DevStage, with stage, go and release (D-242 to D-247). It is a dev hook beside DevCombat (D-114), but a RemoteFunction, because the client's Capture panel calls it.
+  - server/dev/DevStageLogic: pure rules for spots, holds and the rate limit, and the stand ring and walk route: ring(open, stage), inRing(ring, x, feetY, z), route(open, stage, built, fromX, fromZ) round the ledge and ramp ending with an approach along the spot's facing, crosses(box, ax, az, bx, bz), rampFrame(ledge), onRamp(ledge, x, z) (D-244).
+  - DevStage "stage" never moves the player and no longer requires AntiCheatService (D-244). Outside the ring it replies { ok = false, error = "walk into the ring first", walk = { x, y, z, facing, radius, tolerance, over?, path } }; inside, it heals and spawns around the root's actual position and facing.
+  - Capture.client phase "Walking": a flat SystemCyan disc marks the ring, and the render step "SkyspireCaptureWalk" at dev.luau capture.walk.renderOrder (Input + 1, after the control script's Move and before CharacterController reads MoveDirection) hands the route's direction to Humanoid:Move. It lets go 2 studs short so the two-step stop carries the body in, waits for rest, removes the disc and asks again. A movement key hands the walk over (the shot stages once the root stands in the ring); J and P end it; capture.walk.timeoutSeconds (15) ends it with a note. It is not a FrameOrder step. CaptureLogic.walkFrom, inRing, steer and askWait are its pure half.
+  - dev.luau capture gains staging: shots (stage, camera, cameraSide, prompts, perform), cameras, stage, prompt, confirmSeconds, stageTimeoutSeconds, and hotkeys U and J.
+- **Rigs:** RigBuilder.footprint(rigId), and the blocker over the rest footprint (D-237).
+- **Enemies (server):**
+  - server/ai/Spacing.luau: pure capsule spacing between enemies. footprintOf(profile) is taken from RushWorld.profileOf corners at spawn; clearance, standOff and steer cover the goal edge, the slide and the step out. EnemyService.keepRoom reads it every AI tick before moverUpdate, and Brain reads it through context.standOff for the Return home (D-259).
+  - EnemyService entries carry footprint and stepping. keepRoom(entry) steers free enemies (ai.spacing.freePhases). context.attackDropped fires RushEnded "Dropped" when a held or sleeping enemy loses its wind-up (D-254).
+  - Remotes: the RushEnded reasons gain "Dropped" (the server abandoned a wind-up before launch).
+- **Telegraphs and rushes (client):**
+  - A melee tell stays lit to the snap, with a steady glint over the parry window (ai.telegraph snapLeadSeconds, glintFillTransparency; D-252). Cones are WedgePart fans on the ground (RushDraw.ground; D-253).
+  - RushDraw's Armed phase faces the Telegraph's facing (D-255) and infers a jam from a root at rest (ai.rushWorld restStuds, restSeconds, restSpeed; D-256).
+- **Trails, glow, sound and HUD:**
+  - TrailRibbon (client/fx): a ring of blade samples drawn as chained camera-facing Beams. Trails owns one per rig with a blade chain and feeds it the sub-step blades from BladeContact.blade between rendered frames. Trails.bind takes a held dependency so the ribbon's ages stand still during hit-stop. Trails.ribbonOf(model) is for specs (D-261, D-269).
+  - Trails.activationLight also lights the blade's glow Beams (fx.activationLight.glow) and fades them with the light when cancelled (D-263).
+  - Mixer.preview(handle, dt) reports what a handle's limbs will show after the next step, by Mixer.step's own rule. Mixer.hold(handle) stops its clock while the envelope keeps moving. Locomotion's sheath hook uses preview; SheathState cuts back with hold plus choreo.sheath.cutBackBlend (D-262).
+  - SfxPool: each group's EQ is always in (flat while idle) and setEnabled switches only the reverb; sub-frame ramps land at once. The low-HP heartbeat loop ducks under the local player's own hit cues (sfx.mix.heartbeatDuck), stepped on Heartbeat (D-264).
+  - HudLogic.declutter(boxes, gap, maxHeights, previous?) → (lifts, order) is pure: it returns each screen box's lift, the nearest first. PlateBox.key names a plate from update to update; with previous given, adjacent plates swap only past reorderStuds. HudLogic.easeLift eases a lift exponentially (D-265, D-270).
+  - Nameplates: each update builds boxes for the shown plates, keyed by record.id, declutters them and keeps declutterOrder; each Heartbeat eases SizeOffset.Y. Nameplates.setProjector(fn) is for specs.
+  - SpeedLines: each pooled line carries a UIStroke ink edge with its own UIGradient; lay() writes the edge's transparency with the core's.
+- **Data tables:** combat.luau hitStopShaveFrames and contact (keyEpsilon, wordWaitSeconds, standOff); camera.luau lock keys; ai.luau telegraph, strikePrediction, rushWorld rest keys and spacing; fx.luau trail.ribbon, activationLight.glow and wallSlam; sfx.luau mix.heartbeatDuck, playback.sameFrameSeconds and shatterBalance; ui.luau systemLine, hud.artList and nameplates.declutter; accents.luau speedLines edge; choreo.luau sheath.cutBackBlend; dev.luau capture staging and hitMatrix.clientFps.
+
+### Gate shot fixes, second round (D-271 to D-296)
+
+- **Hit path (client):**
+  - Mixer: a pause ends at the frame nearest its length. `owes(pause, dt)` is false once what is left is under half of dt. combat.hitStopShaveFrames is 0, so Replication.heldFrames passes holds through whole (D-271).
+  - Replication: a kill's HitConfirmed is held for its strike key like any other word (D-267), and the kill's EntityDied waits with it (deaths kept per entity: takeDeaths, releaseDeaths, playDeath). The death freeze, silence and shatter start on the key frame (D-272).
+  - Trails and TrailRibbon: a stroke starts at its window's open instant. The sub-steps between rendered frames are the clip's own poses at those times (residualsOf, followSource, bladeAt), not chords (D-273).
+  - ContactPredictor:
+    - worldCast(model, blockcast?, exclude?) → BoxCast, room(...) and fighters(model, scene?, players?) give the stand-off's world limit.
+    - standOff(model, clip, time, rootCFrame, target, cast?) returns a plan with room(rootCFrame, distance) → number, which CharacterController.stepStandOff applies every frame (D-276).
+    - A fighter judged beside the swing when a window opens (besideSwing; per-window aims and beside sets) is tested with the blade only (D-275).
+    - Contacts use BladeContact.hurtbox (D-277).
+- **BladeContact (shared by HitSweep, ContactPredictor and tools/hitmatrix):**
+  - held(part) and hurtbox(part): a part named in its rig's trailParts, under a Model whose Rig attribute names a rigs.luau rig, is a weapon and never a hurtbox (D-277).
+  - beside(...) judges a fighter outside the assist cone. sweptTouch, followTouch and rootBow test it along the drawn arc with besideHitRadius (D-275).
+- **HitSweep and CombatService (server):**
+  - The beside sweep (sweepBeside, nearBlade, besideOf) runs alongside the aimed sweep.
+  - A cast that meets a held weapon excludes only that part and goes on.
+  - CombatService keeps per-window aimOrigin and besideIds, and its traces use hurtbox (D-275, D-277).
+- **Enemies (server):**
+  - EnemyService movers (D-278, D-279, D-295):
+    - snoutWalk returns the room and the face's normal, and snoutRoom slides a slanted walk along that face.
+    - snoutAhead and canFace judge a turn where the body stands.
+    - A rush stop within ai.movement.haltLeadSeconds is made exact through Engine.halt.
+  - Brain.turnStep turns the short way unless context.canFace refuses. A free body then turns the long way (turnSense) until it is through the half turn; an attack's turn never does (D-295). Brain gains moveDirect and halt.
+  - Charger: blocked(brain, rush, now, progress) is the blocked-step jam (archetypes.Charger runningFraction, blockedFraction, blockedSeconds; D-280).
+  - EnemyService.blockerClear(model) runs a separating-axis test (uprightBoxesOverlap) between the model's blocker and every other entry's colliding blocker. The rejoin needs it as well as CollisionGroups.clear. ai.collision.apart no longer keeps blockers apart from enemies or from blockers (D-281).
+  - EnemyService's endedPayload builds RushEnded as Types.RushEndedPayload, and Types.RushEndedReason is the wire's reason union (D-282).
+- **Camera:**
+  - CharacterController.step calls CameraController.lockMove right after reading Humanoid.MoveDirection, and writes a turned stick back with Humanoid:Move (D-284).
+  - holdLock(seconds) holds for seconds + camera.lock.riseHoldSeconds with the framed point frozen (D-285).
+  - The two-shot measures each shoulder's reach (reachLeft) and takes the open side once (CameraMath.takesOpenSide; D-286). A target that left the view raises the turn cap (turnCap, CameraMath.acrossView; D-287).
+  - shake(tier, scale?) scales the tier's amplitude, and CameraMath.falloff(distance, full, radius) gives the scale. Replication.slamCue calls shake(tier, falloff(...)) and requires client/camera/CameraMath (D-288, D-296).
+- **Telegraphs (D-289):**
+  - Telegraphs keeps a ring of the last fx.telegraph.glintLeadSamples lateBy values. glintLead() is their minimum, capped by glintLeadMax. resetLatency() is for specs.
+  - TelegraphShapes.timing(windUp, strike?, lead?) → (ends, glintFrom, glintUntil); fillTransparency(elapsed, windUp, intensity, ends?, glintFrom?, glintUntil?).
+- **Dev capture (D-290):**
+  - CaptureLogic.lockPress(stagedId, lockedId) → "Lock" | "Release" | "Key"; letGo(held, slotOf) → { action, slot? } in name order.
+  - Capture.client routes LockOn presses through lockPress and stops a take through letGo, calling CharacterController.cancelArt before the key's End.
+- **Animation:**
+  - Locomotion: on the local rig (holdsCutAttacks true), an attack clip let go before its first HitWindowOpen, TrailOn or SmearOn is held (holdCutAttacks → Mixer.hold) and fades where it stood. Locomotion.attach (remote players) sets holdsCutAttacks false (D-294).
+  - Flinch clips are impact frames: the hit pose is on key 0 and held to 0.04 s (D-294).
+  - LocomotionState.heldShare(speed, input, walkSpeed): the walks play alone at walkSpeed when the move is held, and a run hands back over choreo locomotion.stride.heldRiseSeconds (D-292).
+  - tools/gaitgen generates all 12 gait clips, Run and Sprint from sources/Run.luau and sources/Sprint.luau; GaitGen.DRIFTED is empty (D-291).
+- **Validators (D-283):**
+  - camera: close-shot and aim rules, footprintPart = RigBuilder.BLOCKER_NAME.
+  - dev: capture cameras, shots, prompts, perform lists, hotkeys, ledge and ring geometry.
+  - sfx: the shatter balance.
+  - ai: haltLeadSeconds and snoutSlackStuds bounds.
+- **Data tables:**
+  - combat.luau: aim.assistConeDegrees 80, besideHitRadius, besideFollowStep, besideMaxSubdivisions, contact.standOff.wallGapStuds, hitStopShaveFrames 0.
+  - ai.luau: movement.haltLeadSeconds, movement.snoutSlackStuds, archetypes.Charger runningFraction / blockedFraction / blockedSeconds, collision.apart.
+  - camera.luau: lock riseHoldSeconds, wallBlockedFraction, wallGainFraction, catchUpDegreesPerSecond, catchUpMostDegrees, catchUpMargin, catchUpEase.
+  - fx.luau: wallSlam.shakeFullRadius, telegraph.glintLeadMax and glintLeadSamples.
+  - choreo.luau: sheath.movingTipShare, locomotion.stride.heldRiseSeconds.
+
+### Gate shot fixes, third round (D-297 to D-341)
+
+- **Hit path (client):**
+  - Replication:
+    - Each prediction carries `asked` and `waiting`. The Heartbeat runs holdForWords(step) after stepWords. A hold whose HitConfirmed has not come by the tier's last frame goes on a frame at a time until the word comes, capped at combat.contact.wordHoldSeconds from the contact (D-312).
+    - A Kill word in the running or waiting hold extends that hold to the Kill length from the contact, never a second freeze. EntityDied leads its silence from a contact within deathDuckDelay (D-313).
+    - dropAttack sets `launches[id]` to the RushEnded payload's serverTime and leaves alone a wind-up that began at or after the drop (D-339).
+  - Mixer:
+    - While a hit-stop pause holds, the procedural channels (lean, foot IK, drawn sprint) are added as the last unpaused step composed them (D-314).
+    - A pause is a frame count picked once at its start from the rig's pace (impact.hold: framesAt, holdFor, clockStep, notePace; paceFrames, hitchFactor, tieFrames). A rig with too few steps keeps the nearest-frame end (D-327, D-341).
+  - ContactPredictor: `standOff(model, clip, from, rootCFrame, target, cast?, options?)` with options { keepOut, step }. The plan gains keep(clipTime), keepUntil, side, keepSide(clipTime) and roomSide(rootCFrame, distance). It holds keepOut.parts no deeper in any blocker face than the swing found them, in up to maxPieces pieces when parts turn more than maxTurnDegrees (D-314, D-315).
+  - CharacterController:
+    - Every Art and every basic plans a keep-out stand-off (basics pass step = false). stepStandOff moves the root along `away` by step + keep and along `side` by keepSide, on the clip's clock; each move is room-capped and only grows. clearCharacter resets the stand-off state (D-314).
+    - struckShown (a shown blow's Flinch on the local rig) and waitUnlit hold an Art short of its ActivationHold; lightHold seeks it to the hold pose once the blow is taken back (Hold.unlit; D-326).
+    - onServerState stops an Art the server takes away over combat.struckStanceBlendOut through clearHold(blendOut) and takeArtAway(current, blendOut). stopClip(handle, blendOut?) defaults to locomotionBlendOut, which every action the player starts keeps (D-340).
+- **Blockers and enemies (server):**
+  - RigBuilder: `addBlocker(model): Part?` builds upright faces from the floor to blockerHeight, welded to the root, in the blockers group, CanQuery and CanTouch off, Massless. "Blocker" (BLOCKER_NAME) is the flat hull of every part but the trailParts, at rest and over rigs[rig].blocker.clips; one "HeldBlocker" (HELD_BLOCKER_NAME) per trailPart. `footprints(rigId)` returns each face's name, centre, size and parts in root space, cached per rig; `footprint(rigId)` is the body face (D-315).
+  - EnemyService:
+    - bodyExtents skips the faces. blockersOf and blockerClear test every own face against every colliding face of every other entry, solid corpse faces included (D-318, D-329).
+    - forget records each corpse with offAt (deathDuckDelay + combat.deathFreeze); sweepCorpses in tickAll turns its faces off at the shatter (D-329).
+    - facesOf(model) gives the faces in root space for the spawn footprint (D-332).
+    - Dev hooks: place, walk, walking, charge and devRushOf, plus engine.pivot (Model:PivotTo) (D-333).
+  - Spacing: Face and Footprint.faces; footprintOf(profile, faces); faceCorners; clearance is the separation over the faces' own axes, then the nearest point-to-edge distance; a slide keeps its way round by the cross product's sign (D-332).
+  - Charger: rushOf and charge, additive only, for the dev hooks (D-333).
+  - RushWorld.profileOf skips the faces, so the client reads the body the server measured before addBlocker (D-322).
+- **Camera:**
+  - CameraController: during holdLock the still shot stops the rig springs (stillSprings) and moves the follow rigidly with the body (stillPivot), with no late pass, shake or nudge. A look past camera.lock.lookBreakDegrees (lookDuringHold) lets the hold go (letGoHold). A wall-forced shoulder change dwells camera.lock.wallSwapDwellSeconds (wallSwappedAt) (D-323, D-324, D-325).
+  - TargetController: a locked target's death ends the lock on the kill the client shows (onShownHit on Replication.hit killed), or combat.contact.wordWaitSeconds after State Dead with no kill word (dying). stageTarget(id), accepted only in a DevCapture place, makes toggle() follow CaptureLogic.lockPress. TargetController now requires Replication and Client.dev.CaptureLogic (D-323, D-328).
+- **Telegraphs:** TelegraphShapes gives timing, glinting, glints, token and decalAlpha. A glinting blow's glint is fx.telegraph.glintFrames frames centred glintAimFrames early on the parry window, early again by Telegraphs.glintLead; only fx.telegraph.glintKinds glint. Telegraphs paints the weapon fill (ai.telegraph.glintFillTransparency), the ground pieces, textured decals (glintDecalAlpha) and a weapon-less rig's outline tint glintToken white (D-316, D-317). This replaces the D-252 bullet's "steady glint over the parry window".
+- **Animation:**
+  - Locomotion.stepTravel advances the gait phase by speed × dt plus the change in a running travel slip clamped to locomotion.stride.travelSlipSeconds of travel; it resets standing, in the air, on a stall and when held, and drops a teleport or shove (D-334).
+  - tools/gaitgen: Run and Sprint get denser stance keys and the strafes a trail-foot approach; the 8 regenerated clips match (D-334).
+  - player/OneHandedSword/Draw is 0.97 s, settle key included; docs/ANIMATION_REVIEW.md regenerated (D-330).
+- **Trails:** a stroke that started at its clip's open ends once it has swept fx.trail.ribbon.turnBackAfter and a tip step turns more than turnBackDegrees (D-335). A lazily attached rig's first stroke uses standIn (the current pose for the missing previous one) and ribbonStart (the ribbon clock from the last render time) (D-336).
+- **Input:** InputController.handle(action, state, inputObject, source?) keeps sprintHolds per source (nil is the player); sprint is on while any source holds it, sprintChanged fires only on a change, and toggle mode flips only the player's hold (D-338).
+- **Dev capture:**
+  - CaptureLogic: walk helpers stopCarry, lastLeg, ahead, steer and restOff (D-302, D-303). Auto-perform state: Press carries a Move entry; Reaction {entry, at, heard, pressed, count}; Standing {entry, last}; reactions, hear(reaction, events, eventTime, elapsed, early), inside, pause, pressed, standing, standingDue, cycleAction, stickMove, enemyId and enqueue (D-306, D-307, D-319, D-320).
+  - Capture.client: holdSprint presses as "CapturePanel" through InputController.handle and stopWalk releases it. walkStep polls the cancel keys (takeOver), learns the stop carry and walks the last leg again up to secondWalks; manual lasts until P. While recording, the "SkyspireCaptureWalk" render step runs stickStep (Humanoid:Move for the stick), feeds Replication.clipEvent to the reactions with the Guard early by Telegraphs.glintLead, pushes a waiting reaction by a hit's attackPause, and presses due keys, reactions, chain steps and standing rules, never past a reaction's `to`. The panel shows "r N" (RenderStepped frames) and the FrameTick square (D-302 to D-304, D-306, D-307, D-319, D-320, D-337, D-338).
+  - DevStage.server: "hold" at take end (EnemyService.setHeld, holdTake); stageShot calls clearStaged first; "go" lets the released enemies go and schedules releaseAfter ones (task.delay with releaseToken); letGo sets the staged HP again (D-297, D-308, D-309).
+- **DevCombat (Studio only, D-333):** "enemy", "walk", "charge", "part" and "clearparts" go through the same gate and BindableFunction, with no remote and no anti-cheat call. dev.luau hooks (arriveStuds, maxWalkStuds, walkTimeoutSeconds, chargeTimeoutSeconds) with tools/validators/dev.luau checkHooks. "part" builds anchored, collidable, non-touch parts in workspace.SkyspireDevParts.
+- **Validators (35):**
+  - New tools/validators/contact.luau: wordHoldSeconds ≥ the Kill hold; standOff.maxStuds ≤ keepOut.maxStuds ≤ rootMotionSlack; bodyFace and heldFace equal RigBuilder's names; keepOut sampleSeconds, maxTurnDegrees, rounds, maxPieces, depthEpsilon and parts; every rigs[name].blocker clip is an enemy/<Rig>/ clip that plays on that rig (D-312, D-314, D-315).
+  - New tools/validators/telegraph.luau: glintFrames, glintAimFrames, glintToken, glintKinds (never Unblockable), decal.alpha < glintDecalAlpha ≤ 1, glintLeadMax, glintLeadSamples, and every glinting blow's zero-lead glint inside [lands − parryWindow, lands − snapLeadSeconds] (D-316, D-317).
+  - New tools/validators/wallSlam.luau: shakeTier, shakeRadius, shakeFullRadius (D-331).
+  - combat, camera, choreo, stride and dev carry the round's other keys: assist cone vs snap reach, besideHitRadius vs in-scope blades, wallGapStuds ≤ stepStuds, besideFollowStep, camera.lock round-B keys, movingTipShare, heldRiseSeconds, struckStanceBlendOut and struckStanceTipSpeed, capture.walk, perform triggers, releaseAfter, frameTick, hooks (D-300, D-303, D-306, D-308, D-320, D-331, D-333, D-337, D-340).
+- **tools/hitmatrix/HitMatrix:** the player path plans standOff with { keepOut = true, step = isArt } at every assisted enemy and applies away × (step + keep) + side × keepSide; each cell carries keepOut (D-321).
+- **Data keys:**
+  - rigs: RigDef.blocker { clips, sampleSeconds }.
+  - combat: contact.wordHoldSeconds; contact.standOff.keepOut { parts, bodyFace, heldFace, maxStuds, sampleSeconds, depthEpsilon, rounds, maxTurnDegrees, maxPieces }; struckStanceBlendOut, struckStanceTipSpeed.
+  - impact: hold { paceFrames, hitchFactor, tieFrames }.
+  - camera: lock.lookBreakDegrees, lock.wallSwapDwellSeconds.
+  - fx: telegraph glintFrames, glintAimFrames, glintToken, glintDecalAlpha, glintKinds, glintLeadMax, glintLeadSamples; trail lifetime 0.13, widthKeys, Body and Core transparency, ribbon.turnBackDegrees and turnBackAfter.
+  - ai: telegraph.glintFillTransparency.
+  - choreo: locomotion.stride.travelSlipSeconds; stride flatBand, frameBar, slideBar.
+  - dev: capture.walk (lookaheadStuds, carrySeconds, restStuds, restDegrees, secondWalks), capture.artGlowSeconds, capture.perform.moveAction, capture.frameTick, capture.cameras.ThreeQuarter, StagedEnemy.releaseAfter and charge, Perform and PerformStep, hooks.
+- **New specs:** tests/client/CaptureWalk, CameraStageFraming, HitWordHold, FreezeStill, ParryGlint, TrailsArc, InputController and DropThenCharge; tests/server/DevStageTakes, CorpseBlocker, DevEnemyHooks and PackFaces; tests/choreo/StanceLetGo (all .spec.luau).
+- **Lines to replace in older sections:**
+  - ~706 (server/world/RigBuilder): replace "builds the invisible blocker: the root's footprint from the floor to blockerHeight, welded to the root, in the blockers group, named `RigBuilder.BLOCKER_NAME` ("Blocker")" with "builds the invisible blocker faces: "Blocker" over the body's hull at rest and in its idle, one "HeldBlocker" per held part, from the floor to blockerHeight, welded to the root, in the blockers group (D-315)".
+  - ~843: replace "the blocker over the rest footprint (D-237)" with "the blocker faces over the body's rest and idle hull and each held part (D-237, D-315); RigBuilder.footprints(rigId)".
+  - ~845: replace "pure capsule spacing between enemies. footprintOf(profile) is taken from RushWorld.profileOf corners at spawn" with "face-to-face spacing between enemies. footprintOf(profile, faces) is taken from RushWorld.profileOf corners and EnemyService.facesOf at spawn (D-332)".
+  - ~849: replace "with a steady glint over the parry window" with "with a three-frame white glint on the parry window, never on an Unblockable blow (D-316, D-317)".
+
+### Gate shot fixes, fourth round (D-342 to D-468)
+
+- Frame order. Choreo writes a rig's pose on PreSimulation, after the Animator's reset, so a step's pose is drawn one rendered frame later (impact.poseLagFrames 1). FrameClock has a third render step, FrameClockPosed at fx.renderOrder.posed (200), between the rigs (199) and the controller (301). poseShownOn() is the last frame the rigs wrote plus poseLagFrames. atPose(fn) runs a cue on that frame; atStepPose(fn) does the same for cues a rig's own step finds (slam, rush blow, skid dust, smear). pace() is the mean of the last hold.paceFrames (32) frames without hitches, the Mixer's own hold rule.
+- Mixer. heldShown (this frame draws the pose the frame before drew), heldCount, holdPace and holdSteps (holds counted in whole rig steps). Hand-overs: play options handOver and cancels; a cut clip holds its pose and fades over handOver.seconds while the new one snaps in; closes fires a cut clip's HitWindowClose, TrailOff and SmearOff once on its next step. handOff (GaitHandOff) blends an attack over a showing gait per joint group while the gait's phase stands. Choreo forwards all of these.
+- Replication. cueAtPose and takeCue sit on the FrameClock gate; inRigStep switches stepRush's cues to atStepPose. holdOverPicture holds a word's rigs over Impact.hiddenFrames at FrameClock.pace. Holds that wait for words step in CharacterController.afterContacts. holdShot and shotLockedOn drive CameraController.holdFollow and lockedOn. takeRemoteAction stops and holds a remote player's struck stance; remote ActionStarted hands over like the local fighter's. Guard reactions coexist with the Guard. smearOnPose changes the blade on the drawn snap frames.
+- Impact and camera. HitInfo.late drops the picture and the punch; a stronger tier's white plays after its picture (afterHidden). CameraController.holdFollow stands the follow while a hit is drawn held; lockedOn skips the nudge and shake of a proven locked kill; a shake from rest starts at camera.shake.startPhase. Staged views can be fixed (camera.stage fixAfterSeconds, fixStillStuds); Behind is fixed and Rear is new.
+- Trails. A ribbon fades out over closeSeconds when its window ends, narrows edge-on (edgeOn fullAt, edgeAt, minShare), and its host carries TrailOwner.
+- Bodies. ContactPredictor: the reach rule at each strike key, the keep-out capped at 12 studs/s and frozen inside a strike's authored hold, depthEpsilon at a freeze's first key. CharacterController: standOffLost at walls; the WalkShell hold block cuts the stick walk with BodyShell boxes against enemy faces through Humanoid WalkSpeed.
+- Enemies. EnemyService seams Engine.land (no PivotTo in a rush; its landing contract is D-525's, under the section AI fixes below) and Engine.anchor (held enemies Anchored), the walk cast with the body's corners, and limitAttacks for staged enemies. Brain.settle ends spent Interrupts. Charger forgives climb lag and rests Done at the line end. RushWorld.posesOf judges the rush on its drawn Charge poses; the client composes the rush root after physics (rootAhead) and shoulders the drawn rush past the player's body (RushDraw planPass) with a dust puff every 2 studs of skid.
+- Clips and review. ClipAudit (dev) plays every audited clip through the real sampler and Mixer in every game context, with bounds in dev.luau review.audit and a scoped PENDING list in its spec; tools/animation-review.luau adds a Problems column. TurnPlant keeps a standing body's feet planted while its root turns. LabKeys binds the ClipLab's keys through ContextActionService. ReviewMarkers.hitStopPreview pauses on the strike key.
+- Capture and dev. The capture walk has modes Auto, Correct, Face, Settle, Blocked and Manual, asks only after askSettleSeconds at rest, and its f counter holds on frames drawn held. DevStage reads a settled root, replies with receivedAt, never builds the ledge around a body, and moves field enemies past the ramp (awaySpot, floorAt). DevCombat gains pack and place onWindUp; DevAim gains draw; DevFrameCap caps Studio frames for capture. AntiCheatService.Deps.isPlayer gates the system line; serverMoved is untouched and no remote handler calls it (D-143).
+
+### Code leftovers after the fourth round (D-469 to D-493)
+
+- Clip speed on the wire (D-469). ActionStarted (server to client, unreliable) has an optional `speed`: a number in combat.luau actionSpeed [0.6, 1.4], sent only when it is not 1. It is the rate of the clip clock the server sweeps the run on (clip time = elapsed server time x speed). Other clients pass it to the Mixer and to the activation riser; a value missing, non-numeric, NaN or outside the bounds plays at 1 (Replication.actionSpeedOf), because server-to-client payloads are not schema-checked on arrival. CombatService.beginArt(entityId, artId, facing?, speed?) takes the speed through CombatService.actionSpeedOf(requested) (nil, NaN or a non-number → 1); ArtRequest and BasicAttackRequest never pass one. The Art lock is postMotionAt/speed + art.postMotion (post-motion is real seconds); a basic swing's lock is basicHitDuration/speed; rootMotionAllowance stays in studs. A late ActionStarted still starts at most choreo catchUpMaxJump (0.25 clip-s) into the clip, at any speed.
+- Switch (D-470). The server keeps one window per enemy (opener, openedAt, closesAt), opened by the events that fire SwitchWindow (an Art connecting, a perfect parry) and cleared by a Switch, a death, an unregister or a reset; CombatService.switchWindowOf(enemyId) → (openerId?, closesAt?) reads it. CombatService.landHit sets Types.AppliedHit isSwitch and switchPartnerId; HitConfirmed (reliable) carries switchPartner (an entity id of 1 or more) with isSwitch = true only on a Switch. The client takes the partner from switchPartner when it names a tracked Player, otherwise from the last SwitchWindow it saw on that enemy. Impact.hit(info, previous) plays a confirmation's Switch layer (the land sound and both blades' 2-frame white flash) even after a predicted contact, with no second hold, flash, nudge, shake or tick.
+- Guard break (D-471). The HitConfirmed.hitStop of the enemy blow that breaks a player's guard (broke and not killed) is combat.guardBreakHitStop ('Final'). Every client takes its hold, shake and tick from that tier; Replication no longer raises a Normal guard break to a Final tick.
+- Frame order (D-479). A new bound render step, SkyspireDrawnPose (FrameOrder.DRAWN_POSE), runs at fx.luau renderOrder.drawnPose = First+1: after FrameClock's frame start (First), so the cues due on the frame (atStepPose callbacks such as a trail turning on) have already run, and before SkyspireRigs (Camera−1), so the rigs' Transforms are still the pose this frame draws (the previous step's, impact.poseLagFrames 1). tools/validators/impact.luau enforces First < drawnPose < choreo renderOrder.rigs.
+- Replication (D-479, D-480, D-478). onDrawn(record, fn) wraps deps.atStepPose: it drops fn when the rig is unwatched or rewatched in between, and runs fn at once when no gate is bound. routeClipEvent queues every visible effect through onDrawn; the trail kind it resolves, the trailKinds clear and Replication.clipEvent:Fire stay immediate. routeOneShot takes (record, clipId, event, serial, speed), captured when the event fires. replaySkipped defers to the clip's first drawn frame, skips a handle stopped before then and plays from max(handle.time, startTime); replayHold takes the serial. EntityDied's Art trail-off and smearOnPose go through onDrawn, and EntityDied's no-rig fallback goes through SfxPool.shatter. armRush passes the root position to RushDraw.new(line, shown).
+- Trails (D-479, D-473). Deps gains onDrawn(fn) (FrameOrder.join(DRAWN_POSE, …); nil under Lune). At each frame start readDrawn snapshots every lit rig, and every unlit rig within accents.swing.sampleDistance: the chain's pose; the clip handle that crossed a lighting event in the step being drawn, with its clock span and shown weight; the stroke clip's clock, done flag and weight. stepRibbons, followSource, standIn and shownWeight use that snapshot when it is fresh (same frame counter, same chain) and fall back to the live read otherwise; the ribbon is laid on the snapshot pose with the root CFrame as it stands at the pose readers' step. activationLight(rig, on, token, fade, serial?): a call with no serial is made at once and increments entry.lightSerial; a call with a serial is dropped unless it still matches; Trails.lightSerial(rig) reads the count, and Replication.lightOvertaken checks it before the call. Trails tracks each weapon's WeaponModels.motorName joint and its Part0; a Part0 change restarts the tip ring.
+- Stick input (D-474). src/client/controllers/MoveInput.luau is the one reader of player move intent: MoveInput.world(humanoid) returns the active controller's GetMoveVector turned onto the camera yaw, as a unit vector or zero, and falls back to Humanoid.MoveDirection with no control module; MoveInput.bind({controls, camera}) / bind(nil) is the spec seam. CharacterController must not read Humanoid.MoveDirection as the stick, because it Moves the Humanoid itself (the stop carry, the lock frame and the body shell).
+- Locomotion (D-472). A Skid one-shot is skipped while a higher-priority live FullBody handle holds the body.
+- Outline budget (D-476). OutlineRanking candidates carry `signal`; rank() = min(importance rank, fx.outline.signalRank) while it is set, and select() admits signals at any distance. OutlineManager lights a Highlight only when it ranks; flash, tint and untint re-rank instead of force-enabling. reserve() is for Highlights that are not a rig outline (Telegraphs reserves only for a weapon-fill Highlight). OutlineManager.reset() is for specs only, because the Lune harness shares modules across spec files.
+- Impact-frame warming (D-477). ImpactFrames.prewarm(rig) and forget(rig) are fed by Main.client from EntityTracker.added/removed/all(). The Heartbeat calls ImpactFrames.warm(dt), which clones at most impact.figures.prewarmPerFrame parts per call into the pool for the nearest rigs whose figures fit in poolCap, re-ranked every prewarmInterval. A play takes figures from the pool first; clonesMade() counts clones for specs.
+- Screen insets (D-475). Every full-screen effect ScreenGui reads screenInsets and clipToDeviceSafeArea from its data table: impact.overlay and accents.speedLines use None/false; the HUD keeps CoreUISafeInsets/true. ScreenInsets is set after IgnoreGuiInset.
+- Shatter merge (D-478). SfxPool.shatter(position?, cue) is the only entry for shatter cues, no-rig deaths included. It merges against every play of the cue in the last dedupeSeconds within rolloffMaxDistance. Impact.death(…) blooms once per Moments.sweep.mergeSeconds moment, and the longer contour wins; shatter flashes stay one per body.
+- Rush draw (D-480). RushDraw State.shown is where the root stood when the rush was armed; a launch with no crouch drawn starts from it.
+- Rigs and gaits (D-481 to D-483). New tools/validators/rigs.luau (with tools/validators/outline.luau from D-476, 41 validators): it builds each parts rig's rest pose from data/rigs.luau (the root centre at hipHeight plus half the root height, every joint at c0*c1^-1) and requires the lowest corner within choreo.locomotion.stride.contact of the floor, the rootPart to be one of the parts, and every part reachable from the root; the player's R15 has no parts and is skipped. tools/gaitgen: Keys.SwingJoint gains an optional `out` (degrees on hip Z, mirrored per side) and Gait gains `swingOut` (a per-gait scale, default 1). The enemy Break, Stagger and Walk clips are dense generated keys, one per 60 fps frame; their generators are scratch scripts outside the repo, so they have no --check like gaitgen's. EnemyWalkStride.spec traces the real Lab plan over one whole cycle at each sampleHz with the fallback idle play removed; GaitLegCrossing.spec measures RunDrawn's leg-pair depth against overlapStuds on the hit-matrix avatar. RigDriver, Locomotion, Mixer and ClipAudit code are unchanged.
+- Follow-through audit (D-484 to D-493). tests/choreo/FollowThrough.spec.luau plays every Art of the OneHandedSword clip set that has a clip, plus Basic1–3, through ClipAudit.trace (the real Mixer over the drawn idle and breathing, at each review.audit.idlePhases Stand plan) on the hit matrix's standing player with ContactPredictor.standOff (keep-out, step and side). Every 60 Hz frame it reads the blade (64 points from guard to tip) and the keepOut.limbs against the kobold's hurtboxes at 3.5 and 4.8. The rules are Exit, Late, Approach and Limb, bounded by dev.luau review.audit.followThrough (exitFrames, touchStuds), which tools/validators/clipAudit.luau validates. A per-swing PENDING list (studs past the bound, rounded up to the hundredth) must not grow, and an entry fails once it no longer breaks. A second describe block checks that the rules catch a follow-through held at the key (played on Basic3), an anticipation started in the body and a hand pushed into the torso, and that each cut reaches the body. The re-keys change only keys after each contact key, except Basic2's wind-up keys at 0.0208 and 0.0667; hit windows and strike keys are unchanged.
+
+### Section AF fixes (D-494 to D-507)
+
+- Enemies upright (D-494). EnemyService.Engine gains two optional seams. keepUpright(model) is called once in spawn, right after place and before registerEnemy and any hold, so it runs before the body's first physics step; standUp(model) is called from anchorBody whenever the root is freed (anchor false), after anchor. The default engine turns off every Humanoid state in ai.upright.offStates (FallingDown, Ragdoll) with SetStateEnabled, and standUp asks for GettingUp only when the body is in one of them. Both are nil-safe, so fake engines without them behave as before. The state names are data, checked by the ai validator (non-empty, no duplicates, FallingDown required, every name one of FallingDown, Ragdoll, Physics, PlatformStanding, Seated). The server owns the state, since enemies are server-owned (D-436). ClipLab pedestals are PlatformStand and anchored and never use MoveTo, so they are unchanged.
+- The rush on a slope (D-495). No contract change: RushDraw keeps the server's flat line clock up a slope and stands the drawn body on the ground (D-166, D-209).
+- Root timing (D-496). Normally the local root leads its pose by one frame: the root is written in the render step and shows that frame, while the pose shows on the next. From a frame that draws a held pose (heldShown), each CharacterController step's translation, measured from just before the root-motion block to just after stepStandOff, is taken off the root at the end of the step and added back at the start of the next one, for as long as consecutive steps move. Inside a step everything (snap, lock turn, stand-off casts, contacts) works on the logical root. Code that reads the root between steps (the camera at Character+2, Heartbeat, physics replication) sees the drawn root, up to one step behind (≤ one frame of keep-out or root motion, 0.4 at 60 Hz under D-424's cap). No remote handler changes, and nothing calls serverMoved (D-143).
+- Still shot (D-497). CameraController keeps the shake's world offset frozen for the whole still shot (D-323: nothing moves) and lets it decay at shake.decay after the shot lets go; the late pass adds the carried offset when it draws a shake again (drawn.shakeVector, drawn.shakeCarry).
+- Trails (D-498). The TrailLit host attribute (fx.trail.ribbon.litAttribute) sits beside TrailOwner. It is written only when lit changes, when a ribbon is taken and when it is released. The trail validator requires a non-empty name different from ownerAttribute.
+- Pack spacing (D-499). playground.spawnSpacing.widenings is 8. tools/validators/dev.luau holds hooks.maxPackSize to floor(room / (PACK_CROWD 3 × PACK_DRAW_SHARE 4)), the room being what the widest disc holds.
+- DevCombat (D-500). busyToken, busyEnemy and endedBy[token]: invoke frees busy only if its token still holds it, and holdCommand and enemyCommand call endChargeWait for the enemy a waiting charge is for. The charge's reply then carries complete = false and endedBy.
+- Keep-out limbs (D-501). ContactPredictor.keepOutOf keeps a limb sweep chain (limbBefore, limbNow and per-piece frames) beside the colliding-part chain. limbOut(at, shift) runs after the strikes' reach in every fill sample and steps the body out (stepOut) until no hand or arm (keepOut.limbs) is deeper than depthEpsilon in the target's hurt parts, through the sweep from the sample before; the limbs' turn counts in the pieces (turnOf). Budget, speed cap and the reach at keys are unchanged.
+- Stand-off order (D-502). CharacterController.stepStandOff now holds the lost share off the carried motion first, then takes free share = min(by, the carried motion left), then room-casts the rest; lost adds what the world took.
+- Staging (D-503). DevStageLogic.nearParts(ledge, x, z, near, names) is the flat distance to the partBoxes footprints; DevStage.server settledRoot takes `unbuilt` and settles a read near any part still to build as well as near the ring.
+- Sheath under a cover (D-504). SheathState's drawFirst branch reads the cover: while covered and the sword is still on the back, the Draw stops; once the arm is free it plays over the guard from its start. dev.luau groundClearance.sheathCover holds the spec's cases and bars.
+- Lock turn (D-505). CharacterController connects RunService.PreSimulation (with a Heartbeat guard) and lands the lock's turn there (pendingLockYaw, flushLockYaw). Readers between Character+1 and PreSimulation (impactFrames at 303, poseReaders at 304, a logger at Last+2) see the root before this frame's lock turn, together with the pose that matches it on screen. Only in free states (Idle, Guard, the held Art stance), where nothing makes contacts; the snap's whip and a clip's hold-turn still write in the render step. Locomotion's State gains yawAhead, the turn still to land, which stepTurnPlant takes back with its own pose.
+- Stand height (D-506). Locomotion requires Shared.choreo.Pose, measures the avatar's bind-pose sole depth (standDepth, cached by root and foot sizes; a body still being assembled is measured again the next step), reads the Humanoid's HipHeight for the floor (floorDepth), and adds a procedural standHeight channel (Root pos Y, LocomotionState.standOffsets) within footIK.maxAdjust. It runs only with foot IK on; every Lune spec that sets footIK = false is unchanged.
+- Turn plant (D-507). TurnPlant.offsets takes optional stanceWaist and stanceNeck and cuts its twist so that the pose's own yaw plus the twist stays within twistDegrees; Locomotion passes the Waist and Neck yaw the pose gave last step without the channel (plantWaist).
+- Specs. New: tests/server/EnemyUpright.spec.luau, tests/client/HandsOut.spec.luau, tests/choreo/SheathCover.spec.luau, LockTurnShown.spec.luau and StandHeight.spec.luau; new cases in CharacterController, CameraHitFreeze, TrailWindows, StandOffWall, DevPack, DevCombat, DevStage, DevStageLogic, EnemyService and the data and validator specs. The fake RunService in TrailingSend.spec has PreSimulation. FollowThrough.spec's hand-push self-test pushes 4 studs and requires an excess over 0.5 (D-501 takes a 2-stud push back whole).
+
+### Section AH fixes (D-508 to D-522)
+
+- Enemy bodies on the client (D-508). Replication's Deps gains keepUpright(model), and the module a public Replication.keepUpright(humanoid), which turns off every ai.upright.offStates state with SetStateEnabled. watch calls the seam first, once per record, only when the model's own EntityKind attribute reads "Enemy" and the record is not the local one; start() wires it with a Players:GetPlayerFromCharacter guard. It is the client's only write to an enemy Humanoid (its state-enabled flags); the client still reads only FloorMaterial, MoveDirection, HipHeight and the root's velocity from enemy Humanoids. It assumes the tag's InstanceAdded handler (EntityTracker.track, whose added signal runs watch in the same frame) runs before the client's first physics step on the model. D-523 and D-524 replace the single ask: see "Enemy bodies on the client" under the section AI fixes below.
+- Tick-judged waits (D-509). Brain.ticksWaited(now, since, seconds) compares whole AI ticks, to the nearest one, so a wait ends on the tick it is due whatever the server's frame jitter. Only the Alert uses it; Recover, the interrupt resume and the leash's grace still compare seconds.
+- A scripted stick (D-512). MoveInput.script(move?, relative?) holds a stick that MoveInput.world returns ahead of the control module's vector, camera-relative by default; nil or zero lets it go, and so does bind. Only the dev capture's auto-perform uses it, on exactly the frames it Moves the Humanoid (stickStep, released in releaseKeys); its walk-in still Moves in world space. CharacterController still never reads Humanoid.MoveDirection as the stick (D-474).
+- Clip starts (D-513). Replication.clipStarted(record, clipId, clipTime) fires at the end of ActionStarted when a remote action clip starts, with the clip time the catch-up started it at; events before that time never fire. Capture's hearClip listens to it as well as to clipEvent.
+- Rushes after physics (D-514). Rigs step at Camera−1, and each step writes the rush offset against the root rootAhead predicts. Replication's new afterPhysics dependency, bound to RunService.PostSimulation in start(), runs Replication.redrawRushes: each Rush with redraw set is drawn again from the root physics moved, through RushDraw.redrawn(state, root) (with State.handWeight for HandBack) and Choreo's Animator.redrawBody(offset) → boolean, which rewrites the root joint on the last step's clip key (drawnKeyed) and updates pose, bodyOffset and DrawnBody. Armed and Done are not redrawn. The frame then draws the body where the step placed it. Readers inside a frame's render steps (a logger at Last+2 among them) still see the step's offset against the pre-physics root, so the Studio rush lines read the drawn body at Input+1 (STUDIO_TASKS item 420). Measured on 4b18b5c: a PostSimulation joint write never shows on screen (the screen shows the pose as physics solved it, drawn the next frame), so this redraw has no visible effect. Removed by D-532; D-531 draws the rush instead (section AI fixes, third part).
+- Camera continuity (D-515). CameraController's main step remembers the pivot it last framed (lastPivot). A still shot or a freeze that starts on this frame moves its follow (and the freeze's rest) by pivot − lastPivot. A frame with no framing forgets lastPivot: a scripted shot, a missing subject root, a snap past snapDistance, or setSubject.
+- Guard resume (D-516). EntityService remembers a held guard's button (record.guardResume; types EntityRecord.guardResume) when a blow's Stagger or GuardBroken takes it (GUARD_RESUME_STATES). When that lock expires (expireState), the guard is raised again with guardSince nil, so it opens no parry window. Any other lock, or a release, clears guardResume, and a press inside the stagger is still refused. On the client, CharacterController keeps the button and the last send (guardButton, guardSent), sends a release made inside a stagger and re-raises the guard at the stagger's end; ActionLogic.reconcile ends a local Stagger or GuardBroken when the server sends Guard. The server still owns the guard.
+- Stand-off room (D-517). ContactPredictor.standOff's room(at, distance) and roomSide are the least room any colliding part (keepOut.parts) leaves (boxRoom, columnOf, columnRoom). Each part is posed live, from its CFrame relative to the root as read at call time; a torso or head already overlapping the world gives 0. bladeStep and stepStandOff use these unchanged, and ContactPredictor.room keeps its signature.
+- Staged turn (D-518). A staged enemy may stand turned off facing the player: dev.luau StagedEnemy.yaw (+ toward its own left, as the hit matrix's yaw), held by tools/validators/dev.luau within a quarter turn. DevStageLogic.placeStaged is the one place the staging turns it, and DevStage.server spawnStaged calls it. The gate kobold's 4.2 studs and −10.35° are data (GATE_KOBOLD), pinned by HandsOut.spec against WalkShell's own walk-in rest (the yaw within 0.5°, the distance never nearer than 3.272); the walk-in rest cannot be computed on the server, because WalkShell's march is client code. The hit matrix gains the KoboldGate setup. The shots never move or turn the player (D-244).
+- Weapon mount (D-519). WeaponMount re-runs its resolve each step while a retryable piece is missing (the weapon category or UpperTorso). It is the only writer of the client-only WeaponMount and WeaponMountWhy character attributes (weaponModels.attributes.mount and mountWhy), a log aid nothing in the game reads. The motor is character.Weapon.Weapon.Weapon (the model, its blade part, the Motor6D).
+- Spawn settle (D-520). EnemyService.Engine has a new optional settle(model, studs); the default engine pivots the model down, and fakes without it skip the lowering. Entry.spawnLift is set at spawn and cleared for unanchored bodies at the end of EnemyService.step, which runs on Heartbeat after physics; anchorBody and place(…, held = true) lower a body that still carries it.
+- Landing on the move (D-521). Locomotion's Land one-shot: on a landing on the move (Land has weight 0) the Fall hands the legs to the stride over choreo.luau locomotion.landOnMoveBlend; standing, the Land takes them over oneShotBlendIn as before.
+- Settle rule (D-522). ClipAudit's Report gains settlePeak = {speed (studs/s, sample to sample), clipTime, strike}, the fastest tip speed after a strike's snap and before the next strike's anticipation (after the last strike, to the clip's end), and snapSpeed, the fastest sample-to-sample tip speed in a step that touches a snap. ClipAudit.findings adds the kind "Settle" (settlePeak.speed over snapSpeed against dev.luau review.audit.settle.maxSpeedShare); tools/validators/clipAudit.luau KINDS has 10 entries. animation-review.luau and the ClipLab show it like any other kind, and ClipAudit.spec's PENDING list may name it. The basics' 0.24–0.28 follow-through is no longer a Spring.
+- No contract change (D-510, D-511): the 30 cap's frame-time line and the rush's MoveDirection line are corrected in STUDIO_TASKS section AI.
+- Specs. New: tests/client/EnemyUprightClient.spec.luau and tests/client/ClipStartHeard.spec.luau; new cases in EnemyUpright, Brain, DevFrameCap, Capture, MoveInput, CharacterController, RushDrawOrder, CameraHitFreeze, CombatService, ActionLogic, StandOff, HandsOut, DevStage, DevStageKobold, WeaponMount, StandHeight, EnemyService, ClipAudit and the data and validator specs. The Capture specs' fake Replication has clipStarted, and WeaponMount.spec's fake RunService has PreSimulation.
+
+### Section AI fixes, first part (D-523 to D-526)
+
+- Enemy bodies on the client (D-523, D-524; amends D-508). Replication owns this client's copy of every watched enemy Humanoid's fall states (ai.upright.client). deps.keepUpright(model) now returns (state, why): "Off" or "StoodUp" when done, "Waiting" with a why when not, nil for a player's character. A new deps.beforePhysics(fn), bound to RunService.PreSimulation in start(), asks every waiting copy again before the client's physics step, up to ai.upright.client.maxTries; Replication also listens to the tracker's `changed` for EntityKind (the connection is replaced on every bind) and asks at once. The seam reads the copy first (GetState), turns off each offStates entry still on, reads them back, and stands a copy found in a fall state up with ChangeState(standUpState) only after the turn-off. An enemy is known only by its model's own EntityKind "Enemy"; "Player", a character Players:GetPlayerFromCharacter knows and the local record are never asked. It writes UprightClient, UprightClientWhy and UprightClientTries on the enemy Model (ai.upright.client.attributes): client-only log aids in WeaponMount's shape (D-519) that nothing in the game reads. Public helpers: Replication.standUpright(humanoid) and Replication.uprightModel(model, isPlayer, humanoidOf); the old Replication.keepUpright is kept unchanged. These are still the client's only writes to an enemy Humanoid (its state-enabled flags and, once, its state).
+- Landing contract (D-525, D-526; amends D-431). Engine.land(model, position, seconds) is now one frame of a landing. EnemyService calls it every server frame with what is left (landStep); the pace never exceeds the body's speed and spreads what is left over at least ai.movement.landFrames of the last frame. The landing ends with halt(model, nil) once the body is within landSlackStuds, past the stop along the landing's way (never walked back), or landMaxSeconds after it began. Mover.landingUntil is now an upper bound (start + landMaxSeconds). `landed` runs every frame for every entry (asleep or held too) and skips one already landed this pass (Mover.landAt). With land, arrive's lead is speed × haltLeadSeconds whatever the frame's dt; without land, the halt onto the position keeps the old clamp(dt) lead. A new movement that takes over still ends the landing at once. Once halted on an exact goal, the mover issues no MoveTo to it again (D-526). Done, RushEnded and the hit sweep keep their clocks; the root's arrival at the line end trails Done by at most landMaxSeconds, inside Recover. No CFrame write is added and no remote handler changes (D-143).
+- Specs. EnemyUprightClient.spec runs the seam through the real Replication.uprightModel, with a fake attributeChanged and a PreSimulation step, and adds every arrival order of the model, its Humanoid and its attributes (D-523). BoarHooks.spec's frames() are time-based (task.wait returns dt) and gain a studio-Humanoid mode, jittered and 144 Hz server frames, frameHook and hiddenWalls (D-525). New cases in data/ai.spec and validators.spec; validators.spec's D-494 fixture carries upright.client.
+
+### Section AI fixes, second part (D-527 to D-529)
+
+- Mixer.snapIn(handle) (D-527): turns a handle that has not stepped yet (fresh, not stopping) into a hand-over snap: blendIn = min(blendIn, handOver.seconds), handOver = true, so visibleWeight eases it by handOver.easing and composeRank lays it over its peers while it fades in. Mixer.play is unchanged: with nothing live to cut, a play blends in as ever, and the snap with nothing to cut is the caller's choice.
+- Locomotion's animator step order is now holdCutAttacks, handOffAttacks, snapRaises, stepSheath, stepGait, stepTurnPlant (D-527). snapRaises reads the sheath place before this step's sheath move, so a guard pressed sheathed is never snapped and gets D-420's Draw over it. The clips it snaps are choreo.luau handOver.snapClips.
+- Dodge take-over (D-528). GaitHandOff gains dodges(clip), dodgeLive(mixer) (Mixer.find per dodge id, no allocation) and dodgeBlends() (the data table, which Mixer.handOff copies). handOffAttacks treats a fresh dodge as it treats an attack (gaitHeldBy) plus the per-joint blends of locomotion.dodgeHandOff; stepGait's pace is held while gaitHeldBy is a dodge; Locomotion.update leaves the gait handles' target weights alone while any dodge clip is live, standing included. This applies wherever Locomotion drives a rig: the local character and remote players (Replication's remote dodge plays with handOver and cancels; with nothing cut it gets the same per-joint blends).
+- Specs. New: tests/choreo/GuardRaise.spec.luau and tests/choreo/DodgeTakeOver.spec.luau; validators.spec gains two cases in "choreo validator: the cancel hand-over and the gait hand-off", and its runWith also clones locomotion.dodgeHandOff.
+
+### Section AI fixes, third part (D-530 to D-533)
+
+- The screen frame model in Lune (D-531). RushDrawOrder.spec judges every frame on the screen: shoot() copies the pose right after the rig's step (every motor's Transform, plus any joint that is off whose Part1 is anchored), physics then moves the root, and screenOf() solves that copy on the root where physics left it (the BasePart.CFrame the frame shows); a write after physics never shows. hungFrom() gives the root the screen hangs the body from, and drawn = hung·offset. A `replay` option plays a PC per-row root log (frame length, post-physics place, PreSimulation velocity, the server's words by row) through the real path (RigBuilder Boar, Choreo, Replication, the clips).
+- Choreo draws a rush's Torso off its joint (D-531). Animator.setBodyOffset(offset, at?) takes the root CFrame the offset was drawn from. With `at` (and choreo.luau enemy.rush.detachBody true), the step turns the root Motor6D off, anchors its Part1, client-local, and writes Part1.CFrame = at·C0·Transform·C1⁻¹; `self.detached` holds the motor and part; attachBody restores Anchored false, then Enabled true, on a nil offset, a missing `at` and destroy. The Transform is still written, so chain readers and DrawnBody see the same pose. Replication.stepRush passes `at` while RushDraw.drawing (Run, Settle, HandBack, Frozen); Armed stays on its joint (D-255).
+- D-514 removed (D-532). Animator.redrawBody, Choreo's drawnKeyed, RushDraw.redrawn and handWeight, Rush.redraw, Replication.redrawRushes and the afterPhysics dependency with its PostSimulation binding are gone. Replication.start keeps only E1's beforePhysics binding (D-523).
+- DrawnBody carriers (D-533). DrawnBody.publish(model, offset, carrier?, at?): with a carrier, every follower (DrawnBody.follow: the nameplate, the SWITCH prompt) is adorned to the carrier at its lift plus the way from the carrier to the drawn body (place); without one, or on unfollow and reset, it goes home to its owner's adornee and lift (goHome), unless the owner set another adornee meanwhile. Choreo's applyOffsets publishes the detached Torso and heldAt = at·offset. DrawnBody.position and cframe still answer root·offset (the lock camera and target distances are unchanged).
+
+### Section AI fixes, fourth part (D-534 to D-537)
+
+- The stand-off's room over the poses still to come (D-534). StandOff.room and StandOff.roomSide (ContactPredictor.StandOff) take an optional third argument clipTime: (rootCFrame, distance, clipTime?) -> number. With it, the room is the least of the live column's room and the room left by every clip pose from clipTime to the clip's end (sampled every keepOut.sampleSeconds, lazily on the first ask); without it, from the plan's `from`. For each colliding part the pose that carries it farthest along the cast direction is cast at the stepped root; the clip's future root motion is ignored (conservative). The Art stand-off's distance uses the same room, so a wall within the clip's later lean shortens the Art's step back too. CharacterController's standOffClock keeps the clip time of the last stand-off step, and the room is asked from min(that, handle.time), the pose the frame showing this step's root still draws; it is reset in planStandOff and clearCharacter. bladeStep's room parameter follows the same signature.
+- The keep-out as the screen draws it (D-535). StandOffOptions.poseLag (optional) is the seconds of clip time the drawn pose runs behind the root: the keep-out's hand-and-arm sweep covers both the posed and the drawn picture; 0 means posed only, nil a 60 Hz frame. CharacterController passes its screen's frame × impact.poseLagFrames, read when the plan is made. The hit matrix gives each client rate its own plan and keeps the 60 Hz plan for the server swing.
+- Damage numbers (D-536). Each pooled digit records when it last faded (`freed`), and Digits.acquire picks the oldest free one.
+- The blade chain for plans (D-537). Stand-off plans pose the blade through ContactPredictor swingChain: BladeContact.chain with the Weapon link re-rooted on the hand at the rigs.luau grip C0 (GRIP, GRIP_C0). WeaponMount's client-only back mount no longer reaches any plan; the live contact predictor still reads the blade where it is drawn.
+
+### Ribbon fixes (D-538 and D-539)
+
+- A late remote start's trail (D-538). Replication.replayTrail runs right after replaySkipped in ActionStarted and reaches Trails.lateStroke(model, handle) through `rawget(d.trails, "lateStroke")`, so spec recorder packages, whose __index answers every key, record no extra call. Call lateStroke when a late clip starts, before the frame that draws its first step. While the handle's lastTime still equals the clock it came in at (its first step), lighting() returns a 6th value saying the step is a late first one and the drawn-pose step records `drawn.late`; liveLighting falls back to the late handle when no lighting event was crossed but the clip is lit at lastTime; setActive starts the sample ring over and sets `snapLate`.
+- The stroke's end (D-539). Each ribbon stroke stores `cutEnd` = ClipSampler.strikeLandingAt(clip, openedAt), the landing of the latest strike snap begun by that time (a sibling of strikeHoldAfter); pushBlade stops the stroke when the source clock reaches it, and a stroke opened at or past cutEnd is cut at birth.
+
+### Enemy walk and weapon (D-541 and D-542)
+
+- RigDriver (Locomotion.luau) crossfades an enemy rig's walk by LocomotionState.gaitWeights(speed, walkSpeed, walkDuration), the player's no-Run walk rule: walk weight = clamp01(speed / (stride.rateFloor × walkSpeed)), Idle = 1 − walk; walk rate = max(speed / walkSpeed, stride.rateFloor) with no ceiling, so a rush's drawn body still plays the walk at 2×. The walk's duration is read once from ClipLibrary when the driver is made.
+- EnemyWeaponGround spec: every enemy clip in review.audit.clips whose rig lists a weapon, attacks left out, is played through ClipAudit.plans and trace at every review.audit.sampleHz. Once the clip's own blendIn has passed no weapon corner may go deeper than footSinkStuds under the field, and no weapon part may turn more than popDegrees in one 60 Hz frame in the root's frame. Its pending list can only shrink.
+- EnemyWalkStart spec runs the real server (EnemyService over the "studio" Humanoid fake) and the real client gait (Choreo and Locomotion.attach), stepping the client, the server and then replication each frame.
+- Client upright (Replication, ai.upright.client, D-543 and D-544). Replication takes an optional deps.humanoidAdded(model, fn) -> connection; in start() it is the model's ChildAdded filtered to a Humanoid. It is connected only while a watched enemy copy waits (uprightCatches), its handler asks the keepUpright seam at once, and a settled copy, unwatch and bind drop it. Replication.standUpright turns off and reads back ai.upright.client.offStates, the client's own superset of the server's ai.upright.offStates, and for a copy already in one of those states sets EvaluateStateMachine = false before the ChangeState when rescue is "StateMachine"; that copy's state machine stays off. The seam's (state, why) shape, the log attributes and the PreSimulation and EntityKind retries are unchanged.
+- Beside D-334: Locomotion.stepTravel takes up the root's last-frame physics travel, which plants the feet for a pose drawn on the root before physics. The screen draws the pose on the root after this frame's physics, so on the screen the take-up runs a frame late and the planted foot moves by this frame's travel minus last frame's. Stride spec's "on the engine's own steps" block models the order before the render check (root moved, then posed), so its numbers are the chain read's.
+- Engine.land(model, position, seconds, past?) (D-431, D-525, amended by D-548): the written velocity and WalkSpeed pace the body onto position in seconds, and the Humanoid's MoveTo goal is position plus `past` studs along the flat line from the root, outside its arrival tolerance (ai.movement.moveToToleranceStuds), so it walks at the paced WalkSpeed on every landing frame. Only the service ends a landing, with halt. EnemyService.landStep passes movement.landAimStuds and clears mover.issuedGoal on each land frame and at the halt.
+- Trails back-fill (D-550): a late remote stroke records drawn.pending and the entry fields lateFull and lastWeight; backfill, pushFull, pushClipSpan and clipBladeAt draw the stroke from windowOpenAt (which replaces litAt) on the clip's own blade at full weight. Replication.replayTrail's landing check is landing <= startTime + 1e-6. A spec that loads Trails should stub RunService first (Trails keeps its Choreo lookup for the process).
+
+### Boar rush hand-over and sword to hand (D-551 to D-555)
+
+- Choreo re-attach (D-551): the drawn offset's last step runs `reattachBody`, which keeps the root joint's Part1 anchored on its joint's place (Part0 · C0 · Transform · C1⁻¹ with this step's Transform) and marks `attachDue`. Choreo's PreSimulation loop runs `attachBody` for every animator with `attachDue` (Anchored false and Enabled true in one handler), then `reapplyPose`. `attachOnPreSimulation` is set once start() has connected PreSimulation; without it, and on destroy, the joint goes back on at once.
+- DrawnBody (D-552): `cframe`, and `position` through it, read the carrier's `at` while Choreo publishes a carrier for the model; otherwise the root part's CFrame moved by the offset, as before.
+- RushDraw (D-553): `State.rootSeen` and `teleported()` run at the top of `step` for every phase but Done and Frozen; a flat jump over choreo.luau `enemy.rush.teleportStuds` beyond the move down the path ends the rush (Done, drawn on its root). `tools/validators/rushDraw.luau` keeps teleportStuds over the Charger's chargeSpeed × 0.1.
+- WeaponMount (D-555): `WeaponMount.new(animator, model, deps?)` takes `deps.atStepPose` (FrameClock.atStepPose). `set(place, withPose?)`: `withPose` means asked from inside the animator's step; such a move lands on the first frame that draws that step's pose, before that frame draws, and any other move lands at once. `get()` is still the place last asked for; the motor's Part0, its pin and the WeaponMount attribute show the place on the motor (`shown`), which trails the wish by up to one frame for a step-asked move. A turned-back wish cancels the wait, a new motor takes the wish at once, destroy cancels the wait, and apply sets the pin before Part0 and C0.
+- Locomotion forwards `Dependencies.atStepPose` to WeaponMount (Locomotion.attach passes its deps through); the sheath step and the WeaponDraw / WeaponSheathe handler call `set(place, true)`; Locomotion.new's first `set` lands at once. CharacterController.onCharacter passes `{ atStepPose = FrameClock.atStepPose }` (nil when FrameClock is a stub) and Replication's remote player options carry `deps.atStepPose`; enemy rigs are unaffected.
+- Frame order: the sword's Part0 now changes in FrameClock's First render step of the frame that draws the pose, so Trails' D-473 ring reset, which keys on Part0, sees the change in that frame's samples (the drawn step at First+1, the readers at Character+4).
+
+### Watcher hit-stop, blade light, rescued upright and wall stand-off (D-556 to D-562)
+
+- **Trails, held frames and the light (D-556, D-558).** A frame drawn held (deps.held, Choreo's heldShown) lays nothing on any rig: the body's move under a held pose (a watcher's copy whose replicated root still moves) is no part of the cut. The stroke resumes from that frame's blade, with its clip clock where it held. A window that lights the ribbon hands its light-off to the ribbon: the light goes out on the frame that lays the stroke's first segment, not before.
+- **Replication, a watcher's hit-stop (D-557).** HitConfirmed for another player's hit goes through D-267's held-word queue while this client's copy of that swing has not yet shown the strike's key. remoteArts (the artId per attacker, from ActionStarted) ties the word to the copy; the key is ClipSampler.strikeLandingAt of the window's open, and stepWords on Heartbeat lets the word go at most combat.contact.wordWaitSeconds later. So the hit-stop freezes the key pose on the watcher's screen, as the caster's contact does on theirs. The held-word contact match takes only the local fighter's own words. remotePlayerOptions is untouched.
+- **Client upright resume (D-559; amends the D-543 and D-544 paragraph).** Replication takes an optional deps.resumeUpright(model) → string?; start() wires Replication.resumeModel, which calls the public Replication.resumeUpright(humanoid, root) and answers one of Replication.RESUME: "Held" (the root is anchored or missing; nothing written), "Resumed" (EvaluateStateMachine set true), "On" (on and upright), "KeptOff" (it read a fall state: EvaluateStateMachine false, then ChangeState(standUpState)). tryUpright enrolls a copy in uprightResumes when the seam answers StoodUp with the "StateMachine" rescue and ai.upright.client.resumeOnRelease is true. The beforePhysics callback runs resumeUprights, then retryUpright; a copy leaves the table after resumeChecks "On" answers, on "KeptOff" or nil, on unwatch or on bind. A rescued copy's state machine is now off only while it is held.
+- **ContactPredictor, the stand-off's room (D-560).** columnRoom, behind StandOff.room and StandOff.roomSide, casts every colliding part, the root box included, from one box-depth ahead along the step. The room is 0 whenever any colliding part is already deeper in the world than wallGapStuds, up to that part's own depth along the step, whether the clip leant it in or the engine pressed it in; otherwise it is the gap short of where the part would touch. ContactPredictor.room (the single-box API) is unchanged. The StandOffWall spec's harness can hand the controller the real ContactPredictor.standOff and a world cast, run at any frame rate and replace the walk with a physics step: a Studio-like body for item 496, its assumptions in the spec's comments.
+
+### Moving-target keep-out, nameplate adornee, enemy walk pace and the sheath arm (D-565 to D-580)
+
+- **ContactPredictor, a target that moves on (D-565, D-566).** ContactPredictor.standOff takes an optional `options.target: TargetMotion?`, `{ base: { clip, time, speed }?, flinch: ClipDef? }`. `ContactPredictor.targetMotion(handles, flinch)` builds it from a rig's Mixer handles: the Base handle that shows most, not done and not stopping, with speed 0 when held. With it, keepOutOf poses the target's hurt parts over the swing on the target's own clock (openBetween: still through the swing's hit-stop holds, on through the authored holds it skips), and sweeps the hands, the arms and, between the cuts, the blade's part against them as they move (stepOutMoving, targetPieces); the reach at each key is taken against the target as it stands at that key. Without it, the plan is exactly the old one.
+- **combat.contact.standOff.keepOut.bladeOutSeconds** (0.1, D-566): how long after a strike's hold the blade must be out of a moving target. tools/validators/contact.luau keeps it finite and ≥ 0.
+- **Choreo `Animator:handles()`.** The mixer's handles, a copy (Mixer.handles); the caller never writes them.
+- **CharacterController (D-565, D-568).** planStandOff passes `target = targetMotionOf(the aimed model, its record, the root's position)`: the aimed enemy's animator (Choreo.find) and the flinch Replication plays, ClipLibrary `enemy/<Rig>/Flinch<side>`, with the side (sideOf) mirroring DamageMath.staggerDirection. stepStandOff keeps a basic's plan through its clip's tail in Idle, to the clip's end (`tail`, with planStandOff's `standOffBasic`); a new basic asks for its own plan on its first frame even while the old one holds.
+- **DrawnBody.adorn and Nameplates (D-571; amends the D-193 and D-533 paragraphs).** `DrawnBody.adorn(gui, adornee)` sets a follower's own adornee. Off a carrier it writes gui.Adornee at once, and only when the value changes; while a carrier part holds the billboard (homes[gui], with gui.Adornee still that part), it updates the adornee the billboard goes back to when the body is back on its root. An owner that changes its billboard's adornee while it follows a rig calls this instead of writing Adornee: a direct write mid-rush takes the billboard off the drawn body and is kept after the hand-back. Each Heartbeat, after keepFolder and expireDue, Nameplates points every plate the shatter has not taken at its rig's PrimaryPart, or at the Model while it has none, through DrawnBody.adorn (primaryPartOf, adorneeOf, keepAdornees). A plate's adornee is so re-read every frame, not only at attach: the root part, or the Torso while a rush draws the body off its joint.
+- **Locomotion, an enemy's gait on its root's travel (D-575).** Locomotion.attach gives an enemy rig, when no tracker is passed, `Locomotion.travelTracker(character, Locomotion.humanoidTracker(character))`. The Humanoid tracker's state (grounded, fall, drawn) is handed on, with its flat speed, velocity and move direction replaced by the root's own flat travel over choreo.enemy.gait.travelSeconds (0.05); a step over enemy.rush.teleportStuds starts it afresh. The drawn rush's drawnTracker still runs after it and overrides it while an offset is drawn. Player rigs are unchanged, and Replication still passes only `{ phase }` for enemies. tools/validators/choreo.luau keeps travelSeconds positive and ≤ 1 / locomotion.weightBlendRate.
+- **EnemyService, paced walks (D-574).** A Mover carries `paced`: its WalkSpeed was set by a walk under way. moverUpdate no longer sets a paced walk's new WalkSpeed itself; the frame pass (frameAll, after arrive) eases it there with easePace at ai.movement.paceChangeRate (30 studs/s a second). `paced` is cleared by a change of movement kind (moverRequest), every stop (moverStop) and a landing (landStep). nearFaces' look-ahead and arrive's lead use paceOf, the faster of the asked pace and the pace still eased toward. tools/validators/ai.luau keeps paceChangeRate positive and paceChangeRate × (1/60)² ≤ stride.contact.
+- **Locomotion, a taker that leaves the sheath clip the arm (D-579, D-580).** A clip that takes the body while a Draw or Sheathe is under way can leave that clip the arm (leaveSheathArm): the taker's own keys on the sheath clips' arm joints and the Weapon joint get a blend-in of math.huge (Mixer.handOff), so the taker never shows there and does not count as SheathState's "covered". stepSkidBrake then stands the sheath clips: for a Skid, through choreo.luau sheath.skidBrakeSeconds (0.27, validated above 0 and at most the Skid clip's duration); for a dodge (dodgeLeavesSheath), until the dodge is done, with any fade-in standing too. A covering clip that is fading out still covers until it has gone (scanClips).
+- **Mixer.hold(handle, held?, fade?) (D-580).** A false `held` lets a stood clock run again; `fade` true also stands a fade-in under way (Handle.fadeHeld, read in fadeAfter), while a fade-out still runs. `hold(handle)` is unchanged.
+
+### Art tell and stance, sword grab, rescued upright, SWITCH, enemy walk start, rush hand-back, lock turn and dodge (D-582 to D-617)
+
+- **RushWorld's numbers are data (D-582).** RushWorld (shared/choreo) reads every number it uses from ai.luau rushWorld, the ground probe's box and the riser rule's reach included (probeBoxStuds 0.1, riserBeforeStuds 0.25, riserPastStuds 0.5). The server's Charger and every client's RushDraw read the same probe from the same table. tools/validators/ai.luau requires all three positive, and half the box under riserBeforeStuds.
+- **Hud's SWITCH prompt (D-583; amends the D-571 paragraph).** While SWITCH shows, each Heartbeat Hud's stepLoop puts it on its target's root part when the rig has one, else on the target, through DrawnBody.adorn, as Nameplates does its plates. DrawnBody.adorn now has two callers, Nameplates and Hud; both re-read the adornee every frame and never write Adornee directly while a carrier part holds the billboard. The close sets Enabled false and the Adornee to nil under pcall.
+- **Client upright resume (D-589; amends the D-559 paragraph).** `deps.resumeUpright(model, settling: boolean) → string?`; start() passes `settling` to `Replication.resumeModel(model, humanoidOf, settling?)`, which hands it to `Replication.resumeUpright(humanoid, root, settling?)`. Two answers join Held, Resumed, On and KeptOff in Replication.RESUME: "Settling", a let-go copy read in a fall state while settling, with nothing written; and "HeldOff", a held or rootless copy read in a fall state with its state machine on, which gets EvaluateStateMachine false, then ChangeState(standUpState), and stays enrolled. Each uprightResumes entry carries `settle`: Resumed sets it to 0, each Settling adds 1, On and HeldOff clear it, and resumeUprights passes `settling = settle ~= nil and settle < resumeSettleSteps` (ai.upright.client, 12). Resumed and HeldOff also reset the On count. The main path, standUpright, the order (resumes before retries) and the log attributes are unchanged.
+- **FrameClock.atStepPoseSolve and the sword's move (D-590; amends the D-555 paragraph).** `FrameClock.atStepPoseSolve(fn): Cancel` runs `fn` right before the physics that first solves the pose a rig's step writes now: at the next RunService.PreSimulation after the asking frame's render steps. It is for a joint write that belongs to that pose, a Part0 or C0 change, which the engine places from the last physics-solved Transform. Without a PreSimulation connection it behaves as atStepPose, and it runs at once when poseLagFrames is 0 or under Lune. A pending entry carries `atSolve = true` with `due = math.huge`: only PreSimulation or the stall watchdog runs it, never First, and FrameClock.bind drops it with every other pending entry. FrameClock.Deps and Overrides gain `onPreSimulation` (RunService.PreSimulation through a shared connectSignal helper, which Heartbeat now uses too). WeaponMount.Deps gains atStepPoseSolve, and a step-asked move (`set(place, true)`) waits on `deps.atStepPoseSolve or deps.atStepPose`, then applies the pin, Part0 and C0 as before. Locomotion.Dependencies gains atStepPoseSolve and passes it to WeaponMount.new; CharacterController.onCharacter hands both FrameClock functions (rawget keeps a FrameClock without them working); Replication.Deps gains atStepPoseSolve, filled by Replication.start and handed by remotePlayerOptions to every remote player rig's Locomotion.
+- **The Brute wheel (D-598).** Brute.chase has the Charger's two modes: more than ai.archetypes.Brute.wheelAngle (20°) off its target it walks along its facing (`brain:moveForward(speed × wheelSpeedMultiplier)`, a goal moveAheadStuds ahead), and within it `brain:moveToward(target, speed)` as before. The turn stays turnToward at turnRate, the stop at stopDistance and the attack pick are unchanged, and the pace eases between the wheel's and the full one through EnemyService's easePace (D-574). An archetype with no brain yet uses the Brute's brain and tuning, so it wheels too. The validator's two wheel rules check only archetype "Brute" enemies.
+- **RigDriver's start phase (D-599).** newRigDriver takes an optional startPhase, passed by Locomotion.attach from choreo.luau enemy.gait.startPhase[rigId]. With one, the Walk handle starts at startPhase × duration, and each update puts its clock back there while the walk's weight and target weight are both 0, so every walk from standing crossfades in from the same pose and then runs freely. Rigs with no entry (the boar, every player rig) are unchanged.
+- **RushDraw.step's `standing` (D-602).** `RushDraw.step(state, now, dt, root, room, ground, rootVelocity, bodies, standing)`: the 9th argument is where the replicated root stands now, before the frame's physics, while `root` stays where the frame will draw it (Replication's rootAhead, D-438); nil means `root`. Replication.stepRush is the only caller that passes it (root.CFrame). In the HandBack phase, while that root is within settleStuds of the hand-back's start and closing on it faster than enemy.rush.settleRestSpeed (0.5 studs/s), the slide's clock is held, for at most settleSeconds in all; then the slide runs as before. The state carries handLast, handWaited and standingSeen. Every other phase, rootAhead's cap at the stop, DrawnBody.position and the detached Torso's draw are unchanged.
+- **The Art stand-off waits for the hold (D-604, D-605; amends the D-235 lines).** ContactPredictor.StandOff's `from` is now the clip time the blade step starts: the end of the clip's first activation hold, or as early before it as keepOut.maxSpeedStudsPerSecond needs, never before the release (with no step, the release). `to` is unchanged, the first window's open. The new optional `still` is the hold's end when the plan was made before it, nil for a basic or a plan made past it. Every reader applies the step as AimLogic.standOffAt(distance, from, to, t), so CharacterController.stepStandOff, the hit matrix's standOffShift and the spec replicas follow with no change; room(rootCFrame, distance) with no clipTime still keeps the gap from the clip time the plan was made at, and the keep-out series (keep, keepSide) still reads from the release. The reach's first strike takes its step from the first keep-out sample at or past the hold's end. `ContactPredictor.stepStart(clip, from, to, distance): number` is new and pure: where a step of `distance`, due by `to`, starts for a clip released at `from`, its speed read as the keep-out reads it (item 285). CharacterController.stepStandOff now returns a boolean, true while the frame's drawn clock is at or before the plan's `still` (within combat.contact.keyEpsilon, D-616, since a summed clock lands a hair off the hold's end), and step() adds it to D-496's hold-back condition. The hit matrix's keepOutMost samples from the swing's release (releaseOf). The contact validator requires every player clip's first ActivationHold to end before its first HitWindowOpen, with data.hold, when given, a positive number.
+- **ContactPredictor.standOff's `options.stance` (D-606).** It plans an Art's held start pose: keep-out only, up to that clip time, with no strike reach, no blade box and no step (keepUntil is min(clip.duration, stance)). The last sample, the still pose, is swept against the target's motion over Combat.activationCancelTime + (stance − from), in combat.contact.standOff.keepOut.stanceSampleSeconds (0.1) steps. CharacterController.beginArt calls planStandOff(handle, facing the lock, nil, holdClipTime) after the Holding state is set; planStandOff marks standOffStance; stepStandOff keeps a stance plan while the state is Holding on the same handle and applies root = keep(handle.time) as for any plan. releaseArt's plan replaces it as before. A stance plan carries no `still` (D-617): its steps show on their own frames, and only a swing plan waits for the hold. Unlocked Arts ask nothing, and without `stance` standOff is unchanged.
+- **LocomotionState's dropFrom (D-612).** LocomotionState.update reads the Skid's drop against `dropFrom`, the highest recent speed, falling at locomotion.stopSpeedDrop / stopDropSeconds (360 studs/s each second). A Skid fires on the update where the drop starts (`dropping`, one per drop). The stop-frame rule (previousSpeed > skidSpeedThreshold) stands.
+- **Locomotion's stop brake and the dodge hand-off (D-609 to D-611, D-613).** stepSkidBrake also holds the live sheath clips while `stopBraking` is true: the sum over sheath.stopBrakeClips handles of the shown weight now minus Mixer.preview(handle, dt), each times its step, is above stopBrakeRate × dt. The handles it holds go in brakeHeld and are released as the Skid's are, and each braking step re-holds them with the taker's `whole` flag, so a dodge over a Skid's brake also stands the fade-in (D-580). In handOffAttacks a dodge that played to its end sets gaitPhase to locomotion.dodgeHandOff.resumePhase (0.21) as it lets go of the gait, and dodgeHandOff.joints hands the legs back over 0.13 s. A fresh dodge whose cut clips are all dodgeHandOff.takesFrom one-shots (the turns in place) gets the dodge hand-off, and their blendOut rises to GaitHandOff.dodgeBlendSeconds(). GaitHandOff gains dodgeTakesFrom(clip) and dodgeBlendSeconds().
+- **Mixer's root yaw (D-615).** Procedural channels still add to the layered offsets per joint. The sum of their yaw on the root joint ("Root" rot[2], weighted) also turns the root joint's composed position (pos x and z) about the root part's vertical axis (rootYaw, turnRootPosition), in the live branch and in a hit-stop's held branch, so a channel that yaws the root turns the whole body round the root joint's origin, the hips' offset included. It assumes the root joint's C0 lies on the root part's vertical axis and the standing clips' Root rot.x is 0. Only TurnPlant keys that yaw today.
+
+### Enemy walk start, turn and stop, boar breath, sheathed lock-turn and Brute room (D-618 to D-629)
+
+- **EnemyService's start from standing (D-618; amends the D-574 paragraph).** The Mover carries `stoppedAt` (the server time moverStop last stopped a moving body), `starting` and `startFrom`. moverUpdate treats a walk that is not direct as from standing when the mover was not moving and stopped before `now`: it sets WalkSpeed to ai.movement.startPace and marks it starting. easePace eases a starting walk on each frame pass as it eases a pace change (paceChangeRate × the Heartbeat's dt), and only when the root moved at least AI.flatEpsilon since the previous pass. A change of movement kind (moverRequest) and a stop (moverStop) clear the start; direct movements (a strike's own rush) still take their pace at once. The dev walk (EnemyService.walk) goes through the same mover. Callers see no API change.
+- **WalkTurnPlant and RigDriver (D-619).** New client module src/client/choreo/WalkTurnPlant.luau: `plan(character, clip, config)` samples the walk clip once (120 samples, Pose.solve on the rig) for each foot's stances, sweeps and next-stance data, and `new`, `reset` and `step(state, dt, turned, time, rate)` return per-joint procedural offsets (pos and rot). Locomotion.attach builds it for a rig with choreo.luau enemy.gait.turnPlant[rigId]. RigDriver.update calls stepWalkPlant after setSpeed: it keeps the root's unwrapped heading over gait.travelSeconds, steps the plant at the walk handle's clock and writes `animator:setProcedural("walkTurnPlant", offsets, weight)`, the weight being the walk's target weight, or 0 under a FullBody clip; at 0 it resets and clears the channel, and destroy clears it too. Procedural channels add on top of the clip's pose (Mixer addInto), so the clip still owns the walk. The player's paths in Locomotion are not touched.
+- **RigDriver's start phase (D-621, D-625; amends the D-599 paragraph).** Data only, through D-599's hold: enemy.gait.startPhase gains Boar 0.25, and the kobold's goes to 0.23. Every enemy rig now has an entry.
+- **RigDriver's stop plant (D-623).** An enemy rig with choreo.luau enemy.gait.stopPlant[rigId] gets a second procedural channel, `walkStopPlant`, beside walkTurnPlant. RigDriver.update calls stepWalkStop first; while a stop is under way it sets the Walk and Idle weights itself, holds the Walk handle's clock (Mixer hold) and returns phase "Idle", and the speed-paced gait does not run that step. WalkStopPlant is pure root-space maths: `plan(character, rigId, config)` reads each foot's joint path from Pose.chain; `begin(shown, idle)` holds the legs from Mixer.lastOffsets(); `step(dt, base, idle)` returns hip offsets over the base layer's own pose, the walk and the idle normalised by their weights as the Base mix group mixes them. The stop keeps the rig's clock: a hit-stop pause holds it and a time scale paces it. A FullBody handle with weight above 0 ends a stop at once and clears the channel, so the plant never draws under the Charge's crouch, a Stagger or an attack. The root moving off (a row's move more than twice the last row's and over locomotion.idleSpeedThreshold studs/s) releases the walk's clock, and the channel fades over locomotion.weightBlendRate. A stop resets the walking-turn plant.
+- **ClipAudit's set-off (D-624).** `Travel.setOff = { pace, rate, floor }` marks a walk from standing: the trace carries the root by the closed-form ease in game seconds from the measured clip's first step (ClipAudit.setOffDistance) and sets the measured handle's speed to that step's pace over walkSpeed, no slower than `floor`. travelOf sets it for every enemy walk from ai.movement and choreo.luau locomotion.stride; the rush and every other travel are unchanged.
+- **Enemy walk data and clips (D-618 to D-620, D-622, D-623).** tools/validators/ai.luau checks ai.movement.startPace is a number of at least 0 with (startPace + paceChangeRate / 60) / 60 ≤ stride.contact. tools/validators/choreo.luau checks that each enemy.gait.turnPlant names a rig with a walk clip, with distinct feet each hung from its own joint, share in (0, 1], maxRollDegrees in (0, 20] and maxShiftStuds in (0, the narrowest foot's half depth]; that each enemy.gait.stopPlant names a rig with a walk clip, with two or more groups of distinct parts each hung from its own joint, stepSeconds of at least 1 / locomotion.weightBlendRate and all its steps within the walk clip's duration, liftStuds above stride.contact and at most half the shortest foot part's height, and a settleStuds glide that slides a foot at most stride.contact a 60 Hz frame; and that enemy.gait.stopBrakeShare is above 0 and below 1. enemy/Boar/Walk's first frame is quartered on its line like the rest, and enemy/Boar/Idle's breath carries hip keys that cancel the Root's rise at the hooves; RigBuilder's boar blocker is unchanged.
+- **Standing idles keep their feet (D-626).** A standing idle that moves the root (a shift, a drop, a roll) keys its legs solved so each sole stays where the cycle's 0 s stands it, within stride.contact (0.02). The sheathed Idle does so now, as IdleDrawn does (D-417); the turn-in-place clips start and end on those places, so a turn's blend from any idle phase holds the feet, and a key that changes the root re-solves the legs. LockTurnShown also turns the body from the sheathed idle's weight shift (dev.luau groundClearance.lockTurn.sheathedIdleStarts, 5 and 6.5 s) at sheathedStepHz (60 and 144); above 60 the row bar is judged over a 60 Hz row's time (worstRow60, the sum of the last ceil(hz / 60) rows' least-moving corner moves). tools/validators/dev.luau requires the sheathed starts within one Idle cycle and whole step rates of at least 30.
+- **The Brute's back room (D-627, D-628).** Brain.Context gains two optional hooks: `worldBehind(targetId, direction, distance) → number?`, how far past the target's root centre the world stands along the flat line within `distance` (nil for nothing or no world), and `faceReach() → number`, the body's blocker face ahead of its root; Brain:worldBehind(target, distance) and Brain:faceReach() wrap them, a nil or bad value reading as nothing behind and 0. Brute exports `stopDistanceFor(brain, target)`, and Brute.chase walks while target.distance is above it. EnemyService's Engine gains an optional `worldBehind(root, direction, distance)`; the default casts with workspace:Blockcast through `EnemyService.worldBehind(root, direction, distance, cast?)`, the target's root box in AI.collision.rushing, its leading face starting at the root's centre, ground normals ignored. Each Entry gains `faceFront` (the blocker faces crossing the root's facing line, the most of half.Z − centre.Z, measured at spawn), and makeContext wires both hooks (worldBehind finds the target's root through entities.rootOf). HitMatrix gains `leanColumns(Harness, sampleSeconds?)`, the sequential front-to-back column of each matrix attack on the matrix body ({id, clipId, depth, at} each). ai.luau BruteTuning gains `backRoom: BackRoomTuning { leanStuds, brakeSeconds, maxStopDistance }`, and tools/validators/ai.luau checks leanStuds and maxStopDistance positive, brakeSeconds at least 0 and under one AI tick, and maxStopDistance at least stopDistance, at most each Brute attack's reach × engageFraction and at most each Brute hit-matrix setup's realFight.max that is not point-blank.
+- **StandOffWall's push readings (D-629).** The bench's take() reads the engine's push out of the kobold's blockers (koboldPush, koboldPath) apart from its push out of the wall (push, pushPath), and takes an optional `art` (Sharp Nail when nil).
+
+### Colliding Head, Art hold, enemy attack plant, watcher tell and ribbon, stance step, Brute landing, dodge tap and rush hand-back (D-630 to D-650)
+
+- **CollisionGroups' column (D-630; extends D-167).** joinPlayers also sets CanCollide true on the character's column, the parts combat.contact.standOff.keepOut.parts names (HumanoidRootPart, LowerTorso, UpperTorso and Head); playerPartAdded takes the character as a second argument, so a column part added later (a swapped Head) collides as it joins. Accessories and limbs keep their own CanCollide. The data's `parts` list is now both what the keep-out casts and what the server makes collide: a change to it changes both.
+- **ContactPredictor.keepOutOf's hold (D-631; amends D-314 and D-604).** keepOutOf takes a final `stillUntil`, which standOff passes as the plan's `still`: the activation hold's end for a swing planned before it, nil for a stance or a plan made after the hold. Before `stillUntil` the shown series grows only to each sample's own need; the lead, back and aside, starts at `stillUntil` and runs at the speed cap; the plan's reader moves between samples only with the clip time outside the hold. StandOff's fields are unchanged.
+- **Mixer pose hooks (D-632).** `Mixer.setPoseHook(name, hook?)` sets or removes a named hook `(pose: Offsets) -> ()`. Each step, once the layers are composed (and the full-body override applied), every hook is handed the composed pose and may set joints in it; it sets a joint by giving it a new table, because entries can alias clip data. This runs before the procedural channels are added and before the held channels under a pause, and on hit-stop steps too, with the clocks held. Mixer.clear removes all hooks; a mixer with no hook behaves as before.
+- **RigDriver's attack plant (D-632).** An enemy rig with choreo.luau enemy.gait.attackPlant[rigId] gets a second WalkStopPlant state. RigDriver.update calls stepAttackPlant first: it reads the root (where the last row was drawn), predicts the root this row is drawn on (attackDrawn), and on the step that finds a fresh full-body attack handle begins the plant from `mixer:lastOffsets()` and the clip's pose at the handle's caught-up clock, then installs the "attackPlant" pose hook. The hook calls WalkStopPlant.stepUnder with the clip's clock advance on that step, the composed pose, the clip's own pose and attackDrawn. The plant ends, and the hook comes off, when the steps are done and the clip is no longer blending in, or when the handle stops or is done; RigDriver.destroy ends it too. The stop plant and the turn plant are unchanged. WalkStopPlant keeps its stop API and adds Leg.attach (where the hip holds the leg), State.field (each leg's world CFrame as the clip came in), State.follows (the offset for a leg that stood on the clip's spot), schedule (the shared group order) and hang (the leg turned about its standing sole corner so the hip's attach lies on the line to the socket, raised by any sink).
+- **The attack plant's data (D-632, D-633).** enemy.gait.attackPlant takes stopPlant's shape (groups, stepSeconds, liftStuds, settleStuds) and stopPlant's rules through the shared checkPlant; in place of the walk-cycle cap, catchUpMaxJump + groups × stepSeconds must be at most the first HitWindowOpen of each attack clip in the walk's folder. enemy.gait.attackBrakeShare is 0 to 1, and attackBrakeSeconds a positive number of seconds. ClipAudit and ClipLab play attack clips without RigDriver, so their rows show the clip's own blend-in, not the plant.
+- **Trails' back-fill mark (D-634).** A stroke's back-fill mark (`lateFull`, D-550) belongs to one stroke: pushBlade clears it whenever a stroke starts, before the late check sets it again for a stroke that came in late.
+- **A late remote clip's blend (D-635).** `Mixer.blendWithin(handle, seconds)` caps a fresh (unstepped) handle's blend-in; at 0 the handle shows at its full weight on its first step, and a handle that has stepped, or is going, keeps its blend. Replication's ActionStarted calls it through `blendBeforeHold` for any clip with an ActivationHold event: the cap is the clip time from the catch-up start to the first ActivationHold, divided by the handle's speed, and applies only when that is shorter than the blend. The local fighter's clips never pass through it.
+- **SfxPool's floor memory (D-636).** Deps and Overrides gain `state: (humanoid) -> string?`, which reads Humanoid:GetState().Name by default and returns nil when it cannot be read. surfaceOf keeps, per model, the last surface read from a floor that was not Air (weak keys; reset clears it); on an Air read it returns that surface while the state is listed in fx.audio.airFloorStates, and defaultSurface otherwise, as before.
+- **Locomotion's Base set (D-640).** LocomotionState gets `baseDrawn`, the set the Base layer stands in, in place of `showsDrawn`. `showsDrawn` is still what the body should show; `baseDrawn` follows it at once except while standing, where it waits for a stance clip (`stanceHandle`, `stanceTo`) to reach full weight. The stance clips are TurnLeftDraw and TurnRightDraw (picked by `turnClipName` over the sheathed idle when the drawn set is wanted) and DrawStep and SheatheStep (`stepStance`, after the state's update). TurnPlant treats the stance handle as it treats the turn and does not let the lag go under it. A new full-body clip that holds the body, the first update, or leaving the ground or moving off settles `baseDrawn` at once. A new stance clip must start on one idle's 0 s stance, end on the other's, and key every leg joint at every key.
+- **TurnPlant's window (D-641).** `TurnPlant.window(clip)` is now (first Footstep, second Footstep − turnPlant.leadSeconds), cached by clip id. Every turn clip's window less the lead must still hold half a turn at stepDegrees (the validator); the turn clips are TURN_CLIPS in tools/validators/choreo.luau: TurnLeft, TurnRight, TurnLeftDrawn, TurnRightDrawn, TurnLeftDraw and TurnRightDraw.
+- **ClipAudit's stance plan and LockTurnShown (D-640, D-641).** dev.luau review.audit.rigs.<rig>.stances maps a clip to true (out of the idle into the drawn idle) or false (back); such a clip is traced as "Lab" (cut in, the set turned at once) and "Stance@<phase>" for each idle phase, both idles playing, the set retargeted at the lead plus the clip's blend-in. The validator requires a non-looping clip of the rig, a boolean, and a rig with both idles. LockTurnShown's `lockRun` takes coarse 0.2 s rows to the phase, then the run's own rows, read 0.9 s after the lock; it drives a sword rig through the predicted draw (a Signal hooked as Main.client.luau hooks targetChanged, read through ActionLogic.drawnTarget) or a plain rig on the PC's seeded row times (groundClearance.lockTurn.pcRowSeconds and rowSeed), over idlePhaseCount phases of the sheathed Idle's cycle from 0.5 s.
+- **HitMatrix.leanColumns (D-642; amends D-628).** It returns `{id, clipId, depth, at, behindAt, body}` per player attack. `depth` is the full column front to back over combat keepOut.parts as each clip's poses lean them with the root held, the deeper of two bodies: `matrix`, or `ownerHead`, the matrix body with dev.luau hitMatrix.ownerHead fitted. `HitMatrix.ownerHead(Harness, model)` fits the owner's Head on a matrix-built model in place: it sets the Head's depth and moves the Neck's C0 (or Attachment0) back until the box's back stands `behindStuds` behind UpperTorso's at the drawn idle; the StandOffWall bench fits its Head the same way. Brute backRoom.leanStuds is that deepest depth plus 2 × wallGapStuds (ai.spec pins it).
+- **Brute.chase lands a grown stop (D-643; amends D-627).** A stop grown past stopDistance is landed on: within pace × (tick + brakeSeconds) of it, chase issues moveDirect(stopPoint, pace, exact), and EnemyService lands the body on it (D-525, the strike stop's landing). A plain stop (beginAttack) does not cut it short. The stop formula's slack is pace × brakeSeconds only. A Brute resting within the landing's slack (0.02) outside its stop is landed again where it stands, so it does not move. maxStopDistance + movement.landSlackStuds must be inside every Brute attack's engage range (the validator).
+- **Locomotion under a dodge (D-646; amends D-528).** While `GaitHandOff.dodgeLive(mixer)` holds, Locomotion.update still runs the gait's state, so the stop and Skid bookkeeping hear the root (D-472); instead of skipping `setWeight` it now writes each gait handle's target as its current weight, so the Mixer moves none of them. From the dodge's let-go (its handle stopping) the gait's live targets are written again and the weights move at `weightBlendRate`. The contract: while a dodge holds the body a gait weight is constant, and code that wants one to move under a dodge goes through something other than Locomotion's weight writes.
+- **RushDraw's hand-back wait (D-648; amends D-602).** On every step RushDraw.step compares the root before physics (`standing`, or `root` when none is given) with the last step's; when it came nearer to where the body was last drawn by more than settleRestSpeed × the seconds between the two steps, it records `rootCameAt = now`, and `standingAt` keeps the last step's time. In HandBack, `comingIn` holds the slide while the slide's goal (`root`: what the frame draws, Replication.rootAhead's carried place) is within settleStuds, flat, of where the slide started, `now − rootCameAt < settleRestSeconds`, and the slide has waited less than settleSeconds. While held, the step returns the CFrame last drawn and the slide restarts from it (`handFrom = drawn`, `handAt = now`): the drawn body never moves on a held step, and handSeconds stays as set when the hand-back began. New data key: choreo.luau enemy.rush.settleRestSeconds, which tools/validators/rushDraw.luau requires to be positive, at least 2 × 0.035 s and under settleSeconds.
+- **Test hooks (D-649, D-650).** HandsOut's swingAt takes an optional `lead`, which shifts the frames after the cut on the clip's clock, and reports `bladeEarly`. BoarHooks' halt-row case reads its logRun both ways: `velocity` (before the service) and `written` (after it).
+
+### Locked walk take-up, enemy attack wait, ClipLab views, wall stand-off line and dodge stick gait (D-651 to D-657)
+
+- **StepTakeUp (D-651).** src/client/choreo/StepTakeUp.luau is a pure module with no engine reads: `new(config)`; `observe(steps)`, the whole steps the frame last given to `guess` took; `guess(dt)`, which returns this frame's steps (nil when it is not sure) and the mean steps a frame over the span; and `reset()`. Its numbers are choreo.luau locomotion.stride.takeUp (spanRows, planRows, phases, refitRows, extraSeconds, gateRows, gateShare, minRows, stepHz, wholeSteps, p90Bar), each with a rule in tools/validators/stride.luau.
+- **Locomotion's step take-up (D-651; beside D-334).** Locomotion gains `Dependencies.stepsAhead: boolean?`, for a caller whose pose is drawn on the root that the frame's physics then moves: CharacterController's render step sets it, and nothing else does. A pose read after physics (the chain order) must leave it off: there the take-up already has the frame's steps, and forced on it moved TravelSlipLeak's flat foot 0.100 a frame. In stepTravel, inside the slip bound, the phase gains (guess − steps taken) × speed / 240. The overrun branch resets the take-up, as do standing, the air, a stall, and a frame whose travel is wholeSteps or more off whole steps. travelSlip's memory is unchanged: the guess's offset is not part of it.
+- **RigDriver's attack wait (D-652).** `Locomotion.windUpAt(driver, origin)` dispatches to `RigDriver.windUpAt` (a player Locomotion ignores it), which keeps the origin fresh for attackWaitSeconds; Replication's handlers.Telegraph calls it for an enemy with a driver and an origin. In stepAttackPlant a fresh full-body attack handle whose fade is at 0 is held (`mixer:hold(h, true, true)`) while the drawn root is short of the origin and the wait allows. Each held step owes the beat that step (`mixer:shiftBeat(h, -dt)`; none in a hit-stop, which the Mixer owes itself). Released (`hold(h, false)`), the plant begins on it, with the first row carried on attackBrakeShare if the root still walked, or as a braking root keeps. The walk plant and the stop plant do not count a waiting handle as a full-body clip, so the walk shows and plants under it, and RigDriver.destroy lets a waiting clip go.
+- **LabPlayback (D-653).** src/client/dev/LabPlayback.luau holds the ClipLab's pure helpers: walkOf and idleOf (choreo rigs), walkPace (rigs.luau walkSpeed, LocomotionState.gaitWeights, stride.rateFloor), carried (a CFrame along the facing, wrapping every walkLoopSeconds) and nextShare. ClipLab plays the walk and the idle coexisting on Base, stops its previous handle itself before each play, and in once mode lets a clip play with its own blends over the idle. The dev.luau validator keeps every pedestal rig with a data walk inside stage.radius at its fastest share, and the two new hotkeys inside the Studio-shortcut rule.
+- **The keep-out's room and the next Art's lean (D-656).** No contract changed. The keep-out's room (columnRoom and aheadRoom, D-534) covers only the swing that is playing. The next Art's held start pose is not reserved, so at a wall the engine pushes that lean off the face once per hold (Lune 0.13–0.70 a hold on the owner's colliding Head); at a turned face that push runs partly across the line and grazes the kobold's blockers.
+- **Locomotion under a dodge (D-657; amends D-646's contract).** `State.stickSpeed: number?` is the speed (studs a second, 1x) the stick walks the body at once no action locks it, 0 with the stick at rest. While `GaitHandOff.dodgeLive` holds, Locomotion.update still runs the gait's state on the root (D-472). Until the dodge covers (`GaitHandOff.coveringDodge(mixer)` returns it) each weight's target is the weight itself (D-646). From then, with a stickSpeed and grounded, each weight's target is `LocomotionState.aimWeights` of the stick's way and speed, and the covering dodge becomes the gait's holder (gaitHeldBy) if nothing held it, so the phase and pace stand and the legs come back at resumePhase. From the let-go the live targets are written again. Contract: a gait weight moves under a dodge only while the dodge hides every joint the gait keys; a joint left to a live sheath clip (D-580) never counts as hidden. The drawnSprint additive and the upright lean read the moving weights; at the aimed targets the sprint flag follows stickSpeed, so a sprint's dodge keeps SprintDrawn where it was.
+- **LocomotionState.aimWeights(input, into) (D-657)** is pure and writes every weight name into `into`: a move's cadence shares with heldShare's own share (no rise), or the set's Idle at or under idleSpeedThreshold. moveWeights is split into cadenceWeights and holdWalks, the same operations in the same order, so aimWeights shares them with no state.
+- **CharacterController's stickSpeed (D-657).** Every step sends `AimLogic.moveSpeed(ActionLogic.speedFor("Idle", sprinting, speeds), AimLogic.facesLock("Idle", hasLock, sprintingNow, aim), speeds.walk)` with the stick held, else 0.
+
+### Head hull, Brute stop, take-up flip, enemy wait and even body, boar turn, keep-out lead, late ribbon, Art hold, lunge aside and even walk body (D-658 to D-675)
+
+- **The owner's Head on its hull (D-658).** No contract changed. StandOffWall's bench can collide the owner's Head by a hull fitted to the PC's reads (OWNER_HULL), turn the wall or the pillar about the line's meeting point (`tilt`), and break the kobold's push down by part (`koboldParts`). The Studio lines read a MeshPart Head by rays on its collision hull and by GetPartsInPart, never by its box.
+- **EnemyService.worldBehind (D-659)** casts the target's root box turned along the line, so its width runs across the line, whichever way the fighter's root is turned.
+- **Brute.chase lands every stop (D-643, D-660).** A grown stop lands from within pace × (tick + brake), and the open field's stop the same way once a walk is under way (`brain.memory.walking`, cleared by `onChaseStart` and by a stop). EnemyService's mover: an exact direct goal that takes over a paced walk under way keeps the walk's eased WalkSpeed through its landing (`Mover.keptPace`, cleared by `moverStop` and by any other request). A rush or a move from standing is unchanged.
+- **StepTakeUp (D-651, amended by D-661).** The module stays pure. Its config gains gateLead (whole frames, 1 to leadRows), leadRows (gateRows to spanRows) and leadShare (above 0 and under 1), each with a rule in tools/validators/stride.luau. `observe(steps)` treats a pair of frames, one a step over and one a step under the plan, as a flip: the plan stays sure, both frames' drift is zeroed and the first frame's off-plan record dropped. It holds a frame one step off against the drift for one frame before breaking the plan, and counts, over gateRows and leadRows and only on frames that had a guess, the frames whose steps equalled the frame before's (the frames on which D-334 alone does not move the foot). `fitPlan` still chooses the phase on exact matches; it is sure when that phase holds every frame, a flip allowed, the newest frame one step off at most. `guess(dt)` returns the guess while either gate is open: the share gate (hits ≥ gateShare × gateRows) or the lead gate (sure; over leadRows the D-334 misses less the guess misses ≥ gateLead and the guess misses ≤ leadShare × the D-334 misses; over gateRows hits ≥ sames). Locomotion and CharacterController are unchanged.
+- **EvenRoot (D-664).** src/client/choreo/EvenRoot.luau is a pure module that rebuilds an even root from the replicated root's windowed pace and yaw rate (choreo.luau enemy.gait.evenRoot). RigDriver owns one per enemy rig, draws the body on it through `Choreo.setBodyOffset(offset, at)` (D-531's detach), standing too, and every plant reads it through `drawnOf`. The default gait is paced by its move, with attach's default tracker only; `Locomotion.drawnTracker` takes an optional `own` getter, and an offset equal to it counts as the body on its root. RigDriver leaves alone any offset with an `at`, or any that moves the body more than settleStuds: a rush's own draw is its owner's. The Animator gains `getBodyAt()`. Choreo publishes every body offset with its carrier to DrawnBody, so the plate, the SWITCH prompt, the lock camera, the picker, fx placement and the attack wait all read the same even root with no change on their side.
+- **RigDriver's attack wait and plants (D-663, D-664, D-665).** stepAttackPlant's `short()` waits with no origin heard while the drawn body walks on (`walksOn()`), and an origin heard later takes over. stepWalkStop triggers on the replicated root's brake and holds the feet at their field points on the drawn root (WalkStopPlant's field hold). stepStandTurn plays a rig's stand turn (`standConfigOf`, enemy.gait.standTurn) through WalkStopPlant's beginStand, stepStand, standHome and standDone.
+- **The keep-out's lead (D-314, D-426, amended by D-667).** The shown keep-out is led by keepOut.leadSeconds, which now covers its whole budget (keepOut.maxStuds at maxSpeedStudsPerSecond).
+- **Mixer.withChannels(offsets) (D-670)** returns a clip's sample with the procedural channels added as the last step added them (held ones through a pause), on the joints the sample keys only: the pose the clip would show at full weight on this body. Trails' late strokes (D-550, amended by D-670): the back-fill and the full-weight follow-on (`clipBladeAt`) pose the clip's keyed links from it; the rest of the chain and the root still come from the frames.
+- **ContactPredictor.keepOutOf's stance (D-671).** A stance plan's last sample also sweeps the hold's own poses to `holdEndOf(clip)` (`holdPosesEnd`, `holdPosesOut`); the faces rounds are one local, `facesOut`, shared by `fill` and that sweep.
+- **CharacterController.stepStandOff's aside (D-672).** The aside goes through `asideShare`, which returns the aside this frame takes and how much of the lunge it holds back; `standOffYielded` carries that hold until the plan's back grows into it, and `planStandOff` resets it.
+- **CharacterController.beginArt's stance (D-606, D-673).** The stance is planned at a lock or, with none, at the soft assist's pick, taken from the body's facing as the release's snap takes it (`AimLogic.assistPick`) and facing where the body faces; `assistTargetId` holds the pick while the key is held.
+- **CharacterController.asideShare (D-674)** takes `stance`: a stance's aside shares the frame's 12 × c with its back, flat; other plans keep D-608's per-axis cap.
+- **Choreo's Animator.setBodyOn(drawn, most) (D-675)** draws the body on `drawn`'s flat place, at the root's height and facing, through the root joint: the step offsets it from the root as it stands, and PreSimulation (whose handler now takes deltaTime) offsets it again from the root moved on by its flat AssemblyLinearVelocity × that deltaTime. Both offsets go to DrawnBody. An offset over `most`, or a step not asked for again, draws the body on its root, and setBodyOffset clears it. The offset is position-only, so a lock turn written on PreSimulation (D-505) still turns the body.
+- **EvenRoot.step(state, root, dt, handed, own?) (D-675).** `own` is a Tuning in place of enemy.gait.evenRoot's; with none the enemy path is unchanged.
+- **Locomotion's even root (D-675).** `Dependencies.evenRoot` marks the local fighter and `State.evenRoot` that no clip moves the root this frame. `stepEvenRoot` owns the local fighter's EvenRoot, stepped on the root plus its velocity × dt, and calls setBodyOn; `stepTravel` paces the gait by the drawn root's travel from where the last frame drew the body. The take-up is idle while the even root draws and starts over when it stops.
+- **CameraController.pivotOf (D-675)** reads DrawnBody.position(subject), so the camera and the body sit on the same root.
+- **Data (D-675).** choreo.luau locomotion.stride.evenRoot (drawBody, rateSeconds 0.15, followSeconds 0.05, lagSeconds 0, maxLagStuds 0.07, maxLagDegrees 0, settleStuds 0.001, settleDegrees 0, maxDrawnStuds 0.15), with rules in tools/validators/stride.luau.
+
+### Camera pivot, late enemy plant, brace, Brute landing, shard axes, enemy standing height, breath yield, Art stance and stance aside (D-676 to D-697)
+
+- **Choreo's setBodyOn bound (D-676, amends D-675).** `most` is measured from where the frame's physics is expected to take the root: in the render step from the root moved on by its flat velocity × the step's dt (`offsetOn(root, drawn, most, ahead?)`), on PreSimulation × its deltaTime. The offset the render step writes is still from the root as it stands. `applyOffsets(self, offsets, dt)` takes the step's dt.
+- **RigDriver's plants (D-677).** An enemy rig's plants (the walking turn, the stop, the attack and the stand turn) are built from whole plans once the rig's legs are in (`planLegs`, `wholeTurnPlan`, `wholeStopPlan`). The driver is attached in the tag's handler, before the model's parts and its PrimaryPart reference replicate, so `planLegs` runs at construction and at the top of `RigDriver.update`, before stepDrawnRoot, and reads the plans again whenever the PrimaryPart or Choreo's joint map changes, until every plant is in. A rig that is whole at attach gets the same plants on the same step as before.
+- **EnemyService's Mover.landsAtOnce (D-678)** is set in moverRequest for an exact goal that takes over a walk or a standing body, kept by a request renewing the same landing, and cleared by moverStop. arrive lands such a goal at once from within ai.luau movement.moveToToleranceStuds (1.4), with no lead check; a strike's own run keeps its lead.
+- **EnemyService.lookNear (D-679)** drops a near face whose reach across it is 0 or less: one behind the body's own root centre.
+- **The brace (D-680).** ContactPredictor.standOff's StandOff carries `depth(rootCFrame)`: how far the column (root, torsos, Head, as they stand relative to the root) stands in the world along `away`. Each colliding box is cast from a box-depth back along `away`, and a part in contact.standOff.hullInsetStuds is read on its box less that inset. CharacterController's render step now ends with braceRoot, after the D-496 hold-back. While a stand-off plan runs (stepStandOff hands it braceDepth and braceAway), it steps the root along −`away` by depth − braceStuds, capped so the frame's whole move from where the frame found the root stays within max(keepOut.maxSpeedStudsPerSecond × dt, |m flat|). Data: combat.luau contact.standOff.braceStuds (0.05) and hullInsetStuds (Head 0.08), with rules in tools/validators/combat.luau. What the brace steps out is owed back (D-697): braceRoot keeps braceOwed, what it has stepped out since the plan began (reset when the plan ends), and once the drawn body is within braceStuds of the world again, a frame that moves the root toward the target takes that move back along the line, no more than braceOwed and no more than the frame moved toward the target, so the lunge is never reversed and the root stays within the plan's room (D-534).
+- **ShatterMath.Limb.axes (D-681).** Shatter.limbsOf passes each visible part's position, size and axes (its CFrame's vectors), and ShatterMath.layout scatters each shard inside that limb's oriented box, each by limbJitter of that axis's half-size. The random draws keep their order, so a limb with no axes lays exactly as before.
+- **EvenRoot's height (D-682).** An enemy's even root keeps the replicated root's pitch and roll. Its height holds where it stood over a sink of up to enemy.gait.evenRoot.sinkStuds (0.004) and follows past that, never under the root, and rises with it at once (State.height, the clamp in step, compose). A placement starts afresh at the root's height. A Tuning without sinkStuds (the local fighter's, D-675) keeps the root's own height.
+- **ContactPredictor's own layers (D-683, D-685).** A stand-off plan is told the swinger's own Additive layers (StandOffOptions.own, read by ContactPredictor.ownLayers off the body's animator handles, as targetMotion reads the target's, each with `yields`). The keep-out poses the body with them on top of the swing clip, each on its own clock, and gives a yielding layer way at the swing's clip time. CharacterController.planStandOff passes them on every plan.
+- **The breath's give (D-685).** A Mixer play that `yields` (every rig's breathing, as Choreo.newAnimator plays it) gives way under the live attack clips' strikes: its joints listed in choreo.luau breathYield scale by 1 − the largest ClipSampler.breathYield × the attack's shown weight. ClipSampler now reads data/choreo.luau; breathYield and yieldMask come from each clip's beats and strike snaps, cached with its structure. ClipAudit plays the review's breathing yielding, as Choreo does. Data: choreo.luau breathYield (joints, outSeconds 2/60, outEasing QuadIn, inEasing SineInOut), with rules in tools/validators/choreo.luau.
+- **ContactPredictor.keepOutOf, a stance (D-686, D-687, D-690, D-691, D-694).** A stance's series grows back and aside together within the keep-out's speed, and allows a colliding part keepOut.stanceDepthStuds from its start. A sample keeps its faces out again after any later step back. A stance's plan may carry `wait`: its keep, keepSide and keepUntil run on the stance's clock, the clip time plus the time its pose waited. Its colliding parts carry a copy in the clip's first pose through the blend in; placeParts takes an optional first index.
+- **AimLogic.stancePick (D-689)** is the enemy an unlocked stance keeps out of: the assist's pick, else the nearest in range at any bearing.
+- **ContactPredictor.keepStanding(model, rootCFrame, offsets, records, studs, cast?) (D-692)** is the flat step a standing body's root takes this frame out of the deepest enemy's blockers. CharacterController runs it in step() after stepStandOff on standing frames.
+- **CharacterController (D-688, D-691, D-693).** Locomotion is asked for the even root (D-675) only while neither a clip nor a stand-off plan moves the root. Hold.waitFor and Hold.waited hold the clip's clock at the press for the plan's wait, in whole frames; the clip's own clock counts from pressedAt + waited (freezeAt, syncPlan, the hold pose's age), and the cancel time from pressedAt. holdBreath masks the breathing handle's Root, Waist and Neck while a hold is up. That mask and the breath's give under a strike (D-685) multiply: Mixer's Additive pass calls ClipSampler.yieldMask(share, handle.mask), and ContactPredictor's pose() copies both mask and yields, so with Q held Root, Waist and Neck stay at zero and the yield scales the rest.
+- **Data (D-691, D-692).** combat.luau keepOut.stanceWaitSeconds (1/30), stanceDepthStuds (0.0025) and standingDirections (6), with rules in tools/validators/contact.luau.
+- **ContactPredictor.asideRoom (D-696)**, beside boxRoom and columnRoom: a stance's aside (roomAlong's side key, given the stand-off's line) takes D-517's inside cast first, and the plain cast where a part's hull already stands in the world behind along the line and after the aside stands there no deeper than braceStuds. worldDepth (how deep a box stands in the world along a direction) is shared with columnDepth, and aheadOf carries each body's hull inset.
+
+## Data tables (src/shared/data)
+
+| File | Holds |
+| --- | --- |
+| `combat.luau` | section 6 tunables |
+| `palette.luau` | color tokens |
+| `rigs.luau` | rig joint lists and rest poses |
+| `scope.luau` | the current `phase` and the Art, enemy, boss and rig ids whose clips it must ship, with `hasArt` / `hasEnemy` / `hasBoss` / `hasRig` (D-015) |
+| `arts.luau` | every Art row from section 8 as `Types.ArtDef`, keyed by id |
+| `weapons.luau` | weapon defs, named weapons, the starter `TrialistSword` |
+| `armor.luau` | armor defs, the Trialist cloth set |
+| `enemies.luau` | every enemy from the floors 1 to 10 bestiary; Frenzy Boar and Kobold Axeman complete |
+| `bosses.luau` | Grolak in full (bars, phases, lockstep), floors 2 to 10 as rows |
+| `tiers.luau` | per-tier multipliers for HP, attack, defense, gauge, XP |
+| `floors.luau` | floors 1 to 25 from section 5 |
+| `loot.luau` | drop tables and rarity weights |
+| `origins.luau` | lineage/origin/mark weights (sum to 100 per roll) |
+| `paths.luau` | the six Paths |
+| `apex.luau` | floor 1 Apex set |
+| `lighting.luau` | section 11 lighting values per floor |
+| `sfx.luau` | every sound by `family.Name` (D-080): entries `{ id, placeholder, volume, pitchRange?, spatial, note?, startAt?, stopAt?, fadeOut?, loop?, length?, title?, creator?, peakAt? }` (times in asset seconds before PlaybackSpeed; `Sfx.isReal`, `Sfx.region`, `Sfx.peakLead`, `Sfx.gainOf`, `Sfx.vocalName`); `cues` (layers of `{ name, delay, gainDb, pitch? }`), `contours` (EQ and reverb steps per group), `effects`, `engine` (playbackSpeed, soundVolume), `limits` (cueLayers, hitCueMinLayers, cueDelaySeconds, layerGainDb, maxPlayVolume, loopMinSeconds, contourSeconds, subLayers, bassBackDb, sharedAssetSemitones), `playback` (openEndSeconds, sameFrameSeconds), `preload`, `shatterCues` (normal, heavy, boss), `mix`, `music` |
+| `assets.luau` | asset ids by name; missing ids are reported |
+| `choreo.luau` | animation tunables: blend times and the blend easing, smear scale, idle cycle, locomotion speeds and clip names, `locomotion.stride` (ground speeds, touchdowns, pacing bounds and check bars, D-054), the stop (`stopStepsSeconds`, `stopMinCycles`, `stopEndSpeed`, D-059), `locomotion.lean.upright` (D-058), `locomotion.stopHandOverCycles` (D-136), `locomotion.stride.blocked` (D-144), `stall.jumpSeconds` (D-132), `priority.Sheath` and the `sheath` table (clips, draw-cuts, predictSeconds, sheatheDelay, stopBlend, remoteDrawDelay) |
+| `camera.luau` | section 10 camera numbers and the `punch` rows (Final, Kill; D-072) |
+| `fx.luau` | budgets, shard counts, trail lifetimes, telegraph sizes, the parry spark burst, quality tiers; `audio` (dedupe, `maxSoundLength`, the heartbeat loop and ramp, `materialSurface`, `ambience`: bed, rim wind, ramp, sample rate, rim band and floor, D-095) |
+| `playground.luau` | the Playground: field radius, rim, pillars, clouds, spawn tables, loadout |
+| `ai.luau` | every AI tunable: perception, archetype tuning, pathing, tick rates |
+| `world.luau` | world builder tunables (folders, railing, pillars, clouds, kill volume) and the anti-cheat policy, including the shadow and teleport-cap fractions, the per-remote rate limits (`anticheat.remoteRates`, with an optional `clientBurst` for a TrailingSend sender) and `anticheat.remoteStallSeconds` (a client burst plus perSecond times it must fit inside the server's burst, D-056) |
+| `weaponModels.luau` | placeholder weapon geometry per category, the names the client relies on, and the back mounts (`sheaths`, `sheath(category)`, D-050; the one-handed sword's `mount`, D-055) |
+| `input.luau` | key, gamepad and touch bindings |
+| `ui.luau` | HUD, nameplate and system-line layout numbers, and the death system-line text |
+| `impact.luau` | the impact frames (D-060 to D-066): looks, sequences (tier, rank, steps), the flash budget and the luminance curve, the reduced dim, the Reduce flashing attribute, the overlay, viewport, silhouette and strokes, quality part caps |
+| `accents.luau` | the reel accents (D-067, D-068, D-096): glint, slashArc (with `tilt`), slashLine and speedLines sizes and timings, `limits`, `budget`, `swing` (samples, travel bounds, memorySeconds, snapFrames), quality caps |
+| `moments.luau` | what each combat moment fires (D-069 to D-073, D-098): `effects`, default `audience`, `accentRange`, `select` rules and `fallback`, `hitFields`, `death.duckDelayFrames`, `sweep.mergeSeconds`, `rows`; `byId`, `rangeOf`, `audienceOf`, `selectFor`, `deathDuckDelay`, `deathFor` |
+| `dev.luau` | dev tooling numbers: Capture panel, ClipLab, PoseEditor, pose server (D-028), clip review tolerances (D-043), hit matrix setups and real-fight ranges (D-045), ground clearance and the sheath checks (`groundClearance.offBody` with its `turns`, `sheathSlide`; D-047, D-050, D-055, D-058), the WeaponDraw and WeaponSheathe tokens |
+
+Row convention (D-017): tables with many rows keep them under `Module.rows` with `byId(id)` and
+`list()` functions; `list()` returns a clone. Validators read `rows` first and fall back to the
+module table.
+
+Each table has a validator in `tools/validators/`. The naming blocklist lives in
+`tools/naming/blocklist.luau` (not shipped to clients, D-014) and `tools/validators/naming.luau`
+scans every text file in the repo except `docs/GAME_SPEC.md` and the blocklist itself.
+
+## Client reactions to remotes
+
+| Remote | Client reaction |
+| --- | --- |
+| `ActionStarted` | `Choreo.play(rig, clipId, serverTime)` on that entity's rig at `payload.speed` (1 when absent); the local player ignores its own. It remembers `{ clipId, speed }` per entity, replays the Sfx and Voice events the catch-up start jumped over through `SfxPool.playLate`, and an ActivationHold it jumped over while the first damage window is still ahead (light, late chime, `Impact.activation` with `lateBy`; D-101). A clip whose id contains `/Dodge` calls `Impact.dodge(model, false)` |
+| `Telegraph` | `Telegraphs.show(entity, kind, windUp, shape)`: weapon Highlight fill + ground decal |
+| `HitConfirmed` | builds a `HitInfo` (`art` from the artId and the attacker's kind, the Switch `partner` from the open window, a blow that breaks a player's guard as `guarded`). Hit-stop on attacker and target rigs, `Digits`, the white outline flash unless `Impact.ownsHighlight(info)` or the blow breaks a player's guard (GuardBroken's HPRed fill stays), the GuardHit reaction, and on an enemy hit that neither kills nor breaks the additive `Flinch<staggerDirection>` clip. For the people in the hit: one camera nudge per attacker's sweep, `camera.shake(tier)` and one hit-stop tick per attacker's sweep (Final for a player's guard-breaking hit; a stronger tier takes over; D-098). Then the HUD HP flash and `Impact.hit(info)`, which plays every hit sound and reel accent (D-069). On a parry: `Impact.hit(info)`, then `Trails.flashWhite` and `Sparks.parry(position)` after `Impact.hiddenSeconds()`, the Parry reaction and `shake(Normal)` (D-071) |
+| `StateChanged` | stagger/break/guard-break clips, HUD status; `Stagger`, `Break`, `GuardBroken` and `Dead` hide that enemy's telegraph. `GuardBroken` flashes HPRed and calls `Impact.guardBreak(model, isLocal)`; `Guard` on a remote player plays the guard pose and `Impact.guardRaise(model, false)` (the local raise is predicted in `CharacterController.setGuard`; D-097) |
+| `EntityDied` | DeathFreeze, time scale 0, trails off and the enemy's death vocal at once (once per voice for one sweep's deaths). A death landing inside another death's silence first restores full volume (`SfxPool.duck(0, 0)`). At `Moments.deathDuckDelay()` (the kill's hit-stop) the newest death runs `SfxPool.duck(deathDuckDb, deathFreeze)` on the Music, SFX and UI groups; an older one does not. At that lead plus `deathFreeze`: `duck(0, 0)` when this is the newest death or the silence ends within `moments.sweep.mergeSeconds`; then `Shatter.play(model, kind, cueName)` (or `SfxPool.cue(cueName, position)` when the rig is already gone), then `Impact.death(model?, position, boss, heavy)`. `cueName` is `Impact.shatterCue(boss, heavy)` (heavy for a player or an Elite). The system line follows at lead + `deathFreeze` + shatter time: `ui.luau` `systemLine.deathSelf` for the dying player, `deathOther` with the name for everyone else (D-073, D-079, D-102) |
+| `ActionRejected` | cancel the predicted clip, no digit |
+| `SystemLine` | centered system text with chime |
+| `SwitchWindow` | `SwitchRing` on the enemy, SWITCH prompt (Phase 1 logic, Phase 0 visuals); remembers the opener per enemy, and the window's own close clears only that window (D-099) |
+| clip events (every watched rig) | trail, smear and footstep events to the FX and audio packages; `Sfx` and `Voice` through `SfxPool.play`; `ActivationHold` lights the blade, plays the art chime, kicks the FOV for the local player and calls `Impact.activation(model, clipId, token, isLocal, speed)` (D-074) |
+
+Rig lifecycle: `EntityTracker.added` -> `Replication.watch(record)` registers the outline, attaches
+the trail, routes the rig's clip events to the FX package and, for every rig the local
+`CharacterController` does not own, drives locomotion with `Locomotion.attach(animator, model)`
+(other players run the blend space, enemies their data Idle/Walk pair; a remote player's driver reads `Drawn`
+through `SheathState.riseFilter`, D-057). Replication tells the local
+rig apart by `EntityTracker.peekLocalId`, then by `Players.LocalPlayer.Character`, and drops a
+driver that reached the local rig before its id resolved when `EntityTracker.localChanged` fires.
+`EntityTracker.removed` -> `Replication.unwatch(record)` destroys that driver and releases the rig's
+trails, telegraph, smear and state clip. `Main.client` wires
+`Telegraphs.setIntensitySource(Hud.telegraphIntensity)` so the accessibility slider drives telegraph
+intensity.
+
+Clip tables are immutable after load: `ClipSampler` caches each clip's structure (the sorted joint
+list and which key authors each joint's held value) and reads offset values live, so replacing a
+joint's offset table needs no invalidate while adding or removing a key, a joint or the root does;
+editors call `ClipSampler.invalidate(clip)` after such an edit. The PoseEditor `Session` cannot
+require shared modules (it also runs under Lune), so the plugin host registers
+`Session.setInvalidator(ClipSampler.invalidate)` and Session calls it after every edit, undo and
+redo. A stale cache degrades to rest values for keys it never saw and never errors mid-frame.
+
+## Places
+
+- `places/Playground.project.json`: the 400-stud field, ceiling and lighting; `PlaygroundBuilder`
+  adds the rim, pillars, clouds and kill volume at server start from `playground.luau`.
+- `places/ClipLab.project.json`: the clip review scene (`ClipLab.client.luau` runs when
+  `workspace:GetAttribute("ClipLab") == true`).
+- Built with `tools/build-places.sh`; outputs are gitignored.
+- Every project file (the game and each place) carries an empty LocalScript `Animate` in
+  StarterCharacterScripts so Choreo is the only writer of joint `Transform`s on characters;
+  `HttpService.HttpEnabled` is set in the dev places only (D-039).
+
+## Smoke scripts (D-038)
+
+`tests/smoke/*.smoke.luau` are plain server scripts: they wait for `workspace.SkyspireReady`, drive
+the real services, and raise `error("[<name>] FAILED: ...", 0)` from a `check()` helper on the first
+failed assertion. They never return at top level (the runner appends a done line). `tools/smoke.sh`
+wraps each into a runner that run-in-roblox executes in a plugin: it installs the script as a
+Script in ServerScriptService, starts a Run session (no player; stand-ins are registered through
+`EntityService.registerPlayer` with a table for the Player), and prints one
+`SMOKE-RESULT: PASS|FAIL <name>` line. Current scripts: playground, combat, archetypes, rigs
+(joint names and `Rig` attributes from `rigs.luau`) and perf (section 16 server numbers from
+`world.luau` `performance`).

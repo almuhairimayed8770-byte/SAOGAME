@@ -1,0 +1,7 @@
+{
+	"name": "SkyspirePoseEditor",
+	"globIgnorePaths": ["**/*.spec.luau", "**/selene.toml"],
+	"tree": {
+		"$path": "src"
+	}
+}

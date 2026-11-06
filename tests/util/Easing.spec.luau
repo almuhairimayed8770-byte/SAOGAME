@@ -1,3 +1,4 @@
+--!strict
 local Easing = Harness.load("src/shared/util/Easing")
 
 describe("Easing", function()

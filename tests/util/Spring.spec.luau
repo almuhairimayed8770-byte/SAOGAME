@@ -1,3 +1,4 @@
+--!strict
 local Spring = Harness.load("src/shared/util/Spring")
 
 describe("Spring", function()

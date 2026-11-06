@@ -1,4 +1,5 @@
-# Selene standard library for spec files: Luau plus the globals tests/run.luau injects.
+# Selene standard library for spec files: Luau plus the globals tests/run.luau injects
+# (describe/it/expect/Harness/Test and the Roblox datatypes the harness provides).
 base: luau
 globals:
   describe:
@@ -12,7 +13,29 @@ globals:
   expect:
     args:
       - type: any
-  Harness:
-    any: true
-  Test:
-    any: true
+  Harness: { any: true }
+  Test: { any: true }
+  game: { any: true }
+  workspace: { any: true }
+  Instance: { any: true }
+  Vector2: { any: true }
+  Vector3: { any: true }
+  CFrame: { any: true }
+  Color3: { any: true }
+  BrickColor: { any: true }
+  UDim: { any: true }
+  UDim2: { any: true }
+  NumberRange: { any: true }
+  NumberSequence: { any: true }
+  NumberSequenceKeypoint: { any: true }
+  ColorSequence: { any: true }
+  ColorSequenceKeypoint: { any: true }
+  Rect: { any: true }
+  Ray: { any: true }
+  Font: { any: true }
+  Enum: { any: true }
+  Random: { any: true }
+  task: { any: true }
+  tick: { any: true }
+  typeof: { any: true }
+  warn: { any: true }

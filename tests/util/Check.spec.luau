@@ -1,3 +1,4 @@
+--!strict
 local Check = Harness.load("src/shared/util/Check")
 
 describe("Check", function()

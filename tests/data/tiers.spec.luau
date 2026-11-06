@@ -1,0 +1,98 @@
+--!strict
+local Tiers = Harness.load("src/shared/data/tiers")
+local Combat = Harness.load("src/shared/data/combat")
+
+describe("tiers data", function()
+	it("tier 1 is the identity and the hand-tuned rows rise through floor 25", function()
+		expect(Tiers.get(1)).toEqual({ hp = 1, attack = 1, defense = 1, gauge = 1, xp = 1 })
+		local ten = Tiers.get(10)
+		expect(ten.hp).toBe(3.59)
+		expect(ten.attack).toBe(2.57)
+		expect(ten.defense).toBe(2.22)
+		expect(ten.gauge).toBe(2.3)
+		expect(ten.xp).toBe(39.81)
+		expect(Tiers.get(25).hp).toBe(12.23)
+		for floor = 2, 25 do
+			local previous = Tiers.get(floor - 1)
+			local current = Tiers.get(floor)
+			for _, stat in { "hp", "attack", "defense", "gauge", "xp" } do
+				expect(current[stat]).toBeGreaterThan(previous[stat])
+			end
+		end
+	end)
+
+	it("extends floors 26 to 100 geometrically from tier 25", function()
+		local base = Tiers.get(25)
+		local next = Tiers.get(26)
+		expect(next.hp).toBeCloseTo(base.hp * Tiers.extension.hp, 1e-9)
+		expect(next.attack).toBeCloseTo(base.attack * Tiers.extension.attack, 1e-9)
+		expect(Tiers.get(30).hp).toBeCloseTo(base.hp * Tiers.extension.hp ^ 5, 1e-9)
+		for floor = 26, 100 do
+			local previous = Tiers.get(floor - 1)
+			local current = Tiers.get(floor)
+			expect(current.hp).toBeGreaterThan(previous.hp)
+			expect(current.xp).toBeGreaterThan(previous.xp)
+			expect(current.hp).toBeLessThan(1e6)
+		end
+	end)
+
+	it("clamps floors outside 1..100 and never hands out its own rows", function()
+		expect(Tiers.get(0)).toEqual(Tiers.get(1))
+		expect(Tiers.get(-5)).toEqual(Tiers.get(1))
+		expect(Tiers.get(250)).toEqual(Tiers.get(100))
+		local row = Tiers.get(3)
+		row.hp = 999
+		expect(Tiers.get(3).hp).toBe(1.41)
+	end)
+
+	it("XP to next level is 120 * level^1.6", function()
+		expect(Tiers.xpToNext(1)).toBe(120)
+		expect(Tiers.xpToNext(2)).toBe(364)
+		expect(Tiers.xpToNext(10)).toBe(4777)
+		expect(Tiers.xpToNext(100)).toBe(math.floor(120 * 100 ^ 1.6 + 0.5))
+		expect(Tiers.xpToNext(0)).toBe(120)
+	end)
+
+	it("totals and inverts the XP curve", function()
+		expect(Tiers.totalXpForLevel(1)).toBe(0)
+		expect(Tiers.totalXpForLevel(2)).toBe(120)
+		expect(Tiers.totalXpForLevel(3)).toBe(484)
+		expect(Tiers.levelFromTotalXp(0)).toBe(1)
+		expect(Tiers.levelFromTotalXp(119)).toBe(1)
+		expect(Tiers.levelFromTotalXp(120)).toBe(2)
+		expect(Tiers.levelFromTotalXp(483)).toBe(2)
+		expect(Tiers.levelFromTotalXp(484)).toBe(3)
+		expect(Tiers.levelFromTotalXp(1e12)).toBe(Tiers.levelCap)
+		for level = 1, 40 do
+			expect(Tiers.levelFromTotalXp(Tiers.totalXpForLevel(level))).toBe(level)
+		end
+	end)
+
+	it("levels grant +10 max HP and 3 stat points, from the section 6 base", function()
+		expect(Tiers.hpPerLevel).toBe(10)
+		expect(Tiers.hpPerLevel).toBe(Combat.hpPerLevel)
+		expect(Tiers.statPointsPerLevel).toBe(3)
+		expect(Tiers.maxHp(1)).toBe(Combat.basePlayerHp)
+		expect(Tiers.maxHp(2)).toBe(Combat.basePlayerHp + 10)
+		expect(Tiers.maxHp(100)).toBe(Combat.basePlayerHp + 990)
+		expect(Tiers.statPointsEarned(1)).toBe(0)
+		expect(Tiers.statPointsEarned(10)).toBe(27)
+	end)
+
+	it("halves XP more than 5 levels over a floor and doubles damage more than 5 under", function()
+		expect(Tiers.overLevelXpHalving).toBe(5)
+		expect(Tiers.underLevelDamageDoubling).toBe(5)
+		expect(Tiers.xpMultiplier(6, 1)).toBe(1)
+		expect(Tiers.xpMultiplier(7, 1)).toBe(0.5)
+		expect(Tiers.xpMultiplier(1, 10)).toBe(1)
+		expect(Tiers.damageTakenMultiplier(1, 6)).toBe(1)
+		expect(Tiers.damageTakenMultiplier(1, 7)).toBe(2)
+		expect(Tiers.damageTakenMultiplier(20, 7)).toBe(1)
+	end)
+
+	it("scales kill XP by floor and never gives zero", function()
+		expect(Tiers.scaleXp(5, 1)).toBe(5)
+		expect(Tiers.scaleXp(5, 10)).toBe(199)
+		expect(Tiers.scaleXp(0.1, 1)).toBe(1)
+	end)
+end)

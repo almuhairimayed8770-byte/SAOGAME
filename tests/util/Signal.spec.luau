@@ -1,3 +1,4 @@
+--!strict
 local Signal = Harness.load("src/shared/util/Signal")
 local task = require("@lune/task")
 
