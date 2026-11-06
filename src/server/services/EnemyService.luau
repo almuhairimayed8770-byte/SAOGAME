@@ -255,6 +255,9 @@ type Mover = {
 	startFrom: Vector3?,
 	-- An exact goal took over a walk under way at the pace it had eased to (moverRequest, D-660).
 	keptPace: boolean,
+	-- An exact goal took over a walk or a standing body, not a strike's own run: it is landed from
+	-- wherever it is taken within the Humanoid's arrival tolerance (arrive, D-678).
+	landsAtOnce: boolean,
 }
 
 export type Entry = {
@@ -442,6 +445,7 @@ local function newMover(model: Model, speed: number, body: RushWorld.Body?): Mov
 		starting = false,
 		startFrom = nil,
 		keptPace = false,
+		landsAtOnce = false,
 	}
 end
 
@@ -470,6 +474,8 @@ end
 -- that takes over a walk under way (a Brute landing on its stop, D-643) is reached at the pace the
 -- walk has eased to and keeps it while it lands (D-660): taken whole at once, the walk's speed
 -- stepped up by as much as 7 studs/s in one frame (D-574) a few ticks into a walk from standing.
+-- Such a goal, taking over a walk or a standing body rather than ending a strike's own run, is
+-- landed from wherever it is taken (landsAtOnce, arrive, D-678).
 local function moverRequest(mover: Mover, goal: Vector3, speed: number, direct: boolean?, exact: boolean?)
 	mover.stopAfter = false
 	local isDirect = direct == true
@@ -483,6 +489,8 @@ local function moverRequest(mover: Mover, goal: Vector3, speed: number, direct: 
 	else
 		mover.keptPace = false
 	end
+	-- Read before the movement turns direct: a request that renews the same landing keeps it.
+	mover.landsAtOnce = isExact and (not mover.direct or (mover.exact and mover.landsAtOnce))
 	mover.exact = isExact
 	if isDirect ~= mover.direct then
 		-- A different kind of movement is a new movement: its own clock, and no path from the old one.
@@ -515,6 +523,7 @@ local function moverStop(mover: Mover, dead: boolean?)
 	end
 	mover.stopAfter = false
 	mover.keptPace = false
+	mover.landsAtOnce = false
 	mover.landingUntil = nil
 	mover.landWay = nil
 	mover.cutStop = nil
@@ -566,6 +575,14 @@ local function lookNear(mover: Mover, look: Vector3, axis: Vector3, back: number
 	-- The body walks `room - back` from where it stands before its corner meets the face, so the
 	-- face stands that much (across it) past the body's own reach toward it.
 	local across = RushWorld.support(body.profile, look, into) + (room - back) * closing
+	if across <= 0 then
+		-- The face stands behind the root's own centre: the far side of a wall thinner than the
+		-- cast's run-up, met by a cast that started past it (the kobold 5 studs off a 1-stud wall,
+		-- its run-up 2 * radius). No root stands inside a wall; read as a face near it, every
+		-- facing read about 7 studs deep, a turn the short way was refused and the body turned the
+		-- long way round, then wheeled in toward the fighter (D-679).
+		return
+	end
 	table.insert(mover.nearPoints, position + into * across)
 	table.insert(mover.nearInto, into)
 end
@@ -1006,7 +1023,12 @@ end
 -- (Engine.halt) once it would reach it before the next server frame (at its speed over this frame's
 -- seconds, at most haltLeadSeconds). A walk a wall cut short lands on its cut the same way (D-435),
 -- with an engine that lands a body (a halt onto it would be a CFrame write): it stands with its snout
--- at the face, not a skid past it. Once per stop.
+-- at the face, not a skid past it. An exact goal that took over a walk or a standing body (the
+-- Brute's stop, landsAtOnce) lands from wherever it stands within movement.moveToToleranceStuds of
+-- it (D-678): Studio's Humanoid holds a MoveTo goal that near reached and never walks it (the PC's
+-- P2 probe), so the Brute's walk, sent onto its stop from up to its pace times a tick and a brake
+-- away, braked 0.2-0.3 short of it and stood there (the PC's open field on 577a59a: 3.777 and
+-- 3.725 against 3.50). Once per stop.
 local function arrive(mover: Mover, dt: number, now: number)
 	local goal = stopOf(mover)
 	if not mover.moving or goal == nil then
@@ -1028,7 +1050,8 @@ local function arrive(mover: Mover, dt: number, now: number)
 	end
 	local position = engine.position(mover.model)
 	local left = Brain.horizontalDistance(position, goal)
-	if left > paceOf(mover) * leadSeconds + AI.flatEpsilon then
+	local atOnce = mover.landsAtOnce and land ~= nil and left <= AI.movement.moveToToleranceStuds
+	if left > paceOf(mover) * leadSeconds + AI.flatEpsilon and not atOnce then
 		return
 	end
 	mover.halted = goal

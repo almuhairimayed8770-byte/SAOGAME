@@ -15,6 +15,9 @@
 	exponential that spreads the cut over the snap's frames (section 10, issue 4). The path is the
 	same; only its timing differs, for the client's animator and the server's sweep alike.
 
+	An attack clip also says how far a rig's breath gives way under it at each clip time
+	(breathYield, choreo.luau breathYield, D-685), from its beats and its strike snaps.
+
 	Clip tables are immutable after load. The sampler keeps a per-clip cache (weak-keyed by the
 	clip table) of the clip's structure: the sorted joint list and, for every joint, which key
 	authors the value it holds at each key index. Offsets themselves are read live from the keys.
@@ -26,6 +29,7 @@
 local Types = require(script.Parent.Parent.types)
 local Easing = require(script.Parent.Parent.util.Easing)
 local Combat = require(script.Parent.Parent.data.combat)
+local ChoreoData = require(script.Parent.Parent.data.choreo)
 
 export type Offset = { pos: Types.Vec3, rot: Types.Vec3 }
 export type Offsets = { [string]: Offset }
@@ -34,6 +38,9 @@ type ClipCache = {
 	names: { string }, -- sorted and frozen; ROOT_KEY included when any key moves the root
 	held: { [string]: { number } }, -- per joint: for each key index, the key authoring the held value (0: none yet)
 	snaps: { [number]: boolean }, -- key indices whose segment (from the key before) is a strike snap
+	-- The breath's give (breathYield): the clip times it starts and ends going out, and starts and
+	-- ends coming back. Nil: the clip never takes the breath.
+	yields: { number }?,
 }
 
 local ClipSampler = {}
@@ -55,6 +62,12 @@ local function lerpVec(a: Types.Vec3, b: Types.Vec3, t: number): Types.Vec3
 	return { lerp(a[1], b[1], t), lerp(a[2], b[2], t), lerp(a[3], b[3], t) }
 end
 
+-- The breath's give under a strike (choreo.luau breathYield, D-685).
+local YIELD_JOINTS: { string } = ChoreoData.breathYield.joints
+local YIELD_OUT_EASING: string = ChoreoData.breathYield.outEasing
+local YIELD_IN_EASING: string = ChoreoData.breathYield.inEasing
+local YIELD_OUT: number = ChoreoData.breathYield.outSeconds
+
 -- A HitWindowOpen this close before a snap's first key still opens it (authored times are rounded).
 local SNAP_EPSILON = 1e-4
 
@@ -69,6 +82,48 @@ local function snapEase(u: number): number
 		return 1
 	end
 	return (1 - 2 ^ (-SNAP_SHARPNESS * u)) * SNAP_SCALE
+end
+
+-- The breath's give over an attack clip (breathYield): out over breathYield.outSeconds up to the
+-- first strike snap's start, inside the Anticipation beat and after the first ActivationHold's end
+-- (its `hold`, or combat.luau activationHold); back from the last strike's hold (the Hold key after
+-- its snap, the snap's landing without one) over the Settle beat's length. Nil without beats or a
+-- strike snap.
+local function yieldSpans(clip: Types.ClipDef, snaps: { [number]: boolean }): { number }?
+	local beats = clip.beats
+	if beats == nil or beats.Anticipation == nil or beats.Settle == nil then
+		return nil
+	end
+	local keys = clip.keys
+	local first, last = 0, 0
+	for index = 2, #keys do
+		if snaps[index] then
+			if first == 0 then
+				first = index
+			end
+			last = index
+		end
+	end
+	if first == 0 then
+		return nil
+	end
+	local holdEnd = 0
+	local tell: Types.ClipEvent? = nil
+	for _, event in clip.events do
+		if event.kind == "ActivationHold" and (tell == nil or event.time < (tell :: Types.ClipEvent).time) then
+			tell = event
+		end
+	end
+	if tell ~= nil then
+		local data = tell.data
+		holdEnd = tell.time
+			+ (if data ~= nil and typeof(data.hold) == "number" then data.hold else Combat.activationHold)
+	end
+	local outTo = keys[first - 1].time
+	local outFrom = math.min(math.max(outTo - YIELD_OUT, beats.Anticipation.start, holdEnd), outTo)
+	local after = keys[last + 1]
+	local inFrom = if after ~= nil and after.easing == "Hold" then after.time else keys[last].time
+	return { outFrom, outTo, inFrom, inFrom + math.max(0, beats.Settle.finish - beats.Settle.start) }
 end
 
 -- One pass over the keys: the joint set and, per joint, the authoring key index at every key.
@@ -125,7 +180,7 @@ local function buildCache(clip: Types.ClipDef): ClipCache
 			end
 		end
 	end
-	return { names = table.freeze(names), held = held, snaps = snaps }
+	return { names = table.freeze(names), held = held, snaps = snaps, yields = yieldSpans(clip, snaps) }
 end
 
 local function cacheFor(clip: Types.ClipDef): ClipCache
@@ -244,6 +299,56 @@ function ClipSampler.strikeLandingAt(clip: Types.ClipDef, time: number): number?
 		end
 	end
 	return nil
+end
+
+--- How far a rig's breath gives way under attack clip `clip` at clip time `time` (D-685, choreo.luau
+--- breathYield): 0 (none: not an attack, through the Anticipation beat but its last
+--- breathYield.outSeconds, through an Art's activation hold, and once its last strike has settled)
+--- to 1 (from the first strike snap's start through the last strike's hold), eased by
+--- breathYield.outEasing over those last outSeconds going out and by inEasing over the Settle
+--- beat's length coming back.
+function ClipSampler.breathYield(clip: Types.ClipDef, time: number): number
+	if clip.attack ~= true then
+		return 0
+	end
+	local span = cacheFor(clip).yields
+	if span == nil then
+		return 0
+	end
+	local outFrom, outTo, inFrom, inTo = span[1], span[2], span[3], span[4]
+	if time <= outFrom or time >= inTo then
+		return 0
+	elseif time < outTo then
+		return Easing.evaluate(YIELD_OUT_EASING, (time - outFrom) / (outTo - outFrom))
+	elseif time <= inFrom then
+		return 1
+	end
+	return 1 - Easing.evaluate(YIELD_IN_EASING, (time - inFrom) / (inTo - inFrom))
+end
+
+--- `mask` (joint name -> weight multiplier, nil: every joint 1) with the joints choreo.luau
+--- breathYield lists given way by `share` (0..1 of breathYield): each scaled by 1 - share. `mask`
+--- itself when nothing gives way; otherwise `into` (cleared and filled) or a new table.
+function ClipSampler.yieldMask(
+	share: number,
+	mask: { [string]: number }?,
+	into: { [string]: number }?
+): { [string]: number }?
+	if share <= 0 then
+		return mask
+	end
+	local result = into or {}
+	table.clear(result)
+	if mask ~= nil then
+		for name, scale in mask do
+			result[name] = scale
+		end
+	end
+	local keep = math.max(0, 1 - share)
+	for _, name in YIELD_JOINTS do
+		result[name] = (result[name] or 1) * keep
+	end
+	return result
 end
 
 --- The set of joint names a clip touches (plus the root if any key moves it), sorted. The list is

@@ -20,6 +20,9 @@ export type Vec3 = { number }
 export type Limb = {
 	pos: Vec3, -- world position of the limb's center
 	size: Vec3, -- the limb's size
+	-- The limb's own axes in world space (its X, Y and Z vectors, unit), or nil for world-aligned:
+	-- each size is along its own axis (D-681).
+	axes: { Vec3 }?,
 }
 
 export type Shard = {
@@ -113,11 +116,20 @@ function ShatterMath.layout(limbs: { Limb }, count: number, seed: number, boss: 
 		-- Round-robin over limbs so every limb sheds shards; the jitter spreads them inside it.
 		local limb = limbs[((index - 1) % #limbs) + 1]
 		local jitter = config.limbJitter
-		local pos: Vec3 = {
-			limb.pos[1] + nextRange(rng, -1, 1) * limb.size[1] * 0.5 * jitter,
-			limb.pos[2] + nextRange(rng, -1, 1) * limb.size[2] * 0.5 * jitter,
-			limb.pos[3] + nextRange(rng, -1, 1) * limb.size[3] * 0.5 * jitter,
-		}
+		-- Scattered along the limb's own axes, each by its own size, so a shard starts inside the
+		-- limb whichever way it is turned (D-681: along the world's, a boar's tail and tusks
+		-- turned off them shed shards 0.06 to 0.15 outside).
+		local x = nextRange(rng, -1, 1) * limb.size[1] * 0.5 * jitter
+		local y = nextRange(rng, -1, 1) * limb.size[2] * 0.5 * jitter
+		local z = nextRange(rng, -1, 1) * limb.size[3] * 0.5 * jitter
+		local axes = limb.axes
+		local pos: Vec3 = if axes ~= nil
+			then {
+				limb.pos[1] + axes[1][1] * x + axes[2][1] * y + axes[3][1] * z,
+				limb.pos[2] + axes[1][2] * x + axes[2][2] * y + axes[3][2] * z,
+				limb.pos[3] + axes[1][3] * x + axes[2][3] * y + axes[3][3] * z,
+			}
+			else { limb.pos[1] + x, limb.pos[2] + y, limb.pos[3] + z }
 		local outward = normalize({ pos[1] - center[1], pos[2] - center[2], pos[3] - center[3] })
 		-- A shard at the exact center still needs a direction: scatter it.
 		if length({ pos[1] - center[1], pos[2] - center[2], pos[3] - center[3] }) < 1e-6 then

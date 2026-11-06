@@ -291,6 +291,23 @@ local Combat = {
 			-- touching a wall still finds it, and the body stops this far short of what it meets. A
 			-- wall nearer than the step the target calls for takes the longest step that fits.
 			wallGapStuds = 0.05,
+			-- The brace (D-680): while a stand-off plan runs, the body as the frame draws it (the
+			-- pose before, on the root the stand-off leaves) stands no deeper than this in the world
+			-- behind; the root steps out toward the target by the rest. The engine pushes a part the
+			-- pose leans in out over its 240 Hz steps, and a frame at 144 holds one or two of them:
+			-- the PC's lean rows on 577a59a showed the colliding parts 0.050-0.058 in at 60 and
+			-- 0.067-0.087 at 144, the engine a frame behind the lean. The engine rests a pressed part
+			-- 0.050-0.056 in (the PC's walk-in), so a body it holds there is never stepped. An aside
+			-- may carry a part standing in the world behind along its face no deeper along the line
+			-- than this (D-696).
+			braceStuds = 0.05,
+			-- A colliding part the engine collides by a hull inside its box is braced by its box
+			-- less this on every side: the owner's Head, a MeshPart at CollisionFidelity Default,
+			-- whose hull the PC's rays found 0.077-0.085 behind its box square on (item 538's
+			-- pre-check, D-658). Its box alone read 0.118-0.301 in where the hull stood 0.072-0.081
+			-- (item 564(d) on 577a59a), and the brace would have stepped the body 0.1-0.25 off a
+			-- wall the engine held it at.
+			hullInsetStuds = { Head = 0.08 },
 			-- The keep-out (D-314): a swing's own motion (the clip's root motion, its pose, and the
 			-- step above) never carries the body's colliding parts (`parts`: the R15 root, torsos and
 			-- head, what the engine collides of a character: CollisionGroups.joinPlayers switches
@@ -388,6 +405,25 @@ local Combat = {
 				-- against the target in steps this long (an idle moves slowly: the kobold's carried
 				-- its torso 0.015 studs onto a still Horizontal stance over a 1 s hold).
 				stanceSampleSeconds = 0.1,
+				-- And its start pose forms only as fast as the body steps it out at
+				-- maxSpeedStudsPerSecond (D-691): where the step would fall behind the pose, the
+				-- pose waits on its first pose this long at most while the body steps, a few frames'
+				-- later pose under the held key rather than a faster slide. Within it a 0.2 s tap
+				-- still reaches the hold pose (0.15) before its release.
+				stanceWaitSeconds = 1 / 30,
+				-- How deep a stance leaves a colliding part in the target's blockers (D-691): within
+				-- the held rows' bar (0.004, item 573(b)) with room for a pose the screen draws between
+				-- two samples, which bows up to 0.0004 off their sweep at 144 Hz.
+				stanceDepthStuds = 0.0025,
+				-- A body standing free at an enemy (D-692: idle, no walk this frame, no swing's or
+				-- stance's plan) is kept out of its blockers to within stanceDepthStuds too, stepping
+				-- its root out at maxSpeedStudsPerSecond, never toward the enemy: the stick's walk stops
+				-- at wallGapStuds (WalkShell), and the PC's unlockB presses began with the drawn Head
+				-- 0.024-0.068 in the axe's blocker, more than one 144 Hz row's step (0.083) clears as
+				-- the press's first row. The step takes the shortest way out of this many directions
+				-- each side of straight back from the enemy, square to it at the last (6: 15 degrees
+				-- apart).
+				standingDirections = 6,
 			},
 		},
 		-- A contact is predicted to kill only when the hit cannot do less than the enemy has left:

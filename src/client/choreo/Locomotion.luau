@@ -2080,6 +2080,71 @@ local STAND_TURN_CHANNEL = "standTurn"
 local ATTACK_PLANT_HOOK = "attackPlant"
 local TRAVEL_TIME_SLACK = 1e-9 -- unit: seconds, float noise in a sum of frame times
 
+-- A walking-turn plan with every configured foot in it, or nil (D-677).
+local function wholeTurnPlan(character: Model, clip: any, config: WalkTurnPlant.Config): WalkTurnPlant.Plan?
+	local plan = WalkTurnPlant.plan(character, clip, config)
+	return if plan ~= nil and #plan.feet == #config.feet then plan else nil
+end
+
+-- A stop-plant plan (a stop's, an attack's or a stand turn's) with every configured leg in it, or nil
+-- (D-677).
+local function wholeStopPlan(character: Model, rigId: string, config: WalkStopPlant.Config): WalkStopPlant.Plan?
+	local plan = WalkStopPlant.plan(character, rigId, config)
+	if plan == nil then
+		return nil
+	end
+	local legs = 0
+	for _, group in config.groups do
+		legs += #group
+	end
+	return if #plan.legs == legs then plan else nil
+end
+
+-- Builds every plant the rig is configured for and has not got yet, each from a whole plan (every
+-- leg it names there, hung from the root; D-677). The client meets a spawned enemy before its
+-- parts: the tag replicates before the model's descendants (442, D-543) and its PrimaryPart
+-- reference after them (D-571), and Replication attaches the driver in the tag's handler, so every
+-- plan read there was nil and stayed nil: no attack waited (566(f): held false on all 20 takes),
+-- no stop, turn or stand turn planted. A plan is read again only when the rig's root part or the
+-- animator's joint map (Choreo rebuilds it as a joint arrives or leaves) has changed since the last
+-- read, and never once every plant is in.
+local function planLegs(self: any)
+	if self.planned then
+		return
+	end
+	local character: Model? = self.character
+	local root: BasePart? = if character ~= nil then character.PrimaryPart else nil
+	local joints = self.animator.motors
+	if self.plannedRead and root == self.plannedRoot and joints == self.plannedJoints then
+		return
+	end
+	self.plannedRead, self.plannedRoot, self.plannedJoints = true, root, joints
+	if character == nil or root == nil then
+		return
+	end
+	local walk = ClipLibrary.get(self.walkId)
+	if self.walkPlant == nil and self.plantConfig ~= nil then
+		local plan = wholeTurnPlan(character, walk, self.plantConfig)
+		self.walkPlant = if plan ~= nil then WalkTurnPlant.new(plan) else nil
+	end
+	if self.walkStop == nil and self.stopConfig ~= nil then
+		local plan = wholeStopPlan(character, walk.rig, self.stopConfig)
+		self.walkStop = if plan ~= nil then WalkStopPlant.new(plan) else nil
+	end
+	if self.attackPlant == nil and self.attackConfig ~= nil then
+		local plan = wholeStopPlan(character, walk.rig, self.attackConfig)
+		self.attackPlant = if plan ~= nil then WalkStopPlant.new(plan) else nil
+	end
+	if self.standTurn == nil and self.standConfig ~= nil then
+		local plan = wholeStopPlan(character, walk.rig, self.standConfig)
+		self.standTurn = if plan ~= nil then WalkStopPlant.new(plan) else nil
+	end
+	self.planned = (self.plantConfig == nil or self.walkPlant ~= nil)
+		and (self.stopConfig == nil or self.walkStop ~= nil)
+		and (self.attackConfig == nil or self.attackPlant ~= nil)
+		and (self.standConfig == nil or self.standTurn ~= nil)
+end
+
 local function newRigDriver(
 	animator: any,
 	idleId: string,
@@ -2095,18 +2160,6 @@ local function newRigDriver(
 	standTwist: number?
 ): any
 	local walkDuration = ClipLibrary.get(walkId).duration
-	local plan = if character ~= nil and plantConfig ~= nil
-		then WalkTurnPlant.plan(character, ClipLibrary.get(walkId), plantConfig)
-		else nil
-	local stopPlan = if character ~= nil and stopConfig ~= nil
-		then WalkStopPlant.plan(character, ClipLibrary.get(walkId).rig, stopConfig)
-		else nil
-	local attackPlan = if character ~= nil and attackConfig ~= nil
-		then WalkStopPlant.plan(character, ClipLibrary.get(walkId).rig, attackConfig)
-		else nil
-	local standPlan = if character ~= nil and standConfig ~= nil
-		then WalkStopPlant.plan(character, ClipLibrary.get(walkId).rig, standConfig)
-		else nil
 	local self = setmetatable({
 		animator = animator,
 		handles = {} :: { [string]: any },
@@ -2114,9 +2167,20 @@ local function newRigDriver(
 		walkDuration = walkDuration,
 		-- Where the walk steps off from standing (choreo enemy.gait.startPhase, D-599), or nil.
 		walkStartAt = if startPhase ~= nil then startPhase * walkDuration else nil,
-		-- The walking-turn plant (D-619), the root it last read and that step's turn, or nil.
 		character = character,
-		walkPlant = if plan ~= nil then WalkTurnPlant.new(plan) else nil,
+		walkId = walkId,
+		-- The plants' configs, whether every configured plant is in (planLegs, D-677), and the
+		-- root part and the animator's joint map it last read them on.
+		plantConfig = plantConfig,
+		stopConfig = stopConfig,
+		attackConfig = attackConfig,
+		standConfig = standConfig,
+		planned = false,
+		plannedRead = false,
+		plannedRoot = nil :: BasePart?,
+		plannedJoints = nil :: { [string]: Instance }?,
+		-- The walking-turn plant (D-619), the root it last read and that step's turn, or nil.
+		walkPlant = nil :: WalkTurnPlant.State?,
 		plantYaw = nil :: CFrame?,
 		plantAt = nil :: Vector3?,
 		plantClock = 0,
@@ -2126,7 +2190,7 @@ local function newRigDriver(
 		-- The stop plant (D-623), the root it last read and its flat move then, whether the walk
 		-- has shown whole since it last stood (a stop under it is planted), whether the root walked
 		-- off from the stop and what is left of its legs then, and whether a stop drew its last step.
-		walkStop = if stopPlan ~= nil then WalkStopPlant.new(stopPlan) else nil,
+		walkStop = nil :: WalkStopPlant.State?,
 		stopAt = nil :: Vector3?,
 		stopMoved = 0,
 		walked = false,
@@ -2135,7 +2199,7 @@ local function newRigDriver(
 		stopEnds = false,
 		-- The attack plant (D-632), the attack clip it plants under, the root the last step read
 		-- and that step's dt, and the root this step's row is drawn on.
-		attackPlant = if attackPlan ~= nil then WalkStopPlant.new(attackPlan) else nil,
+		attackPlant = nil :: WalkStopPlant.State?,
 		attackHandle = nil :: any,
 		attackRoot = nil :: CFrame?,
 		attackRootDt = 0,
@@ -2159,12 +2223,13 @@ local function newRigDriver(
 		pacesDrawnRoot = false,
 		-- The stand turn (D-665), the hip twist past which a group steps, and whether a walk took
 		-- the rig from it (its legs step onto the walk).
-		standTurn = if standPlan ~= nil then WalkStopPlant.new(standPlan) else nil,
+		standTurn = nil :: WalkStopPlant.State?,
 		standTwist = standTwist or 0,
 		standLetGo = false,
 		unhook = nil :: (() -> ())?,
 		destroyed = false,
 	}, RigDriver)
+	planLegs(self)
 	local idleStart = phase * ClipLibrary.get(idleId).duration
 	local walkStart = self.walkStartAt or phase * walkDuration
 	self.handles.Idle = animator:play(idleId, { coexist = true, weight = 1, blendIn = 0, startTime = idleStart })
@@ -2738,6 +2803,7 @@ local function stepStandTurn(self: any, dt: number, walk: number)
 end
 
 function RigDriver.update(self: any, dt: number, state: State): LocomotionState.Output
+	planLegs(self)
 	stepDrawnRoot(self, dt)
 	stepAttackPlant(self, dt)
 	if self.stopEnds then

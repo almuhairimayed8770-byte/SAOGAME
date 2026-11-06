@@ -286,6 +286,30 @@ function AimLogic.assistPick(candidates: { Bearing }, config: Config): Bearing?
 	return nil
 end
 
+--- The enemy an unlocked Art's held stance keeps its start pose out of (D-606, D-673): the soft
+--- assist's pick, else the nearest of `candidates` inside config.assistRange at any bearing
+--- (D-689). A start pose leans into an enemy beside the body as well as one ahead of it: a
+--- fighter pressed facing a kobold's axe 99 degrees off the kobold had no pick, no stance, and was
+--- shoved off the axe while the key was held. One closer than config.minFaceDistance is skipped,
+--- as by the pick.
+function AimLogic.stancePick(candidates: { Bearing }, config: Config): Bearing?
+	local pick = AimLogic.assistPick(candidates, config)
+	if pick ~= nil then
+		return pick
+	end
+	local nearest: Bearing? = nil
+	for _, candidate in candidates do
+		if
+			candidate.distance >= config.minFaceDistance
+			and candidate.distance <= config.assistRange
+			and (nearest == nil or candidate.distance < (nearest :: Bearing).distance)
+		then
+			nearest = candidate
+		end
+	end
+	return nearest
+end
+
 --- The Humanoid speed while the body faces its lock: no faster than a walk, so the strafe and the
 --- back-walk the 8-direction walk set shows keep their feet (D-054); otherwise `speed` stands.
 function AimLogic.moveSpeed(speed: number, facingLock: boolean, walk: number): number

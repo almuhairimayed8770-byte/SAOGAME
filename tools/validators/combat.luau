@@ -51,6 +51,8 @@
 	to chords that the straight steps of besideHitRadius then walk; besideMaxSubdivisions is a
 	positive whole number. The Art stand-off (fix F1): contact.standOff.wallGapStuds is 0 or more and
 	at most stepStuds, so a wall in the way costs the step at most one increment more than it must.
+	The brace (D-680): contact.standOff.braceStuds is 0 or more and at most twice wallGapStuds;
+	contact.standOff.hullInsetStuds maps keepOut.parts names to insets from 0 to 0.5.
 
 	A struck stance (D-340): struckStanceBlendOut is at least locomotionBlendOut and at most
 	staggerDuration, so the stance a hit takes away comes down slower than a plain end and is gone
@@ -396,6 +398,53 @@ return function(ctx: Context): { string }
 					tostring(step)
 				)
 			)
+		end
+		-- The brace (D-680): a drawn part at the engine's own rest is never stepped, and none is
+		-- left deeper than a wall gap past it.
+		local brace = standOff.braceStuds
+		if not isNumber(brace) or brace < 0 then
+			problem(("contact.standOff.braceStuds must be a number, 0 or more (got %s)"):format(tostring(brace)))
+		elseif isNumber(gap) and brace > 2 * gap + 1e-9 then
+			problem(
+				("contact.standOff.braceStuds %s is over twice contact.standOff.wallGapStuds (%s): the drawn body would stand deeper in the world than a gap past the engine's rest"):format(
+					tostring(brace),
+					tostring(gap)
+				)
+			)
+		end
+		-- A part braced by its box less a hull's inset (D-680) is one the keep-out collides, and the
+		-- inset leaves a head-sized part (about 1.2 a side) a box to cast.
+		local insets = standOff.hullInsetStuds
+		local keepOut = standOff.keepOut
+		local collided: { [string]: boolean } = {}
+		if typeof(keepOut) == "table" and typeof(keepOut.parts) == "table" then
+			for _, name in keepOut.parts do
+				collided[name] = true
+			end
+		end
+		if typeof(insets) ~= "table" then
+			problem(
+				("contact.standOff.hullInsetStuds must be a table of part names to studs (got %s)"):format(
+					tostring(insets)
+				)
+			)
+		else
+			for name, inset in insets do
+				if typeof(name) ~= "string" or not collided[name] then
+					problem(
+						("contact.standOff.hullInsetStuds names %s, which is not one of contact.standOff.keepOut.parts"):format(
+							tostring(name)
+						)
+					)
+				elseif not isNumber(inset) or inset < 0 or inset > 0.5 then
+					problem(
+						("contact.standOff.hullInsetStuds.%s must be a number from 0 to 0.5 (got %s)"):format(
+							name,
+							tostring(inset)
+						)
+					)
+				end
+			end
 		end
 	end
 

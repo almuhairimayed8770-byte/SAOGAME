@@ -75,11 +75,21 @@
 	never a mean over longer than the gait takes to answer a change of pace twice); followSeconds positive and lagSeconds 0 or more, each at most rateSeconds;
 	maxLagStuds positive and at most enemy.rush.teleportStuds (further off is a placement);
 	maxLagDegrees above 0 and at most 90; settleStuds 0 up to locomotion.stride.contact (the snap
-	onto the root is inside the contact band); settleDegrees 0 or more, below maxLagDegrees. Each
+	onto the root is inside the contact band); settleDegrees 0 or more, below maxLagDegrees;
+	sinkStuds (D-682) 0 up to locomotion.stride.contact (a body held that far over its root still
+	stands its feet in the contact band). Each
 	enemy.gait.standTurn (D-665) keeps the stop plant's rules but the walk's cycle, and its
 	twistStuds is above its settleStuds (a turning stance steps only past its twist);
 	enemy.gait.standTurnDegrees is a positive number of degrees, at least evenRoot.settleDegrees (a
 	drawn root snapping onto its root reads as no turn).
+
+	And the breath's give under a strike (D-685): breathYield.joints names distinct joints of
+	every rig with a breathing clip (rigs.<rig>.breathing), among them every joint that clip keys on
+	the chain from the rig's root part to its weapon (rigs.luau, the weaponModels.luau motorName
+	motor up through each joint's Part0): a breath left on one moves the blade under every strike.
+	breathYield.outEasing and inEasing are util/Easing curves other than Linear and Hold. outSeconds is
+	a positive number of seconds, at most every attack's Anticipation beat under
+	locomotion.clipPrefix (the breath leaves inside the wind-up).
 ]]
 
 local TIERS = { "High", "Medium", "Low" }
@@ -1004,7 +1014,7 @@ return function(ctx: any): { string }
 	local even = if typeof(gait) == "table" then gait.evenRoot else nil
 	check(
 		typeof(even) == "table",
-		"enemy.gait.evenRoot must be a table (drawBody, rateSeconds, followSeconds, lagSeconds, maxLagStuds, maxLagDegrees, settleStuds, settleDegrees)"
+		"enemy.gait.evenRoot must be a table (drawBody, rateSeconds, followSeconds, lagSeconds, maxLagStuds, maxLagDegrees, settleStuds, settleDegrees, sinkStuds)"
 	)
 	local settleDegrees: number? = nil
 	if typeof(even) == "table" then
@@ -1063,6 +1073,16 @@ return function(ctx: any): { string }
 			("enemy.gait.evenRoot.settleDegrees %s must be 0 or more, below maxLagDegrees"):format(tostring(snap))
 		)
 		settleDegrees = if snapOk then snap else nil
+		-- The height held over a settling root (D-682): a body held that far over it still stands
+		-- its feet in the contact band.
+		local sink = even.sinkStuds
+		check(
+			typeof(sink) == "number" and sink >= 0 and positive(contact) and sink <= contact,
+			("enemy.gait.evenRoot.sinkStuds %s must be 0 up to locomotion.stride.contact (%s): a body held that far over its root still stands its feet in the contact band"):format(
+				tostring(sink),
+				tostring(contact)
+			)
+		)
 	end
 
 	-- The stand turn (D-665) keeps the stop plant's rules but the walk's cycle; a turning stance
@@ -1093,6 +1113,103 @@ return function(ctx: any): { string }
 			tostring(settleDegrees)
 		)
 	)
+
+	-- The breath's give under a strike (D-685): distinct joints of every breathing rig, among them
+	-- every joint its breathing clip keys from the root to the weapon, eased by a curve.
+	local breathYield = choreo.breathYield
+	if typeof(breathYield) ~= "table" or typeof(breathYield.joints) ~= "table" then
+		check(false, "breathYield is missing (the joints that give way under a strike and the easing)")
+	else
+		local listed: { [string]: boolean } = {}
+		for _, name in breathYield.joints do
+			check(
+				typeof(name) == "string" and listed[name] == nil,
+				("breathYield.joints names %s twice or not as a joint name"):format(tostring(name))
+			)
+			if typeof(name) == "string" then
+				listed[name] = true
+			end
+		end
+		local Easing = ctx.load("src/shared/util/Easing")
+		for _, field in { "outEasing", "inEasing" } do
+			local curve = breathYield[field]
+			check(
+				typeof(curve) == "string" and curve ~= "Linear" and curve ~= "Hold" and (pcall(Easing.get, curve)),
+				("breathYield.%s '%s' must be a util/Easing curve other than Linear and Hold"):format(
+					field,
+					tostring(curve)
+				)
+			)
+		end
+		local out = breathYield.outSeconds
+		check(positive(out), ("breathYield.outSeconds (%s) must be a positive number of seconds"):format(tostring(out)))
+		local prefix = if typeof(choreo.locomotion) == "table" then choreo.locomotion.clipPrefix else nil
+		if positive(out) and typeof(prefix) == "string" then
+			for _, file in ctx.listFiles("src/shared/clips/" .. prefix, "%.luau$") do
+				local clip = ctx.load((file:gsub("%.luau$", "")))
+				local beats = if typeof(clip) == "table" and clip.attack == true then clip.beats else nil
+				local anticipation = if typeof(beats) == "table" then beats.Anticipation else nil
+				if typeof(anticipation) == "table" then
+					local span = anticipation.finish - anticipation.start
+					check(
+						out <= span + 1e-9,
+						("breathYield.outSeconds %.4f is longer than %s's Anticipation beat (%.4f): the breath leaves inside the wind-up"):format(
+							out,
+							tostring(clip.id),
+							span
+						)
+					)
+				end
+			end
+		end
+		local Rigs = ctx.load("src/shared/data/rigs")
+		local motorName = ctx.load("src/shared/data/weaponModels").motorName
+		for rigId, rigClips in (if typeof(choreo.rigs) == "table" then choreo.rigs else {}) :: { [string]: any } do
+			local rig = Rigs[rigId]
+			if typeof(rigClips) ~= "table" or typeof(rigClips.breathing) ~= "string" or typeof(rig) ~= "table" then
+				continue
+			end
+			local names: { [string]: boolean } = {}
+			local byChild: { [string]: any } = {}
+			local weapon: any = nil
+			for _, joint in rig.joints do
+				names[joint.name] = true
+				byChild[joint.part1] = joint
+				if joint.name == motorName then
+					weapon = joint
+				end
+			end
+			for name in listed do
+				check(names[name] == true, ("breathYield.joints names %s, not a %s joint"):format(name, rigId))
+			end
+			-- The sword's chain: the weapon motor and each joint above it to the root part.
+			local chain: { [string]: boolean } = {}
+			local joint = weapon
+			while joint ~= nil and chain[joint.name] == nil do
+				chain[joint.name] = true
+				joint = byChild[joint.part0]
+			end
+			local ok, clip = pcall(ctx.load, "src/shared/clips/" .. rigClips.breathing)
+			if not ok or typeof(clip) ~= "table" or typeof(clip.keys) ~= "table" then
+				continue
+			end
+			local keyed: { [string]: boolean } = {}
+			for _, key in clip.keys do
+				for name in key.joints or {} do
+					keyed[name] = true
+				end
+			end
+			for name in keyed do
+				check(
+					chain[name] ~= true or listed[name] == true,
+					("breathYield.joints leaves out %s, which %s keys on the sword's chain: the breath would move the blade under every strike"):format(
+						name,
+						rigClips.breathing
+					)
+				)
+			end
+		end
+	end
 
 	local settle = if typeof(camera.stall) == "table" then camera.stall.settleSeconds else nil
 	if positive(settle) then

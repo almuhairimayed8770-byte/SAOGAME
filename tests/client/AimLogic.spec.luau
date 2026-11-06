@@ -223,6 +223,28 @@ describe("AimLogic.assistPick", function()
 	end)
 end)
 
+describe("AimLogic.stancePick (item 573(b), D-689)", function()
+	it("the assist's pick when it has one, else the nearest enemy in range at any bearing", function()
+		-- The pick wins over a nearer enemy outside the cone, as the release's snap will face it.
+		local pick = AimLogic.stancePick({
+			{ id = 1, distance = 6, bearing = 30 },
+			{ id = 2, distance = 3, bearing = 120 },
+		}, aim)
+		expect((pick :: any).id).toBe(1)
+		-- The PC's unlockB takes: the kobold 2.7-3.0 off at 99 degrees, outside the cone; no pick.
+		local candidates = { { id = 7, distance = 2.9, bearing = 99 }, { id = 8, distance = 4, bearing = -150 } }
+		expect(AimLogic.assistPick(candidates, aim)).toBeNil()
+		local beside = AimLogic.stancePick(candidates, aim)
+		expect(beside).never.toBeNil()
+		expect((beside :: any).id).toBe(7)
+		-- Never past assistRange, nor one standing on the body.
+		expect(AimLogic.stancePick({ { id = 1, distance = aim.assistRange + 0.01, bearing = 170 } }, aim)).toBeNil()
+		expect(AimLogic.stancePick({ { id = 1, distance = aim.minFaceDistance / 2, bearing = 170 } }, aim)).toBeNil()
+		expect(AimLogic.stancePick({ { id = 1, distance = aim.assistRange, bearing = -170 } }, aim)).never.toBeNil()
+		expect(AimLogic.stancePick({}, aim)).toBeNil()
+	end)
+end)
+
 describe("AimLogic.moveSpeed", function()
 	it("a body facing its lock strafes at walk speed; otherwise the speed stands", function()
 		expect(AimLogic.moveSpeed(16, true, 8)).toBe(8)

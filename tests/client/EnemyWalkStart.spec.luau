@@ -69,12 +69,30 @@ local CollectionService = Harness.game():GetService("CollectionService")
 
 local clientNow = 0
 local Choreo = Harness.load("src/client/choreo/Choreo")
+-- The engine's instance signals Choreo connects (the harness's instances fire none): a copy met
+-- before its parts fires DescendantAdded as each part arrives.
+local engineSignals: { [any]: { [string]: { (...any) -> () } } } = {}
+local function fire(instance: any, eventName: string, ...: any)
+	local list = engineSignals[instance]
+	if list ~= nil and list[eventName] ~= nil then
+		for _, fn in list[eventName] do
+			fn(...)
+		end
+	end
+end
 Choreo.configure({
 	now = function()
 		return clientNow
 	end,
 	cameraPosition = function()
 		return Vector3.zero
+	end,
+	connect = function(instance: any, eventName: string, fn: (...any) -> ()): any
+		local list = engineSignals[instance] or {}
+		engineSignals[instance] = list
+		list[eventName] = list[eventName] or {}
+		table.insert(list[eventName], fn)
+		return { Disconnect = function() end }
 	end,
 })
 local Locomotion = Harness.load("src/client/choreo/Locomotion")
@@ -442,6 +460,9 @@ type View = {
 	-- Rows each Telegraph reaches the driver after the ActionStarted it went out with (math.huge:
 	-- it is lost). Both are unreliable remotes: neither their order nor their arrival is sure.
 	telegraphRows: number?,
+	-- How far the replicated root reads lower from the release on than it was held (the server's
+	-- root let go settling into its contact; nil: none).
+	sink: number?,
 }
 
 local SERVER: View = { hz = 60, interpolated = false }
@@ -482,7 +503,7 @@ end
 -- clips play on the client copy once the drawn root has reached the server time they were sent at
 -- (the view's `arrival`: as they are sent), and each Telegraph names its wind-up's origin to the
 -- driver as Replication does (Locomotion.windUpAt, D-652).
-local function take(rig: string, off: number, view: View?, seconds: number?, actions: boolean?): Take
+local function take(rig: string, off: number, view: View?, seconds: number?, actions: boolean?, late: boolean?): Take
 	local seen = view or SERVER
 	fresh()
 	spawnPlayer(Vector3.new(0, 3, 25))
@@ -508,8 +529,33 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 	clientRoot.CFrame = serverRoot.CFrame
 	clientRoot.Position = serverRoot.CFrame.Position
 	clientRoot.AssemblyLinearVelocity = Vector3.zero
-	local animator = Choreo.get(client)
-	local driver = Locomotion.attach(animator, client, { phase = Locomotion.idlePhase(id) })
+	local animator: any, driver: any
+	if late == true then
+		-- Met before its parts (the tag before the model's descendants, 442, D-543; its PrimaryPart
+		-- reference after them, D-571): the gait attaches to the model with only the rig's
+		-- attributes, then each part arrives (its DescendantAdded and its descendants') and the
+		-- PrimaryPart resolves.
+		local shell = Instance.new("Model")
+		shell.Name = client.Name
+		for name, value in client:GetAttributes() do
+			shell:SetAttribute(name, value)
+		end
+		local children = client:GetChildren()
+		animator = Choreo.get(shell)
+		driver = Locomotion.attach(animator, shell, { phase = Locomotion.idlePhase(id) })
+		for _, child in children do
+			child.Parent = shell
+			fire(shell, "DescendantAdded", child)
+			for _, descendant in child:GetDescendants() do
+				fire(shell, "DescendantAdded", descendant)
+			end
+		end
+		shell.PrimaryPart = clientRoot
+		client = shell
+	else
+		animator = Choreo.get(client)
+		driver = Locomotion.attach(animator, client, { phase = Locomotion.idlePhase(id) })
+	end
 	for _ = 1, 60 do
 		clientNow += FRAME
 		animator:step(FRAME)
@@ -530,7 +576,8 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 	for _, foot in feet do
 		local_[foot] = corners((client:FindFirstChild(foot) :: BasePart).Size)
 	end
-	local rest = clientRoot.CFrame.Position
+	-- The root first moves off where it stands let go (a root settling at the release is no move).
+	local rest = clientRoot.CFrame.Position - Vector3.new(0, seen.sink or 0, 0)
 	local started: number? = nil
 	local previous: { [string]: { Vector3 } }? = nil
 	local result: Take = {
@@ -677,6 +724,9 @@ local function take(rig: string, off: number, view: View?, seconds: number?, act
 		else
 			local last = history[#history]
 			cframe, velocity = last.cframe, last.velocity
+		end
+		if seen.sink ~= nil then
+			cframe -= Vector3.new(0, seen.sink, 0)
 		end
 		local flat = Vector3.new(velocity.X, 0, velocity.Z)
 		clientRoot.CFrame = cframe
@@ -1075,6 +1125,53 @@ local STOP_PENDING: { [string]: { [string]: { [number]: number } } } = {
 	["144"] = { Boar = {}, Kobold = {} },
 }
 
+-- The stop's bars (D-623) on one take: the slide within the bar plus its STOP_PENDING entry (an entry
+-- whose take is within the bar must go), no corner under the field, and the idle has the rig after.
+local function stopCheck(case: { rig: string, off: number, seconds: number }, view: View, result: Take)
+	local key = tostring(view.hz)
+	local pending = STOP_PENDING[key][case.rig][case.off]
+	print(
+		("%s off %d @%d Hz, the stop at %s s: slide %.4f at %.3f s, lowest %.4f (stood %.4f); after it walk %s, channel %s, highest foot %s"):format(
+			case.rig,
+			case.off,
+			view.hz,
+			if result.stopAt ~= nil then ("%.3f"):format(result.stopAt :: number) else "-",
+			result.stopSlide,
+			result.stopSlideAt,
+			result.stopLowest,
+			result.standLowest,
+			tostring(result.stopWalk),
+			tostring(result.stopChannel),
+			if result.stopHighest ~= nil then ("%.4f"):format(result.stopHighest :: number) else "-"
+		)
+	)
+	assert(result.stopAt ~= nil and result.stopWalk ~= nil, "the take ended before its stop did")
+	local bound = SLIDE * 60 / view.hz
+	local bar = bound + (pending or 0)
+	if result.stopSlide > bar then
+		error(
+			("a planted foot slides %.3f in a row at %.3f s as it stops (max %.3f)"):format(
+				result.stopSlide,
+				result.stopSlideAt,
+				bar
+			)
+		)
+	end
+	if pending ~= nil and result.stopSlide <= bound then
+		error(
+			("slides %.3f as it stops, within the bound %.3f: take it off STOP_PENDING"):format(result.stopSlide, bound)
+		)
+	end
+	local floor = math.min(result.standLowest, -CONTACT)
+	if result.stopLowest < floor - 1e-6 then
+		error(("a foot corner %.3f under the field as it stops (max %.3f)"):format(-result.stopLowest, -floor))
+	end
+	-- The swinging foot landed and the idle has the rig.
+	expect(result.stopWalk).toBe(0)
+	expect(result.stopChannel).toBe(false)
+	expect((result.stopHighest :: number) <= CONTACT).toBe(true)
+end
+
 describe("EnemyWalkStart: an enemy's stop keeps its feet planted (AO 511(k); D-623)", function()
 	for _, case in
 		{
@@ -1086,54 +1183,7 @@ describe("EnemyWalkStart: an enemy's stop keeps its feet planted (AO 511(k); D-6
 		for _, view in { SERVER, PC144 } do
 			local label = if view.interpolated then "on a 144 Hz client over the interpolated root" else "60 Hz"
 			it(("%s stopping after it set off %d deg, %s"):format(case.rig, case.off, label), function()
-				local result = take(case.rig, case.off, view, case.seconds)
-				local key = tostring(view.hz)
-				local pending = STOP_PENDING[key][case.rig][case.off]
-				print(
-					("%s off %d @%d Hz, the stop at %s s: slide %.4f at %.3f s, lowest %.4f (stood %.4f); after it walk %s, channel %s, highest foot %s"):format(
-						case.rig,
-						case.off,
-						view.hz,
-						if result.stopAt ~= nil then ("%.3f"):format(result.stopAt :: number) else "-",
-						result.stopSlide,
-						result.stopSlideAt,
-						result.stopLowest,
-						result.standLowest,
-						tostring(result.stopWalk),
-						tostring(result.stopChannel),
-						if result.stopHighest ~= nil then ("%.4f"):format(result.stopHighest :: number) else "-"
-					)
-				)
-				assert(result.stopAt ~= nil and result.stopWalk ~= nil, "the take ended before its stop did")
-				local bound = SLIDE * 60 / view.hz
-				local bar = bound + (pending or 0)
-				if result.stopSlide > bar then
-					error(
-						("a planted foot slides %.3f in a row at %.3f s as it stops (max %.3f)"):format(
-							result.stopSlide,
-							result.stopSlideAt,
-							bar
-						)
-					)
-				end
-				if pending ~= nil and result.stopSlide <= bound then
-					error(
-						("slides %.3f as it stops, within the bound %.3f: take it off STOP_PENDING"):format(
-							result.stopSlide,
-							bound
-						)
-					)
-				end
-				local floor = math.min(result.standLowest, -CONTACT)
-				if result.stopLowest < floor - 1e-6 then
-					error(
-						("a foot corner %.3f under the field as it stops (max %.3f)"):format(-result.stopLowest, -floor)
-					)
-				end
-				-- The swinging foot landed and the idle has the rig.
-				expect(result.stopWalk).toBe(0)
-				expect(result.stopChannel).toBe(false)
-				expect((result.stopHighest :: number) <= CONTACT).toBe(true)
+				stopCheck(case, view, take(case.rig, case.off, view, case.seconds))
 			end)
 		end
 	end
@@ -1870,3 +1920,138 @@ describe("EnemyWalkStart: a wheeling boar's planted hooves hold the field (D-619
 		end)
 	end
 end)
+
+-- A copy the client met before its parts (AW 566(c), 568(b) on 577a59a; D-677). The client
+-- meets a spawned enemy before its parts: the tag replicates before the model's descendants (442,
+-- D-543) and its PrimaryPart reference after them (D-571), and Replication attaches the gait in
+-- the tag's handler. On 577a59a every plant read there was nil and stayed nil, so the copy stopped
+-- and turned on no plant: the kobold's stop at 0 and 90 slid 0.122 and 0.251 a 60 Hz row (0.099 and
+-- 0.107 at 144, the PC's 0.049 and 0.095), the boar's at 60 0.175 (0.082); the boar's start under
+-- the PC's logged yaw at 144 0.038 to 0.042 (the PC's 0.043 to 0.053), against 0.018 to 0.040 met
+-- whole. Each plant is built once its legs are in. Bars: the same takes' met whole.
+describe(
+	"EnemyWalkStart: a copy met before its parts stops and starts on its plants (AW 566(c), 568(b); D-677)",
+	function()
+		for _, case in
+			{
+				{ rig = "Kobold", off = 0, seconds = 2.2 },
+				{ rig = "Kobold", off = 90, seconds = 2.2 },
+				{ rig = "Boar", off = 60, seconds = 1.2 },
+			}
+		do
+			for _, view in { SERVER, PC144 } do
+				local label = if view.interpolated then "on a 144 Hz client over the interpolated root" else "60 Hz"
+				it(
+					("%s met before its parts stopping after it set off %d deg, %s"):format(case.rig, case.off, label),
+					function()
+						stopCheck(case, view, take(case.rig, case.off, view, case.seconds, nil, true))
+					end
+				)
+			end
+		end
+		for _, off in { 90, 135, 180 } do
+			for _, rows in PC_YAW_ROWS do
+				if rows.hz ~= 144 then
+					continue
+				end
+				it(
+					("Boar met before its parts set off %d deg keeps its feet from the release through the window, its yaw drawn as the PC drew the boar's %d deg take at 144 Hz"):format(
+						off,
+						rows.off
+					),
+					function()
+						local view = table.clone(PC144_YAW)
+						view.yawLead = yawCycle(yawShares(rows.yaw), rows.hz)
+						local result = take("Boar", off, view, 1.5 + (view.lag :: number), nil, true)
+						startCheck("Boar", off, result, view.hz)
+						check("Boar", off, result, view.hz, nil, false)
+					end
+				)
+			end
+		end
+	end
+)
+
+-- A root that settles as it is let go (AW 568(c) on 577a59a; D-682). The PC's kobold read its
+-- root 3.4000 held and 3.3984 on every row from the release on (its tcf likewise, 3.4300 to
+-- 3.4284), the server's root let go settling 0.0016 into its contact, and the drawn body went down
+-- with it: the LeftLeg's inner front corner stood at -0.032 on the last held row at 60 (the idle's
+-- own stand) and read -0.034 from the release at 60 and 144, past the Studio bar of -0.0335 (the
+-- idle's own deepest corner, -0.0325, with 0.001 for the sampling). Lune's server root never
+-- settles, so its takes read -0.0325; here the replicated root reads RELEASE_SINK lower from the
+-- release on. Bars: the same take held at its height (no corner from the release, on the stand
+-- row or in the window deeper than there), and startCheck's.
+local RELEASE_SINK = 0.0016 -- unit: studs, the PC's root from held to let go (3.4000 to 3.3984)
+
+describe(
+	"EnemyWalkStart: a root that settles at the release keeps its start at the stand's height (AW 568(c); D-682)",
+	function()
+		for _, case in
+			{
+				{ rig = "Kobold", off = 135, hz = 60 },
+				{ rig = "Kobold", off = 135, hz = 144 },
+				{ rig = "Kobold", off = 60, hz = 144 },
+				{ rig = "Kobold", off = 60, hz = 60 },
+				{ rig = "Boar", off = 135, hz = 60 },
+				{ rig = "Boar", off = 135, hz = 144 },
+			}
+		do
+			local label = if case.hz == 144 then "on a 144 Hz client over the interpolated root" else "60 Hz"
+			it(
+				("%s set off %d deg on a root settling %.4f at the release, %s"):format(
+					case.rig,
+					case.off,
+					RELEASE_SINK,
+					label
+				),
+				function()
+					local view = if case.hz == 144 then PC144 else SERVER
+					local settling = table.clone(view)
+					settling.sink = RELEASE_SINK
+					local held = take(case.rig, case.off, view)
+					local result = take(case.rig, case.off, settling)
+					print(
+						("%s off %d @%d Hz settling %.4f: lowest from the release %.4f (held %.4f), stood %.4f (held %.4f), window %.4f (held %.4f)"):format(
+							case.rig,
+							case.off,
+							case.hz,
+							RELEASE_SINK,
+							result.startLowest,
+							held.startLowest,
+							result.standLowest,
+							held.standLowest,
+							result.lowest,
+							held.lowest
+						)
+					)
+					local floor = math.min(held.standLowest, -CONTACT)
+					if result.startLowest < floor - 1e-6 then
+						error(
+							("a foot corner %.4f under the field from the release on a settling root (max %.4f, the held stand's)"):format(
+								-result.startLowest,
+								-floor
+							)
+						)
+					end
+					if result.standLowest < held.standLowest - 1e-6 then
+						error(
+							("the stand row's lowest corner %.4f on a settling root, %.4f held"):format(
+								result.standLowest,
+								held.standLowest
+							)
+						)
+					end
+					if result.lowest < held.lowest - 1e-6 then
+						error(
+							("the window's lowest corner %.4f on a settling root, %.4f held"):format(
+								result.lowest,
+								held.lowest
+							)
+						)
+					end
+					startCheck(case.rig, case.off, result, case.hz)
+				end
+			)
+		end
+	end
+)

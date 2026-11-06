@@ -18,10 +18,25 @@
 	WeaponBuilder sword, the real ClipLibrary clip and the real Trails and TrailRibbon on their render
 	steps. The swinger's own rig as CharacterController drives it: Replication watches it (its trail
 	and its clip events) with no driver, Locomotion.new with the controller's deps updated before the
-	rig's step, and Basic1 played as basicAttack plays it. The watcher's copy through the real
+	rig's step, Basic1 played as basicAttack plays it, and its root carried by the clip's root motion
+	after the rig's step, as the controller's step carries it (Basic1's lunge: 0.10 by clip 0.1083,
+	0.17 by 0.1167).
+
+	Each first point is read in the root its own screen drew it on (D-684): the watcher's copy draws
+	on the root it shows (the server's, which has not taken the lunge at the late start), the
+	swinger's own screen on its root at the window's open, between the rows before and on its first
+	Core (Trails bladeAt: the two rows' roots, the share of the frame's drawn clip step at which the
+	window opens). Read on the root of the row it first shows a Core, the swinger's own point stands
+	that frame's lunge behind it: AU 571(a) on 577a59a, 0.117 / 0.087 from the late points, 0.112 /
+	0.084 of it along the root's back (Lune 0.090 at 60, 0.083 along it). The watcher's copy through the real
 	Replication's ActionStarted, `late` seconds after the server's start, its Locomotion attached by
 	Replication. Both with foot IK on over a flat floor (Lune casts no rays: the floor is handed in)
 	and a Humanoid that holds the root `lift` off its bind-pose soles.
+
+	Both rigs breathe (Choreo plays Breathe from the frame a rig appears), each from its own start,
+	and the back-fill draws none of it: a watcher cannot know the swinger's breath. The breath now
+	gives way under the strike (D-685): the blade's joints are out of it by the window's open, so
+	the swinger's own first point is the clip's with the body's channels at any point of its breath.
 ]]
 
 local function frameSignal(): any
@@ -57,12 +72,25 @@ local WeaponModels = Harness.load("src/shared/data/weaponModels")
 local Weapons = Harness.load("src/shared/data/weapons")
 
 local BASIC1 = ChoreoData.locomotion.clipPrefix .. "Basic1"
+-- The player rig's breath, which Choreo plays from the frame the rig appears (rigs.PlayerR15).
+local BREATHE = ClipLibrary.get(ChoreoData.rigs.PlayerR15.breathing)
+-- Points of the swinger's breath cycle its swing starts at.
+local BREATH_PHASES = 16
+-- Frames the rig idles before the swing starts.
+local WARM_UP = 90
 local ROOT = CFrame.new(0, 3, 0)
 -- The PC's gap (S542_60_A_1 against the late copies): A's own first point 0.121 below its root,
 -- the late ones 0.004 above it.
 local LIFT = -0.125
 -- AU 542(d): the late copies' first points within 0.05 of A's own.
 local BAR = 0.05
+-- Where the stroke starts: Basic1's TrailOn.
+local OPEN = 0
+for _, event in ClipLibrary.get(BASIC1).events do
+	if event.kind == "TrailOn" then
+		OPEN = event.time
+	end
+end
 
 local clock = 100
 Choreo.configure({
@@ -169,12 +197,16 @@ local function floorUnder(model: Model): (origin: Vector3, direction: Vector3) -
 	end
 end
 
-type Take = { guard: Vector3?, tip: Vector3?, stand: number }
+-- The first sample's tip in the root its screen drew it on (`tip`) and in the root of the row it
+-- first shows on (`onRow`).
+type Take = { guard: Vector3?, tip: Vector3?, onRow: Vector3?, stand: number, breath: number }
 
 -- Plays Basic1 at `fps` on the swinger's own rig (`late` nil) or on a watcher's copy whose
 -- ActionStarted comes `late` seconds after the server's start; returns the stroke's first sample
--- in the root's space and the stand height the rig's Root showed on top of the clip.
-local function take(drawn: boolean, late: number?, fps: number): Take
+-- in the root's space, the stand height the rig's Root showed on top of the clip and the rig's
+-- breath clock at the start. `breath`: the rig idles on, its breath running from the frame it
+-- appeared, until its breath stands there (to the nearest frame) before the swing.
+local function take(drawn: boolean, late: number?, fps: number, breath: number?): Take
 	local model = build(drawn, LIFT)
 	local own = late == nil
 	local record = {
@@ -300,19 +332,40 @@ local function take(drawn: boolean, late: number?, fps: number): Take
 	end
 	local tipAttachment = model:FindFirstChild("TrailEnd", true) :: Attachment
 	tipAttachment.WorldPosition = ROOT.Position
-	local result: Take = { guard = nil, tip = nil, stand = 0 }
+	local result: Take = { guard = nil, tip = nil, onRow = nil, stand = 0, breath = 0 }
 	local recording = false
+	local rootPart = model.PrimaryPart :: BasePart
+	-- Basic1's clock now, and on the rows before: a row draws the pose of the step before (D-342).
+	local function clockNow(): number
+		for _, handle in animator:handles() do
+			if handle.clip.id == BASIC1 then
+				return handle.time
+			end
+		end
+		return 0
+	end
+	local roots: { CFrame } = { rootPart.CFrame, rootPart.CFrame }
+	local clocks: { number } = { 0, 0 }
 	local realPush = TrailRibbon.push
 	TrailRibbon.push = function(ribbon: any, guard: Vector3, tip: Vector3, born: number, joined: boolean): boolean
 		local ok = realPush(ribbon, guard, tip, born, joined)
 		if recording and ok and result.tip == nil then
-			result.guard = ROOT:PointToObjectSpace(guard)
-			result.tip = ROOT:PointToObjectSpace(tip)
+			-- The root at the window's open: this row's and the row before's, by the share of the
+			-- clip step between the poses they draw (the clocks a step before each) it opens at.
+			local before, now = clocks[2], clocks[1]
+			local share = if now > before then math.clamp((OPEN - before) / (now - before), 0, 1) else 1
+			local drawnOn = roots[1]:Lerp(rootPart.CFrame, share)
+			result.guard = drawnOn:PointToObjectSpace(guard)
+			result.tip = drawnOn:PointToObjectSpace(tip)
+			result.onRow = rootPart.CFrame:PointToObjectSpace(tip)
 		end
 		return ok
 	end
 	local dt = 1 / fps
 	local function step()
+		-- The row before's root, and the clocks the row before and this one draw.
+		roots[1] = rootPart.CFrame
+		clocks[2], clocks[1] = clocks[1], clockNow()
 		clock += dt
 		hooks.start(dt)
 		if hooks.drawn ~= nil then
@@ -329,6 +382,10 @@ local function take(drawn: boolean, late: number?, fps: number): Take
 			})
 		end
 		animator:step(dt)
+		if own then
+			-- CharacterController's step: the clip's root motion, along the facing, after the rig's.
+			rootPart.CFrame += rootPart.CFrame:VectorToWorldSpace(animator:currentRootMotionDelta())
+		end
 		local channel = animator.mixer._procedural.standHeight
 		if channel ~= nil and recording then
 			result.stand = channel.offsets.Root.pos[2] * channel.weight
@@ -342,9 +399,18 @@ local function take(drawn: boolean, late: number?, fps: number): Take
 		end
 		hooks.finish(dt)
 	end
+	local frames = WARM_UP
+	if breath ~= nil then
+		frames += math.round(((breath - WARM_UP * dt) % BREATHE.duration) * fps)
+	end
 	local ok, err = pcall(function()
-		for _ = 1, 90 do
+		for _ = 1, frames do
 			step()
+		end
+		for _, handle in animator:handles() do
+			if handle.clip.id == BREATHE.id then
+				result.breath = handle.time
+			end
 		end
 		recording = true
 		if own then
@@ -377,10 +443,16 @@ local function take(drawn: boolean, late: number?, fps: number): Take
 end
 
 describe("a late remote basic's stroke starts where the swinger's own does (AU 542(d), D-670)", function()
-	it("within 0.05 in the root's space, the body held 0.125 under its bind pose, at 60 and 144", function()
-		-- Before: 0.093 apart at 60 and 0.165 at 144, the late copy at the clip's own height and the
-		-- swinger's own 0.125 lower, where its stand height holds the body (D-506).
+	it("within 0.05 in the root it was drawn on, the body held 0.125 under its bind pose, at 60 and 144", function()
+		-- Before D-670: 0.093 apart at 60 and 0.165 at 144, the late copy at the clip's own height
+		-- and the swinger's own 0.125 lower, where its stand height holds the body (D-506). On the
+		-- root of the row each first shows on, the swinger's own lunge parts them (AU 571(a),
+		-- D-684): 0.090 / 0.056 at 60 / 144, 0.083 / 0.031 of it along the root's back. With the
+		-- swinger's breath 1.5 s in, 0.0475 at 144 before the breath gave way under the strike
+		-- (D-685), 0.0045 since.
 		local worst, worstAt = 0, ""
+		-- The same points read on the root of the row each first shows on (571(a)'s first reading).
+		local onRow: { [number]: number } = { [60] = 0, [144] = 0 }
 		for _, fps in { 60, 144 } do
 			for _, drawn in { false, true } do
 				local own = take(drawn, nil, fps)
@@ -393,6 +465,7 @@ describe("a late remote basic's stroke starts where the swinger's own does (AU 5
 					local copyTip = copy.tip
 					expect({ label, copyTip ~= nil }).toEqual({ label, true })
 					local apart = ((copyTip :: Vector3) - (ownTip :: Vector3)).Magnitude
+					onRow[fps] = math.max(onRow[fps], ((copy.onRow :: Vector3) - (own.onRow :: Vector3)).Magnitude)
 					if apart > worst then
 						worst, worstAt =
 							apart, ("%s: own %s, late %s"):format(label, tostring(ownTip), tostring(copyTip))
@@ -400,7 +473,70 @@ describe("a late remote basic's stroke starts where the swinger's own does (AU 5
 				end
 			end
 		end
-		print(("[542(d)] the late first point within %.4f of the swinger's own (%s)"):format(worst, worstAt))
+		print(
+			("[542(d)] the late first point within %.4f of the swinger's own (%s); on the rows' roots %.4f / %.4f at 60 / 144"):format(
+				worst,
+				worstAt,
+				onRow[60],
+				onRow[144]
+			)
+		)
 		expect(worst <= BAR).toBe(true)
+	end)
+	it("within 0.05 with the swinger breathing from every point of its cycle, at 60 and 144 (AU 571(a))", function()
+		-- Every player rig breathes (Choreo plays Breathe from the frame it appears, never
+		-- stopping), each screen from its own start, and a hit-stop pauses it: no watcher knows
+		-- the swinger's breath. The back-fill draws the clip's blade with the body's channels and
+		-- no breath; the swinger's own screen drew it with the breath on, whose waist, shoulder,
+		-- wrist and sword keys carried the first point 0.023-0.120 from the late copies' at 60,
+		-- 11 of 16 points of the cycle over 0.05, and 0.023-0.124 at 144. Since the breath gives way
+		-- under the strike (D-685), out of the blade's joints by the open: within 0.0000 / 0.0117
+		-- at 60 / 144 (what is left of it on the 144 Hz frame short of the open).
+		local worst: { [number]: number } = { [60] = 0, [144] = 0 }
+		local worstAt: { [number]: string } = {}
+		local over: { [number]: number } = { [60] = 0, [144] = 0 }
+		for _, fps in { 60, 144 } do
+			for _, drawn in { false, true } do
+				local copies: { Vector3 } = {}
+				for _, late in { 0.1, 0.12, 0.14 } do
+					local copy = take(drawn, late, fps)
+					expect(copy.tip ~= nil).toBe(true)
+					table.insert(copies, copy.tip :: Vector3)
+				end
+				for step = 0, BREATH_PHASES - 1 do
+					local breath = BREATHE.duration * step / BREATH_PHASES
+					local own = take(drawn, nil, fps, breath)
+					local label = ("%d fps, %s, breath at %.3f s (%.4f)"):format(
+						fps,
+						if drawn then "drawn" else "sheathed",
+						breath,
+						own.breath
+					)
+					expect({ label, own.tip ~= nil }).toEqual({ label, true })
+					local apart = 0
+					for _, copyTip in copies do
+						apart = math.max(apart, (copyTip - (own.tip :: Vector3)).Magnitude)
+					end
+					if apart > BAR then
+						over[fps] += if drawn then 0 else 1
+					end
+					if apart > worst[fps] then
+						worst[fps], worstAt[fps] = apart, label
+					end
+				end
+			end
+		end
+		print(
+			("[571(a)] breathing: the late first point within %.4f / %.4f of the swinger's own at 60 / 144 (%s; %s), sheathed phases over %.2f: %d / %d"):format(
+				worst[60],
+				worst[144],
+				worstAt[60] or "",
+				worstAt[144] or "",
+				BAR,
+				over[60],
+				over[144]
+			)
+		)
+		expect(math.max(worst[60], worst[144]) <= BAR).toBe(true)
 	end)
 end)

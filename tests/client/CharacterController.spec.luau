@@ -423,6 +423,8 @@ local function load(options: Options?): Rig
 			end,
 			-- The target's motion as the real predictor reads it off the rig's handles (D-565).
 			targetMotion = RealContactPredictor.targetMotion,
+			-- And the body's own Additive layers off its own (D-683).
+			ownLayers = RealContactPredictor.ownLayers,
 			-- The world the stand-off may not step into (D-235 amended): a marker the plan is asked with.
 			worldCast = function(model: any): any
 				local cast = function(): number?
@@ -1694,6 +1696,40 @@ describe("CharacterController: the Art stand-off (fix F1)", function()
 			expect(rig.contacts.standOffs[1].options.target).toBe(nil)
 		end
 	)
+
+	it("tells the plan the body's own Additive layers: its Breathe, on from its clock (D-683, D-685)", function()
+		local plan = {
+			distance = 0,
+			away = Vector3.new(0, 0, 1),
+			to = 0,
+			keep = function(): number
+				return 0
+			end,
+			keepUntil = 10,
+		}
+		local rig = load({ choreo = true, impact = true, standOff = plan, clipLibrary = true })
+		for _ = 1, 40 do
+			rig.frame(STILL)
+		end
+		local breathe = rig.animator.mixer:find(ChoreoData.rigs.PlayerR15.breathing)
+		expect(breathe ~= nil).toBe(true)
+		local clock = breathe.time
+		expect(clock > 0).toBe(true)
+		rig.setLock(rig.root.Position + Vector3.new(0, 0, -3.3))
+		rig.controller.basicAttack()
+		-- The plan is asked on the swing's first frame, with the breath's clock as that frame finds it.
+		local before = breathe.time
+		rig.frame(STILL)
+		expect(#rig.contacts.standOffs).toBe(1)
+		local own = rig.contacts.standOffs[1].options.own
+		expect(own ~= nil and #own).toBe(1)
+		expect(own[1].clip.id).toBe(ChoreoData.rigs.PlayerR15.breathing)
+		expect(own[1].time >= before - 1e-9 and own[1].time <= breathe.time + 1e-9).toBe(true)
+		expect(own[1].weight).toBe(1)
+		expect(own[1].speed).toBe(1)
+		-- The rig's breath gives way under the swing's strike, and the plan poses it so (D-685).
+		expect(own[1].yields).toBe(true)
+	end)
 
 	it("holds a basic's keep-out on past its state while its clip plays on, to the clip's end (D-568)", function()
 		local away = Vector3.new(0, 0, 1)

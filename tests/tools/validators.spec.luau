@@ -5224,6 +5224,49 @@ describe("camera, dev capture and sfx shatter rules", function()
 			end),
 			"keepOut.stanceSampleSeconds (nil) must be above 0 and at most 0.25"
 		)).toBe(true)
+		-- D-691: how deep a stance leaves a colliding part in the target's blockers.
+		for _, bad in { 0, -0.001, 0.006, math.huge } do
+			expect(hasProblem(
+				contact("src/shared/data/combat", function(copy)
+					copy.contact.standOff.keepOut.stanceDepthStuds = bad
+				end),
+				("keepOut.stanceDepthStuds (%s) must be above 0 and at most depthEpsilon"):format(tostring(bad))
+			)).toBe(true)
+		end
+		-- D-691: the most a stance's pose waits on its first pose.
+		for _, bad in { -0.01, 0.1, 0.5, math.huge } do
+			expect(
+				hasProblem(
+					contact("src/shared/data/combat", function(copy)
+						copy.contact.standOff.keepOut.stanceWaitSeconds = bad
+					end),
+					("keepOut.stanceWaitSeconds (%s) must be 0 or more and less than combat.activationHold"):format(
+						tostring(bad)
+					)
+				)
+			).toBe(true)
+		end
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.stanceWaitSeconds = nil
+			end),
+			"keepOut.stanceWaitSeconds (nil) must be 0 or more and less than combat.activationHold"
+		)).toBe(true)
+		-- D-692: the directions a body standing at an enemy steps out along.
+		for _, bad in { 0, -1, 2.5, math.huge } do
+			expect(hasProblem(
+				contact("src/shared/data/combat", function(copy)
+					copy.contact.standOff.keepOut.standingDirections = bad
+				end),
+				("keepOut.standingDirections (%s) must be a whole number, 1 or more"):format(tostring(bad))
+			)).toBe(true)
+		end
+		expect(hasProblem(
+			contact("src/shared/data/combat", function(copy)
+				copy.contact.standOff.keepOut.standingDirections = nil
+			end),
+			"keepOut.standingDirections (nil) must be a whole number, 1 or more"
+		)).toBe(true)
 	end)
 
 	it("contact: an Art's activation hold ends before its first window opens (D-604)", function()
@@ -5529,6 +5572,48 @@ describe("camera, dev capture and sfx shatter rules", function()
 			copy.contact.standOff.wallGapStuds = copy.contact.standOff.stepStuds
 		end)).toEqual({})
 	end)
+
+	it(
+		"combat: the brace stands within two wall gaps, a hull's inset on a part the keep-out collides (D-680)",
+		function()
+			local function combat(mutate: (any) -> ()): { string }
+				return runWith("combat", "src/shared/data/combat", mutate)
+			end
+			local deep = combat(function(copy)
+				copy.contact.standOff.braceStuds = 0.11
+				copy.contact.standOff.hullInsetStuds = { Head = 0.6, Sword = 0.1 }
+			end)
+			expect(
+				hasProblem(
+					deep,
+					"combat: contact.standOff.braceStuds 0.11 is over twice contact.standOff.wallGapStuds (0.05)"
+				)
+			).toBe(true)
+			expect(
+				hasProblem(
+					deep,
+					"combat: contact.standOff.hullInsetStuds.Head must be a number from 0 to 0.5 (got 0.6)"
+				)
+			).toBe(true)
+			expect(
+				hasProblem(
+					deep,
+					"combat: contact.standOff.hullInsetStuds names Sword, which is not one of contact.standOff.keepOut.parts"
+				)
+			).toBe(true)
+			expect(hasProblem(
+				combat(function(copy)
+					copy.contact.standOff.braceStuds = -0.01
+				end),
+				"combat: contact.standOff.braceStuds must be a number, 0 or more (got -0.01)"
+			)).toBe(true)
+			-- At the edges each rule still passes: two gaps, no inset and the widest.
+			expect(combat(function(copy)
+				copy.contact.standOff.braceStuds = 2 * copy.contact.standOff.wallGapStuds
+				copy.contact.standOff.hullInsetStuds = { Head = 0.5, UpperTorso = 0 }
+			end)).toEqual({})
+		end
+	)
 
 	it("combat: a struck stance falls inside the stagger and slower than a plain end (D-340)", function()
 		local function combat(mutate: (any) -> ()): { string }
@@ -7296,7 +7381,8 @@ describe("choreo validator: the even root and the stand turn (D-664, D-665)", fu
 	it("wants each of the even root's numbers in range", function()
 		-- The window is at most two of the gait's crossfades (0.25 s at weightBlendRate 8); the pull
 		-- and the lag inside it (0.15 s); the lag short of a placement (teleportStuds 4); the snap
-		-- inside the contact band (stride.contact 0.02) and below maxLagDegrees (10).
+		-- inside the contact band (stride.contact 0.02) and below maxLagDegrees (10); the height held
+		-- over a settling root inside the contact band too.
 		local bad: { [string]: { any } } = {
 			drawBody = { "yes", 1 },
 			rateSeconds = { 0, -0.1, 0.26, 0 / 0, "0.15" },
@@ -7306,6 +7392,7 @@ describe("choreo validator: the even root and the stand turn (D-664, D-665)", fu
 			maxLagDegrees = { 0, 91 },
 			settleStuds = { -0.001, 0.03 },
 			settleDegrees = { -1, 10 },
+			sinkStuds = { -0.001, 0.03, 0 / 0, "0.004" },
 		}
 		for field, values in bad do
 			for _, value in values do
@@ -7540,5 +7627,108 @@ describe("choreo validator: an enemy walk's start phase (D-599)", function()
 		expect(hasProblem(withStarts({ Wolf = 0.25 }), "enemy.gait.startPhase.Wolf names no rig with a walk clip")).toBe(
 			true
 		)
+	end)
+end)
+
+describe("choreo validator: the breath gives way under a strike (D-685)", function()
+	local function withYield(change: (any) -> ()): { string }
+		local real = Harness.load("src/shared/data/choreo")
+		local copy = table.clone(real)
+		copy.breathYield = table.clone(real.breathYield)
+		copy.breathYield.joints = table.clone(real.breathYield.joints)
+		change(copy)
+		local context = table.clone(realContext)
+		context.load = function(path: string): any
+			if path == "src/shared/data/choreo" then
+				return copy
+			end
+			return Harness.load(path)
+		end
+		return loadTool("tools/validators/choreo")(context)
+	end
+
+	it("passes the real table", function()
+		expect(withYield(function() end)).toEqual({})
+	end)
+
+	it("wants the table", function()
+		expect(hasProblem(
+			withYield(function(c)
+				c.breathYield = nil
+			end),
+			"breathYield is missing"
+		)).toBe(true)
+	end)
+
+	it("wants distinct joints of the breathing rig", function()
+		expect(hasProblem(
+			withYield(function(c)
+				table.insert(c.breathYield.joints, "Tail")
+			end),
+			"breathYield.joints names Tail, not a PlayerR15 joint"
+		)).toBe(true)
+		expect(hasProblem(
+			withYield(function(c)
+				table.insert(c.breathYield.joints, "Waist")
+			end),
+			"breathYield.joints names Waist twice"
+		)).toBe(true)
+	end)
+
+	it("wants every joint the breath keys from the root to the weapon", function()
+		-- Breathe keys the waist, the sword arm's shoulder and wrist and the sword: each moves the
+		-- blade. Its neck and left shoulder do not: the data yields the neck with the chest it turns
+		-- against, and either may be listed or left to breathe on.
+		for _, name in { "Waist", "RightShoulder", "RightWrist", "Weapon" } do
+			expect(hasProblem(
+				withYield(function(c)
+					table.remove(c.breathYield.joints, table.find(c.breathYield.joints, name))
+				end),
+				"breathYield.joints leaves out " .. name
+			)).toBe(true)
+		end
+		expect(withYield(function(c)
+			table.insert(c.breathYield.joints, "LeftShoulder")
+		end)).toEqual({})
+		expect(withYield(function(c)
+			table.remove(c.breathYield.joints, table.find(c.breathYield.joints, "Neck"))
+		end)).toEqual({})
+	end)
+
+	it("lets the breath go inside every attack's wind-up", function()
+		for _, bad in { 0, -0.01, 0 / 0, "0.02" } :: { any } do
+			expect(hasProblem(
+				withYield(function(c)
+					c.breathYield.outSeconds = bad
+				end),
+				"breathYield.outSeconds"
+			)).toBe(true)
+		end
+		-- The Arts' wind-ups after the tell are the shortest: 0.0833 (Rising Arc, Sharp Nail).
+		expect(hasProblem(
+			withYield(function(c)
+				c.breathYield.outSeconds = 0.09
+			end),
+			"breathYield.outSeconds 0.0900 is longer than player/OneHandedSword/RisingArc's Anticipation beat"
+		)).toBe(true)
+		expect(withYield(function(c)
+			c.breathYield.outSeconds = 0.08
+		end)).toEqual({})
+	end)
+
+	it("eases the give each way by a curve, never Linear nor Hold", function()
+		for _, field in { "outEasing", "inEasing" } do
+			for _, bad in { "Linear", "Hold", "Wobble", 3 } :: { any } do
+				expect(hasProblem(
+					withYield(function(c)
+						c.breathYield[field] = bad
+					end),
+					"breathYield." .. field
+				)).toBe(true)
+			end
+			expect(withYield(function(c)
+				c.breathYield[field] = "QuadOut"
+			end)).toEqual({})
+		end
 	end)
 end)

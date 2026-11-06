@@ -137,6 +137,7 @@ export type Play = {
 	weight: number?,
 	coexist: boolean?,
 	fallback: boolean?,
+	yields: boolean?, -- gives way under a strike (Mixer PlayOptions.yields: the breathing, D-685)
 	measured: boolean?, -- the clip the trace audits (exactly one)
 }
 
@@ -587,7 +588,8 @@ function ClipAudit.plans(clip: Types.ClipDef, library: (string) -> Types.ClipDef
 	local settle = Audit.settleSeconds
 	local lead = Audit.leadSeconds
 	local travel = ClipAudit.travelOf(clip)
-	-- The rig's idle (and the player's breathing) under everything, as Choreo stands a rig.
+	-- The rig's idle (and the player's breathing, giving way under a strike) under everything, as
+	-- Choreo stands a rig.
 	local function under(phase: number?): { Play }
 		local list: { Play } = {}
 		if config.idle ~= nil and config.idle ~= clip.id then
@@ -601,7 +603,7 @@ function ClipAudit.plans(clip: Types.ClipDef, library: (string) -> Types.ClipDef
 			})
 		end
 		if config.breathing ~= nil and config.breathing ~= clip.id then
-			table.insert(list, { clip = library(config.breathing), at = 0, coexist = true, blendIn = 0 })
+			table.insert(list, { clip = library(config.breathing), at = 0, coexist = true, blendIn = 0, yields = true })
 		end
 		return list
 	end
@@ -625,7 +627,10 @@ function ClipAudit.plans(clip: Types.ClipDef, library: (string) -> Types.ClipDef
 		local function stancePlan(label: string, phase: number, cutIn: boolean): Plan
 			local plays: { Play } = {}
 			if config.breathing ~= nil then
-				table.insert(plays, { clip = library(config.breathing), at = 0, coexist = true, blendIn = 0 })
+				table.insert(
+					plays,
+					{ clip = library(config.breathing), at = 0, coexist = true, blendIn = 0, yields = true }
+				)
 			end
 			for _, stance in { idle, drawn } do
 				table.insert(plays, {
@@ -831,6 +836,7 @@ function ClipAudit.trace(body: Body, plan: Plan, hz: number): { Frame }
 				blendOut = play.blendOut,
 				weight = play.weight,
 				coexist = play.coexist,
+				yields = play.yields,
 				fallback = play.fallback,
 				handOver = handOver,
 				cancels = cancels,

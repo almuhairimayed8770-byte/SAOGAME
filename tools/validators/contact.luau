@@ -31,6 +31,13 @@
 	  between the two;
 	- the held stance (D-606): keepOut.stanceSampleSeconds, the step its hold is swept against the
 	  target in, is above 0 and at most 0.25;
+	- the stance's depth (D-691): keepOut.stanceDepthStuds, how deep a stance leaves a colliding
+	  part in the target's blockers, is above 0 and at most depthEpsilon;
+	- the stance's wait (D-691): keepOut.stanceWaitSeconds, the most a stance's pose waits on its
+	  first pose while the body steps out, is 0 or more and less than combat.activationHold, so the
+	  hold pose still comes before the activation hold's fallback freeze;
+	- the standing keep-out (D-692): keepOut.standingDirections, how many directions each side
+	  of straight back a body standing at an enemy steps out along, is a whole number, 1 or more;
 	- every rig's `blocker` and `rush` (D-437: the poses a rush is judged against walls in) pose
 	  clips of its own rig (enemy/<Rig>/...) that exist, at least one, every sampleSeconds above 0;
 	- the walk shell (item 236, D-430): a blocker's heldSlices is a whole number of at least 1, and
@@ -239,6 +246,32 @@ return function(ctx: any): { string }
 			and keepOut.stanceSampleSeconds <= 0.25,
 		("standOff.keepOut.stanceSampleSeconds (%s) must be above 0 and at most 0.25: the step a held stance is swept against its target in (D-606)"):format(
 			tostring(keepOut.stanceSampleSeconds)
+		)
+	)
+	check(
+		isNumber(keepOut.stanceDepthStuds)
+			and keepOut.stanceDepthStuds > 0
+			and isNumber(keepOut.depthEpsilon)
+			and keepOut.stanceDepthStuds <= keepOut.depthEpsilon,
+		("standOff.keepOut.stanceDepthStuds (%s) must be above 0 and at most depthEpsilon (%s): how deep a stance leaves a colliding part in the target's blockers (D-691)"):format(
+			tostring(keepOut.stanceDepthStuds),
+			tostring(keepOut.depthEpsilon)
+		)
+	)
+	check(
+		isNumber(keepOut.stanceWaitSeconds)
+			and keepOut.stanceWaitSeconds >= 0
+			and isNumber(combat.activationHold)
+			and keepOut.stanceWaitSeconds < combat.activationHold,
+		("standOff.keepOut.stanceWaitSeconds (%s) must be 0 or more and less than combat.activationHold (%s): the most a stance's pose waits on its first pose (D-691)"):format(
+			tostring(keepOut.stanceWaitSeconds),
+			tostring(combat.activationHold)
+		)
+	)
+	check(
+		isWhole(keepOut.standingDirections, 1),
+		("standOff.keepOut.standingDirections (%s) must be a whole number, 1 or more: the directions each side of straight back a body standing at an enemy steps out along (D-692)"):format(
+			tostring(keepOut.standingDirections)
 		)
 	)
 

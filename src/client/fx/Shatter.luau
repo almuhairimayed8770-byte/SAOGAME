@@ -132,7 +132,8 @@ local function release(part: BasePart)
 	table.insert(pool, part)
 end
 
--- The limbs a rig sheds: every visible BasePart except the root, as plain tables.
+-- The limbs a rig sheds: every visible BasePart except the root, as plain tables, each with its
+-- own axes (D-681).
 local function limbsOf(model: Instance): { ShatterMath.Limb }
 	local limbs: { ShatterMath.Limb } = {}
 	local root: Instance? = nil
@@ -143,7 +144,12 @@ local function limbsOf(model: Instance): { ShatterMath.Limb }
 		if part == root or part.Name == "HumanoidRootPart" or part.Transparency >= 1 then
 			continue
 		end
-		table.insert(limbs, { pos = Engine.toTable(part.CFrame.Position), size = Engine.toTable(part.Size) })
+		local frame = part.CFrame
+		table.insert(limbs, {
+			pos = Engine.toTable(frame.Position),
+			size = Engine.toTable(part.Size),
+			axes = { Engine.toTable(frame.XVector), Engine.toTable(frame.YVector), Engine.toTable(frame.ZVector) },
+		})
 	end
 	if #limbs == 0 then
 		local position = Engine.modelPosition(model)

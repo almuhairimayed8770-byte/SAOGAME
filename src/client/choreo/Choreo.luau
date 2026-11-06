@@ -380,11 +380,14 @@ end
 
 -- The offset in `root`'s space that draws the body on `drawn`'s flat place, at the root's own
 -- height and facing (setBodyOn, D-675: a lock's turn written on PreSimulation, D-505, still turns
--- it); nil when that is more than `most` studs off the root.
-local function offsetOn(root: CFrame, drawn: CFrame, most: number): CFrame?
+-- it); nil when that is more than `most` studs off `ahead`, where the frame's physics is expected
+-- to take the root (the root itself when nil), so a long frame's own travel is not counted as the
+-- body's distance off its root (D-676).
+local function offsetOn(root: CFrame, drawn: CFrame, most: number, ahead: Vector3?): CFrame?
 	local shift = drawn.Position - root.Position
 	shift = Vector3.new(shift.X, 0, shift.Z)
-	if shift.Magnitude > most then
+	local off = drawn.Position - (ahead or root.Position)
+	if Vector3.new(off.X, 0, off.Z).Magnitude > most then
 		return nil
 	end
 	return CFrame.new(root:VectorToObjectSpace(shift))
@@ -399,7 +402,7 @@ end
 -- stood at root * offset. The offset drawn (nil when none is) is published to DrawnBody (D-193).
 -- With the root part's CFrame it is drawn from (`bodyAt`), Part1 is drawn there itself, off the
 -- joint (detachBody); otherwise the body goes back on the joint (reattachBody, at PreSimulation).
-local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
+local function applyOffsets(self: any, offsets: ClipSampler.Offsets, dt: number)
 	local motors = self.motors
 	local pinned: { [string]: boolean } = self.pinned
 	local touched: { [string]: boolean } = self.touchedScratch
@@ -428,10 +431,17 @@ local function applyOffsets(self: any, offsets: ClipSampler.Offsets)
 		self.bodyOnFresh = false
 		if on ~= nil then
 			-- setBodyOn (D-675): offset from the root part as it stands, over the clip's own key.
+			-- `most` is measured from where this frame's physics is expected to take the root, on
+			-- by its flat velocity over the step's dt, as on PreSimulation (D-676).
 			local name = rootJointName(self)
 			local primary = self.model.PrimaryPart
 			self.bodyKeyed = if name ~= nil and touched[name] then pose[name] else CFrame.identity
-			self.bodyOffset = if primary ~= nil then offsetOn(primary.CFrame, on, self.bodyOnMost) else nil
+			self.bodyOffset = nil
+			if primary ~= nil then
+				local velocity = primary.AssemblyLinearVelocity
+				local ahead = primary.CFrame.Position + Vector3.new(velocity.X, 0, velocity.Z) * math.max(0, dt)
+				self.bodyOffset = offsetOn(primary.CFrame, on, self.bodyOnMost, ahead)
+			end
 		end
 		local body: CFrame? = self.bodyOffset
 		if body ~= nil then
@@ -975,8 +985,9 @@ end
 --- step on, through the root joint, or back on its root with nil (D-675). The step offsets it
 --- from the root part as it stands; PreSimulation offsets it again from the root part moved on by
 --- its velocity over that PreSimulation's deltaTime, so the frame draws the body on `drawn` after
---- the physics that moves the root. An offset more than `most` studs (default: none) draws the
---- body on its root. Replaces a setBodyOffset. It holds for the next step and its PreSimulation:
+--- the physics that moves the root. A `drawn` more than `most` studs (default: none) off where
+--- that physics is expected to take the root (on by its velocity over the step's dt or that
+--- deltaTime, D-676) draws the body on its root. Replaces a setBodyOffset. It holds for the next step and its PreSimulation:
 --- a step it was not asked for again before draws the body on its root.
 function AnimatorClass.setBodyOn(self: any, drawn: CFrame?, most: number?)
 	self.bodyOn = drawn
@@ -1029,7 +1040,7 @@ function AnimatorClass.step(self: any, dt: number)
 	local delta = result.rootDelta
 	self.rootDelta = Vector3.new(delta[1], delta[2], delta[3])
 	self.rootDeltaAt = now
-	applyOffsets(self, result.offsets)
+	applyOffsets(self, result.offsets, dt)
 	fireEvents(self, result.events)
 	for _, handle in result.finished do
 		self.finished:Fire(handle)
@@ -1135,12 +1146,14 @@ local function newAnimator(model: Model): any
 		end)
 	)
 
-	-- Posed the frame it appears: the rig's idle underneath everything, breathing on top.
+	-- Posed the frame it appears: the rig's idle underneath everything, breathing on top. The
+	-- breath gives way under a strike, from its anticipation's last two frames through its hold
+	-- (D-685).
 	local rigClips = ChoreoData.rigs[rigId]
 	if rigClips ~= nil then
 		self.mixer:play(ClipLibrary.get(rigClips.idle), { fallback = true, blendIn = 0 })
 		if rigClips.breathing ~= nil then
-			self.mixer:play(ClipLibrary.get(rigClips.breathing), { coexist = true, blendIn = 0 })
+			self.mixer:play(ClipLibrary.get(rigClips.breathing), { coexist = true, blendIn = 0, yields = true })
 		end
 	end
 	self:step(0)

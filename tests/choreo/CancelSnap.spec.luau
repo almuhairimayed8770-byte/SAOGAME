@@ -66,11 +66,12 @@ local CANCELS = {
 	{ clip = "Guard", over = "Basic1", gap = 0.1, stop = true },
 }
 
--- What plays under every player clip (ClipAudit.plans' own: the idle, the breathing, the drawn idle).
+-- What plays under every player clip (ClipAudit.plans' own: the idle, the breathing giving way
+-- under a strike, D-685, the drawn idle).
 local function under(): { any }
 	return {
 		{ clip = ClipLibrary.get(CONFIG.idle), at = 0, startTime = 0, fallback = true, blendIn = 0 },
-		{ clip = ClipLibrary.get(CONFIG.breathing), at = 0, coexist = true, blendIn = 0 },
+		{ clip = ClipLibrary.get(CONFIG.breathing), at = 0, coexist = true, blendIn = 0, yields = true },
 		{ clip = ClipLibrary.get(CONFIG.drawnIdle), at = 0, startTime = 0, coexist = true, weight = 1, blendIn = 0 },
 	}
 end

@@ -237,3 +237,122 @@ describe("Shatter: kills that land together (D-478)", function()
 		end
 	end)
 end)
+
+-- The shards against the drawn limbs (AW 569(c) on 577a59a; D-681). The PC tested every shard
+-- against its own part's oriented box on the row before the death row: the boar walking at 144 had
+-- 4 of 40 outside, by the Tail and both tusks, 0.15 to 0.34 from their centres (1 of 72 at 60, by
+-- the Tail); standing, none. Here a boar drawn mid-walk at a heading (its pose solved from the walk
+-- clip on its root) shatters, and each shard is read against the part it was laid in: Shatter lays
+-- them round the rig's visible parts but the root, in order, one part after another.
+local Engine = Harness.load("src/client/fx/Engine")
+local RigBuilder = Harness.load("src/server/world/RigBuilder")
+local Pose = Harness.load("src/shared/choreo/Pose")
+local ClipSampler = Harness.load("src/shared/choreo/ClipSampler")
+local ClipLibrary = Harness.load("src/client/choreo/ClipLibrary")
+local ChoreoData = Harness.load("src/shared/data/choreo")
+local Rigs = Harness.load("src/shared/data/rigs")
+
+-- The boar drawn at `yaw` degrees, `t` seconds into its walk: every part where the pose puts it.
+local function walkingBoar(yaw: number, t: number): Model
+	local model = RigBuilder.build("Boar")
+	local rig = Rigs.Boar
+	local height = rig.hipHeight + rig.parts[rig.rootPart].size[2] / 2
+	local root = CFrame.new(3, height, -4) * CFrame.Angles(0, math.rad(yaw), 0)
+	local clip = ClipLibrary.get(ChoreoData.rigs.Boar.walk)
+	local solved = Pose.solve(model, root, ClipSampler.sample(clip, t))
+	for _, descendant in model:GetDescendants() do
+		local frame = solved[descendant.Name]
+		if descendant:IsA("BasePart") and frame ~= nil then
+			-- The spec's parts keep CFrame and Position apart: both are written.
+			descendant.CFrame = frame
+			descendant.Position = frame.Position
+		end
+	end
+	return model
+end
+
+-- The parts Shatter lays shards in, in its order: every visible part but the root.
+local function shedding(model: Model): { BasePart }
+	local list: { BasePart } = {}
+	for _, descendant in model:GetDescendants() do
+		if
+			descendant:IsA("BasePart")
+			and descendant ~= model.PrimaryPart
+			and descendant.Name ~= "HumanoidRootPart"
+			and descendant.Transparency < 1
+		then
+			table.insert(list, descendant)
+		end
+	end
+	return list
+end
+
+describe("Shatter: every shard starts inside its drawn limb (AW 569(c); D-681)", function()
+	for _, yaw in { 0, 45, 90, 135 } do
+		for _, t in { 0.1, 0.3 } do
+			it(("the boar walking at %d deg, %.1f s into its walk"):format(yaw, t), function()
+				recording(function(_plays)
+					-- Past every shatter the real clock started.
+					local clock = os.clock() + 1e5
+					Engine.setClock(function(): number
+						return clock
+					end)
+					local ok, err = pcall(function()
+						-- The shatters before this one are over: their shards go back to the pool.
+						Shatter.step()
+						-- Shatter's live folder (Engine.folder keeps one per parent and name).
+						local live = Engine.folder(workspace, fx.shatter.poolFolderName .. "Live")
+						local before: { [Instance]: boolean } = {}
+						for _, child in live:GetChildren() do
+							before[child] = true
+						end
+						local model = walkingBoar(yaw, t)
+						local limbs = shedding(model)
+						local frames: { CFrame } = {}
+						for index, part in limbs do
+							frames[index] = part.CFrame
+						end
+						Shatter.play(model, "Beast")
+						local shards: { BasePart } = {}
+						for _, child in live:GetChildren() do
+							if not before[child] and child:IsA("BasePart") then
+								table.insert(shards, child)
+							end
+						end
+						expect(#shards).toBeGreaterThanOrEqual(#limbs)
+						local worst, worstPart = 0, ""
+						for index, shard in shards do
+							local limb = (index - 1) % #limbs + 1
+							local size = limbs[limb].Size
+							local at = frames[limb]:PointToObjectSpace(shard.CFrame.Position)
+							local out = math.max(
+								math.abs(at.X) - size.X / 2,
+								math.abs(at.Y) - size.Y / 2,
+								math.abs(at.Z) - size.Z / 2
+							)
+							if out > worst then
+								worst, worstPart = out, limbs[limb].Name
+							end
+						end
+						if worst > 1e-6 then
+							error(
+								("%d shards: one starts %.3f outside its part's box, by the %s"):format(
+									#shards,
+									worst,
+									worstPart
+								)
+							)
+						end
+						-- Every shard goes back to the pool.
+						clock += 10
+						Shatter.step()
+					end)
+					Engine.setClock(nil)
+					if not ok then
+						error(err, 0)
+					end
+				end)
+			end)
+		end
+	end
+end)

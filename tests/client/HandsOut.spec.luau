@@ -69,6 +69,8 @@ local DamageMath = Harness.load("src/server/combat/DamageMath")
 local AimLogic = Harness.load("src/client/controllers/AimLogic")
 local WalkShell = Harness.load("src/client/controllers/WalkShell")
 local Mixer = Harness.load("src/client/choreo/Mixer")
+-- The player rig's breath, which Choreo plays from the frame the rig appears (D-683).
+local BREATHE = Harness.load("src/shared/clips/" .. Harness.load("src/shared/data/choreo").rigs.PlayerR15.breathing)
 
 local STAND_OFF = Combat.contact.standOff
 local KEEP_OUT = STAND_OFF.keepOut
@@ -311,8 +313,12 @@ end
 -- HeldBlocker, what the keep-out holds alone where the HeldBlocker beside the line holds nothing
 -- off. `lead`: seconds added to the first frame past clip 0.2 (inside the cut's hold), so the
 -- frames after the cut fall on another phase of the clip's clock (the PC's 60 Hz rows read clip
--- 0.2836 where Lune's read 0.2833, item 523).
-type Play = { played: boolean?, bare: boolean?, lead: number? }
+-- 0.2836 where Lune's read 0.2833, item 523). `breath`: the body breathes as Choreo plays every
+-- player rig from the frame it appears (choreo.luau rigs.PlayerR15.breathing, Additive, giving way
+-- under the swing's strike, D-685), this far into its cycle as the swing starts, and the plan is
+-- told (ContactPredictor.ownLayers off the body's Mixer, as CharacterController asks it of the
+-- body's animator, D-683).
+type Play = { played: boolean?, bare: boolean?, lead: number?, breath: number? }
 -- The frames after a contact the hit's word comes (inside the hold at every rate).
 local WORD_FRAMES = 1
 
@@ -390,11 +396,16 @@ local function swingAt(
 	end
 	local elapsed = 0
 	avatar.root.CFrame = rest
+	local mixer = Mixer.new()
+	if how.breath ~= nil then
+		mixer:play(BREATHE, { coexist = true, blendIn = 0, startTime = how.breath, yields = true })
+	end
 	local plan = ContactPredictor.standOff(avatar.model, swing.clip, swing.from, rest, model, nil, {
 		keepOut = true,
 		step = swing.art ~= nil,
 		poseLag = Impact.poseLagFrames / fps,
 		target = if enemyMixer ~= nil then ContactPredictor.targetMotion(enemyMixer:handles(), flinch) else nil,
+		own = ContactPredictor.ownLayers(mixer:handles()),
 	})
 	local records = {
 		{ id = 1, model = avatar.model, kind = "Player", state = "Art", weaponId = WEAPON.id },
@@ -405,7 +416,6 @@ local function swingAt(
 			return records
 		end,
 	})
-	local mixer = Mixer.new()
 	local handle = mixer:play(swing.clip)
 	if swing.from > 0 then
 		mixer:seek(handle, swing.from)
@@ -761,6 +771,11 @@ local BLADE_PHASES = { 0, 1, 2, 3 }
 -- The bar for the blade at the key (item 464(b)), on the trail's line the reach caps at
 -- bladeDepthStuds plus depthEpsilon (D-424); the blade's own part reads up to its half-width more.
 local KEY_BAR = 0.25
+-- Points of the body's breath cycle a breathing swing starts at (Play.breath, D-683).
+local BREATH_PHASES = 16
+-- The PC's own (577a59a, C570_144_S1): Breathe at 1.005123-1.032407 on the rows Basic1 read
+-- 0.360939-0.388222, the swing started 0.6442 into the breath.
+local PC_BREATH = 0.6442
 
 -- Every swing at `fps` from `rest`, the kobold played as the game plays it (Play), from each idle
 -- phase: the deepest limb as posed and as drawn, and the swing and phase it was in.
@@ -1001,6 +1016,61 @@ describe(
 				end
 				print(("[551(a)] no aside: the blade after the cut %.3f (%s)"):format(drawn, drawnAt))
 				expect(drawn <= DEEPEST).toBe(true)
+			end
+		)
+		it(
+			"straight back with no aside, the body breathing at every point of its cycle, at 60 and 144 (AU 570(a), D-683)",
+			function()
+				-- The PC on 577a59a, C570_144_S1: the root on the line (no aside), stepped back on the
+				-- plan's track (net 0.153 / 0.934 / 1.683 / 2.220 by drawn 0.146 / 0.249 / 0.311 /
+				-- 0.363), and Basic1's Weapon BasePart 0.011 / 0.023 / 0.018 in the flinching kobold's
+				-- LeftArm at drawn 0.3609 / 0.3680 / 0.3749. The plan posed the bare clip; the body
+				-- breathes on top of it (Choreo plays Breathe on every player rig, never stopping): its
+				-- waist, shoulder, wrist and sword keys move the blade on the settle by up to 0.1 either
+				-- way with the breath's phase. With the plan posing the body's own layers on from their
+				-- clocks, every phase holds the blade at the plan's bound, the hit landing. The breath
+				-- gives way under the strike (D-685) and is whole again on the settle, by clip 0.28.
+				local deepest: { [number]: number } = { [60] = -math.huge, [144] = -math.huge }
+				local deepestAt: { [number]: string } = {}
+				local atPC: { [number]: number } = {}
+				local breaths = { PC_BREATH }
+				for step = 0, BREATH_PHASES - 1 do
+					table.insert(breaths, BREATHE.duration * step / BREATH_PHASES)
+				end
+				for _, fps in { 60, 144 } do
+					for _, breath in breaths do
+						local result = swingAt(
+							"KoboldAxeman",
+							frame,
+							rest,
+							fps,
+							basic1,
+							2,
+							{ played = true, bare = true, breath = breath }
+						)
+						local tag = ("%d Hz, breath at %.3f s"):format(fps, breath)
+						expect({ tag, result.hits }).toEqual({ tag, 1 })
+						local depth = math.max(result.bladeScreen, result.blade)
+						if breath == PC_BREATH then
+							atPC[fps] = depth
+						end
+						if depth > deepest[fps] then
+							deepest[fps], deepestAt[fps] = depth, tag .. ": " .. result.bladeScreenWhere
+						end
+					end
+				end
+				print(
+					("[570(a)] no aside, breathing: the blade after the cut %.3f / %.3f at 60 / 144 (%s; %s); from the PC's %.4f, %.3f / %.3f"):format(
+						deepest[60],
+						deepest[144],
+						deepestAt[60],
+						deepestAt[144],
+						PC_BREATH,
+						atPC[60],
+						atPC[144]
+					)
+				)
+				expect(math.max(deepest[60], deepest[144]) <= DEEPEST).toBe(true)
 			end
 		)
 	end

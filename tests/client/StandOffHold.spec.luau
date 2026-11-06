@@ -53,12 +53,15 @@ local BladeContact = Harness.load("src/shared/choreo/BladeContact")
 local RigBuilder = Harness.load("src/server/world/RigBuilder")
 local PlaygroundLayout = Harness.load("src/server/world/PlaygroundLayout")
 local RealContactPredictor = Harness.load("src/client/controllers/ContactPredictor")
+local EvenRoot = Harness.load("src/client/choreo/EvenRoot")
+local ChoreoData = Harness.load("src/shared/data/choreo")
 
 local CONTROLLER_PATH = "src/client/controllers/CharacterController"
 local CHOREO_PATH = "src/client/choreo/Choreo"
 local MOVE_INPUT_PATH = "src/client/controllers/MoveInput"
 local PHYSICS = 1 / 60 -- the fake physics' step (the root never walks here)
 local SPEED: number = Combat.contact.standOff.keepOut.maxSpeedStudsPerSecond
+local EVEN_ROOT = ChoreoData.locomotion.stride.evenRoot
 local VERTICAL = "player/OneHandedSword/Vertical"
 
 local root = Harness.repoRoot()
@@ -92,6 +95,27 @@ local function kobold(bearing: number, yaw: number, distance: number): any
 	local frame = avatar.base
 		* CFrame.new(math.sin(turn) * distance, height - avatar.rootHeight, -math.cos(turn) * distance)
 		* CFrame.Angles(0, math.pi - turn + math.rad(yaw), 0)
+	for name, solved in Pose.solve(model, frame, {}) do
+		local part = model:FindFirstChild(name)
+		if part ~= nil and part:IsA("BasePart") then
+			part.CFrame = solved
+		end
+	end
+	assert(RigBuilder.addBlocker(model) ~= nil, "no blocker for the kobold")
+	return model
+end
+
+-- The kobold as the PC's unlockB takes stood it (item 573(b) on 577a59a): its root at (-60, 72)
+-- with yaw 0, the local fighter's at (`x`, `z`) with `yaw` (degrees, Roblox's: 0 looks along -Z,
+-- -90 along +X), placed off the avatar as it stood off that root.
+local PC_KOBOLD = CFrame.new(-60, 0, 72) -- unit: the PC's place, studs
+local function pcKobold(x: number, z: number, yaw: number): any
+	local def = Enemies.byId("KoboldAxeman")
+	local model = RigBuilder.build(def.skin)
+	local height =
+		PlaygroundLayout.rootHeight(Rigs[def.skin].hipHeight, model.PrimaryPart.Size.Y, World.spawn.groundEpsilon)
+	local rel = (CFrame.new(x, 0, z) * CFrame.Angles(0, math.rad(yaw), 0)):ToObjectSpace(PC_KOBOLD)
+	local frame = avatar.base * CFrame.new(rel.X, height - avatar.rootHeight, rel.Z) * rel.Rotation
 	for name, solved in Pose.solve(model, frame, {}) do
 		local part = model:FindFirstChild(name)
 		if part ~= nil and part:IsA("BasePart") then
@@ -169,12 +193,17 @@ type Rig = {
 	frame: (dt: number) -> (),
 	-- Locks an enemy standing at `position`.
 	setLock: (position: Vector3) -> (),
-	-- With no lock, the soft assist's pick: an enemy standing at `position` (no stance plan, D-606).
-	setAssist: (position: Vector3) -> (),
+	-- With no lock, the soft assist's candidate: an enemy standing at `position`, handed to the
+	-- controller straight ahead of where it looks; with `seen`, at the bearing and distance
+	-- TargetController.assistCandidates measures from where the controller asks (item 573(b)).
+	setAssist: (position: Vector3, seen: boolean?) -> (),
 	-- What the controller asked ContactPredictor.standOff for a swing, and the plan it was handed.
 	asked: { { from: number, root: CFrame, options: any, plan: any } },
 	-- The held start pose's asks at the press (options.stance, D-606), kept apart from the swing's.
 	stances: { { from: number, root: CFrame, options: any, plan: any } },
+	-- Where the last frame's physics finds the body: on the even root the controller asked
+	-- Locomotion for (D-675), or on its root.
+	body: () -> CFrame,
 }
 
 -- The controller on a real Choreo; its ContactPredictor.standOff hands back the real plan against
@@ -219,6 +248,7 @@ local function load(target: any): Rig
 	})
 	local lockRecord: any = nil
 	local assistRecord: any = nil
+	local assistSeen = false
 	local model = {
 		WaitForChild = function(_self: any, name: string): any
 			return if name == "Humanoid" then humanoid else rootPart
@@ -230,13 +260,28 @@ local function load(target: any): Rig
 			return Signal.new()
 		end,
 	}
+	-- Locomotion's even root (stepEvenRoot, D-675) as the controller asks for it: while the frame's
+	-- state says evenRoot on the ground, EvenRoot evens the root as it stands at the update, on by
+	-- its flat velocity, and Choreo draws the body there on PreSimulation, on its root past
+	-- maxDrawnStuds (offsetOn); asked for nothing, on its root.
+	local even = EvenRoot.new()
+	local drawnOn: CFrame? = nil
 	local locomotion = {
 		new = function(): any
 			return {
 				serverDrawn = function(): boolean
 					return false
 				end,
-				update = function() end,
+				update = function(_self: any, dt: number, state: any)
+					if EVEN_ROOT.drawBody and state.evenRoot == true and state.grounded and dt > 0 then
+						local velocity: Vector3 = state.velocity or rootState.AssemblyLinearVelocity
+						local ahead = rootState.CFrame + Vector3.new(velocity.X, 0, velocity.Z) * dt
+						drawnOn = EvenRoot.step(even, ahead, dt, nil, EVEN_ROOT)
+					elseif drawnOn ~= nil then
+						drawnOn = nil
+						EvenRoot.reset(even)
+					end
+				end,
 			}
 		end,
 	}
@@ -244,17 +289,24 @@ local function load(target: any): Rig
 		current = function(): any
 			return lockRecord
 		end,
-		assistCandidates = function(): { any }
-			-- The pick straight ahead, as the lock is: the request's facing does not turn.
-			return if assistRecord ~= nil
-				then {
+		assistCandidates = function(origin: Vector3, look: Vector3): { any }
+			if assistRecord == nil then
+				return {}
+			end
+			local at: Vector3 = assistRecord.model.PrimaryPart.Position
+			if assistSeen then
+				-- TargetController.assistCandidates: flat, from where the controller asks.
+				local dx, dz = at.X - origin.X, at.Z - origin.Z
+				return {
 					{
 						id = assistRecord.id,
-						distance = (assistRecord.model.PrimaryPart.Position - START.Position).Magnitude,
-						bearing = 0,
+						distance = math.sqrt(dx * dx + dz * dz),
+						bearing = AimLogic.bearing(look.X, look.Z, dx, dz),
 					},
 				}
-				else {}
+			end
+			-- The pick straight ahead, as the lock is: the request's facing does not turn.
+			return { { id = assistRecord.id, distance = (at - START.Position).Magnitude, bearing = 0 } }
 		end,
 	}
 	local asked: { { from: number, root: CFrame, options: any, plan: any } } = {}
@@ -314,6 +366,7 @@ local function load(target: any): Rig
 						side = turned(real.side),
 						keepSide = real.keepSide,
 						still = real.still,
+						wait = real.wait,
 					}
 					else nil
 				table.insert(
@@ -323,6 +376,26 @@ local function load(target: any): Rig
 				return plan
 			end,
 			targetMotion = RealContactPredictor.targetMotion,
+			-- A body standing free at the kobold (D-692) as the real one steps it, on the avatar.
+			keepStanding = function(
+				_model: any,
+				rootCFrame: CFrame,
+				offsets: any,
+				_records: { any },
+				studs: number
+			): Vector3
+				local by = RealContactPredictor.keepStanding(
+					avatar.model,
+					avatar.base * START:ToObjectSpace(rootCFrame),
+					offsets,
+					{ { model = target } },
+					studs,
+					function(): number?
+						return nil
+					end
+				)
+				return START:VectorToWorldSpace(avatar.base:VectorToObjectSpace(by))
+			end,
 			worldCast = function(): any
 				return function(): number?
 					return nil
@@ -357,6 +430,10 @@ local function load(target: any): Rig
 			end,
 			peekLocalId = function(): any
 				return nil
+			end,
+			-- The kobold is live, picked or not.
+			live = function(): { any }
+				return { { id = 1, kind = "Enemy", state = "Idle", model = target } }
 			end,
 			changed = Signal.new(),
 			localChanged = Signal.new(),
@@ -514,16 +591,28 @@ local function load(target: any): Rig
 		setLock = function(position: Vector3)
 			lockRecord = { id = 1, kind = "Enemy", state = "Idle", model = { PrimaryPart = { Position = position } } }
 		end,
-		setAssist = function(position: Vector3)
+		setAssist = function(position: Vector3, seen: boolean?)
+			assistSeen = seen == true
 			assistRecord = { id = 1, kind = "Enemy", state = "Idle", model = { PrimaryPart = { Position = position } } }
 		end,
 		asked = asked,
 		stances = stances,
+		body = function(): CFrame
+			local frame: CFrame = rootState.CFrame
+			local on = drawnOn
+			if on == nil then
+				return frame
+			end
+			local shift = on.Position - frame.Position
+			shift = Vector3.new(shift.X, 0, shift.Z)
+			return if shift.Magnitude > EVEN_ROOT.maxDrawnStuds then frame else frame + shift
+		end,
 	}
 end
 
--- One row as item 397's logger reads it at Last+2: the clip the frame stepped to, and the root.
-type Row = { clip: number, root: Vector3, frame: CFrame }
+-- One row as item 397's logger reads it at Last+2: the clip the frame stepped to, and the root;
+-- where the frame's physics found the body (Rig.body), where a row records it.
+type Row = { clip: number, root: Vector3, frame: CFrame, body: CFrame? }
 
 -- One Vertical cast: the rows from the release on, the swing's plan and the clip time it was
 -- released at; and from the press to the release, the stance's ask (nil with no lock), the rows
@@ -711,12 +800,10 @@ local function judgeStance(label: string, fps: number, c: Cast): number
 			)
 		end
 	end
-	local whole = stance.away * stance.keep(frozen)
-		+ (
-			if stance.side ~= nil and stance.keepSide ~= nil
-				then stance.side * stance.keepSide(frozen)
-				else Vector3.zero
-		)
+	-- The plan's series runs on the stance's clock: the clip time plus its pose's wait (D-691).
+	local clock = frozen + (stance.wait or 0)
+	local whole = stance.away * stance.keep(clock)
+		+ (if stance.side ~= nil and stance.keepSide ~= nil then stance.side * stance.keepSide(clock) else Vector3.zero)
 	local shift = c.held[#c.held].root - c.held[1].root
 	expect((shift - whole).Magnitude <= 1e-4).toBe(true)
 	expect(c.releaseStep.Magnitude).toBe(0)
@@ -792,15 +879,19 @@ describe("the Art stand-off waits for the activation hold (item 492(a), D-604)",
 	end)
 
 	it("at a lock the stance steps back as it forms, the hold stands still, and the swing's step follows it", function()
-		-- D-606 with D-604: the blade step's kobold behind the sword arm, half a stud nearer
-		-- (2.3 off at 120 degrees, turned -30). The stance's hands reach it, so the body steps back as the stance forms and stands still from
-		-- the freeze; the release plans from where the root then stands (nothing of the stance's
-		-- step counted twice, nothing taken back), and the raised blade still meets the kobold from
-		-- there, so its 0.25 step waits for the hold's end like any other.
-		local target = kobold(120, -30, 2.3)
+		-- D-606 with D-604: a kobold behind the sword arm, 2.5 off at 110 degrees, square to the
+		-- body, where the stance's hands reach it and the raised blade meets it from where the stance
+		-- leaves the body, the largest blade step after a stance the kobold's placements give (0.25,
+		-- Vertical's start pose; behind the sword arm at 120 degrees turned -30 the stance steps out
+		-- of the whole start pose: 2.3 off, item 573(b)'s describe below, and 2.6 off now leave the
+		-- release no blade step). The body steps back as the stance forms and stands still from the
+		-- freeze; the release plans from where the root then stands (nothing of the stance's step
+		-- counted twice, nothing taken back), and its 0.25 step waits for the hold's end like any
+		-- other.
+		local target = kobold(110, 0, 2.5)
 		for _, fps in { 30, 60, 144 } do
 			local c = cast(target, 2.8, fps, true)
-			expect(judgeStance("stance, then blade step 0.25", fps, c) > 0.5).toBe(true)
+			expect(judgeStance("stance, then blade step 0.25", fps, c) > 0.2).toBe(true)
 			local plan = c.plan
 			expect(plan).never.toBeNil()
 			expect(plan.distance).toBeCloseTo(0.25, 1e-6)
@@ -1201,7 +1292,9 @@ local function lockedHold(target: any, ahead: number, fps: number, slot: number)
 		end
 	end
 	local stance = rig.stances[1]
-	local keep = if stance ~= nil and stance.plan ~= nil then stance.plan.keep(holdAt(handle.clip)) else 0
+	local keep = if stance ~= nil and stance.plan ~= nil
+		then stance.plan.keep(holdAt(handle.clip) + (stance.plan.wait or 0))
+		else 0
 	return count, moved, most, keep
 end
 
@@ -1423,7 +1516,7 @@ describe("an unlocked Art's press steps off the kobold as its stance forms (item
 					expect(c.stance).never.toBeNil()
 					local back = judgeStance(label, fps, c)
 					local stance = c.stance.plan
-					local aside = if stance.keepSide ~= nil then stance.keepSide(c.released) else 0
+					local aside = if stance.keepSide ~= nil then stance.keepSide(c.released + (stance.wait or 0)) else 0
 					print(
 						("[539b] %s at %d fps: the stance %.3f back, %.3f aside; the colliding parts at most %+.3f in the kobold's blockers while the key is held"):format(
 							label,
@@ -1449,5 +1542,669 @@ describe("an unlocked Art's press steps off the kobold as its stance forms (item
 			expect(c.releaseStep.Magnitude).toBe(0)
 		end
 		target:Destroy()
+	end)
+end)
+
+-- Item 573(b) on 577a59a (D-686, D-687): the unlocked presses' stance rows (the press's first
+-- rows, to the first frozen row) edged toward the kobold on Horizontal, Rising Arc and Sharp Nail,
+-- at most 0.0048 / 0.025 / 0.017 a row at 60 and 0.008 / 0.014 / 0.009 at 144, and one Rising Arc
+-- row at 144 moved 0.124 against its 12 x dt of 0.057. The code moves the root only along `away`
+-- and `side`, by amounts that only grow, so from a kobold that stands still its own share never
+-- nears it: what moved it there was the engine, pushing a colliding part out of the kobold's
+-- blockers along a face turned to the line. The judges above read the pose the screen draws (the
+-- clip the row before stepped to, D-342); the engine solves the pose the step writes (the clip at
+-- the step) at the root the step leaves, and there the stance held two overlaps:
+--
+-- - D-674 holds a stance's back and aside together to the speed, but its series grew each to the
+--   speed, so the aside fell behind it: Rising Arc's Head stood 0.065 / 0.036 in the axe's blocker
+--   at 2.65 square ahead at 60 / 144, 0.173 / 0.147 at 10 degrees, 0.39 at 10 degrees with the
+--   kobold turned 5, pushed out 0.07-0.09 of the push toward the kobold. The series now grows the
+--   two together within the speed (D-686).
+-- - A part the press found in a blocker (the cleared-lock walk-ins end 2.65-2.94 off, inside the
+--   locked rests) was allowed to stay that deep: the stance kept it there through the hold, and
+--   the engine pushed it out along the axe's face, 0.07-0.14 of the push toward the kobold. The
+--   stance now steps it out as the start pose forms (D-687).
+-- - The body was drawn on an even root through the hold (D-675: no clip moves the root), evened
+--   where the root stood before the stance's step and left behind it, up to maxDrawnStuds, toward
+--   the kobold: with the two above fixed, Rising Arc's drawn Head still stood 0.037-0.075 in the
+--   axe's blocker square ahead 2.65-3.18 off at 60, 0.025-0.052 at 144, and Horizontal and Sharp
+--   Nail were drawn up to 0.146 off their root (clear of the kobold). The body is now drawn on its
+--   root while a stand-off moves it (D-688).
+
+-- The deepest any colliding part (keepOut.parts) stands in the kobold's Blocker or HeldBlocker,
+-- posed at clip time `clipTime` with the controller's root at `frame`.
+local function solvedDepth(target: any, clip: any, clipTime: number, frame: CFrame): (number, string)
+	local rootFrame = avatar.base * START:ToObjectSpace(frame)
+	local solved = Pose.solve(avatar.model, rootFrame, ClipSampler.sample(clip, clipTime))
+	local deepest, where = -math.huge, ""
+	for _, name in KEEP_OUT.parts do
+		local part = avatar.model:FindFirstChild(name)
+		for _, face in target:GetChildren() do
+			if
+				part ~= nil
+				and solved[name] ~= nil
+				and face:IsA("BasePart")
+				and (face.Name == KEEP_OUT.bodyFace or face.Name == KEEP_OUT.heldFace)
+			then
+				local depth = BodyShell.depth(solved[name], part.Size, face.CFrame, face.Size)
+				if depth > deepest then
+					deepest, where = depth, name .. " in " .. face.Name
+				end
+			end
+		end
+	end
+	return deepest, where
+end
+
+-- One Art (quick slot `slot`) pressed at `fps` against `target`, locked on it or (`locked` false)
+-- at the soft assist's pick of it (`seen`: at its real bearing, Rig.setAssist), held 0.2 s: each row from the press to the release, with the
+-- clip the step stepped to and the root it left; the colliding parts' depth at the press; the
+-- stance's plan (nil with none); and the kobold's root in the controller's world.
+type Pressed = { rows: { Row }, pressDepth: number, plan: any, kobold: Vector3, clip: any, released: number }
+local function press(target: any, fps: number, slot: number, locked: boolean, seen: boolean?): Pressed
+	local rig = load(target)
+	local dt = 1 / fps
+	for _ = 1, 40 do
+		rig.frame(dt)
+	end
+	local koboldAt = START:ToWorldSpace(avatar.base:ToObjectSpace(target.PrimaryPart.CFrame)).Position
+	if locked then
+		rig.setLock(koboldAt)
+	else
+		rig.setAssist(koboldAt, seen)
+	end
+	local art = rig.controller.slots()[slot]
+	local clip = Harness.load("src/shared/clips/" .. art.clip)
+	local pressDepth = solvedDepth(target, clip, 0, rig.root.CFrame)
+	rig.controller.beginArt(slot)
+	local handle = rig.animator.mixer:find(art.clip)
+	assert(#rig.stances == 1, "the press at a lock or an assist pick asks for one stance plan")
+	local rows: { Row } =
+		{ { clip = handle.time, root = rig.root.Position, frame = rig.root.CFrame, body = rig.body() } }
+	for _ = 1, math.ceil(0.2 * fps) do
+		rig.frame(dt)
+		table.insert(rows, { clip = handle.time, root = rig.root.Position, frame = rig.root.CFrame, body = rig.body() })
+	end
+	return {
+		rows = rows,
+		pressDepth = pressDepth,
+		plan = rig.stances[1].plan,
+		kobold = koboldAt,
+		clip = clip,
+		released = handle.time,
+	}
+end
+
+-- Judges a press's rows by 498(b), read as the PC reads them: every row within 12 x dt flat and
+-- never toward the kobold, along the stance's `away` and along the flat line from the kobold's root
+-- to where the row starts; and still from the first frozen row. Returns the deepest any colliding
+-- part stands on the stance's rows (the press's first rows, to the first frozen row) and on the
+-- frozen rows, as the engine solves each row: the pose the step wrote at the root it left, on the
+-- body's drawn offset from it where the frame draws one (D-675).
+local function judgeSolved(label: string, fps: number, target: any, p: Pressed): (number, number)
+	local stanceDeepest, heldDeepest = -math.huge, -math.huge
+	for index = 2, #p.rows do
+		local row, before = p.rows[index], p.rows[index - 1]
+		local step = row.root - before.root
+		step = Vector3.new(step.X, 0, step.Z)
+		local line = before.root - p.kobold
+		line = Vector3.new(line.X, 0, line.Z).Unit
+		local along = step:Dot(line)
+		if step.Magnitude > SPEED / fps + 1e-6 or along < -1e-6 then
+			error(
+				("%s at %d fps: the row stepping clip %.4f moves the root %.4f flat, %.5f along the line from the kobold (12 x dt %.4f)"):format(
+					label,
+					fps,
+					row.clip,
+					step.Magnitude,
+					along,
+					SPEED / fps
+				)
+			)
+		end
+		if p.plan ~= nil then
+			expect(step:Dot(p.plan.away) >= -1e-6).toBe(true)
+		end
+		local depth = solvedDepth(target, p.clip, row.clip, row.body or row.frame)
+		if before.clip >= p.released - 1e-9 then
+			expect(step.Magnitude).toBe(0)
+			heldDeepest = math.max(heldDeepest, depth)
+		else
+			stanceDeepest = math.max(stanceDeepest, depth)
+		end
+	end
+	return stanceDeepest, heldDeepest
+end
+
+describe(
+	"an unlocked Art's stance keeps its colliding parts out where the engine solves them (item 573(b), D-686)",
+	function()
+		it(
+			"every Art at the soft assist's pick 2.65 to 3.18 off, square ahead and 10 degrees aside, at 60 and 144",
+			function()
+				-- 577a59a: Rising Arc's Head 0.065 / 0.036 in the axe's blocker at 2.65 square ahead at 60 /
+				-- 144, 0.173 / 0.147 at 10 degrees; Horizontal, Vertical and Sharp Nail clear.
+				local worst = {}
+				for _, bearing in { 0, 10 } do
+					for _, distance in { 2.65, 2.8, 2.94, 3.08, 3.18 } do
+						local target = kobold(bearing, 0, distance)
+						for slot = 1, 4 do
+							for _, fps in { 60, 144 } do
+								local label = ("slot %d at %.2f, %d degrees"):format(slot, distance, bearing)
+								local p = press(target, fps, slot, false)
+								expect(p.pressDepth <= KEEP_OUT.depthEpsilon).toBe(true)
+								local stance, held = judgeSolved(label, fps, target, p)
+								local key = ("slot %d at %d fps"):format(slot, fps)
+								worst[key] = math.max(worst[key] or -math.huge, stance, held)
+								if math.max(stance, held) > KEEP_OUT.depthEpsilon + 1e-6 then
+									error(
+										("%s at %d fps: a colliding part stands %.4f in the kobold's blockers on the stance's rows, %.4f on the frozen rows"):format(
+											label,
+											fps,
+											stance,
+											held
+										)
+									)
+								end
+							end
+						end
+						target:Destroy()
+					end
+				end
+				for slot = 1, 4 do
+					print(
+						("[573b] slot %d: the deepest colliding part as solved %+.4f at 60, %+.4f at 144"):format(
+							slot,
+							worst[("slot %d at 60 fps"):format(slot)],
+							worst[("slot %d at 144 fps"):format(slot)]
+						)
+					)
+				end
+			end
+		)
+	end
+)
+
+describe(
+	"a press that finds a colliding part in the kobold's blocker steps it out as the stance forms (item 573(b), D-687)",
+	function()
+		it("every Art at the pick 2.65 to 2.94 off with the axe's blocker on the Head, at 60 and 144", function()
+			-- The kobold turned 6 to 8 degrees, so its axe's blocker stands 0.010 to 0.080 over the Head
+			-- at the press. 577a59a: the stance kept that depth through the hold (Horizontal's Head
+			-- 0.076 in at 2.65), for the engine to push out along the axe's face, 0.07 to 0.14 of the push
+			-- toward the kobold.
+			for _, placement in { { 0, 8, 2.65 }, { 10, 6, 2.8 }, { -5, 6, 2.94 } } do
+				local bearing, yaw, distance = placement[1], placement[2], placement[3]
+				local target = kobold(bearing, yaw, distance)
+				for slot = 1, 4 do
+					for _, fps in { 60, 144 } do
+						local label = ("slot %d at %.2f, %d degrees, turned %d"):format(slot, distance, bearing, yaw)
+						local p = press(target, fps, slot, false)
+						expect(p.pressDepth > KEEP_OUT.depthEpsilon).toBe(true)
+						expect(p.plan).never.toBeNil()
+						local stance, held = judgeSolved(label, fps, target, p)
+						print(
+							("[573b] %s at %d fps: %.4f in at the press, at most %+.4f on the stance's rows and %+.4f on the frozen rows"):format(
+								label,
+								fps,
+								p.pressDepth,
+								stance,
+								held
+							)
+						)
+						expect(held <= KEEP_OUT.depthEpsilon + 1e-6).toBe(true)
+					end
+				end
+				target:Destroy()
+			end
+		end)
+
+		it("a locked press with the torso in the kobold's body blocker, at 30, 60 and 144", function()
+			-- The blade step's kobold behind the sword arm, 2.3 off at 120 degrees turned -30, where
+			-- UpperTorso stands 0.206 in the kobold's Blocker at the press. 577a59a: the stance stepped
+			-- 0.692 back, leaving the torso in the blocker on the wind-up's rows, and the release took a
+			-- 0.25 blade step after the hold. Now the stance steps the torso out as it forms, 0.930 back
+			-- by the hold pose, and the release has no step left to take.
+			local target = kobold(120, -30, 2.3)
+			for _, fps in { 30, 60, 144 } do
+				local label = "Vertical at 2.3, 120 degrees, turned -30, locked"
+				local p = press(target, fps, 2, true)
+				expect(p.pressDepth > KEEP_OUT.depthEpsilon).toBe(true)
+				local stance, held = judgeSolved(label, fps, target, p)
+				local c = cast(target, 2.8, fps, true)
+				local back = judgeStance(label, fps, c)
+				print(
+					("[573b] %s at %d fps: %.4f in at the press, at most %+.4f on the stance's rows and %+.4f on the frozen rows; the stance %.3f back, the release's blade step %.3f"):format(
+						label,
+						fps,
+						p.pressDepth,
+						stance,
+						held,
+						back,
+						c.plan.distance
+					)
+				)
+				expect(held <= KEEP_OUT.depthEpsilon + 1e-6).toBe(true)
+				expect(c.plan.distance).toBe(0)
+			end
+			target:Destroy()
+		end)
+	end
+)
+
+describe(
+	"a stance draws the body on the root its keep-out holds out, not on an even root behind it (item 573(b), D-688)",
+	function()
+		it("every Art at the pick 2.65 to 2.94 off, square ahead and 10 degrees aside, at 60 and 144", function()
+			-- 577a59a with D-686 and D-687: the root itself within depthEpsilon, the body drawn on
+			-- the even root left behind the stance's steps, up to 0.146 off it; Rising Arc's Head
+			-- 0.037 / 0.043 / 0.054 in the axe's blocker at 2.65 / 2.8 / 2.94 square ahead at 60, and
+			-- 0.028 / 0.025 / 0.032 at 144.
+			for _, bearing in { 0, 10 } do
+				for _, distance in { 2.65, 2.8, 2.94 } do
+					local target = kobold(bearing, 0, distance)
+					for slot = 1, 4 do
+						for _, fps in { 60, 144 } do
+							local label = ("slot %d at %.2f, %d degrees"):format(slot, distance, bearing)
+							local p = press(target, fps, slot, false)
+							expect(p.plan).never.toBeNil()
+							local drawnOff = 0
+							for index = 2, #p.rows do
+								local row = p.rows[index]
+								local body = row.body :: CFrame
+								drawnOff = math.max(drawnOff, (body.Position - row.frame.Position).Magnitude)
+							end
+							local stance, held = judgeSolved(label, fps, target, p)
+							if drawnOff > 1e-9 or math.max(stance, held) > KEEP_OUT.depthEpsilon + 1e-6 then
+								error(
+									("%s at %d fps: the body drawn %.4f off its root, a colliding part %.4f in the kobold's blockers on the stance's rows, %.4f on the frozen rows"):format(
+										label,
+										fps,
+										drawnOff,
+										stance,
+										held
+									)
+								)
+							end
+						end
+					end
+					target:Destroy()
+				end
+			end
+		end)
+	end
+)
+
+-- G6e-4, item 573(b) on the PC (577a59a with G6e-3), the unlockB takes:
+-- - The press planned no stance on any take (the code share 0.0000 on every row): the fighter faced
+--   the kobold's axe along +X with the kobold 2.7-3.0 off at about 99 degrees, outside the soft
+--   assist's 80 degree cone, so it had no pick. A stance now steps off the nearest enemy in the
+--   assist's range at any bearing when there is no pick (D-689).
+-- - Planned there, the stance's hands step back (Sharp Nail's 0.127) carried its torso along the
+--   axe's face, turned to the stance's line, back into the axe's blocker the aside had just taken it
+--   out of (0.029 as planned, 0.028 as solved, mid-stance). The faces are kept out again after any
+--   step back past their own (D-690).
+-- - The start pose formed faster than the body could step it out at 12 x dt: Rising Arc's Head
+--   stood 0.12 in the axe's blocker on the first five rows at 144. The pose waits on its first pose
+--   while the body steps (D-691), at most keepOut.stanceWaitSeconds, and the stance keeps its
+--   parts within keepOut.stanceDepthStuds, under the held rows' 0.004.
+
+-- A guard on how the start pose forms (not item 573(b)'s bar, which judgeStood below holds): judges
+-- a stance's rows as `judgeSolved` does (12 x dt, never toward), and the start pose against
+-- the press's own overlap: on every row before the first frozen one no colliding part stands deeper
+-- than depthEpsilon, or than the press's pose (the clip at its first pose) stands at that row's
+-- root, the overlap the body was already in at the press, which it steps out at the speed; what a
+-- row may keep of it never grows from the row before; and the frozen rows stand within
+-- stanceDepthStuds. Returns how far past what a stance row may keep its deepest part stands (0 at
+-- most), the press's pose's overlap at the first row's root, and the deepest frozen row.
+local function judgeForming(label: string, fps: number, target: any, p: Pressed): (number, number, number)
+	local _, held = judgeSolved(label, fps, target, p)
+	local past, first = -math.huge, -math.huge
+	local kept = math.max(p.pressDepth, KEEP_OUT.depthEpsilon)
+	for index = 2, #p.rows do
+		local row = p.rows[index]
+		if p.rows[index - 1].clip < p.released - 1e-9 then
+			local frame = row.body or row.frame
+			local depth = solvedDepth(target, p.clip, row.clip, frame)
+			local own = solvedDepth(target, p.clip, 0, frame)
+			if index == 2 then
+				first = own
+			end
+			kept = math.max(math.min(own, kept), KEEP_OUT.depthEpsilon)
+			past = math.max(past, depth - kept)
+			if depth > kept + 1e-6 then
+				error(
+					("%s at %d fps: the row drawing clip %.4f stands %.4f in the kobold's blockers, where the press's pose leaves %.4f"):format(
+						label,
+						fps,
+						row.clip,
+						depth,
+						kept
+					)
+				)
+			end
+		end
+	end
+	if held > KEEP_OUT.stanceDepthStuds + 1e-6 then
+		error(("%s at %d fps: a frozen row stands %.4f in the kobold's blockers"):format(label, fps, held))
+	end
+	return past, first, held
+end
+
+describe("an unlocked press beside a kobold it does not face plans a stance (item 573(b), D-689 to D-691)", function()
+	it("the PC's six unlockB takes, each at 60 and 144, at the kobold's real bearing", function()
+		-- 874c250: no stance on any of them (the assist's cone holds no kobold at 99 degrees), and
+		-- Lune's colliding parts stood up to 0.44 / 0.50 in the axe's blocker on the held rows
+		-- (Rising Arc at 60 / 144) for the engine to push out. With the stance alone (D-689),
+		-- Sharp Nail's torso stood 0.028 in mid-stance, Rising Arc's Head 0.12 on the first rows
+		-- at 144 and Horizontal's frozen rows 0.0036.
+		for _, take in
+			{
+				{ "H60", -59.5158, 69.0253, -90.1009, 1 },
+				{ "RA60", -59.4285, 69.3646, -89.5342, 3 },
+				{ "SN60", -59.3115, 69.3106, -87.1496, 4 },
+				{ "H144", -59.4046, 69.3464, -86.8634, 1 },
+				{ "RA144", -59.3562, 69.4136, -87.3195, 3 },
+				{ "SN144", -59.3850, 69.3918, -88.8721, 4 },
+			}
+		do
+			local target = pcKobold(take[2], take[3], take[4])
+			for _, fps in { 60, 144 } do
+				local label = ("%s (slot %d)"):format(take[1], take[5])
+				local p = press(target, fps, take[5], false, true)
+				expect(p.plan).never.toBeNil()
+				local moved = (p.rows[#p.rows].root - p.rows[1].root).Magnitude
+				expect(moved > 0.1).toBe(true)
+				local past, first, held = judgeForming(label, fps, target, p)
+				print(
+					("[573b] PC %s at %d fps: %.4f in at the press, the stance %.3f in all with its pose waiting %.4f; the press's pose %+.4f at the first row's root, the rows at most %+.4f past it, the frozen rows %+.4f"):format(
+						label,
+						fps,
+						p.pressDepth,
+						moved,
+						p.plan.wait or 0,
+						first,
+						past,
+						held
+					)
+				)
+			end
+			target:Destroy()
+		end
+	end)
+end)
+
+describe("a stance's start pose forms only as fast as the body steps it out (item 573(b), D-691)", function()
+	it(
+		"every Art at the pick 2.65 to 3.18 off a kobold turned 5 to 8 degrees, square ahead and 10 aside, at 60 and 144",
+		function()
+			-- 874c250 (after G6e-3): the start pose formed into the axe's blocker faster than 12 x dt could
+			-- step it out at 144 and the hands' step carried the torso back into it; a clear press at 2.65,
+			-- 10 degrees, turned 5 read 0.0054 on its stance's rows. The release, the key and the server's
+			-- clock are the clip's own (ActionLogic.syncPlan), and a 0.2 s tap still freezes at 573(a)'s
+			-- clip: 0.150 at 60 and 0.153 at 144.
+			local waited = { [60] = 0, [144] = 0 }
+			for _, yaw in { 5, 6, 8 } do
+				for _, bearing in { 0, 10 } do
+					for _, distance in { 2.65, 2.8, 2.94, 3.08, 3.18 } do
+						local target = kobold(bearing, yaw, distance)
+						for slot = 1, 4 do
+							for _, fps in { 60, 144 } do
+								local label = ("slot %d at %.2f, %d degrees, turned %d"):format(
+									slot,
+									distance,
+									bearing,
+									yaw
+								)
+								local p = press(target, fps, slot, false)
+								expect(p.plan).never.toBeNil()
+								local wait = p.plan.wait or 0
+								expect(wait <= KEEP_OUT.stanceWaitSeconds + 1e-6).toBe(true)
+								waited[fps] = math.max(waited[fps], wait)
+								expect(p.released).toBeCloseTo(math.ceil(holdAt(p.clip) * fps - 1e-6) / fps, 1e-6)
+								local past = judgeForming(label, fps, target, p)
+								if p.pressDepth <= KEEP_OUT.depthEpsilon then
+									-- A clear press: every stance row within depthEpsilon.
+									expect(past <= 1e-6).toBe(true)
+								end
+							end
+						end
+						target:Destroy()
+					end
+				end
+			end
+			for _, fps in { 60, 144 } do
+				print(
+					("[573b] the longest wait at %d fps: %.4f s, %d rows"):format(
+						fps,
+						waited[fps],
+						math.ceil(waited[fps] * fps - 1e-6)
+					)
+				)
+			end
+		end
+	)
+end)
+
+-- G6e-5, item 573(b)'s bar: no colliding part deeper than 0.004 on any row while Q is held, as the
+-- PC's logger reads the parts the screen draws. With G6e-4 a press made where the PC's fighter
+-- stood (its first pose up to 0.151 in the axe's blocker in Lune) read 0.022-0.083 on the first
+-- one or two rows at 144, where one row steps 0.083 at most. Three things stood between the held
+-- rows and the bar:
+-- - The body stood in the blockers before the press: nothing kept a standing body out (the walk
+--   stops at wallGapStuds, WalkShell; the PC's drawn Head stood 0.024-0.068 in the axe's blocker
+--   at the press). A body standing free at an enemy steps out of its blockers now (D-692).
+-- - The breath: Breathe's chest rise stood the drawn UpperTorso 0.029-0.039 deeper than the clip's
+--   pose on the held rows. A held start pose holds its breath (D-693).
+-- - The blend in: the start pose blends in from the drawn idle over the clip's blendIn, and the
+--   stance kept only the clip's pose out: the drawn Head stood 0.006 in at 144 (Horizontal 2.65
+--   square ahead of a kobold turned 8). It keeps the first pose out through the blend too
+--   (D-694).
+-- The kobold's blockers collide here, as CollisionGroups.assign switches them on in play, and the
+-- body stands in the drawn idle Locomotion stands it in.
+local BAR = 0.004 -- item 573(b): studs, the deepest a colliding part may stand on a held row
+local DRAWN_IDLE = "player/OneHandedSword/IdleDrawn"
+
+-- The deepest any colliding part stands in the kobold's Blocker or HeldBlocker in the pose the
+-- mixer drew (`offsets`: the clip's blend in over the idle, and the breathing) on the root `frame`.
+local function drawnDepth(target: any, offsets: any, frame: CFrame): number
+	local solved = Pose.solve(avatar.model, avatar.base * START:ToObjectSpace(frame), offsets)
+	local deepest = -math.huge
+	for _, name in KEEP_OUT.parts do
+		local part = avatar.model:FindFirstChild(name)
+		for _, face in target:GetChildren() do
+			if
+				part ~= nil
+				and solved[name] ~= nil
+				and face:IsA("BasePart")
+				and (face.Name == KEEP_OUT.bodyFace or face.Name == KEEP_OUT.heldFace)
+			then
+				deepest = math.max(deepest, (BodyShell.depth(solved[name], part.Size, face.CFrame, face.Size)))
+			end
+		end
+	end
+	return deepest
+end
+
+-- A press `press` makes after the body stood: the rows it stood (from the frame it appeared), the
+-- pose the mixer drew on each of the press's rows (drawn[1] the press's own), and the press.
+type Stood = { idle: { Row }, drawn: { any }, pressed: Pressed }
+
+-- The fighter standing drawn at `target`, its blockers colliding, for 40 frames at `fps`, then one
+-- Art (quick slot `slot`) pressed at the soft assist's pick (`seen`: at its real bearing) and
+-- held 0.2 s, as `press` does.
+local function stood(target: any, fps: number, slot: number, seen: boolean?): Stood
+	for _, face in target:GetChildren() do
+		if face:IsA("BasePart") and (face.Name == KEEP_OUT.bodyFace or face.Name == KEEP_OUT.heldFace) then
+			face.CanCollide = true
+		end
+	end
+	local rig = load(target)
+	local dt = 1 / fps
+	rig.animator:play(DRAWN_IDLE)
+	local idle: { Row } = { { clip = 0, root = rig.root.Position, frame = rig.root.CFrame, body = rig.body() } }
+	for _ = 1, 40 do
+		rig.frame(dt)
+		table.insert(idle, { clip = 0, root = rig.root.Position, frame = rig.root.CFrame, body = rig.body() })
+	end
+	local koboldAt = START:ToWorldSpace(avatar.base:ToObjectSpace(target.PrimaryPart.CFrame)).Position
+	rig.setAssist(koboldAt, seen)
+	local art = rig.controller.slots()[slot]
+	local clip = Harness.load("src/shared/clips/" .. art.clip)
+	local pressDepth = solvedDepth(target, clip, 0, rig.root.CFrame)
+	local drawn = { rig.animator.mixer:lastOffsets() }
+	rig.controller.beginArt(slot)
+	local handle = rig.animator.mixer:find(art.clip)
+	assert(#rig.stances == 1, "the press at an assist pick asks for one stance plan")
+	local rows: { Row } =
+		{ { clip = handle.time, root = rig.root.Position, frame = rig.root.CFrame, body = rig.body() } }
+	for _ = 1, math.ceil(0.2 * fps) do
+		rig.frame(dt)
+		table.insert(rows, { clip = handle.time, root = rig.root.Position, frame = rig.root.CFrame, body = rig.body() })
+		table.insert(drawn, rig.animator.mixer:lastOffsets())
+	end
+	return {
+		idle = idle,
+		drawn = drawn,
+		pressed = {
+			rows = rows,
+			pressDepth = pressDepth,
+			plan = rig.stances[1].plan,
+			kobold = koboldAt,
+			clip = clip,
+			released = handle.time,
+		},
+	}
+end
+
+-- Judges a stood press by item 573(b)'s bar: every row it stood within 12 x dt flat and never
+-- toward the kobold (along the line from its root to where the row starts); the held rows by
+-- judgeSolved (12 x dt, never toward, still once frozen); and on the press's row and every held
+-- row no colliding part deeper than BAR, as the clip poses it there (judgeSolved's reading) and
+-- as the mixer drew it. A 0.2 s tap still freezes on the hold pose's frame. Returns the deepest
+-- press, held row as the clip poses it, and held row as drawn.
+local function judgeStood(label: string, fps: number, target: any, s: Stood): (number, number, number)
+	local p = s.pressed
+	for index = 2, #s.idle do
+		local row, before = s.idle[index], s.idle[index - 1]
+		local step = row.root - before.root
+		step = Vector3.new(step.X, 0, step.Z)
+		local line = before.root - p.kobold
+		line = Vector3.new(line.X, 0, line.Z).Unit
+		if step.Magnitude > SPEED / fps + 1e-6 or step:Dot(line) < -1e-6 then
+			error(
+				("%s at %d fps: standing row %d moves the root %.4f flat, %.5f along the line from the kobold (12 x dt %.4f)"):format(
+					label,
+					fps,
+					index - 1,
+					step.Magnitude,
+					step:Dot(line),
+					SPEED / fps
+				)
+			)
+		end
+	end
+	judgeSolved(label, fps, target, p)
+	expect(p.released).toBeCloseTo(math.ceil(holdAt(p.clip) * fps - 1e-6) / fps, 1e-6)
+	expect((p.plan.wait or 0) <= KEEP_OUT.stanceWaitSeconds + 1e-6).toBe(true)
+	local first = p.rows[1]
+	local pressed = drawnDepth(target, s.drawn[1], first.body or first.frame)
+	local posed, drawn = -math.huge, -math.huge
+	for index = 2, #p.rows do
+		local row = p.rows[index]
+		local frame = row.body or row.frame
+		local clipDepth = solvedDepth(target, p.clip, row.clip, frame)
+		local drawnAt = drawnDepth(target, s.drawn[index], frame)
+		if math.max(clipDepth, drawnAt) > BAR then
+			error(
+				("%s at %d fps: held row %d (clip %.4f) stands %.4f in the kobold's blockers as posed, %.4f as drawn (the bar %.4f)"):format(
+					label,
+					fps,
+					index - 1,
+					row.clip,
+					clipDepth,
+					drawnAt,
+					BAR
+				)
+			)
+		end
+		posed, drawn = math.max(posed, clipDepth), math.max(drawn, drawnAt)
+	end
+	if pressed > BAR then
+		error(
+			("%s at %d fps: the press's row stands %.4f in the kobold's blockers as drawn"):format(label, fps, pressed)
+		)
+	end
+	return pressed, posed, drawn
+end
+
+describe("no colliding part stands deeper than 0.004 on a held row (item 573(b), D-692 to D-694)", function()
+	it("the PC's six unlockB takes, the body standing there first, at 60 and 144", function()
+		for _, take in
+			{
+				{ "H60", -59.5158, 69.0253, -90.1009, 1 },
+				{ "RA60", -59.4285, 69.3646, -89.5342, 3 },
+				{ "SN60", -59.3115, 69.3106, -87.1496, 4 },
+				{ "H144", -59.4046, 69.3464, -86.8634, 1 },
+				{ "RA144", -59.3562, 69.4136, -87.3195, 3 },
+				{ "SN144", -59.3850, 69.3918, -88.8721, 4 },
+			}
+		do
+			local target = pcKobold(take[2], take[3], take[4])
+			for _, fps in { 60, 144 } do
+				local label = ("%s (slot %d)"):format(take[1], take[5])
+				local s = stood(target, fps, take[5], true)
+				local pressed, posed, drawn = judgeStood(label, fps, target, s)
+				print(
+					("[573b] PC %s at %d fps: stood %.4f out, the first pose %+.4f at the press; the press's row %+.4f, the held rows %+.4f posed and %+.4f drawn, the pose waiting %.4f"):format(
+						label,
+						fps,
+						(s.idle[#s.idle].root - s.idle[1].root).Magnitude,
+						s.pressed.pressDepth,
+						pressed,
+						posed,
+						drawn,
+						s.pressed.plan.wait or 0
+					)
+				)
+			end
+			target:Destroy()
+		end
+	end)
+
+	it("every Art at the pick 2.65 to 3.18 off a kobold turned 5 to 8 degrees, square ahead and 10 aside", function()
+		local worst = { [60] = { -math.huge, -math.huge, -math.huge }, [144] = { -math.huge, -math.huge, -math.huge } }
+		for _, yaw in { 5, 6, 8 } do
+			for _, bearing in { 0, 10 } do
+				for _, distance in { 2.65, 2.8, 2.94, 3.08, 3.18 } do
+					local target = kobold(bearing, yaw, distance)
+					for slot = 1, 4 do
+						for _, fps in { 60, 144 } do
+							local label = ("slot %d at %.2f, %d degrees, turned %d"):format(
+								slot,
+								distance,
+								bearing,
+								yaw
+							)
+							local pressed, posed, drawn = judgeStood(label, fps, target, stood(target, fps, slot))
+							local w = worst[fps]
+							w[1], w[2], w[3] = math.max(w[1], pressed), math.max(w[2], posed), math.max(w[3], drawn)
+						end
+					end
+					target:Destroy()
+				end
+			end
+		end
+		for _, fps in { 60, 144 } do
+			local w = worst[fps]
+			print(
+				("[573b] the turned grid at %d fps: the press's row %+.4f, the held rows %+.4f posed and %+.4f drawn"):format(
+					fps,
+					w[1],
+					w[2],
+					w[3]
+				)
+			)
+		end
 	end)
 end)

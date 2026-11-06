@@ -37,8 +37,14 @@
 		EvenRoot.turnTo(even, crouch)                       -- a rush's crouch turned the body
 		EvenRoot.reset(even)                                -- forget it (a rush has the body)
 
-	Pure: no instances, nothing but the CFrame it is handed. Height, pitch and roll are the
-	replicated root's own; only its flat place and its yaw are evened.
+	Its height is the one it stood at while the replicated root sinks no more than sinkStuds
+	below it (the server's root let go at a walk's start settles into its contact: 0.0016 on the
+	PC's rows of 568(c), and the body drawn there stood its feet 0.0016 deeper, D-682), and
+	followed past that: it is never under the replicated root nor more than sinkStuds over it, and
+	it rises with it. Tuning with no sinkStuds (the local fighter's) keeps the root's own height.
+
+	Pure: no instances, nothing but the CFrame it is handed. Pitch and roll are the replicated
+	root's own.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -59,6 +65,7 @@ export type State = {
 	rawYaw: number, -- its last yaw as read (radians, -pi .. pi)
 	rootYaw: number, -- its last yaw, unwrapped
 	at: Vector3, -- this root's flat place
+	height: number, -- this root's height
 	yaw: number, -- this root's yaw, unwrapped as rootYaw is
 	pace: Vector3, -- the replicated root's flat pace over the window (studs a second)
 	turn: number, -- its yaw rate over the window (radians a second)
@@ -73,6 +80,8 @@ export type Tuning = {
 	maxLagDegrees: number,
 	settleStuds: number,
 	settleDegrees: number,
+	-- The most the replicated root may sink below the height this root holds (nil: none).
+	sinkStuds: number?,
 }
 
 local EvenRoot = {}
@@ -101,6 +110,7 @@ function EvenRoot.new(): State
 		rawYaw = 0,
 		rootYaw = 0,
 		at = Vector3.zero,
+		height = 0,
 		yaw = 0,
 		pace = Vector3.zero,
 		turn = 0,
@@ -126,16 +136,17 @@ local function start(state: State, root: CFrame, raw: number)
 	state.rawYaw = raw
 	state.rootYaw = raw
 	state.at = flat(root.Position)
+	state.height = root.Position.Y
 	state.yaw = raw
 	state.pace = Vector3.zero
 	state.turn = 0
 end
 
--- The CFrame this root stands at: the replicated root's height, pitch and roll, this root's flat
--- place and yaw.
+-- The CFrame this root stands at: the replicated root's pitch and roll, this root's flat place,
+-- height and yaw.
 local function compose(state: State, root: CFrame): CFrame
 	local turned = CFrame.Angles(0, state.yaw - state.rootYaw, 0) * root.Rotation
-	return CFrame.new(state.at.X, root.Position.Y, state.at.Z) * turned
+	return CFrame.new(state.at.X, state.height, state.at.Z) * turned
 end
 
 --- One step: `root` is the replicated root as the last row left it, `dt` this step's seconds, and
@@ -161,6 +172,9 @@ function EvenRoot.step(state: State, root: CFrame, dt: number, handed: CFrame?, 
 		state.rootYaw += wrap(raw - state.rawYaw)
 		state.rawYaw = raw
 	end
+	-- The height: held while the replicated root sinks within sinkStuds of it, never under it.
+	local rootY = root.Position.Y
+	state.height = math.clamp(state.height, rootY, rootY + (tuning.sinkStuds or 0))
 	if not (dt > 0) then
 		return compose(state, root)
 	end

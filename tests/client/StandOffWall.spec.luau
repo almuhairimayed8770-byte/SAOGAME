@@ -414,7 +414,19 @@ local function load(options: Options?): Rig
 			localRecord = function(): any
 				return nil
 			end,
-			get = function(): any
+			-- The soft assist's enemies (setEnemies), as an unlocked Art's stance looks its pick up.
+			get = function(id: number): any
+				for _, enemy in enemies do
+					if enemy.id == id then
+						local at = enemy.position
+						return {
+							id = id,
+							kind = "Enemy",
+							state = "Idle",
+							model = { PrimaryPart = { Position = at, CFrame = CFrame.new(at) } },
+						}
+					end
+				end
 				return nil
 			end,
 			peekLocalId = function(): any
@@ -1362,6 +1374,18 @@ type Conditions = {
 	-- Item 548's tilted stops: the wall or the pillar turned this many degrees about the point
 	-- where the line meets its face.
 	tilt: number?,
+	-- Items 563 and 564 on 577a59a (D-680): the engine as the PC's rows show it, an assumption
+	-- fitted to them. A walk into a face a colliding part touches is taken off at once (the
+	-- contact's velocity), and a part the pose carried in is pushed out by `share` of what stands
+	-- past `contact` on each of PUSH_PASSES passes a substep (the bench's own PUSH_SHARE pushes
+	-- it out about twice as fast).
+	engine: { share: number }?,
+	-- Item F1i-3 (D-695): the take is one unlocked press of the first of `arts`, held 0.2 s, by a
+	-- fighter standing at `stanceAt` beside the kobold (StandOffHold's pcKobold stands, moved onto
+	-- this bench's kobold), the soft assist seeing it; the wall or the pillar stands at
+	-- `blockFrame` instead of on the line.
+	stanceAt: CFrame?,
+	blockFrame: CFrame?,
 }
 
 -- The owner's Head's hull as the engine collides it, an assumption fitted to the PC's reads
@@ -1372,6 +1396,12 @@ type Conditions = {
 -- degrees about the upright, 0.15 / 0.21 / 0.25 (item 548(d): the box 0.08 in at the pillar square
 -- on and up to 0.30 at the 30 degree stops).
 local OWNER_HULL = { inset = 0.08, radius = 0.4 }
+
+-- The engine as the PC's rows on 577a59a show it at a lean into the world behind (items 563 and
+-- 564, D-680), an assumption fitted to them (Conditions.engine): on 577a59a's code it reads
+-- Sharp Nail's UpperTorso 0.055 / 0.073 in at 60 / 144 (the PC 0.054-0.058 / 0.067-0.080); the
+-- bench's stiffer engine 0.041 / 0.046.
+local PC_ENGINE = { share = 0.09 }
 
 -- The hull's inner box (the box less `inset`, and less `radius` across the upright edges).
 local function hullCore(size: Vector3, hull: { inset: number, radius: number }): Vector3
@@ -1487,6 +1517,9 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 	local avatar = b.avatar
 	local GAP: number = b.gap
 	local block = blockAt(shape, face, pc.tilt)
+	if pc.blockFrame ~= nil then
+		block.CFrame = pc.blockFrame
+	end
 	local obstacles: { BasePart } = { block }
 	for _, blocker in b.blockers do
 		table.insert(obstacles, blocker)
@@ -1540,6 +1573,11 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		enemyMixer:play(Harness.load("src/shared/clips/enemy/Kobold/Idle"), { startTime = 0, blendIn = 0 })
 		flinch = Harness.load("src/shared/clips/enemy/Kobold/FlinchFront")
 	end
+	-- The stance plans the take asked for (`stanceAt`), and this frame's brace read (the root the
+	-- brace found and the depth it read there: CharacterController.braceRoot asks plan.depth once a
+	-- frame, last).
+	local stances: { any } = {}
+	local braced: { at: CFrame, depth: number }? = nil
 	-- The real plan on the avatar as the screen shows it, asked again on the root of the moment.
 	local function standOffWith(
 		_model: any,
@@ -1574,12 +1612,25 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 				return roomSide(at, distance, clipTime)
 			end
 		end
+		local depth = real.depth
+		if depth ~= nil then
+			plan.depth = function(at: CFrame): number
+				pose(rig.root.CFrame, shown)
+				local deep = depth(at)
+				braced = { at = at, depth = deep }
+				return deep
+			end
+		end
+		if options.stance ~= nil then
+			table.insert(stances, plan)
+		end
 		return plan
 	end
 	-- `byKobold`: the share of the push out of the kobold's blockers alone (D-627).
 	local pushed, walked, byKobold = Vector3.zero, Vector3.zero, Vector3.zero
 	-- Over the take, the kobold's push by the part and blocker it pushed (D-658).
 	local koboldBy: { [string]: number } = {}
+	local share = if pc.engine ~= nil then pc.engine.share else PUSH_SHARE
 	local function physics(dt: number)
 		local count = math.max(1, math.floor(dt * SUBSTEP_HZ + 0.5))
 		local h = dt / count
@@ -1588,6 +1639,20 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		for _ = 1, count do
 			local velocity = rig.humanoid.MoveDirection * rig.humanoid.WalkSpeed
 			local walk = Vector3.new(velocity.X, 0, velocity.Z) * h
+			if pc.engine ~= nil then
+				-- The walk into a face a colliding part touches is the contact's to take off.
+				local solved = b.solve(rig.root.CFrame, transforms)
+				for _, name in colliding do
+					for _, obstacle in obstacles do
+						local apart, along = apartOf(name, solved[name], obstacle)
+						local out = Vector3.new(along.X, 0, along.Z)
+						if apart < 0 and out.Magnitude > 1e-6 then
+							out = out.Unit
+							walk -= out * math.min(walk:Dot(out), 0)
+						end
+					end
+				end
+			end
 			rig.root.CFrame = rig.root.CFrame + walk
 			walked += walk
 			for _ = 1, PUSH_PASSES do
@@ -1602,14 +1667,14 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 							if obstacle ~= block then
 								fromKobold += out
 								local key = name .. " in " .. obstacle.Name
-								koboldBy[key] = (koboldBy[key] or 0) + out.Magnitude * PUSH_SHARE
+								koboldBy[key] = (koboldBy[key] or 0) + out.Magnitude * share
 							end
 						end
 					end
 				end
-				rig.root.CFrame = rig.root.CFrame + push * PUSH_SHARE
-				pushed += push * PUSH_SHARE
-				byKobold += fromKobold * PUSH_SHARE
+				rig.root.CFrame = rig.root.CFrame + push * share
+				pushed += push * share
+				byKobold += fromKobold * share
 			end
 		end
 	end
@@ -1625,6 +1690,11 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 	local koboldAt = Vector3.new(KOBOLD_AT.X, b.koboldRoot.Position.Y, KOBOLD_AT.Z)
 	rig.root.CFrame = CFrame.lookAt(Vector3.new(30, ry, start), Vector3.new(KOBOLD_AT.X, ry, KOBOLD_AT.Z))
 	rig.setLock(koboldAt)
+	if pc.stanceAt ~= nil then
+		rig.root.CFrame = pc.stanceAt
+		rig.setLock(nil)
+		rig.setEnemies({ { id = 1, position = koboldAt } })
+	end
 	rig.animator:play("player/OneHandedSword/IdleDrawn", {})
 	local basicId = "player/OneHandedSword/Basic1"
 	local clips = {
@@ -1694,6 +1764,7 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		end
 		rig.setFrameSeconds(dt)
 		local first = rig.root.CFrame
+		braced = nil
 		shown = table.clone(rig.animator.pose)
 		local drawn = shown
 		local before: { [string]: number } = {}
@@ -1780,6 +1851,7 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 			end
 		end
 		table.insert(rows, {
+			brace = braced,
 			limb = limb,
 			limbPart = limbPart,
 			label = label,
@@ -1797,6 +1869,29 @@ local function take(b: any, shape: string, face: number, fps: number, start: num
 		for _ = 1, math.floor(seconds * fps + 0.5) do
 			row(label)
 		end
+	end
+	if pc.stanceAt ~= nil then
+		-- Each held row's colliding parts against the kobold's blockers as they stand that row, the
+		-- swing's clip posed on the root the step left (StandOffHold's solvedDepth).
+		local BodyShell = Harness.load("src/shared/choreo/BodyShell")
+		local keepOut = CombatData.contact.standOff.keepOut
+		hold("place", 0.3)
+		hold("rest", 0.8)
+		local art = swung[1]
+		rig.controller.beginArt(art.slot)
+		for _ = 1, math.floor(0.2 * fps + 0.5) do
+			row("hold")
+			local held = rows[#rows]
+			local solved = ChoreoPose.solve(avatar.model, held.code, ClipSampler.sample(clips[art.id], held.swing.time))
+			held.blockerDepth = -math.huge
+			for _, name in keepOut.parts do
+				for _, blocker in b.blockers do
+					local depth = BodyShell.depth(solved[name], sizes[name], blocker.CFrame, blocker.Size)
+					held.blockerDepth = math.max(held.blockerDepth, depth)
+				end
+			end
+		end
+		return { rows = rows, stances = stances, kobold = koboldAt }
 	end
 	hold("place", 0.3)
 	hold(if pc.off ~= nil then "rest" else "S", 0.5)
@@ -2853,7 +2948,7 @@ describe("item 535 under the PC's conditions (D-655, D-656)", function()
 	)
 
 	it(
-		"the owner's Head by its hull at a tilted stop: within the face's contact, out of the blockers (D-658)",
+		"the owner's Head by its hull at a tilted stop: within the face's contact, out of the blockers (D-658, D-680, D-697)",
 		function()
 			-- Items 538, 548(d) and 561(a)(b) on aa27e35 and d310ca7: the owner's Head is a MeshPart the
 			-- engine collides by its hull (CollisionFidelity Default), and its box sits 0.08-0.10 in front
@@ -2862,9 +2957,16 @@ describe("item 535 under the PC's conditions (D-655, D-656)", function()
 			-- its ray read of the hull was at most 0.050 at 60 and 0.068 at 144. Here the bench's engine
 			-- collides the Head by a hull fitted to those reads (OWNER_HULL), at the PC's deepest case:
 			-- the pillar at 30 degrees (the line 32.7 off its normal), the gap 3.89, the root 1.01 off
-			-- the face. The hull stays within the engine's contact of the face; it never enters the
-			-- kobold's blockers, where the box reads past 0.04; the kobold's push there is UpperTorso's
-			-- in the HeldBlocker (openIssue: the hold's lean pushed off a turned face).
+			-- the face. The hull stays within the engine's contact of the face, and it never enters the
+			-- kobold's blockers. Before the brace (D-680) the engine pushed the leaning body off the
+			-- turned face along its normal, across the line and into the HeldBlocker: the box read
+			-- 0.195 / 0.139 in the blockers at 60 / 144 and the kobold pushed UpperTorso back 0.116 /
+			-- 0.035 a row (577a59a). The brace steps the root out along the line before the engine's
+			-- push comes, so the kobold never pushes the body. What it stepped out it takes back off the
+			-- lunge once the body stands clear (D-697): with Breathe giving way under the strike
+			-- (D-685) the brace stepped out 0.136 over Basic1's wind-up lean at 144, and the box stood
+			-- 0.042 in the HeldBlocker on its follow-through. Now the box too stays within the
+			-- engine's contact of the blockers (0.005 / 0.005).
 			local CollisionGroups = Harness.load("src/server/world/CollisionGroups")
 			local b = bench()
 			ownerHead(b)
@@ -2903,7 +3005,101 @@ describe("item 535 under the PC's conditions (D-655, D-656)", function()
 				expect(result.hullBlocker <= 0.04).toBe(true)
 				-- The box, as GetPartBoundsInBox and a box's depth read it, is not what the engine stops.
 				expect(result.torso.Head > 0.07).toBe(true)
-				expect(result.blockerDeep > 0.04).toBe(true)
+				expect(result.blockerDeep <= 0.04).toBe(true)
+				expect(result.koboldPush <= 1e-6).toBe(true)
+			end
+			b.kobold:Destroy()
+		end
+	)
+
+	it(
+		"563 and 564(d) at 144 on 577a59a: an engine a frame behind the lean, the brace keeps the drawn body within its contact (D-680)",
+		function()
+			-- The PC on 577a59a: at 144 UpperTorso stood 0.070-0.087 into the wall behind on Sharp
+			-- Nail's and Vertical's lean rows (item 563, the face flush behind) and the Head's hull
+			-- 0.072-0.081 on Vertical's early rows at the Brute's stops (564(d): the wall 0, 10 and 20
+			-- degrees and the pillar square on), every step all the engine's; at 60 0.044-0.058. The
+			-- engine pushes a part the pose leans in out over its 240 Hz steps, one or two of them in
+			-- a 144 fps frame, and the screen draws the lean on the root it left. Under PC_ENGINE
+			-- 577a59a's code read UpperTorso 0.055 / 0.073 and the Head's hull 0.080 / 0.113 at 60 /
+			-- 144 on item 563's Vertical take, and the hull 0.074-0.078 / 0.114-0.115 at those stops.
+			-- The brace steps the root out toward the target by what the drawn body stands past
+			-- standOff.braceStuds (the Head on its box less standOff.hullInsetStuds), within the
+			-- frame's budget, so nothing reads past the engine's contact and no step of the code's
+			-- goes past its long-row bar.
+			local CollisionGroups = Harness.load("src/server/world/CollisionGroups")
+			local b = bench()
+			ownerHead(b)
+			CollisionGroups.joinPlayers(b.avatar.model)
+			local function judge(result: any)
+				expect(result.root <= 0.07).toBe(true)
+				expect(result.torso.UpperTorso <= 0.07).toBe(true)
+				expect(result.torso.LowerTorso <= 0.07).toBe(true)
+				expect(result.hull <= 0.07).toBe(true)
+				expect(result.headRay <= 0.07).toBe(true)
+				expect(result.stepLag <= 1e-3).toBe(true)
+			end
+			-- Item 563: item 538's takes, the face 25.7 flush behind, at 60 and 144. Its Vertical take
+			-- is a squeeze at the kobold's own stand (the face 2.44 off the Blocker), where the strike
+			-- carries the Head's hull into the Blocker with or without the brace (0.042-0.112 on
+			-- 577a59a, 0.043-0.115 now; item 563 reads the face alone).
+			for _, case in { { "SharpNail", "wall" }, { "SharpNail", "pillar" }, { "Vertical", "wall" } } do
+				for _, fps in { 60, 144 } do
+					local result = take(b, case[2], 25.7, fps, 26.6, {
+						hits = true,
+						jitter = if fps == 144 then 0.45 else nil,
+						contact = 0.04,
+						art = case[1],
+						hull = OWNER_HULL,
+						engine = PC_ENGINE,
+					})
+					print(
+						("[F1i-2 563 %s %s %d] UT %.4f LT %.4f root %.4f | the Head's hull %.4f (rays %.4f, box %.3f) | past the long-row bar %.4f, First-to-First over it %d"):format(
+							case[1],
+							case[2],
+							fps,
+							result.torso.UpperTorso,
+							result.torso.LowerTorso,
+							result.root,
+							result.hull,
+							result.headRay,
+							result.torso.Head,
+							result.stepLag,
+							result.firstLag
+						)
+					)
+					judge(result)
+					-- 563(a) on every touching row: the code's step never toward the face.
+					expect(result.normal <= 1e-3).toBe(true)
+					expect(result.normalHull <= 1e-3).toBe(true)
+				end
+			end
+			-- Item 564(d): the PC's four takes over at 144, the root 1.01 off the face.
+			for _, case in { { "wall", 0 }, { "wall", 7.6 }, { "wall", 15.5 }, { "pillar", 0 } } do
+				local angle = case[2]
+				local face = blockerFaceOf(b) - (3.89 + math.min(math.tan(math.rad(angle)), 1))
+				local result = take(
+					b,
+					case[1],
+					face,
+					144,
+					face + 1.01,
+					conditions(144, { off = 1.01, hull = OWNER_HULL, tilt = angle, engine = PC_ENGINE })
+				)
+				line(("564(d) %s %.1f 144"):format(case[1], angle), result)
+				print(
+					("[F1i-2 564(d) %s %.1f 144] the Head's hull %.4f (rays %.4f, box %.3f) | in the blockers: the box %.3f, the hull %.3f"):format(
+						case[1],
+						angle,
+						result.hull,
+						result.headRay,
+						result.torso.Head,
+						result.blockerDeep,
+						result.hullBlocker
+					)
+				)
+				judge(result)
+				expect(result.hullBlocker <= 0.04).toBe(true)
 			end
 			b.kobold:Destroy()
 		end
@@ -2928,4 +3124,194 @@ describe("item 535 under the PC's conditions (D-655, D-656)", function()
 		expect(result.codeShare < 0).toBe(true)
 		b.kobold:Destroy()
 	end)
+end)
+
+-- Item F1i-3 on M17: StandOffHold's unlocked PC presses (item 573(b)) with the world behind A, on
+-- the line from the kobold. Rising Arc's start pose leans its column about 0.4 past the root's box
+-- along the line, so with a wall or a pillar 0.3 behind it leans 0.10 into it as the stance steps
+-- aside along the face.
+local PC_STANDS: { [string]: { number } } = {
+	-- The PC's unlockB stands (StandOffHold): the fighter's root and yaw with the kobold's root at
+	-- (-60, 72), yaw 0.
+	RA60 = { -59.4285, 69.3646, -89.5342 },
+	RA144 = { -59.3562, 69.4136, -87.3195 },
+	H144 = { -59.4046, 69.3464, -86.8634 },
+}
+
+-- One press from a PC stand moved onto this bench's kobold, the wall or the pillar `gap` past the
+-- root's box behind it along the line (nil: none), and its rows from the press to the release.
+local function pcPress(b: any, stand: string, art: string, shape: string, gap: number?, fps: number): any
+	local ry: number = b.avatar.rootHeight
+	local rootSize = (b.avatar.model.PrimaryPart :: BasePart).Size
+	local place = PC_STANDS[stand]
+	local at = CFrame.new(KOBOLD_AT.X + place[1] + 60, ry, KOBOLD_AT.Z + place[2] - 72)
+		* CFrame.Angles(0, math.rad(place[3]), 0)
+	local away = Vector3.new(at.X - KOBOLD_AT.X, 0, at.Z - KOBOLD_AT.Z).Unit
+	local face = at.Position + away * (halfAlong(at, rootSize, away) + (gap or 50))
+	local center = Vector3.new(face.X, 4, face.Z) + away * (if shape == "wall" then 0.5 else 1)
+	local r = take(b, shape, 0, fps, 0, {
+		hits = true,
+		contact = 0.04,
+		jitter = if fps == 144 then 0.45 else nil,
+		played = true,
+		hull = OWNER_HULL,
+		engine = PC_ENGINE,
+		arts = { art },
+		stanceAt = at,
+		blockFrame = CFrame.lookAt(center, center + away),
+	})
+	expect(#r.stances).toBe(1)
+	local held: { any } = {}
+	for _, row in r.rows do
+		if row.label == "hold" then
+			table.insert(held, row)
+		end
+	end
+	local moved = held[#held].code.Position - held[1].first.Position
+	return {
+		plan = r.stances[1],
+		kobold = Vector3.new(r.kobold.X, 0, r.kobold.Z),
+		held = held,
+		released = held[#held].swing.time,
+		moved = Vector3.new(moved.X, 0, moved.Z).Magnitude,
+	}
+end
+
+-- A press's stance rows judged by D-695: every row within 12 x dt; the code's step toward the
+-- kobold (along the line from its root and along the plan's `away`) never more than the brace's
+-- own step that row, the root the brace found to the root it left (1e-5 over it: a float32 holds a
+-- coordinate 30 studs out to 1.9e-6, and with no brace the stance's rows read up to 3.7e-6), and
+-- the brace's step never past what the drawn column stood beyond braceStuds; the frozen rows
+-- still. Returns the most a row's code step went toward the kobold, the brace's most, and the
+-- deepest colliding part on the frozen rows in the kobold's blockers.
+local function judgeBraced(label: string, p: any): (number, number, number)
+	local keepOut = CombatData.contact.standOff.keepOut
+	local braceStuds: number = CombatData.contact.standOff.braceStuds
+	local toward, braceMost, frozenDeep = 0, 0, -math.huge
+	for _, row in p.held do
+		local step = row.code.Position - row.first.Position
+		step = Vector3.new(step.X, 0, step.Z)
+		local line = (Vector3.new(row.first.X, 0, row.first.Z) - p.kobold).Unit
+		local rowToward = math.max(-step:Dot(line), -step:Dot(p.plan.away), 0)
+		local brace = 0
+		if row.brace ~= nil then
+			local braceStep = row.code.Position - row.brace.at.Position
+			brace = Vector3.new(braceStep.X, 0, braceStep.Z).Magnitude
+			if brace > math.max(row.brace.depth - braceStuds, 0) + 1e-5 then
+				error(
+					("%s: the brace stepped %.5f where the drawn column stood %.5f in the world behind"):format(
+						label,
+						brace,
+						row.brace.depth
+					)
+				)
+			end
+		end
+		toward = math.max(toward, rowToward)
+		braceMost = math.max(braceMost, brace)
+		if rowToward > brace + 1e-5 then
+			error(
+				("%s: a stance row's code step goes %.6f toward the kobold, the brace's own step %.6f"):format(
+					label,
+					rowToward,
+					brace
+				)
+			)
+		end
+		expect(step.Magnitude <= keepOut.maxSpeedStudsPerSecond * row.dt + 1e-6).toBe(true)
+		if row.swing.was >= p.released - 1e-9 then
+			expect(step.Magnitude).toBe(0)
+			frozenDeep = math.max(frozenDeep, row.blockerDepth)
+		end
+	end
+	return toward, braceMost, frozenDeep
+end
+
+describe("an Art's stance with the world behind (item F1i-3, D-695, D-696)", function()
+	it(
+		"steps toward the kobold only by the brace's step out of the world: Rising Arc's PC presses with a wall or a pillar 0.3 to 1.0 behind and in the open, at 60 and 144",
+		function()
+			-- M17: Rising Arc's lean 0.10 into the world 0.3 behind; the brace stepped the root out of
+			-- it toward the kobold in what the stance's own step left of the frame's budget, 0.0039 /
+			-- 0.0100 a row at 60 / 144 from RA60's stand, 0.0032 at 144 from RA144's (the pillar
+			-- 0.0039 / 0.0101 / 0.0035), and held the drawn lean at 0.050 (0.054 / 0.065 without it).
+			-- No toward step 0.45 behind or farther, nor on a frozen row. A held stance may step
+			-- toward its target by the brace's step out of the world behind alone (D-695); the
+			-- open field (items 498(b) and 573(b)) never.
+			local CollisionGroups = Harness.load("src/server/world/CollisionGroups")
+			local keepOut = CombatData.contact.standOff.keepOut
+			local b = bench()
+			ownerHead(b)
+			CollisionGroups.joinPlayers(b.avatar.model)
+			for _, stand in { "RA60", "RA144" } do
+				for _, fps in { 60, 144 } do
+					for _, case in
+						{
+							{ "wall", 0.3 },
+							{ "pillar", 0.3 },
+							{ "wall", 0.6 },
+							{ "pillar", 0.6 },
+							{ "wall", 1.0 },
+							{ "pillar", 1.0 },
+							{ "wall" },
+						}
+					do
+						local shape, gap = case[1] :: string, case[2] :: number?
+						local label = if gap ~= nil
+							then ("%s, the %s %.1f behind, at %d fps"):format(stand, shape, gap, fps)
+							else ("%s in the open at %d fps"):format(stand, fps)
+						local p = pcPress(b, stand, "RisingArc", shape, gap, fps)
+						local toward, brace, frozenDeep = judgeBraced(label, p)
+						print(
+							("[F1i-3] %s: the code's step at most %.5f toward the kobold, the brace's at most %.5f; the frozen rows %+.4f in its blockers"):format(
+								label,
+								toward,
+								brace,
+								frozenDeep
+							)
+						)
+						if gap == nil then
+							expect(toward <= 1e-5).toBe(true)
+							expect(brace).toBe(0)
+						end
+						expect(frozenDeep <= keepOut.stanceDepthStuds + 1e-6).toBe(true)
+					end
+				end
+			end
+			b.kobold:Destroy()
+		end
+	)
+
+	it(
+		"takes a stance's whole aside along a pillar's face the start pose stands past (D-696), at 60 and 144",
+		function()
+			-- M17: from H144's stand Horizontal's Head at clip 0.383 (the swing after the release) stood
+			-- 0.046 past the face of a pillar 0.3 behind the press, and the aside's cast, started a
+			-- box-depth back along the aside (D-517), met the pillar's side face at once: the stance
+			-- stepped 0.119 aside of its 0.261 (the wall's 0.261), and the frozen rows stood 0.0109 /
+			-- 0.0110 in the kobold's blockers at 60 / 144. The aside carries the Head along the face, no
+			-- deeper along the line.
+			local CollisionGroups = Harness.load("src/server/world/CollisionGroups")
+			local keepOut = CombatData.contact.standOff.keepOut
+			local b = bench()
+			ownerHead(b)
+			CollisionGroups.joinPlayers(b.avatar.model)
+			for _, fps in { 60, 144 } do
+				local wall = pcPress(b, "H144", "Horizontal", "wall", 0.3, fps)
+				local pillar = pcPress(b, "H144", "Horizontal", "pillar", 0.3, fps)
+				local _, _, frozenDeep = judgeBraced(("H144, the pillar 0.3 behind, at %d fps"):format(fps), pillar)
+				print(
+					("[F1i-3] H144, the pillar 0.3 behind, at %d fps: the stance %.3f (the wall's %.3f), the frozen rows %+.4f in the kobold's blockers"):format(
+						fps,
+						pillar.moved,
+						wall.moved,
+						frozenDeep
+					)
+				)
+				expect(math.abs(pillar.moved - wall.moved) <= 1e-3).toBe(true)
+				expect(frozenDeep <= keepOut.stanceDepthStuds + 1e-6).toBe(true)
+			end
+			b.kobold:Destroy()
+		end
+	)
 end)

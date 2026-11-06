@@ -19,6 +19,13 @@
 	  logged row (a handler is stamped with the logged row, whose interval holds the next rig step).
 	Either way the clip must wait: held, its clock standing, from its first row, for at most
 	enemy.gait.attackWaitSeconds, and then run.
+
+	On 577a59a the PC's attacks still never waited (AW 566(f): held false on all 20 takes, the
+	Telegraph heard first on 19). The client meets a spawned enemy before its parts: the tag
+	replicates before the model's descendants (442, D-543) and its PrimaryPart reference after them
+	(D-571), and Replication.watch attaches the driver in the tag's handler. So the last block
+	watches an empty model with the rig's attributes, then its parts arrive (Choreo's
+	DescendantAdded fired for each, as the engine does) and its PrimaryPart resolves.
 ]]
 
 -- Fresh modules, as when this spec runs alone.
@@ -61,12 +68,30 @@ local HELD_ROWS = 3
 local WAIT_SECONDS: number = ChoreoData.enemy.gait.attackWaitSeconds
 
 local clock = 0
+-- The engine's instance signals Choreo connects (the harness's instances fire none): the late
+-- block fires DescendantAdded as each part arrives.
+local engineSignals: { [any]: { [string]: { (...any) -> () } } } = {}
+local function fire(instance: any, eventName: string, ...: any)
+	local list = engineSignals[instance]
+	if list ~= nil and list[eventName] ~= nil then
+		for _, fn in list[eventName] do
+			fn(...)
+		end
+	end
+end
 Choreo.configure({
 	now = function()
 		return clock
 	end,
 	cameraPosition = function()
 		return Vector3.zero
+	end,
+	connect = function(instance: any, eventName: string, fn: (...any) -> ()): any
+		local list = engineSignals[instance] or {}
+		engineSignals[instance] = list
+		list[eventName] = list[eventName] or {}
+		table.insert(list[eventName], fn)
+		return { Disconnect = function() end }
 	end,
 })
 
@@ -95,18 +120,34 @@ type Result = {
 	ran: boolean,
 }
 
-local function take(rigName: string, defId: string, hz: number, uneven: boolean, telegraphAfterStep: boolean): Result
+local function take(
+	rigName: string,
+	defId: string,
+	hz: number,
+	uneven: boolean,
+	telegraphAfterStep: boolean,
+	late: boolean?
+): Result
 	local dt = 1 / hz
 	local lag = LAG[hz]
 	clock = 100
 	local def = Enemies.byId(defId)
 	local attack = def.attacks[1]
-	local model = RigBuilder.build(rigName)
-	local root = model.PrimaryPart :: BasePart
+	local built = RigBuilder.build(rigName)
+	local model = built
+	local root = built.PrimaryPart :: BasePart
 	root.LocalTransparencyModifier = 0
-	local humanoid = model:FindFirstChildOfClass("Humanoid") :: any
+	local humanoid = built:FindFirstChildOfClass("Humanoid") :: any
 	humanoid.MoveDirection = Vector3.zero
 	humanoid.FloorMaterial = Enum.Material.Grass
+	if late == true then
+		-- Watched before its parts: the model the tag's handler meets, with the rig's attributes.
+		model = Instance.new("Model")
+		model.Name = built.Name
+		for name, value in built:GetAttributes() do
+			model:SetAttribute(name, value)
+		end
+	end
 	local folder = Instance.new("Folder")
 	model.Parent = folder
 	local record = {
@@ -191,6 +232,17 @@ local function take(rigName: string, defId: string, hz: number, uneven: boolean,
 	end
 	place()
 	Replication.watch(record)
+	if late == true then
+		-- Its parts arrive (each one's DescendantAdded, its descendants' too), then its PrimaryPart.
+		for _, child in built:GetChildren() do
+			child.Parent = model
+			fire(model, "DescendantAdded", child)
+			for _, descendant in child:GetDescendants() do
+				fire(model, "DescendantAdded", descendant)
+			end
+		end
+		model.PrimaryPart = root
+	end
 	local animator = Choreo.get(model)
 	animator:step(dt)
 	local origin = bodyAt(0)
@@ -306,6 +358,18 @@ describe("EnemyAttackWait: the Telegraph handled after the clip's first step, on
 			it(("the %s's attack waits at %d Hz"):format(case.rig, hz), function()
 				local result = take(case.rig, case.def, hz, false, true)
 				report(("%s @%d Telegraph after the step"):format(case.rig, hz), result)
+				expectWaits(result, hz)
+			end)
+		end
+	end
+end)
+
+describe("EnemyAttackWait: a rig the client met before its parts (AW 566(f); D-677)", function()
+	for _, case in RIGS do
+		for _, hz in { 60, 144 } do
+			it(("the %s's attack waits at %d Hz, its Telegraph heard first"):format(case.rig, hz), function()
+				local result = take(case.rig, case.def, hz, false, false, true)
+				report(("%s @%d met before its parts"):format(case.rig, hz), result)
 				expectWaits(result, hz)
 			end)
 		end

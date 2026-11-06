@@ -55,7 +55,11 @@
 	server's beat and nothing freezes twice. Past the mark nothing is corrected.
 
 	A play's `mask` scales an Additive clip per joint (a joint not listed keeps its full weight):
-	an enemy's flinch during its attack leaves the weapon arm on the attack (D-173).
+	an enemy's flinch during its attack leaves the weapon arm on the attack (D-173). A play that
+	`yields` (the rig's breathing) gives way under a strike too (D-685): its joints choreo.luau
+	breathYield lists scale by one less the largest ClipSampler.breathYield of the live attack
+	clips at their clocks, each times the weight it shows, so the blade's joints and the neck leave
+	the breath at the end of an attack's anticipation and take it back over its settle.
 
 	A procedural channel's yaw on the root joint (the turn plant's lag, D-416) turns the whole body
 	about the root part's vertical axis: the position the layers give the root joint (a stance's
@@ -97,6 +101,9 @@ export type PlayOptions = {
 	sinceStep: number?,
 	-- Additive clips only: joint name -> weight multiplier (a joint not listed keeps 1).
 	mask: { [string]: number }?,
+	-- Additive clips only: the joints choreo.luau breathYield lists give way under the live attack
+	-- clips' strikes (ClipSampler.breathYield, D-685): the rig's breathing.
+	yields: boolean?,
 	-- Override layers only: joint name -> seconds that joint blends in over instead of `blendIn`
 	-- (a longer one: the hand-off from a moving gait, Mixer.handOff). It fades out with the clip.
 	jointBlendIn: { [string]: number }?,
@@ -145,6 +152,7 @@ export type Handle = {
 	absorbKey: number,
 	absorbSeconds: number,
 	mask: { [string]: number }?, -- PlayOptions.mask (Additive only)
+	yields: boolean, -- PlayOptions.yields (Additive only)
 	-- PlayOptions.jointBlendIn and each listed joint's own envelope (nil: every joint has `fade`).
 	jointBlendIn: { [string]: number }?,
 	jointFade: { [string]: number }?,
@@ -438,6 +446,7 @@ function Mixer.play(self: any, clip: Types.ClipDef, opts: PlayOptions?): Handle
 		absorbKey = 0,
 		absorbSeconds = 0,
 		mask = options.mask,
+		yields = options.yields == true and layer == "Additive",
 		jointBlendIn = nil,
 		jointFade = nil,
 		beat = nil,
@@ -952,6 +961,24 @@ local function visibleWeight(handle: Handle): number
 	return Easing.evaluate(easing, handle.fade) * handle.weight
 end
 
+-- How far a breath that yields gives way (D-685): the largest ClipSampler.breathYield of the live
+-- attack clips (any layer but Additive) at their clocks, each times the weight it shows.
+local function breathYieldOf(handles: { Handle }): number
+	local share = 0
+	for _, handle in handles do
+		if not handle.done and handle.layer ~= "Additive" and handle.clip.attack == true then
+			local yield = ClipSampler.breathYield(handle.clip, handle.time)
+			if yield > 0 then
+				share = math.max(share, yield * visibleWeight(handle))
+			end
+		end
+	end
+	return math.min(share, 1)
+end
+
+-- The mask a yielding handle composes with (ClipSampler.yieldMask's `into`): read at once by addInto.
+local yieldScratch: { [string]: number } = {}
+
 -- The rule one step follows, in pieces Mixer.step and Mixer.preview share, so a caller that reads
 -- the next step's blend ahead of it never copies (and drifts from) the step's own.
 
@@ -1464,10 +1491,16 @@ function Mixer.step(self: any, dt: number): StepResult
 			end
 		end
 		if layer == "Additive" then
+			local share: number? = nil
 			for _, handle in layerHandles do
 				local weight = visibleWeight(handle)
 				if weight > 0 then
-					addInto(result, ClipSampler.sample(handle.clip, handle.time), weight, handle.mask)
+					local mask = handle.mask
+					if handle.yields then
+						share = share or breathYieldOf(self._handles)
+						mask = ClipSampler.yieldMask(share :: number, mask, yieldScratch)
+					end
+					addInto(result, ClipSampler.sample(handle.clip, handle.time), weight, mask)
 				end
 			end
 		else

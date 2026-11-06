@@ -82,6 +82,7 @@ local Pose = Harness.load("src/shared/choreo/Pose")
 local Joints = Harness.load("src/shared/choreo/Joints")
 local ClipAudit = Harness.load("src/client/dev/ClipAudit")
 local ChoreoData = Harness.load("src/shared/data/choreo")
+local DrawnBody = Harness.load("src/client/choreo/DrawnBody")
 
 local root = Harness.repoRoot()
 local function loadTool(path: string): any
@@ -385,7 +386,10 @@ local function solveJoints(model: any, root: any, chain: any): { [string]: any }
 	return out
 end
 
-type Walk = { p90: number, largest: number, low: { number } }
+-- pivot: on an even walk, the most the drawn body the render step publishes (the camera's pivot,
+-- DrawnBody) stands off the body the frame draws, past the steps its physics made beyond what
+-- PreSimulation's deltaTime said (D-676).
+type Walk = { p90: number, largest: number, low: { number }, pivot: number }
 
 -- The drawn walk at walkSpeed, locked straight ahead, on `steps`'s clock for 9 s, read on screen:
 -- the step p90 and the largest step of the least-moving grounded corner from 1.5 s, and each
@@ -434,6 +438,7 @@ local function walk(steps: Clock, ahead: boolean, once: boolean?, even: boolean?
 	local t, frame, rows = 0, 0, 0
 	local moves: { number } = {}
 	local largest = 0
+	local pivot = 0
 	local last: { [string]: any } = {}
 	local low = { 0, 0 }
 	local seconds, from = 9, 1.5
@@ -468,6 +473,8 @@ local function walk(steps: Clock, ahead: boolean, once: boolean?, even: boolean?
 		primary.AssemblyLinearVelocity = state.velocity
 		locomotion:update(dt, state)
 		animator:step(dt)
+		-- What the render step's readers find (the camera's pivot, D-675).
+		local published = if even then DrawnBody.position(model) else nil
 		local said = if steps.presim ~= nil then steps.presim[i] else steps.steps[i]
 		if even then
 			firePreSimulation(said / 240)
@@ -480,6 +487,11 @@ local function walk(steps: Clock, ahead: boolean, once: boolean?, even: boolean?
 			else Pose.solve(model, drawnOn, animator.mixer:lastOffsets(), chain)
 		if t > from and not (steps.held ~= nil and steps.held[i]) then
 			rows += 1
+			if published ~= nil then
+				local body = (drawnOn * (animator:getBodyOffset() or CFrame.new())).Position
+				local beyond = math.abs(steps.steps[i] - said) * speed / 240
+				pivot = math.max(pivot, flat(published - body).Magnitude - beyond)
+			end
 			for f, name in FEET do
 				local now = bottom(solved[name], (model:FindFirstChild(name) :: any).Size)
 				local grounded = {}
@@ -515,6 +527,7 @@ local function walk(steps: Clock, ahead: boolean, once: boolean?, even: boolean?
 		p90 = moves[math.max(1, math.floor(#moves * 0.9))],
 		largest = largest,
 		low = { low[1] / rows, low[2] / rows },
+		pivot = pivot,
 	}
 end
 
@@ -598,6 +611,34 @@ describe("the locked drawn walk on screen, on the PC's step clocks (item 530, D-
 			end
 			-- The PC's frames take one step more than PreSimulation's deltaTime says on 6% of
 			-- them at 60 fps and 2.6% at 144, and the foot moves a step on those alone.
+			for _, fps in { 60, 144 } do
+				judge(("PC %d fps"):format(fps), walk(pcWalk(fps), false, true, true))
+			end
+			for _, rate in { { fps = 60, rows = 900 }, { fps = 144, rows = 2000 } } do
+				for _, seed in SEEDS do
+					judge(
+						("530 at %d fps seed %d"):format(rate.fps, seed),
+						walk(engine530(rate.rows, rate.fps, 0.3, 6, seed, 64, 1), false, false, true)
+					)
+				end
+			end
+			judge("item 282", walk(pc282(1200), false, false, true))
+			expect(table.concat(problems, "; ")).toBe("")
+		end
+	)
+
+	it(
+		"drawn on the even root, the camera's pivot is the body the frame draws (D-676): what the render step publishes (DrawnBody) stands off it by no more than the steps physics made past PreSimulation's deltaTime, on the owner's PC walk at 60 and 144, item 530's clocks and item 282's pattern",
+		function()
+			local problems = {}
+			local function judge(label: string, result: Walk)
+				-- Float32 positions: a thousandth of a stud.
+				if result.pivot > 1e-3 then
+					table.insert(problems, ("%s: %.4f past the steps"):format(label, result.pivot))
+				end
+			end
+			-- A long frame at 60 carries the root more than maxDrawnStuds before its physics: the
+			-- PC's 19.2 ms row put the camera's pivot 0.154 off the body, 530's clocks 0.20.
 			for _, fps in { 60, 144 } do
 				judge(("PC %d fps"):format(fps), walk(pcWalk(fps), false, true, true))
 			end

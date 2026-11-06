@@ -91,6 +91,30 @@ local Choreo = {
 		drawnSprint = 1,
 	},
 
+	-- The breath gives way under a strike (D-685; section 10: a strike reads crisp, the
+	-- post-motion breathes). A rig's breathing clip (rigs.<rig>.breathing) leaves these joints over
+	-- the last `outSeconds` of an attack's Anticipation beat (the breath catches on the cut: the
+	-- wind-up breathes, and so does an Art's tell, D-637), stays out of them through every strike's
+	-- snap and hold, and comes back over the Settle beat's length after the last strike's hold
+	-- (ClipSampler.breathYield), as far as the attack shows. They are the joints that carry the
+	-- blade, and the neck, whose breath turns the head against the chest's: left on alone it nods
+	-- the head on a still chest, into the kobold's blocker at Sharp Nail's thrust (StandOffWall's
+	-- open field: the Head 0.0111 in against its 0.011, 0.0050 with the neck yielding). The off
+	-- arm breathes on. It goes out gathering into the snap: a quarter of it by the wind-up's last
+	-- 60 Hz frame, where Basic2's cock still takes the blade past the kobold's near side
+	-- (FollowThrough's pending), and under three quarters in any one frame short of the snap, where
+	-- Basic3's forearm turns 19 degrees on its own from a run (review.audit.popDegrees counts the
+	-- frame's whole turn); a screen whose frame falls just short of the open draws little of it
+	-- into the stroke's first point. It comes back eased in and out. The choreo validator keeps
+	-- every joint a breathing clip keys from the root to the weapon listed, and outSeconds within
+	-- every attack's Anticipation beat.
+	breathYield = {
+		joints = { "Waist", "Neck", "RightShoulder", "RightWrist", "Weapon" },
+		outSeconds = 2 / 60, -- two 60 Hz frames, the wind-up's last
+		outEasing = "QuadIn", -- gathering into the snap
+		inEasing = "SineInOut",
+	},
+
 	-- Clips the animator plays the frame a rig appears (no T-pose, ever) and keeps underneath;
 	-- `walk` is the loop Locomotion.attach crossfades in by speed on a rig the server moves.
 	rigs = {
@@ -405,7 +429,10 @@ local Choreo = {
 			-- root's travel from where the last frame drew the body, and Choreo draws the body
 			-- there through the root joint, offset again on PreSimulation from the root moved on
 			-- by its velocity over that PreSimulation's deltaTime, the steps physics is about to
-			-- make (Animator.setBodyOn); an offset over maxDrawnStuds draws the body on its root.
+			-- make (Animator.setBodyOn); an even root more than maxDrawnStuds off where the frame's
+			-- physics is expected to take the root draws the body on its root (D-676: measured from
+			-- the root as it stands, a 19 ms frame's own travel at 60 fps passed it, and the render
+			-- step published the body on its root, the camera's pivot 0.15 off the body drawn).
 			-- On the PC's own walk of item 555 (d310ca7) PreSimulation's deltaTime held the frame's
 			-- steps on 94% of frames at 60 fps and 97.4% at 144 (the rest one more), so the foot
 			-- moves only on those: its step p90 0.0208 at 60 and 0.0202 at 144 with the held rows
@@ -766,6 +793,11 @@ local Choreo = {
 			-- 60 fps 0.0255 s, and 0.014 s of it lies past the mean), never past it, never back along
 			-- the way, never more than maxLagStuds or maxLagDegrees off it. Standing, it snaps onto
 			-- the root within settleStuds and settleDegrees, and RigDriver still draws the body on it.
+			-- Its height holds where it stood while the replicated root sinks no more than sinkStuds
+			-- below it, and follows past that, never under it (D-682): the server's root let go at
+			-- a walk's start settles into its contact (the PC's kobold, 568(c) on 577a59a: 3.4000 held,
+			-- 3.3984 from the release on), and the body drawn on it stood its feet 0.0016 deeper, the
+			-- idle's -0.032 to -0.034, past the start's -0.0335. sinkStuds is 2.5 such settles.
 			evenRoot = {
 				drawBody = true,
 				rateSeconds = 0.15,
@@ -775,6 +807,7 @@ local Choreo = {
 				maxLagDegrees = 10,
 				settleStuds = 0.001,
 				settleDegrees = 0.05,
+				sinkStuds = 0.004,
 			},
 			-- A rig's stand turn (D-665, WalkStopPlant.beginStand; tools/validators/choreo.luau):
 			-- its drawn root turns on the spot (more than standTurnDegrees a row, moving under

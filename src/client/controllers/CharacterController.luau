@@ -106,6 +106,7 @@ local ChoreoData = require(Shared.data.choreo)
 local ImpactData = require(Shared.data.impact)
 local InputData = require(Shared.data.input)
 local Playground = require(Shared.data.playground)
+local Rigs = require(Shared.data.rigs)
 local World = require(Shared.data.world)
 local Arts = require(Shared.data.arts)
 local Dev = require(Shared.data.dev)
@@ -154,6 +155,11 @@ type Hold = {
 	-- Frozen short of its hold pose while a shown blow waits for its word (D-326): the
 	-- ActivationHold has not fired.
 	unlit: boolean,
+	-- The stance's wait (D-691): the clip seconds its plan's pose waits on its first pose at the
+	-- press while the body steps out first (0 for none), and the seconds the clip's clock was held
+	-- so far. The clip runs `waited` behind the press: its clock reads from pressedAt + waited.
+	waitFor: number,
+	waited: number,
 }
 
 -- The flinches Replication plays on the local fighter for a blow shown before the server's word
@@ -200,7 +206,7 @@ local heldYaw: number? = nil
 -- The facing the last ArtRequest or BasicAttackRequest carried (DevAim reports it).
 local lastFacing: { number }? = nil
 -- The enemy the soft assist turned the last request to (nil with a lock or no pick), or, while an
--- unlocked Art's key is held, the one its press picked for the stance (D-673).
+-- unlocked Art's key is held, the one its press picked for the stance (D-673, D-689).
 local assistTargetId: number? = nil
 -- The Art stand-off the body is stepping (fix F1), the clip handle it follows and how much of it
 -- the root already shows; nil when none is under way.
@@ -226,6 +232,15 @@ local standOffStance = false
 local STAND_OFF_EASING: string = Combat.contact.standOff.easing
 -- The fastest the keep-out moves the body, back or aside, on the clip's clock (item 285).
 local KEEP_OUT_SPEED: number = Combat.contact.standOff.keepOut.maxSpeedStudsPerSecond
+local BRACE_STUDS: number = Combat.contact.standOff.braceStuds
+-- The running stand-off plan's depth read and its way back, for this frame's brace (D-680).
+local braceDepth: ((rootCFrame: CFrame) -> number)? = nil
+local braceAway = Vector3.zero
+-- The plan's room behind and the clip time of the pose this frame draws, for the brace's way back,
+-- and what the brace has stepped out toward the target since the plan began (D-697).
+local braceRoom: ((at: CFrame, distance: number, clipTime: number?) -> number)? = nil
+local bracePose = 0
+local braceOwed = 0
 -- Clip seconds within which a clock counts as at a key (combat.luau contact.keyEpsilon): a drawn
 -- clock summed from frame steps to an activation hold's end lands a hair past it (0.25 + 6e-17
 -- after 36 steps of 1/144), and that pose is still the hold's (D-616).
@@ -525,6 +540,7 @@ local standOffAsked: any = nil
 local function planStandOff(handle: any, facing: { number }, basic: boolean?, stance: number?)
 	standOff, standOffHandle, standOffShown, standOffSideShown, standOffYielded = nil, nil, 0, 0, 0
 	standOffLost = 0
+	braceOwed = 0
 	standOffClock = nil
 	standOffAsked = handle
 	standOffBasic = basic == true
@@ -554,6 +570,10 @@ local function planStandOff(handle: any, facing: { number }, basic: boolean?, st
 		poseLag = poseLag,
 		target = targetMotionOf(target :: Model, record, position),
 		stance = stance,
+		-- The body's own Additive layers as its mixer holds them: its Breathe, a flinch (D-683).
+		own = if animator ~= nil and typeof(animator.handles) == "function"
+			then Siblings.call(ContactPredictor, "ownLayers", animator:handles())
+			else nil,
 	})
 	standOffHandle = if standOff ~= nil then handle else nil
 end
@@ -571,7 +591,8 @@ end
 -- together: 0.348 flat against 0.286 at 60 fps. A held Art's stance (`stance`, D-606) holds its
 -- back and its aside to that speed together, flat, as the body takes the start pose under the held
 -- key (D-674), the rest of the aside on the next frames of the wind-up: Rising Arc's stance off a
--- kobold's axe 2.65 ahead took 0.200 back and 0.103 aside on one 60 fps frame, 0.225 flat.
+-- kobold's axe 2.65 ahead took 0.200 back and 0.103 aside on one 60 fps frame, 0.225 flat. Its plan
+-- now grows the two within that speed together (D-686), so this only guards it.
 local function asideShare(
 	carried: Vector3,
 	moved: Vector3,
@@ -630,6 +651,7 @@ end
 -- faces where the request turned it). True while the frame still draws the activation hold the
 -- plan waits for (D-604): a move this frame makes then shows with the pose that leaves it.
 local function stepStandOff(rootPart: BasePart, carried: Vector3): boolean
+	braceDepth = nil
 	local current = predicted
 	if
 		current ~= nil
@@ -664,13 +686,18 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3): boolean
 		standOff, standOffHandle = nil, nil
 		return false
 	end
+	-- A stance's plan runs on its clock (D-691): the clip time plus what its pose waited on its
+	-- first pose at the press, so the body steps out while the pose waits.
+	local waited = if stance and plan.wait ~= nil then math.min((hold :: Hold).waited, plan.wait :: number) else 0
+	local clock = handle.time + waited
 	local keep = plan.keep
 	local shown = AimLogic.standOffAt(plan.distance, plan.from, plan.to, handle.time, STAND_OFF_EASING)
-		+ (if keep ~= nil then keep(handle.time) else 0)
+		+ (if keep ~= nil then keep(clock) else 0)
 	local by = shown - standOffShown
 	-- The room is kept for every pose from the one this frame still draws on (D-534).
-	local drawnClock = math.min(standOffClock or plan.from, handle.time)
-	standOffClock = handle.time
+	local drawnClock = math.min(standOffClock or plan.from, clock)
+	local drawnPose = math.max(drawnClock - waited, plan.from)
+	standOffClock = clock
 	local leads = plan.still ~= nil and drawnClock <= plan.still + KEY_EPSILON
 	local movedFrom = rootPart.Position
 	-- Back along the way this frame's root motion came, so never into the world: first what a wall
@@ -695,7 +722,7 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3): boolean
 		local rest = by - free
 		local room = plan.room
 		local move = if rest > 0 and room ~= nil
-			then room(rootPart.CFrame + plan.away * free, rest, drawnClock)
+			then room(rootPart.CFrame + plan.away * free, rest, drawnPose)
 			else rest
 		rootPart.CFrame = rootPart.CFrame + plan.away * (free + move)
 		standOffShown = shown
@@ -705,7 +732,7 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3): boolean
 	end
 	local side, keepSide = plan.side, plan.keepSide
 	if side ~= nil and keepSide ~= nil then
-		local aside = keepSide(handle.time)
+		local aside = keepSide(clock)
 		-- Shared with a lunge's frame, the rest carried on (D-672).
 		local wanted = aside - standOffSideShown
 		local sideBy, yielded = asideShare(
@@ -714,7 +741,7 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3): boolean
 			wanted,
 			side,
 			plan.away,
-			handle.time - drawnClock,
+			clock - drawnClock,
 			aside - keepSide(drawnClock),
 			toward,
 			stance
@@ -725,17 +752,139 @@ local function stepStandOff(rootPart: BasePart, carried: Vector3): boolean
 		end
 		if sideBy ~= 0 then
 			local roomSide = plan.roomSide
-			local move = if sideBy > 0 and roomSide ~= nil
-				then roomSide(rootPart.CFrame, sideBy, drawnClock)
-				else sideBy
+			local move = if sideBy > 0 and roomSide ~= nil then roomSide(rootPart.CFrame, sideBy, drawnPose) else sideBy
 			rootPart.CFrame = rootPart.CFrame + side * move
 			standOffSideShown = if sideBy == wanted then aside else standOffSideShown + sideBy
 		end
 	end
-	if handle.time >= math.max(plan.to, plan.keepUntil or plan.to) then
+	-- The brace reads this plan once the step has placed the root (braceRoot, D-680).
+	braceDepth, braceAway = plan.depth, plan.away
+	braceRoom, bracePose = plan.room, drawnPose
+	if clock >= math.max(plan.to, plan.keepUntil or plan.to) then
 		standOff, standOffHandle = nil, nil
 	end
 	return leads
+end
+
+-- The brace (D-680): while a stand-off plan runs, the body as this frame draws it (the pose
+-- before, on the root as the step leaves it) stands no deeper than standOff.braceStuds in the world
+-- behind; the root steps out toward the target by the rest, as the engine would push it a frame
+-- later. The engine pushes a lean out over its 240 Hz steps, one or two of them in a 144 fps
+-- frame, so the screen showed a lean's last frame or two in the wall (the PC on 577a59a: 0.067 to
+-- 0.087 at 144, 0.050 to 0.058 at 60). It runs once the step has placed the root, a move held back
+-- for the next frame (D-496) already taken off, so it bounds what this frame draws. It shares the
+-- frame's budget, max(keepOut.maxSpeedStudsPerSecond x dt, the clip's own motion) (the long-row
+-- bar's, D-645), with every move the step made from `from`, the root where the frame found it:
+-- what does not fit is left to the engine. A step back the plan takes later can take that room
+-- back (its room keeps the gap from the root's box); the next frame's brace steps it out again.
+--
+-- What the brace steps out is owed back to the plan (D-697). The plan's keep-out holds the body
+-- off the target's blockers on the root's planned path, and a brace's step toward the target
+-- leaves every later pose that much nearer them. So once the drawn body stands within braceStuds
+-- of the world again, a frame that moves the root toward the target takes that move back along
+-- the line: no more than is owed, no more than the frame moved toward it (the lunge carries the
+-- body less far, and never back past where the frame found it), and no farther than the plan's
+-- room leaves for every pose from the one this frame draws (D-534). Basic1 at the pillar turned
+-- 32.7 degrees, at 144, as Breathe gives way (D-685): the brace stepped out 0.136 over the
+-- wind-up's lean and the Head's box stood 0.042 in the kobold's HeldBlocker on the follow-through.
+local function braceRoot(rootPart: BasePart, dt: number, from: Vector3, carried: Vector3)
+	local depth = braceDepth
+	braceDepth = nil
+	if depth == nil then
+		return
+	end
+	local deep = depth(rootPart.CFrame) - BRACE_STUDS
+	local moved = rootPart.Position - from
+	local flat = Vector3.new(moved.X, 0, moved.Z)
+	if deep <= 0 then
+		local room = braceRoom
+		local toward = -flat:Dot(braceAway)
+		if braceOwed <= 0 or toward <= 0 or room == nil then
+			return
+		end
+		local want = math.min(toward, braceOwed)
+		local back = math.clamp(room(rootPart.CFrame, want, bracePose), 0, want)
+		if back > 0 then
+			rootPart.CFrame = rootPart.CFrame + braceAway * back
+			braceOwed -= back
+		end
+		return
+	end
+	local budget = math.max(KEEP_OUT_SPEED * dt, Vector3.new(carried.X, 0, carried.Z).Magnitude)
+	local out = -braceAway
+	-- The longest step out that keeps the frame's whole move within the budget (none past what
+	-- brings a move already over it nearest).
+	local along = flat:Dot(out)
+	local fits = -along + math.sqrt(math.max(along * along - flat:Dot(flat) + budget * budget, 0))
+	local step = math.clamp(fits, 0, deep)
+	if step > 0 then
+		rootPart.CFrame = rootPart.CFrame + out * step
+		braceOwed += step
+	end
+end
+
+-- A held start pose holds its breath (D-693): while an Art's key is held the breathing layer
+-- (choreo.luau rigs.PlayerR15.breathing) leaves each joint that carries a colliding part
+-- (keepOut.parts: the root joint, the waist and the neck) and keeps the shoulders' and the blade's
+-- tremor, so the screen draws the column where the stance's keep-out poses it: Breathe's chest
+-- rise stood the drawn UpperTorso 0.029-0.039 deeper in the axe's blocker than the plan's pose on
+-- the held rows at the PC's unlockB takes in Lune. It breathes again once the key is up.
+local HELD_BREATH: { [string]: number } = {}
+for _, joint in Rigs.PlayerR15.joints do
+	if table.find(Combat.contact.standOff.keepOut.parts, joint.part1) ~= nil then
+		HELD_BREATH[joint.name] = 0
+	end
+end
+table.freeze(HELD_BREATH)
+local BREATHING: string? = ChoreoData.rigs.PlayerR15.breathing
+local breathHeld = false
+local function holdBreath(held: boolean)
+	if not held and not breathHeld then
+		return
+	end
+	breathHeld = held
+	local mixer = if animator ~= nil then animator.mixer else nil
+	local id = BREATHING
+	if id == nil or typeof(mixer) ~= "table" or typeof(mixer.find) ~= "function" then
+		return
+	end
+	local handle = mixer:find(id)
+	if typeof(handle) ~= "table" then
+		return
+	end
+	if held then
+		handle.mask = HELD_BREATH
+	elseif handle.mask == HELD_BREATH then
+		handle.mask = nil
+	end
+end
+
+-- A body standing free at an enemy (D-692: idle on the ground, no walk this frame, no plan of
+-- a swing's or a stance's) steps out of its blockers on the pose this frame draws, at the
+-- keep-out's speed, never toward it (ContactPredictor.keepStanding): the stick's walk stops at
+-- wallGapStuds (WalkShell) and the engine left the PC's drawn Head 0.024-0.068 in a kobold's
+-- axe's blocker, so a press there began deeper than one 144 Hz row steps out (item 573(b)).
+local function keepStanding(rootPart: BasePart, dt: number)
+	local model, records = character, liveRecords()
+	if model == nil or animator == nil or next(records) == nil then
+		return
+	end
+	local mixer = animator.mixer
+	if typeof(mixer) ~= "table" or typeof(mixer.lastOffsets) ~= "function" then
+		return
+	end
+	local by = Siblings.call(
+		ContactPredictor,
+		"keepStanding",
+		model,
+		rootPart.CFrame,
+		mixer:lastOffsets(),
+		records,
+		KEEP_OUT_SPEED * dt * captureScale
+	)
+	if typeof(by) == "Vector3" and by.Magnitude > 0 then
+		rootPart.CFrame = rootPart.CFrame + by
+	end
 end
 
 -- GuardRequest goes through TrailingSend: never faster than its rate limit, and the last raise or
@@ -963,7 +1112,8 @@ function CharacterController.freezeHold()
 	if current.frozenClipTime ~= nil then
 		return
 	end
-	local clipTime, seek = ActionLogic.freezeAt(current.pressedAt, now(), holdClipTime(current), rigSteppedAt)
+	local clipTime, seek =
+		ActionLogic.freezeAt(current.pressedAt + current.waited, now(), holdClipTime(current), rigSteppedAt)
 	if seek and struckShown() then
 		waitUnlit(current)
 		return
@@ -994,12 +1144,14 @@ local function beforeRigStep(dt: number)
 		local holdAt = holdClipTime(current)
 		local age = now() - current.pressedAt
 		if holdAt ~= nil and age < Combat.activationCancelTime then
-			-- Where the step would leave the clip (an Art plays at speed 1, ActionLogic.freezeAt).
+			-- Where the step would leave the clip (an Art plays at speed 1, ActionLogic.freezeAt), on
+			-- from where a stance's wait left it (D-691).
 			local reached = current.handle.time + dt * appliedScale
 			if reached >= holdAt and struckShown() then
 				waitUnlit(current)
 			elseif
-				age >= holdAt and (dt > ChoreoData.stall.jumpSeconds or reached > holdAt + Combat.activationHold)
+				age - current.waited >= holdAt
+				and (dt > ChoreoData.stall.jumpSeconds or reached > holdAt + Combat.activationHold)
 			then
 				CharacterController.freezeHold()
 			end
@@ -1040,15 +1192,19 @@ function CharacterController.beginArt(slot: number)
 		frozenClipTime = nil,
 		token = holdToken,
 		unlit = false,
+		waitFor = 0,
+		waited = 0,
 	}
 	setState("Holding")
 	predictDraw()
 	-- At a held lock the body steps back as it takes the stance, so the start pose's hands stand
 	-- out of the target through the hold (D-606); the release plans the swing afresh. With no lock
-	-- the same off the enemy the soft assist picks from where the body faces (D-673): a fighter
-	-- winding up beside a kobold steps off its axe as the start pose forms instead of being shoved
-	-- off it while the key is held (item 539(b): Rising Arc's colliding Head 0.29 into the
-	-- HeldBlocker). No pick, no stance; the release picks again for its snap.
+	-- the same off the enemy the soft assist picks from where the body faces (D-673), or with no
+	-- pick off the nearest enemy in its range whatever its bearing (D-689): a fighter winding up
+	-- beside a kobold steps off its axe as the start pose forms instead of being shoved off it
+	-- while the key is held (item 539(b): Rising Arc's colliding Head 0.29 into the HeldBlocker;
+	-- item 573(b): pressed facing the axe 99 degrees off the kobold, no pick, and the engine pushed
+	-- the body 0.18 a row). No enemy in range, no stance; the release picks again for its snap.
 	local lockAt = lockPosition()
 	local holdAt = holdClipTime(hold :: Hold)
 	local rootPart = root
@@ -1059,12 +1215,20 @@ function CharacterController.beginArt(slot: number)
 		else
 			local look = aimRotation(rootPart).LookVector
 			local candidates = Siblings.call(TargetController, "assistCandidates", rootPart.Position, look)
-			local pick = if candidates ~= nil then AimLogic.assistPick(candidates, AIM) else nil
+			local pick = if candidates ~= nil then AimLogic.stancePick(candidates, AIM) else nil
 			if pick ~= nil then
 				assistTargetId = pick.id
 				planStandOff((hold :: Hold).handle, { look.X, 0, look.Z }, nil, holdAt)
 			end
 		end
+	end
+	-- Where the body cannot step the start pose out as fast as it forms, the pose waits on its
+	-- first pose while the body steps (D-691): the clip's clock holds from the press, and step()
+	-- lets it go once the plan's wait is over.
+	local plan = standOff
+	if plan ~= nil and standOffStance and plan.wait ~= nil then
+		(hold :: Hold).waitFor = plan.wait :: number
+		setTimeScale(0)
 	end
 	Siblings.call(Hud, "noteArtUse")
 	-- If the clip carries no ActivationHold event the freeze still lands at the section 6 time.
@@ -1087,7 +1251,7 @@ function CharacterController.releaseArt(slot: number, heldSeconds: number)
 		return
 	end
 	local releasedAt = now()
-	local plan = ActionLogic.syncPlan(current.pressedAt, current.frozenClipTime, releasedAt)
+	local plan = ActionLogic.syncPlan(current.pressedAt + current.waited, current.frozenClipTime, releasedAt)
 	if character ~= nil then
 		-- The clip waits at freezeClipTime for freezeClipTime more: the riser and the highs land on
 		-- its first damage frame after that.
@@ -1536,6 +1700,8 @@ local function step(dt: number)
 		runAfterContacts(dt)
 		return
 	end
+	-- Where the frame found the root, before any of this step's moves (the brace's budget).
+	local frameFrom = rootPart.Position
 	-- The move held back last step (D-496) shows now, with the pose its step wrote: everything
 	-- this step reads and writes stands on the root the clip and the keep-out put it at.
 	local heldBack = rootHeldBack
@@ -1681,7 +1847,10 @@ local function step(dt: number)
 			-- The reading `speed` came from: a velocity off the stick blocks the body (D-144).
 			velocity = velocity,
 			yawAhead = pendingLockYaw, -- D-505
-			evenRoot = not ActionLogic.rootMotionActive(state), -- D-675: no clip moves the root
+			-- D-675: no clip moves the root, and no stand-off (a stance, a basic's tail) does either:
+			-- its keep-out holds the pose out at the root itself, so an even root left behind its
+			-- steps drew the body back into the target (D-688).
+			evenRoot = not ActionLogic.rootMotionActive(state) and standOff == nil,
 			-- D-657: the stick's walk speed once the action lets go (a dodge ends in Idle): a
 			-- dodge aims the gait it hides at the stick's gait.
 			stickSpeed = if stickNow.Magnitude > 0
@@ -1694,6 +1863,18 @@ local function step(dt: number)
 		})
 	end
 
+	-- A stance's pose waits on its first pose (D-691): the clip's clock holds on each step until
+	-- it has waited its plan's wait, the body stepping out meanwhile, then runs on from there.
+	local waiting = hold
+	if waiting ~= nil and waiting.waitFor > 0 and waiting.frozenClipTime == nil then
+		if waiting.waited < waiting.waitFor - 1e-6 then
+			waiting.waited += dt
+		else
+			waiting.waitFor = 0
+			setTimeScale(captureScale)
+		end
+	end
+	holdBreath(hold ~= nil)
 	-- The rig's step, here and nowhere else (D-139): this frame's pose, clip events and root delta,
 	-- moved by just below. A step after a render stall is a jump (Choreo, D-132).
 	Siblings.call(Choreo, "stepLocal", dt)
@@ -1729,6 +1910,9 @@ local function step(dt: number)
 	end
 	-- The Art stand-off over the anticipation (fix F1), on the clip's clock like the root motion.
 	local stepLeads = stepStandOff(rootPart, carried)
+	if state == "Idle" and standOff == nil and grounded and moveDir.Magnitude == 0 then
+		keepStanding(rootPart, dt)
+	end
 	local moved = rootPart.Position - movedFrom
 	-- The blade on the pose this frame shows: a touch plays its hit now (issue 4).
 	stepContacts()
@@ -1744,6 +1928,7 @@ local function step(dt: number)
 		rootPart.CFrame = rootPart.CFrame - moved
 		rootHeldBack = moved
 	end
+	braceRoot(rootPart, dt, frameFrom, carried)
 end
 
 -- ------------------------------------------------------------------ character lifecycle
@@ -1776,6 +1961,7 @@ local function clearCharacter()
 	snap = nil
 	standOff, standOffHandle, standOffShown, standOffSideShown, standOffAsked = nil, nil, 0, 0, nil
 	standOffLost = 0
+	braceOwed = 0
 	standOffClock = nil
 	rootHeldBack = Vector3.zero
 	assistTargetId = nil

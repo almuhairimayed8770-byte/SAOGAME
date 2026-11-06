@@ -959,6 +959,57 @@ describe("Choreo", function()
 		end
 	)
 
+	it(
+		"setBodyOn's `most` is measured from where the frame's physics takes the root: a long frame's own travel keeps the step's body on the drawn root, which the render step's readers see (D-676)",
+		function()
+			camera = Vector3.zero
+			local DrawnBody = Harness.load("src/client/choreo/DrawnBody")
+			local model = buildUpgradedCharacter(true)
+			local animatorInstance = Instance.new("Animator")
+			animatorInstance.Parent = model:FindFirstChildOfClass("Humanoid")
+			local animator = Choreo.get(model)
+			Choreo.setLocalModel(model)
+			local root = model.PrimaryPart :: BasePart
+			local rootJoint = jointOf(model, "Root")
+			root.CFrame = CFrame.new(3, 1, 2)
+			root.AssemblyLinearVelocity = Vector3.new(0, 0, -8)
+			local ok, problem = pcall(function()
+				local function near(a: Vector3?, b: Vector3): boolean
+					return a ~= nil and (a - b).Magnitude < 1e-4
+				end
+				local function shift(): Vector3
+					local at = rootJoint.Transform.Position
+					return Vector3.new(at.X, 0, at.Z)
+				end
+				-- A 20 ms frame carries the root 0.16 on: a body drawn 0.01 past that is 0.17 off
+				-- the root as it stands, over `most`, yet 0.01 off where physics takes the root.
+				local long = 0.02
+				local ahead = 2 - 8 * long
+				animator:setBodyOn(CFrame.new(3, 5, ahead - 0.01), 0.15)
+				renderStepped:Fire(long)
+				expect(near(DrawnBody.position(model), Vector3.new(3, 1, ahead - 0.01))).toBe(true)
+				expect(near(shift(), Vector3.new(0, 0, -0.17))).toBe(true)
+				-- PreSimulation offsets it from the root moved on, as before.
+				engineReset(model)
+				preSimulation:Fire(4 / 240)
+				expect(near(shift(), Vector3.new(0, 0, ahead - 0.01 - (2 - 8 * 4 / 240)))).toBe(true)
+				-- More than `most` off where physics takes the root: on its root.
+				root.CFrame = CFrame.new(3, 1, 2)
+				animator:setBodyOn(CFrame.new(3, 5, ahead - 0.16), 0.15)
+				renderStepped:Fire(long)
+				expect(near(shift(), Vector3.zero)).toBe(true)
+				expect(DrawnBody.offset(model)).toBe(nil)
+				animator:setBodyOn(nil)
+				renderStepped:Fire(FRAME)
+			end)
+			Choreo.setLocalModel(nil)
+			Choreo.release(model)
+			if not ok then
+				error(problem, 0)
+			end
+		end
+	)
+
 	it("an Animator that arrives after the animator attached turns the rewrite on", function()
 		local fire, restore = recordConnections()
 		camera = Vector3.zero

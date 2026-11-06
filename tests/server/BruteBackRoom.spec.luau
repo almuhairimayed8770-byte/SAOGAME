@@ -7,7 +7,10 @@
 	Played the way the game plays it: the real EnemyService (the Brute's brain at the AI's tick, the
 	frame pass, the yaw align, the mover), EntityService and CombatService, over EnemyWalkStart's
 	"studio" Humanoid (BoarHooks.spec's: its walk settled once a frame, reaching its WalkSpeed at
-	1320 studs/s^2, braking 0.672 a 1/240 s step) at 60 server frames a second. The kobold is
+	1320 studs/s^2, braking 0.672 a 1/240 s step) at 60 server frames a second. That Humanoid also
+	holds a MoveTo goal within 0.933 of it reached and brakes, walking or standing (the PC's P2
+	probe on a real server Humanoid; D-678), and a landing's MoveTo aims past its stop as the real
+	engine's does (D-548). The kobold is
 	RigBuilder's, its blocker faces carried with its root. The fighter is a player's root box (2 x 2
 	x 1) looking at the kobold, backed to the face of item 519's wall (10 x 8 x 1) or pillar (2 x 8 x
 	2) at z 25.7: its deepest corner rests 0.05 in it (the engine's contact, F1e), its root 0.45 off
@@ -103,8 +106,10 @@ local ROOT_SIZE = Vector3.new(2, 2, 1) -- an R15's root box
 local START = 9 -- studs from the fighter the kobold is let loose
 local KOBOLD = Enemies.byId("KoboldAxeman")
 
--- BoarHooks.spec's "studio" Humanoid (the PC's server log on 4b18b5c).
-local humanoid = { arriveFrames = 1.7, brake = 0.672, acceleration = 1320 }
+-- BoarHooks.spec's "studio" Humanoid (the PC's server log on 4b18b5c), holding a MoveTo goal within
+-- `arrival` reached (the PC's P2 probe on 4e60f11: a goal that near never starts a standing body,
+-- and every walk stops that far short of its goal; BoarHooks.spec's startStuds, D-678).
+local humanoid = { arriveFrames = 1.7, brake = 0.672, acceleration = 1320, arrival = 0.9335 }
 local clock = { t = 1000 }
 local bodies: { [Model]: any } = {}
 local world: { BasePart } = {}
@@ -282,13 +287,16 @@ local engine = {
 		body.written = true
 		placeParts(model, body)
 	end,
-	land = function(model: Model, position: Vector3, seconds: number)
+	land = function(model: Model, position: Vector3, seconds: number, past: number?)
 		local body = bodies[model]
 		local offset = Vector3.new(position.X - body.position.X, 0, position.Z - body.position.Z)
 		local pace = if seconds > 0 then offset / seconds else Vector3.zero
 		body.velocity = pace
 		body.walkSpeed = pace.Magnitude
-		body.goal = Vector3.new(position.X, body.position.Y, position.Z)
+		-- Its MoveTo aims `past` beyond the stop, outside the arrival (the real engine's, D-548).
+		local way = if offset.Magnitude > 1e-6 then offset.Unit else Vector3.zero
+		local aim = position + way * (past or 0)
+		body.goal = Vector3.new(aim.X, body.position.Y, aim.Z)
 		body.written = true
 	end,
 	setWalkSpeed = function(model: Model, speed: number)
@@ -327,7 +335,7 @@ local function studioFrame(model: Model, body: any, untilT: number)
 	if goal ~= nil and not body.anchored then
 		local delta = Vector3.new(goal.X - body.position.X, 0, goal.Z - body.position.Z)
 		local reached = humanoid.arriveFrames * body.walkSpeed * math.max(seconds, 0)
-		if delta.Magnitude > math.max(reached, 1e-3) then
+		if delta.Magnitude > math.max(reached, humanoid.arrival, 1e-3) then
 			desired = delta.Unit * body.walkSpeed
 		end
 	end
@@ -476,8 +484,10 @@ type Take = {
 -- resting CONTACT in the face at its deepest corner); `square`, its root box turned square to the
 -- face (facing +Z) instead of along that line. `frame`, the server frame's seconds (1/60 when nil),
 -- and `start`, how far off the kobold is let loose (START when nil): where the walk's ticks fall
--- (D-660).
-type Stand = { off: number?, square: boolean?, frame: number?, start: number? }
+-- (D-660). `moved`: the fighter's root moved by this once the kobold's first blow has landed, as
+-- the PC's server root moves between the blows (564(b) on 577a59a: 0.97-1.48 off the face, turned
+-- -146 to 180 degrees).
+type Stand = { off: number?, square: boolean?, frame: number?, start: number?, moved: Vector3? }
 
 local function take(shape: string, angle: number, stand: Stand?): Take
 	fresh()
@@ -519,6 +529,7 @@ local function take(shape: string, angle: number, stand: Stand?): Take
 	local speed = 0
 	local seen = 0
 	local hp = hpBefore
+	local moved = if stand ~= nil then stand.moved else nil
 	for _ = 1, math.floor(9 / FRAME) do
 		serverFrame()
 		local now = (EntityService.get(playerId) :: any).hp
@@ -526,6 +537,11 @@ local function take(shape: string, angle: number, stand: Stand?): Take
 			result.blows += 1
 		end
 		hp = now
+		if moved ~= nil and result.blows >= 1 then
+			playerRoot.CFrame += moved
+			playerAt += moved
+			moved = nil
+		end
 		local velocity = bodies[model].velocity
 		local flatSpeed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
 		if seen == 1 then
@@ -643,6 +659,51 @@ describe("a Brute at a fighter backed to a wall or a pillar (D-627)", function()
 		end
 	end)
 
+	it("leaves that room when the fighter's root moves between the blows (564(b) on 577a59a, D-679)", function()
+		-- Item 564(b) on 577a59a: the gap read 3.689 / 3.693 across the root's width at the wall 10
+		-- degrees (3.746 / 3.918 on the line), the stop 3.761 / 3.745, where every other take left
+		-- 3.903-4.000; the fighter's server root stood 0.97-1.48 off the face, turned -146 to 180
+		-- degrees, having moved between the blows. The body's near faces (D-435) are found by casting
+		-- its box back onto where it stands from twice its radius away: 5 studs off a wall 1 stud
+		-- thick, the cast behind it started past the wall and met the wall's far side, a face behind
+		-- the root's own centre, so every facing read about 7 studs inside it. A fighter that had
+		-- moved a few hundredths asked the kobold for a turn of a fraction of a degree: the short way
+		-- read deeper and was refused, the body turned the long way round, wheeled along its facing
+		-- 26 degrees off the line and stood in closer (Lune on 577a59a, the root 1.01 off: the stop
+		-- 3.960 / 3.961 and the gap 3.700 / 3.718 at 60 / 144). A face behind the root's centre is
+		-- no face near the body (D-679).
+		for _, shape in { "wall", "pillar" } do
+			for _, angle in { 0, 10, 20, 30 } do
+				for _, off in { 1.01, 1.36 } do
+					for _, moved in { Vector3.new(-0.02, 0, 0), Vector3.new(0, 0, 0.05) } do
+						for _, hz in { 60, 144 } do
+							local result = take(shape, angle, { off = off, moved = moved, frame = 1 / hz })
+							print(
+								("[F1i-2] %s at %d deg, root %.2f off, moved (%.2f, %.2f) at %d server frames: stopped at %.3f (%.1f deg off the normal); gap %.3f across the root's width, %.3f on the line; %d blows"):format(
+									shape,
+									angle,
+									off,
+									moved.X,
+									moved.Z,
+									hz,
+									result.stand,
+									result.angle,
+									result.gap,
+									result.centre,
+									result.blows
+								)
+							)
+							expect(result.gap >= ROOM - 1e-3).toBe(true)
+							expect(result.stand <= AI.archetypes.Brute.backRoom.maxStopDistance + 1e-6).toBe(true)
+							expect(result.blows >= 2).toBe(true)
+						end
+					end
+				end
+			end
+		end
+		FRAME = 1 / 60
+	end)
+
 	it("keeps its stopDistance with no world behind the fighter", function()
 		-- The open field: the walk lands on stopDistance, resting up to landSlackStuds short of it
 		-- (D-660; it stopped in a 3.0-3.5 band before).
@@ -664,8 +725,14 @@ describe("a Brute at a fighter backed to a wall or a pillar (D-627)", function()
 		-- 3.186 / 3.236 / 3.073 at 144 (3.05-3.43 and 3.07-3.41 over the walk's phase). The walk now
 		-- lands on its stop from within a tick's walk and a brake of it (D-643's landing, at the pace
 		-- the walk has eased to), so the frame rate and the tick's phase no longer move it.
+		-- The PC on 577a59a: 3.777 at 60 and 3.725 at 144. Sent onto its stop from up to its pace
+		-- times a tick and a brake away (0.6), the walk's MoveTo lay inside the Humanoid's arrival
+		-- (0.933): the Humanoid braked and the body stood 0.2-0.3 short, outside the landing's lead
+		-- (the eased pace times haltLeadSeconds). Lune on 577a59a with that arrival: 3.797 / 3.847 /
+		-- 3.885 at 60 and 3.998 / 4.048 / 3.805 at 144. The stop is now landed from wherever the walk
+		-- is taken onto it (D-678).
 		local tuning = AI.archetypes.Brute
-		for _, start in { 9, 9.05, 9.3 } do
+		for _, start in { 9, 9.05, 9.1, 9.15, 9.2, 9.25, 9.3, 9.4, 9.5 } do
 			local stops = {}
 			for _, hz in { 60, 144 } do
 				local open = take("none", 0, { frame = 1 / hz, start = start })
